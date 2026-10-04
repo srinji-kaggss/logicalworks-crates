@@ -360,11 +360,13 @@ impl Checkpoint {
 fn check_push<T>(list: &[T], ceiling: usize, what: &'static str) -> Result<(), CheckpointError> {
     let would_hold = list.len().saturating_add(1);
     if would_hold > ceiling {
-        return Err(CheckpointError::Limit {
+        let refusal = Err(CheckpointError::Limit {
             what,
             got: u64::try_from(would_hold).unwrap_or(u64::MAX),
             limit: u64::try_from(ceiling).unwrap_or(u64::MAX),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_push: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }

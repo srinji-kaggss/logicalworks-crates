@@ -45,7 +45,7 @@ fn edge(dims: &Dims) -> Result<Vec<DirectEdge>, Box<dyn Error>> {
         .target
         .map_or("null".to_owned(), |value| format!("\"{value}\""));
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"engine","source":"registry+https://github.com/rust-lang/crates.io-index","req":"1.0","kind":null,"rename":null,"optional":{optional},"uses_default_features":{default},"features":[{features}],"target":{target},"path":null}}]}}],"workspace_members":["app"]}}"#,
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"engine","source":"registry+https://github.com/rust-lang/crates.io-index","req":"1.0","kind":null,"rename":null,"optional":{optional},"uses_default_features":{default},"features":[{features}],"target":{target},"path":null}}]}},{{"id":"lic-engine","name":"engine","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#,
         optional = dims.optional,
         default = dims.uses_default_features,
         features = features,
@@ -65,6 +65,7 @@ fn register(policy: &str) -> Result<Contract, Box<dyn Error>> {
             "version = \"1.0\"\n",
             "owner = \"app\"\n",
             "capability = \"engine.core\"\n",
+            "license = \"MIT OR Apache-2.0\"\n",
             "source = \"registry\"\n",
             "{policy}",
             "allowed_consumers = \"app\"\n",

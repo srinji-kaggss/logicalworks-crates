@@ -404,7 +404,15 @@ class ParityRegression(unittest.TestCase):
         self.assertTrue(any("unwrap-scan" in p for p in problems), problems)
 
     def test_toolchain_mismatch_fails(self):
-        mutated = self.manifest.replace('rust = "1.98.0"', 'rust = "1.97.0"', 1)
+        # Derive the pinned version from the manifest under test rather than
+        # hard-coding one: a literal here went stale on the 1.99.0 bump, and
+        # `.replace` on an absent string is a silent no-op, so the test would
+        # have asserted nothing while reporting green.
+        pinned = re.search(r'rust = "([^"]+)"', self.manifest).group(1)
+        mutated = self.manifest.replace(f'rust = "{pinned}"', 'rust = "0.0.0-mismatch"', 1)
+        self.assertNotEqual(
+            mutated, self.manifest, "the mutation must actually change the manifest"
+        )
         problems = check_parity(mutated, self.workflow)
         self.assertTrue(problems, "a toolchain drift must break parity")
         self.assertTrue(any("toolchain" in p for p in problems), problems)

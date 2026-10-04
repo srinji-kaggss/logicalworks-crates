@@ -145,10 +145,14 @@ fn tenant_isolation_same_key(band: Band) -> TestResult {
         match FileJournal::open(&first) {
             Err(JournalError::Locked { .. }) => {}
             Err(other) => {
-                return Err(format!("expected a lock refusal, got {other}").into());
+                let refusal = Err(format!("expected a lock refusal, got {other}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_isolation_same_key: returning an error to the caller");
+                return refusal;
             }
             Ok(_) => {
-                return Err("a second tenant opened an already-owned journal".into());
+                let refusal = Err("a second tenant opened an already-owned journal".into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_isolation_same_key: returning an error to the caller");
+                return refusal;
             }
         }
 
@@ -203,6 +207,51 @@ fn sim_events(tenant: usize) -> Result<Vec<EffectEvent>, Box<dyn Error>> {
     Ok(events)
 }
 
+/// One tier of the tenant sweep: open every tenant's journal, append, reopen, and require each tenant's own events.
+fn one_tier(sim: &mut sim::Sim, requested: usize) -> Result<(), Box<dyn Error>> {
+    let level = requested.min(SIM_CEILING);
+    let dir = sim.scratch(&format!("tiers-{requested}"))?;
+    let mut paths = Vec::with_capacity(level);
+    let mut journals = Vec::with_capacity(level);
+    for tenant in 0..level {
+        let path = sim.journal_path(&dir, u32::try_from(tenant)?);
+        journals.push(FileJournal::open(&path)?);
+        paths.push(path);
+    }
+
+    for (tenant, journal) in journals.iter_mut().enumerate() {
+        drop(journal.compare_and_append_all(&sim_events(tenant)?)?);
+    }
+    for (tenant, journal) in journals.iter().enumerate() {
+        assert_eq!(
+            journal.events().count(),
+            SIM_EVENTS_PER_TENANT,
+            "tenant {tenant} of the {requested} tier held another tenant's events"
+        );
+    }
+    drop(journals);
+
+    for (tenant, path) in paths.iter().enumerate() {
+        let reopened = FileJournal::open(path)?;
+        let held: Vec<EffectEvent> = reopened.events().copied().collect();
+        assert_eq!(
+            held,
+            sim_events(tenant)?,
+            "tenant {tenant} of the {requested} tier did not reopen to exactly its own events"
+        );
+    }
+
+    sim.record("tenant-tier-isolated");
+    sim.trace
+        .record_u64("tier-requested", u64::try_from(requested)?);
+    sim.trace.record_u64("tier-reached", u64::try_from(level)?);
+    sim.trace
+        .record_u64("tier-ceiling", u64::try_from(SIM_CEILING)?);
+    sim.trace
+        .record_count("tier-events", level.saturating_mul(SIM_EVENTS_PER_TENANT));
+    Ok(())
+}
+
 /// Run the real tiers at the level the simulation can drive, and return the
 /// trace hash.
 ///
@@ -216,46 +265,7 @@ fn sim_events(tenant: usize) -> Result<Vec<EffectEvent>, Box<dyn Error>> {
 fn run_tenant_tiers(seed: u64) -> Result<u64, Box<dyn Error>> {
     let mut sim = sim::Sim::new(seed);
     for requested in TIERS {
-        let level = requested.min(SIM_CEILING);
-        let dir = sim.scratch(&format!("tiers-{requested}"))?;
-        let mut paths = Vec::with_capacity(level);
-        let mut journals = Vec::with_capacity(level);
-        for tenant in 0..level {
-            let path = sim.journal_path(&dir, u32::try_from(tenant)?);
-            journals.push(FileJournal::open(&path)?);
-            paths.push(path);
-        }
-
-        for (tenant, journal) in journals.iter_mut().enumerate() {
-            drop(journal.compare_and_append_all(&sim_events(tenant)?)?);
-        }
-        for (tenant, journal) in journals.iter().enumerate() {
-            assert_eq!(
-                journal.events().count(),
-                SIM_EVENTS_PER_TENANT,
-                "tenant {tenant} of the {requested} tier held another tenant's events"
-            );
-        }
-        drop(journals);
-
-        for (tenant, path) in paths.iter().enumerate() {
-            let reopened = FileJournal::open(path)?;
-            let held: Vec<EffectEvent> = reopened.events().copied().collect();
-            assert_eq!(
-                held,
-                sim_events(tenant)?,
-                "tenant {tenant} of the {requested} tier did not reopen to exactly its own events"
-            );
-        }
-
-        sim.record("tenant-tier-isolated");
-        sim.trace
-            .record_u64("tier-requested", u64::try_from(requested)?);
-        sim.trace.record_u64("tier-reached", u64::try_from(level)?);
-        sim.trace
-            .record_u64("tier-ceiling", u64::try_from(SIM_CEILING)?);
-        sim.trace
-            .record_count("tier-events", level.saturating_mul(SIM_EVENTS_PER_TENANT));
+        one_tier(&mut sim, requested)?;
     }
     Ok(sim.hash())
 }

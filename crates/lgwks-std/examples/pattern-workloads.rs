@@ -62,7 +62,10 @@ fn run_scenario(
         .map(|item| (item.start(), item.end()))
         .collect::<Vec<_>>();
     if facade_spans != engine_spans {
-        return Err(io::Error::other("facade and regex engine spans differ").into());
+        let refusal = Err(io::Error::other("facade and regex engine spans differ").into());
+        #[cfg(feature = "trace")]
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_scenario: returning an error to the caller");
+        return refusal;
     }
     let hash = span_hash(&facade_spans);
     let match_count = facade_spans.len();
@@ -179,9 +182,12 @@ where
         elapsed.push(start.elapsed().as_nanos());
         if let Some(expected) = expected_work {
             if work != expected {
-                return Err(io::Error::other(
+                let refusal = Err(io::Error::other(
                     "operation work count changed between samples",
                 ));
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "emit: returning an error to the caller");
+                return refusal;
             }
         } else {
             expected_work = Some(work);

@@ -94,7 +94,9 @@ fn scratch(tag: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// tests read, and those are gone by the time this runs.
 fn discard(dir: &Path) {
     if dir.is_dir() {
-        let _ = std::fs::remove_dir_all(dir);
+        if let Err(error) = std::fs::remove_dir_all(dir) {
+            ai_task_support::diagnostic(format_args!("could not discard {}: {error}", dir.display()));
+        }
     }
 }
 

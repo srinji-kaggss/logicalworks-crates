@@ -156,9 +156,11 @@ impl EffectJournal for LostReplyJournal {
         // Half two: nothing is written, the reply is still reported lost, so
         // readback proves absence and the caller may safely re-append.
         if is_outcome && self.unknown_once.take() {
-            return Err(JournalError::OutcomeUnknown {
+            let refusal = Err(JournalError::OutcomeUnknown {
                 cause: std::io::Error::other("injected unknown outcome, nothing written"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+            return refusal;
         }
         let acknowledgment = self
             .store
@@ -168,9 +170,11 @@ impl EffectJournal for LostReplyJournal {
         // would claim the journal is unchanged, which the committed event
         // contradicts, so the conforming report is `OutcomeUnknown`.
         if is_outcome && self.ambiguous_once.take() {
-            return Err(JournalError::OutcomeUnknown {
+            let refusal = Err(JournalError::OutcomeUnknown {
                 cause: std::io::Error::other("injected post-commit lost reply"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
+            return refusal;
         }
         Ok(acknowledgment)
     }
@@ -187,7 +191,9 @@ impl EffectJournal for LostReplyJournal {
                     if held == key && held_evidence == evidence)
         });
         if !held {
-            return Err(JournalError::ReceiptUnavailable { required });
+            let refusal = Err(JournalError::ReceiptUnavailable { required });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
+            return refusal;
         }
         Ok(DurableAck::new(position, self.durability()))
     }
@@ -228,14 +234,20 @@ pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 /// trace hash exists to catch — and the takeover family in particular needs two
 /// keys that differ in the generation and in nothing else.
 fn key_as(action: ActionId, epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+    let run = RunId::from_hex(RUN)?;
+    let attempt = AttemptId::from_decimal(&n.to_string())?;
+    let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let environment = EnvironmentId::from_hex(ENV)?;
+    let epoch = EnvironmentEpoch::from_decimal(&epoch.to_string())?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
+        run,
         action,
-        AttemptId::from_decimal(&n.to_string())?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal(&epoch.to_string())?,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 

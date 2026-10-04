@@ -973,7 +973,9 @@ impl Journal for TestJournal {
         if self.refusals.get() > 0 {
             self.refusals.set(self.refusals.get().saturating_sub(1));
             self.refused.borrow_mut().push(receipt.clone());
-            return Err(JournalError::new("test-sink", "the sink refused the write"));
+            let refusal = Err(JournalError::new("test-sink", "the sink refused the write"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "record_decision: returning an error to the caller");
+            return refusal;
         }
         self.accepted.borrow_mut().push(receipt.clone());
         Ok(self.acceptance)

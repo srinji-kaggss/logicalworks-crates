@@ -51,7 +51,7 @@ pub fn edge(
     let target = target.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let rename = rename.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":{source},"req":"1.0","kind":null,"rename":{rename},"optional":{optional},"uses_default_features":{uses_default_features},"features":[{features}],"target":{target},"path":null}}]}}],"workspace_members":["app"]}}"#
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":{source},"req":"1.0","kind":null,"rename":{rename},"optional":{optional},"uses_default_features":{uses_default_features},"features":[{features}],"target":{target},"path":null}}]}},{{"id":"lic-{package}","name":"{package}","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#
     );
     let mut edges = metadata::parse(&document)?;
     edges
@@ -67,7 +67,7 @@ pub fn register(package: &str, source: &str, extra: &str) -> Result<Contract, Bo
             "[policy]\nschema = 2\nenforce = true\n\n",
             "[[approved]]\n",
             "crate = \"{package}\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
-            "capability = \"engine.core\"\nsource = \"{source}\"\n{extra}",
+            "capability = \"engine.core\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"{source}\"\n{extra}",
             "allowed_consumers = \"app\"\nallowed_kinds = \"normal\"\n",
             "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
             "approved_by = \"reviewer\"\napproved_on = \"2026-09-30\"\nreview = \"tests/support/deps_sim.rs\"\n",

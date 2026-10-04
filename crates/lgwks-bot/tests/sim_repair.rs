@@ -303,11 +303,13 @@ fn block_with(host: &Host, reach: usize) -> Result<Case, Box<dyn Error>> {
     let report =
         lgwks_bot::block_on(host.run(&declared, input_needing(Arc::clone(&polls), 7, needs)));
     if report.disposition() != Disposition::Blocked {
-        return Err(format!(
+        let refusal = Err(format!(
             "the run must block before any decision: {:?}",
             report.error()
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block_with: returning an error to the caller");
+        return refusal;
     }
     let ticket = report
         .repair()
@@ -383,11 +385,13 @@ fn decide(
                 (0, 0) => "at-zero",
                 (1, 1) => "at-one",
                 (epoch, applied) => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "a run that has had one ticket applied is at epoch 1 with one \
-                         applied; got epoch {epoch} with {applied}"
+                     applied; got epoch {epoch} with {applied}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide: returning an error to the caller");
+                    return refusal;
                 }
             });
         }
@@ -397,11 +401,13 @@ fn decide(
         Ok(report) => Ok(match report.disposition() {
             Disposition::Succeeded => "succeeded",
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "an authorized repair must succeed, got {other}: {:?}",
                     report.error()
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide: returning an error to the caller");
+                return refusal;
             }
         }),
         Err(_) => Ok(expected),
@@ -443,9 +449,10 @@ fn bounded_host(
     attempts: u64,
     spend: u64,
 ) -> Result<Host, Box<dyn Error>> {
-    Ok(Host::builder(tenant)?
+    let stored = Host::builder(tenant)?
         .grants(GrantSet::empty())
-        .run_store(dir)?
+        .run_store(dir)?;
+    Ok(stored
         .repair_ledger(dir)?
         .repair_bounds(attempts, spend)
         .build()?)
@@ -528,6 +535,85 @@ fn disposition_arm(disposition: Disposition) -> &'static str {
 
 // ── Families ───────────────────────────────────────────────────────────────
 
+/// One decision of a seeded order: apply it, then check the run was charged only what the decision allows.
+fn decision_in_order(
+    sim: &mut sim::Sim,
+    case: &Case,
+    plan: &Plan,
+    index: usize,
+    action: &Action,
+) -> TestResult {
+    let Case {
+        ref host,
+        ref ticket,
+        run,
+        ref declared,
+        ref polls,
+    } = *case;
+    let before = shared::ledger_of(host)?
+        .control(run)
+        .ok_or("the blocked run was charged")?;
+    let verdict = decide(host, declared, ticket, polls, *action, plan.reach)?;
+    let after = shared::ledger_of(host)?
+        .control(run)
+        .ok_or("the run still has a control state")?;
+    match *action {
+        Action::Repair => {
+            // A repair succeeds while the ticket is unused and is refused
+            // once it has been used — and which of those this is depends on
+            // whether an earlier decision in *this* order already took it.
+            // Both are correct; what must hold either way is that the run
+            // never ends past one applied ticket.
+            assert!(
+                verdict == "succeeded" || after.epoch() <= 1,
+                "decision {index} ({}) left the run at epoch {} with {} applied",
+                action.label(),
+                after.epoch(),
+                after.applied()
+            );
+        }
+        Action::Deny | Action::OverWide => {
+            assert_eq!(
+                (after.attempts(), after.spend(), after.epoch()),
+                (before.attempts(), before.spend(), before.epoch()),
+                "decision {index} ({}) must charge nothing and mint no epoch",
+                action.label()
+            );
+            assert_eq!(
+                verdict,
+                "refused",
+                "decision {index} ({}) is a denial",
+                action.label()
+            );
+        }
+        Action::Duplicate => {
+            // A redelivery applies the ticket if nothing has yet and is
+            // refused if something has; either way it moves the epoch at
+            // most once, and never past one. The bound is what the
+            // property is, so it is asserted rather than predicted from
+            // the action list — which action came first is the seed's
+            // business, and a test that read it back would prove the plan
+            // rather than the run.
+            assert!(
+                after.epoch() <= 1,
+                "a redelivery at step {index} left the run at epoch {}, which is \
+                 past the one ticket it has",
+                after.epoch()
+            );
+        }
+        Action::Inspect => {}
+    }
+    sim.record(&format!(
+        "decision {index} {} verdict={verdict} attempts={} spend={} epoch={} applied={}",
+        action.label(),
+        after.attempts(),
+        after.spend(),
+        after.epoch(),
+        after.applied()
+    ));
+    Ok(())
+}
+
 /// The order of repair / duplicate / stale / deny is immaterial — and the same
 /// seed replays exactly.
 ///
@@ -546,74 +632,14 @@ fn seeded_orders_reach_the_same_state(band: Band) -> TestResult {
         let case = block(TENANTS[0], &dir, plan.reach)?;
         let Case {
             ref host,
-            ref ticket,
+            ticket: _,
             run,
-            ref declared,
+            declared: _,
             ref polls,
         } = case;
 
         for (index, action) in plan.actions.iter().enumerate() {
-            let before = shared::ledger_of(host)?
-                .control(run)
-                .ok_or("the blocked run was charged")?;
-            let verdict = decide(host, declared, ticket, polls, *action, plan.reach)?;
-            let after = shared::ledger_of(host)?
-                .control(run)
-                .ok_or("the run still has a control state")?;
-            match *action {
-                Action::Repair => {
-                    // A repair succeeds while the ticket is unused and is refused
-                    // once it has been used — and which of those this is depends on
-                    // whether an earlier decision in *this* order already took it.
-                    // Both are correct; what must hold either way is that the run
-                    // never ends past one applied ticket.
-                    assert!(
-                        verdict == "succeeded" || after.epoch() <= 1,
-                        "decision {index} ({}) left the run at epoch {} with {} applied",
-                        action.label(),
-                        after.epoch(),
-                        after.applied()
-                    );
-                }
-                Action::Deny | Action::OverWide => {
-                    assert_eq!(
-                        (after.attempts(), after.spend(), after.epoch()),
-                        (before.attempts(), before.spend(), before.epoch()),
-                        "decision {index} ({}) must charge nothing and mint no epoch",
-                        action.label()
-                    );
-                    assert_eq!(
-                        verdict,
-                        "refused",
-                        "decision {index} ({}) is a denial",
-                        action.label()
-                    );
-                }
-                Action::Duplicate => {
-                    // A redelivery applies the ticket if nothing has yet and is
-                    // refused if something has; either way it moves the epoch at
-                    // most once, and never past one. The bound is what the
-                    // property is, so it is asserted rather than predicted from
-                    // the action list — which action came first is the seed's
-                    // business, and a test that read it back would prove the plan
-                    // rather than the run.
-                    assert!(
-                        after.epoch() <= 1,
-                        "a redelivery at step {index} left the run at epoch {}, which is \
-                         past the one ticket it has",
-                        after.epoch()
-                    );
-                }
-                Action::Inspect => {}
-            }
-            sim.record(&format!(
-                "decision {index} {} verdict={verdict} attempts={} spend={} epoch={} applied={}",
-                action.label(),
-                after.attempts(),
-                after.spend(),
-                after.epoch(),
-                after.applied()
-            ));
+            decision_in_order(sim, &case, &plan, index, action)?;
         }
 
         // The endpoint does not depend on the order. Two things are true whatever
@@ -752,9 +778,10 @@ fn tenants_keep_their_own_tickets_and_budgets(band: Band) -> TestResult {
                 );
             }
             other => {
-                return Err(
-                    format!("another tenant's ticket must be refused, got {other:?}").into(),
-                );
+                let refusal =
+                    Err(format!("another tenant's ticket must be refused, got {other:?}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenants_keep_their_own_tickets_and_budgets: returning an error to the caller");
+                return refusal;
             }
         }
         // The run ids are *not* in the trace: they are minted from the estate's
@@ -905,10 +932,12 @@ fn saturation_applies_each_ticket_once(band: Band) -> TestResult {
             )) {
                 Err(RepairError::AlreadyApplied) | Err(RepairError::StaleEpoch { .. }) => {}
                 other => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "tier {tier}: redelivery {index} must be refused, got {other:?}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "saturation_applies_each_ticket_once: returning an error to the caller");
+                    return refusal;
                 }
             }
         }

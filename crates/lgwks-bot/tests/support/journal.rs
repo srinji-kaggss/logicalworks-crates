@@ -163,14 +163,21 @@ pub fn key(attempt: u64) -> Result<EffectKey, Box<dyn Error>> {
 /// its key here, so two harnesses cannot fold different worlds under what
 /// looks like the same key.
 pub fn key_for(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn Error>> {
+    let run = RunId::from_hex(RUN)?;
+    let action = ActionId::from_hex(ACTION)?;
+    let attempt = AttemptId::from_decimal(attempt)?;
+    let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let digest = ActionDigest::from_tagged("blake3_256", digest)?;
+    let environment = EnvironmentId::from_hex(ENV)?;
+    let epoch = EnvironmentEpoch::from_decimal("1")?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", digest)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal("1")?,
+        run,
+        action,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 
@@ -219,7 +226,12 @@ impl ProbeGuard {
         test_name: &str,
     ) -> Result<(), Box<dyn Error>> {
         let Some(mut child) = self.take() else {
-            return Err(format!("the probe child for {test_name} was gone before the kill").into());
+            {
+                let refusal =
+                    Err(format!("the probe child for {test_name} was gone before the kill").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
+                return refusal;
+            };
         };
         for _ in 0..2_000 {
             if marker.exists() {
@@ -240,10 +252,12 @@ impl ProbeGuard {
                 return Ok(());
             }
             if let Some(status) = child.try_wait()? {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the probe child for {test_name} exited on its own before the kill: {status}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
+                return refusal;
             }
             pause(5);
         }

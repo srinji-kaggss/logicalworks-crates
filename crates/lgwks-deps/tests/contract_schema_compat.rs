@@ -18,7 +18,7 @@ const SCHEMA_1: &str = concat!(
     "[policy]\nenforce = true\n\n",
     "[[approved]]\n",
     "crate = \"serde\"\ntier = \"boundary\"\nversion = \"^1\"\nowner = \"lgwks_std\"\n",
-    "capability = \"encoding.serde\"\nsource = \"registry\"\n",
+    "capability = \"encoding.serde\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"registry\"\n",
     "allowed_consumers = \"lgwks_std\"\nallowed_kinds = \"normal\"\n",
     "reason = \"Derive-based serialization needs compiler introspection the standard library does not expose.\"\n",
     "approved_by = \"maintainer\"\napproved_on = \"2026-08-30\"\nreview = \"https://example.invalid/1\"\n",

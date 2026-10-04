@@ -24,6 +24,7 @@ name = "ai_task_support"
 version = "0.1.0"
 dependencies = [
  "lgwks_bot",
+ "lgwks_std",
 ]
 
 [[package]]
@@ -647,6 +648,7 @@ name = "lgwks_macros"
 version = "0.1.2"
 dependencies = [
  "lgwks_deps",
+ "lgwks_std",
 ]
 
 [[package]]

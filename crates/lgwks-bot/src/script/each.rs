@@ -34,7 +34,7 @@ use super::{FlowError, MAX_IN_FLIGHT, POLL_BUDGET, Scope};
 ///
 /// # Errors
 ///
-/// The first body error, or [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) when `scope` is stopped.
+/// The first body error, or [`FlowError::Cancelled`] when `scope` is stopped.
 pub async fn each<I, T, F, Fut>(
     scope: &Scope,
     step: &str,

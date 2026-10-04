@@ -156,6 +156,56 @@ fn tier(band: Band) -> TestResult {
 /// they run the same loop and a second copy is where "each tenant inherits
 /// nothing" and "no two tenants share a fence" would drift apart. Every claim
 /// the two tests make about isolation is made here, once.
+/// Provisions one tenant's store and folds its result into the run's totals.
+///
+/// A helper rather than the loop body inline: as one block the loop opened a
+/// journal, built a ladder and appended it -- three fallible steps -- and the
+/// three assertions that make this loop a provision check rather than a write
+/// loop are the reason it exists. `tails` and `events` are threaded through so
+/// the uniqueness and total checks stay exactly where they were.
+fn provision_one(
+    sim: &sim::Sim,
+    dir: &Path,
+    tenant: u32,
+    tails: &mut BTreeSet<String>,
+    events: &mut usize,
+) -> Result<(), Box<dyn Error>> {
+    let path = sim.journal_path(dir, tenant);
+    let mut journal = FileJournal::open(&path)?;
+    // Provision is the *first* open of a store that does not exist, so
+    // this is the only place "inherited nothing" is a claim about anything
+    // at all.
+    assert_eq!(
+        journal.events().count(),
+        0,
+        "tenant {tenant} inherited history on provision"
+    );
+    journal.compare_and_append_all(&ladder(tenant, 0)?)?;
+    let held = journal.events().count();
+    assert_eq!(
+        held, 2,
+        "tenant {tenant} did not get exactly its own ladder"
+    );
+    let tail = journal.tail();
+    assert!(
+        tails.insert(format!("{tail}")),
+        "tenant {tenant} ended on a tail another tenant already holds"
+    );
+    *events = events.saturating_add(held);
+    drop(journal);
+
+    // Read the tail back through a second handle, because a tail that only
+    // exists in the writer's memory is not yet a durable claim.
+    let reopened = FileJournal::open(&path)?;
+    assert_eq!(
+        reopened.tail(),
+        tail,
+        "tenant {tenant}'s tail moved across a reopen"
+    );
+    drop(reopened);
+    Ok(())
+}
+
 fn provision_tenants(
     sim: &sim::Sim,
     dir: &Path,
@@ -165,39 +215,7 @@ fn provision_tenants(
     let mut events = 0usize;
 
     for tenant in 0..total {
-        let path = sim.journal_path(dir, tenant);
-        let mut journal = FileJournal::open(&path)?;
-        // Provision is the *first* open of a store that does not exist, so
-        // this is the only place "inherited nothing" is a claim about anything
-        // at all.
-        assert_eq!(
-            journal.events().count(),
-            0,
-            "tenant {tenant} inherited history on provision"
-        );
-        journal.compare_and_append_all(&ladder(tenant, 0)?)?;
-        let held = journal.events().count();
-        assert_eq!(
-            held, 2,
-            "tenant {tenant} did not get exactly its own ladder"
-        );
-        let tail = journal.tail();
-        assert!(
-            tails.insert(format!("{tail}")),
-            "tenant {tenant} ended on a tail another tenant already holds"
-        );
-        events = events.saturating_add(held);
-        drop(journal);
-
-        // Read the tail back through a second handle, because a tail that only
-        // exists in the writer's memory is not yet a durable claim.
-        let reopened = FileJournal::open(&path)?;
-        assert_eq!(
-            reopened.tail(),
-            tail,
-            "tenant {tenant}'s tail moved across a reopen"
-        );
-        drop(reopened);
+        provision_one(sim, dir, tenant, &mut tails, &mut events)?;
     }
     Ok((tails.len(), events))
 }

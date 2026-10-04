@@ -3,12 +3,14 @@
 //! A [`RetryPolicy`](crate::retry::RetryPolicy) is a pure value: attempts,
 //! exponential backoff, and a total deadline. It performs no I/O, spawns no
 //! threads, and holds no clock: the caller sleeps (via
-//! [`task`](crate::task) synchronously or `lgwks_bot::rt::time`
+//! [`task`] synchronously or `lgwks_bot::rt::time`
 //! asynchronously) and checks
 //! [`deadline_exceeded`](crate::retry::RetryPolicy::deadline_exceeded)
 //! against its own clock. That split keeps this module in `core` with zero
 //! external dependencies and makes budgets explicit at every hop instead of
 //! smuggled inside a client.
+//!
+//! [`task`]: crate::task
 //!
 //! Jitter is caller-supplied (`u64` entropy the caller already holds, e.g.
 //! from `lgwks_std::random`) so `core` stays free of entropy sources:

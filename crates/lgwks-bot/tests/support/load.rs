@@ -122,7 +122,7 @@ macro_rules! ticking_task {
                     let now = live
                         .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
                         .saturating_add(1);
-                    let _previous = peak.fetch_update(
+                    let _previous = peak.try_update(
                         ::std::sync::atomic::Ordering::Relaxed,
                         ::std::sync::atomic::Ordering::Relaxed,
                         |high| (now > high).then_some(now),
@@ -130,7 +130,7 @@ macro_rules! ticking_task {
                     for _ in 0..$yields {
                         lgwks_bot::rt::task::yield_now().await;
                     }
-                    let _previous = live.fetch_update(
+                    let _previous = live.try_update(
                         ::std::sync::atomic::Ordering::Relaxed,
                         ::std::sync::atomic::Ordering::Relaxed,
                         |count| count.checked_sub(1),

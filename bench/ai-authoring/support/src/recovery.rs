@@ -174,7 +174,10 @@ struct UnitLiveGuard {
 impl UnitLiveGuard {
     /// Enter the live set and update the high-water mark.
     fn enter(counters: Arc<UnitCounters>) -> Self {
-        let live = counters.live.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        let live = counters
+            .live
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
         counters.max_live.fetch_max(live, Ordering::AcqRel);
         Self { counters }
     }
@@ -292,8 +295,18 @@ impl World {
             .unwrap_or_else(|| planned_delay(self.seed, index));
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&index) {
-            return Err(UnitError::Unit { index });
+            Err(UnitError::Unit { index })
+        } else {
+            self.record_unit(scope, index).await
         }
+    }
+
+    /// Record the unit's value under its own step and count the body that ran.
+    ///
+    /// A record the store refuses is the same error as a configured failure, for
+    /// the reason [`Self::unit`] gives; the refusal's own cause goes to stderr so
+    /// the two stay distinguishable to whoever reads the run.
+    async fn record_unit(&self, scope: &Scope, index: u32) -> Result<u64, UnitError> {
         let counters = Arc::clone(&self.units);
         let step = unit_step(index);
         let value = u64::from(index).saturating_mul(3);
@@ -304,7 +317,12 @@ impl World {
             Ok::<u64, FlowError>(value)
         })
         .await
-        .map_err(|_| UnitError::Unit { index })
+        .map_err(|cause| {
+            crate::diagnostic(format_args!(
+                "unit {index}: its record was refused: {cause}"
+            ));
+            UnitError::Unit { index }
+        })
     }
 }
 
@@ -361,9 +379,7 @@ impl Ledger {
 
     /// The names lock, recovering from poisoning.
     fn lock(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        self.names
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.names.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

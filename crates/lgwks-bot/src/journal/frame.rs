@@ -1,7 +1,7 @@
 //! The frame grammar both file-backed append logs in this crate share.
 //!
-//! Two stores write a disk: [`FileJournal`](super::FileJournal) and
-//! [`RunStore`](crate::task::RunStore). Both put a record on it the same way —
+//! Two stores write a disk: [`FileJournal`] and
+//! [`RunStore`]. Both put a record on it the same way —
 //! a `u32` big-endian payload length, the archived record, then the 32-byte head
 //! the append commits to — and both read it back the same way, classifying the
 //! three ways a frame's bytes can end. That grammar is here, once, so the torn
@@ -12,7 +12,7 @@
 //! # What is *not* here
 //!
 //! What a record *means* and what its head is over. Those are the caller's: the
-//! journal chains effect positions and [`RunStore`](crate::task::RunStore) chains
+//! journal chains effect positions and [`RunStore`] chains
 //! step records, and neither is derivable from the other. So this module is pure
 //! grammar — how many bytes a frame occupies, how a prefix classifies, when a
 //! length is possible — and each store keeps its own loop, its own chain
@@ -125,7 +125,11 @@ pub(crate) fn read_prefix(
             Ok(0) => break,
             Ok(read) => filled = filled.saturating_add(read),
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_prefix: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Ok(match filled {
@@ -232,7 +236,14 @@ where
 {
     let payload = archive(record)?;
     let Some(payload_len) = writable_length(payload.len(), max_frame_bytes) else {
-        return Err(refuse(payload.len()));
+        {
+            lgwks_std::trace::debug!(
+                payload_len = payload.len(),
+                max_frame_bytes,
+                "frame_record: the archived record exceeds the frame ceiling"
+            );
+            return Err(refuse(payload.len()));
+        };
     };
     // The head is chained from the record and the archived bytes together, and the
     // bytes are handed to the closure rather than re-encoded inside it: a store that
@@ -243,6 +254,51 @@ where
 }
 /// The grammar's own tests: the round trip, the three prefix endings, the piece
 /// ending, and the two questions about a length.
+/// The bytes of one whole frame: the payload and the head that follows it.
+#[cfg(feature = "script")]
+pub(crate) struct Raw {
+    /// The payload bytes, which the chain head is computed over.
+    pub(crate) payload: Vec<u8>,
+    /// The chain head the frame recorded for itself.
+    pub(crate) head: [u8; HEAD_BYTES],
+}
+
+/// Read the next whole frame, or `None` where the file stops holding one.
+///
+/// A partial length prefix, or a payload or head cut short, is an append that
+/// never finished: it was never anyone's answer, so the scan stops and the
+/// caller trims. A complete prefix naming a length the writer never produces
+/// cannot be an interrupted append, and is `corrupt`.
+#[cfg(feature = "script")]
+pub(crate) fn read_raw<E>(
+    reader: &mut impl Read,
+    max_frame_bytes: usize,
+    storage: fn(std::io::Error) -> E,
+    corrupt: impl FnOnce() -> E,
+) -> Result<Option<Raw>, E> {
+    let mut prefix = [0u8; LENGTH_BYTES];
+    let declared = match read_prefix(reader, &mut prefix).map_err(storage)? {
+        Prefix::Eof | Prefix::Torn => return Ok(None),
+        Prefix::Full => declared_length(&prefix),
+    };
+    if !is_possible_length(declared, max_frame_bytes) {
+        lgwks_std::trace::debug!(
+            declared,
+            "read_raw: the declared length is one the writer never produces"
+        );
+        return Err(corrupt());
+    }
+    let mut payload = vec![0u8; declared];
+    if let Piece::Interrupted = read_piece(reader, &mut payload).map_err(storage)? {
+        return Ok(None);
+    }
+    let mut head = [0u8; HEAD_BYTES];
+    if let Piece::Interrupted = read_piece(reader, &mut head).map_err(storage)? {
+        return Ok(None);
+    }
+    Ok(Some(Raw { payload, head }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

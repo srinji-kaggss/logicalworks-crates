@@ -1,7 +1,7 @@
 //! The durable, file-backed per-step record store behind a resumable run.
 //!
-//! [`HostBuilder::run_store`](crate::task::HostBuilder::run_store) installs one
-//! of these. A step marked [`Scope::remember`](crate::script::Scope::remember)
+//! [`HostBuilder::run_store`] installs one
+//! of these. A step marked [`Scope::remember`]
 //! consults it before running its future and appends to it after; that is the
 //! whole of the durability claim, and it covers exactly the steps an author asked
 //! to be durable.
@@ -12,7 +12,7 @@
 //! holds the length prefix, the 32-byte head, the torn-tail scan and the refusal
 //! of a frame no writer produces, and both this store and `journal::file` call
 //! those same functions. What cannot be reused is the *record*: `journal::file`
-//! frames [`EffectEvent`](crate::journal::EffectEvent) and its head chains effect
+//! frames [`EffectEvent`] and its head chains effect
 //! positions, so a step record smuggled through it would claim to be an effect
 //! event and chain against a sequence that has nothing to do with steps. So this
 //! module states its own record and reuses the frame grammar; the encoding is
@@ -46,7 +46,7 @@ use lgwks_std::hash::{Digest, Hasher};
 use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
-use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix};
+use crate::journal::frame::{self, HEAD_BYTES};
 use crate::journal::owner::{self, Stage, StorageGate, StorageOwner, SubmitError};
 use crate::script::run_store::{Appended, RunRecords, StagedRecord, StoredValue};
 use crate::script::{FlowError, StepKey};
@@ -121,7 +121,9 @@ const VERSION_BYTE: usize = STORE_MAGIC.len() - 1;
 /// does.
 fn check_format_version(header: [u8; STORE_HEADER.len()]) -> Result<(), StoreError> {
     if header[..VERSION_BYTE] != STORE_MAGIC[..VERSION_BYTE] {
-        return Err(StoreError::NotAStore);
+        let refusal = Err(StoreError::NotAStore);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_format_version: returning an error to the caller");
+        return refusal;
     }
     let found = header[VERSION_BYTE];
     if found == STORE_FORMAT {
@@ -190,7 +192,7 @@ pub enum StoreError {
     /// store's, the other says they were, and were written by a version of this
     /// crate whose records mean something this build cannot reconstruct. A
     /// pre-version store holds records with no
-    /// [`DefinitionIdentity`](super::DefinitionIdentity) in them, and the only
+    /// [`DefinitionIdentity`] in them, and the only
     /// ways to read those are to invent an identity they never carried — which
     /// makes every pre-version resume look exactly compatible — or to discard
     /// evidence a running system is relying on. So the store is refused with both
@@ -829,9 +831,11 @@ impl RunStore {
     /// the same fault.
     fn step_readable(&self) -> Result<(), StoreError> {
         if self.inner.unreadable.swap(false, Ordering::SeqCst) {
-            return Err(StoreError::storage(std::io::Error::other(
+            let refusal = Err(StoreError::storage(std::io::Error::other(
                 "the run store's device refused a read of its index",
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step_readable: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -841,7 +845,7 @@ impl RunStore {
 /// over archived bytes, with no `lgwks_bot::task` in its own surface.
 ///
 /// The implementation is here; the trait lives in
-/// [`script`](crate::script) because the task module is a *consumer* of a
+/// [`script`] because the task module is a *consumer* of a
 /// durable step, and a step must be markable without the host that runs it.
 impl RunRecords for RunStore {
     fn lookup(
@@ -856,11 +860,13 @@ impl RunRecords for RunStore {
             return Ok(None);
         };
         if held.tenant != tenant {
-            return Err(StoreError::ForeignTenant {
+            let refusal = Err(StoreError::ForeignTenant {
                 owner: held.tenant.clone(),
                 asked: tenant.to_owned(),
             }
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "lookup: returning an error to the caller");
+            return refusal;
         }
         Ok(held
             .steps
@@ -923,11 +929,13 @@ impl RunRecords for RunStore {
     /// refuse. Naming an axis in either case would mean inventing one.
     fn drift(&self, run: RunId, definition: &DefinitionIdentity) -> Result<Drift, FlowError> {
         let Some(recorded) = self.definition_of(run) else {
-            return Err(FlowError::failed(format!(
+            let refusal = Err(FlowError::failed(format!(
                 "this store holds no definition identity for run {}, so it cannot name a drift \
-                 axis; refusing to invent one",
+             axis; refusing to invent one",
                 run.id().to_hex()
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drift: returning an error to the caller");
+            return refusal;
         };
         match definition.drift_from(&recorded) {
             Some(drift) => Ok(drift),
@@ -1077,10 +1085,12 @@ fn decide_and_write(
     let owned = index.runs.get(&stored.run);
     if let Some(owned) = owned {
         if owned.tenant != stored.tenant {
-            return Err(refusal(StoreError::ForeignTenant {
+            let refusal = Err(refusal(StoreError::ForeignTenant {
                 owner: owned.tenant.clone(),
                 asked: stored.tenant.clone(),
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
+            return refusal;
         }
         if let Some(step) = owned.steps.get(&key.to_hex()) {
             // Already recorded. An identical record is the same fact seen
@@ -1094,13 +1104,15 @@ fn decide_and_write(
             })));
         }
         if u64::try_from(owned.steps.len()).unwrap_or(u64::MAX) >= MAX_RECORDS_PER_RUN {
-            return Err(refusal(StoreError::Limit {
+            let refusal = Err(refusal(StoreError::Limit {
                 kind: StoreLimitKind::Records,
                 requested: u64::try_from(owned.steps.len())
                     .unwrap_or(u64::MAX)
                     .saturating_add(1),
                 limit: MAX_RECORDS_PER_RUN,
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -1113,7 +1125,9 @@ fn decide_and_write(
         .checked_add(staged)
         .ok_or_else(|| refusal(store_full(u64::MAX)))?;
     if next > MAX_STORE_BYTES {
-        return Err(refusal(store_full(next)));
+        let refusal = Err(refusal(store_full(next)));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
+        return refusal;
     }
 
     // The fence, checked before a byte is written: the length this handle
@@ -1126,10 +1140,12 @@ fn decide_and_write(
         .map_err(refusal)?
         .len();
     if on_disk != index.committed {
-        return Err(refusal(StoreError::Corrupt {
+        let refusal = Err(refusal(StoreError::Corrupt {
             at: u64::try_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len()))
                 .unwrap_or(u64::MAX),
         }));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
+        return refusal;
     }
 
     // The chain head and the committed length move *before* the write, and are the
@@ -1390,10 +1406,52 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, StoreError>
             Ok(0) => return Ok(false),
             Ok(read) => filled = filled.saturating_add(read),
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(cause) => return Err(StoreError::storage(cause)),
+            Err(cause) => {
+                let refusal = Err(StoreError::storage(cause));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_full: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Ok(true)
+}
+
+/// One complete, decoded frame read from the store.
+struct Framed {
+    /// The record the frame's payload decoded to.
+    stored: Stored,
+    /// The payload bytes, which the chain head is computed over.
+    payload: Vec<u8>,
+    /// The chain head the frame recorded for itself.
+    head: [u8; HEAD_BYTES],
+    /// The payload length the frame declared.
+    declared: usize,
+}
+
+/// Read the frame at ordinal `at`, or `None` where the file stops holding a
+/// whole frame.
+///
+/// A partial length prefix, or a payload or head cut short, is an append that
+/// never finished: it was never anyone's answer, so the scan stops and the
+/// caller trims to `committed`. A complete prefix naming a frame this store
+/// never writes (a write leaves a prefix of a length it did finish computing,
+/// and that length was always legal) or a payload that does not decode cannot
+/// be an interrupted append and is refused.
+fn next_frame(file: &mut File, at: u64) -> Result<Option<Framed>, StoreError> {
+    let corrupt = || StoreError::Corrupt { at };
+    let Some(raw) = frame::read_raw(file, MAX_RECORD_BYTES, StoreError::storage, corrupt)? else {
+        return Ok(None);
+    };
+    let stored = from_bytes::<Stored, WireError>(&raw.payload).map_err(|error| {
+        lgwks_std::trace::debug!(?error, at, "next_frame: the payload did not decode");
+        StoreError::Corrupt { at }
+    })?;
+    Ok(Some(Framed {
+        stored,
+        declared: raw.payload.len(),
+        payload: raw.payload,
+        head: raw.head,
+    }))
 }
 
 /// Read every committed frame, returning the index it implies.
@@ -1408,7 +1466,9 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
 
     let mut header = [0u8; STORE_HEADER.len()];
     if !read_full(file, &mut header)? {
-        return Err(StoreError::NotAStore);
+        let refusal = Err(StoreError::NotAStore);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+        return refusal;
     }
     // The two refusals are separated, and the version one is checked first,
     // because they are different facts and only one of them is a version the
@@ -1426,38 +1486,17 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     };
     let mut previous = genesis_head();
     let mut at = 0u64;
-    loop {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        let declared = match frame::read_prefix(file, &mut prefix).map_err(StoreError::storage)? {
-            Prefix::Eof => break,
-            // A partial length prefix is an append that never finished: it was
-            // never anyone's answer, so the scan stops here and the caller trims
-            // to `committed`.
-            Prefix::Torn => break,
-            Prefix::Full => frame::declared_length(&prefix),
-        };
-        if !frame::is_possible_length(declared, MAX_RECORD_BYTES) {
-            // A complete prefix naming a frame this store never writes cannot be
-            // an interrupted append: a write leaves a prefix of a length it did
-            // finish computing, and that length was always legal. Refuse.
-            return Err(StoreError::Corrupt { at });
-        }
-        let mut payload = vec![0u8; declared];
-        if let Piece::Interrupted =
-            frame::read_piece(file, &mut payload).map_err(StoreError::storage)?
-        {
-            break;
-        }
-        let mut head = [0u8; HEAD_BYTES];
-        if let Piece::Interrupted =
-            frame::read_piece(file, &mut head).map_err(StoreError::storage)?
-        {
-            break;
-        }
-        let stored: Stored =
-            from_bytes::<Stored, WireError>(&payload).map_err(|_| StoreError::Corrupt { at })?;
+    while let Some(Framed {
+        stored,
+        payload,
+        head,
+        declared,
+    }) = next_frame(file, at)?
+    {
         if stored.head_from(&previous, &payload) != Digest::from_bytes(head) {
-            return Err(StoreError::Corrupt { at });
+            let refusal = Err(StoreError::Corrupt { at });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+            return refusal;
         }
         let frame_len = frame::framed_len(declared);
         // A frame that runs past the end of the file is an interrupted append.
@@ -1475,11 +1514,13 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         previous = stored.head_from(&previous, &payload);
         at = at.saturating_add(1);
         if at > MAX_RECORDS_PER_RUN {
-            return Err(StoreError::Limit {
+            let refusal = Err(StoreError::Limit {
                 kind: StoreLimitKind::Records,
                 requested: at,
                 limit: MAX_RECORDS_PER_RUN,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "replay: returning an error to the caller");
+            return refusal;
         }
         let run = index.runs.entry(stored.run).or_insert_with(|| RunIndex {
             tenant: stored.tenant.clone(),
@@ -1512,5 +1553,5 @@ fn hex_of(bytes: &[u8]) -> String {
     // Every byte pushed above is an ASCII digit, so this is well-formed UTF-8
     // and the conversion cannot fail; `String::from_utf8` reports the invariant
     // rather than trusting it.
-    String::from_utf8(hex).unwrap_or_default()
+    hex.into_iter().map(char::from).collect()
 }

@@ -34,7 +34,7 @@ pub struct Operation {
 }
 
 impl Operation {
-    /// The name a proposal names this operation by.
+    /// The registry key a proposal uses to ask for this operation, unique within one surface.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -112,7 +112,7 @@ impl Surface {
         self.held.contains(cap)
     }
 
-    /// The registered names, in name order.
+    /// Every operation key in the surface, sorted, so a listing printed twice reads identically.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.operations.keys().map(String::as_str)
     }
@@ -173,9 +173,11 @@ impl SurfaceBuilder {
     /// escaping.
     pub fn operation(mut self, name: &str, requires: &[Cap]) -> Result<Self, SurfaceError> {
         if !is_operation_name(name) {
-            return Err(SurfaceError::InvalidOperation {
+            let refusal = Err(SurfaceError::InvalidOperation {
                 name: name.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "operation: returning an error to the caller");
+            return refusal;
         }
         self.operations.insert(
             name.to_owned(),
@@ -213,7 +215,7 @@ impl SurfaceBuilder {
 
 /// Whether `name` is a usable operation name.
 ///
-/// The same vocabulary [`Tenant`](crate::script::Tenant) enforces, so an
+/// The same vocabulary [`Tenant`] enforces, so an
 /// operation name and a tenant name are interchangeable in a path and a log line
 /// and neither can smuggle a separator.
 fn is_operation_name(name: &str) -> bool {

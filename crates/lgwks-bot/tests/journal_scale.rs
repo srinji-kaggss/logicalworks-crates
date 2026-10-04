@@ -135,11 +135,13 @@ fn append_tenant(
         .map_err(|error| error.to_string())?;
     let elapsed = start.elapsed().as_micros();
     if acks.len() != EVENTS_PER_TENANT {
-        return Err("the batch did not acknowledge every rung".to_owned());
+        let refusal = Err("the batch did not acknowledge every rung".to_owned());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "append_tenant: returning an error to the caller");
+        return refusal;
     }
     let held = journal.events().count();
     sink.lock()
-        .map_err(|_| "the latency sink was poisoned".to_owned())?
+        .map_err(|error| format!("the latency sink was poisoned: {error}"))?
         .push(elapsed);
     Ok(held)
 }
@@ -398,19 +400,21 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
                 paths.push(path);
             }
             Err(error) => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "the host refused a tenant thread at {tenant} of {target} with a \
-                     measured ceiling of {ceiling}: {error}"
+                 measured ceiling of {ceiling}: {error}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_tier: returning an error to the caller");
+                return refusal;
             }
         }
     }
 
     for handle in handles {
-        let count = handle
-            .join()
-            .map_err(|_| std::io::Error::other("a tenant thread panicked"))??;
+        let count = handle.join().map_err(|panic| {
+            std::io::Error::other(format!("a tenant thread panicked: {panic:?}"))
+        })??;
         assert_eq!(
             count, EVENTS_PER_TENANT,
             "a tenant journal held another tenant's events"
@@ -419,7 +423,7 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
 
     let mut samples = latencies
         .lock()
-        .map_err(|_| std::io::Error::other("the latency sink was poisoned"))?
+        .map_err(|error| std::io::Error::other(format!("the latency sink was poisoned: {error}")))?
         .clone();
     samples.sort_unstable();
     let p50 = percentile(&samples, 50);

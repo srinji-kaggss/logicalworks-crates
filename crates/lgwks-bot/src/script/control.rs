@@ -21,7 +21,7 @@ use super::{FlowError, MAX_ATTEMPTS, MAX_BACKOFF, MAX_IN_FLIGHT, Scope, StepKey}
 ///
 /// # Errors
 ///
-/// [`FlowError::InvalidBound`](crate::script::FlowError::InvalidBound) outside `1..=MAX_IN_FLIGHT`.
+/// [`FlowError::InvalidBound`] outside `1..=MAX_IN_FLIGHT`.
 pub fn at_most(limit: usize) -> Result<NonZeroUsize, FlowError> {
     NonZeroUsize::new(limit)
         .filter(|bound| bound.get() <= MAX_IN_FLIGHT)
@@ -37,7 +37,7 @@ pub fn at_most(limit: usize) -> Result<NonZeroUsize, FlowError> {
 ///
 /// # Errors
 ///
-/// [`FlowError::InvalidBound`](crate::script::FlowError::InvalidBound) outside `1..=MAX_ATTEMPTS`.
+/// [`FlowError::InvalidBound`] outside `1..=MAX_ATTEMPTS`.
 pub fn attempts(count: u32) -> Result<NonZeroU32, FlowError> {
     NonZeroU32::new(count)
         .filter(|budget| budget.get() <= MAX_ATTEMPTS)
@@ -50,8 +50,30 @@ pub fn attempts(count: u32) -> Result<NonZeroU32, FlowError> {
 
 // ── within ──────────────────────────────────────────────────────────────────
 
-/// Run `body`, failing with [`FlowError::TimedOut`](crate::script::FlowError::TimedOut) once `limit` passes and
-/// with [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) as soon as `scope` is stopped.
+/// Records why a step was refused, outside the caller's frame.
+///
+/// The event macro expands to a callsite, a value set and a formatter; inline
+/// in an `async fn` those become part of its state, and `within` is paid once
+/// per nesting level, so a deep nest of steps would otherwise overflow the
+/// stack the nest test budgets for. Out of line, the frame holds one call.
+#[inline(never)]
+fn note_refusal(site: &str, error: &FlowError) {
+    lgwks_std::trace::debug!(site, ?error, "a step was refused before it ran");
+}
+
+/// The refusal a step returns once `note_refusal` has recorded it.
+///
+/// Always inlined so the `Err` is built in the caller's return slot, as a
+/// direct `return Err(..)` builds it: a call that returned the `Result` by
+/// value would add a body-sized temporary to every nested `within`.
+#[inline(always)]
+fn refuse_step<T>(site: &str, error: FlowError) -> Result<T, FlowError> {
+    note_refusal(site, &error);
+    Err(error)
+}
+
+/// Run `body`, failing with [`FlowError::TimedOut`] once `limit` passes and
+/// with [`FlowError::Cancelled`] as soon as `scope` is stopped.
 ///
 /// Either way the body is dropped, which is how a Rust future is stopped: an
 /// expired step does not keep running in the background.
@@ -60,9 +82,9 @@ pub fn attempts(count: u32) -> Result<NonZeroU32, FlowError> {
 ///
 /// `limit` is checked against **the scope's declared [`Clock`]**, not against a
 /// local wall timer, so a scope built on a caller-advanceable clock reports the
-/// same [`FlowError::TimedOut`](crate::script::FlowError::TimedOut) when the clock is advanced past `limit`
+/// same [`FlowError::TimedOut`] when the clock is advanced past `limit`
 /// that a real overrun reports — with no real wait. A scope built by
-/// [`Scope::root`](crate::script::Scope::root) carries a wall clock, so the
+/// [`Scope::root`] carries a wall clock, so the
 /// default behaviour is exactly what it always was.
 ///
 /// The body is raced against the scope's stop **and** against the wall watchdog
@@ -120,7 +142,7 @@ where
     // refuse the step with no real wait and produce the same error a real
     // overrun produces.
     if deadline.is_exhausted() {
-        return Err(timed_out());
+        return refuse_step("within_on", timed_out());
     }
     // The two refusal arms and the body are boxed. A `select!` builds one future
     // per branch and holds them all for the body's whole life, so an unboxed
@@ -203,7 +225,7 @@ where
     };
     loop {
         if deadline.is_exhausted() {
-            return Err(refused());
+            return refuse_step("settle_logical_bound", refused());
         }
         lgwks_deps::tokio::select! {
             biased;
@@ -230,7 +252,7 @@ where
 
 /// Run `body` until it succeeds, fails permanently, or spends `attempts`.
 ///
-/// Every attempt runs in the **same** step scope, so [`Scope::key`](crate::script::Scope::key) inside the
+/// Every attempt runs in the **same** step scope, so [`Scope::key`] inside the
 /// body is identical on each attempt: an effect keyed by it is one effect
 /// however many times it is sent. The attempt number (from 1) is passed
 /// alongside for the rare body that must know it.
@@ -241,18 +263,18 @@ where
 /// `async` closure that borrows its surroundings is such a body.
 ///
 /// Between attempts the wait doubles from `backoff`, capped at
-/// [`MAX_BACKOFF`](crate::script::MAX_BACKOFF), plus up to half again of deterministic jitter drawn from
+/// [`MAX_BACKOFF`], plus up to half again of deterministic jitter drawn from
 /// the step key: siblings retrying the same failure spread out instead of
 /// arriving together, and the same step always waits the same time, so a
 /// replay is exact. The wait races cancellation.
 ///
 /// # Errors
 ///
-/// The first non-retryable error as-is; [`FlowError::Exhausted`](crate::script::FlowError::Exhausted) wrapping the
-/// last error when `attempts` runs out; [`FlowError::Throttled`](crate::script::FlowError::Throttled) when
+/// The first non-retryable error as-is; [`FlowError::Exhausted`] wrapping the
+/// last error when `attempts` runs out; [`FlowError::Throttled`] when
 /// the run's retry budget is spent: 10 retries, plus one per five first
 /// attempts, shared by every `retry` under the root scope;
-/// [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) on a stop.
+/// [`FlowError::Cancelled`] on a stop.
 pub async fn retry<T, F, Fut>(
     scope: &Scope,
     step: &str,
@@ -274,21 +296,27 @@ where
             Err(error) => error.located(&here),
         };
         if !error.is_retryable() {
-            return Err(error);
+            let refusal = Err(error);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         if attempt >= attempts.get() {
-            return Err(FlowError::Exhausted {
+            let refusal = Err(FlowError::Exhausted {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         if !here.policy().take_retry() {
-            return Err(FlowError::Throttled {
+            let refusal = Err(FlowError::Throttled {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         // The key is hashed here, only once a retry is due: most steps never
         // retry, and those should not pay for a digest they do not use.
@@ -300,16 +328,18 @@ where
                 .await
                 .is_none()
         {
-            return Err(FlowError::Cancelled {
+            let refusal = Err(FlowError::Cancelled {
                 at: Arc::clone(here.shared_path()),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
         attempt = attempt.saturating_add(1);
     }
 }
 
 /// The wait after failed attempt `attempt`: `base · 2^(attempt-1)`, capped at
-/// [`MAX_BACKOFF`](crate::script::MAX_BACKOFF), plus `0..=½` of that again chosen by a byte of `key`.
+/// [`MAX_BACKOFF`], plus `0..=½` of that again chosen by a byte of `key`.
 fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     if base.is_zero() {
         return Duration::ZERO;

@@ -42,7 +42,7 @@
 //! know them.
 //!
 //! The identity travels out on the verdict itself, as
-//! [`Provenance::model`](crate::session::Provenance::model), and not only into
+//! [`Provenance::model`], and not only into
 //! this resolver's own accessor. `resolve` calls `identity()` once per decision
 //! and the caller holds the result: a caller that resolved through a trait
 //! object has no way back to `embedder_identity`, and `embedder_identity` is a
@@ -74,8 +74,8 @@
 //!
 //! This module does not log. It reports. The cause travels to the caller in the
 //! verdict, and the verdict reaches the run's declared record — the
-//! [`DecisionReceipt`](crate::session::DecisionReceipt) written to the
-//! [`Journal`](crate::session::Journal) — rather than a session transcript,
+//! [`DecisionReceipt`] written to the
+//! [`Journal`] — rather than a session transcript,
 //! which is a rendering of what was said and not of what was decided. A log line
 //! would be a second, unmanaged copy of the same fact, and this crate has no
 //! logging edge to write one through. An [`Embedder`] that fails is expected to
@@ -187,13 +187,19 @@ impl EmbedderIdentity {
         let name = name.into();
         let digest = digest.into();
         if name.is_empty() {
-            return Err(SemanticError::UnnamedEmbedder);
+            let refusal = Err(SemanticError::UnnamedEmbedder);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if digest.is_empty() {
-            return Err(SemanticError::UndigestedEmbedder { name });
+            let refusal = Err(SemanticError::UndigestedEmbedder { name });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if dimension == 0 {
-            return Err(SemanticError::ZeroDimension { name });
+            let refusal = Err(SemanticError::ZeroDimension { name });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self {
             name,
@@ -355,16 +361,24 @@ impl SemanticPolicy {
     /// Validates a threshold and margin.
     pub fn new(threshold: f64, margin: f64) -> Result<Self, SemanticError> {
         if !threshold.is_finite() {
-            return Err(SemanticError::NonFiniteThreshold);
+            let refusal = Err(SemanticError::NonFiniteThreshold);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if !(0.0..=1.0).contains(&threshold) {
-            return Err(SemanticError::InvalidThreshold { threshold });
+            let refusal = Err(SemanticError::InvalidThreshold { threshold });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if !margin.is_finite() {
-            return Err(SemanticError::NonFiniteMargin);
+            let refusal = Err(SemanticError::NonFiniteMargin);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if !(0.0..=1.0).contains(&margin) {
-            return Err(SemanticError::InvalidMargin { margin });
+            let refusal = Err(SemanticError::InvalidMargin { margin });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self { threshold, margin })
     }
@@ -589,7 +603,11 @@ impl<E: Embedder> SemanticResolver<E> {
             // above, so a refusal here can only be about this candidate.
             match metric.try_score(&target, &candidate) {
                 Ok(score) => scored.push((index, MatchTier::Semantic, score)),
-                Err(reason) => return Err(Self::degrade(reason)),
+                Err(reason) => {
+                    let refusal = Err(Self::degrade(reason));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "score_semantically: returning an error to the caller");
+                    return refusal;
+                }
             }
         }
 
@@ -695,7 +713,9 @@ mod tests {
         fn embed(&self, text: &str) -> Result<Vec<f32>, Self::Error> {
             self.calls.set(self.calls.get().saturating_add(1));
             if self.failing {
-                return Err(StubFailure);
+                let refusal = Err(StubFailure);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "embed: returning an error to the caller");
+                return refusal;
             }
             Ok(self
                 .vectors

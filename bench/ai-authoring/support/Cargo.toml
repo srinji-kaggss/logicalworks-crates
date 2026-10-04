@@ -21,3 +21,7 @@ publish = false
 # record rather than the body is what survives an interruption. A fixture that
 # hand-rolled its own durability would be testing the fixture.
 lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["rt", "time", "script"] }
+
+# The estate's own tracing facade, for the one place the rig reports a refusal.
+# `lgwks_bot` already depends on it, so this names an edge the graph has.
+lgwks_std = { path = "../../../crates/lgwks-std", default-features = false, features = ["trace"] }

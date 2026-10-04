@@ -33,10 +33,12 @@ pub(super) fn if_chain(
         let line = &node.line;
         refuse::check(&line.tokens)?;
         if !line.opens_block {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 line.span,
                 "`else` opens a block: end it with `:`",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "if_chain: returning an error to the caller");
+            return refusal;
         }
         let is_final_else = position > 0 && line.tokens.len() == 1;
         let condition_tokens: &[TokenTree] = if is_final_else {
@@ -47,21 +49,27 @@ pub(super) fn if_chain(
             match *line.tokens.get(1..).unwrap_or_default() {
                 [ref word, ref rest @ ..] if is_ident(word, "if") && !rest.is_empty() => rest,
                 _ => {
-                    return Err(Error::new(
+                    let refusal = Err(Error::new(
                         line.span,
                         "an `else` line is `else:` or `else if <condition>:`",
                     ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "if_chain: returning an error to the caller");
+                    return refusal;
                 }
             }
         };
         if !is_final_else && condition_tokens.is_empty() {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 line.span,
                 "`if` needs a condition before its `:`",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "if_chain: returning an error to the caller");
+            return refusal;
         }
         if is_final_else && position.saturating_add(1) != chain.len().saturating_add(1) {
-            return Err(Error::new(line.span, "`else:` must be the last branch"));
+            let refusal = Err(Error::new(line.span, "`else:` must be the last branch"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "if_chain: returning an error to the caller");
+            return refusal;
         }
         let mut run_shapes = Shapes::default();
         let condition = rewrite(condition_tokens, labels, &mut run_shapes, line)?;
@@ -100,10 +108,12 @@ pub(super) fn each(
 ) -> Result<(TokenStream, TokenStream)> {
     let tokens = line.tokens.get(1..).unwrap_or_default();
     let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`each` reads `each <name> in <items>:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "each: returning an error to the caller");
+        return refusal;
     };
     let (pattern, after_in) = tokens.split_at(in_at);
     let after_in = after_in.get(1..).unwrap_or_default();
@@ -121,19 +131,23 @@ pub(super) fn each(
                     (items, Some(limit))
                 }
                 _ => {
-                    return Err(Error::new(
+                    let refusal = Err(Error::new(
                         line.span,
                         "the bound reads `, at most (limit) at once`",
                     ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "each: returning an error to the caller");
+                    return refusal;
                 }
             }
         }
     };
     if pattern.is_empty() || items.is_empty() {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`each` reads `each <name> in <items>:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "each: returning an error to the caller");
+        return refusal;
     }
     let script = runtime();
     let (limit, detail) = match limit_tokens {
@@ -215,10 +229,12 @@ pub(super) fn retry(
         rest = tail;
     }
     let Some(times_at) = rest.iter().position(|token| is_ident(token, "times")) else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`retry` reads `retry up to N times:` or `retry up to N times, waiting 100ms:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+        return refusal;
     };
     let (count, after) = rest.split_at(times_at);
     let subject = text(count);
@@ -231,10 +247,12 @@ pub(super) fn retry(
             duration(spec, line)?
         }
         _ => {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 line.span,
                 "after `times` comes `, waiting <duration>` or `:`",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
+            return refusal;
         }
     };
     let count = bound(count, line, "up to", 1_000)?;
@@ -271,10 +289,12 @@ pub(super) fn step(
         _ => None,
     };
     let Some(name) = name else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`step` reads `step <name>:`, where the name is one word",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step: returning an error to the caller");
+        return refusal;
     };
     let label = labels.next(&name.to_string());
     let (body, inner) = nested_body(children)?;
@@ -305,52 +325,18 @@ pub(super) fn together(
     labels: &mut Labels,
 ) -> Result<(Piece, TokenStream)> {
     if line.tokens.len() != 1 {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`together:` takes nothing before its `:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "together: returning an error to the caller");
+        return refusal;
     }
     let mut patterns = Vec::new();
     let mut branches = Vec::new();
     let mut shapes = Shapes::default();
     for child in children {
-        let child_line = &child.line;
-        refuse::check(&child_line.tokens)?;
-        let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {
-            let (pattern, rest) = split_let(child_line)?;
-            (pattern, rest)
-        } else {
-            (quote!(_), child_line.tokens.clone())
-        };
-        let value_line = Line {
-            tokens: value,
-            column: child_line.column,
-            number: child_line.number,
-            opens_block: child_line.opens_block,
-            span: child_line.span,
-        };
-        let branch = if value_line.opens_block {
-            let keyword = value_line.keyword().unwrap_or_default();
-            let (expr, shape) = construct_expr(&value_line, &keyword, &child.children, labels)?;
-            shapes.push(shape);
-            expr
-        } else {
-            if !child.children.is_empty() {
-                return Err(Error::new(
-                    child_line.span,
-                    "unexpected indent inside `together:`",
-                ));
-            }
-            match run_only(&value_line.tokens, labels, &mut shapes, &value_line)? {
-                Some(call) => call,
-                None => ok(&rewrite(
-                    &value_line.tokens,
-                    labels,
-                    &mut shapes,
-                    &value_line,
-                )?),
-            }
-        };
+        let (pattern, branch) = together_child(child, labels, &mut shapes)?;
         patterns.push(pattern);
         branches.push(quote!(async { #branch }));
     }
@@ -365,6 +351,55 @@ pub(super) fn together(
     ))
 }
 
+/// Emits one `together:` child as a `(pattern, async body)` pair.
+///
+/// A helper rather than the loop body inline: as one block the loop carried
+/// four propagation operators across the refusal check, the `let` split, the
+/// block construct and the inline rewrite, so a caller reading the `together:`
+/// arm had to hold four distinct refusal paths to see what one child can refuse
+/// on.
+fn together_child(
+    child: &Node,
+    labels: &mut Labels,
+    shapes: &mut Shapes,
+) -> Result<(TokenStream, TokenStream)> {
+    let child_line = &child.line;
+    refuse::check(&child_line.tokens)?;
+    let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {
+        let (pattern, rest) = split_let(child_line)?;
+        (pattern, rest)
+    } else {
+        (quote!(_), child_line.tokens.clone())
+    };
+    let value_line = Line {
+        tokens: value,
+        column: child_line.column,
+        number: child_line.number,
+        opens_block: child_line.opens_block,
+        span: child_line.span,
+    };
+    let branch = if value_line.opens_block {
+        let keyword = value_line.keyword().unwrap_or_default();
+        let (expr, shape) = construct_expr(&value_line, &keyword, &child.children, labels)?;
+        shapes.push(shape);
+        expr
+    } else {
+        if !child.children.is_empty() {
+            let refusal = Err(Error::new(
+                child_line.span,
+                "unexpected indent inside `together:`",
+            ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "together_child: returning an error to the caller");
+            return refusal;
+        }
+        match run_only(&value_line.tokens, labels, shapes, &value_line)? {
+            Some(call) => call,
+            None => ok(&rewrite(&value_line.tokens, labels, shapes, &value_line)?),
+        }
+    };
+    Ok((pattern, branch))
+}
+
 /// `for <pattern> in <items>:`, sequential, one scope per iteration.
 pub(super) fn for_loop(
     line: &Line,
@@ -374,18 +409,22 @@ pub(super) fn for_loop(
 ) -> Result<(Piece, TokenStream)> {
     let tokens = line.tokens.get(1..).unwrap_or_default();
     let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`for` reads `for <name> in <items>:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "for_loop: returning an error to the caller");
+        return refusal;
     };
     let (pattern, items) = tokens.split_at(in_at);
     let items = items.get(1..).unwrap_or_default();
     if pattern.is_empty() || items.is_empty() {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "`for` reads `for <name> in <items>:`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "for_loop: returning an error to the caller");
+        return refusal;
     }
     let label = labels.next(&format!("for:{}", text(pattern)));
     let mut run_shapes = Shapes::default();
@@ -455,12 +494,16 @@ pub(super) fn split_let(line: &Line) -> Result<(TokenStream, Vec<TokenTree>)> {
         }
     }
     let Some(at) = at else {
-        return Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
+        let refusal = Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");
+        return refusal;
     };
     let (pattern, rest) = tokens.split_at(at);
     let rest = rest.get(1..).unwrap_or_default();
     if pattern.is_empty() || rest.is_empty() {
-        return Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
+        let refusal = Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");
+        return refusal;
     }
     Ok((pattern.iter().cloned().collect(), rest.to_vec()))
 }

@@ -2090,6 +2090,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/sim_proposal.rs` (`seeded_runs_reach_the_declared_disposition_band_20..23`,
   `two_tenants_admitting_on_one_host_stay_isolated_band_24..27`,
   `saturation_over_admit_conserves_the_budget`)
+- **INV-SCAN-ZERO** No file this workspace ships carries a source finding: no
+  error is silently discarded, no fallible return reaches a caller with no
+  recorded signal, no statement chains more than three fallible steps without an
+  intermediate binding, and no public item's documentation is a paraphrase of its
+  own name. A file the scanner cannot parse is a refusal, not a pass. · why: the
+  name appeared in `scan.rs`'s module doc while 433 findings sat in shipped source
+  and no lane ran it — the invariant was advertised and unenforced · enforced by:
+  the `scan` lane, which exits 2 on any finding
 
 ## Open questions for the Director
 

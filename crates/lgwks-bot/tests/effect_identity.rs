@@ -66,14 +66,21 @@ fn key(
     epoch: u64,
     digest_hex: &str,
 ) -> Result<EffectKey, Box<dyn std::error::Error>> {
+    let key_run = RunId::from_hex(RUN)?;
+    let key_action = ActionId::from_hex(action)?;
+    let key_attempt = AttemptId::new(counter(attempt)?);
+    let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
+    let key_environment = EnvironmentId::from_hex(ENV)?;
+    let key_epoch = EnvironmentEpoch::new(counter(epoch)?);
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(action)?,
-        AttemptId::new(counter(attempt)?),
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", digest_hex)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::new(counter(epoch)?),
+        key_run,
+        key_action,
+        key_attempt,
+        key_flow_revision,
+        key_digest,
+        key_environment,
+        key_epoch,
     ))
 }
 

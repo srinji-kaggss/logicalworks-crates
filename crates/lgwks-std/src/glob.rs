@@ -401,10 +401,13 @@ fn compile_pattern(
             if dialect == GlobDialect::Strict
                 && (star_cursor.saturating_sub(run_start) != 2 || !left_boundary || !right_boundary)
             {
-                return Err(PatternError {
+                let refusal = Err(PatternError {
                     kind: PatternErrorKind::DoubleStarPlacement,
                     byte_offset: byte_offset(&chars, run_start),
                 });
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "compile_pattern: returning an error to the caller");
+                return refusal;
             }
         } else {
             star_cursor = star_cursor.saturating_add(1);
@@ -429,10 +432,13 @@ fn compile_pattern(
             let after = index.saturating_add(2);
             let next_is_separator = after == chars.len() || chars.get(after) == Some(&'/');
             if dialect == GlobDialect::Strict && !(previous_is_separator && next_is_separator) {
-                return Err(PatternError {
+                let refusal = Err(PatternError {
                     kind: PatternErrorKind::DoubleStarPlacement,
                     byte_offset: byte_offset(&chars, index),
                 });
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "compile_pattern: returning an error to the caller");
+                return refusal;
             }
             tokens.push(Token::DoubleStar);
             index = after;
@@ -446,10 +452,13 @@ fn compile_pattern(
             let (negated, content, close) = class_bounds(&chars, &next_close, index);
             if close == chars.len() {
                 if dialect == GlobDialect::Strict {
-                    return Err(PatternError {
+                    let refusal = Err(PatternError {
                         kind: PatternErrorKind::UnclosedClass,
                         byte_offset: byte_offset(&chars, index),
                     });
+                    #[cfg(feature = "trace")]
+                    crate::trace::debug!(error = ?refusal.as_ref().err(), "compile_pattern: returning an error to the caller");
+                    return refusal;
                 }
                 tokens.push(Token::Literal('['));
                 index = index.saturating_add(1);
@@ -514,10 +523,13 @@ fn compile_class(
             let start = body[index];
             let end = body[index.saturating_add(2)];
             if start > end && dialect == GlobDialect::Strict {
-                return Err(PatternError {
+                let refusal = Err(PatternError {
                     kind: PatternErrorKind::DescendingRange,
                     byte_offset: class_offset,
                 });
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "compile_class: returning an error to the caller");
+                return refusal;
             }
             if start <= end {
                 ranges.push(ScalarRange { start, end });

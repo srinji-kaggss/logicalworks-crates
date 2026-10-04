@@ -43,7 +43,7 @@ pub fn take_captured() -> TestResult<Inspection> {
         .ok_or_else(|| "the capture action did not run".into())
 }
 
-/// Clear the capture before a run.
+/// Forget whatever inspection the recording action last captured, so a test asserts on its own run and not an earlier one.
 pub fn clear_captured() {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
 }

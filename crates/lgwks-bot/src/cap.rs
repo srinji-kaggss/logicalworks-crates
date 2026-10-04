@@ -10,7 +10,7 @@
 //! shorthand constructors for shipped capabilities.
 //!
 //! Names ([`Cap`]) are forgeable labels; authority is the sealed [`Auth`]
-//! proof, minted only by [`GrantSet`](crate::gate::GrantSet). Every
+//! proof, minted only by [`GrantSet`]. Every
 //! side-effecting verb takes `(Auth, input)` tuples and checks coverage
 //! before acting. This stops confused-deputy calls and accidental ungated
 //! use; it is not a sandbox, since in-process code can always dial out

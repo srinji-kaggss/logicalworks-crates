@@ -305,12 +305,12 @@ fn reference_answers(shared: &Shared, callers: usize) -> Vec<CallerAnswer> {
 /// What a caller that panicked reports: a value that can never equal any
 /// reference answer, so a panic is a counted divergence rather than a silent
 /// pass.
-fn panicked_caller() -> CallerAnswer {
+fn panicked_caller(cause: &str) -> CallerAnswer {
     CallerAnswer {
         matched: false,
         score_bits: 0,
         accepted: false,
-        refusal: String::from("caller panicked"),
+        refusal: format!("caller panicked: {cause}"),
         delay_nanos: 0,
     }
 }
@@ -335,7 +335,9 @@ fn run_tier(shared: &Arc<Shared>, tier: usize) -> (Vec<Observation>, Vec<String>
                 shared.observe(&mut scratch, index)
             }) {
             Ok(joined) => {
-                let observation = joined.join().unwrap_or_else(|_| (panicked_caller(), 0, 0));
+                let observation = joined
+                    .join()
+                    .unwrap_or_else(|panic| (panicked_caller(&format!("{panic:?}")), 0, 0));
                 observations.push(observation);
             }
             Err(error) => failures.push(format!("caller {index}: {error}")),

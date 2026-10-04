@@ -51,13 +51,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use lgwks_bot::script::FlowError;
+use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{
-    Disposition, InputDigest, RequestError, RequestKey, RunStore, Submission, task,
+    Disposition, Host, InputDigest, RequestError, RequestKey, RunStore, Submission, Task, task,
 };
 
 use request::{
-    FirstStepRuns, counting_task, distinct_runs, drop_after_first_step, host_on,
+    BodyFuture, FirstStepRuns, counting_task, distinct_runs, drop_after_first_step, host_on,
     host_with_deadline, hosts_over, overrunning_task, parking_task, stop_mid_run, stored_host,
     two_step_task,
 };
@@ -84,6 +84,95 @@ const MAX_TIER: u32 = 12;
 /// ceiling levels can be read together (the INV-BOT-16 rule).
 const DECLARED_TIER_CEILING: u64 = 10_000;
 
+/// The tenant a drawn request index belongs to, alternating over [`TENANTS`].
+fn tenant_for(index: u32) -> Result<&'static str, Box<dyn Error>> {
+    let tenants = u32::try_from(TENANTS.len())?;
+    let which = usize::try_from(index.checked_rem(tenants).ok_or("a nonzero tenant count")?)?;
+    let tenant = TENANTS.get(which).ok_or("the tenant index is in range")?;
+    Ok(tenant)
+}
+
+/// The host a request goes to and the key it is filed under, alternating
+/// between the two tenants' hosts as `parity` flips.
+fn alternating_target<'h>(
+    hosts: &'h [Host],
+    parity: bool,
+    name: &str,
+) -> Result<(&'h Host, RequestKey), Box<dyn Error>> {
+    let host = hosts
+        .get(usize::from(parity))
+        .ok_or("the tenant index is in range")?;
+    Ok((host, RequestKey::new(name)?))
+}
+
+/// One iteration of the loop it was lifted from.
+fn collide_key<F: Fn(Scope, u32) -> BodyFuture>(
+    sim_run: &mut sim::Sim,
+    host: &Host,
+    work: &Task<F>,
+    tenant: &str,
+    index: u32,
+    payload: u32,
+    runs: &mut Vec<String>,
+) -> TestResult {
+    let key = RequestKey::new(&format!("{tenant}-{index}"))?;
+
+    let first = lgwks_bot::block_on(host.submit(&key, work, payload))?;
+    assert!(
+        matches!(first, Submission::Executed(_)),
+        "a first submission executes"
+    );
+    let run = first.run_id().ok_or("a submission names a run")?;
+    assert_eq!(
+        first.report().and_then(|report| report.output().copied()),
+        Some(payload),
+        "the body's value is the recorded value"
+    );
+    let hex = run.id().to_hex();
+    assert!(
+        !runs.contains(&hex),
+        "every key derives a distinct run; {tenant}/{index} collided with {hex}"
+    );
+    sim_run.trace.record(&format!("run {tenant} {index} {hex}"));
+    runs.push(hex);
+
+    let duplicate = lgwks_bot::block_on(host.submit(&key, work, payload))?;
+    assert!(
+        matches!(duplicate, Submission::Reattached(_)),
+        "the same key and input reattaches"
+    );
+    assert_eq!(
+        duplicate.run_id(),
+        Some(run),
+        "a reattach names the same derived run"
+    );
+
+    let other = payload.saturating_add(1);
+    let conflict = lgwks_bot::block_on(host.submit(&key, work, other))
+        .err()
+        .ok_or("a different payload under one key must conflict")?;
+    match conflict {
+        RequestError::Conflict(named) => {
+            assert_eq!(
+                named.existing(),
+                InputDigest::of(&payload),
+                "the conflict names the bound input's digest"
+            );
+            assert_eq!(
+                named.requested(),
+                InputDigest::of(&other),
+                "the conflict names the refused input's digest"
+            );
+        }
+        other => {
+            let refusal = Err(format!("expected a conflict, got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "collision_scenario: returning an error to the caller");
+            return refusal;
+        }
+    }
+    Ok(())
+}
+
 /// Two tenants, one store file: reattach, conflict and distinct runs.
 fn collision_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let keys = sim_run.rng().between(1, MAX_KEYS);
@@ -99,59 +188,7 @@ fn collision_scenario(sim_run: &mut sim::Sim) -> TestResult {
     for tenant in TENANTS {
         let host = host_on(tenant, store.clone())?;
         for index in 0..keys {
-            let key = RequestKey::new(&format!("{tenant}-{index}"))?;
-
-            let first = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
-            assert!(
-                matches!(first, Submission::Executed(_)),
-                "a first submission executes"
-            );
-            let run = first.run_id().ok_or("a submission names a run")?;
-            assert_eq!(
-                first.report().and_then(|report| report.output().copied()),
-                Some(payload),
-                "the body's value is the recorded value"
-            );
-            let hex = run.id().to_hex();
-            assert!(
-                !runs.contains(&hex),
-                "every key derives a distinct run; {tenant}/{index} collided with {hex}"
-            );
-            sim_run.trace.record(&format!("run {tenant} {index} {hex}"));
-            runs.push(hex);
-
-            let duplicate = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
-            assert!(
-                matches!(duplicate, Submission::Reattached(_)),
-                "the same key and input reattaches"
-            );
-            assert_eq!(
-                duplicate.run_id(),
-                Some(run),
-                "a reattach names the same derived run"
-            );
-
-            let other = payload.saturating_add(1);
-            let conflict = lgwks_bot::block_on(host.submit(&key, &work, other))
-                .err()
-                .ok_or("a different payload under one key must conflict")?;
-            match conflict {
-                RequestError::Conflict(named) => {
-                    assert_eq!(
-                        named.existing(),
-                        InputDigest::of(&payload),
-                        "the conflict names the bound input's digest"
-                    );
-                    assert_eq!(
-                        named.requested(),
-                        InputDigest::of(&other),
-                        "the conflict names the refused input's digest"
-                    );
-                }
-                other => {
-                    return Err(format!("expected a conflict, got {other:?}").into());
-                }
-            }
+            collide_key(sim_run, &host, &work, tenant, index, payload, &mut runs)?;
         }
     }
     assert_eq!(
@@ -188,7 +225,11 @@ fn drop_scenario(sim_run: &mut sim::Sim) -> TestResult {
                 .trace
                 .record_u64("records", u64::try_from(in_flight.records()).unwrap_or(0));
         }
-        other => return Err(format!("expected an in-flight report, got {other:?}").into()),
+        other => {
+            let refusal = Err(format!("expected an in-flight report, got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drop_scenario: returning an error to the caller");
+            return refusal;
+        }
     }
     Ok(())
 }
@@ -205,9 +246,7 @@ fn tier_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let mut runs: Vec<String> = Vec::new();
     let mut parity = false;
     for index in 0..requested {
-        let which = usize::from(parity);
-        let host = hosts.get(which).ok_or("the tenant index is in range")?;
-        let key = RequestKey::new(&format!("tier-{index}"))?;
+        let (host, key) = alternating_target(&hosts, parity, &format!("tier-{index}"))?;
         let submission = lgwks_bot::block_on(host.submit(&key, &work, index))?;
         let run = submission.run_id().ok_or("a submission names a run")?;
         assert_eq!(
@@ -286,6 +325,144 @@ impl StopPoint {
 /// How many requests one seeded stop sweep drives.
 const MAX_STOP_REQUESTS: u32 = 3;
 
+/// One request of the stop sweep: draw a host stop, reopen, settle, and reattach.
+fn stop_request(
+    sim_run: &mut sim::Sim,
+    store: &RunStore,
+    index: u32,
+    reaches_terminal: &mut u32,
+) -> TestResult {
+    let tenant = tenant_for(index)?;
+    // A fresh host per request, over one shared store handle: a *stopped*
+    // host stays stopped, so a host that has already been used to draw a
+    // `BeforeAdmission` stop could not drive anything afterwards. Two store
+    // handles over one file would be two writers, which the store's own chain
+    // fence refuses, so the file is opened once and the hosts share it.
+    let host = host_on(tenant, store.clone())?;
+    let point = if sim_run.rng().chance(500) {
+        StopPoint::BeforeAdmission
+    } else {
+        StopPoint::AfterFirstStep
+    };
+    let payload = sim_run.rng().between(0, 1000);
+    let key = RequestKey::new(&format!("stop-{tenant}-{index}"))?;
+    let runs = FirstStepRuns::new();
+    let recorded = Arc::new(AtomicBool::new(false));
+    // The first run's body waits for a release that never comes, so the
+    // host's stop is what ends it. The settling run uses a body that goes
+    // on to the second step.
+    let parked = two_step_task(
+        Arc::clone(&recorded),
+        Arc::new(AtomicBool::new(false)),
+        runs.clone(),
+    )?;
+    let released = two_step_task(
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(true)),
+        runs.clone(),
+    )?;
+
+    let first = match point {
+        StopPoint::BeforeAdmission => {
+            host.cancel();
+            lgwks_bot::block_on(host.submit(&key, &parked, payload))?
+        }
+        StopPoint::AfterFirstStep => stop_mid_run(&host, &key, &parked, payload, &recorded)?,
+    };
+    let stopped = first
+        .report()
+        .map(lgwks_bot::task::Report::disposition)
+        .ok_or("a first submission carries a report")?;
+    assert!(
+        matches!(stopped, Disposition::Cancelled | Disposition::Refused),
+        "the drawn stop point must produce a host stop, drew {stopped} at {tenant}/{index}"
+    );
+    sim_run
+        .trace
+        .record(&format!("stopped {point:?} {stopped}"));
+    sim_run
+        .trace
+        .record(&format!("stop-point {}", point.label()));
+
+    // A fresh host over the same store file — a new *host*, which is what a
+    // restart is, rather than a second writer, which the store's own chain
+    // fence refuses. This is the whole claim: a host stop recorded as the
+    // verdict would reattach here, forever.
+    let reopened = host_on(tenant, store.clone())?;
+    let seen = lgwks_bot::block_on(reopened.submit(&key, &released, payload))?;
+    let seen_disposition = match seen {
+        Submission::Reattached(report) => {
+            let refusal = Err(format!(
+                "a request stopped at {point:?} reattached to {:?}; a host stop is not the \
+             request's outcome",
+                report.disposition()
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+            return refusal;
+        }
+        Submission::InFlight(ref in_flight) => {
+            sim_run
+                .trace
+                .record_u64("in-flight-records", u64::try_from(in_flight.records())?);
+            None
+        }
+        Submission::Executed(ref report) => Some(report.disposition()),
+        // `Submission` is `#[non_exhaustive]`: a new arm is a compile-time
+        // prompt here, and a request whose settlement this family has not
+        // been taught to read is not silently treated as unsettled.
+        other => {
+            let refusal = Err(format!(
+                "a request this family does not know how to read came back as {other:?}"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+            return refusal;
+        }
+    };
+    sim_run.trace.record(&format!("after-stop {seen:?}"));
+    assert_eq!(
+        seen_disposition, None,
+        "a stopped request is unsettled: the reopen must report it in flight, not settle it"
+    );
+
+    // Settle it on a host that can admit it, then reattach and read the one
+    // recorded terminal.
+    let run = seen.run_id().ok_or("a submission names a run")?;
+    let settled = lgwks_bot::block_on(reopened.resume(run, &released, payload));
+    assert_eq!(
+        settled.disposition(),
+        Disposition::Succeeded,
+        "the resumed run reaches the request's own verdict"
+    );
+    let repeat = lgwks_bot::block_on(reopened.submit(&key, &released, payload))?;
+    let reattached = match repeat {
+        Submission::Reattached(report) => report.disposition(),
+        other => {
+            let refusal = Err(format!(
+                "a request driven to a verdict must record exactly one terminal; a later \
+             submission saw {other:?}"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stop_scenario: returning an error to the caller");
+            return refusal;
+        }
+    };
+    assert_eq!(
+        reattached,
+        Disposition::Succeeded,
+        "the recorded terminal is the request's own verdict"
+    );
+    assert_eq!(
+        runs.count(),
+        1,
+        "the first durable step's effect ran once across the stop, the settle and the reattach"
+    );
+    *reaches_terminal = reaches_terminal.saturating_add(1);
+    sim_run.trace.record_u64("effects", u64::from(runs.count()));
+    Ok(())
+}
+
 /// A seeded stop sweep: a drawn stop point and disposition per request, over both
 /// tenants sharing one store file.
 ///
@@ -313,131 +490,7 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let mut reaches_terminal = 0_u32;
 
     for index in 0..requests {
-        let tenants = u32::try_from(TENANTS.len())?;
-        let which = usize::try_from(index.checked_rem(tenants).ok_or("a nonzero tenant count")?)
-            .map_err(|_| "the tenant index is in range")?;
-        let tenant = TENANTS.get(which).ok_or("the tenant index is in range")?;
-        // A fresh host per request, over one shared store handle: a *stopped*
-        // host stays stopped, so a host that has already been used to draw a
-        // `BeforeAdmission` stop could not drive anything afterwards. Two store
-        // handles over one file would be two writers, which the store's own chain
-        // fence refuses, so the file is opened once and the hosts share it.
-        let host = host_on(tenant, store.clone())?;
-        let point = if sim_run.rng().chance(500) {
-            StopPoint::BeforeAdmission
-        } else {
-            StopPoint::AfterFirstStep
-        };
-        let payload = sim_run.rng().between(0, 1000);
-        let key = RequestKey::new(&format!("stop-{tenant}-{index}"))?;
-        let runs = FirstStepRuns::new();
-        let recorded = Arc::new(AtomicBool::new(false));
-        // The first run's body waits for a release that never comes, so the
-        // host's stop is what ends it. The settling run uses a body that goes
-        // on to the second step.
-        let parked = two_step_task(
-            Arc::clone(&recorded),
-            Arc::new(AtomicBool::new(false)),
-            runs.clone(),
-        )?;
-        let released = two_step_task(
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(true)),
-            runs.clone(),
-        )?;
-
-        let first = match point {
-            StopPoint::BeforeAdmission => {
-                host.cancel();
-                lgwks_bot::block_on(host.submit(&key, &parked, payload))?
-            }
-            StopPoint::AfterFirstStep => stop_mid_run(&host, &key, &parked, payload, &recorded)?,
-        };
-        let stopped = first
-            .report()
-            .map(lgwks_bot::task::Report::disposition)
-            .ok_or("a first submission carries a report")?;
-        assert!(
-            matches!(stopped, Disposition::Cancelled | Disposition::Refused),
-            "the drawn stop point must produce a host stop, drew {stopped} at {tenant}/{index}"
-        );
-        sim_run
-            .trace
-            .record(&format!("stopped {point:?} {stopped}"));
-        sim_run
-            .trace
-            .record(&format!("stop-point {}", point.label()));
-
-        // A fresh host over the same store file — a new *host*, which is what a
-        // restart is, rather than a second writer, which the store's own chain
-        // fence refuses. This is the whole claim: a host stop recorded as the
-        // verdict would reattach here, forever.
-        let reopened = host_on(tenant, store.clone())?;
-        let seen = lgwks_bot::block_on(reopened.submit(&key, &released, payload))?;
-        let seen_disposition = match seen {
-            Submission::Reattached(report) => {
-                return Err(format!(
-                    "a request stopped at {point:?} reattached to {:?}; a host stop is not the \
-                     request's outcome",
-                    report.disposition()
-                )
-                .into());
-            }
-            Submission::InFlight(ref in_flight) => {
-                sim_run
-                    .trace
-                    .record_u64("in-flight-records", u64::try_from(in_flight.records())?);
-                None
-            }
-            Submission::Executed(ref report) => Some(report.disposition()),
-            // `Submission` is `#[non_exhaustive]`: a new arm is a compile-time
-            // prompt here, and a request whose settlement this family has not
-            // been taught to read is not silently treated as unsettled.
-            other => {
-                return Err(format!(
-                    "a request this family does not know how to read came back as {other:?}"
-                )
-                .into());
-            }
-        };
-        sim_run.trace.record(&format!("after-stop {seen:?}"));
-        assert_eq!(
-            seen_disposition, None,
-            "a stopped request is unsettled: the reopen must report it in flight, not settle it"
-        );
-
-        // Settle it on a host that can admit it, then reattach and read the one
-        // recorded terminal.
-        let run = seen.run_id().ok_or("a submission names a run")?;
-        let settled = lgwks_bot::block_on(reopened.resume(run, &released, payload));
-        assert_eq!(
-            settled.disposition(),
-            Disposition::Succeeded,
-            "the resumed run reaches the request's own verdict"
-        );
-        let repeat = lgwks_bot::block_on(reopened.submit(&key, &released, payload))?;
-        let reattached = match repeat {
-            Submission::Reattached(report) => report.disposition(),
-            other => {
-                return Err(format!(
-                    "a request driven to a verdict must record exactly one terminal; a later \
-                     submission saw {other:?}"
-                )
-                .into());
-            }
-        };
-        assert_eq!(
-            reattached,
-            Disposition::Succeeded,
-            "the recorded terminal is the request's own verdict"
-        );
-        assert_eq!(
-            runs.count(),
-            1,
-            "the first durable step's effect ran once across the stop, the settle and the reattach"
-        );
-        reaches_terminal = reaches_terminal.saturating_add(1);
-        sim_run.trace.record_u64("effects", u64::from(runs.count()));
+        stop_request(sim_run, &store, index, &mut reaches_terminal)?;
     }
     sim_run.trace.record_u64("requests", u64::from(requests));
     sim_run
@@ -480,6 +533,80 @@ const MAX_DEADLINE_MILLIS: u32 = 1_500;
 /// How many requests one seeded deadline sweep drives.
 const MAX_DEADLINE_REQUESTS: u32 = 2;
 
+/// One request of the deadline sweep: overrun a drawn budget, then reattach to the recorded verdict.
+fn deadline_request(
+    sim_run: &mut sim::Sim,
+    scratch: &Scratch,
+    runs: &FirstStepRuns,
+    index: u32,
+    reached_terminal: &mut u32,
+) -> TestResult {
+    let tenant = tenant_for(index)?;
+    let millis = sim_run
+        .rng()
+        .between(MIN_DEADLINE_MILLIS, MAX_DEADLINE_MILLIS);
+    let payload = sim_run.rng().between(0, 1000);
+    let key = RequestKey::new(&format!("deadline-{tenant}-{index}"))?;
+
+    // A fresh host per request, because the declared budget is part of what
+    // the request is and a host carries one budget for its whole life.
+    let host = host_with_deadline(
+        tenant,
+        scratch.path(),
+        std::time::Duration::from_millis(u64::from(millis)),
+    )?;
+    let work = overrunning_task(runs.clone())?;
+
+    let first = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
+    let disposition = first
+        .report()
+        .map(lgwks_bot::task::Report::disposition)
+        .ok_or("a first submission carries a report")?;
+    assert_eq!(
+        disposition,
+        Disposition::DeadlineExceeded,
+        "a body waiting on something that never arrives outruns its declared budget \
+         ({millis}ms for {tenant}/{index}); got {disposition}"
+    );
+    sim_run.trace.record_u64("budget-millis", u64::from(millis));
+    sim_run.trace.record(&format!("overran {disposition}"));
+
+    // A fresh host over the same store file — a new *host*, which is what a
+    // restart is, rather than a second writer, which the store's chain fence
+    // refuses. It carries the *same* declared budget, because the budget is
+    // part of what this request is: a repeat under a longer budget is a
+    // different declaration, and letting the crate default in here would let
+    // the body overrun for thirty seconds and report a fresh `Executed`
+    // rather than reattaching to the recorded verdict. That is the defect
+    // this assertion exists to catch, not a nuisance to work around.
+    let reopened = host_with_deadline(
+        tenant,
+        scratch.path(),
+        std::time::Duration::from_millis(u64::from(millis)),
+    )?;
+    let seen = lgwks_bot::block_on(reopened.submit(&key, &work, payload))?;
+    let recorded = match seen {
+        Submission::Reattached(report) => report.disposition(),
+        other => {
+            let refusal = Err(format!(
+                "a request that overran its budget reported {other:?} on a repeat; the \
+             deadline is the request's own verdict and must be recorded"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "deadline_scenario: returning an error to the caller");
+            return refusal;
+        }
+    };
+    assert_eq!(
+        recorded,
+        Disposition::DeadlineExceeded,
+        "the reattached report carries the recorded deadline"
+    );
+    *reached_terminal = reached_terminal.saturating_add(1);
+    sim_run.trace.record(&format!("reattached {recorded}"));
+    Ok(())
+}
+
 /// A seeded deadline sweep: a drawn budget per request, over both tenants
 /// sharing one store file.
 ///
@@ -509,70 +636,7 @@ fn deadline_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let mut reached_terminal = 0_u32;
 
     for index in 0..requests {
-        let tenants = u32::try_from(TENANTS.len())?;
-        let which = usize::try_from(index.checked_rem(tenants).ok_or("a nonzero tenant count")?)
-            .map_err(|_| "the tenant index is in range")?;
-        let tenant = TENANTS.get(which).ok_or("the tenant index is in range")?;
-        let millis = sim_run
-            .rng()
-            .between(MIN_DEADLINE_MILLIS, MAX_DEADLINE_MILLIS);
-        let payload = sim_run.rng().between(0, 1000);
-        let key = RequestKey::new(&format!("deadline-{tenant}-{index}"))?;
-
-        // A fresh host per request, because the declared budget is part of what
-        // the request is and a host carries one budget for its whole life.
-        let host = host_with_deadline(
-            tenant,
-            scratch.path(),
-            std::time::Duration::from_millis(u64::from(millis)),
-        )?;
-        let work = overrunning_task(runs.clone())?;
-
-        let first = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
-        let disposition = first
-            .report()
-            .map(lgwks_bot::task::Report::disposition)
-            .ok_or("a first submission carries a report")?;
-        assert_eq!(
-            disposition,
-            Disposition::DeadlineExceeded,
-            "a body waiting on something that never arrives outruns its declared budget \
-             ({millis}ms for {tenant}/{index}); got {disposition}"
-        );
-        sim_run.trace.record_u64("budget-millis", u64::from(millis));
-        sim_run.trace.record(&format!("overran {disposition}"));
-
-        // A fresh host over the same store file — a new *host*, which is what a
-        // restart is, rather than a second writer, which the store's chain fence
-        // refuses. It carries the *same* declared budget, because the budget is
-        // part of what this request is: a repeat under a longer budget is a
-        // different declaration, and letting the crate default in here would let
-        // the body overrun for thirty seconds and report a fresh `Executed`
-        // rather than reattaching to the recorded verdict. That is the defect
-        // this assertion exists to catch, not a nuisance to work around.
-        let reopened = host_with_deadline(
-            tenant,
-            scratch.path(),
-            std::time::Duration::from_millis(u64::from(millis)),
-        )?;
-        let seen = lgwks_bot::block_on(reopened.submit(&key, &work, payload))?;
-        let recorded = match seen {
-            Submission::Reattached(report) => report.disposition(),
-            other => {
-                return Err(format!(
-                    "a request that overran its budget reported {other:?} on a repeat; the \
-                     deadline is the request's own verdict and must be recorded"
-                )
-                .into());
-            }
-        };
-        assert_eq!(
-            recorded,
-            Disposition::DeadlineExceeded,
-            "the reattached report carries the recorded deadline"
-        );
-        reached_terminal = reached_terminal.saturating_add(1);
-        sim_run.trace.record(&format!("reattached {recorded}"));
+        deadline_request(sim_run, &scratch, &runs, index, &mut reached_terminal)?;
     }
 
     // One count for the whole sweep, and exactly one effect per request: a
@@ -631,6 +695,95 @@ fn oversize_failure_task() -> Result<
     task("oversize", body)
 }
 
+/// One request of the settle-refusal sweep: leave it in flight, then refuse to settle it.
+fn settle_request(
+    sim_run: &mut sim::Sim,
+    scratch: &Scratch,
+    index: u32,
+    refused: &mut u32,
+) -> TestResult {
+    let tenant = tenant_for(index)?;
+    let key = RequestKey::new(&format!("settle-{tenant}-{index}"))?;
+    let payload = sim_run.rng().between(0, 1000);
+    // One signal shared by the parked body and the dropping waiter: the
+    // waiter must observe the *same* flag the body sets, or the drop would
+    // fire at an arbitrary point and the family would be measuring luck.
+    let recorded = Arc::new(AtomicBool::new(false));
+    let parked = parking_task(Arc::clone(&recorded))?;
+
+    // Leave the request in flight: a receipt and one durable record, and no
+    // verdict yet. That is the only state a settle can be asked to settle.
+    //
+    // Its own host, and its own store handle: walking away from an append
+    // latches that handle's poison (INV-BOT-50), because the bytes may be on
+    // the disk under no acknowledgment. Every later step in this iteration
+    // therefore *reopens* the file rather than sharing the handle, which is
+    // also what a restart is.
+    drop_after_first_step(
+        Box::pin(host_on(tenant, reopen(scratch)?)?.submit(&key, &parked, payload)),
+        &recorded,
+    );
+    let run = match lgwks_bot::block_on(
+        host_on(tenant, reopen(scratch)?)?.submit(&key, &parked, payload),
+    )? {
+        Submission::InFlight(in_flight) => in_flight.run(),
+        other => {
+            let refusal = Err(format!(
+                "seed {}: a dropped waiter must leave the request in flight; got {other:?}",
+                sim_run.seed
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_refusal_scenario: returning an error to the caller");
+            return refusal;
+        }
+    };
+
+    // The settle: a resume whose verdict is too large for one record.
+    let settler = host_on(tenant, reopen(scratch)?)?;
+    let settled = lgwks_bot::block_on(settler.resume(run, &oversize_failure_task()?, payload));
+    assert_eq!(
+        settled.disposition(),
+        Disposition::Failed,
+        "seed {}: a run that reached a verdict the store refused is Failed, not Succeeded",
+        sim_run.seed
+    );
+    let rendered = settled
+        .error()
+        .ok_or("the refusal names its failure")?
+        .to_string();
+    assert!(
+        rendered.contains("outcome was not recorded"),
+        "seed {}: the report says the outcome was not recorded: {rendered}",
+        sim_run.seed
+    );
+    assert!(
+        rendered.contains("record's bytes"),
+        "seed {}: the report names the ceiling that refused it: {rendered}",
+        sim_run.seed
+    );
+    sim_run.trace.record(&format!("settle-refused {tenant}"));
+
+    // Nothing was recorded, so a reopen still sees the request unsettled.
+    let reopened = host_on(tenant, reopen(scratch)?)?;
+    let after = lgwks_bot::block_on(reopened.submit(&key, &oversize_failure_task()?, payload))?;
+    match after {
+        Submission::InFlight(_) => {}
+        other => {
+            let refusal = Err(format!(
+                "seed {}: a request whose verdict the store refused must stay unsettled, not \
+             reattach to {other:?}",
+                sim_run.seed
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "settle_refusal_scenario: returning an error to the caller");
+            return refusal;
+        }
+    }
+    *refused = refused.saturating_add(1);
+    sim_run.trace.record(&format!("still-unsettled {tenant}"));
+    Ok(())
+}
+
 /// A seeded sweep of the settlement path when the store refuses the verdict.
 ///
 /// The complement of every other family here, and the only one about the
@@ -653,84 +806,7 @@ fn settle_refusal_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let mut refused = 0_u32;
 
     for index in 0..requests {
-        let tenants = u32::try_from(TENANTS.len())?;
-        let which = usize::try_from(index.checked_rem(tenants).ok_or("a nonzero tenant count")?)
-            .map_err(|_| "the tenant index is in range")?;
-        let tenant = TENANTS.get(which).ok_or("the tenant index is in range")?;
-        let key = RequestKey::new(&format!("settle-{tenant}-{index}"))?;
-        let payload = sim_run.rng().between(0, 1000);
-        // One signal shared by the parked body and the dropping waiter: the
-        // waiter must observe the *same* flag the body sets, or the drop would
-        // fire at an arbitrary point and the family would be measuring luck.
-        let recorded = Arc::new(AtomicBool::new(false));
-        let parked = parking_task(Arc::clone(&recorded))?;
-
-        // Leave the request in flight: a receipt and one durable record, and no
-        // verdict yet. That is the only state a settle can be asked to settle.
-        //
-        // Its own host, and its own store handle: walking away from an append
-        // latches that handle's poison (INV-BOT-50), because the bytes may be on
-        // the disk under no acknowledgment. Every later step in this iteration
-        // therefore *reopens* the file rather than sharing the handle, which is
-        // also what a restart is.
-        drop_after_first_step(
-            Box::pin(host_on(tenant, reopen(&scratch)?)?.submit(&key, &parked, payload)),
-            &recorded,
-        );
-        let run = match lgwks_bot::block_on(
-            host_on(tenant, reopen(&scratch)?)?.submit(&key, &parked, payload),
-        )? {
-            Submission::InFlight(in_flight) => in_flight.run(),
-            other => {
-                return Err(format!(
-                    "seed {}: a dropped waiter must leave the request in flight; got {other:?}",
-                    sim_run.seed
-                )
-                .into());
-            }
-        };
-
-        // The settle: a resume whose verdict is too large for one record.
-        let settler = host_on(tenant, reopen(&scratch)?)?;
-        let settled = lgwks_bot::block_on(settler.resume(run, &oversize_failure_task()?, payload));
-        assert_eq!(
-            settled.disposition(),
-            Disposition::Failed,
-            "seed {}: a run that reached a verdict the store refused is Failed, not Succeeded",
-            sim_run.seed
-        );
-        let rendered = settled
-            .error()
-            .ok_or("the refusal names its failure")?
-            .to_string();
-        assert!(
-            rendered.contains("outcome was not recorded"),
-            "seed {}: the report says the outcome was not recorded: {rendered}",
-            sim_run.seed
-        );
-        assert!(
-            rendered.contains("record's bytes"),
-            "seed {}: the report names the ceiling that refused it: {rendered}",
-            sim_run.seed
-        );
-        sim_run.trace.record(&format!("settle-refused {tenant}"));
-
-        // Nothing was recorded, so a reopen still sees the request unsettled.
-        let reopened = host_on(tenant, reopen(&scratch)?)?;
-        let after = lgwks_bot::block_on(reopened.submit(&key, &oversize_failure_task()?, payload))?;
-        match after {
-            Submission::InFlight(_) => {}
-            other => {
-                return Err(format!(
-                    "seed {}: a request whose verdict the store refused must stay unsettled, not \
-                     reattach to {other:?}",
-                    sim_run.seed
-                )
-                .into());
-            }
-        }
-        refused = refused.saturating_add(1);
-        sim_run.trace.record(&format!("still-unsettled {tenant}"));
+        settle_request(sim_run, &scratch, index, &mut refused)?;
     }
     assert_eq!(
         refused, requests,
@@ -999,9 +1075,7 @@ fn measure_tier(tier: usize) -> TestResult {
     let mut runs: Vec<String> = Vec::with_capacity(tier);
     let mut parity = false;
     for index in 0..tier {
-        let which = usize::from(parity);
-        let host = hosts.get(which).ok_or("the tenant index is in range")?;
-        let key = RequestKey::new(&format!("scale-{index}"))?;
+        let (host, key) = alternating_target(&hosts, parity, &format!("scale-{index}"))?;
         let at = Instant::now();
         let submission = lgwks_bot::block_on(host.submit(
             &key,

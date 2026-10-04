@@ -170,18 +170,23 @@ fn boxed_body(scope: Scope, input: JourneyInput) -> BodyFuture {
             Ok::<_, FlowError>(input.analysis)
         })
         .await?;
-        // The reach is here, at the step that is about to leave the process, so
-        // the analysis above is already recorded and a repair replays it rather
-        // than paying for it twice.
-        let publication = scope.enter("publish")?;
-        publication.require(input.needs())?;
-        let published = remember(&publication, "send", || async {
-            input.polls.publish.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, FlowError>(analyzed)
-        })
-        .await?;
-        Ok(published)
+        publish(&scope, &input, analyzed).await
     })
+}
+
+/// The publication step of the journey: reach for the needs, then send.
+///
+/// The reach is here, at the step that is about to leave the process, so the
+/// analysis before it is already recorded and a repair replays it rather than
+/// paying for it twice.
+async fn publish(scope: &Scope, input: &JourneyInput, analyzed: u32) -> Result<u32, FlowError> {
+    let publication = scope.enter("publish")?;
+    publication.require(input.needs())?;
+    remember(&publication, "send", || async {
+        input.polls.publish.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, FlowError>(analyzed)
+    })
+    .await
 }
 
 /// The input a journey attempt is given, reaching for the default need.
@@ -213,11 +218,8 @@ pub fn input_needing(polls: Arc<Polls>, analysis: u32, needs: Vec<Cap>) -> Journ
 /// refuses the other half, and the tests that need one without the other build it
 /// explicitly.
 pub fn repairable_host(tenant: &str, dir: &Path, grants: GrantSet) -> Result<Host, Box<dyn Error>> {
-    Ok(Host::builder(tenant)?
-        .grants(grants)
-        .run_store(dir)?
-        .repair_ledger(dir)?
-        .build()?)
+    let stored = Host::builder(tenant)?.grants(grants).run_store(dir)?;
+    Ok(stored.repair_ledger(dir)?.build()?)
 }
 
 /// A host with a run store but no repair ledger: it can replay, and it cannot be

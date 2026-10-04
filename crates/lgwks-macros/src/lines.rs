@@ -106,11 +106,13 @@ pub(crate) fn tree(lines: Vec<Line>) -> Result<Vec<Node>> {
     };
     let nodes = block(&mut queue, first_column)?;
     if let Some(stray) = queue.next() {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             stray.span,
             "this line is indented less than the first line of the script; \
-             every flow starts at the same column",
+         every flow starts at the same column",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tree: returning an error to the caller");
+        return refusal;
     }
     Ok(nodes)
 }
@@ -126,10 +128,12 @@ fn block(
             break;
         }
         if next.column > column {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 next.span,
                 "unexpected indent: only a line ending in `:` opens an indented block",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+            return refusal;
         }
         let Some(line) = queue.next() else {
             break;
@@ -137,19 +141,25 @@ fn block(
         let mut children = Vec::new();
         if line.opens_block {
             let Some(child_column) = queue.peek().map(|child| child.column) else {
-                return Err(expected_block(&line));
+                let refusal = Err(expected_block(&line));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                return refusal;
             };
             if child_column <= column {
-                return Err(expected_block(&line));
+                let refusal = Err(expected_block(&line));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                return refusal;
             }
             children = block(queue, child_column)?;
             if let Some(after) = queue.peek()
                 && after.column > column
             {
-                return Err(Error::new(
+                let refusal = Err(Error::new(
                     after.span,
                     "this dedent does not line up with any enclosing block",
                 ));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                return refusal;
             }
         }
         nodes.push(Node { line, children });

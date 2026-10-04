@@ -340,14 +340,18 @@ impl Clock {
     /// both cases the clock is unchanged.
     pub fn advance(&self, by: Duration) -> Result<Duration, ClockError> {
         if self.inner.source == TimeSource::Wall {
-            return Err(ClockError::NotVirtual);
+            let refusal = Err(ClockError::NotVirtual);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "advance: returning an error to the caller");
+            return refusal;
         }
         let now = self.placed_at();
         if now >= Self::elapsed_ceiling() {
-            return Err(ClockError::OutOfRange {
+            let refusal = Err(ClockError::OutOfRange {
                 requested: by,
                 ceiling: Duration::ZERO,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "advance: returning an error to the caller");
+            return refusal;
         }
         // Clamped rather than refused: see the saturation contract above.
         let by = duration_to_nanos(by.min(Self::elapsed_ceiling().saturating_sub(now)));
@@ -369,10 +373,12 @@ impl Clock {
                     // above and this attempt. Refuse rather than move: the
                     // clock is at a horizon the caller was told about.
                     if observed >= duration_to_nanos(Self::elapsed_ceiling()) {
-                        return Err(ClockError::OutOfRange {
+                        let refusal = Err(ClockError::OutOfRange {
                             requested: nanos_to_duration(by),
                             ceiling: Duration::ZERO,
                         });
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "advance: returning an error to the caller");
+                        return refusal;
                     }
                     current = observed;
                 }

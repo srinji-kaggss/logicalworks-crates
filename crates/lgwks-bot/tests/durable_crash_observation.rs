@@ -109,9 +109,9 @@ fn probe_body() -> TestResult {
     let path = std::env::var_os(PROBE_JOURNAL)
         .ok_or("the probe child was started without a journal path")?;
     let events: usize = std::env::var(PROBE_EVENTS)
-        .map_err(|_| "the probe child was started without an event count")?
+        .map_err(|error| format!("the probe child was started without an event count: {error}"))?
         .parse()
-        .map_err(|_| "the probe event count was not a number")?;
+        .map_err(|error| format!("the probe event count was not a number: {error}"))?;
     let marker = std::env::var_os(PROBE_MARKER)
         .ok_or("the probe child was started without a marker path")?;
 
@@ -326,7 +326,7 @@ fn boundary_probe_body() -> TestResult {
         .ok_or("the boundary probe was started without a report path")?;
     let rung = ProbeRungs::from_str(
         &std::env::var("LGWKS_PROBE_RUNG")
-            .map_err(|_| "the boundary probe was started without a rung")?,
+            .map_err(|error| format!("the boundary probe was started without a rung: {error}"))?,
     )
     .map_err(std::io::Error::other)?;
 
@@ -1033,7 +1033,9 @@ fn stalled_probe_body() -> TestResult {
     // set rather than only where `rt` is compiled in.
     let mut cx = Context::from_waker(Waker::noop());
     if append.as_mut().poll(&mut cx).is_ready() {
-        return Err("the stalled append completed before the kill".into());
+        let refusal = Err("the stalled append completed before the kill".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stalled_probe_body: returning an error to the caller");
+        return refusal;
     }
     std::fs::write(&marker, b"in-flight")?;
 

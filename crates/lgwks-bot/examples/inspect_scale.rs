@@ -63,54 +63,59 @@ fn percentile(values: &[u64], quantile: usize) -> u64 {
     values.get(index).copied().unwrap_or(0)
 }
 
+/// Drive one concurrency tier through a bounded host and print its percentiles.
+fn one_tier(out: &mut std::io::Stdout, jobs: usize) -> std::io::Result<()> {
+    let host = Host::builder("scale")
+        .map_err(to_io)?
+        .max_concurrent_tasks(NonZeroUsize::new(CEILING).unwrap_or(NonZeroUsize::MIN))
+        .default_deadline(Duration::from_secs(120))
+        .build()
+        .map_err(to_io)?;
+    let task = inspection_task("inspect").map_err(to_io)?;
+    let next = AtomicUsize::new(0);
+    let latencies: Mutex<Vec<u64>> = Mutex::new(Vec::with_capacity(jobs));
+
+    std::thread::scope(|scope| {
+        for _ in 0..CEILING {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= jobs {
+                        break;
+                    }
+                    let started = Instant::now();
+                    if let Ok(report) =
+                        host.block_on(&task, InspectionJob::new("scale.rs", SUBJECT))
+                        && report.into_result().is_ok()
+                        && let Ok(mut guard) = latencies.lock()
+                    {
+                        guard
+                            .push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                    }
+                }
+            });
+        }
+    });
+
+    let mut values = latencies.into_inner().unwrap_or_default();
+    values.sort_unstable();
+    writeln!(
+        out,
+        "tier={jobs} ceiling={CEILING} reached={} peak_in_flight={} p50={}us p95={}us p99={}us",
+        values.len(),
+        host.admission().peak_in_flight(),
+        percentile(&values, 50),
+        percentile(&values, 95),
+        percentile(&values, 99),
+    )?;
+    Ok(())
+}
+
 /// Run each concurrency tier through one bounded host and print percentiles.
 fn tiers() -> std::io::Result<()> {
     let mut out = std::io::stdout();
     for &jobs in &TIERS {
-        let host = Host::builder("scale")
-            .map_err(to_io)?
-            .max_concurrent_tasks(NonZeroUsize::new(CEILING).unwrap_or(NonZeroUsize::MIN))
-            .default_deadline(Duration::from_secs(120))
-            .build()
-            .map_err(to_io)?;
-        let task = inspection_task("inspect").map_err(to_io)?;
-        let next = AtomicUsize::new(0);
-        let latencies: Mutex<Vec<u64>> = Mutex::new(Vec::with_capacity(jobs));
-
-        std::thread::scope(|scope| {
-            for _ in 0..CEILING {
-                scope.spawn(|| {
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= jobs {
-                            break;
-                        }
-                        let started = Instant::now();
-                        if let Ok(report) =
-                            host.block_on(&task, InspectionJob::new("scale.rs", SUBJECT))
-                            && report.into_result().is_ok()
-                            && let Ok(mut guard) = latencies.lock()
-                        {
-                            guard.push(
-                                u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                            );
-                        }
-                    }
-                });
-            }
-        });
-
-        let mut values = latencies.into_inner().unwrap_or_default();
-        values.sort_unstable();
-        writeln!(
-            out,
-            "tier={jobs} ceiling={CEILING} reached={} peak_in_flight={} p50={}us p95={}us p99={}us",
-            values.len(),
-            host.admission().peak_in_flight(),
-            percentile(&values, 50),
-            percentile(&values, 95),
-            percentile(&values, 99),
-        )?;
+        one_tier(&mut out, jobs)?;
     }
     Ok(())
 }

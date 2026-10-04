@@ -111,7 +111,10 @@ impl FlowShape {
         }
     }
 
-    /// The flow's name.
+    /// The name the document declared for this flow.
+    ///
+    /// A `&'static str` because it comes from the script, which lives as long
+    /// as the process, so no caller has to hold the script to read it.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         self.name

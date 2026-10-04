@@ -1,6 +1,6 @@
 //! Request-keyed durable submission.
 //!
-//! [`Host::submit`](crate::task::Host::submit) is the explicit durable door a
+//! [`Host::submit`] is the explicit durable door a
 //! client uses when it wants an *idempotent request* rather than one run: the
 //! caller supplies a [`RequestKey`], the host derives the run identity from the
 //! tenant and the key, and the input's canonical [`InputDigest`] is recorded as
@@ -43,7 +43,7 @@
 //! exists) is the very fact a stop recorded as the verdict destroys. So a stop
 //! returns [`Submission::Executed`] for the call that saw it, leaves the
 //! receipt, and leaves the request completable by the next submission or by a
-//! [`Host::resume`](crate::task::Host::resume) under the run it named.
+//! [`Host::resume`] under the run it named.
 //!
 //! Enforced by `tests/request_key.rs`
 //! (`a_host_stop_mid_run_leaves_the_request_resumable`,
@@ -581,7 +581,11 @@ pub(crate) fn derive_run(tenant: &str, key: &RequestKey) -> Result<RunId, Reques
     let mut raw = [0u8; 16];
     match digest.as_bytes().get(..raw.len()) {
         Some(head) => raw.copy_from_slice(head),
-        None => return Err(RequestError::IdCollision),
+        None => {
+            let refusal = Err(RequestError::IdCollision);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "derive_run: returning an error to the caller");
+            return refusal;
+        }
     }
     match NonZeroU128::new(u128::from_be_bytes(raw)) {
         Some(value) => Ok(RunId::new(Id128::from_nonzero(value))),
@@ -597,10 +601,10 @@ pub(crate) fn derive_run(tenant: &str, key: &RequestKey) -> Result<RunId, Reques
 /// digest is, which cannot happen for a record this crate wrote and is refused
 /// rather than truncated.
 pub(crate) fn digest_of_record(bytes: &[u8]) -> Result<InputDigest, RequestError> {
-    let raw: [u8; 32] = bytes.try_into().map_err(|_| {
-        RequestError::Record(FlowError::failed(
-            "the request receipt is not a 32-byte input digest",
-        ))
+    let raw: [u8; 32] = bytes.try_into().map_err(|error| {
+        RequestError::Record(FlowError::failed(format!(
+            "the request receipt is not a 32-byte input digest: {error}"
+        )))
     })?;
     Ok(InputDigest::from_bytes(raw))
 }

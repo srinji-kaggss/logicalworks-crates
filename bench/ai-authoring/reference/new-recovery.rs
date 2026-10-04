@@ -43,6 +43,12 @@ pub enum RecoveryError {
     NoLedger,
 }
 
+/// The caller's refusal when the store cannot be had, naming why on stderr.
+fn no_store(cause: impl std::fmt::Debug) -> RecoveryError {
+    ai_task_support::diagnostic(format_args!("the recovery store was refused: {cause:?}"));
+    RecoveryError::NoStore
+}
+
 /// The tenant every recovered run is booked under.
 const TENANT: &str = "recovery";
 
@@ -95,13 +101,14 @@ fn recovery_task(
         Box::pin(async move {
             let mut total: u64 = 0;
             for index in 0..width {
-                match world.unit(&scope, index).await {
-                    Ok(value) => total = total.saturating_add(value),
-                    Err(UnitError::Unit { index }) => {
+                let value = world
+                    .unit(&scope, index)
+                    .await
+                    .map_err(|UnitError::Unit { index }| {
                         *failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(index);
-                        return Err(FlowError::failed(format!("unit {index} failed")));
-                    }
-                }
+                        FlowError::failed(format!("unit {index} failed"))
+                    })?;
+                total = total.saturating_add(value);
             }
             // The exactly-once half. Read the ledger before applying: a replayed
             // run finds the effect already applied and skips it, so the count
@@ -113,7 +120,7 @@ fn recovery_task(
             Ok(total)
         })
     })
-    .map_err(|_| RecoveryError::NoStore)
+    .map_err(no_store)
 }
 
 /// A host over `store_dir` for `TENANT`, carrying `deadline`.
@@ -124,12 +131,12 @@ fn recovery_task(
 /// second attempt is the one that finds the first attempt's records.
 fn recovery_host(store_dir: &std::path::Path, deadline: Duration) -> Result<Host, RecoveryError> {
     Host::builder(TENANT)
-        .map_err(|_| RecoveryError::NoStore)?
+        .map_err(no_store)?
         .default_deadline(deadline)
         .run_store(store_dir)
-        .map_err(|_| RecoveryError::NoStore)?
+        .map_err(no_store)?
         .build()
-        .map_err(|_| RecoveryError::NoStore)
+        .map_err(no_store)
 }
 
 /// Read the outcome of one attempt into the caller's own error type.
@@ -155,7 +162,7 @@ pub async fn recover(
     store_dir: PathBuf,
     deadline: Duration,
 ) -> Result<u64, RecoveryError> {
-    let run = RunId::from_hex(RUN).map_err(|_| RecoveryError::NoStore)?;
+    let run = RunId::from_hex(RUN).map_err(no_store)?;
     let host = recovery_host(&store_dir, deadline)?;
     let failed: Failed = Arc::new(Mutex::new(None));
     // The world moves into the task: the caller reads the ledger from the world

@@ -76,21 +76,29 @@ impl Repository {
             reason,
         };
         if spec.is_empty() {
-            return Err(invalid("the repository reference is empty"));
+            let refusal = Err(invalid("the repository reference is empty"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if spec.len() > MAX_REPOSITORY_BYTES {
-            return Err(invalid("the repository reference is too long"));
+            let refusal = Err(invalid("the repository reference is too long"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         let mut parts = spec.split('/');
         let owner = parts.next().unwrap_or_default();
         let name = parts.next().unwrap_or_default();
         if parts.next().is_some() {
-            return Err(invalid(
+            let refusal = Err(invalid(
                 "a repository reference is `owner/repo`, with exactly one `/`",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if owner.is_empty() || name.is_empty() {
-            return Err(invalid("both `owner` and `repo` must be non-empty"));
+            let refusal = Err(invalid("both `owner` and `repo` must be non-empty"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         // `.` and `..` are path segments, not names: `../..` would turn
         // `repos/{owner}/{repo}/pulls` into a request for another endpoint.
@@ -98,9 +106,11 @@ impl Repository {
             .iter()
             .any(|segment| matches!(*segment, "." | ".."))
         {
-            return Err(invalid(
+            let refusal = Err(invalid(
                 "`.` and `..` are path segments, not repository names",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         let allowed = |segment: &str| {
             segment
@@ -108,9 +118,11 @@ impl Repository {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
         };
         if !allowed(owner) || !allowed(name) {
-            return Err(invalid(
+            let refusal = Err(invalid(
                 "`owner` and `repo` hold ASCII letters, digits, '-', '_' and '.' only",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self { spec })
     }
@@ -146,19 +158,23 @@ impl CommitId {
     pub fn new(hex: impl Into<String>) -> Result<Self, GhError> {
         let hex = hex.into();
         if hex.len() != SHA_HEX_LEN {
-            return Err(GhError::CommitId {
+            let refusal = Err(GhError::CommitId {
                 hex,
                 reason: "a commit id is 40 hexadecimal characters",
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if !hex
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
-            return Err(GhError::CommitId {
+            let refusal = Err(GhError::CommitId {
                 hex,
                 reason: "a commit id is lowercase hexadecimal",
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self(hex))
     }
@@ -413,7 +429,7 @@ impl ReviewComment {
         self.line
     }
 
-    /// The comment body.
+    /// The text a reviewer wrote, as GitHub returned it, with no trimming or marker stripping applied.
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
@@ -453,7 +469,7 @@ impl ChangedFile {
         &self.filename
     }
 
-    /// The change status.
+    /// GitHub's own status word for this file in the diff, such as added, modified, removed or renamed, passed through verbatim.
     #[must_use]
     pub fn status(&self) -> &str {
         &self.status
@@ -507,7 +523,7 @@ impl PullDiff {
         self.number
     }
 
-    /// The changed files.
+    /// Every file the pull request touches, in the order GitHub listed them, each with its status and line counts.
     #[must_use]
     pub fn files(&self) -> &[ChangedFile] {
         &self.files
@@ -676,7 +692,7 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
-    /// The repository this names.
+    /// Which repository, as owner and name, the pull request number below belongs to.
     #[must_use]
     pub const fn repository(&self) -> &Repository {
         &self.repository
@@ -741,7 +757,7 @@ impl ReviewPayload {
         &self.commit_id
     }
 
-    /// The review event.
+    /// GitHub's review verdict word that will be submitted with the payload: COMMENT, APPROVE or REQUEST_CHANGES.
     #[must_use]
     pub fn event(&self) -> &str {
         &self.event
@@ -769,7 +785,7 @@ impl ReviewPayload {
         }
     }
 
-    /// The application marker.
+    /// The hidden trailer text that a read-back searches for, so a later run can locate this review again.
     #[must_use]
     pub fn marker(&self) -> &str {
         &self.marker
@@ -810,7 +826,9 @@ impl ReviewPayload {
     ) -> Result<Self, GhError> {
         let event = event.into();
         if !Self::EVENTS.contains(&event.as_str()) {
-            return Err(GhError::Event { event });
+            let refusal = Err(GhError::Event { event });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         let marker = marker.into();
         let invalid = |reason: &'static str| GhError::Marker {
@@ -818,13 +836,17 @@ impl ReviewPayload {
             reason,
         };
         if marker.len() > Self::MAX_MARKER_BYTES {
-            return Err(invalid("a marker is at most 256 bytes"));
+            let refusal = Err(invalid("a marker is at most 256 bytes"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if marker.contains("--") || marker.contains(['<', '>']) || marker.contains(char::is_control)
         {
-            return Err(invalid(
+            let refusal = Err(invalid(
                 "a marker travels inside an HTML comment, so it may not hold `--`, `<`, `>` or a control character",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         let mut body = body.into();
         if !marker.is_empty() {
@@ -985,10 +1007,12 @@ impl GhOutcome {
     /// truncated rather than decoded into a partial value.
     pub fn parse_json<T: json::serde::de::DeserializeOwned>(&self) -> Result<T, GhError> {
         if self.stdout_truncated {
-            return Err(GhError::TruncatedResponse {
+            let refusal = Err(GhError::TruncatedResponse {
                 retained: self.stdout.len(),
                 total: self.stdout_total_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_json: returning an error to the caller");
+            return refusal;
         }
         json::from_str::<T>(self.stdout.trim()).map_err(|source| GhError::MalformedResponse {
             path: String::from("stdout"),
@@ -1257,16 +1281,20 @@ impl Gh {
             && let Ok(moved) = outcome.parse_json::<MovedWire>()
             && let Some(canonical) = moved.canonical()
         {
-            return Err(GhError::MovedRepository {
+            let refusal = Err(GhError::MovedRepository {
                 requested: self.repository.as_str().to_owned(),
                 canonical,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "snapshot: returning an error to the caller");
+            return refusal;
         }
         if snapshot.head_sha().len() != SHA_HEX_LEN || snapshot.base_sha().len() != SHA_HEX_LEN {
-            return Err(GhError::Response {
+            let refusal = Err(GhError::Response {
                 path,
                 reason: String::from("the pull request has no 40-character head and base"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "snapshot: returning an error to the caller");
+            return refusal;
         }
         Ok(snapshot)
     }
@@ -1336,11 +1364,13 @@ impl Gh {
         // about *completeness*, not about memory. A list over the ceiling is
         // refused outright, never truncated and returned.
         if reviews.len() > MAX_REVIEWS_PER_PULL {
-            return Err(GhError::ReviewCeiling {
+            let refusal = Err(GhError::ReviewCeiling {
                 path,
                 reviews: reviews.len(),
                 ceiling: MAX_REVIEWS_PER_PULL,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_reviews: returning an error to the caller");
+            return refusal;
         }
         Ok(reviews)
     }
@@ -1382,30 +1412,36 @@ impl Gh {
             // large, which is the *unavailable diff* this read exists to report:
             // a typed coverage-incomplete answer, not a transport outage.
             if outcome.http_status() == Some(406) {
-                return Err(GhError::DiffUnavailable {
+                let refusal = Err(GhError::DiffUnavailable {
                     path,
                     reason: outcome.stderr().trim().to_owned(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_diff: returning an error to the caller");
+                return refusal;
             }
             outcome.require_success("reading the pull request's changed files")?;
         }
         let files = outcome.parse_json::<Vec<ChangedFile>>()?;
         if files.len() > MAX_DIFF_FILES_PER_PULL {
-            return Err(GhError::DiffFileCeiling {
+            let refusal = Err(GhError::DiffFileCeiling {
                 path,
                 files: files.len(),
                 ceiling: MAX_DIFF_FILES_PER_PULL,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_diff: returning an error to the caller");
+            return refusal;
         }
         let patch_bytes = files.iter().fold(0usize, |total, file| {
             total.saturating_add(file.patch_bytes())
         });
         if patch_bytes > MAX_DIFF_BYTES {
-            return Err(GhError::DiffTooLarge {
+            let refusal = Err(GhError::DiffTooLarge {
                 path,
                 bytes: patch_bytes,
                 ceiling: MAX_DIFF_BYTES,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_diff: returning an error to the caller");
+            return refusal;
         }
         Ok(PullDiff {
             number: pull.number(),
@@ -1481,10 +1517,12 @@ impl Gh {
         outcome.require_success("creating the review")?;
         let created = outcome.parse_json::<ReviewRecord>()?;
         if created.id() == 0 {
-            return Err(GhError::Response {
+            let refusal = Err(GhError::Response {
                 path,
                 reason: String::from("the created review has no id"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "publish: returning an error to the caller");
+            return refusal;
         }
         Ok(created.id())
     }
@@ -1502,9 +1540,11 @@ impl GhOutcome {
     /// what a separate read-back is for.
     fn require_success(&self, what: &str) -> Result<(), GhError> {
         if self.deadline_fired {
-            return Err(GhError::Deadline {
+            let refusal = Err(GhError::Deadline {
                 what: what.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "require_success: returning an error to the caller");
+            return refusal;
         }
         match self.exit_code {
             Some(0) => Ok(()),
@@ -1519,11 +1559,13 @@ impl GhOutcome {
                 // flattened into [`GhError::Transport`]. A status the client did
                 // not name stays a transport failure.
                 if let Some(status @ (401 | 403 | 404)) = self.http_status() {
-                    return Err(GhError::Unauthorized {
+                    let refusal = Err(GhError::Unauthorized {
                         what: what.to_owned(),
                         status,
                         reason: self.stderr.clone(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "require_success: returning an error to the caller");
+                    return refusal;
                 }
                 Err(GhError::Transport {
                     what: what.to_owned(),
@@ -1657,22 +1699,26 @@ fn stage_input(input: &[u8]) -> Result<StagedInput, GhError> {
     // `create_new` below is what makes a collision a refusal rather than an
     // overwrite, so the name is the only thing that has to differ.
     let Some(tag) = unique_tag() else {
-        return Err(GhError::Staging {
+        let refusal = Err(GhError::Staging {
             path: path.display().to_string(),
             source: String::from(
                 "no entropy source to name the staged payload uniquely; a build without the \
-                 `ephemeral` feature refuses to publish rather than reuse a name",
+             `ephemeral` feature refuses to publish rather than reuse a name",
             ),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stage_input: returning an error to the caller");
+        return refusal;
     };
     path.push(format!("lgwks-gh-payload-{tag}.json"));
     let Some(text) = path.to_str().map(str::to_owned) else {
-        return Err(GhError::Staging {
+        let refusal = Err(GhError::Staging {
             path: path.display().to_string(),
             source: String::from(
                 "the temporary directory is not UTF-8, so it cannot be an argument",
             ),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "stage_input: returning an error to the caller");
+        return refusal;
     };
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

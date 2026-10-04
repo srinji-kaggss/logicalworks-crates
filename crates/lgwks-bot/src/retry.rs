@@ -1,7 +1,7 @@
 //! Whether a failed attempt may be tried again.
 //!
 //! The vocabulary already existed. [`RetryClass`] says what a failure permits
-//! and [`DispatchCertainty`](crate::DispatchCertainty) says what it
+//! and [`DispatchCertainty`] says what it
 //! established, and `BotError::retry_class` is the total map from one to the
 //! other that never inspects a rendered cause. What did not exist is the
 //! decision: a class of `Safe` says the effect did not happen, and it says
@@ -112,7 +112,9 @@ impl DedupScope {
     pub fn new(text: impl Into<String>) -> Result<Self, ScopeError> {
         let text = text.into();
         if text.len() > MAX_SCOPE_BYTES {
-            return Err(ScopeError { len: text.len() });
+            let refusal = Err(ScopeError { len: text.len() });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self(text))
     }
@@ -219,7 +221,11 @@ impl DeduplicationContract {
         self.action
     }
 
-    /// The bound payload.
+    /// The digest of the payload this deduplication contract is bound to.
+    ///
+    /// A resend with a different payload is a different request, and the remote
+    /// is not obliged to deduplicate it -- so a caller confirming that a retry is
+    /// still the same request compares this rather than the action id alone.
     #[must_use]
     pub const fn payload(&self) -> ActionDigest {
         self.payload
@@ -554,14 +560,21 @@ mod tests {
 
     /// A dispatched attempt on the shared action, carrying `digest_hex`.
     fn dispatched(digest_hex: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
+        let key_run = RunId::from_hex(RUN)?;
+        let key_action = ActionId::from_hex(ACTION)?;
+        let key_attempt = AttemptId::from_decimal("1")?;
+        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
+        let key_environment = EnvironmentId::from_hex(ENV)?;
+        let key_epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", digest_hex)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            key_run,
+            key_action,
+            key_attempt,
+            key_flow_revision,
+            key_digest,
+            key_environment,
+            key_epoch,
         ))
     }
 

@@ -158,10 +158,13 @@ pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), Dec
     check_even_length(input.len())?;
     let expected = input.len().checked_div(2).unwrap_or(0);
     if output.len() != expected {
-        return Err(DecodeError::OutputLength {
+        let refusal = Err(DecodeError::OutputLength {
             expected,
             actual: output.len(),
         });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "decode_into: returning an error to the caller");
+        return refusal;
     }
     let (pairs, _) = input.as_chunks::<2>();
     for (pair_index, pair) in pairs.iter().enumerate() {

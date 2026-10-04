@@ -362,7 +362,7 @@ impl<'a> StagedRecord<'a> {
         self.tenant
     }
 
-    /// The run the record is for.
+    /// The run this stored record was filed under, which names the run that wrote it.
     #[must_use]
     pub const fn run(&self) -> RunId {
         self.run

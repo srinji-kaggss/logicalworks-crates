@@ -1,6 +1,6 @@
 //! Spans, severities, and the diagnostics a tool reports on code.
 //!
-//! The refusal type is [`ParseError`](crate::ParseError); this module is what a
+//! The refusal type is [`ParseError`]; this module is what a
 //! tool actually renders. A [`Diagnostic`] carries the four things a report line
 //! needs and the refusal type does not: which file, where in it, how bad, and
 //! what to say.
@@ -19,7 +19,7 @@
 //! is what [`str::get`] and slicing take.
 //!
 //! The walk is the same frame-per-active-ancestor walk
-//! [`inspect_ast`](crate::inspect_ast) uses, so collecting diagnostics over a
+//! [`inspect_ast`] uses, so collecting diagnostics over a
 //! wide tree retains memory proportional to depth rather than to fan-out.
 
 use std::ops::Range;
@@ -232,7 +232,7 @@ impl Diagnostic {
 struct LineIndex<'src> {
     /// The text spans are resolved against. Borrowed, never copied: the caller
     /// already holds it and copying it per file would double peak memory on a
-    /// file near [`MAX_SOURCE_BYTES`](crate::MAX_SOURCE_BYTES).
+    /// file near [`MAX_SOURCE_BYTES`].
     source: &'src str,
     /// Byte offset of the start of each line, always beginning with 0.
     line_starts: Vec<usize>,
@@ -389,13 +389,13 @@ pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// resident memory, not O(N).
 ///
 /// Children are visited in reverse index order, which is the order
-/// [`inspect_ast`](crate::inspect_ast) preserves. Callers that present results
+/// [`inspect_ast`] preserves. Callers that present results
 /// in source order sort afterwards.
 ///
 /// The root is visited first, then every descendant. `inspect_ast` charges and
 /// inspects the root too, so the two walks agree on which nodes exist: a tree
 /// whose root is itself a recovery node is counted here exactly as it is
-/// refused by [`try_parse`](crate::try_parse).
+/// refused by [`try_parse`].
 fn visit_each_node<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     visit: &mut dyn FnMut(&AstNode<'t, L>),
@@ -492,7 +492,7 @@ pub fn end_of(source: &str) -> Span {
 
 /// The span of `range` in `source`, each end clamped into the source.
 ///
-/// How a checked parse's [`SyntaxDiagnostic`](crate::SyntaxDiagnostic) byte
+/// How a checked parse's [`SyntaxDiagnostic`] byte
 /// offsets become the line and column a renderer points at.
 pub(crate) fn span_of(source: &str, range: Range<usize>) -> Span {
     LineIndex::new(source).span(range)

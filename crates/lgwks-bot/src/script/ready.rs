@@ -42,7 +42,7 @@
 //! this crate already delivers a stop: the dependant's own
 //! [`CancellationToken`], cancelled at the instant the readiness fails. The
 //! dependant then reports [`FlowError::Cancelled`] at its own path, and the
-//! run's [`Report`](crate::task::Report) carries it. A caller that wants to
+//! run's [`Report`] carries it. A caller that wants to
 //! distinguish "my scope was stopped by the host" from "the service I depended
 //! on failed" reads [`Readiness::outcome`] before waiting, or races the token
 //! against its own work.
@@ -55,7 +55,7 @@
 //!
 //! It does not decide *what* "ready" means for a given service, it does not
 //! supervise the service itself (that is
-//! [`Supervisor`](crate::rt::supervise::Supervisor)), and it does not make a
+//! [`Supervisor`]), and it does not make a
 //! dependant's own work safe once released — a released dependant is told the
 //! service was ready, which is all a readiness fact ever asserts.
 //!
@@ -157,7 +157,7 @@ impl Generation {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         Self(
             COUNTER
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     Some(value.saturating_add(1))
                 })
                 .unwrap_or(u64::MAX),
@@ -470,7 +470,7 @@ pub struct Ready<T> {
 }
 
 impl<T> Ready<T> {
-    /// The generation that was released.
+    /// The generation this release was published for, so a dependant can tell which instance of the service its evidence came from.
     #[must_use]
     pub const fn generation(&self) -> Generation {
         self.generation
@@ -731,14 +731,18 @@ impl<T: Clone> Readiness<T> {
     /// [`MAX_NAME_BYTES`].
     pub fn named(what: &str, generation: Generation, cap: usize) -> Result<Self, ReadinessError> {
         if what.is_empty() {
-            return Err(ReadinessError::InvalidName {
+            let refusal = Err(ReadinessError::InvalidName {
                 reason: "the name is empty",
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "named: returning an error to the caller");
+            return refusal;
         }
         if what.len() > MAX_NAME_BYTES {
-            return Err(ReadinessError::InvalidName {
+            let refusal = Err(ReadinessError::InvalidName {
                 reason: "the name is longer than MAX_NAME_BYTES",
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "named: returning an error to the caller");
+            return refusal;
         }
         let (settled, _receiver) = watch::channel(Settled::Waiting);
         Ok(Self {
@@ -909,13 +913,17 @@ impl<T: Clone> Readiness<T> {
         let closed = matches!(&*status, Status::Closed(_));
         let failed = matches!(&*status, Status::Failed { .. });
         if current != generation {
-            return Err(self.mismatch(current, generation, closed));
+            let refusal = Err(self.mismatch(current, generation, closed));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fail: returning an error to the caller");
+            return refusal;
         }
         if failed {
-            return Err(ReadinessError::AlreadyFailed {
+            let refusal = Err(ReadinessError::AlreadyFailed {
                 what: Arc::clone(&self.inner.what),
                 generation: current,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fail: returning an error to the caller");
+            return refusal;
         }
         let reason: Arc<str> = Arc::from(reason);
         let released = matches!(*status, Status::Released(_));
@@ -955,13 +963,17 @@ impl<T: Clone> Readiness<T> {
         let current = status.generation();
         let closed = matches!(&*status, Status::Closed(_));
         if current != generation {
-            return Err(self.mismatch(current, generation, closed));
+            let refusal = Err(self.mismatch(current, generation, closed));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "shutdown: returning an error to the caller");
+            return refusal;
         }
         if matches!(*status, Status::Failed { .. }) {
-            return Err(ReadinessError::AlreadyFailed {
+            let refusal = Err(ReadinessError::AlreadyFailed {
                 what: Arc::clone(&self.inner.what),
                 generation: current,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "shutdown: returning an error to the caller");
+            return refusal;
         }
         *status = Status::Closed(generation);
         drop(status);
@@ -1155,18 +1167,20 @@ impl<T: Clone> Readiness<T> {
         // `MAX_DEPENDANTS` is 65 536, and a caller that asked for more than a
         // `u64` of dependants is asking for a number, not a bound.
         let cap_as_count = u64::try_from(cap).unwrap_or(u64::MAX);
-        let charged =
-            self.inner
-                .admitted
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    (count < cap_as_count).then_some(count.saturating_add(1))
-                });
+        let charged = self
+            .inner
+            .admitted
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < cap_as_count).then_some(count.saturating_add(1))
+            });
         if charged.is_err() {
-            return Err(ReadinessError::DependantsFull {
+            let refusal = Err(ReadinessError::DependantsFull {
                 what: Arc::clone(&self.inner.what),
                 cap,
             }
             .located(Arc::from(scope.path())));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "admit: returning an error to the caller");
+            return refusal;
         }
         self.inner
             .dependants

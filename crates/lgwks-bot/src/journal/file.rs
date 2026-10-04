@@ -123,7 +123,7 @@ use super::owner::{StorageGate, StorageOwner};
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
     EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition, MAX_JOURNAL_BYTES,
-    MAX_JOURNAL_EVENTS, Recovered, chain, next_allowed_of, recover,
+    MAX_JOURNAL_EVENTS, Recovered, chain, check_append_order, next_allowed_of, recover,
 };
 use lgwks_std::wire::{WireError, from_bytes};
 
@@ -318,12 +318,112 @@ fn resolve_ambiguous_tail(
         // length lied about a frame this journal had acknowledged. The
         // prefix is not evidence of an interrupted append, so the file is
         // refused with every byte preserved.
-        return Err(JournalError::Corrupt(Box::new(Corruption::new(
+        let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
             index,
             CorruptionKind::Framed,
         ))));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "resolve_ambiguous_tail: returning an error to the caller");
+        return refusal;
     }
     Ok(ScanStop::Torn(offset))
+}
+
+/// A whole, decodable frame read from a journal file.
+struct Whole {
+    /// The event the payload decoded to.
+    event: EffectEvent,
+    /// The chain head the frame recorded for itself.
+    head: [u8; HEAD_BYTES],
+    /// The payload length the frame declared.
+    payload_len: usize,
+}
+
+/// Why a frame read halted the scan, before the offset it halted at is known.
+#[derive(Clone, Copy)]
+enum Halt {
+    /// A clean end of file.
+    Complete,
+    /// An interrupted length prefix or head.
+    Torn,
+    /// A payload that ran past the end of the file, declaring this length.
+    Ambiguous(usize),
+}
+
+impl Halt {
+    /// The stop this halt is once the offset of the frame being read is known.
+    const fn at(self, offset: u64) -> ScanStop {
+        match self {
+            Self::Complete => ScanStop::Complete(offset),
+            Self::Torn => ScanStop::Torn(offset),
+            Self::Ambiguous(declared_len) => ScanStop::AmbiguousTail {
+                offset,
+                declared_len,
+            },
+        }
+    }
+}
+
+/// Read the frame at ordinal `index`, with `held` entries already read.
+///
+/// A complete prefix naming a frame this journal never writes is not a torn
+/// append: a write leaves only a prefix of its bytes, so the length a writer
+/// did complete is the length it intended, and that is always a frame this
+/// journal writes. It is refused, never trimmed, because the bytes after it may
+/// be acknowledged. A declared payload that runs past the end of the file is
+/// left to `resolve_ambiguous_tail`, which decides on the frame's own stored
+/// head and never by trusting the prefix.
+fn next_frame(
+    reader: &mut impl Read,
+    held: usize,
+    max_events: usize,
+    index: u64,
+) -> Result<Result<Whole, Halt>, JournalError> {
+    let mut prefix = [0u8; LENGTH_BYTES];
+    match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
+        Prefix::Eof => return Ok(Err(Halt::Complete)),
+        Prefix::Torn => return Ok(Err(Halt::Torn)),
+        Prefix::Full => {
+            let requested = u64::try_from(held).unwrap_or(u64::MAX).saturating_add(1);
+            if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
+                let refusal = Err(JournalError::CapacityExceeded {
+                    resource: JournalLimitKind::Events,
+                    limit: u64::try_from(max_events).unwrap_or(u64::MAX),
+                    requested,
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "next_frame: the file holds more events than the ceiling");
+                return refusal;
+            }
+        }
+    }
+    let payload_len = super::frame::declared_length(&prefix);
+    if !super::frame::is_possible_length(payload_len, MAX_FRAME_BYTES) {
+        let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Framed,
+        ))));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), payload_len, "next_frame: the declared length is one this journal never writes");
+        return refusal;
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
+        return Ok(Err(Halt::Ambiguous(payload_len)));
+    }
+    let mut head = [0u8; HEAD_BYTES];
+    if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
+        return Ok(Err(Halt::Torn));
+    }
+    let event = from_bytes::<EffectEvent, WireError>(&payload).map_err(|error| {
+        lgwks_std::trace::debug!(?error, index, "next_frame: the payload did not decode");
+        JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Undecodable,
+        )))
+    })?;
+    Ok(Ok(Whole {
+        event,
+        head,
+        payload_len,
+    }))
 }
 
 /// Read frames from `reader`, stopping at the first torn frame.
@@ -341,60 +441,14 @@ fn scan(
     let mut offset = 0u64;
     let mut index = 0u64;
     loop {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
-            Prefix::Eof => return Ok((entries, ScanStop::Complete(offset))),
-            Prefix::Torn => return Ok((entries, ScanStop::Torn(offset))),
-            Prefix::Full => {
-                let requested = u64::try_from(entries.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1);
-                if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
-                    return Err(JournalError::CapacityExceeded {
-                        resource: JournalLimitKind::Events,
-                        limit: u64::try_from(max_events).unwrap_or(u64::MAX),
-                        requested,
-                    });
-                }
-            }
-        }
-        let payload_len = super::frame::declared_length(&prefix);
-        if !super::frame::is_possible_length(payload_len, MAX_FRAME_BYTES) {
-            // A complete prefix that names an impossible frame is not a torn
-            // append: a write leaves only a prefix of its bytes, so the
-            // length a writer did complete is the length it intended, and
-            // that is always a frame this journal writes. Refuse, never
-            // trim: the bytes after this point may be acknowledged.
-            return Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Framed,
-            ))));
-        }
-        let mut payload = vec![0u8; payload_len];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut payload)? {
-            // The declared payload ran past the end of the file. Whether that
-            // is an interrupted append or a lying length is decided in
-            // `resolve_ambiguous_tail`, on the frame's own stored head — not
-            // here, and never by trusting the prefix.
-            return Ok((
-                entries,
-                ScanStop::AmbiguousTail {
-                    offset,
-                    declared_len: payload_len,
-                },
-            ));
-        }
-        let mut head = [0u8; HEAD_BYTES];
-        if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
-            return Ok((entries, ScanStop::Torn(offset)));
-        }
-
-        let event: EffectEvent = from_bytes::<EffectEvent, WireError>(&payload).map_err(|_| {
-            JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Undecodable,
-            )))
-        })?;
+        let Whole {
+            event,
+            head,
+            payload_len,
+        } = match next_frame(reader, entries.len(), max_events, index)? {
+            Ok(whole) => whole,
+            Err(halt) => return Ok((entries, halt.at(offset))),
+        };
         let head_digest = chain(position, &event)?;
         let recomputed = JournalPosition {
             sequence: position.sequence().saturating_add(1),
@@ -405,7 +459,7 @@ fn scan(
             head: lgwks_std::hash::Digest::from_bytes(head),
         };
         if recorded != recomputed {
-            return Err(JournalError::Corrupt(Box::new(Corruption::new(
+            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
                 index,
                 CorruptionKind::Chain(ChainBreak::Disagreement {
                     at: recorded.sequence(),
@@ -413,6 +467,8 @@ fn scan(
                     recomputed,
                 }),
             ))));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: returning an error to the caller");
+            return refusal;
         }
         entries.push(JournalEntry::new(recorded, event));
         position = recorded;
@@ -695,11 +751,13 @@ impl FileJournal {
 
         let file_len = file.metadata().map_err(JournalError::Storage)?.len();
         if file_len > MAX_JOURNAL_BYTES {
-            return Err(JournalError::CapacityExceeded {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Bytes,
                 limit: MAX_JOURNAL_BYTES,
                 requested: file_len,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_impl: returning an error to the caller");
+            return refusal;
         }
 
         file.seek_read_zero()?;
@@ -735,9 +793,11 @@ impl FileJournal {
                     // Unreachable by construction: the resolver answers
                     // either a torn tail or refuses with the corruption
                     // itself.
-                    return Err(JournalError::Storage(std::io::Error::other(
+                    let refusal = Err(JournalError::Storage(std::io::Error::other(
                         "ambiguous tail resolved to an impossible state",
                     )));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_impl: returning an error to the caller");
+                    return refusal;
                 };
                 file.set_len(offset).map_err(JournalError::Storage)?;
                 file.sync_all().map_err(JournalError::Storage)?;
@@ -785,11 +845,13 @@ impl FileJournal {
             .saturating_add(additional);
         let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
         if requested > limit {
-            return Err(JournalError::CapacityExceeded {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
                 limit,
                 requested,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound_events: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -857,17 +919,21 @@ impl FileJournal {
     /// [`JournalError::Storage`] when this handle is stale and must be reopened.
     fn fence(&self) -> Result<(), JournalError> {
         if self.storage.poisoned() {
-            return Err(JournalError::Storage(std::io::Error::new(
+            let refusal = Err(JournalError::Storage(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "a previous append failed while writing; the file may hold \
-                 unacknowledged bytes, reopen to replay",
+             unacknowledged bytes, reopen to replay",
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fence: returning an error to the caller");
+            return refusal;
         }
         if self.view.len()? != self.disk_len {
-            return Err(JournalError::Storage(std::io::Error::new(
+            let refusal = Err(JournalError::Storage(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "the journal file moved under this controller; reopen before appending",
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fence: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -931,11 +997,13 @@ impl FileJournal {
             .disk_len
             .saturating_add(u64::try_from(staged).unwrap_or(u64::MAX));
         if requested > MAX_JOURNAL_BYTES {
-            return Err(JournalError::CapacityExceeded {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Bytes,
                 limit: MAX_JOURNAL_BYTES,
                 requested,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound_bytes: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -1027,21 +1095,12 @@ impl FileJournal {
         event: &EffectEvent,
     ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
         let actual = self.tail();
-        if expected_tail != actual {
-            return Err(JournalError::TailMismatch {
-                expected: expected_tail,
-                actual,
-            });
-        }
-        let attempted = event.kind();
-        let expected = next_allowed_of(self.ladder.get(&event.key()).copied());
-        if expected != Some(attempted) {
-            return Err(JournalError::OutOfOrder {
-                key: Box::new(event.key()),
-                expected,
-                attempted,
-            });
-        }
+        check_append_order(
+            expected_tail,
+            actual,
+            event,
+            self.ladder.get(&event.key()).copied(),
+        )?;
         self.fence()?;
         self.bound_events(1)?;
         let (position, frame) = self.frame(event, actual)?;
@@ -1159,11 +1218,13 @@ impl FileJournal {
             let expected =
                 next_allowed_of(staged.get(&key).or_else(|| self.ladder.get(&key)).copied());
             if expected != Some(attempted) {
-                return Err(JournalError::OutOfOrder {
+                let refusal = Err(JournalError::OutOfOrder {
                     key: Box::new(key),
                     expected,
                     attempted,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append_all: returning an error to the caller");
+                return refusal;
             }
             staged.insert(key, attempted);
             let (next, framed) = self.frame(event, position)?;
@@ -1207,10 +1268,12 @@ fn commit(
 ) -> std::io::Result<super::owner::Stage<(), ()>> {
     let on_disk = file.metadata()?.len();
     if on_disk != expected_len {
-        return Err(std::io::Error::new(
+        let refusal = Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the journal file moved under this controller; reopen before appending",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "commit: returning an error to the caller");
+        return refusal;
     }
     file.write_all(frames)?;
     // A journal folds no state of its own, so the settle closure is empty: the
@@ -1368,7 +1431,9 @@ impl EffectJournal for FileJournal {
         required: DurabilityPromise,
     ) -> Result<DurableAck, JournalError> {
         if !self.durability().meets(required) {
-            return Err(JournalError::ReceiptUnavailable { required });
+            let refusal = Err(JournalError::ReceiptUnavailable { required });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
+            return refusal;
         }
         let settled = self
             .committed
@@ -1466,14 +1531,21 @@ pub(super) mod tests {
     }
 
     fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal("1")?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 
@@ -1586,27 +1658,41 @@ pub(super) mod tests {
     /// A key for attempt `n`, so a frame count can be built without
     /// tripping the ladder's one-climb-per-key rule.
     fn attempt_key(n: u64) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal(&n.to_string())?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal(&n.to_string())?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 
     /// A second key, so a batch can fail on its own rung.
     fn key2() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(RUN)?;
+        let action = ActionId::from_hex(ACTION)?;
+        let attempt = AttemptId::from_decimal("7")?;
+        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+        let environment = EnvironmentId::from_hex(ENV)?;
+        let epoch = EnvironmentEpoch::from_decimal("1")?;
         Ok(crate::effect::EffectKey::new(
-            RunId::from_hex(RUN)?,
-            ActionId::from_hex(ACTION)?,
-            AttemptId::from_decimal("7")?,
-            FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-            ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-            EnvironmentId::from_hex(ENV)?,
-            EnvironmentEpoch::from_decimal("1")?,
+            run,
+            action,
+            attempt,
+            flow,
+            digest,
+            environment,
+            epoch,
         ))
     }
 
@@ -1890,7 +1976,9 @@ pub(super) mod tests {
     impl Read for FaultyAfter {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.inner.position() >= self.serve {
-                return Err(std::io::Error::other("injected storage fault"));
+                let refusal = Err(std::io::Error::other("injected storage fault"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read: returning an error to the caller");
+                return refusal;
             }
             let remaining = self.serve.saturating_sub(self.inner.position());
             let cap = usize::try_from(remaining).unwrap_or(buf.len());

@@ -168,6 +168,7 @@ enum CheckRequest {
 /// because the operator's next action is to look at that token, and every one
 /// of them used to be silently tolerated — which is how an option's value
 /// became the audited repository.
+#[derive(Debug)]
 enum CheckArgError {
     /// An option that takes a value was the last argument.
     MissingValue {
@@ -252,31 +253,41 @@ fn parse_check_args(args: &[String]) -> Result<CheckRequest, CheckArgError> {
             "--json" => json = true,
             "--contract" => {
                 if contract.is_some() {
-                    return Err(CheckArgError::DuplicateOverride { flag: "--contract" });
+                    let refusal = Err(CheckArgError::DuplicateOverride { flag: "--contract" });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 let Some(value) = cursor.next() else {
-                    return Err(CheckArgError::MissingValue { flag: "--contract" });
+                    let refusal = Err(CheckArgError::MissingValue { flag: "--contract" });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 };
                 if value.starts_with("--") {
-                    return Err(CheckArgError::ValueLooksLikeOption {
+                    let refusal = Err(CheckArgError::ValueLooksLikeOption {
                         flag: "--contract",
                         value: value.clone(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 contract = Some(PathBuf::from(value));
             }
             flag if flag.starts_with("--") => {
-                return Err(CheckArgError::UnknownFlag {
+                let refusal = Err(CheckArgError::UnknownFlag {
                     flag: flag.to_owned(),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                return refusal;
             }
             // A single `-` token is a path, not an option: the only short flag
             // this command defines is `-h`, which is matched above.
             path => {
                 if target.is_some() {
-                    return Err(CheckArgError::SurplusTarget {
+                    let refusal = Err(CheckArgError::SurplusTarget {
                         value: path.to_owned(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_check_args: returning an error to the caller");
+                    return refusal;
                 }
                 target = Some(PathBuf::from(path));
             }
@@ -497,9 +508,11 @@ fn audit_invariant_root(
 
 /// Prints every refusal and returns the verdict's exit code.
 ///
-/// Exit 0 when `[policy] enforce = false`: the register has stood enforcement
-/// down deliberately, so the refusals are reported as adoption guidance and the
-/// build still passes. Exit 2 otherwise.
+/// Always exit 2 when there is at least one refusal. Adoption mode no longer
+/// returns success from this path: an `enforce = false` register on a tree that
+/// carries refusals is itself refused, so arriving here with a non-empty list
+/// means the gate found something, and the note explains which posture it was
+/// read under.
 fn report_refusals(
     root: &Path,
     register: &Contract,
@@ -524,12 +537,12 @@ fn report_refusals(
     if !register.enforce {
         writeln!(
             err,
-            "\nNOTE  [policy] enforce = false, so builds still pass. This is adoption-only."
+            "\nNOTE  [policy] enforce = false does not make these pass. Adoption mode \
+             is a reviewable posture over a *clean* tree; a stand-down over a violating \
+             tree is refused above, so fix the named edges or set enforce = true."
         )?;
-        Ok(ExitCode::SUCCESS)
-    } else {
-        Ok(ExitCode::from(2))
     }
+    Ok(ExitCode::from(2))
 }
 
 /// Prints the admitted-edge summary and returns success.
@@ -655,15 +668,90 @@ impl<'a> InvariantReport<'a> {
     }
 
     /// Computes the combined check exit code for this invariant report.
-    fn check_exit_code(self, register: &Contract, refusals: &[Refusal]) -> ExitCode {
-        let dependencies_pass = refusals.is_empty() || !register.enforce;
-        let invariants_pass = self.audit.refusals().is_empty() || !self.register.enforce;
-        if dependencies_pass && invariants_pass {
+    ///
+    /// Both halves are pure functions of the refusal count. `enforce = false`
+    /// no longer reaches this verdict: `audit_direct` refuses a stand-down
+    /// outright when the tree carries violations, so an adoption-mode register
+    /// on a violating tree arrives here with a non-empty list and exits 2
+    /// exactly as `enforce = true` would. No token remains whose flip changes
+    /// the verdict.
+    fn check_exit_code(self, refusals: &[Refusal]) -> ExitCode {
+        if refusals.is_empty() && self.audit.refusals().is_empty() {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)
         }
     }
+}
+
+/// Reports a check whose dependency register audited, beside its invariant audit.
+fn report_audited_check(
+    root: &Path,
+    mode: PolicyMode,
+    verdict: &Verdict,
+    invariant: InvariantReport<'_>,
+    json_output: bool,
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let register = verdict.register();
+    let refusals = verdict.refusals();
+    if json_output {
+        print_check_json(
+            &CheckOutcome {
+                root: Some(root),
+                mode,
+                audit: Ok(verdict),
+            },
+            Some(invariant.json()),
+            out,
+        )?;
+        return Ok(invariant.check_exit_code(refusals));
+    }
+    if refusals.is_empty() && invariant.audit.refusals().is_empty() {
+        writeln!(
+            out,
+            "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
+            root.display(),
+            register.entry_count(),
+            invariant.audit.registered(),
+            invariant.audit.resolved(),
+            invariant.audit.attested()
+        )?;
+        write_receipt(
+            &CheckOutcome {
+                root: Some(root),
+                mode,
+                audit: Ok(verdict),
+            },
+            out,
+        )?;
+        writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    writeln!(
+        err,
+        "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
+        root.display(),
+        refusals.len(),
+        invariant.audit.refusals().len()
+    )?;
+    write_dependency_refusals(refusals, err)?;
+    write_invariant_refusals(invariant.audit, err)?;
+    write_receipt(
+        &CheckOutcome {
+            root: Some(root),
+            mode,
+            audit: Ok(verdict),
+        },
+        err,
+    )?;
+    writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
+    writeln!(
+        err,
+        "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
+    )?;
+    Ok(invariant.check_exit_code(refusals))
 }
 
 /// Reports one check verdict after both registers have been audited.
@@ -677,66 +765,7 @@ fn report_check_with_invariants(
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     match audit {
-        Ok(verdict) => {
-            let register = verdict.register();
-            let refusals = verdict.refusals();
-            if json_output {
-                print_check_json(
-                    &CheckOutcome {
-                        root: Some(root),
-                        mode,
-                        audit: Ok(verdict),
-                    },
-                    Some(invariant.json()),
-                    out,
-                )?;
-                return Ok(invariant.check_exit_code(register, refusals));
-            }
-            if refusals.is_empty() && invariant.audit.refusals().is_empty() {
-                writeln!(
-                    out,
-                    "OK  {} — {} semantic approvals; {} invariants resolve ({} resolved, {} attested by a recorded run)",
-                    root.display(),
-                    register.entry_count(),
-                    invariant.audit.registered(),
-                    invariant.audit.resolved(),
-                    invariant.audit.attested()
-                )?;
-                write_receipt(
-                    &CheckOutcome {
-                        root: Some(root),
-                        mode,
-                        audit: Ok(verdict),
-                    },
-                    out,
-                )?;
-                writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            writeln!(
-                err,
-                "REFUSED  {} — {} dependency-edge violations, {} invariant violations\n",
-                root.display(),
-                refusals.len(),
-                invariant.audit.refusals().len()
-            )?;
-            write_dependency_refusals(refusals, err)?;
-            write_invariant_refusals(invariant.audit, err)?;
-            write_receipt(
-                &CheckOutcome {
-                    root: Some(root),
-                    mode,
-                    audit: Ok(verdict),
-                },
-                err,
-            )?;
-            writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
-            writeln!(
-                err,
-                "\nBoth registers are reviewed contracts; repair each named refusal before delivery."
-            )?;
-            Ok(invariant.check_exit_code(register, refusals))
-        }
+        Ok(verdict) => report_audited_check(root, mode, verdict, invariant, json_output, out, err),
         Err(dependency_error) => report_check_with_dependency_error(
             root,
             mode,
@@ -801,39 +830,53 @@ fn report_check_with_invariant_error(
         audit: None,
         error: Some(invariant_error),
     };
+    if machine_output {
+        print_check_json(&outcome, Some(broken_invariant), stdout)?;
+        return Ok(ExitCode::from(2));
+    }
     match audit {
-        Ok(verdict) => {
-            if machine_output {
-                print_check_json(&outcome, Some(broken_invariant), stdout)?;
-                return Ok(ExitCode::from(2));
-            }
-            writeln!(
-                stderr,
-                "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
-                root.display(),
-                verdict.refusals().len()
-            )?;
-            write_dependency_refusals(verdict.refusals(), stderr)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            write_receipt(&outcome, stderr)?;
-            Ok(ExitCode::from(2))
-        }
+        Ok(verdict) => write_invariant_register_error(root, verdict, invariant_error, stderr)?,
         Err(dependency_error) => {
-            if machine_output {
-                print_check_json(&outcome, Some(broken_invariant), stdout)?;
-                return Ok(ExitCode::from(2));
-            }
-            writeln!(
-                stderr,
-                "REFUSED  {} — both registers could not be audited",
-                root.display()
-            )?;
-            write_register_detail(stderr, "dependency", dependency_error)?;
-            write_register_detail(stderr, "invariant", invariant_error)?;
-            write_receipt(&outcome, stderr)?;
-            Ok(ExitCode::from(2))
+            write_both_registers_unaudited(root, dependency_error, invariant_error, stderr)?;
         }
     }
+    write_receipt(&outcome, stderr)?;
+    Ok(ExitCode::from(2))
+}
+
+/// Writes the human refusal for a tree whose dependency register audited and
+/// whose invariant register did not, naming every dependency refusal it found.
+fn write_invariant_register_error(
+    root: &Path,
+    verdict: &Verdict,
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
+        root.display(),
+        verdict.refusals().len()
+    )?;
+    write_dependency_refusals(verdict.refusals(), stderr)?;
+    write_register_detail(stderr, "invariant", invariant_error)
+}
+
+/// Writes the human refusal for a tree on which neither register could be
+/// audited, naming why each one could not.
+fn write_both_registers_unaudited(
+    root: &Path,
+    dependency_error: &str,
+    invariant_error: &str,
+    stderr: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        stderr,
+        "REFUSED  {} — both registers could not be audited",
+        root.display()
+    )?;
+    write_register_detail(stderr, "dependency", dependency_error)?;
+    write_register_detail(stderr, "invariant", invariant_error)
 }
 
 /// Writes the receipt that binds the verdict to what it was reached against.
@@ -899,7 +942,7 @@ fn write_register_detail(err: &mut impl io::Write, register: &str, detail: &str)
 /// One function rather than a branch at each call site: the human and machine
 /// renderings differ in bytes and must not differ in *verdict*, and the only way
 /// to guarantee that is for a single place to compute it. Both modes exit 0 for
-/// an admitted tree, 0 for refusals under `enforce = false`, and 2 otherwise.
+/// an admitted tree and 2 for any refusal, including a stand-down of refusals.
 fn report_check(
     outcome: &CheckOutcome<'_>,
     json_output: bool,
@@ -911,23 +954,22 @@ fn report_check(
         // A gate that could not reach a verdict is a refusal, and exits 2.
         // This arm is first because the code below would otherwise *pass*: with
         // no register, `enforce` defaults to true and `refusals` is empty, so
-        // `refusals.is_empty() || !enforced` is satisfied and the gate would
+        // `refusals.is_empty()` is satisfied and the gate would
         // report success for a tree it never read. That is the one failure this
         // crate's fail-closed rule exists to prevent, and it was reachable only
         // through `--json`.
         if outcome.audit.is_err() {
             return Ok(ExitCode::from(2));
         }
-        // `enforce = false` is adoption-only: refusals are reported and the
-        // build still passes, exactly as in the human path. The two modes must
-        // not disagree about what an exit code means.
-        let enforced = outcome
-            .audit
-            .is_ok_and(|verdict| verdict.register().enforce);
+        // The verdict is the refusal count alone. `enforce = false` is no
+        // longer consulted: an adoption-mode register on a violating tree is
+        // itself refused by `audit_direct`, so it arrives here with a non-empty
+        // `refusals` and exits 2 -- identical to the human path, which is the
+        // property `--json` must never lose.
         let admitted = outcome
             .audit
             .is_ok_and(|verdict| verdict.refusals().is_empty());
-        return Ok(if admitted || !enforced {
+        return Ok(if admitted {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(2)
@@ -941,15 +983,23 @@ fn report_check(
     let named = outcome.root.unwrap_or(Path::new("."));
     if verdict.refusals().is_empty() {
         report_ok(named, verdict.register().entry_count(), out)?;
-        write_receipt(outcome, out)?;
-        writeln!(out, "SCOPE  {INVARIANT_SCOPE}")?;
-        Ok(ExitCode::SUCCESS)
+        finish_verdict(outcome, out, ExitCode::SUCCESS)
     } else {
         let code = report_refusals(named, verdict.register(), verdict.refusals(), err)?;
-        write_receipt(outcome, err)?;
-        writeln!(err, "SCOPE  {INVARIANT_SCOPE}")?;
-        Ok(code)
+        finish_verdict(outcome, err, code)
     }
+}
+
+/// Closes a human verdict with its receipt and the scope the verdict covers,
+/// then hands back the exit code the verdict earned.
+fn finish_verdict(
+    outcome: &CheckOutcome<'_>,
+    writer: &mut impl io::Write,
+    code: ExitCode,
+) -> io::Result<ExitCode> {
+    write_receipt(outcome, writer)?;
+    writeln!(writer, "SCOPE  {INVARIANT_SCOPE}")?;
+    Ok(code)
 }
 
 /// Writes the verdict as one JSON object on `out`.
@@ -1263,13 +1313,17 @@ fn parse_debug_args(args: &[String]) -> Result<DebugArgs, String> {
         match argument.as_str() {
             "--json" => json = true,
             flag if flag.starts_with("--") => {
-                return Err(format!("unknown option for `debug`: {flag}"));
+                let refusal = Err(format!("unknown option for `debug`: {flag}"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_debug_args: returning an error to the caller");
+                return refusal;
             }
             value => {
                 if target.is_some() {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "`debug` inspects one repository, and {value:?} is a second path"
                     ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse_debug_args: returning an error to the caller");
+                    return refusal;
                 }
                 target = Some(PathBuf::from(value));
             }
@@ -1478,6 +1532,7 @@ fn print_request_template(krate: &str, version: &str, out: &mut impl io::Write) 
          version = \"{version}\"\n\
          owner = \"\"                 # workspace crate responsible for the capability\n\
          capability = \"\"            # stable semantic capability name\n\
+         license = \"\"              # SPDX expression the package declares\n\
          source = \"registry\"        # registry | git | path\n\
          allowed_consumers = \"\"     # comma-separated workspace crate names\n\
          allowed_kinds = \"normal\"   # normal, build, and/or dev\n\
@@ -1885,6 +1940,33 @@ fn handle_vendor(
     run_vendor_check(&start, out, err)
 }
 
+/// Writes the refusal for a lock file the vendor tree does not cover: how many
+/// locked packages are missing, each one by name and version, and the repair.
+fn write_missing_packages(
+    root: &Path,
+    tree: &Path,
+    report: &lgwks_deps::vendor::Report,
+    err: &mut impl io::Write,
+) -> io::Result<()> {
+    writeln!(
+        err,
+        "REFUSED  {} — {} of {} locked packages missing from {}\n",
+        root.display(),
+        report.missing.len(),
+        // Both operands are counts of entries in one lock file, so the
+        // sum is bounded by its package count and cannot overflow.
+        report.covered.saturating_add(report.missing.len()),
+        tree.display()
+    )?;
+    for missing in &report.missing {
+        writeln!(err, "  {} {}", missing.name, missing.version)?;
+    }
+    writeln!(
+        err,
+        "\nRe-run the vendor sync for this repo, then re-check."
+    )
+}
+
 /// Proves every locked package resolves to the shared vendor tree.
 ///
 /// Exit 0 when the tree covers the lock file and 2 when any locked package is
@@ -1914,23 +1996,7 @@ fn run_vendor_check(
             Ok(ExitCode::SUCCESS)
         }
         Ok(report) => {
-            writeln!(
-                err,
-                "REFUSED  {} — {} of {} locked packages missing from {}\n",
-                root.display(),
-                report.missing.len(),
-                // Both operands are counts of entries in one lock file, so the
-                // sum is bounded by its package count and cannot overflow.
-                report.covered.saturating_add(report.missing.len()),
-                tree.display()
-            )?;
-            for missing in &report.missing {
-                writeln!(err, "  {} {}", missing.name, missing.version)?;
-            }
-            writeln!(
-                err,
-                "\nRe-run the vendor sync for this repo, then re-check."
-            )?;
+            write_missing_packages(&root, &tree, &report, err)?;
             Ok(ExitCode::from(2))
         }
         Err(error) => refuse(&error.to_string(), err),

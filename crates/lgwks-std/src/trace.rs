@@ -269,7 +269,10 @@ impl DebugConfig {
     /// Refuses a config that cannot identify the emitting service.
     fn validate(&self) -> Result<(), DebugInstallError> {
         if self.service_name.trim().is_empty() {
-            return Err(DebugInstallError::MissingServiceName);
+            let refusal = Err(DebugInstallError::MissingServiceName);
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "validate: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }

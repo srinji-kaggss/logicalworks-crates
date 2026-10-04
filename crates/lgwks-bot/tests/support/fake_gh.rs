@@ -91,7 +91,10 @@ impl FakeGh {
     /// Handed to a binding as a per-child variable rather than set on this
     /// process, which keeps tests independent and needs no `unsafe`.
     pub fn search_path(&self) -> Result<std::ffi::OsString, std::env::JoinPathsError> {
-        let ambient = std::env::var_os("PATH").unwrap_or_default();
+        let ambient = match std::env::var_os("PATH") {
+            Some(path) => path,
+            None => std::ffi::OsString::new(),
+        };
         let mut entries = vec![self.dir.clone()];
         entries.extend(std::env::split_paths(&ambient));
         std::env::join_paths(&entries)
@@ -694,14 +697,14 @@ impl Scenario {
         self.head_after_first.as_deref()
     }
 
-    /// A create is accepted and its response then dropped.
+    /// Make the fake accept a create request and then drop the response, which leaves the caller unsure whether the review exists.
     #[must_use]
     pub fn accept_then_drop(mut self) -> Self {
         self.create = "accept_then_drop";
         self
     }
 
-    /// A create is refused.
+    /// Make the fake refuse every create request outright, so the caller must report a refusal with nothing published.
     #[must_use]
     pub fn refuse_creates(mut self) -> Self {
         self.create = "refuse";
@@ -715,14 +718,14 @@ impl Scenario {
         self
     }
 
-    /// A created review carries `body`.
+    /// Set the body the fake reports for a review it created, so a test can compare it with the body that was sent.
     #[must_use]
     pub fn created_body(mut self, body: &str) -> Self {
         body.clone_into(&mut self.created_body);
         self
     }
 
-    /// The head moves to `head` after the first read.
+    /// Make the pull request's head commit become `head` after the first read, which simulates a push landing mid-review.
     #[must_use]
     pub fn head_moves_to(mut self, head: &str) -> Self {
         self.head_after_first = Some(head.to_owned());

@@ -131,7 +131,7 @@ pub trait Observe {
     /// awaiting anything: it is a statement about state the poll already
     /// touched, not another call into the source. The substrate forces its next
     /// poll exactly when this reports a
-    /// [`RefreshReason::invalidates_baseline`](RefreshReason::invalidates_baseline)
+    /// [`RefreshReason::invalidates_baseline`]
     /// reason, and records the reason on the tick report.
     fn cache_state(&self) -> Option<RefreshReason> {
         None

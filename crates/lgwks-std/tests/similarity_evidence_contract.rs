@@ -313,10 +313,13 @@ impl CheckedSimilarity for StructuralMatch {
 
     fn try_score(&self, left: &Self::Value, right: &Self::Value) -> Result<f64, EvidenceError> {
         if left.len() != right.len() {
-            return Err(EvidenceError::DimensionMismatch {
+            let refusal = Err(EvidenceError::DimensionMismatch {
                 left: left.len(),
                 right: right.len(),
             });
+            #[cfg(feature = "trace")]
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "try_score: returning an error to the caller");
+            return refusal;
         }
         Ok(1.0)
     }

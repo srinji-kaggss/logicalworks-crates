@@ -43,7 +43,7 @@
 #             CI ignores the field: every CI job is its own machine.
 
 [toolchain]
-rust = "1.98.0"
+rust = "1.99.0"
 
 # ── shared: one command, both surfaces ──────────────────────────────────────
 
@@ -119,7 +119,9 @@ required = true
 # The storefront consumer builds run in their own lane and CI job: they are
 # nested cargo builds that serialize on one target-directory lock, and in the
 # Tests job they alone held the step at 441 s of a 513 s job.
-command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'"
+# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
+# whole suite.
+command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run all workspace tests"
 
 [[lane]]
@@ -160,7 +162,9 @@ id = "tests-bot-full"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full"
+# CI runs this as four shards by setting PARTITION=count:N/4; unset, it is the
+# whole suite.
+command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot async runner tests"
 
 [[lane]]
@@ -224,6 +228,15 @@ required = true
 fast = true
 command = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 ci_step = "Clippy all workspace targets"
+
+[[lane]]
+id = "scan"
+group = "quality"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
+ci_step = "Scan reports zero findings"
 
 [[lane]]
 id = "docs-all-features"

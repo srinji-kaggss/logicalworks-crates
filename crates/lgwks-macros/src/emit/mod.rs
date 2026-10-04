@@ -264,10 +264,12 @@ pub(crate) fn script(nodes: Vec<Node>) -> Result<TokenStream> {
         flows.push(shape);
     }
     if let Some(stray) = attributes.first() {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             stray.span(),
             "this attribute is not followed by a flow",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "script: returning an error to the caller");
+        return refusal;
     }
     let script = runtime();
     output.extend(quote! {
@@ -284,23 +286,29 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStr
     let tokens = &line.tokens;
     let at_flow = tokens.iter().position(|token| is_ident(token, "flow"));
     let (Some(at_flow), true) = (at_flow, line.opens_block) else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "a script is a list of flows: `flow name(param: Type) -> Output:` followed by \
-             its indented body",
+         its indented body",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flow: returning an error to the caller");
+        return refusal;
     };
     let visibility: TokenStream = tokens.iter().take(at_flow).cloned().collect();
     let mut rest = tokens.iter().skip(at_flow.saturating_add(1));
     let (Some(name), Some(params)) = (rest.next().and_then(ident), rest.next().and_then(group))
     else {
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             line.span,
             "expected `flow name(params)`; a flow with no inputs is `flow name():`",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flow: returning an error to the caller");
+        return refusal;
     };
     if params.delimiter() != Delimiter::Parenthesis {
-        return Err(Error::new(params.span(), "a flow's inputs are in `( )`"));
+        let refusal = Err(Error::new(params.span(), "a flow's inputs are in `( )`"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flow: returning an error to the caller");
+        return refusal;
     }
     let after: Vec<TokenTree> = rest.cloned().collect();
     let output_type = match *after.as_slice() {
@@ -311,10 +319,12 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStr
             Some(ty.iter().cloned().collect::<TokenStream>())
         }
         _ => {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 line.span,
                 "after a flow's inputs comes `-> Output:` or just `:`",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flow: returning an error to the caller");
+            return refusal;
         }
     };
     refuse::check_stream(&params.stream())?;
@@ -330,11 +340,13 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStr
     let body = block(&children, &mut labels, place)?;
     if output_type.is_some() && body.tail.is_none() && !body.diverges {
         let span = children.last().map_or(line.span, |last| last.line.span);
-        return Err(Error::new(
+        let refusal = Err(Error::new(
             span,
             "this flow promises an output (`-> ..`) but its last line produces no value; \
-             end it with `give back <value>` or with the value itself",
+         end it with `give back <value>` or with the value itself",
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flow: returning an error to the caller");
+        return refusal;
     }
     let (body_block, steps) = body.into_ok_block();
 
@@ -399,10 +411,12 @@ fn block(nodes: &[Node], labels: &mut Labels, place: Place) -> Result<Body> {
     while let Some(node) = nodes.get(index) {
         let keyword = node.line.keyword();
         if keyword.as_deref() == Some("else") {
-            return Err(Error::new(
+            let refusal = Err(Error::new(
                 node.line.span,
                 "`else:` must follow an `if ..:` block at the same indentation",
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+            return refusal;
         }
         let consumed = if keyword.as_deref() == Some("if") && node.line.opens_block {
             let chain: Vec<&Node> = nodes
@@ -522,46 +536,8 @@ fn simple(
     let script = runtime();
     let tokens = &line.tokens;
     match keyword {
-        "give" => {
-            let rest = expect_words(line, &["give", "back"], "`give back <value>`")?;
-            if place.nested {
-                return Err(Error::new(
-                    line.span,
-                    "`give back` returns from the flow, and this line is inside a block that \
-                     has its own value; make the value this block's last line instead",
-                ));
-            }
-            let value = rewrite(rest, labels, run_shapes, line)?;
-            run_shapes.push(shape_tokens("GiveBack", "", &text(tokens), line, &[]));
-            Ok(Piece::leaving(
-                quote!(return ::core::result::Result::Ok(#value);),
-            ))
-        }
-        "fail" => {
-            let (constructor, rest) = if tokens
-                .get(1)
-                .is_some_and(|token| is_ident(token, "transiently"))
-            {
-                (
-                    quote!(transient),
-                    expect_words(
-                        line,
-                        &["fail", "transiently", "with"],
-                        "`fail transiently with <reason>`",
-                    )?,
-                )
-            } else {
-                (
-                    quote!(failed),
-                    expect_words(line, &["fail", "with"], "`fail with <reason>`")?,
-                )
-            };
-            let reason = rewrite(rest, labels, run_shapes, line)?;
-            run_shapes.push(shape_tokens("Fail", "", &text(tokens), line, &[]));
-            Ok(Piece::leaving(
-                quote!(return ::core::result::Result::Err(#script::FlowError::#constructor(#reason));),
-            ))
-        }
+        "give" => give_back(line, place, labels, run_shapes),
+        "fail" => fail_line(line, &script, labels, run_shapes),
         "let" => {
             let rewritten = rewrite(tokens, labels, run_shapes, line)?;
             Ok(Piece::new(quote!(#rewritten;), false))
@@ -571,4 +547,61 @@ fn simple(
             None => Ok(Piece::new(rewrite(tokens, labels, run_shapes, line)?, true)),
         },
     }
+}
+
+/// `give back <value>`: leaves the flow with that value.
+fn give_back(
+    line: &Line,
+    place: Place,
+    labels: &mut Labels,
+    run_shapes: &mut Shapes,
+) -> Result<Piece> {
+    let rest = expect_words(line, &["give", "back"], "`give back <value>`")?;
+    if place.nested {
+        let refusal = Err(Error::new(
+            line.span,
+            "`give back` returns from the flow, and this line is inside a block that \
+         has its own value; make the value this block's last line instead",
+        ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "give_back: returning an error to the caller");
+        return refusal;
+    }
+    let value = rewrite(rest, labels, run_shapes, line)?;
+    run_shapes.push(shape_tokens("GiveBack", "", &text(&line.tokens), line, &[]));
+    Ok(Piece::leaving(
+        quote!(return ::core::result::Result::Ok(#value);),
+    ))
+}
+
+/// `fail [transiently] with <reason>`: leaves the flow with a typed error.
+fn fail_line(
+    line: &Line,
+    script: &TokenStream,
+    labels: &mut Labels,
+    run_shapes: &mut Shapes,
+) -> Result<Piece> {
+    let tokens = &line.tokens;
+    let (constructor, rest) = if tokens
+        .get(1)
+        .is_some_and(|token| is_ident(token, "transiently"))
+    {
+        (
+            quote!(transient),
+            expect_words(
+                line,
+                &["fail", "transiently", "with"],
+                "`fail transiently with <reason>`",
+            )?,
+        )
+    } else {
+        (
+            quote!(failed),
+            expect_words(line, &["fail", "with"], "`fail with <reason>`")?,
+        )
+    };
+    let reason = rewrite(rest, labels, run_shapes, line)?;
+    run_shapes.push(shape_tokens("Fail", "", &text(tokens), line, &[]));
+    Ok(Piece::leaving(
+        quote!(return ::core::result::Result::Err(#script::FlowError::#constructor(#reason));),
+    ))
 }

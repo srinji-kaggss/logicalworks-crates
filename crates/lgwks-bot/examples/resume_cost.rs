@@ -93,14 +93,22 @@ fn key(index: u32) -> Result<EffectKey, Box<dyn std::error::Error>> {
     // Every id here is one-based: `AttemptId` and `EnvironmentEpoch` are non-zero
     // counters by construction, and an attempt of zero is not an attempt.
     let at = u64::from(index).saturating_add(1);
+    let run = RunId::from_hex(&format!("{at:032x}"))?;
+    let action = ActionId::from_hex(&format!("{:032x}", at.saturating_add(1)))?;
+    let attempt = AttemptId::from_decimal(&at.to_string())?;
+    let flow = FlowRevision::from_tagged("blake3_256", &format!("{at:064x}"))?;
+    let digest =
+        ActionDigest::from_tagged("blake3_256", &format!("{:064x}", at.saturating_add(2)))?;
+    let environment = EnvironmentId::from_hex(&format!("{:032x}", at.saturating_add(3)))?;
+    let epoch = EnvironmentEpoch::from_decimal(&at.to_string())?;
     Ok(EffectKey::new(
-        RunId::from_hex(&format!("{at:032x}"))?,
-        ActionId::from_hex(&format!("{:032x}", at.saturating_add(1)))?,
-        AttemptId::from_decimal(&at.to_string())?,
-        FlowRevision::from_tagged("blake3_256", &format!("{at:064x}"))?,
-        ActionDigest::from_tagged("blake3_256", &format!("{:064x}", at.saturating_add(2)))?,
-        EnvironmentId::from_hex(&format!("{:032x}", at.saturating_add(3)))?,
-        EnvironmentEpoch::from_decimal(&at.to_string())?,
+        run,
+        action,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 
@@ -179,10 +187,10 @@ fn report_concurrent(
                             lgwks_bot::rt::runtime::block_on(host.run(&work, (lane, index)));
                         local.push(at.elapsed().as_micros());
                         if !result.disposition().is_success() {
-                            return Err(format!(
+                            { let refusal = Err(format!(
                                 "lane {lane} append {index}: {:?}",
                                 result.error()
-                            ));
+                            )); lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "report_concurrent: returning an error to the caller"); return refusal; };
                         }
                     }
                     samples
@@ -195,7 +203,7 @@ fn report_concurrent(
     }
     for lane in lanes {
         lane.join()
-            .map_err(|_| "a benchmark lane panicked".to_owned())??;
+            .map_err(|panic| format!("a benchmark lane panicked: {panic:?}"))??;
     }
     let elapsed = started.elapsed();
     let acknowledged = LANE_APPENDS.saturating_mul(concurrency);
@@ -245,7 +253,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
         plain.push(started.elapsed().as_micros());
         if outcome.is_err() {
-            return Err("the unstored measurement step failed".into());
+            let refusal = Err("the unstored measurement step failed".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     report("plain  (no store)", &measure::Summary::of(&mut plain));
@@ -263,7 +273,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
         stored.push(started.elapsed().as_micros());
         if !report.disposition().is_success() {
-            return Err(format!("the stored measurement step failed: {:?}", report.error()).into());
+            {
+                let refusal =
+                    Err(format!("the stored measurement step failed: {:?}", report.error()).into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     report("stored (remember)", &measure::Summary::of(&mut stored));
@@ -304,7 +319,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let appended = journal.compare_and_append(tail_of(&journal), &event);
         journalled.push(started.elapsed().as_micros());
         if appended.is_err() {
-            return Err(format!("journal append {index} failed: {:?}", appended.err()).into());
+            {
+                let refusal =
+                    Err(format!("journal append {index} failed: {:?}", appended.err()).into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     report(

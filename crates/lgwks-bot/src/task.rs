@@ -363,7 +363,7 @@ pub struct Task<F> {
     /// A task needs nothing by default: a body that reaches nothing declares nothing.
     ///
     /// A step that does reach something asks for it at the step that reaches,
-    /// through [`Scope::require`](crate::script::Scope::require). That is the step
+    /// through [`Scope::require`]. That is the step
     /// that knows what the step is about to do, and it is where a repair is
     /// relevant — a run that has already analyzed something and then finds the
     /// publication blocked is the case a repair exists for, and a whole-task
@@ -391,7 +391,7 @@ impl<F> Task<F> {
 
     /// Declare capabilities this task needs before its body runs at all.
     ///
-    /// The blunt form of [`Scope::require`](crate::script::Scope::require): the
+    /// The blunt form of [`Scope::require`]: the
     /// whole task is refused at admission if any of `caps` is uncovered, so
     /// nothing runs and nothing is recorded. Use it for a task that reaches
     /// something in its very first step; use `require` in the body when the reach
@@ -616,13 +616,21 @@ impl<O> Report<O> {
         self.effects
     }
 
-    /// The tenant this run was for.
+    /// The tenant this run was admitted for.
+    ///
+    /// Fixed at admission and not a property of the work, so a caller charging
+    /// the run reads it here rather than tracking which tenant's flow it came
+    /// from.
     #[must_use]
     pub fn tenant(&self) -> &Tenant {
         &self.tenant
     }
 
-    /// The task that ran.
+    /// The declared name of the task this run executed.
+    ///
+    /// Borrowed from the run rather than returned, so it cannot outlive the run
+    /// it names. Two runs of the same task share it, and a task name says nothing
+    /// about which tenant it ran for.
     #[must_use]
     pub fn task_name(&self) -> &str {
         self.task.as_str()
@@ -726,7 +734,7 @@ impl Ticket {
         &self.tenant
     }
 
-    /// The task that was running.
+    /// The identity of the task whose run this outcome describes, as the caller submitted it.
     #[must_use]
     pub fn task(&self) -> &str {
         self.task.as_str()
@@ -760,6 +768,27 @@ impl fmt::Display for Ticket {
             write!(formatter, " at {at}")?;
         }
         Ok(())
+    }
+}
+
+/// The receipt a claim just lost to, read back from the store.
+///
+/// A claim that reports another submitter's record already on the disk and a
+/// lookup that then finds nothing contradict each other, so that is an
+/// [`RequestError::IdCollision`] rather than a missing value.
+fn recorded_receipt(
+    records: &Records,
+    tenant: &str,
+    run: RunId,
+    binding_key: crate::script::StepKey,
+) -> Result<StoredValue, RequestError> {
+    match records.lookup(tenant, run, binding_key)? {
+        Some(held) => Ok(held),
+        None => {
+            let refusal = Err(RequestError::IdCollision);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "recorded_receipt: the claim reported a record the lookup cannot find");
+            refusal
+        }
     }
 }
 
@@ -1445,15 +1474,17 @@ impl Host {
         Fut: Future<Output = Result<O, FlowError>>,
     {
         if ticket.tenant() != &self.inner.tenant {
-            return Err(FlowError::Failed {
+            let refusal = Err(FlowError::Failed {
                 at: Arc::from(ticket.task()),
                 reason: format!(
                     "the ticket names tenant {:?}, not {:?}; refusing to resume another \
-                     tenant's run",
+                 tenant's run",
                     ticket.tenant().as_str(),
                     self.inner.tenant.as_str()
                 ),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "resume_ticket: returning an error to the caller");
+            return refusal;
         }
         Ok(self.run_plan(task, input, Plan::Resume(ticket.run())).await)
     }
@@ -1531,7 +1562,9 @@ impl Host {
         Fut: Future<Output = Result<O, FlowError>>,
     {
         let Some(store) = self.inner.store.as_ref() else {
-            return Err(RequestError::NoStore);
+            let refusal = Err(RequestError::NoStore);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "submit: returning an error to the caller");
+            return refusal;
         };
         let tenant = self.inner.tenant.as_str();
         let run = derive_request_run(tenant, key)?;
@@ -1559,7 +1592,7 @@ impl Host {
         }
 
         // No receipt yet: the claim decides which submitter may run the body.
-        match records
+        let claimed = records
             .claim(
                 tenant,
                 run,
@@ -1568,13 +1601,11 @@ impl Host {
                 &definition,
                 digest.as_bytes().to_vec(),
             )
-            .await?
-        {
+            .await?;
+        match claimed {
             Appended::Recorded => {}
             Appended::AlreadyRecorded => {
-                let held = records
-                    .lookup(tenant, run, binding_key)?
-                    .ok_or(RequestError::IdCollision)?;
+                let held = recorded_receipt(&records, tenant, run, binding_key)?;
                 let existing = Existing {
                     store,
                     records: &records,
@@ -1587,15 +1618,15 @@ impl Host {
                 return self.observe_existing(existing, task);
             }
             Appended::Conflicting => {
-                let held = records
-                    .lookup(tenant, run, binding_key)?
-                    .ok_or(RequestError::IdCollision)?;
+                let held = recorded_receipt(&records, tenant, run, binding_key)?;
                 let existing = digest_of_record(held.bytes())?;
-                return Err(RequestError::Conflict(RequestConflict::new(
+                let refusal = Err(RequestError::Conflict(RequestConflict::new(
                     key.clone(),
                     existing,
                     digest,
                 )));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "submit: returning an error to the caller");
+                return refusal;
             }
         }
 
@@ -1648,11 +1679,13 @@ impl Host {
         } = existing;
         let recorded = digest_of_record(held.bytes())?;
         if recorded != digest {
-            return Err(RequestError::Conflict(RequestConflict::new(
+            let refusal = Err(RequestError::Conflict(RequestConflict::new(
                 key.clone(),
                 recorded,
                 digest,
             )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "observe_existing: returning an error to the caller");
+            return refusal;
         }
         let terminal_key = reserved_step_key(tenant, TERMINAL_STEP);
         if let Some(head) = records.lookup(tenant, run, terminal_key)? {
@@ -1907,10 +1940,12 @@ impl Host {
         let started = Instant::now();
         let ledger = self.inner.ledger.as_ref().ok_or(RepairError::NoLedger)?;
         if ticket.tenant() != self.inner.tenant.as_str() {
-            return Err(RepairError::ForeignTenant {
+            let refusal = Err(RepairError::ForeignTenant {
                 ticket: ticket.tenant().to_owned(),
                 host: self.inner.tenant.as_str().to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "repair: returning an error to the caller");
+            return refusal;
         }
         // The grant is checked against the ticket *before* the run is admitted and
         // before the ledger is charged, so a denied repair costs nothing at all:
@@ -1924,10 +1959,12 @@ impl Host {
                 run: ticket.run().id().to_hex(),
             })?;
         if control.epoch() != ticket.epoch() {
-            return Err(RepairError::StaleEpoch {
+            let refusal = Err(RepairError::StaleEpoch {
                 current: control.epoch(),
                 offered: ticket.epoch(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "repair: returning an error to the caller");
+            return refusal;
         }
         let delta = ticket.delta();
         let report = self
@@ -2235,9 +2272,20 @@ impl Host {
         // A nested run's identity joins the set its parent established, so a
         // child two levels down sees every ancestor's host and is charged the
         // same way. Sibling runs have their own scopes and their own sets.
+        //
+        // Outside a scope there is no held set, and an empty one is the correct
+        // reading: this run holds nothing it inherited, so it is charged for
+        // everything it does itself. `Vec::new()` rather than a discard of the
+        // not-entered error, which carries no permit information at all.
         let held = HELD_PERMITS
             .try_with(Clone::clone)
-            .unwrap_or_else(|_unentered| Vec::new());
+            .unwrap_or_else(|not_entered| {
+                lgwks_std::trace::debug!(
+                    ?not_entered,
+                    "submit: no enclosing scope holds a permit set"
+                );
+                Vec::new()
+            });
         let charged = if held.contains(&self.inner.identity) {
             held
         } else {
@@ -2504,7 +2552,9 @@ impl Host {
         // Checked before the reactor is taken, so the refusal cannot leave a
         // freshly built runtime behind for a caller that never used it.
         if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
-            return Err(HostError::InsideRuntime);
+            let refusal = Err(HostError::InsideRuntime);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block_on: returning an error to the caller");
+            return refusal;
         }
         let handle = self.reactor()?;
         Ok(handle.block_on(self.run(task, input)))
@@ -2559,9 +2609,11 @@ impl Host {
             return Ok(Permit::Charged);
         }
         if self.inner.token.is_cancelled() {
-            return Err(AdmissionFailure::Refused(Refused {
+            let refusal = Err(AdmissionFailure::Refused(Refused {
                 at: Arc::from(task.as_str()),
             }));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "admit: returning an error to the caller");
+            return refusal;
         }
         // The wait for a permit is bounded in real time, charged to the run's
         // deadline. It is a wait on other runs releasing capacity — a real
@@ -2716,7 +2768,7 @@ impl HighWater {
         // exists to refuse — or `drop` on a `Copy` value, which does nothing.
         let _previous = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
                 (live > peak).then_some(live)
             });
     }
@@ -2793,7 +2845,7 @@ impl LiveRuns {
         // discarded with `let _ =`, the shape `let_underscore_must_use` refuses.
         let _previous = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
                 live.checked_sub(1)
             });
     }
@@ -2810,12 +2862,14 @@ impl LiveRuns {
 /// is not the one a located failure maps to: a run that never held a permit
 /// never entered a step, so there is no step to be cancelled *at*. Reporting it
 /// as `Cancelled` would tell a reader its body had started and then stopped.
+#[derive(Debug)]
 struct Refused {
     /// The task it was refused for, which is the only location it has.
     at: Arc<str>,
 }
 
 /// Why a run never reached its body, and the disposition each reason reports.
+#[derive(Debug)]
 enum AdmissionFailure {
     /// The host was stopped, or stopped while this run waited.
     Refused(Refused),
@@ -2935,7 +2989,7 @@ enum TrailSnapshot {
 ///
 /// A handle rather than the concrete type for the same reason [`Records`] is: it
 /// is installed as a `dyn` behind a task-local, and the script module must not
-/// depend on [`Host`](self::Host).
+/// depend on [`Host`].
 /// One run's authority: the host's base grant plus this run's repair delta.
 ///
 /// The two are kept apart rather than merged, because merging loses the question
@@ -3187,34 +3241,42 @@ impl HostBuilder {
         let tasks = u64::try_from(self.max_concurrent.get()).unwrap_or(u64::MAX);
         let tasks_ceiling = u64::try_from(MAX_ADMITTED_TASKS).unwrap_or(u64::MAX);
         if tasks > tasks_ceiling {
-            return Err(HostError::Bound {
+            let refusal = Err(HostError::Bound {
                 what: "the admission ceiling",
                 value: tasks,
                 max: tasks_ceiling,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
         }
         if self.deadline.is_zero() {
-            return Err(HostError::Bound {
+            let refusal = Err(HostError::Bound {
                 what: "the default deadline",
                 value: 0,
                 max: MAX_TASK_DEADLINE.as_secs(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
         }
         if self.deadline > MAX_TASK_DEADLINE {
-            return Err(HostError::Bound {
+            let refusal = Err(HostError::Bound {
                 what: "the default deadline",
                 value: self.deadline.as_secs(),
                 max: MAX_TASK_DEADLINE.as_secs(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
         }
         let steps = u64::try_from(self.progress).unwrap_or(u64::MAX);
         let steps_ceiling = u64::try_from(MAX_PROGRESS_STEPS).unwrap_or(u64::MAX);
         if steps > steps_ceiling {
-            return Err(HostError::Bound {
+            let refusal = Err(HostError::Bound {
                 what: "the progress capacity",
                 value: steps,
                 max: steps_ceiling,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
         }
         Ok(Host {
             inner: Arc::new(Installation {

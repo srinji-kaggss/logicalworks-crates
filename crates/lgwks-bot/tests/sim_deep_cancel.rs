@@ -186,7 +186,7 @@ fn trace_on_small_stack(seed: u64) -> TestResult {
     let handle = started?;
     let trace = handle
         .join()
-        .map_err(|_payload| "the deep-cancel journey panicked")?;
+        .map_err(|payload| format!("the deep-cancel journey panicked: {payload:?}"))?;
     let path = std::env::var(TRACE_ENV)?;
     std::fs::write(path, trace)?;
     Ok(())
@@ -218,11 +218,13 @@ fn run_child(seed: u64, run: u32) -> Result<String, Box<dyn std::error::Error>> 
     for _ in 0..GUARD_POLLS {
         if let Some(status) = child.try_wait()? {
             if !status.success() {
-                return Err(format!(
+                let refusal = Err(format!(
                     "seed {seed} run {run}: the child exited with {status}; a stack overflow or \
-                     panic in the deep-cancel journey is the defect this bounds"
+                 panic in the deep-cancel journey is the defect this bounds"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_child: returning an error to the caller");
+                return refusal;
             }
             let recorded = std::fs::read_to_string(&trace)?;
             discard(&trace)?;

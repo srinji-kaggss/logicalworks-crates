@@ -252,12 +252,22 @@ impl RepoPath {
     fn parse(value: &str) -> Result<Self, PathRefusal> {
         let path = Path::new(value);
         if path.is_absolute() {
-            return Err(PathRefusal::Absolute);
+            let refusal = Err(PathRefusal::Absolute);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse: returning an error to the caller");
+            return refusal;
         }
         for component in path.components() {
             match component {
-                Component::ParentDir => return Err(PathRefusal::ParentDirectory),
-                Component::RootDir | Component::Prefix(_) => return Err(PathRefusal::Absolute),
+                Component::ParentDir => {
+                    let refusal = Err(PathRefusal::ParentDirectory);
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse: returning an error to the caller");
+                    return refusal;
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    let refusal = Err(PathRefusal::Absolute);
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse: returning an error to the caller");
+                    return refusal;
+                }
                 Component::CurDir | Component::Normal(_) => {}
             }
         }
@@ -1052,12 +1062,18 @@ fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
         .map_or_else(|| "<unnamed>".to_owned(), str::to_owned);
     for field in REQUIRED_FIELDS {
         match raw.get(field) {
-            None => return Err(ErrorKind::MissingField { id, field }),
+            None => {
+                let refusal = Err(ErrorKind::MissingField { id, field });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+                return refusal;
+            }
             // A blank value is a missing value for every free-text field, and
             // for `enforcement` it is a value outside the closed grammar — the
             // repair is different, so the diagnostic has to be.
             Some(value) if value.trim().is_empty() && field != ENFORCEMENT_FIELD => {
-                return Err(ErrorKind::MissingField { id, field });
+                let refusal = Err(ErrorKind::MissingField { id, field });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+                return refusal;
             }
             Some(_) => {}
         }
@@ -1066,24 +1082,30 @@ fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
         .get("approved_on")
         .map_or_else(String::new, str::to_owned);
     if !contract::is_iso_date(&approved_on) {
-        return Err(ErrorKind::BadDate {
+        let refusal = Err(ErrorKind::BadDate {
             id,
             line: raw.field_line("approved_on").unwrap_or(raw.line()),
             value: approved_on,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+        return refusal;
     }
     let statement = raw.get("statement").map_or_else(String::new, str::to_owned);
     if let Some(reason) = non_monitorable_reason(&statement) {
-        return Err(ErrorKind::NonMonitorable { id, reason });
+        let refusal = Err(ErrorKind::NonMonitorable { id, reason });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+        return refusal;
     }
     let authored_kind = raw
         .get("enforcement")
         .map_or_else(String::new, str::to_owned);
     let Some(enforcement) = Enforcement::parse(&authored_kind) else {
-        return Err(ErrorKind::UnsupportedEnforcement {
+        let refusal = Err(ErrorKind::UnsupportedEnforcement {
             id,
             enforcement: authored_kind,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+        return refusal;
     };
     let enforced_by = match raw.get("enforced_by") {
         None => None,
@@ -1136,16 +1158,20 @@ fn build_evidence(
         .collect();
     if present.is_empty() {
         if enforcement.requires_evidence() {
-            return Err(ErrorKind::MonitorNeedsEvidence { id: id.to_owned() });
+            let refusal = Err(ErrorKind::MonitorNeedsEvidence { id: id.to_owned() });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_evidence: returning an error to the caller");
+            return refusal;
         }
         return Ok(None);
     }
     for field in EVIDENCE_FIELDS {
         if !present.contains(&field) {
-            return Err(ErrorKind::EvidenceIncomplete {
+            let refusal = Err(ErrorKind::EvidenceIncomplete {
                 id: id.to_owned(),
                 missing: field,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_evidence: returning an error to the caller");
+            return refusal;
         }
     }
     let field = |name: &str| {
@@ -1154,27 +1180,33 @@ fn build_evidence(
     };
     let revision = field("evidence_revision");
     if !valid_revision(&revision) {
-        return Err(ErrorKind::EvidenceRevisionShape {
+        let refusal = Err(ErrorKind::EvidenceRevisionShape {
             id: id.to_owned(),
             revision,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_evidence: returning an error to the caller");
+        return refusal;
     }
     let result = field("evidence_result");
     if result != PASSING_RESULT {
-        return Err(ErrorKind::EvidenceNotPassing {
+        let refusal = Err(ErrorKind::EvidenceNotPassing {
             id: id.to_owned(),
             result,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_evidence: returning an error to the caller");
+        return refusal;
     }
     let invocation = field("evidence_invocation");
     if let Some(selector) = enforcer.map(EnforcedBy::selector)
         && !invocation.contains(&selector)
     {
-        return Err(ErrorKind::EvidenceDoesNotNameEnforcer {
+        let refusal = Err(ErrorKind::EvidenceDoesNotNameEnforcer {
             id: id.to_owned(),
             invocation,
             selector,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_evidence: returning an error to the caller");
+        return refusal;
     }
     Ok(Some(Evidence {
         revision,
@@ -1819,7 +1851,9 @@ pub fn check(
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(cause) => {
-            return Err(InvariantError::Unreadable { path, cause });
+            let refusal = Err(InvariantError::Unreadable { path, cause });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
+            return refusal;
         }
     };
     let register = Register::parse(&text)?;

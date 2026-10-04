@@ -497,6 +497,64 @@ fn determinism_probe(scenario: &Scenario, ticks: u64) -> Result<(bool, usize), B
 
 // ── The allocation model ─────────────────────────────────────────────────────
 
+/// Count one scenario's steady-state allocations and append its row.
+fn alloc_row(out: &mut String, scenario: &Scenario) -> Result<(), Box<dyn std::error::Error>> {
+    let clock = Clock::new();
+    let tally = Rc::new(Cell::new(0u64));
+    let evals_bot_cell = Rc::new(Cell::new(0u64));
+    let evals_base_cell = Cell::new(0u64);
+
+    let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
+    let mut chains = build_handrolled(scenario);
+
+    // Warm up, so anything allocated once by the schedule's first run (a
+    // lazily-grown buffer, a query's internal state) is already in place.
+    let warm = 64u64;
+    for tick in 0..warm {
+        clock.set(tick);
+        let _ = bot.tick()?;
+    }
+    for tick in 0..warm {
+        let _ = chains
+            .iter_mut()
+            .map(|c| c.tick(tick, &evals_base_cell))
+            .sum::<u64>();
+    }
+
+    let ticks = 512u64;
+    alloc_count::reset();
+    alloc_count::start();
+    for tick in warm..warm.saturating_add(ticks) {
+        clock.set(tick);
+        let _ = bot.tick()?;
+    }
+    alloc_count::stop();
+    let (bot_allocs, bot_bytes) = alloc_count::snapshot();
+
+    alloc_count::reset();
+    alloc_count::start();
+    for tick in warm..warm.saturating_add(ticks) {
+        let _ = chains
+            .iter_mut()
+            .map(|c| c.tick(tick, &evals_base_cell))
+            .sum::<u64>();
+    }
+    alloc_count::stop();
+    let (base_allocs, _) = alloc_count::snapshot();
+
+    let per_tick = bot_allocs as f64 / ticks as f64;
+    writeln!(
+        out,
+        "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}",
+        scenario.name,
+        per_tick,
+        bot_bytes as f64 / ticks as f64,
+        bot_bytes as f64 / bot_allocs.max(1) as f64,
+        base_allocs as f64 / ticks as f64,
+    )?;
+    Ok(())
+}
+
 /// Count the heap allocations one tick costs, per scenario.
 ///
 /// The bot is built and warmed *outside* the counted window, so what is counted
@@ -517,59 +575,7 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
     )?;
 
     for scenario in SCENARIOS {
-        let clock = Clock::new();
-        let tally = Rc::new(Cell::new(0u64));
-        let evals_bot_cell = Rc::new(Cell::new(0u64));
-        let evals_base_cell = Cell::new(0u64);
-
-        let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
-        let mut chains = build_handrolled(scenario);
-
-        // Warm up, so anything allocated once by the schedule's first run (a
-        // lazily-grown buffer, a query's internal state) is already in place.
-        let warm = 64u64;
-        for tick in 0..warm {
-            clock.set(tick);
-            let _ = bot.tick()?;
-        }
-        for tick in 0..warm {
-            let _ = chains
-                .iter_mut()
-                .map(|c| c.tick(tick, &evals_base_cell))
-                .sum::<u64>();
-        }
-
-        let ticks = 512u64;
-        alloc_count::reset();
-        alloc_count::start();
-        for tick in warm..warm.saturating_add(ticks) {
-            clock.set(tick);
-            let _ = bot.tick()?;
-        }
-        alloc_count::stop();
-        let (bot_allocs, bot_bytes) = alloc_count::snapshot();
-
-        alloc_count::reset();
-        alloc_count::start();
-        for tick in warm..warm.saturating_add(ticks) {
-            let _ = chains
-                .iter_mut()
-                .map(|c| c.tick(tick, &evals_base_cell))
-                .sum::<u64>();
-        }
-        alloc_count::stop();
-        let (base_allocs, _) = alloc_count::snapshot();
-
-        let per_tick = bot_allocs as f64 / ticks as f64;
-        writeln!(
-            out,
-            "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}",
-            scenario.name,
-            per_tick,
-            bot_bytes as f64 / ticks as f64,
-            bot_bytes as f64 / bot_allocs.max(1) as f64,
-            base_allocs as f64 / ticks as f64,
-        )?;
+        alloc_row(&mut out, scenario)?;
     }
     // Per-tick trace for one scenario. A mean over 512 ticks hides the shape of
     // the cost: a bot that allocates nothing on a steady tick and heavily on a
@@ -605,6 +611,126 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
 
 // ── Reporting ────────────────────────────────────────────────────────────────
 
+/// Measure one scenario, refuse an unfair comparison, and append its human and JSON rows.
+fn scenario_report(
+    scenario: &Scenario,
+    human: &mut String,
+    json: &mut String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let m = measure(scenario)?;
+
+    // THE FAIRNESS GATE, on both axes. A ratio between two engines doing
+    // different amounts of work is not a measurement, so refuse to report
+    // one. Effects catch a baseline that produces different results;
+    // evaluations catch a baseline that reaches the same results by
+    // skipping the work.
+    if m.effects_bot != m.effects_base {
+        let refusal = Err(format!(
+            "FAIRNESS CHECK FAILED for '{}': bot fired {} effects, baseline fired {}. \
+         The two engines are not doing the same work, so no timing from this \
+         scenario is reportable.",
+            m.name, m.effects_bot, m.effects_base
+        )
+        .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
+    }
+    if m.evals_bot != m.evals_base {
+        let refusal = Err(format!(
+            "FAIRNESS CHECK FAILED for '{}': bot evaluated the condition {} times, \
+         baseline {} times. The effect counts agree, so this is a baseline that \
+         reaches the same answer with less work -- which is exactly the comparison \
+         this gate exists to refuse.",
+            m.name, m.evals_bot, m.evals_base
+        )
+        .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
+    }
+
+    let mut ratios: Vec<f64> = m
+        .bot
+        .iter()
+        .zip(m.base.iter())
+        .map(|(b, r)| if *r > 0.0 { b / r } else { f64::NAN })
+        .collect();
+
+    let ticks = m.ticks_per_round as f64;
+    let mut bot_tps: Vec<f64> = m.bot.iter().map(|d| ticks / d).collect();
+    let mut base_tps: Vec<f64> = m.base.iter().map(|d| ticks / d).collect();
+
+    let ratio_median = stats::median(&mut ratios);
+    let (ci_lo, ci_hi) = stats::bootstrap_median_ci(&ratios, 10_000, 0.95, 0x5EED_1234);
+    let bot_median_tps = stats::median(&mut bot_tps);
+    let base_median_tps = stats::median(&mut base_tps);
+
+    writeln!(human, "scenario  {}", m.name)?;
+    writeln!(human, "  intent  {}", m.intent)?;
+    writeln!(
+        human,
+        "  workload  {} sources x {} entries, {} ticks/round x {} rounds",
+        scenario.sources, scenario.entries, m.ticks_per_round, scenario.rounds
+    )?;
+    writeln!(
+        human,
+        "  fairness  {} effects and {} condition evaluations, identical in both engines",
+        m.effects_bot, m.evals_bot
+    )?;
+    writeln!(
+        human,
+        "  bot       {:.0} ticks/s   ({:.1} ns/tick)",
+        bot_median_tps,
+        1e9 / bot_median_tps
+    )?;
+    writeln!(
+        human,
+        "  baseline  {:.0} ticks/s   ({:.1} ns/tick)",
+        base_median_tps,
+        1e9 / base_median_tps
+    )?;
+    writeln!(
+        human,
+        "  ratio     {:.2}x  bot / baseline   95% CI [{:.2}, {:.2}]  {}",
+        ratio_median,
+        ci_lo,
+        ci_hi,
+        if stats::distinguishes_parity(ci_lo, ci_hi) {
+            "(excludes parity)"
+        } else {
+            "(INCLUDES parity -- not a distinguishable difference)"
+        }
+    )?;
+    writeln!(
+        human,
+        "  build     {} chains admitted in {:.3} ms\n",
+        scenario.sources,
+        m.build_bot.as_secs_f64() * 1e3
+    )?;
+
+    writeln!(
+        json,
+        "  \"{}\": {{ \"sources\": {}, \"entries\": {}, \"ticks_per_round\": {}, \
+         \"rounds\": {}, \"effects\": {}, \"evaluations\": {}, \
+         \"bot_ticks_per_sec\": {:.1}, \"baseline_ticks_per_sec\": {:.1}, \
+         \"ratio_median\": {:.4}, \"ratio_ci95\": [{:.4}, {:.4}], \
+         \"build_ms\": {:.4} }},",
+        m.name,
+        scenario.sources,
+        scenario.entries,
+        m.ticks_per_round,
+        scenario.rounds,
+        m.effects_bot,
+        m.evals_bot,
+        bot_median_tps,
+        base_median_tps,
+        ratio_median,
+        ci_lo,
+        ci_hi,
+        m.build_bot.as_secs_f64() * 1e3
+    )?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
@@ -625,113 +751,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if run_timings {
         for scenario in SCENARIOS {
-            let m = measure(scenario)?;
-
-            // THE FAIRNESS GATE, on both axes. A ratio between two engines doing
-            // different amounts of work is not a measurement, so refuse to report
-            // one. Effects catch a baseline that produces different results;
-            // evaluations catch a baseline that reaches the same results by
-            // skipping the work.
-            if m.effects_bot != m.effects_base {
-                return Err(format!(
-                    "FAIRNESS CHECK FAILED for '{}': bot fired {} effects, baseline fired {}. \
-                     The two engines are not doing the same work, so no timing from this \
-                     scenario is reportable.",
-                    m.name, m.effects_bot, m.effects_base
-                )
-                .into());
-            }
-            if m.evals_bot != m.evals_base {
-                return Err(format!(
-                    "FAIRNESS CHECK FAILED for '{}': bot evaluated the condition {} times, \
-                     baseline {} times. The effect counts agree, so this is a baseline that \
-                     reaches the same answer with less work -- which is exactly the comparison \
-                     this gate exists to refuse.",
-                    m.name, m.evals_bot, m.evals_base
-                )
-                .into());
-            }
-
-            let mut ratios: Vec<f64> = m
-                .bot
-                .iter()
-                .zip(m.base.iter())
-                .map(|(b, r)| if *r > 0.0 { b / r } else { f64::NAN })
-                .collect();
-
-            let ticks = m.ticks_per_round as f64;
-            let mut bot_tps: Vec<f64> = m.bot.iter().map(|d| ticks / d).collect();
-            let mut base_tps: Vec<f64> = m.base.iter().map(|d| ticks / d).collect();
-
-            let ratio_median = stats::median(&mut ratios);
-            let (ci_lo, ci_hi) = stats::bootstrap_median_ci(&ratios, 10_000, 0.95, 0x5EED_1234);
-            let bot_median_tps = stats::median(&mut bot_tps);
-            let base_median_tps = stats::median(&mut base_tps);
-
-            writeln!(human, "scenario  {}", m.name)?;
-            writeln!(human, "  intent  {}", m.intent)?;
-            writeln!(
-                human,
-                "  workload  {} sources x {} entries, {} ticks/round x {} rounds",
-                scenario.sources, scenario.entries, m.ticks_per_round, scenario.rounds
-            )?;
-            writeln!(
-                human,
-                "  fairness  {} effects and {} condition evaluations, identical in both engines",
-                m.effects_bot, m.evals_bot
-            )?;
-            writeln!(
-                human,
-                "  bot       {:.0} ticks/s   ({:.1} ns/tick)",
-                bot_median_tps,
-                1e9 / bot_median_tps
-            )?;
-            writeln!(
-                human,
-                "  baseline  {:.0} ticks/s   ({:.1} ns/tick)",
-                base_median_tps,
-                1e9 / base_median_tps
-            )?;
-            writeln!(
-                human,
-                "  ratio     {:.2}x  bot / baseline   95% CI [{:.2}, {:.2}]  {}",
-                ratio_median,
-                ci_lo,
-                ci_hi,
-                if stats::distinguishes_parity(ci_lo, ci_hi) {
-                    "(excludes parity)"
-                } else {
-                    "(INCLUDES parity -- not a distinguishable difference)"
-                }
-            )?;
-            writeln!(
-                human,
-                "  build     {} chains admitted in {:.3} ms\n",
-                scenario.sources,
-                m.build_bot.as_secs_f64() * 1e3
-            )?;
-
-            writeln!(
-                json,
-                "  \"{}\": {{ \"sources\": {}, \"entries\": {}, \"ticks_per_round\": {}, \
-                 \"rounds\": {}, \"effects\": {}, \"evaluations\": {}, \
-                 \"bot_ticks_per_sec\": {:.1}, \"baseline_ticks_per_sec\": {:.1}, \
-                 \"ratio_median\": {:.4}, \"ratio_ci95\": [{:.4}, {:.4}], \
-                 \"build_ms\": {:.4} }},",
-                m.name,
-                scenario.sources,
-                scenario.entries,
-                m.ticks_per_round,
-                scenario.rounds,
-                m.effects_bot,
-                m.evals_bot,
-                bot_median_tps,
-                base_median_tps,
-                ratio_median,
-                ci_lo,
-                ci_hi,
-                m.build_bot.as_secs_f64() * 1e3
-            )?;
+            scenario_report(scenario, &mut human, &mut json)?;
         }
     }
 

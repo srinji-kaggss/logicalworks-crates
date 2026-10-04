@@ -108,58 +108,70 @@ fn feature_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     Ok((hasher.finish(), tally))
 }
 
+/// One draw of the dimension family: toggles each authored bit independently
+/// and records the verdict against what the policy says it should be.
+fn dimension_draw(
+    seed: u64,
+    rng: &mut Rng,
+    hasher: &mut DefaultHasher,
+    tally: &mut Tally,
+) -> Result<(), Box<dyn Error>> {
+    let targets = [None, Some("cfg(unix)")];
+    // The edge's authored bits and the policy's authored bits are chosen
+    // independently, so a mismatch is a real mismatch.
+    let def_edge = coin(rng);
+    let def_policy = coin(rng);
+    let def_value = coin(rng);
+    let opt_edge = coin(rng);
+    let opt_policy = coin(rng);
+    let opt_value = coin(rng);
+    let target_edge = *rng.pick(&targets);
+    let target_value = *rng.pick(&targets);
+    let target_policy = coin(rng);
+    let mut policy = String::new();
+    if def_policy {
+        writeln!(policy, "uses_default_features = \"{def_value}\"")?;
+    }
+    if opt_policy {
+        writeln!(policy, "optional = \"{opt_value}\"")?;
+    }
+    if target_policy {
+        writeln!(policy, "target = \"{}\"", target_value.unwrap_or(""))?;
+    }
+    let approval = register("engine", "registry", &policy)?;
+    let observed = edge(
+        "engine",
+        Some(REGISTRY),
+        &[],
+        def_edge,
+        opt_edge,
+        target_edge,
+        None,
+    )?;
+    let code = code_for(&approval, observed);
+    let expected = (!def_policy || def_edge == def_value)
+        && (!opt_policy || opt_edge == opt_value)
+        && (!target_policy || target_edge.unwrap_or("") == target_value.unwrap_or(""));
+    tally.record(
+        code,
+        expected,
+        &format!(
+            "seed {seed}: def {def_edge}/{def_policy}:{def_value} opt {opt_edge}/{opt_policy}:{opt_value} target {target_edge:?}/{target_policy}:{target_value:?}"
+        ),
+        hasher,
+    );
+    Ok(())
+}
+
 /// Runs one dimension family for `seed`: default-features, optionality and
 /// target each toggled independently, with the policy either authored or
 /// grandfathered.
 fn dimension_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
-    let targets = [None, Some("cfg(unix)")];
     let mut rng = Rng::new(seed);
     let mut hasher = DefaultHasher::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        // The edge's authored bits and the policy's authored bits are chosen
-        // independently, so a mismatch is a real mismatch.
-        let def_edge = coin(&mut rng);
-        let def_policy = coin(&mut rng);
-        let def_value = coin(&mut rng);
-        let opt_edge = coin(&mut rng);
-        let opt_policy = coin(&mut rng);
-        let opt_value = coin(&mut rng);
-        let target_edge = *rng.pick(&targets);
-        let target_value = *rng.pick(&targets);
-        let target_policy = coin(&mut rng);
-        let mut policy = String::new();
-        if def_policy {
-            writeln!(policy, "uses_default_features = \"{def_value}\"")?;
-        }
-        if opt_policy {
-            writeln!(policy, "optional = \"{opt_value}\"")?;
-        }
-        if target_policy {
-            writeln!(policy, "target = \"{}\"", target_value.unwrap_or(""))?;
-        }
-        let approval = register("engine", "registry", &policy)?;
-        let observed = edge(
-            "engine",
-            Some(REGISTRY),
-            &[],
-            def_edge,
-            opt_edge,
-            target_edge,
-            None,
-        )?;
-        let code = code_for(&approval, observed);
-        let expected = (!def_policy || def_edge == def_value)
-            && (!opt_policy || opt_edge == opt_value)
-            && (!target_policy || target_edge.unwrap_or("") == target_value.unwrap_or(""));
-        tally.record(
-            code,
-            expected,
-            &format!(
-                "seed {seed}: def {def_edge}/{def_policy}:{def_value} opt {opt_edge}/{opt_policy}:{opt_value} target {target_edge:?}/{target_policy}:{target_value:?}"
-            ),
-            &mut hasher,
-        );
+        dimension_draw(seed, &mut rng, &mut hasher, &mut tally)?;
     }
     Ok((hasher.finish(), tally))
 }

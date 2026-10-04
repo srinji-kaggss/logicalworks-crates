@@ -251,10 +251,12 @@ impl ArtifactStore {
             }
             None => {
                 if held.len() >= MAX_ARTIFACTS_PER_TENANT {
-                    return Err(ArtifactError::Full {
+                    let refusal = Err(ArtifactError::Full {
                         tenant: tenant.to_owned(),
                         held: held.len(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "write: returning an error to the caller");
+                    return refusal;
                 }
                 held.insert(
                     digest,
@@ -333,10 +335,12 @@ impl Default for ArtifactStore {
 /// Refuse a content larger than the byte ceiling.
 fn check_bytes(len: usize) -> Result<(), ArtifactError> {
     if len > MAX_ARTIFACT_BYTES {
-        return Err(ArtifactError::TooLarge {
+        let refusal = Err(ArtifactError::TooLarge {
             got: u64::try_from(len).unwrap_or(u64::MAX),
             limit: u64::try_from(MAX_ARTIFACT_BYTES).unwrap_or(u64::MAX),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_bytes: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -344,9 +348,11 @@ fn check_bytes(len: usize) -> Result<(), ArtifactError> {
 /// Refuse a tenant name that could not key a step record.
 fn check_tenant(tenant: &str) -> Result<(), ArtifactError> {
     if tenant.is_empty() || tenant.len() > MAX_ARTIFACT_TENANT_BYTES {
-        return Err(ArtifactError::InvalidTenant {
+        let refusal = Err(ArtifactError::InvalidTenant {
             tenant: tenant.to_owned(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_tenant: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }

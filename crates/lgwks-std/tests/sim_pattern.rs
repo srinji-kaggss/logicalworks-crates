@@ -165,37 +165,37 @@ fn an_input_past_the_ceiling_is_refused_by_every_operation()
             // error — is asserted on the error arm alone.
             assert_eq!(
                 bounded.is_match(&haystack),
-                Err(refused),
+                Err(refused.clone()),
                 "seed {seed}: is_match"
             );
             assert_eq!(
                 bounded.find(&haystack).err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: find must refuse the same way"
             );
             assert_eq!(
                 bounded.captures(&haystack).err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: captures must refuse the same way"
             );
             assert_eq!(
                 bounded.find_all(&haystack).err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: find_all must refuse the same way"
             );
             assert_eq!(
                 bounded.split(&haystack).err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: split must refuse the same way"
             );
             assert_eq!(
                 bounded.replace(&haystack, "x").err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: replace must refuse the same way"
             );
             assert_eq!(
                 bounded.replace_all(&haystack, "x").err(),
-                Some(refused),
+                Some(refused.clone()),
                 "seed {seed}: replace_all must refuse the same way"
             );
         }

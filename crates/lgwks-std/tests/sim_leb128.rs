@@ -34,10 +34,11 @@ use seeded_sweep::{
 /// the whole signed range rather than only its lower half.
 fn next_signed_byte(state: &mut u64) -> i8 {
     let raw = next_byte(state);
-    i8::try_from(raw).unwrap_or_else(|_| i8::try_from(raw.wrapping_sub(128)).unwrap_or(0))
+    i8::from_ne_bytes([raw])
 }
 
 /// Why the reference coder refused one run of bytes.
+#[derive(Debug)]
 enum Refusal {
     /// Every byte had the continuation bit set.
     UnexpectedEnd {
@@ -97,16 +98,25 @@ fn reference_decode_unsigned(bytes: &[u8], bits: u32) -> Result<(u64, usize), Re
         // it must terminate the sequence.
         if index.saturating_add(1) == limit {
             let Some(usable) = usable_bits(bits, index) else {
-                return Err(Refusal::Overflow { at: index });
+                let refusal = Err(Refusal::Overflow { at: index });
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
+                return refusal;
             };
             if payload > width_mask(usable) || byte & 0x80 != 0 {
-                return Err(Refusal::Overflow { at: index });
+                let refusal = Err(Refusal::Overflow { at: index });
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
+                return refusal;
             }
         }
         value |= payload.checked_shl(group_shift(index)).unwrap_or(0);
         if byte & 0x80 == 0 {
             if index > 0 && payload == 0 {
-                return Err(Refusal::NonMinimal { at: index });
+                let refusal = Err(Refusal::NonMinimal { at: index });
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
+                return refusal;
             }
             return Ok((value, index.saturating_add(1)));
         }
@@ -134,10 +144,18 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
                     let mask = width_mask(usable);
                     let high = payload & mask;
                     if (high != 0 && high != mask) || byte & 0x80 != 0 {
-                        return Err(Refusal::Overflow { at: index });
+                        let refusal = Err(Refusal::Overflow { at: index });
+                        #[cfg(feature = "trace")]
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
+                        return refusal;
                     }
                 }
-                None => return Err(Refusal::Overflow { at: index }),
+                None => {
+                    let refusal = Err(Refusal::Overflow { at: index });
+                    #[cfg(feature = "trace")]
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
+                    return refusal;
+                }
                 Some(_) => {}
             }
         }
@@ -150,7 +168,10 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
                 payload == 0
             };
             if index > 0 && redundant {
-                return Err(Refusal::NonMinimal { at: index });
+                let refusal = Err(Refusal::NonMinimal { at: index });
+                #[cfg(feature = "trace")]
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
+                return refusal;
             }
             if negative && shift < 63 {
                 raw |= u64::MAX << shift.saturating_add(7);

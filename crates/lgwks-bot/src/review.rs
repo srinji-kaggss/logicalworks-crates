@@ -80,7 +80,7 @@ pub struct ReviewRequest {
     /// reconciliation.
     ///
     /// Deliberately not a uniqueness proof: two runs of the same request carry
-    /// the same marker, and it is [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) that decides.
+    /// the same marker, and it is [`ReviewRecord::matches`] that decides.
     ///
     /// Read through [`ReviewRequest::marker`], and private so the payload
     /// cannot be edited after the request it belongs to was declared.
@@ -167,7 +167,7 @@ impl ReviewRequest {
         &self.comments
     }
 
-    /// The reconciliation marker.
+    /// The hidden trailer a published review carries, which a later run reads to recognise its own earlier review.
     #[must_use]
     pub fn marker(&self) -> &str {
         &self.marker
@@ -554,7 +554,9 @@ pub async fn review_pr(
             // is the reconciliation read below — which observes GitHub rather
             // than trusting an exit code. It is a read, never a second create.
             if !may_have_landed(&error) {
-                return Err(error);
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "review_pr: returning an error to the caller");
+                return refusal;
             }
             None
         }

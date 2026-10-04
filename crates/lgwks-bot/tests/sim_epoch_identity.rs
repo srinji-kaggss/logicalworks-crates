@@ -135,12 +135,17 @@ fn rewrite(field: u32, held: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
     let mut digest = held.digest();
     let mut environment = held.environment();
     let mut epoch = held.epoch();
+    let other_run = RunId::from_hex(OTHER_RUN)?;
+    let other_action = ActionId::from_hex(OTHER_ACTION)?;
+    let other_digest = ActionDigest::from_tagged("blake3_256", OTHER_DIGEST)?;
+    let other_flow = FlowRevision::from_tagged("blake3_256", OTHER_FLOW)?;
+    let other_environment = EnvironmentId::from_hex(OTHER_ENVIRONMENT)?;
     match field {
-        0 => run = RunId::from_hex(OTHER_RUN)?,
-        1 => action = ActionId::from_hex(OTHER_ACTION)?,
-        2 => digest = ActionDigest::from_tagged("blake3_256", OTHER_DIGEST)?,
-        3 => flow = FlowRevision::from_tagged("blake3_256", OTHER_FLOW)?,
-        4 => environment = EnvironmentId::from_hex(OTHER_ENVIRONMENT)?,
+        0 => run = other_run,
+        1 => action = other_action,
+        2 => digest = other_digest,
+        3 => flow = other_flow,
+        4 => environment = other_environment,
         5 => {
             epoch = epoch
                 .checked_next()
@@ -152,7 +157,9 @@ fn rewrite(field: u32, held: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
                 .ok_or("the attempt cannot be advanced past its ceiling")?;
         }
         other => {
-            return Err(format!("field {other} is not an identity field").into());
+            let refusal = Err(format!("field {other} is not an identity field").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "rewrite: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(EffectKey::new(
@@ -177,11 +184,13 @@ fn refused_as(field: u32, outcome: &Result<(), BotError>) -> TestResult {
         (6, Some(&BotError::EvidenceStaleAttempt { .. })) => {}
         (0 | 1 | 3 | 4, Some(&BotError::ActionNotDeclared { .. })) => {}
         (field, actual) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{}: the refusal was {actual:?}, not the one this field must produce",
                 field_tag(field)
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refused_as: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())
@@ -212,10 +221,17 @@ fn identity_case(sim: &mut sim::Sim, field: u32) -> TestResult {
     match bot.tick() {
         Err(BotError::EffectIndeterminate { .. }) => {}
         Err(other) => {
-            return Err(format!("expected the action's own error, got {other:?}").into());
+            let refusal = Err(format!("expected the action's own error, got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "identity_case: returning an error to the caller");
+            return refusal;
         }
         Ok(fired) => {
-            return Err(format!("an indeterminate effect was reported as {fired} fired").into());
+            {
+                let refusal =
+                    Err(format!("an indeterminate effect was reported as {fired} fired").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "identity_case: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     let held = bot
@@ -375,10 +391,12 @@ fn epoch_case(sim: &mut sim::Sim, order: Order, attempts: u32) -> TestResult {
         match adopter.adopt(environment, &journal) {
             Err(BrokerError::NothingToAdopt { .. }) => {}
             other => {
-                return Err(format!(
-                    "adopting an empty journal must be refused, not silently claim generation one: {other:?}"
+                let refusal = Err(format!(
+                "adopting an empty journal must be refused, not silently claim generation one: {other:?}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "epoch_case: returning an error to the caller");
+                return refusal;
             }
         }
     }
@@ -424,10 +442,12 @@ fn epoch_case(sim: &mut sim::Sim, order: Order, attempts: u32) -> TestResult {
             assert_eq!(current, taken, "and the one the broker holds now");
         }
         other => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "a warrant from the replaced generation must be Superseded, got {other:?}"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "epoch_case: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -441,10 +461,12 @@ fn epoch_case(sim: &mut sim::Sim, order: Order, attempts: u32) -> TestResult {
         match adopter.adopt(environment, &journal) {
             Err(BrokerError::AlreadyRegistered { .. }) => {}
             other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "a second adoption on one broker must be refused, got {other:?}"
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "epoch_case: returning an error to the caller");
+                return refusal;
             }
         }
     }

@@ -186,7 +186,7 @@ pub struct BotSpec {
     /// Observation chains in declaration order. [`Bot::tick`] polls and fires in
     /// this order, so reordering changes which side effects run before an error.
     /// Empty is valid for the builder: a bot with no chains still serves direct
-    /// [`Query`](crate::verb::Query) and [`Execute`](crate::verb::Execute) calls.
+    /// [`Query`] and [`Execute`] calls.
     /// The materializer is stricter and refuses an empty list, because a
     /// materialized bot with nothing to observe is almost always a truncated
     /// document rather than an intentional one. Read it with [`BotSpec::chains`].
@@ -266,7 +266,7 @@ impl BotSpec {
 #[non_exhaustive]
 pub struct ChainSpec {
     /// The domain identifier of the observed source (e.g. `"gh::pr_status"`).
-    /// The builder resolves it against a concrete [`Observe`](crate::verb::Observe)
+    /// The builder resolves it against a concrete [`Observe`]
     /// implementation; the spec itself never carries code. Read it with
     /// [`ChainSpec::source`].
     pub(crate) source: String,
@@ -403,7 +403,7 @@ where
     }
 }
 
-/// Erases one [`Evaluate`](crate::verb::Evaluate) to [`EvaluateAny`], the way
+/// Erases one [`Evaluate`] to [`EvaluateAny`], the way
 /// [`TypedExec`] erases an action.
 ///
 /// Both erasure wrappers have one implementation each: this one is reached both
@@ -450,7 +450,7 @@ pub use crate::ecs::EphemeralError;
 /// which work is outstanding, what is holding it, and how a caller settles an
 /// effect that may or may not have happened. It is re-exported here, next to
 /// `Bot`, because a caller reading [`Bot::pending`] or matching on
-/// [`BotError::PendingTransition`](crate::BotError::PendingTransition) has to be
+/// [`BotError::PendingTransition`] has to be
 /// able to name what those return; `ecs` itself stays private, because it is the
 /// implementation rather than a second way to run a bot.
 pub use crate::ecs::{
@@ -475,7 +475,7 @@ impl ChainEntry {
     /// Assemble one entry from halves that are already erased.
     ///
     /// The materializer's seam: a chain built from wire data pairs a condition
-    /// the [`Source`](crate::Source) built for its own output type with an
+    /// the [`Source`] built for its own output type with an
     /// action the registry built. The two arrive erased because that is the
     /// only shape a document can name, and this constructor is the one place
     /// they are joined, so the join cannot be re-implemented with a different
@@ -502,7 +502,7 @@ impl ChainEntry {
 /// The id is process-local and is not serializable, so this serves the Rust
 /// path only. A durable identity for the same question — which type a chain's
 /// source produces, readable by a materializer that has only wire data — is a
-/// schema key, and no such key exists: [`DomainRegistry`](crate::DomainRegistry)
+/// schema key, and no such key exists: [`DomainRegistry`]
 /// maps an identifier to a constructor and stops there, so the type a source
 /// produces is written down nowhere a document could name. Do not reach for
 /// `TypeId` to answer it.
@@ -557,7 +557,7 @@ impl Witness {
 /// - [`TypeId`] is process-local and is not serializable, so this serves the
 ///   Rust path only. A materializer holding wire data instead of a `Witness`
 ///   needs a durable identity for the same question, and this field is where
-///   that key goes once one exists — [`DomainRegistry`](crate::DomainRegistry)
+///   that key goes once one exists — [`DomainRegistry`]
 ///   is where such a key would be declared. Do not reach for `TypeId` to answer
 ///   it.
 /// - A witness is `TypeId::of::<S::Output>()`, so it distinguishes *types*, not
@@ -588,19 +588,19 @@ impl Erased {
     }
 }
 
-/// Object-safe view of [`Observe`](crate::verb::Observe) that erases
+/// Object-safe view of [`Observe`] that erases
 /// `Output`. The blanket impl forwards each call to the concrete verb, so the
 /// erasure costs one vtable hop and no extra allocation: `poll_any` boxes the
 /// domain's own value at the type-erasure boundary, which is where it must be
 /// boxed anyway. The caller's [`Auth`] is checked here, before the source is
 /// touched, so an erasure bug cannot bypass the gate.
 pub(crate) trait ObserveAny {
-    /// Forwards to [`Observe::domain_id`](crate::verb::Observe::domain_id).
+    /// Forwards to [`Observe::domain_id`].
     fn domain_id(&self) -> &str;
-    /// Forwards to [`Observe::required_caps`](crate::verb::Observe::required_caps).
+    /// Forwards to [`Observe::required_caps`].
     fn required_caps(&self) -> &[Cap];
     /// Forwards to
-    /// [`Observe::cache_state`](crate::verb::Observe::cache_state).
+    /// [`Observe::cache_state`].
     ///
     /// Read on the same tick as `poll_any`, immediately after it resolves, so a
     /// source that reached a failure inside its own poll has already recorded it
@@ -690,7 +690,7 @@ where
     }
 }
 
-/// Object-safe view of [`Evaluate`](crate::verb::Evaluate) that erases the
+/// Object-safe view of [`Evaluate`] that erases the
 /// evaluated type. `check_any` downcasts to the `T` the closure was registered
 /// with; a mismatch is [`BotError::EvaluateError`], never a false result, so a
 /// wiring bug cannot masquerade as a condition that simply did not fire.
@@ -701,16 +701,16 @@ pub(crate) trait EvaluateAny {
     fn check_any(&self, value: &Erased) -> Result<bool, BotError>;
 }
 
-/// Object-safe view of [`Execute`](crate::verb::Execute) that erases both the
+/// Object-safe view of [`Execute`] that erases both the
 /// input and the output. `run_any` issues a fresh [`Auth`] from the grant set
 /// for the action's own caps and checks the downcast input before the action
 /// runs, so a type mismatch fails without a side effect.
 pub(crate) trait ExecuteAny {
-    /// Forwards to [`Execute::required_caps`](crate::verb::Execute::required_caps).
+    /// Forwards to [`Execute::required_caps`].
     fn required_caps(&self) -> &[Cap];
-    /// Forwards to [`Execute::effect_lifetime`](crate::verb::Execute::effect_lifetime).
+    /// Forwards to [`Execute::effect_lifetime`].
     fn effect_lifetime(&self) -> crate::verb::EffectLifetime;
-    /// Forwards to [`Execute::domain_id`](crate::verb::Execute::domain_id).
+    /// Forwards to [`Execute::domain_id`].
     ///
     /// Erased alongside the input and output, and needed here for the same
     /// reason admission needs it: a capability denial names the domain that
@@ -742,7 +742,7 @@ pub(crate) trait ExecuteAny {
     ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>>;
 }
 
-/// Erases one [`Execute`](crate::verb::Execute) to [`ExecuteAny`].
+/// Erases one [`Execute`] to [`ExecuteAny`].
 ///
 /// The action half of a chain is stored erased, so a concrete action is wrapped
 /// before it can be boxed. This is that wrapper, and it is the only one: an
@@ -831,20 +831,24 @@ impl BotSpec {
     /// escaped, because an unknown field name is attacker-chosen.
     pub fn from_json(source: &str) -> Result<Self, BotError> {
         if source.len() > MAX_SPEC_BYTES {
-            return Err(BotError::SpecTooLarge {
+            let refusal = Err(BotError::SpecTooLarge {
                 bytes: source.len(),
                 limit: MAX_SPEC_BYTES,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_json: returning an error to the caller");
+            return refusal;
         }
         let spec: Self =
             crate::json::from_str(source).map_err(|error| BotError::MalformedSpec {
                 cause: error.to_string().escape_debug().to_string(),
             })?;
         if spec.version != Self::CURRENT_VERSION {
-            return Err(BotError::UnsupportedSpecVersion {
+            let refusal = Err(BotError::UnsupportedSpecVersion {
                 found: spec.version,
                 supported: Self::CURRENT_VERSION,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "from_json: returning an error to the caller");
+            return refusal;
         }
         Ok(spec)
     }
@@ -1458,7 +1462,10 @@ mod tests {
                 Bot::builder("")
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the no-chains entry point must reject an empty name"
         );
@@ -1469,7 +1476,10 @@ mod tests {
                     .observe(NeedsNet(vec![]))
                     .with_effects(test_effects()?)
                     .build(&GrantSet::empty()),
-                Err(BotError::IncompleteSpec { field: "name" })
+                Err(BotError::IncompleteSpec {
+                    field: "name",
+                    cause: _,
+                })
             ),
             "the with-chains entry point must reject the same empty name"
         );

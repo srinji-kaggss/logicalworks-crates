@@ -94,14 +94,21 @@ const PREDICATE: &str = "5152535455565758595a5b5c5d5e5f60";
 /// current work: two spellings would let this row pass by constructing two
 /// different attempts.
 fn takeover_key(attempt: &str, epoch: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
+    let run = RunId::from_hex(RUN)?;
+    let action = ActionId::from_hex(TAKEOVER_ACTION)?;
+    let attempt = AttemptId::from_decimal(attempt)?;
+    let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let environment = EnvironmentId::from_hex(ENV)?;
+    let epoch = EnvironmentEpoch::from_decimal(epoch)?;
     Ok(EffectKey::new(
-        RunId::from_hex(RUN)?,
-        ActionId::from_hex(TAKEOVER_ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentId::from_hex(ENV)?,
-        EnvironmentEpoch::from_decimal(epoch)?,
+        run,
+        action,
+        attempt,
+        flow,
+        digest,
+        environment,
+        epoch,
     ))
 }
 
@@ -152,7 +159,12 @@ fn old_worker_body() -> TestResult {
         .committed_entry(prepared.position())?
         .ok_or("the acknowledged preparation must be readable at its own position")?;
     if receipt.event().kind() != EventKind::DispatchPrepared {
-        return Err("the receipt names a position that does not hold the preparation".into());
+        {
+            let refusal =
+                Err("the receipt names a position that does not hold the preparation".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+            return refusal;
+        };
     }
 
     std::fs::write(&orders.parked, b"parked")?;
@@ -166,7 +178,12 @@ fn old_worker_body() -> TestResult {
         pause(100);
     }
     if !orders.release.exists() {
-        return Err("the old worker parked for its whole bound and was never released".into());
+        {
+            let refusal =
+                Err("the old worker parked for its whole bound and was never released".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+            return refusal;
+        };
     }
 
     // Everything below happens *after* the takeover, and this is the row: the old
@@ -251,11 +268,15 @@ impl Orders {
     /// Read all four, naming `who` in the refusal so a missing variable says which
     /// process wanted it and which one it was.
     fn from_env(who: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let journal = worker_path(OWNER_JOURNAL, who, "journal")?;
+        let release = worker_path(OWNER_RELEASE, who, "release")?;
+        let settled = worker_path(OWNER_SETTLED, who, "settled")?;
+        let parked = worker_path(OWNER_PARKED, who, "parked")?;
         Ok(Self {
-            journal: worker_path(OWNER_JOURNAL, who, "journal")?,
-            release: worker_path(OWNER_RELEASE, who, "release")?,
-            settled: worker_path(OWNER_SETTLED, who, "settled")?,
-            parked: worker_path(OWNER_PARKED, who, "parked")?,
+            journal,
+            release,
+            settled,
+            parked,
         })
     }
 }
@@ -609,7 +630,11 @@ fn loop_reopen(path: &std::path::Path) -> Result<FileJournal, Box<dyn std::error
         match FileJournal::open(path) {
             Ok(journal) => return Ok(journal),
             Err(JournalError::Locked { .. }) => pause(25),
-            Err(other) => return Err(format!("reopen after the kill failed: {other}").into()),
+            Err(other) => {
+                let refusal = Err(format!("reopen after the kill failed: {other}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "loop_reopen: returning an error to the caller");
+                return refusal;
+            }
         }
     }
     Err("the writer fence never came back after its holder was killed".into())

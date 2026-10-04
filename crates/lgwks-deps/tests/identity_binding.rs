@@ -27,7 +27,7 @@ fn edge(
     let source_json = source.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let rename_json = rename.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":{source_json},"req":"1.0","kind":null,"rename":{rename_json},"optional":false,"uses_default_features":true,"features":[],"target":null,"path":null}}]}}],"workspace_members":["app"]}}"#
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":{source_json},"req":"1.0","kind":null,"rename":{rename_json},"optional":false,"uses_default_features":true,"features":[],"target":null,"path":null}}]}},{{"id":"lic-{package}","name":"{package}","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#
     );
     Ok(metadata::parse(&document)?)
 }
@@ -35,7 +35,7 @@ fn edge(
 /// One `app` → package filesystem edge with the given local path authority.
 fn path_edge(package: &str, path: &str) -> Result<Vec<DirectEdge>, Box<dyn Error>> {
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":null,"req":"1.0","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"path":"{path}"}}]}}],"workspace_members":["app"]}}"#
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"{package}","source":null,"req":"1.0","kind":null,"rename":null,"optional":false,"uses_default_features":true,"features":[],"target":null,"path":"{path}"}}]}},{{"id":"lic-{package}","name":"{package}","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#
     );
     Ok(metadata::parse(&document)?)
 }
@@ -51,6 +51,7 @@ fn entry_text(krate: &str, aliases: Option<&str>) -> String {
             "version = \"1.0\"\n",
             "owner = \"app\"\n",
             "capability = \"engine.core\"\n",
+            "license = \"MIT OR Apache-2.0\"\n",
             "source = \"registry\"\n",
             "{aliases}",
             "allowed_consumers = \"app\"\n",

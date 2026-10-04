@@ -37,6 +37,10 @@ lgwks_bot = { path = "../../crates/lgwks-bot", default-features = false, feature
 # on the engine's own `watch` channel — the same primitive `rt::cancel` is built
 # on — so the comparison measures the facade rather than two different
 # cancellation implementations, and no second third-party edge is introduced.
+# The diagnostics `unlogged-err-return` requires. This rig is its own workspace
+# root, so the facade is a direct edge here rather than reached through the bot.
+lgwks_std = { path = "../../crates/lgwks-std" }
+
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 
 [[bin]]

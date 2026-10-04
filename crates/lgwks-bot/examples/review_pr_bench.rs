@@ -36,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| String::from("32"))
         .parse()?;
 
-    let program = std::env::var("LWCK_GH").unwrap_or_else(|_| String::from("gh"));
+    let program = std::env::var("LWCK_GH").or_else(|error| match error {
+        std::env::VarError::NotPresent => Ok(String::from("gh")),
+        unreadable @ std::env::VarError::NotUnicode(_) => Err(unreadable),
+    })?;
     let gh = Gh::new(Repository::new(REPO)?)
         .program(&program)
         .capture_limit(std::num::NonZeroUsize::new(64 * 1024).ok_or("a non-zero limit")?)
@@ -55,29 +58,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let mut samples = Vec::with_capacity(requested);
 
-    for index in 0..requested {
+    for _ in 0..requested {
         let review = task("bench-review", |scope: Scope, gh: Gh| async move {
             one(scope, gh).await
         })?;
-        let pull = PullRequest::new(Repository::new(REPO)?, NUMBER);
         let at = Instant::now();
         let report = host.block_on(&review, gh.clone())?;
         samples.push(at.elapsed());
         completed.fetch_add(1, Ordering::Relaxed);
-        match report.output() {
-            Some(&ReviewOutcome::Published { .. }) => {}
-            Some(other) => writeln!(out, "tier {requested}: outcome {other:?}")?,
-            None => {
-                writeln!(
-                    out,
-                    "tier {requested}: run failed: {}",
-                    report
-                        .error()
-                        .map_or_else(|| String::from("no error reported"), ToString::to_string)
-                )?;
-            }
-        }
-        let _ = (index, pull);
+        note_outcome(&mut out, requested, &report)?;
     }
 
     let wall = started.elapsed();
@@ -99,6 +88,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         peak_rss_kib()
     )?;
     Ok(())
+}
+
+/// Print anything about one measured run other than a published review.
+fn note_outcome(
+    out: &mut impl Write,
+    requested: usize,
+    report: &lgwks_bot::task::Report<ReviewOutcome>,
+) -> std::io::Result<()> {
+    match report.output() {
+        Some(&ReviewOutcome::Published { .. }) => Ok(()),
+        Some(other) => writeln!(out, "tier {requested}: outcome {other:?}"),
+        None => writeln!(
+            out,
+            "tier {requested}: run failed: {}",
+            report
+                .error()
+                .map_or_else(|| String::from("no error reported"), ToString::to_string)
+        ),
+    }
 }
 
 /// One review, as the measured task body: the same sequence the journey runs.

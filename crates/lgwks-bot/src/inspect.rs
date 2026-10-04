@@ -206,7 +206,7 @@ impl Budgets {
         Self::default_budgets()
     }
 
-    /// Replace the source-byte ceiling.
+    /// Return these budgets with the largest admitted subject set to `bytes`; a larger subject is refused before the parser runs.
     #[must_use]
     pub const fn with_source_bytes(mut self, bytes: usize) -> Self {
         self.max_source_bytes = bytes;
@@ -328,7 +328,7 @@ impl<'a> InspectRequest<'a> {
         self
     }
 
-    /// Replace the budgets.
+    /// Return the request with all six resource ceilings replaced by `budgets`; every other setting is kept.
     pub const fn budgets(mut self, budgets: Budgets) -> Self {
         self.budgets = budgets;
         self
@@ -440,7 +440,7 @@ pub struct RuleCoverage {
 }
 
 impl RuleCoverage {
-    /// The stable rule id.
+    /// The stable identifier the rule is registered under, which receipts and coverage tables quote verbatim.
     #[must_use]
     pub fn rule_id(&self) -> &str {
         &self.rule_id
@@ -483,13 +483,13 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// The stable rule id that matched.
+    /// The stable identifier of the rule that produced this match, as registered, so a finding can be traced to its rule.
     #[must_use]
     pub fn rule_id(&self) -> &str {
         &self.rule_id
     }
 
-    /// The matched node's byte range.
+    /// Where the matched node sits in the subject, as a start offset and an exclusive end offset in bytes.
     #[must_use]
     pub const fn byte_range(&self) -> (usize, usize) {
         (self.start_byte, self.end_byte)
@@ -501,7 +501,7 @@ impl Finding {
         &self.preview
     }
 
-    /// Whether the preview was truncated.
+    /// True when the matched text was longer than the preview ceiling, so the preview holds only its leading part.
     #[must_use]
     pub const fn preview_truncated(&self) -> bool {
         self.preview_truncated
@@ -604,7 +604,7 @@ impl Inspection {
         &self.artifact
     }
 
-    /// The subject's content digest.
+    /// The digest of the subject's exact bytes, which names the text the verdict was reached over.
     #[must_use]
     pub fn subject_digest(&self) -> &str {
         &self.subject_digest
@@ -616,13 +616,13 @@ impl Inspection {
         self.language.as_deref()
     }
 
-    /// The rule-set identity.
+    /// The identity of the rule set that was applied, which together with the revision pins what the verdict means.
     #[must_use]
     pub fn rule_identity(&self) -> &str {
         &self.rule_identity
     }
 
-    /// The rule-set revision.
+    /// The revision of that rule set, which together with its identity pins which rules produced the verdict.
     #[must_use]
     pub const fn rule_revision(&self) -> u32 {
         self.rule_revision
@@ -634,7 +634,7 @@ impl Inspection {
         self.scope
     }
 
-    /// The verdict.
+    /// The overall result of the inspection: clean, violations found, or a subject this build could not inspect.
     #[must_use]
     pub const fn verdict(&self) -> &Verdict {
         &self.verdict

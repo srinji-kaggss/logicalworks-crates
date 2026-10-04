@@ -581,24 +581,30 @@ fn assert_the_invariant(fault: Fault, run: &Run) -> Result<(), Box<dyn std::erro
         match *outcome {
             ReviewOutcome::Published { verified, .. } => {
                 if !fault.can_be_verified() {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "{} reported a publication it could not have observed: {outcome:?}\n{}",
                         fault.label(),
                         trace.argv
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                    return refusal;
                 }
                 if !verified {
-                    return Err("a Published outcome must carry verified = true".into());
+                    let refusal = Err("a Published outcome must carry verified = true".into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                    return refusal;
                 }
             }
             ReviewOutcome::Unknown { ref commit_id, .. } => {
                 if fault.can_be_verified() {
-                    return Err(format!(
-                        "{} could have been observed but was reported unknown at {commit_id}: {outcome:?}",
-                        fault.label()
+                    let refusal = Err(format!(
+                    "{} could have been observed but was reported unknown at {commit_id}: {outcome:?}",
+                    fault.label()
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                    return refusal;
                 }
             }
             ReviewOutcome::TargetMoved { .. } => {
@@ -607,63 +613,75 @@ fn assert_the_invariant(fault: Fault, run: &Run) -> Result<(), Box<dyn std::erro
                 // commit nobody read, and it must never appear for a fault
                 // whose head never moved.
                 if fault != Fault::HeadMoved {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "{} reported a moved head, but only a head that changed \
-                         can produce one: {outcome:?}",
+                     can produce one: {outcome:?}",
                         fault.label()
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                    return refusal;
                 }
             }
             ReviewOutcome::Refused { .. } => {
                 // Draft-only and similar profiles. No run in this family holds
                 // one, so seeing it means a state machine reached a branch the
                 // journey does not name.
-                return Err(format!(
+                let refusal = Err(format!(
                     "{} reported a draft-only refusal, which no fault here produces",
                     fault.label()
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                return refusal;
             }
             ref other => {
-                return Err(format!(
+                let refusal = Err(format!(
                     "{} reported {other:?}, which no run in this family produces",
                     fault.label()
                 )
                 .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+                return refusal;
             }
         }
     } else if run.report.disposition().label() == "Succeeded" {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} reported a successful run with no outcome at all",
             fault.label()
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+        return refusal;
     }
 
     // Two. At most one create per run, whatever the fault. This is the number a
     // duplicate-post defect doubles, and it is measured at the receiver rather
     // than inferred from the outcome.
     if run.creates > 1 {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} issued {} creates: a run publishes at most once\n{}",
             fault.label(),
             run.creates,
             trace.argv
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+        return refusal;
     }
 
     // Three. A fault that never reaches the create lands nothing, so the
     // receiver's record must agree with the fault's applicability.
     if !fault.applies() && run.creates != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} must publish nothing, but {} creates were issued\n{}",
             fault.label(),
             run.creates,
             trace.argv
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "assert_the_invariant: returning an error to the caller");
+        return refusal;
     }
 
     Ok(())
@@ -1918,7 +1936,7 @@ fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
         );
 
         let Some(outcome) = run.report.output() else {
-            return Err(format!(
+            let refusal = Err(format!(
                 "seed {index} ({}): a reported refusal, not a run failure: {}",
                 fault.label(),
                 run.report
@@ -1926,6 +1944,8 @@ fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
                     .map_or_else(String::new, ToString::to_string)
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "subject_coverage_and_partial_faults: returning an error to the caller");
+            return refusal;
         };
         assert_eq!(
             outcome.is_published(),
@@ -1958,11 +1978,13 @@ fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
                     applied, intended, ..
                 } = outcome
                 else {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "seed {index}: a submission with fewer comments than intended \
-                         is Partial: {outcome:?}"
+                     is Partial: {outcome:?}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "subject_coverage_and_partial_faults: returning an error to the caller");
+                    return refusal;
                 };
                 assert_eq!(
                     (applied, intended),
@@ -2015,65 +2037,71 @@ fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
     Ok(())
 }
 
+/// One seed of the two-identity sweep: each identity publishes and verifies only its own review.
+fn identities_seed(index: u64) -> TestResult {
+    let fake = FakeGh::install("subject-tenants", HEAD)?;
+    fake.configure(Scenario::new(HEAD))?;
+    let host = host()?;
+    let path = fake.search_path()?;
+
+    let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+        let job = task(
+            "review-pr",
+            move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
+                lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
+                    Ok(String::from(body))
+                })
+                .await
+            },
+        )?;
+        let gh = Gh::new(Repository::new("acme/widgets")?)
+            .program(fake.program())
+            .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+            .deadline(Some(Duration::from_secs(20)))
+            .env("PATH", &path);
+        let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
+        let report = host.block_on(&job, (gh, request))?;
+        report
+            .output()
+            .cloned()
+            .ok_or_else(|| "each identity must produce an outcome".into())
+    };
+
+    let first = run_tenant("first identity")?;
+    let second = run_tenant("second identity")?;
+    assert!(
+        first.is_published() && second.is_published(),
+        "seed {index}: both identities publish independently: {first:?} {second:?}"
+    );
+    assert_ne!(
+        first.review_id(),
+        second.review_id(),
+        "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
+    );
+    let payloads = fake.received()?;
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| payload.contains("first identity"))
+            .count(),
+        1,
+        "seed {index}: exactly one payload carries the first identity's body"
+    );
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| payload.contains("second identity"))
+            .count(),
+        1,
+        "seed {index}: exactly one payload carries the second identity's body"
+    );
+    Ok(())
+}
+
 /// Two identities on one pull request each verify only their own review.
 fn two_identities_subject(band: sim::Band) -> TestResult {
     for index in band.seeds() {
-        let fake = FakeGh::install("subject-tenants", HEAD)?;
-        fake.configure(Scenario::new(HEAD))?;
-        let host = host()?;
-        let path = fake.search_path()?;
-
-        let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
-            let job = task(
-                "review-pr",
-                move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
-                    lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
-                        Ok(String::from(body))
-                    })
-                    .await
-                },
-            )?;
-            let gh = Gh::new(Repository::new("acme/widgets")?)
-                .program(fake.program())
-                .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
-                .deadline(Some(Duration::from_secs(20)))
-                .env("PATH", &path);
-            let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
-            let report = host.block_on(&job, (gh, request))?;
-            report
-                .output()
-                .cloned()
-                .ok_or_else(|| "each identity must produce an outcome".into())
-        };
-
-        let first = run_tenant("first identity")?;
-        let second = run_tenant("second identity")?;
-        assert!(
-            first.is_published() && second.is_published(),
-            "seed {index}: both identities publish independently: {first:?} {second:?}"
-        );
-        assert_ne!(
-            first.review_id(),
-            second.review_id(),
-            "seed {index}: two identities must verify two distinct reviews: {first:?} {second:?}"
-        );
-        let payloads = fake.received()?;
-        assert_eq!(
-            payloads
-                .iter()
-                .filter(|payload| payload.contains("first identity"))
-                .count(),
-            1,
-            "seed {index}: exactly one payload carries the first identity's body"
-        );
-        assert_eq!(
-            payloads
-                .iter()
-                .filter(|payload| payload.contains("second identity"))
-                .count(),
-            1,
-            "seed {index}: exactly one payload carries the second identity's body"
-        );
+        identities_seed(index)?;
     }
     Ok(())
 }

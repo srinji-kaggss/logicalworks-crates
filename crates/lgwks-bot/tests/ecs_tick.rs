@@ -139,26 +139,32 @@ fn guarded(test_name: &'static str, body: fn() -> TestResult) -> TestResult {
         match child.try_wait()? {
             Some(status) => {
                 if !status.success() {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "the guarded child for `{test_name}` failed on its own: {status}"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "guarded: returning an error to the caller");
+                    return refusal;
                 }
                 let recorded = match std::fs::read_to_string(&marker) {
                     Ok(recorded) => recorded,
                     Err(error) => {
-                        return Err(format!(
+                        let refusal = Err(format!(
                             "the guarded child for `{test_name}` exited successfully but never ran \
-                             the body ({error}); the child's filter matched no test"
+                         the body ({error}); the child's filter matched no test"
                         )
                         .into());
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "guarded: returning an error to the caller");
+                        return refusal;
                     }
                 };
                 if recorded != test_name {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "the guarded child for `{test_name}` wrote a marker for `{recorded}`"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "guarded: returning an error to the caller");
+                    return refusal;
                 }
                 discard_marker(&marker)?;
                 return Ok(());
@@ -336,19 +342,19 @@ impl Observe for ChannelSource {
         call.0.check(Observe::required_caps(self))?;
         let mut held = self.receiver.lock().await;
         let Some(receiver) = held.as_mut() else {
-            return Err(BotError::DomainError {
-                domain: "test::channel_source".to_owned(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "this source was already drained by an earlier poll".to_owned(),
-            });
+            let refusal = Err(undelivered(
+                "test::channel_source",
+                "this source was already drained by an earlier poll",
+            ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
+            return refusal;
         };
         match receiver.recv().await {
             Some(value) => Ok(value),
-            None => Err(BotError::DomainError {
-                domain: "test::channel_source".to_owned(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "the sibling task dropped its sender before sending".to_owned(),
-            }),
+            None => Err(undelivered(
+                "test::channel_source",
+                "the sibling task dropped its sender before sending",
+            )),
         }
     }
 
@@ -485,11 +491,13 @@ fn refusal_current_thread() -> TestResult {
     match refused {
         Err(BotError::TickInsideRuntime) => {}
         other => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the synchronous adapter must refuse on a thread the shipped current-thread \
-                 runtime is driving; it returned {other:?} instead"
+             runtime is driving; it returned {other:?} instead"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_current_thread: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -520,7 +528,9 @@ fn refusal_current_thread() -> TestResult {
 /// from it.
 fn refusal_one_worker() -> TestResult {
     let Some(workers) = NonZeroUsize::new(1) else {
-        return Err("one is non-zero".into());
+        let refusal = Err("one is non-zero".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+        return refusal;
     };
     let runtime = Builder::new().worker_threads(Some(workers)).build()?;
 
@@ -544,11 +554,13 @@ fn refusal_one_worker() -> TestResult {
     match refused {
         Err(BotError::TickInsideRuntime) => {}
         other => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the synchronous adapter must refuse on a one-worker runtime too; it returned \
-                 {other:?} instead"
+             {other:?} instead"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+            return refusal;
         }
     }
 
@@ -559,13 +571,20 @@ fn refusal_one_worker() -> TestResult {
             "the awaited tick must run the one effect the timer source selects"
         ),
         Ok(Err(error)) => {
-            return Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
+            {
+                let refusal =
+                    Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+                return refusal;
+            };
         }
         Err(_elapsed) => {
-            return Err(format!(
+            let refusal = Err(format!(
                 "the awaited tick did not finish within {TICK_BUDGET:?} on a one-worker runtime"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+            return refusal;
         }
     }
     assert_eq!(
@@ -615,10 +634,17 @@ fn timer_effects_in_order() -> TestResult {
     match ticked {
         Ok(Ok(fired)) => assert_eq!(fired, 2, "both chains' conditions hold on the first tick"),
         Ok(Err(error)) => {
-            return Err(format!("the awaited tick failed: {error}").into());
+            let refusal = Err(format!("the awaited tick failed: {error}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
+            return refusal;
         }
         Err(_elapsed) => {
-            return Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
+            {
+                let refusal =
+                    Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
+                return refusal;
+            };
         }
     }
     assert_eq!(
@@ -667,19 +693,14 @@ fn sibling_channel_completion() -> TestResult {
                 sleep(HEARTBEAT_INTERVAL).await;
                 sibling_beats.fetch_add(1, SeqCst);
             }
-            if let Err(error) = sender.send(SENTINEL).await {
-                return Err(format!("the sibling's send failed: {error}"));
-            }
-            Ok::<(), String>(())
+            sender
+                .send(SENTINEL)
+                .await
+                .map_err(|error| format!("the sibling's send failed: {error}"))
         });
 
         let ticked = timeout(TICK_BUDGET, bot.tick_async()).await;
-        match siblings.join_next().await {
-            Some(Ok(Ok(()))) => {}
-            Some(Ok(Err(message))) => return Err(message),
-            Some(Err(error)) => return Err(format!("the sibling task did not finish: {error}")),
-            None => return Err(String::from("the sibling task was never joined")),
-        }
+        sibling_verdict(siblings.join_next().await)?;
         match ticked {
             Ok(Ok(fired)) => Ok(fired),
             Ok(Err(error)) => Err(format!("the awaited tick failed: {error}")),
@@ -704,6 +725,33 @@ fn sibling_channel_completion() -> TestResult {
         "the effect must have run exactly once, from the value the sibling sent"
     );
     Ok(())
+}
+
+/// A domain failure that provably delivered nothing, so a chain may retry it.
+///
+/// `NotDelivered` and not `Refused`: these fixtures are *transient* refusals a
+/// chain is expected to retry while it has budget, and `Refused` classifies as
+/// `RetryClass::Never`, which abandons the entry on the first failure.
+fn undelivered(domain: &str, cause: &str) -> BotError {
+    BotError::DomainError {
+        domain: domain.to_owned(),
+        certainty: DispatchCertainty::NotDelivered,
+        cause: cause.to_owned(),
+    }
+}
+
+/// What joining the sibling task proves: its own verdict, or why it has none.
+///
+/// One reading of the join for both sibling tests, so a sibling that failed,
+/// panicked or was never joined reads the same in each.
+fn sibling_verdict<E: std::fmt::Display>(
+    joined: Option<Result<Result<(), String>, E>>,
+) -> Result<(), String> {
+    match joined {
+        Some(Ok(verdict)) => verdict,
+        Some(Err(error)) => Err(format!("the sibling task did not finish: {error}")),
+        None => Err(String::from("the sibling task was never joined")),
+    }
 }
 
 /// A tick cancelled mid-observe leaves the bot usable and the runtime alive.
@@ -736,21 +784,16 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
         let mut siblings = JoinSet::new();
         siblings.spawn(async move {
             sleep(HEARTBEAT_INTERVAL).await;
-            if let Err(error) = sender.send(SENTINEL).await {
-                return Err(format!("the sibling's send failed: {error}"));
-            }
-            Ok::<(), String>(())
+            sender
+                .send(SENTINEL)
+                .await
+                .map_err(|error| format!("the sibling's send failed: {error}"))
         });
 
         let cancelled = timeout(CANCEL_AFTER, bot.tick_async()).await;
         let dropped = cancelled.is_err();
         let resumed = timeout(TICK_BUDGET, bot.tick_async()).await;
-        match siblings.join_next().await {
-            Some(Ok(Ok(()))) => {}
-            Some(Ok(Err(message))) => return Err(message),
-            Some(Err(error)) => return Err(format!("the sibling task did not finish: {error}")),
-            None => return Err(String::from("the sibling task was never joined")),
-        }
+        sibling_verdict(siblings.join_next().await)?;
         match resumed {
             Ok(Ok(fired)) => Ok((dropped, fired)),
             Ok(Err(error)) => Err(format!("the tick after the cancellation failed: {error}")),
@@ -861,6 +904,56 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
     use lgwks_bot::rt::io::{AsyncReadExt, AsyncWriteExt};
     use lgwks_bot::rt::net::{TcpListener, TcpStream};
 
+    /// The domain name this source's refusals carry.
+    const DOMAIN: &str = "test::socket_source";
+
+    /// A failure on a socket operation that certainly delivered nothing.
+    ///
+    /// One mapping rather than three copies: `poll` reads the listener's address,
+    /// connects a client and accepts a connection, and each of those refused the
+    /// same way -- `NotDelivered`, because no byte had gone out when any of them
+    /// failed. Naming it is what lets the one arm that is genuinely different --
+    /// the write, which fails `Unsettled` because the connection existed -- read
+    /// as the exception it is.
+    fn not_delivered(error: std::io::Error) -> BotError {
+        BotError::DomainError {
+            domain: DOMAIN.to_owned(),
+            certainty: DispatchCertainty::NotDelivered,
+            cause: error.to_string(),
+        }
+    }
+
+    /// Connects to `listener`, writes `7`, and reads the byte back.
+    ///
+    /// The whole round trip is one helper because the certainty of a failure is
+    /// a property of the round trip, not of one call. Three of the four steps
+    /// fail `NotDelivered` -- nothing had gone out -- and the write fails
+    /// `Unsettled`, because by then the connection existed and the byte may
+    /// already have reached the peer. Inline, that distinction sat in the middle
+    /// of the chain where it was easiest to read as one more of the same.
+    async fn round_trip(listener: &TcpListener) -> Result<u8, BotError> {
+        let peer = listener.local_addr().map_err(not_delivered)?;
+        let mut client = TcpStream::connect(peer).await.map_err(not_delivered)?;
+        if let Err(error) = client.write_all(b"7").await {
+            let refusal = Err(BotError::DomainError {
+                domain: DOMAIN.to_owned(),
+                certainty: DispatchCertainty::Unsettled,
+                cause: error.to_string(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "round_trip: returning an error to the caller");
+            return refusal;
+        }
+        let (mut server, _origin) = listener.accept().await.map_err(not_delivered)?;
+        let mut byte = [0u8; 1];
+        if let Err(error) = server.read_exact(&mut byte).await {
+            let refusal = Err(not_delivered(error));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "round_trip: returning an error to the caller");
+            return refusal;
+        }
+        Ok(byte[0])
+    }
+
+    /// A source that talks to itself over loopback.
     /// A source that talks to itself over loopback.
     struct SocketSource {
         /// The listening end, bound before the tick starts.
@@ -876,52 +969,8 @@ fn socket_source_on_the_shipped_runtime() -> TestResult {
 
         async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
             call.0.check(Observe::required_caps(self))?;
-            let domain = "test::socket_source".to_owned();
-            let peer = self
-                .listener
-                .local_addr()
-                .map_err(|error| BotError::DomainError {
-                    domain: domain.clone(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: error.to_string(),
-                })?;
-            let mut client =
-                TcpStream::connect(peer)
-                    .await
-                    .map_err(|error| BotError::DomainError {
-                        domain: domain.clone(),
-                        certainty: DispatchCertainty::NotDelivered,
-                        cause: error.to_string(),
-                    })?;
-            if let Err(error) = client.write_all(b"7").await {
-                // A write that failed on an established connection is the
-                // `Unsettled` arm, not `NotDelivered`: the connection existed,
-                // so bytes may already have reached the peer and a retry here
-                // is a possible duplicate.
-                return Err(BotError::DomainError {
-                    domain,
-                    certainty: DispatchCertainty::Unsettled,
-                    cause: error.to_string(),
-                });
-            }
-            let (mut server, _origin) =
-                self.listener
-                    .accept()
-                    .await
-                    .map_err(|error| BotError::DomainError {
-                        domain: "test::socket_source".to_owned(),
-                        certainty: DispatchCertainty::NotDelivered,
-                        cause: error.to_string(),
-                    })?;
-            let mut byte = [0u8; 1];
-            if let Err(error) = server.read_exact(&mut byte).await {
-                return Err(BotError::DomainError {
-                    domain: "test::socket_source".to_owned(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: error.to_string(),
-                });
-            }
-            Ok(match byte[0] {
+            let byte = round_trip(&self.listener).await?;
+            Ok(match byte {
                 b'7' => 7,
                 _ => 0,
             })
@@ -1091,11 +1140,13 @@ impl Observe for PollProbe {
         call.0.check(Observe::required_caps(self))?;
         self.polls.set(self.polls.get().saturating_add(1));
         if self.refuse_next.replace(false) {
-            return Err(BotError::DomainError {
+            let refusal = Err(BotError::DomainError {
                 domain: self.domain.to_owned(),
                 certainty: DispatchCertainty::NotDelivered,
                 cause: "one-shot poll refusal".to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
+            return refusal;
         }
         Ok(self.value)
     }
@@ -1156,10 +1207,12 @@ impl Execute for Doubtful {
         call.0.check(Execute::required_caps(self))?;
         self.seen.borrow_mut().push(*call.1);
         if self.uncertain.get() {
-            return Err(BotError::EffectIndeterminate {
+            let refusal = Err(BotError::EffectIndeterminate {
                 domain: "test::doubtful".to_owned(),
                 cause: "the acknowledgment never arrived".to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "execute_action: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -1477,11 +1530,9 @@ impl Execute for Refuses {
         call.0.check(Execute::required_caps(self))?;
         self.attempts.set(self.attempts.get().saturating_add(1));
         if self.refusing.get() {
-            return Err(BotError::DomainError {
-                domain: "test::refuses".to_owned(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "refused".to_owned(),
-            });
+            let refusal = Err(undelivered("test::refuses", "refused"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "execute_action: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }
@@ -1825,11 +1876,9 @@ impl Execute for Grudging {
             // refusal that the chain is expected to retry while it has budget,
             // and `Refused` classifies as `RetryClass::Never`, which abandons
             // the entry on the first failure.
-            return Err(BotError::DomainError {
-                domain: "test::grudging".to_owned(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "refused".to_owned(),
-            });
+            let refusal = Err(undelivered("test::grudging", "refused"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "execute_action: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }

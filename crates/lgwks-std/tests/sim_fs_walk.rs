@@ -748,10 +748,25 @@ impl Locked {
 impl Drop for Locked {
     /// Parents first, the reverse of locking, so each child is reachable
     /// again by the time its turn comes.
+    ///
+    /// A `Drop` cannot report a failure, so a permission that will not be
+    /// restored is written to stderr rather than dropped: a directory left
+    /// read-only makes the next test in the sweep fail with a permission error
+    /// that names neither this struct nor the test that caused it. Stderr is the
+    /// only sink a destructor has, and this is test code.
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt as _;
         for path in &self.paths {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).ok();
+            if let Err(refused) = fs::set_permissions(path, fs::Permissions::from_mode(0o755)) {
+                // The sanctioned facade, not `eprintln!`: the workspace forbids
+                // printing to the terminal, and a destructor has no other way to
+                // say a directory is still read-only.
+                lgwks_std::trace::warn!(
+                    operation = "restore_permissions",
+                    path = %path.display(),
+                    "sim_fs_walk could not restore a locked directory to 0755: {refused}"
+                );
+            }
         }
     }
 }

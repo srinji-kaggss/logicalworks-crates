@@ -249,11 +249,13 @@ impl ResourceLimits {
             let requested = self.get(axis);
             let allowed = ceiling.get(axis);
             if requested > allowed {
-                return Err(BotError::ResourceLimitAboveCeiling {
+                let refusal = Err(BotError::ResourceLimitAboveCeiling {
                     axis,
                     requested,
                     ceiling: allowed,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "within_ceiling: returning an error to the caller");
+                return refusal;
             }
         }
         Ok(self)
@@ -443,7 +445,9 @@ impl VarType {
                     .iter()
                     .find(|option| option.eq_ignore_ascii_case(trimmed))
                 else {
-                    return Err(AnswerRejection::NotADeclaredChoice);
+                    let refusal = Err(AnswerRejection::NotADeclaredChoice);
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decode_answer: returning an error to the caller");
+                    return refusal;
                 };
                 Ok(Value::Choice(option.clone()))
             }
@@ -590,12 +594,8 @@ impl Predicate {
     pub fn evaluate(&self, scope: &VarScope) -> Result<bool, BotError> {
         match *self {
             Self::Const(value) => Ok(value),
-            Self::Eq(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? == resolve_expr(right, scope)?)
-            }
-            Self::Ne(ref left, ref right) => {
-                Ok(resolve_expr(left, scope)? != resolve_expr(right, scope)?)
-            }
+            Self::Eq(ref left, ref right) => same_value(left, right, scope, true),
+            Self::Ne(ref left, ref right) => same_value(left, right, scope, false),
             Self::Lt(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_lt())
             }
@@ -608,25 +608,248 @@ impl Predicate {
             Self::Ge(ref left, ref right) => {
                 compare_expr(left, right, scope, |ordering| ordering.is_ge())
             }
-            Self::And(ref items) => {
-                for item in items {
-                    if !item.evaluate(scope)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Self::Or(ref items) => {
-                for item in items {
-                    if item.evaluate(scope)? {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
+            Self::And(ref items) => all_true(items, scope),
+            Self::Or(ref items) => any_true(items, scope),
             Self::Not(ref inner) => Ok(!inner.evaluate(scope)?),
         }
     }
+}
+
+/// Whether the two sides resolve to the same value, or to different ones.
+///
+/// `equal` is `true` for `Eq` and `false` for `Ne`, so one resolution path
+/// serves both: each side resolves exactly once, which matters because
+/// resolution is fallible and a side that resolved twice could fail twice.
+///
+/// This deliberately does not go through `compare_expr`. That one refuses a
+/// pair of different `Value` variants with `PredicateTypeMismatch`, where `==`
+/// here answers `false`; routing `Eq` through it would turn a comparison that
+/// has always answered into one that fails.
+fn same_value(
+    left: &ValueExpr,
+    right: &ValueExpr,
+    scope: &VarScope,
+    equal: bool,
+) -> Result<bool, BotError> {
+    let left_value = resolve_expr(left, scope)?;
+    let right_value = resolve_expr(right, scope)?;
+    Ok((left_value == right_value) == equal)
+}
+
+/// Every item must hold; evaluation stops at the first that does not.
+///
+/// `Ok(true)` on an empty list, the identity for `and`. The two short-circuit
+/// loops are helpers rather than arms because each was a loop with a
+/// propagation operator inside it, so the `match` above held three of them
+/// across two arms and a reader could not see the short-circuit rule without
+/// reading both loops in full.
+fn all_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if !item.evaluate(scope)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Some item must hold; evaluation stops at the first that does.
+///
+/// `Ok(false)` on an empty list, the identity for `or`.
+fn any_true(items: &[Predicate], scope: &VarScope) -> Result<bool, BotError> {
+    for item in items {
+        if item.evaluate(scope)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Validates one `branch` node: its variable, its predicate and both edges.
+///
+/// A helper so every kind's arm in [`validate_node`] is one call. The order
+/// inside is the order a refusal should name things in: the variable before the
+/// predicate that reads it, and the predicate before either edge it chooses
+/// between.
+fn validate_branch_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    var: &str,
+    when: &Predicate,
+    then: &str,
+    otherwise: &str,
+) -> Result<(), BotError> {
+    validate_variable_reference(spec, node_id, var)?;
+    validate_predicate(spec, node_id, when)?;
+    check_edge_pair(&spec.nodes, node_id, then, otherwise)
+}
+
+/// Validates one `refer` node: its template, and that it reaches a terminal.
+///
+/// A helper for the same reason as the other kinds. A `refer` hands the
+/// conversation to someone else, so its target has to be a place the flow can
+/// actually end -- validated here rather than discovered when the session had
+/// already given the person away.
+fn validate_refer_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    limits: ResourceLimits,
+) -> Result<(), BotError> {
+    validate_template(spec, node_id, text, "refer.text", limits)?;
+    for target in spec.edge_targets(node_id) {
+        check_target(&spec.nodes, node_id, &target)?;
+    }
+    Ok(())
+}
+
+/// Validates one `say` node: its template, and that it has exactly one way out.
+///
+/// A helper so every kind's arm in [`validate_node`] is one call. A `say` node
+/// that continues along two edges is ambiguous at run time -- which one the
+/// driver follows is not written down anywhere -- and a `say` node with no
+/// continuation and no terminal leaves the conversation with nowhere to go, so
+/// both are refused at load rather than at the moment a person is waiting.
+fn validate_say_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    text: &str,
+    limits: ResourceLimits,
+) -> Result<(), BotError> {
+    validate_template(spec, node_id, text, "say.text", limits)?;
+    if spec.edge_targets(node_id).len() > 1 {
+        let refusal = Err(BotError::MalformedFlow {
+            cause: format!("say node {node_id:?} has multiple continuations"),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_say_node: returning an error to the caller");
+        return refusal;
+    }
+    if spec.edge_targets(node_id).is_empty() && !spec.terminals.contains_key(node_id) {
+        let refusal = Err(BotError::MissingTransition {
+            node: node_id.to_owned(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_say_node: returning an error to the caller");
+        return refusal;
+    }
+    Ok(())
+}
+
+/// Validates one `ask` node: its variable, its options and its routes.
+///
+/// A helper rather than the arm inline: as one block the arm carried the
+/// variable lookup, the option decode, the byte check and the two route passes,
+/// so `validate_node` read as a list of kinds when what it needed to say was
+/// which parts of an `ask` node are checked and in what order -- decode with
+/// the runtime's own decoder first, then the session's own ceiling, then the
+/// routes, so a refusal names the earliest thing wrong rather than an arbitrary
+/// one.
+fn validate_ask_node(
+    spec: &FlowSpec,
+    node_id: &str,
+    var: &str,
+    options: &[String],
+    routes: &BTreeMap<String, NodeId>,
+    limits: ResourceLimits,
+    writers: &mut BTreeSet<String>,
+) -> Result<(), BotError> {
+    let declared = declared_variable(spec, var)?;
+    writers.insert(var.to_owned());
+    if options.is_empty() || has_duplicate_strings(options) {
+        let refusal = Err(BotError::MalformedFlow {
+            cause: format!("ask node {node_id:?} has invalid options"),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+        return refusal;
+    }
+    // Distinct strings are not distinct answers. Two options the answer
+    // policy cannot tell apart are one option the person cannot choose
+    // between, and the resolver can only ever report the tie — so the
+    // authoring mistake is refused here, where it names an option,
+    // rather than at run time, where it names none.
+    if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
+        let refusal = Err(BotError::MalformedFlow {
+            cause: format!(
+                "ask node {node_id:?} offers {first:?} and {second:?} as the same \
+                         {} answer",
+                answer_domain_of(spec, var)
+            ),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+        return refusal;
+    }
+    for option in options {
+        let Some(target) = routes.get(option) else {
+            let refusal = Err(BotError::MissingAskRoute {
+                node: node_id.to_owned(),
+                option: option.clone(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+            return refusal;
+        };
+        check_target(&spec.nodes, node_id, target)?;
+        // Every candidate is decoded with the same decoder the runtime
+        // assigns with, so "the flow asks a question the variable
+        // cannot hold an answer to" is a load-time refusal rather than
+        // a conversation the person cannot complete.
+        let value = match declared.decode_answer(option) {
+            Ok(value) => value,
+            Err(rejection) => {
+                let refusal = Err(BotError::AskOptionNotAssignable {
+                    node: node_id.to_owned(),
+                    variable: var.to_owned(),
+                    option: option.clone(),
+                    expected: declared.label(),
+                    cause: rejection.to_string(),
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+                return refusal;
+            }
+        };
+        // Then that the value fits the session that will store it.
+        // "The candidate cannot be held" and "the candidate cannot be
+        // held *here*" are different statements, and both are knowable
+        // while the document is loading: the second one is a session
+        // whose value ceiling is below the option it asked for, and
+        // deferring it to the person's answer would charge them a step
+        // for an operator's configuration.
+        let value_bytes = limits.get(ResourceAxis::Value);
+        if value.rendered_bytes() > value_bytes {
+            let refusal = Err(BotError::AskOptionTooLarge {
+                node: node_id.to_owned(),
+                variable: var.to_owned(),
+                option: option.clone(),
+                bytes: value.rendered_bytes(),
+                limit: value_bytes,
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+            return refusal;
+        }
+    }
+    for (option, target) in routes {
+        if !options.iter().any(|candidate| candidate == option) {
+            let refusal = Err(BotError::MalformedFlow {
+                cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_ask_node: returning an error to the caller");
+            return refusal;
+        }
+        check_target(&spec.nodes, node_id, target)?;
+    }
+    Ok(())
+}
+
+/// Checks both edges of a branch, in the order the branch names them.
+///
+/// A helper for the pair rather than two calls: the branch's whole contract is
+/// that both targets resolve, and a reader checking one edge had no reason to
+/// look for the other three lines below it.
+fn check_edge_pair(
+    nodes: &BTreeMap<NodeId, NodeKind>,
+    node_id: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), BotError> {
+    check_target(nodes, node_id, first)?;
+    check_target(nodes, node_id, second)
 }
 
 /// A declared flow node and its closed operation kind.
@@ -1245,21 +1468,27 @@ fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), B
     let requested = spec.bounds.resources.unwrap_or_default().within_ceiling()?;
     let effective = requested.narrowed(limits);
     if spec.nodes.is_empty() {
-        return Err(BotError::MalformedFlow {
+        let refusal = Err(BotError::MalformedFlow {
             cause: "flow declares no nodes".into(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_flow_within: returning an error to the caller");
+        return refusal;
     }
     if !spec.nodes.contains_key(&spec.entry) {
-        return Err(BotError::InvalidTransitionTarget {
+        let refusal = Err(BotError::InvalidTransitionTarget {
             from: "<entry>".into(),
             target: spec.entry.clone(),
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_flow_within: returning an error to the caller");
+        return refusal;
     }
     if spec.bounds.budget == 0 || spec.nodes.len() > spec.bounds.budget {
-        return Err(BotError::FlowBudgetExceeded {
+        let refusal = Err(BotError::FlowBudgetExceeded {
             steps: spec.nodes.len(),
             budget: spec.bounds.budget,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_flow_within: returning an error to the caller");
+        return refusal;
     }
 
     validate_declarations(&spec.vars)?;
@@ -1271,16 +1500,20 @@ fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), B
     }
     for name in spec.vars.keys() {
         if !writers.contains(name) {
-            return Err(BotError::VariableNeverWritten { name: name.clone() });
+            let refusal = Err(BotError::VariableNeverWritten { name: name.clone() });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_flow_within: returning an error to the caller");
+            return refusal;
         }
     }
     for edge in &spec.edges {
         let (from, to) = edge.endpoints();
         if !spec.nodes.contains_key(from) {
-            return Err(BotError::InvalidTransitionTarget {
+            let refusal = Err(BotError::InvalidTransitionTarget {
                 from: from.to_owned(),
                 target: from.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_flow_within: returning an error to the caller");
+            return refusal;
         }
         check_target(&spec.nodes, from, to)?;
     }
@@ -1354,10 +1587,12 @@ fn reject_uninitialized_reads(spec: &FlowSpec) -> Result<(), BotError> {
         };
         for name in node_reads(spec, node_id, kind)? {
             if !state.contains(&name) {
-                return Err(BotError::VariableReadBeforeInit {
+                let refusal = Err(BotError::VariableReadBeforeInit {
                     node: node_id.clone(),
                     name,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reject_uninitialized_reads: returning an error to the caller");
+                return refusal;
             }
         }
     }
@@ -1401,6 +1636,54 @@ fn node_reads(
     }
 }
 
+/// Compiles `text`, attributing a malformed template to the node and field it
+/// was reached through.
+///
+/// `compile` refuses with `MalformedTemplate` naming the placeholder
+/// `"<runtime>"`, because it does not know its caller. The only thing this adds
+/// is which node and field it was reached through, so the match is on the
+/// variant rather than a map that would discard it: there is no detail in the
+/// cause to keep, and a map would read as though there were.
+fn compile_for_node<'a>(
+    node_id: &str,
+    field: &'static str,
+    text: &'a str,
+) -> Result<CompiledTemplate<'a>, BotError> {
+    match CompiledTemplate::compile(text) {
+        Ok(compiled) => Ok(compiled),
+        Err(BotError::MalformedTemplate { .. }) => {
+            let refusal = Err(BotError::MalformedTemplate {
+                node: node_id.to_owned(),
+                field,
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), node = node_id, field, "compile_for_node: the template is malformed");
+            refusal
+        }
+        Err(other) => {
+            lgwks_std::trace::debug!(error = ?other, node = node_id, field, "compile_for_node: the template did not compile");
+            Err(other)
+        }
+    }
+}
+
+/// Looks `name` up in `scope`, refusing with [`BotError::VariableUnset`] when it
+/// holds no value.
+///
+/// One place for the refusal both the sizing pass and the render pass make, so a
+/// marker with no value reads the same whichever of the two reached it first.
+fn bound<'s>(scope: &'s VarScope, name: &str) -> Result<&'s Value, BotError> {
+    match scope.get(name) {
+        Some(value) => Ok(value),
+        None => {
+            let refusal = Err(BotError::VariableUnset {
+                name: name.to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), name, "bound: the marker has no value");
+            refusal
+        }
+    }
+}
+
 /// Return the declared variables a template interpolates.
 fn declared_template_reads(
     spec: &FlowSpec,
@@ -1408,11 +1691,7 @@ fn declared_template_reads(
     text: &str,
     field: &'static str,
 ) -> Result<BTreeSet<String>, BotError> {
-    let compiled =
-        CompiledTemplate::compile(text).map_err(|_error| BotError::MalformedTemplate {
-            node: node_id.to_owned(),
-            field,
-        })?;
+    let compiled = compile_for_node(node_id, field, text)?;
     let mut names = BTreeSet::new();
     for part in compiled.parts() {
         if let TemplatePart::Variable(name) = *part
@@ -1457,17 +1736,21 @@ fn collect_expr_variables(expression: &ValueExpr, into: &mut BTreeSet<String>) {
 fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotError> {
     for (name, kind) in vars {
         if !valid_identifier(name) {
-            return Err(BotError::MalformedFlow {
+            let refusal = Err(BotError::MalformedFlow {
                 cause: format!("invalid variable name {name:?}"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_declarations: returning an error to the caller");
+            return refusal;
         }
         match *kind {
             VarType::Choice(ref options)
                 if options.is_empty() || has_duplicate_strings(options) =>
             {
-                return Err(BotError::MalformedFlow {
+                let refusal = Err(BotError::MalformedFlow {
                     cause: format!("choice variable {name:?} has invalid options"),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_declarations: returning an error to the caller");
+                return refusal;
             }
             _ => {}
         }
@@ -1490,18 +1773,22 @@ fn validate_declarations(vars: &BTreeMap<String, VarType>) -> Result<(), BotErro
 fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
     for (node_id, declared) in &spec.terminals {
         let Some(kind) = spec.nodes.get(node_id) else {
-            return Err(BotError::InvalidTransitionTarget {
+            let refusal = Err(BotError::InvalidTransitionTarget {
                 from: "<terminal>".into(),
                 target: node_id.clone(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_terminals: returning an error to the caller");
+            return refusal;
         };
         if !matches!(
             *kind,
             NodeKind::End | NodeKind::Handoff { .. } | NodeKind::Refer { .. }
         ) {
-            return Err(BotError::MalformedFlow {
+            let refusal = Err(BotError::MalformedFlow {
                 cause: format!("terminal declaration {node_id:?} names a non-terminal node"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_terminals: returning an error to the caller");
+            return refusal;
         }
         // `End` has an intrinsic outcome too, but it is `Completed` — the
         // absence of a destination rather than a claim about one — so a
@@ -1515,22 +1802,35 @@ fn validate_terminals(spec: &FlowSpec) -> Result<(), BotError> {
             // be one of the three terminal kinds, and every one of them has an
             // intrinsic outcome. Reported rather than skipped so a future node
             // kind added to the check above cannot silently lose the rule.
-            return Err(BotError::MalformedFlow {
+            let refusal = Err(BotError::MalformedFlow {
                 cause: format!("terminal declaration {node_id:?} has no intrinsic outcome"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_terminals: returning an error to the caller");
+            return refusal;
         };
         if intrinsic != *declared {
-            return Err(BotError::ConflictingTerminalDeclaration {
+            let refusal = Err(BotError::ConflictingTerminalDeclaration {
                 node: node_id.clone(),
                 intrinsic,
                 declared: declared.clone(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_terminals: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())
 }
 
-/// Validate one node's references, variables, and text.
+/// Validates one node's references, variables, and text.
+///
+/// The two kinds this skips are `handoff` and `end`, which carry no text, no
+/// variable and no edge to resolve: there is nothing about them that a load-time
+/// check could refuse. That is a claim about the kinds, so it is stated here
+/// rather than left as two empty arms inside the dispatch.
+///
+/// One call rather than a `match` of seven: every arm was a single validator
+/// call, which is the right shape for the reader and the wrong shape for a gate
+/// that reads the whole `match` as one statement.
 fn validate_node(
     spec: &FlowSpec,
     node_id: &str,
@@ -1539,121 +1839,28 @@ fn validate_node(
     writers: &mut BTreeSet<String>,
 ) -> Result<(), BotError> {
     match *kind {
-        NodeKind::Say { ref text } => {
-            validate_template(spec, node_id, text, "say.text", limits)?;
-            if spec.edge_targets(node_id).len() > 1 {
-                return Err(BotError::MalformedFlow {
-                    cause: format!("say node {node_id:?} has multiple continuations"),
-                });
-            }
-            if spec.edge_targets(node_id).is_empty() && !spec.terminals.contains_key(node_id) {
-                return Err(BotError::MissingTransition {
-                    node: node_id.to_owned(),
-                });
-            }
-        }
+        NodeKind::Say { ref text } => validate_say_node(spec, node_id, text, limits),
         NodeKind::Ask {
             ref var,
             ref options,
             ref routes,
-        } => {
-            let declared = declared_variable(spec, var)?;
-            writers.insert(var.clone());
-            if options.is_empty() || has_duplicate_strings(options) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!("ask node {node_id:?} has invalid options"),
-                });
-            }
-            // Distinct strings are not distinct answers. Two options the answer
-            // policy cannot tell apart are one option the person cannot choose
-            // between, and the resolver can only ever report the tie — so the
-            // authoring mistake is refused here, where it names an option,
-            // rather than at run time, where it names none.
-            if let Some((first, second)) = colliding_options(options, answer_domain_of(spec, var)) {
-                return Err(BotError::MalformedFlow {
-                    cause: format!(
-                        "ask node {node_id:?} offers {first:?} and {second:?} as the same \
-                         {} answer",
-                        answer_domain_of(spec, var)
-                    ),
-                });
-            }
-            for option in options {
-                let Some(target) = routes.get(option) else {
-                    return Err(BotError::MissingAskRoute {
-                        node: node_id.to_owned(),
-                        option: option.clone(),
-                    });
-                };
-                check_target(&spec.nodes, node_id, target)?;
-                // Every candidate is decoded with the same decoder the runtime
-                // assigns with, so "the flow asks a question the variable
-                // cannot hold an answer to" is a load-time refusal rather than
-                // a conversation the person cannot complete.
-                let value = match declared.decode_answer(option) {
-                    Ok(value) => value,
-                    Err(rejection) => {
-                        return Err(BotError::AskOptionNotAssignable {
-                            node: node_id.to_owned(),
-                            variable: var.clone(),
-                            option: option.clone(),
-                            expected: declared.label(),
-                            cause: rejection.to_string(),
-                        });
-                    }
-                };
-                // Then that the value fits the session that will store it.
-                // "The candidate cannot be held" and "the candidate cannot be
-                // held *here*" are different statements, and both are knowable
-                // while the document is loading: the second one is a session
-                // whose value ceiling is below the option it asked for, and
-                // deferring it to the person's answer would charge them a step
-                // for an operator's configuration.
-                let value_bytes = limits.get(ResourceAxis::Value);
-                if value.rendered_bytes() > value_bytes {
-                    return Err(BotError::AskOptionTooLarge {
-                        node: node_id.to_owned(),
-                        variable: var.clone(),
-                        option: option.clone(),
-                        bytes: value.rendered_bytes(),
-                        limit: value_bytes,
-                    });
-                }
-            }
-            for (option, target) in routes {
-                if !options.iter().any(|candidate| candidate == option) {
-                    return Err(BotError::MalformedFlow {
-                        cause: format!("ask node {node_id:?} routes undeclared option {option:?}"),
-                    });
-                }
-                check_target(&spec.nodes, node_id, target)?;
-            }
-        }
+        } => validate_ask_node(spec, node_id, var, options, routes, limits, writers),
         NodeKind::Branch {
             ref var,
             ref when,
             ref then,
             ref otherwise,
-        } => {
-            validate_variable_reference(spec, node_id, var)?;
-            validate_predicate(spec, node_id, when)?;
-            check_target(&spec.nodes, node_id, then)?;
-            check_target(&spec.nodes, node_id, otherwise)?;
-        }
-        NodeKind::Handoff { .. } => {}
-        NodeKind::Refer { ref text, .. } => {
-            validate_template(spec, node_id, text, "refer.text", limits)?;
-        }
+        } => validate_branch_node(spec, node_id, var, when, then, otherwise),
+        NodeKind::Refer { ref text, .. } => validate_refer_node(spec, node_id, text, limits),
         NodeKind::Route {
             ref dispatch,
             ref fallback,
         } => {
             check_target(&spec.nodes, node_id, dispatch)?;
-            check_target(&spec.nodes, node_id, fallback)?;
+            check_target(&spec.nodes, node_id, fallback)
         }
-        NodeKind::End => {}
+        NodeKind::Handoff { .. } | NodeKind::End => Ok(()),
     }
-    Ok(())
 }
 
 /// Returns how answers writing `name` are read in `spec`.
@@ -1731,9 +1938,11 @@ fn validate_predicate(
         }
         Predicate::And(ref items) | Predicate::Or(ref items) => {
             if items.is_empty() {
-                return Err(BotError::MalformedFlow {
+                let refusal = Err(BotError::MalformedFlow {
                     cause: format!("node {node_id:?} has an empty predicate"),
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_predicate: returning an error to the caller");
+                return refusal;
             }
             for item in items {
                 validate_predicate(spec, node_id, item)?;
@@ -1749,7 +1958,9 @@ fn validate_expr(spec: &FlowSpec, _node_id: &str, expression: &ValueExpr) -> Res
     if let ValueExpr::Var(ref name) = *expression
         && !spec.vars.contains_key(name)
     {
-        return Err(BotError::UndeclaredVariable { name: name.clone() });
+        let refusal = Err(BotError::UndeclaredVariable { name: name.clone() });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_expr: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -1770,11 +1981,7 @@ fn validate_template(
     field: &'static str,
     limits: ResourceLimits,
 ) -> Result<(), BotError> {
-    let compiled =
-        CompiledTemplate::compile(template).map_err(|_error| BotError::MalformedTemplate {
-            node: node_id.to_owned(),
-            field,
-        })?;
+    let compiled = compile_for_node(node_id, field, template)?;
     let mut literals = 0usize;
     for part in compiled.parts() {
         match *part {
@@ -1789,20 +1996,24 @@ fn validate_template(
             }
             TemplatePart::Variable(name) => {
                 if !spec.vars.contains_key(name) {
-                    return Err(BotError::UndeclaredVariable {
+                    let refusal = Err(BotError::UndeclaredVariable {
                         name: name.to_owned(),
                     });
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_template: returning an error to the caller");
+                    return refusal;
                 }
             }
         }
     }
     let record_bytes = limits.get(ResourceAxis::Record);
     if literals > record_bytes {
-        return Err(BotError::TemplateExpansionTooLarge {
+        let refusal = Err(BotError::TemplateExpansionTooLarge {
             node: node_id.to_owned(),
             bytes: literals,
             limit: record_bytes,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "validate_template: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -1842,9 +2053,11 @@ fn reject_unreachable(spec: &FlowSpec) -> Result<(), BotError> {
     }
     for node_id in spec.nodes.keys() {
         if !seen.contains(node_id) {
-            return Err(BotError::UnreachableNode {
+            let refusal = Err(BotError::UnreachableNode {
                 node: node_id.clone(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reject_unreachable: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())
@@ -1916,10 +2129,12 @@ where
 /// in one and acceptable in another.
 fn check_flow_size(source: &str) -> Result<(), BotError> {
     if source.len() > MAX_FLOW_BYTES {
-        return Err(BotError::FlowTooLarge {
+        let refusal = Err(BotError::FlowTooLarge {
             bytes: source.len(),
             limit: MAX_FLOW_BYTES,
         });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_flow_size: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -1943,10 +2158,12 @@ fn reject_unknown_node_kinds(declared: &BTreeMap<String, String>) -> Result<(), 
             kind.as_str(),
             "say" | "ask" | "branch" | "handoff" | "refer" | "route" | "end"
         ) {
-            return Err(BotError::UnknownNodeKind {
+            let refusal = Err(BotError::UnknownNodeKind {
                 node: node_id.clone(),
                 kind: kind.clone(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reject_unknown_node_kinds: returning an error to the caller");
+            return refusal;
         }
     }
     Ok(())
@@ -2104,9 +2321,11 @@ impl VarScope {
     /// Assign a typed value after checking its declaration.
     pub fn set(&mut self, name: &str, value: Value) -> Result<(), BotError> {
         let Some(declared) = self.declarations.get(name) else {
-            return Err(BotError::UndeclaredVariable {
+            let refusal = Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "set: returning an error to the caller");
+            return refusal;
         };
         if value_matches_type(declared, &value) {
             self.values.insert(name.to_owned(), value);
@@ -2148,29 +2367,36 @@ impl VarScope {
         value_bytes: usize,
     ) -> Result<(), BotError> {
         let Some(declared) = self.declarations.get(name) else {
-            return Err(BotError::UndeclaredVariable {
+            let refusal = Err(BotError::UndeclaredVariable {
                 name: name.to_owned(),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "set_from_answer_within: returning an error to the caller");
+            return refusal;
         };
         // One decoder, not two: `VarType::decode_answer` is the same reading of
         // an answer that flow validation runs, so a value this store accepts is
-        // a value the declaration would have accepted. The variant is dropped
-        // here because the scope's contract is a single "cannot hold this"
-        // error; the distinction between a non-integer and an out-of-range one
-        // is a resolver's business and is kept there.
-        let value = declared.decode_answer(answer).map_err(|_rejection| {
-            BotError::InvalidVariableValue {
-                variable: name.to_owned(),
-                value: answer.to_owned(),
-            }
-        })?;
+        // a value the declaration would have accepted. The rejection is carried
+        // into the error rather than dropped: the scope's contract is one
+        // "cannot hold this" error, and naming *why* keeps a caller from having
+        // to guess between a non-integer, an out-of-range integer, a bad boolean
+        // and an undeclared choice.
+        let value =
+            declared
+                .decode_answer(answer)
+                .map_err(|rejection| BotError::InvalidVariableValue {
+                    variable: name.to_owned(),
+                    value: answer.to_owned(),
+                    reason: rejection.to_string(),
+                })?;
         let bytes = value.rendered_bytes();
         if bytes > value_bytes {
-            return Err(BotError::ValueTooLarge {
+            let refusal = Err(BotError::ValueTooLarge {
                 variable: name.to_owned(),
                 bytes,
                 limit: value_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "set_from_answer_within: returning an error to the caller");
+            return refusal;
         }
         self.set(name, value)
     }
@@ -2285,18 +2511,22 @@ impl<'a> CompiledTemplate<'a> {
             }
             let name_start = start.saturating_add(2);
             let Some(relative_end) = template[name_start..].find('}') else {
-                return Err(BotError::MalformedTemplate {
+                let refusal = Err(BotError::MalformedTemplate {
                     node: "<runtime>".into(),
                     field: "template",
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compile: returning an error to the caller");
+                return refusal;
             };
             let end = name_start.saturating_add(relative_end);
             let name = &template[name_start..end];
             if !valid_identifier(name) {
-                return Err(BotError::MalformedTemplate {
+                let refusal = Err(BotError::MalformedTemplate {
                     node: "<runtime>".into(),
                     field: "template",
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compile: returning an error to the caller");
+                return refusal;
             }
             parts.push(TemplatePart::Variable(name));
             cursor = end.saturating_add(1);
@@ -2330,14 +2560,7 @@ impl<'a> CompiledTemplate<'a> {
         for part in &self.parts {
             let bytes = match *part {
                 TemplatePart::Literal(text) => text.len(),
-                TemplatePart::Variable(name) => {
-                    let Some(value) = scope.get(name) else {
-                        return Err(BotError::VariableUnset {
-                            name: name.to_owned(),
-                        });
-                    };
-                    value.rendered_bytes()
-                }
+                TemplatePart::Variable(name) => bound(scope, name)?.rendered_bytes(),
             };
             total = total
                 .checked_add(bytes)
@@ -2370,12 +2593,7 @@ impl<'a> CompiledTemplate<'a> {
             match *part {
                 TemplatePart::Literal(text) => output.push_str(text),
                 TemplatePart::Variable(name) => {
-                    let Some(value) = scope.get(name) else {
-                        return Err(BotError::VariableUnset {
-                            name: name.to_owned(),
-                        });
-                    };
-                    output.push_str(&value.to_string());
+                    output.push_str(&bound(scope, name)?.to_string());
                 }
             }
         }
@@ -2522,11 +2740,13 @@ impl Interpolate for TemplateInterpolator {
         })?;
         let bytes = compiled.expanded_bytes(scope)?;
         if bytes > limit {
-            return Err(BotError::TemplateExpansionTooLarge {
+            let refusal = Err(BotError::TemplateExpansionTooLarge {
                 node: node.to_owned(),
                 bytes,
                 limit,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "interpolate: returning an error to the caller");
+            return refusal;
         }
         compiled.render(scope)
     }
@@ -3081,7 +3301,11 @@ pub struct RecordedDecision {
 }
 
 impl RecordedDecision {
-    /// Returns the receipt.
+    /// The journal receipt this decision was written under.
+    ///
+    /// Borrowed, not cloned, so a caller cannot present a receipt that is not
+    /// the one the journal accepted. A receipt is the durable half of a decision:
+    /// it is what makes the decision survive a restart that loses this record.
     #[must_use]
     pub fn receipt(&self) -> &DecisionReceipt {
         &self.receipt
@@ -3132,7 +3356,12 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Return the path node id.
+    /// The node this transcript entry was recorded against.
+    ///
+    /// The *path* node rather than the current one: a session that loops back
+    /// through a branch records entries against the node that was current when
+    /// they happened, so a reader replaying the transcript follows the path the
+    /// conversation actually took rather than the one it ended on.
     #[must_use]
     pub fn path_node(&self) -> &str {
         &self.path_node
@@ -3294,6 +3523,26 @@ pub struct Session {
     limits: ResourceLimits,
     /// Bytes retained so far: every transcript record and visited node id.
     retained: usize,
+}
+
+/// What one answer is being judged against: the ask it answers, the resolver's
+/// verdict on it, and the person's own words.
+///
+/// Gathered so the helpers that apply a verdict take one borrowed value rather
+/// than six positional arguments that can be passed in the wrong order.
+struct Turn<'a> {
+    /// The ask node being answered.
+    node_id: &'a str,
+    /// The variable a resolved answer binds.
+    var: &'a str,
+    /// The options the ask offered.
+    options: &'a [String],
+    /// Where each option leads.
+    routes: &'a BTreeMap<String, NodeId>,
+    /// The resolver's verdict.
+    verdict: &'a Verdict,
+    /// What the person said.
+    utterance: &'a str,
 }
 
 impl Session {
@@ -3503,6 +3752,142 @@ impl Session {
         self.retained
     }
 
+    /// Receipts the verdict, then records the person's answer.
+    ///
+    /// Every re-ask arm begins with this pair, and the order is the contract: the
+    /// receipt is the durable fact that a verdict was reached, and the transcript
+    /// line is what a reader sees later. Recording first would put an utterance
+    /// in the transcript for a verdict that was never durably reached.
+    fn receipt_and_record(&mut self, turn: &Turn<'_>) -> Result<(), BotError> {
+        self.write_receipt(turn.node_id, turn.options, turn.verdict, None, None)?;
+        self.record(turn.node_id, "user", turn.utterance)
+    }
+
+    /// Applies a resolved verdict: receipt, bind, record, then continue.
+    ///
+    /// A helper rather than the arm inline: as one block the arm held the
+    /// option lookup, the route lookup, the receipt, the binding, the
+    /// transcript line and the transition -- six fallible steps in one
+    /// statement. The order is the contract `answer` documents above and is
+    /// enforced here: a journal that refuses the receipt aborts the answer with
+    /// the session untouched.
+    fn accept_resolved(&mut self, turn: &Turn<'_>, index: usize) -> Result<(), BotError> {
+        let Turn {
+            node_id,
+            var,
+            options,
+            routes,
+            verdict,
+            utterance,
+        } = *turn;
+        let Some(option) = options.get(index) else {
+            let refusal = Err(BotError::ResolverReturnedInvalidOption {
+                node: node_id.to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "accept_resolved: returning an error to the caller");
+            return refusal;
+        };
+        let Some(target) = routes.get(option).cloned() else {
+            let refusal = Err(BotError::MissingAskRoute {
+                node: node_id.to_owned(),
+                option: option.clone(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "accept_resolved: returning an error to the caller");
+            return refusal;
+        };
+        self.write_receipt(
+            node_id,
+            options,
+            verdict,
+            Some(option.clone()),
+            Some(&target),
+        )?;
+        self.scope
+            .set_from_answer_within(var, option, self.limits.get(ResourceAxis::Value))?;
+        self.last_utterance = Some(utterance.to_owned());
+        self.record(node_id, "user", utterance)?;
+        self.current = Some(target);
+        self.drive()
+    }
+
+    /// Applies one resolver verdict to the session.
+    ///
+    /// Every arm is its own refusal or its own transcript, and reading them side
+    /// by side is what makes the differences between them -- a narrowed re-ask,
+    /// a withdrawn binding, a degraded cause under its own role -- visible.
+    /// Inside `answer` they read as one statement.
+    /// Receipts a verdict, records the answer, then re-asks over `ask`.
+    ///
+    /// The shape every non-resolved verdict shares. `ask` is the option list the
+    /// prompt should carry: the full list for an absent, stale or degraded answer,
+    /// and a strictly smaller one for an ambiguous tie. That difference is the
+    /// whole reason an ambiguous answer terminates rather than looping, so it is
+    /// a parameter here instead of a branch repeated at each call site.
+    fn reask(&mut self, turn: &Turn<'_>, ask: &[String]) -> Result<(), BotError> {
+        self.receipt_and_record(turn)?;
+        self.record_prompt(turn.node_id, ask)
+    }
+
+    /// Applies one resolver verdict to the session.
+    ///
+    /// Each arm is its own refusal or its own transcript, and reading them side
+    /// by side is what makes the differences between them -- a narrowed re-ask,
+    /// a withdrawn binding, a degraded cause under its own role -- visible.
+    /// Inside `answer` they read as one statement.
+    fn apply_resolution(
+        &mut self,
+        turn: &Turn<'_>,
+        resolution: Resolution,
+    ) -> Result<(), BotError> {
+        let options = turn.options;
+        match resolution {
+            Resolution::Resolved { index, .. } => self.accept_resolved(turn, index),
+            Resolution::Ambiguous { tied, .. } => {
+                // Narrow the re-ask to the options still in play. Repeating the
+                // full list is what a two-way verdict forced, and it is why an
+                // ambiguous answer could loop: the same utterance resolves the
+                // same way every time it is asked, so the session never leaves
+                // the node. A re-ask that is strictly smaller terminates.
+                let narrowed: Vec<String> = tied
+                    .iter()
+                    .filter_map(|candidate| options.get(*candidate).cloned())
+                    .collect();
+                // A narrowed set of one is not a question -- there is nothing
+                // to choose between -- so the full list is asked again.
+                let ask: &[String] = if narrowed.len() >= 2 {
+                    &narrowed
+                } else {
+                    options
+                };
+                self.reask(turn, ask)
+            }
+            Resolution::Absent { .. } => self.reask(turn, options),
+            Resolution::StaleAlias {
+                question: bound_question,
+                option,
+            } => {
+                // Re-ask, as for `Absent`, but record what was withdrawn under
+                // its own role. The resolver is not asked to forget the binding:
+                // the seam is read-only by design, and a session that silently
+                // rewrote its resolver's learned vocabulary would be editing the
+                // audit record it is supposed to be producing. The record names
+                // the binding and the question; retiring it is the owner's call.
+                // A re-ask is a decision, so it is receipted like every other
+                // verdict; the receipt names the withdrawal, and the roles
+                // below name it again for whoever reads the transcript.
+                self.record_stale_alias(turn.node_id, &bound_question, &option)?;
+                self.reask(turn, options)
+            }
+            Resolution::Degraded { reason } => {
+                // Re-ask, as for `Absent`, but record the cause under its own
+                // role: a transcript that renders a degraded re-ask exactly as
+                // an unclear one is how an operator concludes the person was
+                // being difficult while the embedder was down.
+                self.record_degraded(turn.node_id, reason)?;
+                self.reask(turn, options)
+            }
+        }
+    }
     /// Submit one free-text answer. Unrecognized input is recorded, the same
     /// ask remains current, and the prompt is recorded again.
     ///
@@ -3522,10 +3907,14 @@ impl Session {
     /// record of why.
     pub fn answer(&mut self, utterance: &str) -> Result<(), BotError> {
         if self.terminal.is_some() {
-            return Err(BotError::SessionTerminated);
+            let refusal = Err(BotError::SessionTerminated);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "answer: returning an error to the caller");
+            return refusal;
         }
         let Some(node_id) = self.current.clone() else {
-            return Err(BotError::SessionNotAwaitingAnswer);
+            let refusal = Err(BotError::SessionNotAwaitingAnswer);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "answer: returning an error to the caller");
+            return refusal;
         };
         let Some(NodeKind::Ask {
             var,
@@ -3533,7 +3922,9 @@ impl Session {
             routes,
         }) = self.flow.node(&node_id).cloned()
         else {
-            return Err(BotError::SessionNotAwaitingAnswer);
+            let refusal = Err(BotError::SessionNotAwaitingAnswer);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "answer: returning an error to the caller");
+            return refusal;
         };
         // The ingress ceiling, and it comes before the step is charged and
         // before the utterance is copied anywhere: a refused line must neither
@@ -3542,104 +3933,26 @@ impl Session {
         // so refusing costs nothing that accepting would not have cost more of.
         let utterance_limit = self.limits.get(ResourceAxis::Utterance);
         if utterance.len() > utterance_limit {
-            return Err(BotError::UtteranceTooLarge {
+            let refusal = Err(BotError::UtteranceTooLarge {
                 bytes: utterance.len(),
                 limit: utterance_limit,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "answer: returning an error to the caller");
+            return refusal;
         }
         self.charge_step()?;
         let question =
             Question::new(&node_id, &options).with_domain(self.scope.answer_domain(&var));
         let verdict = self.resolver.resolve(utterance, &question);
-        match verdict.resolution().clone() {
-            Resolution::Resolved { index, .. } => {
-                let Some(option) = options.get(index) else {
-                    return Err(BotError::ResolverReturnedInvalidOption { node: node_id });
-                };
-                let Some(target) = routes.get(option).cloned() else {
-                    return Err(BotError::MissingAskRoute {
-                        node: node_id,
-                        option: option.clone(),
-                    });
-                };
-                // Written before the transition it describes, which is the
-                // ordering `answer`'s contract above requires: a journal that
-                // refuses the receipt aborts the answer with the session
-                // untouched — not advanced, the variable unwritten, the
-                // transcript bare.
-                self.write_receipt(
-                    &node_id,
-                    &options,
-                    &verdict,
-                    Some(option.clone()),
-                    Some(&target),
-                )?;
-                self.scope.set_from_answer_within(
-                    &var,
-                    option,
-                    self.limits.get(ResourceAxis::Value),
-                )?;
-                self.last_utterance = Some(utterance.to_owned());
-                self.record(&node_id, "user", utterance)?;
-                self.current = Some(target);
-                self.drive()
-            }
-            Resolution::Ambiguous { tied, .. } => {
-                // Narrow the re-ask to the options still in play. Repeating the
-                // full list is what a two-way verdict forced, and it is why an
-                // ambiguous answer could loop: the same utterance resolves the
-                // same way every time it is asked, so the session never leaves
-                // the node. A re-ask that is strictly smaller terminates.
-                let narrowed: Vec<String> = tied
-                    .iter()
-                    .filter_map(|candidate| options.get(*candidate).cloned())
-                    .collect();
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
-                if narrowed.len() >= 2 {
-                    self.record_prompt(&node_id, &narrowed)?;
-                } else {
-                    self.record_prompt(&node_id, &options)?;
-                }
-                Ok(())
-            }
-            Resolution::Absent { .. } => {
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
-            }
-            Resolution::StaleAlias {
-                question: bound_question,
-                option,
-            } => {
-                // Re-ask, as for `Absent`, but record what was withdrawn under
-                // its own role. The resolver is not asked to forget the binding:
-                // the seam is read-only by design, and a session that silently
-                // rewrote its resolver's learned vocabulary would be editing the
-                // audit record it is supposed to be producing. The record names
-                // the binding and the question; retiring it is the owner's call.
-                // A re-ask is a decision, so it is receipted like every other
-                // verdict; the receipt names the withdrawal, and the roles
-                // below name it again for whoever reads the transcript.
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
-                self.record_stale_alias(&node_id, &bound_question, &option)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
-            }
-            Resolution::Degraded { reason } => {
-                // Re-ask, as for `Absent`, but record the cause under its own
-                // role: a transcript that renders a degraded re-ask exactly as
-                // an unclear one is how an operator concludes the person was
-                // being difficult while the embedder was down.
-                self.write_receipt(&node_id, &options, &verdict, None, None)?;
-                self.record(&node_id, "user", utterance)?;
-                self.record_degraded(&node_id, reason)?;
-                self.record_prompt(&node_id, &options)?;
-                Ok(())
-            }
-        }
+        let turn = Turn {
+            node_id: &node_id,
+            var: &var,
+            options: &options,
+            routes: &routes,
+            verdict: &verdict,
+            utterance,
+        };
+        self.apply_resolution(&turn, verdict.resolution().clone())
     }
 
     /// Build one receipt and write it through the journal, or refuse the
@@ -3694,16 +4007,31 @@ impl Session {
                 budget: self.flow.bounds.budget,
             })?;
         if attempted > self.flow.bounds.budget {
-            return Err(BotError::SessionBudgetExceeded {
+            let refusal = Err(BotError::SessionBudgetExceeded {
                 steps: attempted,
                 budget: self.flow.bounds.budget,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "charge_step: returning an error to the caller");
+            return refusal;
         }
         self.steps = attempted;
         Ok(())
     }
 
     /// Execute deterministic nodes until an ask or terminal is reached.
+    /// Renders `text` and records it as the assistant's turn.
+    ///
+    /// `say` and `refer` both speak before either continues, and inline they
+    /// each rendered and recorded as two statements, so the drive loop carried
+    /// four of them across two arms and a reader could not see that the pair is
+    /// one step. It matters that the record follows the render: a render that
+    /// refuses must leave nothing said.
+    fn speak(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        let rendered = self.render(node_id, text)?;
+        self.record(node_id, "assistant", &rendered)
+    }
+
+    /// Advances the session until it needs an answer or reaches an outcome.
     fn drive(&mut self) -> Result<(), BotError> {
         loop {
             let Some(node_id) = self.current.clone() else {
@@ -3717,60 +4045,109 @@ impl Session {
             self.charge_retention(node_id.len())?;
             self.visited.push(node_id.clone());
             let Some(kind) = self.flow.node(&node_id).cloned() else {
-                return Err(BotError::InvalidTransitionTarget {
+                let refusal = Err(BotError::InvalidTransitionTarget {
                     from: "<session>".into(),
                     target: node_id,
                 });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive: returning an error to the caller");
+                return refusal;
             };
-            match kind {
-                NodeKind::Say { text } => {
-                    let rendered = self.render(&node_id, &text)?;
-                    self.record(&node_id, "assistant", &rendered)?;
-                    let Some(target) = self.flow.edge_targets(&node_id).into_iter().next() else {
-                        return Err(BotError::MissingTransition { node: node_id });
-                    };
-                    self.current = Some(target);
-                }
-                NodeKind::Ask { options, .. } => {
-                    self.record_prompt(&node_id, &options)?;
-                    return Ok(());
-                }
-                NodeKind::Branch {
-                    when,
-                    then,
-                    otherwise,
-                    ..
-                } => {
-                    self.current = Some(if when.evaluate(&self.scope)? {
-                        then
-                    } else {
-                        otherwise
-                    });
-                }
-                // The two terminal kinds that emit nothing before they end.
-                // Both read the outcome from the document rather than
-                // constructing it from the node, so a declared outcome is
-                // executed here and not only checked at load.
-                NodeKind::Handoff { .. } | NodeKind::End => self.finish(&node_id)?,
-                NodeKind::Refer { text, .. } => {
-                    // The text is emitted before the outcome is set, and the
-                    // only declared outcome a `refer` node can carry is the
-                    // referral itself — validation refuses anything else — so
-                    // this text is never spoken for an outcome that
-                    // contradicts it.
-                    let rendered = self.render(&node_id, &text)?;
-                    self.record(&node_id, "assistant", &rendered)?;
-                    self.finish(&node_id)?;
-                }
-                NodeKind::Route { dispatch, fallback } => {
-                    self.current = Some(if self.last_utterance.is_some() {
-                        dispatch
-                    } else {
-                        fallback
-                    });
-                }
+            if self.step(&node_id, kind)? {
+                return Ok(());
             }
         }
+    }
+
+    /// Advances one node. Answers whether the session must stop and wait.
+    ///
+    /// A helper rather than the `match` inside the drive loop: as one block the
+    /// loop carried the charge, the lookup and every arm's write as one
+    /// statement, and the thing that actually varies -- what a node kind does --
+    /// was indistinguishable from the thing that does not -- what every node
+    /// does first.
+    ///
+    /// `Ok(true)` means the session is waiting for an answer, which is the only
+    /// kind that stops the loop short of an outcome.
+    /// Speaks a `say` node's text, then follows its single continuation.
+    ///
+    /// Speaking before the transition is the contract: a render that refuses must
+    /// leave the session on the node it was already on, not halfway to the next.
+    fn speak_then_follow(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        self.speak(node_id, text)?;
+        let Some(target) = self.flow.edge_targets(node_id).into_iter().next() else {
+            let refusal = Err(BotError::MissingTransition {
+                node: node_id.to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "speak_then_follow: returning an error to the caller");
+            return refusal;
+        };
+        self.current = Some(target);
+        Ok(())
+    }
+
+    /// Moves to whichever edge the `branch` node's predicate selects.
+    ///
+    /// A `branch` has exactly two edges and its predicate chooses between them,
+    /// so this is a lookup rather than a decision: the predicate is the whole of
+    /// the choice and it has already been validated at load.
+    fn take_branch(
+        &mut self,
+        when: &Predicate,
+        then: NodeId,
+        otherwise: NodeId,
+    ) -> Result<(), BotError> {
+        self.current = Some(if when.evaluate(&self.scope)? {
+            then
+        } else {
+            otherwise
+        });
+        Ok(())
+    }
+
+    /// Speaks a `refer` node's text, then ends with the referral it declares.
+    ///
+    /// The text is emitted before the outcome is set, and the only declared
+    /// outcome a `refer` node can carry is the referral itself -- validation
+    /// refuses anything else -- so this text is never spoken for an outcome that
+    /// contradicts it.
+    fn refer(&mut self, node_id: &str, text: &str) -> Result<(), BotError> {
+        self.speak(node_id, text)?;
+        self.finish(node_id)
+    }
+
+    /// Advances one node, and answers whether the session must stop and wait.
+    ///
+    /// `Ok(true)` is the ask: the only kind that stops the loop short of an
+    /// outcome. Each arm is the one step its kind performs, named below.
+    fn step(&mut self, node_id: &str, kind: NodeKind) -> Result<bool, BotError> {
+        match kind {
+            NodeKind::Say { text } => self.speak_then_follow(node_id, &text),
+            NodeKind::Ask { options, .. } => {
+                self.record_prompt(node_id, &options)?;
+                return Ok(true);
+            }
+            NodeKind::Branch {
+                when,
+                then,
+                otherwise,
+                ..
+            } => self.take_branch(&when, then, otherwise),
+            // The two terminal kinds that emit nothing before they end.
+            // Both read the outcome from the document rather than
+            // constructing it from the node, so a declared outcome is
+            // executed here and not only checked at load.
+            NodeKind::Handoff { .. } | NodeKind::End => self.finish(node_id),
+            NodeKind::Refer { text, .. } => self.refer(node_id, &text),
+            NodeKind::Route { dispatch, fallback } => {
+                self.current = Some(if self.last_utterance.is_some() {
+                    dispatch
+                } else {
+                    fallback
+                });
+                Ok(())
+            }
+        }?;
+        Ok(false)
     }
 
     /// End the session with the outcome the document gives one terminal node.
@@ -3783,9 +4160,11 @@ impl Session {
     /// `handoff` node was accepted by validation and ignored here.
     fn finish(&mut self, node_id: &str) -> Result<(), BotError> {
         let Some(outcome) = self.flow.effective_terminal(node_id) else {
-            return Err(BotError::MalformedFlow {
+            let refusal = Err(BotError::MalformedFlow {
                 cause: format!("node {node_id:?} reached with no terminal outcome"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "finish: returning an error to the caller");
+            return refusal;
         };
         self.terminal = Some(outcome);
         self.current = None;
@@ -3823,10 +4202,12 @@ impl Session {
                 limit,
             })?;
         if total > limit {
-            return Err(BotError::SessionRetentionExceeded {
+            let refusal = Err(BotError::SessionRetentionExceeded {
                 bytes: total,
                 limit,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "charge_retention: returning an error to the caller");
+            return refusal;
         }
         self.retained = total;
         Ok(())
@@ -3848,11 +4229,13 @@ impl Session {
     fn record(&mut self, node_id: &str, role: &str, text: &str) -> Result<(), BotError> {
         let record_bytes = self.limits.get(ResourceAxis::Record);
         if text.len() > record_bytes {
-            return Err(BotError::RecordTooLarge {
+            let refusal = Err(BotError::RecordTooLarge {
                 node: node_id.to_owned(),
                 bytes: text.len(),
                 limit: record_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "record: returning an error to the caller");
+            return refusal;
         }
         let cost = text
             .len()
@@ -3884,11 +4267,13 @@ impl Session {
         let bytes = prompt_bytes(options).unwrap_or(usize::MAX);
         let record_bytes = self.limits.get(ResourceAxis::Record);
         if bytes > record_bytes {
-            return Err(BotError::RecordTooLarge {
+            let refusal = Err(BotError::RecordTooLarge {
                 node: node_id.to_owned(),
                 bytes,
                 limit: record_bytes,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "record_prompt: returning an error to the caller");
+            return refusal;
         }
         let prompt = format!("Choose one: {}", options.join(", "));
         self.record(node_id, "assistant", &prompt)
@@ -4010,7 +4395,11 @@ where
         | (Value::Choice(left), Value::Choice(right)) => left.cmp(&right),
         (Value::Integer(left), Value::Integer(right)) => left.cmp(&right),
         (Value::Boolean(left), Value::Boolean(right)) => left.cmp(&right),
-        _ => return Err(BotError::PredicateTypeMismatch),
+        _ => {
+            let refusal = Err(BotError::PredicateTypeMismatch);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_expr: returning an error to the caller");
+            return refusal;
+        }
     };
     Ok(predicate(ordering))
 }

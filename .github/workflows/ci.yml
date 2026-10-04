@@ -32,10 +32,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
           components: clippy, rustfmt
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -71,10 +71,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
           components: rustfmt
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -94,6 +94,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Two shards of one nextest run: `--partition count:N/2` splits the suite by
+    # test, so the shards cover it exactly once between them. The suite was 269 s
+    # of a 308 s job; halved, the job is as long as one shard plus its build.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     # The simulation suites write a real file journal and `sync_all` it. On the
     # runner's disk those syncs queue behind each other; on tmpfs they cost
     # nothing and the syscalls, the code and every assertion are unchanged.
@@ -102,10 +109,10 @@ jobs:
       TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
           components: clippy
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -116,12 +123,19 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
-        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'
+        env:
+          PARTITION: count:${{ matrix.shard }}/2
+        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
+      # The three checks below are not part of the partitioned suite; they run
+      # once, on the first shard, rather than once per shard.
       - name: Deterministic simulation evidence
+        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane simulation-evidence
       - name: Doc tests
+        if: matrix.shard == 1
         run: cargo test --workspace --doc --locked
       - name: Debug doctor end-to-end journey
+        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane debug-e2e
 
   tests_nodefault:
@@ -132,10 +146,10 @@ jobs:
       TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -153,14 +167,20 @@ jobs:
     name: Tests (lgwks-bot full)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Four shards of one nextest run (542 s of a 571 s job), covering the suite
+    # exactly once between them.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -170,7 +190,9 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full
+        env:
+          PARTITION: count:${{ matrix.shard }}/4
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   bench_fairness:
     # Its own job: it builds a separate workspace root in release, and run after
@@ -201,10 +223,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -222,10 +244,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -243,10 +265,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -262,10 +284,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
           components: clippy
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -275,6 +297,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
+      # so 433 findings sat in shipped source while the name was advertised as
+      # an invariant nothing checked. It is a lane now, and it refuses on any
+      # finding rather than reporting a count.
+      - name: Scan reports zero findings
+        run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
@@ -310,10 +338,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -383,10 +411,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -423,10 +451,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -498,7 +526,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
           components: clippy
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
@@ -512,10 +540,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -534,10 +562,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -562,10 +590,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -591,10 +619,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Pin Rust 1.98.0
+      - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.98.0"
+          toolchain: "1.99.0"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:

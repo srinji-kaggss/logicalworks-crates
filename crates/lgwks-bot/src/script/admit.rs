@@ -6,7 +6,7 @@
 //! has to interpret. This one ends at a [`FlowError`] located at a step path,
 //! like every other failure a flow can have — because that is what a task body can
 //! actually act on. A run that admitted a proposal and got a refusal must be able
-//! to hand that refusal to `retry`, to [`Report`](crate::task::Report) and to a
+//! to hand that refusal to `retry`, to [`Report`] and to a
 //! log without translating it first, and a translation is where provenance
 //! quietly gets dropped.
 //!
@@ -312,7 +312,7 @@ const REFUSAL_SUB_STEP: &str = "refusal";
 
 /// Record a refusal through the run store, when this run has one.
 ///
-/// A hand-built [`Scope`] and a [`Host`](crate::task::Host) in local mode both
+/// A hand-built [`Scope`] and a [`Host`] in local mode both
 /// record nothing and claim nothing, which is the same honesty every other durable
 /// step keeps: no store means no run id, and no run id means nothing could be read
 /// back.

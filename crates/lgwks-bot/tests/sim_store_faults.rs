@@ -153,6 +153,123 @@ fn markers(dir: &Path, steps: u32) -> Result<Vec<u32>, Box<dyn Error>> {
 
 // ── INV-BOT-59: a read failure reaches the caller as the store ───────────────
 
+/// One tenant of the read-fault sweep: a fault armed on the store must reach the report as the store.
+fn read_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let steps = sim.rng().between(1, 4);
+    let warm = sim.rng().below(steps.saturating_add(1));
+    let scratch = Scratch::new("sim-read-fault")?;
+    let dir = scratch.join("store");
+    let plan = Staged {
+        dir: dir.clone(),
+        steps,
+    };
+    let expected = uninterrupted(steps);
+
+    let host = host_for(tenant, &dir)?;
+    let identity = identity_for(&host, steps);
+    let first = lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan.clone()));
+    assert_eq!(
+        first.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the first attempt must succeed before a read can fail"
+    );
+    assert_eq!(
+        first.output(),
+        Some(&expected),
+        "{tenant}: the first attempt's own output"
+    );
+    let run = first.run_id().ok_or("a stored run must name its run id")?;
+    drop(first);
+    drop(host);
+    assert_eq!(
+        markers(&dir, steps)?,
+        vec![1u32; usize::try_from(steps).unwrap_or(1)],
+        "{tenant}: every step's body ran exactly once on the first attempt"
+    );
+
+    // The replays before the fault: a compatible resume returns every
+    // recorded value without entering a body.
+    for replay in 0..warm {
+        let replaying = host_for(tenant, &dir)?;
+        let report = lgwks_bot::block_on(replaying.resume_under(
+            run,
+            &identity,
+            &staged_task()?,
+            plan.clone(),
+        ));
+        assert_eq!(
+            report.disposition(),
+            Disposition::Succeeded,
+            "{tenant}: warm replay {replay} must succeed, got {:?}",
+            report.error()
+        );
+    }
+    let before = markers(&dir, steps)?;
+
+    // The armed resume: the store's next step read fails.
+    let armed = host_for(tenant, &dir)?;
+    armed
+        .run_store()
+        .ok_or("a stored host keeps a store")?
+        .fail_next_index_read();
+    let refused =
+        lgwks_bot::block_on(armed.resume_under(run, &identity, &staged_task()?, plan.clone()));
+    assert_eq!(
+        refused.disposition(),
+        Disposition::Failed,
+        "{tenant}: a read failure is a failure, not a compatibility and not a replay"
+    );
+    let error = refused
+        .error()
+        .ok_or("a store that cannot be read must not succeed")?;
+    assert!(
+        !matches!(error, FlowError::Incompatible { .. }),
+        "{tenant}: a read failure must not be reported as a definition drift, got: {error}"
+    );
+    let refusal = store_refusal(error).ok_or(
+        "a read failure must reach the caller as FlowError::Store carrying the store's own error",
+    )?;
+    assert!(
+        matches!(refusal, StoreError::Storage { .. }),
+        "{tenant}: the wrapped refusal must be the device's own storage error, got: {refusal:?}"
+    );
+    assert_eq!(
+        markers(&dir, steps)?,
+        before,
+        "{tenant}: a refused step entered its body, so the fault did not stop it"
+    );
+    drop(armed);
+
+    // The reopen: a fresh handle over the untouched bytes replays.
+    let recovered = host_for(tenant, &dir)?;
+    let after = lgwks_bot::block_on(recovered.resume_under(run, &identity, &staged_task()?, plan));
+    assert_eq!(
+        after.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: a reopened store must recover, got {:?}",
+        after.error()
+    );
+    assert_eq!(
+        after.output(),
+        Some(&expected),
+        "{tenant}: the recovered resume replays the recorded sum"
+    );
+    assert_eq!(
+        markers(&dir, steps)?,
+        before,
+        "{tenant}: the recovering resume re-ran a durable step"
+    );
+
+    sim.record(tenant);
+    sim.trace.record_u64("steps", u64::from(steps));
+    sim.trace.record_u64("warm", u64::from(warm));
+    sim.trace
+        .record_u64("refused", shared::disposition_code(Disposition::Failed));
+    sim.trace
+        .record_u64("recovered", shared::disposition_code(after.disposition()));
+    Ok(())
+}
+
 /// A failed step read reaches the report as the store's own error, and a reopen
 /// recovers.
 ///
@@ -174,124 +291,7 @@ fn markers(dir: &Path, steps: u32) -> Result<Vec<u32>, Box<dyn Error>> {
 fn read_fault_reaches_the_report_as_the_store(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let steps = sim.rng().between(1, 4);
-            let warm = sim.rng().below(steps.saturating_add(1));
-            let scratch = Scratch::new("sim-read-fault")?;
-            let dir = scratch.join("store");
-            let plan = Staged {
-                dir: dir.clone(),
-                steps,
-            };
-            let expected = uninterrupted(steps);
-
-            let host = host_for(tenant, &dir)?;
-            let identity = identity_for(&host, steps);
-            let first =
-                lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan.clone()));
-            assert_eq!(
-                first.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the first attempt must succeed before a read can fail"
-            );
-            assert_eq!(
-                first.output(),
-                Some(&expected),
-                "{tenant}: the first attempt's own output"
-            );
-            let run = first.run_id().ok_or("a stored run must name its run id")?;
-            drop(first);
-            drop(host);
-            assert_eq!(
-                markers(&dir, steps)?,
-                vec![1u32; usize::try_from(steps).unwrap_or(1)],
-                "{tenant}: every step's body ran exactly once on the first attempt"
-            );
-
-            // The replays before the fault: a compatible resume returns every
-            // recorded value without entering a body.
-            for replay in 0..warm {
-                let replaying = host_for(tenant, &dir)?;
-                let report = lgwks_bot::block_on(replaying.resume_under(
-                    run,
-                    &identity,
-                    &staged_task()?,
-                    plan.clone(),
-                ));
-                assert_eq!(
-                    report.disposition(),
-                    Disposition::Succeeded,
-                    "{tenant}: warm replay {replay} must succeed, got {:?}",
-                    report.error()
-                );
-            }
-            let before = markers(&dir, steps)?;
-
-            // The armed resume: the store's next step read fails.
-            let armed = host_for(tenant, &dir)?;
-            armed
-                .run_store()
-                .ok_or("a stored host keeps a store")?
-                .fail_next_index_read();
-            let refused = lgwks_bot::block_on(armed.resume_under(
-                run,
-                &identity,
-                &staged_task()?,
-                plan.clone(),
-            ));
-            assert_eq!(
-                refused.disposition(),
-                Disposition::Failed,
-                "{tenant}: a read failure is a failure, not a compatibility and not a replay"
-            );
-            let error = refused
-                .error()
-                .ok_or("a store that cannot be read must not succeed")?;
-            assert!(
-                !matches!(error, FlowError::Incompatible { .. }),
-                "{tenant}: a read failure must not be reported as a definition drift, got: {error}"
-            );
-            let refusal = store_refusal(error).ok_or(
-                "a read failure must reach the caller as FlowError::Store carrying the store's own error",
-            )?;
-            assert!(
-                matches!(refusal, StoreError::Storage { .. }),
-                "{tenant}: the wrapped refusal must be the device's own storage error, got: {refusal:?}"
-            );
-            assert_eq!(
-                markers(&dir, steps)?,
-                before,
-                "{tenant}: a refused step entered its body, so the fault did not stop it"
-            );
-            drop(armed);
-
-            // The reopen: a fresh handle over the untouched bytes replays.
-            let recovered = host_for(tenant, &dir)?;
-            let after =
-                lgwks_bot::block_on(recovered.resume_under(run, &identity, &staged_task()?, plan));
-            assert_eq!(
-                after.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: a reopened store must recover, got {:?}",
-                after.error()
-            );
-            assert_eq!(
-                after.output(),
-                Some(&expected),
-                "{tenant}: the recovered resume replays the recorded sum"
-            );
-            assert_eq!(
-                markers(&dir, steps)?,
-                before,
-                "{tenant}: the recovering resume re-ran a durable step"
-            );
-
-            sim.record(tenant);
-            sim.trace.record_u64("steps", u64::from(steps));
-            sim.trace.record_u64("warm", u64::from(warm));
-            sim.trace
-                .record_u64("refused", shared::disposition_code(Disposition::Failed));
-            sim.trace
-                .record_u64("recovered", shared::disposition_code(after.disposition()));
+            read_fault_tenant(sim, tenant)?;
         }
         Ok(())
     };
@@ -316,6 +316,88 @@ const CURRENT_FORMAT: u8 = 2;
 /// assertion but the control.
 const VERSIONS: [u8; 6] = [1, 2, 3, 0, 7, 255];
 
+/// One tenant of the second store-fault sweep.
+fn second_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
+    let steps = sim.rng().between(1, 3);
+    let drawn = VERSIONS[usize::try_from(sim.rng().below(6)).unwrap_or(0)];
+    let scratch = Scratch::new("sim-format")?;
+    let dir = scratch.join("store");
+    let plan = Staged {
+        dir: dir.clone(),
+        steps,
+    };
+
+    let host = host_for(tenant, &dir)?;
+    let identity = identity_for(&host, steps);
+    let first = lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan));
+    assert_eq!(
+        first.disposition(),
+        Disposition::Succeeded,
+        "{tenant}: the store must be written before its version is rewritten"
+    );
+    let run = first.run_id().ok_or("a stored run must name its run id")?;
+    let path = host
+        .run_store()
+        .ok_or("a stored host keeps a store")?
+        .path()
+        .to_path_buf();
+    drop(first);
+    drop(host);
+
+    let mut bytes = std::fs::read(&path)?;
+    assert_eq!(
+        bytes[VERSION_AT], CURRENT_FORMAT,
+        "{tenant}: the shipped store must be written at the current version before it is re-stamped"
+    );
+    bytes[VERSION_AT] = drawn;
+    std::fs::write(&path, &bytes)?;
+    let before = std::fs::read(&path)?;
+
+    match RunStore::open(&path) {
+        Ok(store) => {
+            assert_eq!(
+                drawn, CURRENT_FORMAT,
+                "{tenant}: a store stamped with version {drawn} must not open"
+            );
+            assert_eq!(
+                store.record_count(run),
+                usize::try_from(steps).unwrap_or(1),
+                "{tenant}: the current version reads every record back"
+            );
+        }
+        Err(error) => {
+            assert_ne!(
+                drawn, CURRENT_FORMAT,
+                "{tenant}: the current version was refused: {error}"
+            );
+            let (found, expected) = format_version(&error).ok_or_else(|| -> Box<dyn Error> {
+                format!("{tenant}: an off-version store must be a version refusal, got: {error}")
+                    .into()
+            })?;
+            assert_eq!(
+                found, drawn,
+                "{tenant}: the refusal must name the version byte found"
+            );
+            assert_eq!(
+                expected, CURRENT_FORMAT,
+                "{tenant}: the refusal must name the version this build reads"
+            );
+            assert_eq!(
+                std::fs::read(&path)?,
+                before,
+                "{tenant}: the refusal moved bytes in a store it could not read"
+            );
+        }
+    }
+
+    sim.record(tenant);
+    sim.trace.record_u64("drawn", u64::from(drawn));
+    sim.trace
+        .record_u64("admitted", u64::from(drawn == CURRENT_FORMAT));
+    sim.trace.record_u64("steps", u64::from(steps));
+    Ok(())
+}
+
 /// A real store re-stamped with a drawn version byte: only `\x02` is admitted.
 ///
 /// The store is produced by the shipped writer, so every frame in it is a real
@@ -330,84 +412,7 @@ const VERSIONS: [u8; 6] = [1, 2, 3, 0, 7, 255];
 fn only_the_current_format_is_admitted(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let steps = sim.rng().between(1, 3);
-            let drawn = VERSIONS[usize::try_from(sim.rng().below(6)).unwrap_or(0)];
-            let scratch = Scratch::new("sim-format")?;
-            let dir = scratch.join("store");
-            let plan = Staged {
-                dir: dir.clone(),
-                steps,
-            };
-
-            let host = host_for(tenant, &dir)?;
-            let identity = identity_for(&host, steps);
-            let first =
-                lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan.clone()));
-            assert_eq!(
-                first.disposition(),
-                Disposition::Succeeded,
-                "{tenant}: the store must be written before its version is rewritten"
-            );
-            let run = first.run_id().ok_or("a stored run must name its run id")?;
-            let path = host
-                .run_store()
-                .ok_or("a stored host keeps a store")?
-                .path()
-                .to_path_buf();
-            drop(first);
-            drop(host);
-
-            let mut bytes = std::fs::read(&path)?;
-            assert_eq!(
-                bytes[VERSION_AT], CURRENT_FORMAT,
-                "{tenant}: the shipped store must be written at the current version before it is re-stamped"
-            );
-            bytes[VERSION_AT] = drawn;
-            std::fs::write(&path, &bytes)?;
-            let before = std::fs::read(&path)?;
-
-            match RunStore::open(&path) {
-                Ok(store) => {
-                    assert_eq!(
-                        drawn, CURRENT_FORMAT,
-                        "{tenant}: a store stamped with version {drawn} must not open"
-                    );
-                    assert_eq!(
-                        store.record_count(run),
-                        usize::try_from(steps).unwrap_or(1),
-                        "{tenant}: the current version reads every record back"
-                    );
-                }
-                Err(error) => {
-                    assert_ne!(
-                        drawn, CURRENT_FORMAT,
-                        "{tenant}: the current version was refused: {error}"
-                    );
-                    let (found, expected) = format_version(&error).ok_or_else(|| -> Box<dyn Error> {
-                        format!("{tenant}: an off-version store must be a version refusal, got: {error}")
-                            .into()
-                    })?;
-                    assert_eq!(
-                        found, drawn,
-                        "{tenant}: the refusal must name the version byte found"
-                    );
-                    assert_eq!(
-                        expected, CURRENT_FORMAT,
-                        "{tenant}: the refusal must name the version this build reads"
-                    );
-                    assert_eq!(
-                        std::fs::read(&path)?,
-                        before,
-                        "{tenant}: the refusal moved bytes in a store it could not read"
-                    );
-                }
-            }
-
-            sim.record(tenant);
-            sim.trace.record_u64("drawn", u64::from(drawn));
-            sim.trace
-                .record_u64("admitted", u64::from(drawn == CURRENT_FORMAT));
-            sim.trace.record_u64("steps", u64::from(steps));
+            second_fault_tenant(sim, tenant)?;
         }
         Ok(())
     };

@@ -593,22 +593,30 @@ impl PolitenessPolicy {
         decrease_percent: u32,
     ) -> Result<Self, PolitenessError> {
         if min_window == 0 {
-            return Err(PolitenessError::ZeroWindow);
+            let refusal = Err(PolitenessError::ZeroWindow);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if min_window > max_window {
-            return Err(PolitenessError::InvertedWindow {
+            let refusal = Err(PolitenessError::InvertedWindow {
                 min_window,
                 max_window,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if egress_window == 0 || egress_window > max_window {
-            return Err(PolitenessError::InvalidEgressWindow {
+            let refusal = Err(PolitenessError::InvalidEgressWindow {
                 egress_window,
                 max_window,
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         if decrease_percent == 0 || decrease_percent > 100 {
-            return Err(PolitenessError::InvalidDecreasePercent { decrease_percent });
+            let refusal = Err(PolitenessError::InvalidDecreasePercent { decrease_percent });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self {
             min_window,
@@ -951,7 +959,14 @@ impl Frontier {
         frontier
     }
 
-    /// The policy in force.
+    /// The politeness limits this frontier enforces.
+    ///
+    /// Fixed at construction -- [`Frontier::new`] is the only way one is chosen
+    /// and there is no setter -- so this answers "what was this run admitted
+    /// under", not "what could be raised to". A caller that wants a different
+    /// budget builds a different frontier: a reservation ledger is one
+    /// accounting, and changing its limits mid-flight would change what the
+    /// reservations it already issued mean.
     #[must_use]
     pub fn policy(&self) -> &PolitenessPolicy {
         &self.policy
@@ -1332,10 +1347,14 @@ impl Frontier {
     /// silently stays occupied for the rest of the run.
     fn verify(&self, permit: &InFlightPermit) -> Result<(), CompletionError> {
         if !Arc::ptr_eq(&permit.issuer, &self.issuer) {
-            return Err(CompletionError::ForeignPermit);
+            let refusal = Err(CompletionError::ForeignPermit);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify: returning an error to the caller");
+            return refusal;
         }
         if !self.reservations.contains(&permit.ordinal) {
-            return Err(CompletionError::UnknownPermit);
+            let refusal = Err(CompletionError::UnknownPermit);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify: returning an error to the caller");
+            return refusal;
         }
         Ok(())
     }

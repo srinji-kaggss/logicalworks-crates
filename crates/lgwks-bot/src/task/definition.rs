@@ -49,12 +49,12 @@
 //! version is bumped with them: [`STORE_FORMAT`] is `\x02` where `\x01` named the
 //! record without a definition identity. There is no migration path and there is
 //! none planned, deliberately. An old file is refused at open as
-//! [`StoreError::FormatVersion`](super::StoreError::FormatVersion), naming the
+//! [`StoreError::FormatVersion`], naming the
 //! version it declares and the version this build reads, rather than half-read:
 //! the only alternative is to read a record with no definition identity as one
 //! that had the default identity — which would make every pre-version resume look
 //! like an exactly-compatible one. It is a typed refusal of its own rather than
-//! [`StoreError::NotAStore`](super::StoreError::NotAStore), because that arm says
+//! [`StoreError::NotAStore`], because that arm says
 //! the bytes were never this store's and these were written by an earlier
 //! version of this crate: telling an operator their data is not their own is
 //! what makes someone delete a file a system is still relying on. The format has

@@ -333,7 +333,9 @@ impl Ladder {
     pub fn new(anchors: impl IntoIterator<Item = Anchor>) -> Result<Self, LadderError> {
         let mut sorted: Vec<Anchor> = anchors.into_iter().collect();
         if sorted.is_empty() {
-            return Err(LadderError::Empty);
+            let refusal = Err(LadderError::Empty);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         sorted.sort_unstable_by_key(|anchor| anchor.rank());
         sorted.dedup();
@@ -532,7 +534,9 @@ impl RecognitionVector {
         margin: f64,
     ) -> Result<Self, RecognitionError> {
         if !margin.is_finite() || !(0.0..=1.0).contains(&margin) {
-            return Err(RecognitionError::InvalidMargin { margin });
+            let refusal = Err(RecognitionError::InvalidMargin { margin });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
         }
         Ok(Self {
             scorer: Weighted::new(components, threshold)?,

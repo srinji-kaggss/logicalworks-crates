@@ -400,7 +400,9 @@ where
                     return Ok(0);
                 }
                 Fault::Permanent => {
-                    return Err(FlowError::failed("the seeded fault refused this level"));
+                    let refusal = Err(FlowError::failed("the seeded fault refused this level"));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "descend: returning an error to the caller");
+                    return refusal;
                 }
                 Fault::None => {}
             }
@@ -587,6 +589,31 @@ fn disposition_matches_the_fault(band: Band) -> TestResult {
 
 /// No step path is shared between two tenants, and a rerun for one tenant
 /// reproduces its keys.
+/// Builds one tenant's host, runs it, and returns the keys it took.
+///
+/// A helper rather than the loop body inline: as one block the loop built a
+/// host, resolved a ceiling, built a tree and ran it, so the three fallible
+/// steps a tenant needs sat in one statement next to the assertion that the
+/// keys it took belong to it. Splitting them keeps the assertion attached to
+/// what it is about.
+fn provision_and_observe(plan: &Plan, index: u32) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let name = format!("tenant-{index}");
+    let host = Host::builder(&name)?
+        .max_concurrent_tasks(NonZeroUsize::new(1).ok_or("a ceiling")?)
+        .default_deadline(std::time::Duration::from_millis(400))
+        .build()?;
+    let observed = Rc::new(Observed::default());
+    let tree = build(&host, plan, Rc::clone(&observed))?;
+    run(&host, &tree, 3);
+    for seen in observed.tenants.borrow().iter() {
+        assert_eq!(
+            seen, &name,
+            "a key taken inside the tree belongs to the host's tenant"
+        );
+    }
+    Ok(observed.keys.borrow().clone())
+}
+
 fn keys_never_collide_across_tenants(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
@@ -594,21 +621,7 @@ fn keys_never_collide_across_tenants(band: Band) -> TestResult {
         let mut all: Vec<Vec<(String, String)>> = Vec::new();
 
         for index in 0..tenants {
-            let name = format!("tenant-{index}");
-            let host = Host::builder(&name)?
-                .max_concurrent_tasks(NonZeroUsize::new(1).ok_or("a ceiling")?)
-                .default_deadline(std::time::Duration::from_millis(400))
-                .build()?;
-            let observed = Rc::new(Observed::default());
-            let tree = build(&host, &plan, Rc::clone(&observed))?;
-            run(&host, &tree, 3);
-            all.push(observed.keys.borrow().clone());
-            for seen in observed.tenants.borrow().iter() {
-                assert_eq!(
-                    seen, &name,
-                    "a key taken inside the tree belongs to the host's tenant"
-                );
-            }
+            all.push(provision_and_observe(&plan, index)?);
         }
 
         // Every tenant's key set is disjoint from every other's.

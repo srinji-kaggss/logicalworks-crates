@@ -152,18 +152,22 @@ fn measure(
         let fired = bot.tick()?;
         let elapsed = started.elapsed();
         if fired > 0 {
-            return Err(
+            let refusal = Err(
                 "a measurement tick fired an effect; the cost under test is the \
-                        observation phase alone"
+                    observation phase alone"
                     .into(),
             );
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure: returning an error to the caller");
+            return refusal;
         }
         if bot.tick_report().stalled_any() {
-            return Err(
+            let refusal = Err(
                 "a measurement tick reported a stall; this table is about the \
-                        ordinary tick where every source answers"
+                    ordinary tick where every source answers"
                     .into(),
             );
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "measure: returning an error to the caller");
+            return refusal;
         }
         watchdogs = watchdogs.saturating_add(bot.tick_report().watchdogs());
         samples.push(elapsed.as_micros());
