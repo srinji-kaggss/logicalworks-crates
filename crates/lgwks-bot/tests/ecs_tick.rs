@@ -1568,6 +1568,71 @@ impl Execute for Noted {
     }
 }
 
+/// T07, the subsequent change: a source moves to a new value while a sibling is
+/// refusing, and the sibling then recovers. The moved source's update was never
+/// committed, so it runs exactly once on recovery: not lost with the aborted
+/// observation group, and not run again once it has committed.
+#[test]
+fn a_moved_source_runs_exactly_once_after_a_sibling_recovers() -> TestResult {
+    let moving = Rc::new(Cell::new(17));
+    let refusing = Rc::new(Cell::new(true));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = Bot::builder("moved-source-sibling-recovery")
+        .observe(Dial {
+            value: Rc::clone(&moving),
+        })
+        .on(|_observed: &u32| true, Noted(Rc::clone(&seen)))
+        .observe(PollProbe {
+            domain: "test::poll_refuses_twice",
+            value: 23,
+            polls: Rc::new(Cell::new(0)),
+            refuse_next: Rc::clone(&refusing),
+        })
+        .on(|_observed: &u32| true, Noted(Rc::clone(&seen)))
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?;
+
+    // The initial change: the sibling refuses, then recovers, and both fire.
+    assert!(
+        bot.tick().is_err(),
+        "the first tick reports the sibling's refusal"
+    );
+    assert_eq!(bot.tick()?, 2, "both sources fire once the sibling recovers");
+    assert_eq!(*seen.borrow(), vec![17, 23]);
+
+    // The subsequent change: the source moves while the sibling refuses again.
+    moving.set(18);
+    refusing.set(true);
+    let aborted = bot.tick();
+    assert!(
+        matches!(aborted, Err(BotError::DomainError { ref domain, .. }) if domain == "test::poll_refuses_twice"),
+        "the second refusal is reported exactly, got {aborted:?}"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        vec![17, 23],
+        "an aborted observation admits no action, including for the moved source"
+    );
+
+    assert_eq!(
+        bot.tick()?,
+        1,
+        "only the moved source fires on recovery; the sibling's value did not change"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        vec![17, 23, 18],
+        "the update that was held back runs with its own value"
+    );
+    assert_eq!(
+        bot.tick()?,
+        0,
+        "a committed update is never run a second time"
+    );
+    assert_eq!(*seen.borrow(), vec![17, 23, 18]);
+    Ok(())
+}
+
 /// A sibling's first refusal must not publish or cache away this source's
 /// successful observation; the next public tick must poll it again and run
 /// the action with the exact observed value.
@@ -1705,6 +1770,42 @@ fn an_abandoned_entry_is_never_a_quiet_tick() -> TestResult {
     assert!(
         !lonely.pending().is_empty(),
         "and it stays reported rather than being dropped"
+    );
+    Ok(())
+}
+
+/// T10, the skipped arm and its contrast. An entry whose condition was false is a
+/// *decided* fact: it ran nothing, so it left nothing unsettled, and the entry
+/// behind it runs. That is the other side of an abandoned or unknown predecessor,
+/// which blocks its successors because something may have happened. A successor
+/// is held back by an effect that is in doubt, never merely because a guard in
+/// front of it did not hold.
+#[test]
+fn a_skipped_entry_does_not_block_its_successor() -> TestResult {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut chained = Bot::builder("skipped-then-run")
+        .observe(Dial {
+            value: Rc::new(Cell::new(1)),
+        })
+        .on(|_observed: &u32| false, Noted(Rc::new(RefCell::new(Vec::new()))))
+        .on(|_observed: &u32| true, Noted(Rc::clone(&log)))
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?;
+
+    assert_eq!(
+        chained.tick()?,
+        1,
+        "only the entry whose condition held fires"
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![1],
+        "the successor of a skipped entry ran with the observed value"
+    );
+    assert!(
+        chained.pending().is_empty(),
+        "a skipped entry leaves nothing held: {:?}",
+        chained.pending().len()
     );
     Ok(())
 }

@@ -705,6 +705,77 @@ fn conflicting_writes_to_one_key_are_serialized_and_idempotent() -> TestResult {
     Ok(())
 }
 
+/// T28, the concurrent half: many writers of one key, released together behind a
+/// barrier, commit exactly one artifact per tenant, and the two tenants that write
+/// the same bytes at the same moment never share a shelf, a count or a commit.
+#[test]
+fn concurrent_writers_of_one_key_commit_exactly_once_per_tenant() -> TestResult {
+    const WRITERS_PER_TENANT: usize = 32;
+    let store = ArtifactStore::new();
+    let bytes = b"one report, written by many hands at once".to_vec();
+    let barrier = std::sync::Barrier::new(WRITERS_PER_TENANT * 2);
+
+    let joined = std::thread::scope(|scope| {
+        let handles = (0..WRITERS_PER_TENANT * 2)
+            .map(|index| {
+                let store = store.clone();
+                let bytes = &bytes;
+                let barrier = &barrier;
+                let tenant = if index % 2 == 0 { TENANT } else { OTHER_TENANT };
+                scope.spawn(move || {
+                    barrier.wait();
+                    (tenant, store.write(tenant, bytes).map_err(|error| error.to_string()))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+
+    let mut stored = std::collections::BTreeMap::<&str, usize>::new();
+    let mut already = std::collections::BTreeMap::<&str, usize>::new();
+    for writer in joined {
+        let (tenant, outcome) = writer.map_err(|_| "a writer thread panicked")?;
+        match outcome? {
+            WriteOutcome::Stored { .. } => {
+                let count = stored.entry(tenant).or_default();
+                *count = count.saturating_add(1);
+            }
+            WriteOutcome::AlreadyPresent { .. } => {
+                let count = already.entry(tenant).or_default();
+                *count = count.saturating_add(1);
+            }
+            other => return Err(format!("unexpected outcome for {tenant}: {other:?}").into()),
+        }
+    }
+    let digest = ArtifactStore::digest_of(&bytes)?;
+    for tenant in [TENANT, OTHER_TENANT] {
+        assert_eq!(
+            stored.get(tenant).copied(),
+            Some(1),
+            "{tenant}: exactly one of the racing writers commits"
+        );
+        assert_eq!(
+            already.get(tenant).copied(),
+            Some(WRITERS_PER_TENANT - 1),
+            "{tenant}: every other writer is told it stored nothing"
+        );
+        assert_eq!(
+            store.writers(tenant, &digest),
+            u64::try_from(WRITERS_PER_TENANT)?,
+            "{tenant}: the receipt counts only this tenant's writers"
+        );
+        assert_eq!(
+            store.artifacts(tenant),
+            1,
+            "{tenant}: one artifact was committed for the whole race"
+        );
+    }
+    Ok(())
+}
+
 /// Reads progress while a write is in flight, and a write to one key does not
 /// block a read of a different key.
 #[test]

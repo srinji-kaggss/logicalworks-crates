@@ -890,6 +890,75 @@ fn an_overflowing_trail_counts_what_it_dropped() -> TestResult {
     Ok(())
 }
 
+/// T36, the failure half: the trail overflows *and* the run fails, with a client
+/// that never reads progress while it runs. The terminal state is still the
+/// authoritative one: the disposition, the error located at the failing item, the
+/// count of what the ring dropped, and the capacity it could have retained.
+#[test]
+fn an_overflowing_trail_still_reports_the_terminal_failure() -> TestResult {
+    const CAPACITY: usize = 4;
+    const ITEMS: u32 = 20;
+    const FAILING: u32 = 15;
+    let host = Host::builder("acme")?
+        .progress_capacity(CAPACITY)
+        .default_deadline(Duration::from_secs(30))
+        .build()?;
+
+    let walk = task("walk", |scope: Scope, items: Vec<u32>| async move {
+        each::<_, u32, _, _>(
+            &scope,
+            "page",
+            NonZeroUsize::new(1),
+            items,
+            |step, item| async move {
+                step.checkpoint()?;
+                if item == FAILING {
+                    return Err(FlowError::failed("page refused"));
+                }
+                Ok(item)
+            },
+        )
+        .await
+    })?;
+
+    // One call and one report: no progress channel, no polling loop.
+    let report: Report<Vec<u32>> = drive(host.run(&walk, (0..ITEMS).collect()));
+    assert_eq!(
+        report.disposition(),
+        Disposition::Failed,
+        "an overflowing trail does not hide the failure"
+    );
+    assert!(report.output().is_none(), "a failed run has no output");
+    let error = report
+        .error()
+        .ok_or("a failed run must carry its error")?;
+    assert!(
+        error.at().ends_with(&format!("page#{FAILING}")),
+        "the error is located at the failing item, not at the end of the trail: {}",
+        error.at()
+    );
+    assert_eq!(
+        report.steps().len(),
+        CAPACITY,
+        "the trail is bounded by the host's declared capacity"
+    );
+    assert!(
+        report.dropped_steps() > 0,
+        "what the ring dropped is counted, not hidden"
+    );
+    assert_eq!(
+        report.progress_capacity(),
+        CAPACITY,
+        "the report states what it could have retained"
+    );
+    assert_eq!(
+        report.effects(),
+        EffectKnowledge::None,
+        "a local task still claims no external effect"
+    );
+    Ok(())
+}
+
 /// Every ceiling the host resolves from is finite and readable, and one outside
 /// its declared bound is refused at build time.
 #[test]
