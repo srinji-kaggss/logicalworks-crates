@@ -97,11 +97,20 @@ posture stood down, and `check` exits 2 — identically to `enforce = true`. The
 verdict is therefore a function of the refusals alone; flipping that one token
 cannot change a build. See issue #204.
 
-`vendor check` is the physical counterpart of the register. The register states
-which edges are owned, the tree in `vendor/` states which bytes the offline
-build resolves, and the subcommand binds the two by hash. The tree sits at the
-workspace root so every repository here resolves one physical copy. It is
-outside all package directories, so `cargo package` never ships it.
+`vendor check` is the physical counterpart of the register: the register states
+which edges are owned, a vendored tree states which bytes an offline build
+resolves, and the subcommand binds the two by hash. **Status in this repository,
+unresolved:** `vendor/` is present (294 directories, 12,240 tracked files) but
+`.cargo/config.toml` names no `[source.vendored-sources]`, so no build resolves
+from it and `lgwks-deps vendor check .` refuses with "names no
+[source.vendored-sources] directory". Nothing here makes repositories share one
+physical copy. The tree is outside all package directories, so `cargo package`
+never ships it.
+
+`tier` is read in exactly one place: an approval at the `vendor` tier whose
+authored edge still resolves from a registry or git source is refused by name as
+`VendorTierConflict`. That is the whole of the control. The gate does not prove a
+`boundary` approval is not a vendored crate, and it does not review anything.
 
 `debug` is the cargo-doctor path for observability: install the default
 `lgwks_std::trace` debugger, emit lifecycle events, and refuse if the SDK

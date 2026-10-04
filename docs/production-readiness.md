@@ -217,8 +217,11 @@ Generalized axis is the bulk of the remaining work on this crate.
 
 **✅ — the seams are real and are load-bearing.**
 
-- `lgwks_deps` is a dependency storefront with tiered admission
-  (`boundary` / `vendor` only) and a checked `APPROVED.toml`. No crate authors a
+- `lgwks_deps` is a dependency storefront with a closed tier vocabulary
+  (`boundary` / `vendor`) and a checked `APPROVED.toml`. The tier is enforced
+  in one respect only: a `vendor` approval over a registry or git edge is
+  refused (`VendorTierConflict`). Admission is otherwise decided by owner,
+  source, origin, requirement, features, scope and licence, not by tier. No crate authors a
   `tokio` edge; the async surface is a facade reached through the storefront.
   A build cannot acquire an unaudited dependency without the gate refusing.
 - `EffectJournal` is a trait, and `DurableAck::new` is public specifically

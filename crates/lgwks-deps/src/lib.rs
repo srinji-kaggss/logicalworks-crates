@@ -400,6 +400,19 @@ pub enum Refusal {
         /// Source class the authored edge actually resolves from.
         source: String,
     },
+    /// A workspace member or an approval owner names a surface outside the
+    /// closed set INV-DEP-1 enumerates.
+    ///
+    /// The gate is membership-driven, so a sixth crate would otherwise be
+    /// audited like any other and an `owner = "lgwks_rogue"` approval would
+    /// pass an identifier check. This is the refusal that makes the surface
+    /// list a closed vocabulary rather than a sentence.
+    UnknownSurface {
+        /// The member package or owner name that is not a recognised surface.
+        krate: String,
+        /// Where it was found: `workspace member` or `approval owner`.
+        role: String,
+    },
     /// `[policy] enforce = false` was used to turn a tree that *actually
     /// carries refusals* into a passing build.
     ///
@@ -556,6 +569,16 @@ impl fmt::Display for Refusal {
                  {source}; vendor means audited source checked into this workspace, \
                  not a registry edge"
             ),
+            Self::UnknownSurface {
+                ref krate,
+                ref role,
+            } => write!(
+                formatter,
+                "{krate} is a {role} but not one of the surfaces INV-DEP-1 \
+                 enumerates ({}); a new surface is a decision to record there, \
+                 not a crate to add",
+                SURFACES.join(", ")
+            ),
             Self::AdoptionModeRefusals { refusals } => write!(
                 formatter,
                 "[policy] enforce = false stood down {refusals} dependency-edge \
@@ -591,7 +614,8 @@ impl Refusal {
             | Self::UnusedApproval { ref krate, .. }
             | Self::FrozenSurfaceTier { ref krate, .. }
             | Self::LicenseNotAccepted { ref krate, .. }
-            | Self::VendorTierConflict { ref krate, .. } => krate,
+            | Self::VendorTierConflict { ref krate, .. }
+            | Self::UnknownSurface { ref krate, .. } => krate,
             Self::AdoptionModeRefusals { .. } => "<policy>",
         }
     }
@@ -1157,6 +1181,48 @@ fn frozen_surface_tier_refusals(register: &Contract) -> Vec<Refusal> {
         .collect()
 }
 
+/// The closed set of workspace surfaces INV-DEP-1 enumerates: the three
+/// dependency surfaces, the standalone parser and the proc-macro crate.
+const SURFACES: [&str; 5] = [
+    "lgwks_std",
+    "lgwks_bot",
+    "lgwks_deps",
+    "lgwks_ast",
+    "lgwks_macros",
+];
+
+/// The repository whose workspace [`SURFACES`] describes. The vocabulary is this
+/// repository's own, so it binds only a register that declares it; the gate also
+/// audits other repositories, whose members are theirs to name.
+const SURFACE_REPOSITORY: &str = "https://github.com/srinji-kaggss/logicalworks-crates";
+
+/// Every workspace member and every approval owner outside [`SURFACES`], as
+/// one refusal each, for the register that declares [`SURFACE_REPOSITORY`].
+fn surface_refusals(members: &[String], register: &Contract) -> Vec<Refusal> {
+    if register.repository.as_deref() != Some(SURFACE_REPOSITORY) {
+        return Vec::new();
+    }
+    let unknown = |name: &str| !SURFACES.contains(&name);
+    let members = members
+        .iter()
+        .filter(|name| unknown(name))
+        .map(|name| ("workspace member", name.as_str()));
+    let mut owners: Vec<&str> = register.approvals().map(|entry| entry.owner()).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    let owners = owners
+        .into_iter()
+        .filter(|name| unknown(name))
+        .map(|name| ("approval owner", name));
+    members
+        .chain(owners)
+        .map(|(role, name)| Refusal::UnknownSurface {
+            krate: name.to_owned(),
+            role: role.to_owned(),
+        })
+        .collect()
+}
+
 /// Audits authored direct dependency edges against semantic ownership.
 ///
 /// Five questions, each answered from a different evidence: is every frozen
@@ -1494,9 +1560,10 @@ pub fn check_verdict(
     // so -- the failure `lock::parse` exists to refuse, reached only by the two
     // commands that happened to call it.
     lock::parse(&read(&lock_path)?).map_err(GateError::Lock)?;
-    let edges = metadata::read(root).map_err(GateError::Metadata)?;
-    Ok(edges.map(|edges| {
-        let refusals = audit_direct(&edges, &register);
+    let edges = metadata::read_with_members(root).map_err(GateError::Metadata)?;
+    Ok(edges.map(|(edges, members)| {
+        let mut refusals = audit_direct(&edges, &register);
+        refusals.extend(surface_refusals(&members, &register));
         Verdict {
             register,
             refusals,
@@ -1612,6 +1679,15 @@ mod tests {
         source: &str,
         origin: Option<&str>,
     ) -> Result<Contract, contract::ContractError> {
+        register_tiered("boundary", source, origin)
+    }
+
+    /// [`register_with`] for an approval claiming `tier`.
+    fn register_tiered(
+        tier: &str,
+        source: &str,
+        origin: Option<&str>,
+    ) -> Result<Contract, contract::ContractError> {
         let origin_line = origin
             .map(|value| format!("origin = \"{value}\"\n"))
             .unwrap_or_default();
@@ -1620,7 +1696,7 @@ mod tests {
                 "[policy]\nenforce = true\n\n",
                 "[[approved]]\n",
                 "crate = \"engine\"\n",
-                "tier = \"boundary\"\n",
+                "tier = \"{tier}\"\n",
                 "version = \"1.0\"\n",
                 "owner = \"app\"\n",
                 "capability = \"engine.core\"\n",
@@ -1634,6 +1710,7 @@ mod tests {
                 "approved_on = \"2026-09-30\"\n",
                 "review = \"tests/origin_binding.rs\"\n",
             ),
+            tier = tier,
             source = source,
             origin = origin_line,
         ))
@@ -1644,6 +1721,88 @@ mod tests {
         let mut edge = edge("app", "engine", "1.0");
         edge.source = source;
         edge
+    }
+
+    /// [`REGISTER`] declaring the repository the surface vocabulary binds.
+    fn surface_register() -> String {
+        REGISTER.replacen(
+            "enforce = true\n",
+            &format!("enforce = true\nrepository = \"{SURFACE_REPOSITORY}\"\n"),
+            1,
+        )
+    }
+
+    /// Issue #207: an approval owned by a surface INV-DEP-1 does not list is
+    /// refused by name, where the identifier check alone admitted it.
+    #[test]
+    fn a_rogue_approval_owner_is_refused_by_name() -> TestResult {
+        let register = Contract::parse(&surface_register().replace("lgwks_std", "lgwks_rogue"))?;
+        let refusals = surface_refusals(&[], &register);
+        assert_eq!(
+            refusals,
+            vec![Refusal::UnknownSurface {
+                krate: "lgwks_rogue".into(),
+                role: "approval owner".into(),
+            }]
+        );
+        assert!(
+            refusals[0].to_string().contains("lgwks_rogue"),
+            "the refusal names the rogue surface"
+        );
+        Ok(())
+    }
+
+    /// Issue #207: a sixth workspace member is refused by name, and the five
+    /// real surfaces are not.
+    #[test]
+    fn a_sixth_workspace_member_is_refused_by_name() -> TestResult {
+        let register = Contract::parse(&surface_register())?;
+        let mut members: Vec<String> = SURFACES.iter().map(|name| (*name).to_owned()).collect();
+        assert!(
+            surface_refusals(&members, &register).is_empty(),
+            "the five enumerated surfaces are admitted"
+        );
+        members.push("lgwks_sixth".into());
+        assert_eq!(
+            surface_refusals(&members, &register),
+            vec![Refusal::UnknownSurface {
+                krate: "lgwks_sixth".into(),
+                role: "workspace member".into(),
+            }]
+        );
+        Ok(())
+    }
+
+    /// Issue #210: `tier` is read. A `vendor` approval over an edge that
+    /// resolves from a registry is refused by name, because nothing was checked
+    /// into the workspace for it to describe.
+    #[test]
+    fn a_vendor_tier_approval_over_a_registry_edge_is_refused_by_name() -> TestResult {
+        let register = register_tiered("vendor", "registry", None)?;
+        let edge = app_edge(metadata::DependencySource::Registry(
+            "registry+https://github.com/rust-lang/crates.io-index".into(),
+        ));
+        assert!(
+            audit_direct(&[edge], &register).contains(&Refusal::VendorTierConflict {
+                krate: "engine".into(),
+                source: "registry".into(),
+            }),
+            "a vendor-tier approval must not admit a registry edge"
+        );
+        Ok(())
+    }
+
+    /// The other side of the same reader: a vendored crate is a path
+    /// dependency, and a `vendor` approval over one is the ordinary case.
+    #[test]
+    fn a_vendor_tier_approval_over_a_path_edge_is_admitted() -> TestResult {
+        let register = register_tiered("vendor", "path", Some("../vendor/engine"))?;
+        let edge = app_edge(metadata::DependencySource::Path("../vendor/engine".into()));
+        assert!(
+            audit_direct(&[edge], &register).is_empty(),
+            "a vendored path edge under a vendor approval is admitted"
+        );
+        Ok(())
     }
 
     #[test]
