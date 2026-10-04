@@ -38,13 +38,8 @@ lto = true
 # 2026-09-30). `debug-assertions` and `overflow-checks` are separate settings
 # and stay on, so every assertion and overflow trap still fires. `build`,
 # `check` and `clippy` use `dev` and are unchanged.
-#
-# `debug = "line-tables-only"` keeps file/line in panics and backtraces and drops
-# the variable and type debuginfo that dominated the link of ~100 test binaries
-# (CI build step 162 s per shard on 2026-10-04, repeated in every shard).
 [profile.test]
 opt-level = 1
-debug = "line-tables-only"
 
 # Shared lint contract: every member opts in with `[lints] workspace = true`.
 # Mirrors the crate-level attributes the crates already carried, plus
