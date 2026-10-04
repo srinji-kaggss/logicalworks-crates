@@ -119,7 +119,7 @@ required = true
 # The storefront consumer builds run in their own lane and CI job: they are
 # nested cargo builds that serialize on one target-directory lock, and in the
 # Tests job they alone held the step at 441 s of a 513 s job.
-# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
+# CI runs this as three shards by setting PARTITION=count:N/3; unset, it is the
 # whole suite.
 command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run all workspace tests"
@@ -162,7 +162,7 @@ id = "tests-bot-full"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# CI runs this as four shards by setting PARTITION=count:N/4; unset, it is the
+# CI runs this as six shards by setting PARTITION=count:N/6; unset, it is the
 # whole suite.
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot async runner tests"

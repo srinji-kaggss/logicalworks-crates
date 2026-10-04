@@ -94,13 +94,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Two shards of one nextest run: `--partition count:N/2` splits the suite by
-    # test, so the shards cover it exactly once between them. The suite was 269 s
-    # of a 308 s job; halved, the job is as long as one shard plus its build.
+    # Three shards of one nextest run: `--partition count:N/3` splits the suite by
+    # test, so the shards cover it exactly once between them. Two shards left the
+    # slowest job at 265 s on main (2026-10-04), over the 5-minute gate.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     # The simulation suites write a real file journal and `sync_all` it. On the
     # runner's disk those syncs queue behind each other; on tmpfs they cost
     # nothing and the syscalls, the code and every assertion are unchanged.
@@ -124,7 +124,7 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Run all workspace tests
         env:
-          PARTITION: count:${{ matrix.shard }}/2
+          PARTITION: count:${{ matrix.shard }}/3
         run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
       # The three checks below are not part of the partitioned suite; they run
       # once, on the first shard, rather than once per shard.
@@ -167,12 +167,13 @@ jobs:
     name: Tests (lgwks-bot full)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Four shards of one nextest run (542 s of a 571 s job), covering the suite
-    # exactly once between them.
+    # Six shards of one nextest run, covering the suite exactly once between
+    # them. Four shards left the slowest job at 331 s on main (2026-10-04), over
+    # the 5-minute gate.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     env:
       TMPDIR: /dev/shm
     steps:
@@ -191,7 +192,7 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
         env:
-          PARTITION: count:${{ matrix.shard }}/4
+          PARTITION: count:${{ matrix.shard }}/6
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   bench_fairness:
