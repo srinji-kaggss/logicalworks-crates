@@ -21,11 +21,11 @@ distinguish it from a task runner:
 cargo add lgwks_bot
 ```
 
-**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `0.8.0`, the third
-2026-09-30 cut. `0.7.0` is the previous tag and crates.io version, and it
-exports every module this README names, `script` included. `0.8.0` makes
-`domain::net::NetState::body` a method (the field is crate-private) and moves
-with `lgwks_std 0.10.0`, whose `json` it re-exports. Check `CHANGELOG.md` for the
+**Version boundary.** `crates/lgwks-bot/Cargo.toml` reads `1.0.0`, the first
+stable cut. `0.8.0` is the previous tag and crates.io version, and it exports
+every module this README names, `script` included. `1.0.0` changes no API
+relative to `0.8.0` and moves with `lgwks_std 1.0.0`, whose `json` it
+re-exports. Check `CHANGELOG.md` for the
 release that carries a symbol before depending on it.
 
 ## Quick start

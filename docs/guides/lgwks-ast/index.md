@@ -1,7 +1,7 @@
 # lgwks_ast consumer guide
 
 One AST type across several languages, with grammar selection by cargo feature
-and bounded traversal. Current version: `0.4.0`, MSRV Rust 1.98.0, edition 2024.
+and bounded traversal. Current version: `1.0.0`, MSRV Rust 1.98.0, edition 2024.
 
 ```sh
 cargo add lgwks_ast
@@ -21,19 +21,19 @@ build enables seven:
 
 ```toml
 [dependencies]
-lgwks_ast = "0.4.0"    # rust, python, typescript, javascript, go, java, swift
+lgwks_ast = "1"    # rust, python, typescript, javascript, go, java, swift
 ```
 
 Add the rest by name, or take everything:
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.4.0", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
+lgwks_ast = { version = "1", features = ["lang-c", "lang-cpp", "lang-scala", "lang-kotlin", "lang-tsx"] }
 ```
 
 ```toml
 [dependencies]
-lgwks_ast = { version = "0.4.0", features = ["full"] }
+lgwks_ast = { version = "1", features = ["full"] }
 ```
 
 `full` enables all 28 grammars. A language whose feature is off does not exist in
