@@ -53,6 +53,43 @@ gate still does not pass: #99, #107 and #108 remain unrun, and no p50/p95/p99
 SLO has been measured on the named VPS profile, so the verdict above is
 unchanged. The next regression is still where `INVARIANTS.md` says it is.
 
+**Update, 2026-10-04.** What moved, each with the test or run that moved it:
+
+- **Journal status stopped destroying information** (#257, #259, #260). A failed
+  verification is now `AttemptStatus::VerificationFailed` instead of folding into
+  `Applied`; `Verified` can be superseded by a later verification, so a verdict can
+  go stale and say so; `Recovered` exposes the latest predicate, version and
+  observation digest, and a per-attempt history with journal positions. Real
+  file-backed reopen tests: `a_failed_verification_survives_a_reopen_as_its_own_state`
+  and `a_verdict_is_revised_by_a_later_verification_after_a_reopen`.
+- **`Status::Attested` is bound to the repository** (#258). A recorded revision must
+  be one commit in the history of `HEAD` and the enforcer must be unchanged since,
+  or the entry is refused; where Git cannot answer, it is refused. Five scratch-repo
+  tests in `lgwks_deps::invariants`.
+- **Acceptance rows T07, T10, T28 and T36** each gained the test the spec text asks
+  for. By the coverage map taken earlier in this work, that moves four rows from
+  partial to covered; eight stay partial.
+- **The authoring contract (#87, §7 item 6) was measured four ways**, not argued:
+  160 fixed-model trials across the old surface, the facade, the facade plus
+  `FanOut`, and the `futures` crate. See `bench/ai-authoring/README.md`. The finding
+  is unflattering: on the two tasks the oracle asks, the ecosystem standard is the
+  better authoring surface (39/40, no off-sheet code, 0.15 repairs, 37 lines), and
+  only 12 of 40 facade solutions used the facade. The oracle does not ask for what
+  `lgwks_bot` adds over `futures`, so this does not say the crate has no case; it
+  says the case has to be measured on tasks that ask for it.
+- **Two gaps a real downstream migration found are closed**: `ProcessSpec` can send
+  a stream to a file, and the runtime `Builder` can set the worker stack size. The
+  migration itself (Keel, 64 compile errors to 0, 4,035 unit tests passing) is in
+  `docs/guides/lgwks-bot/migrating-to-1-0.md`.
+- **Multi-tenant (§4.8) has negative tests at the `Auth` boundary under
+  concurrency**: sixteen threads, two grant sets, 256 rounds, and the proof-cover
+  checks in both directions.
+
+What did not move: hyperscale (§4.2) is still not measured at any level, CI is
+still over five minutes, process containment is still Unix-only, the seeded sweeps
+still have no shrinking, and `process_escape`'s intermittent failure is still
+unexplained. The verdict above is unchanged.
+
 Everything below is the reasoning behind that sentence.
 
 ## 2. The claim under test
@@ -338,16 +375,23 @@ not a cross-platform claim.
 
 ### 4.8 Multi-tenant — isolated under concurrent use
 
-**❌ — not covered at all.**
+**⚠️ — covered at the stated boundaries, with the missing half named.**
 
-`GrantSet` is a per-bot capability snapshot and `Auth` is a per-call proof, so
-the *mechanism* for isolation exists. There are no cross-tenant isolation tests,
-no negative tests that one tenant's grant cannot reach another's action, and no
-concurrent-use test where two tenants' bots share a process.
+`GrantSet` is a per-bot capability snapshot and `Auth` is a per-call proof. Two-
+identity tests now exist at: the `Auth` boundary under concurrency
+(`authority::a_tenant_without_the_grant_is_refused_while_the_other_is_served`,
+sixteen threads and 256 rounds, refusals named, and
+`a_proof_minted_for_one_tenant_does_not_cover_the_others_grant` in both
+directions); the artifact store (`proposal::two_tenants_on_one_digest_stay_isolated`
+and, racing, `concurrent_writers_of_one_key_commit_exactly_once_per_tenant`);
+request keys (`request_key::two_tenants_never_share_a_request_run`); forced
+refreshes (`observe_refresh`), the journal at scale
+(`journal_scale::concurrent_tenant_appends_scale_with_isolation`), clocks
+(`sim_clock_wiring`) and inspection (`inspect_wiring`).
 
-*To close it:* negative cross-tenant tests at the `Auth` boundary and a
-concurrent two-tenant journey. The type-level design makes this tractable; the
-tests do not exist.
+*Not covered:* the same two tenants through one shared durable journal under a
+mid-run kill, and any quota or noisy-neighbour measurement. Isolation of identity
+and data is tested; isolation of *capacity* is not.
 
 ### 4.9 Performance — fastest correct implementation
 

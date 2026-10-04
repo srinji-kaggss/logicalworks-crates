@@ -39,6 +39,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Barrier;
 
 use lgwks_bot::spec::EffectScope;
 use lgwks_bot::verb::{Execute, Observe};
@@ -233,6 +234,112 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
         }
         Err(other) => Err(format!("expected CapabilityDenied, got {other:?}").into()),
     }
+}
+
+// ── Two tenants at once ─────────────────────────────────────────────────────
+
+/// Threads per tenant, and rounds each thread repeats admission and dispatch.
+const THREADS_PER_TENANT: usize = 8;
+const ROUNDS: usize = 32;
+
+/// One tenant's round: build a bot whose source requires `bot.net` under `grants`
+/// and, if it is admitted, tick it once. Reports how many times the action fired,
+/// or the refusal admission gave.
+fn round(grants: &GrantSet) -> ScopeResult<Result<usize, BotError>> {
+    let fired = Rc::new(Cell::new(0));
+    let built = Bot::builder("tenant-round")
+        .observe(Script::new(vec![503]))
+        .on(|value: &u16| *value >= 500, Count(Rc::clone(&fired)))
+        .with_effects(test_effects()?)
+        .build(grants);
+    let mut bot = match built {
+        Ok(bot) => bot,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    bot.tick()?;
+    Ok(Ok(fired.get()))
+}
+
+/// Two tenants race through admission and dispatch on separate threads, released
+/// together: the one whose grants lack `bot.net` is refused by name every round,
+/// and the one that holds it is served every round. Neither outcome leaks across.
+#[test]
+fn a_tenant_without_the_grant_is_refused_while_the_other_is_served() -> TestResult {
+    let serves = GrantSet::empty().grant(Cap::net());
+    let lacks = GrantSet::empty().grant(Cap::fs());
+    let barrier = Barrier::new(THREADS_PER_TENANT * 2);
+
+    let outcomes = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..THREADS_PER_TENANT * 2)
+            .map(|index| {
+                let grants = if index % 2 == 0 { &serves } else { &lacks };
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let results: Vec<_> = (0..ROUNDS)
+                        .map(|_| round(grants).map_err(|error| error.to_string()))
+                        .collect();
+                    (index % 2 == 0, results)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+
+    let mut served_rounds = 0_usize;
+    let mut refused_rounds = 0_usize;
+    for joined in outcomes {
+        let (is_serving, results) = joined.map_err(|_| "a tenant thread panicked")?;
+        for result in results {
+            match (is_serving, result?) {
+                (true, Ok(1)) => served_rounds = served_rounds.saturating_add(1),
+                (true, other) => {
+                    return Err(format!("the granted tenant was not served once: {other:?}").into());
+                }
+                (false, Err(BotError::CapabilityDenied { deficit })) => {
+                    assert_eq!(
+                        deficit.first().required(),
+                        &Cap::net(),
+                        "the refusal names the capability this tenant lacks"
+                    );
+                    refused_rounds = refused_rounds.saturating_add(1);
+                }
+                (false, other) => {
+                    return Err(format!("the ungranted tenant was not refused: {other:?}").into());
+                }
+            }
+        }
+    }
+    let per_tenant = THREADS_PER_TENANT * ROUNDS;
+    assert_eq!(served_rounds, per_tenant, "every granted round was served");
+    assert_eq!(refused_rounds, per_tenant, "every ungranted round was refused");
+    Ok(())
+}
+
+/// A proof minted for one tenant does not cover what only the other was granted,
+/// in either direction, and a set cannot mint for what it does not hold.
+#[test]
+fn a_proof_minted_for_one_tenant_does_not_cover_the_others_grant() -> TestResult {
+    let net_tenant = GrantSet::empty().grant(Cap::net());
+    let fs_tenant = GrantSet::empty().grant(Cap::fs());
+    let net_proof = net_tenant.issue(&[Cap::net()])?;
+    let fs_proof = fs_tenant.issue(&[Cap::fs()])?;
+
+    assert!(net_proof.check(&[Cap::net()]).is_ok());
+    assert!(fs_proof.check(&[Cap::fs()]).is_ok());
+    assert!(
+        net_proof.check(&[Cap::fs()]).is_err(),
+        "the net tenant's proof does not cover what only the fs tenant was granted"
+    );
+    assert!(fs_proof.check(&[Cap::net()]).is_err(), "and the reverse");
+    assert!(
+        fs_tenant.issue(&[Cap::net()]).is_err(),
+        "a tenant's set cannot mint a proof for what it does not hold"
+    );
+    Ok(())
 }
 
 // ── The API surface ─────────────────────────────────────────────────────────
