@@ -16,3 +16,6 @@ publish = false
 # either the new task/Host facade or the old rt surface.
 lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["script"] }
 ai_task_support = { path = "../support" }
+# The ecosystem-standard comparator arm (`api/futures.md`). Present in every trial
+# crate so the arms differ only in the API sheet the author is given.
+futures = "0.3"

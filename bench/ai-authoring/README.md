@@ -262,6 +262,59 @@ What the run shows, stated at the level the data supports:
   trials (`trial_id: "crashed"`, with the timeout in `error`) and count as
   failures above.
 
+## Results: four arms, including the ecosystem standard (`runs/20261004T214357Z-models/`, `runs/20261004T224716Z-models/`)
+
+Two models x four API sheets x two tasks (aggregate, pipeline) x five profiles x
+two trials: 160 trials, every one recorded, none selected. The arms are the old
+`lgwks_bot::rt` surface (`old`), the `script`/`task` facade (`new`), the facade
+plus the one-call `FanOut` (`fan`, `api/fan.md`), and the credible alternative a
+Rust author would otherwise reach for: `futures` stream and future combinators
+over a `lgwks_bot` runtime and timer (`futures`, `api/futures.md`). The oracle,
+prompt skeleton, repair budget, sandbox and profiles are identical across arms;
+only the API sheet differs. The `futures` arm was run after the others, with the
+harness fix below, against the same crate sources for everything the arms share.
+
+| arm | trials | full pass | sheet API used | hand-rolled `std::thread` | mean repairs | mean lines | mean tokens out |
+|---|---|---|---|---|---|---|---|
+| `old` | 40 | 38/40 | 38/40 | 1/40 | 0.85 | 68 | 17,396 |
+| `new` | 40 | 37/40 | 12/40 | 24/40 | 0.75 | 140 | 25,859 |
+| `fan` | 40 | 37/40 | 31/40 | 8/40 | 1.07 | 70 | 15,762 |
+| `futures` | 40 | 39/40 | 40/40 | 0/40 | 0.15 | 37 | 6,399 |
+
+| model | task | old | new | fan | futures |
+|---|---|---|---|---|---|
+| `deepseek-v4.1-flash` | aggregate | 9/10 | 10/10 | 10/10 | 10/10 |
+| `deepseek-v4.1-flash` | pipeline | 10/10 | 10/10 | 10/10 | 10/10 |
+| `space-bunny-alpha` | aggregate | 10/10 | 7/10 | 9/10 | 10/10 |
+| `space-bunny-alpha` | pipeline | 9/10 | 10/10 | 8/10 | 9/10 |
+
+What this supports, and what it does not:
+
+- **Pass rate does not separate the arms.** 37 to 39 of 40 each; at ten trials per
+  cell a difference of that size is noise, and this does not claim one.
+- **The `new` facade was abandoned more often than it was used.** Only 12 of 40
+  `new` solutions used `script` at all; 24 of 40 wrote their own `std::thread`,
+  `Condvar` and `Waker` executor instead. The facade's `Scope`, `Tenant` and
+  shared-cell ceremony costs about twice the lines and tokens of any other arm.
+  That is the measured reason `FanOut` exists.
+- **`FanOut` moved adoption from 12/40 to 31/40** and cut lines from 140 to 70
+  and tokens by 39%. It did not remove the escape: 8 of 40 still left the sheet.
+- **The ecosystem standard is the better authoring surface, on this measure.**
+  `futures` combinators: 39/40, 40/40 used the sheet, no threads, 0.15 repairs,
+  37 lines, 6.4k tokens. Nothing here beats that for the two tasks measured, and
+  the score for AI usability does not claim to.
+- **What this does not measure** is what the oracle never asks: tenant-scoped
+  step identities, located errors, a durable record that survives a kill, and
+  process-group containment. Those are where `lgwks_bot` differs from `futures`,
+  and they need tasks whose oracle asks for them. `recovery` is the one that does,
+  and it has no `futures` arm because the combinators have no durable surface.
+- **Off-sheet code is the dominant failure.** Five of the eight failed solutions
+  left the sheet for a hand-rolled executor. No crate surface can prevent
+  `std::thread`; only the oracle catches it.
+- **The harness no longer hangs.** A timeout kills the whole process group, and a
+  hung oracle is recorded as that trial's failure. No oracle timed out in these
+  160 trials and no process was left running.
+
 ## Recovery, re-measured (#247)
 
 The 2/20 above measured three defects in this rig, found one per run and each
