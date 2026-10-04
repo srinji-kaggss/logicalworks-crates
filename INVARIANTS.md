@@ -6,9 +6,14 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 
 ## Surfaces and dependencies
 
-- **INV-DEP-1** Three surfaces (`lgwks_std`, `lgwks_bot`, `lgwks_deps`) plus the
-  finished, standalone `lgwks_ast`. Never grow `lgwks_ast`; never add a new owner or
-  top-level crate for third-party code. · enforced by: `lgwks-deps check .`
+- **INV-DEP-1** Three surfaces (`lgwks_std`, `lgwks_bot`, `lgwks_deps`), the
+  finished, standalone `lgwks_ast`, and the proc-macro crate `lgwks_macros`: five
+  workspace members. Never grow `lgwks_ast`; never add a new owner or top-level
+  crate for third-party code. A workspace member or approval owner outside those
+  five is refused by name as `UnknownSurface`. · why: #207 · enforced by:
+  `lgwks_deps::tests::a_rogue_approval_owner_is_refused_by_name`,
+  `lgwks_deps::tests::a_sixth_workspace_member_is_refused_by_name`, and
+  `lgwks-deps check .`
 - **INV-DEP-2** Every authored external edge is an optional, default-off feature of
   `lgwks_deps` registered in `contract/APPROVED.toml` with owner, capability, source,
   requirement, consumers and kinds (INV-DEP-EDGE-OWNED). Exception: the `scan`
@@ -16,10 +21,15 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
 - **INV-DEP-3** Never depend directly on tokio, futures, async-trait, pollster, syn,
   proc-macro2, regex, uuid, chrono, walkdir, glob, base64, hex, percent-encoding,
   serde_json, ureq, reqwest or ast-grep-*; use the workspace path. One `tokio` edge,
-  owned by `lgwks_deps`. · enforced by: `lgwks-deps check .`
-- **INV-DEP-4** `lgwks_std` never routes through `lgwks_deps` (cycle). · enforced by: cargo
+  owned by `lgwks_deps`. · enforced by: `lgwks-deps check .`, but only
+  incidentally: the gate holds no forbidden-name list, it refuses an edge the
+  register does not approve (`UnregisteredEdge`), so a listed name is kept out by
+  the register's contents and by review, not refused by name
+- **INV-DEP-4** `lgwks_std` never routes through `lgwks_deps` (cycle). · enforced
+  by: Cargo's own dependency-cycle refusal at resolve time; a build-graph fact
+  with no gate lane of its own
 - **INV-DEP-5** Never widen consumers or edit a pinned version to clear a gate
-  refusal. · enforced by: review
+  refusal. · enforced by: human review only; no machine observes it
 - **INV-DEP-6** `lgwks_std::random` is feature-gated; code built in the feature
   matrix must not assume it. Test identities use nanos + `AtomicU64`. · enforced by:
   feature-matrix CI

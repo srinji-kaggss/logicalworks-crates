@@ -1618,7 +1618,19 @@ fn manifest_path(root: &Path) -> Result<std::path::PathBuf, MetadataError> {
 /// Runs locked Cargo metadata and returns every direct workspace edge, with
 /// any capture cleanup that could not be confirmed after a complete read.
 pub fn read(root: &Path) -> Result<Collected<Vec<DirectEdge>>, MetadataError> {
+    Ok(read_with_members(root)?.map(|(edges, _)| edges))
+}
+
+/// [`read`], and the package name of every workspace member from the same
+/// Cargo run, so the member list and the edges cannot describe two states.
+pub fn read_with_members(
+    root: &Path,
+) -> Result<Collected<(Vec<DirectEdge>, Vec<String>)>, MetadataError> {
     read_metadata(root)?.try_map(|metadata| {
+        let members = located_members(&metadata)?
+            .into_iter()
+            .map(|member| member.name)
+            .collect();
         let mut edges = direct_edges(metadata)?;
         // A second read, this time with dependencies, because the first cannot
         // see them. `--no-deps` is what makes an inactive optional edge
@@ -1636,7 +1648,7 @@ pub fn read(root: &Path) -> Result<Collected<Vec<DirectEdge>>, MetadataError> {
                 }
             }
         }
-        Ok(edges)
+        Ok((edges, members))
     })
 }
 
@@ -2099,6 +2111,32 @@ mod tests {
         assert_eq!(
             edge.target_repository,
             Some("https://example.invalid/helper".to_owned())
+        );
+        Ok(())
+    }
+
+    /// Issue #207: a dependency declared only under
+    /// `[target.'cfg(unix)'.dependencies]` is an edge like any other, carrying
+    /// its scope, so the register can approve or refuse it.
+    #[test]
+    fn a_target_scoped_dependency_is_classified_as_an_edge() -> TestResult {
+        let input = r#"{
+          "packages": [
+            {"id":"path+file:///repo#app@0.1.0","name":"app","repository":null,
+             "manifest_path":"/repo/Cargo.toml",
+             "dependencies":[
+               {"name":"nix","source":"registry+https://github.com/rust-lang/crates.io-index",
+                "req":"0.29","kind":null,"optional":false,"path":null,"target":"cfg(unix)"}
+             ]}
+          ],
+          "workspace_members": ["path+file:///repo#app@0.1.0"]
+        }"#;
+        let edges = parse(input)?;
+        let edge = edges.first().ok_or("the target-scoped edge is visible")?;
+        assert_eq!(
+            (edge.package(), edge.target()),
+            ("nix", Some("cfg(unix)")),
+            "the edge keeps the target scope it was declared under"
         );
         Ok(())
     }
