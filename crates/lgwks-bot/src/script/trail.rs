@@ -2,7 +2,7 @@
 //!
 //! A report has to answer "what ran, in what order" without a second ledger
 //! running beside the flow. The answer already exists while the flow runs: every
-//! [`Scope::enter`](crate::script::Scope::enter) knows the path it is entering.
+//! [`Scope::enter`] knows the path it is entering.
 //! A [`Trail`] is where that path is written down, and it is the only place.
 //!
 //! # Overflow is a reported state, never a silent loss

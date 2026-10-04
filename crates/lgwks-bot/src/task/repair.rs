@@ -373,7 +373,7 @@ impl RepairTicket {
     /// Check a grant against this ticket, refusing both a short grant and a wide
     /// one.
     ///
-    /// Order matters and is the same order [`Host::repair`](super::Host::repair)
+    /// Order matters and is the same order [`Host::repair`]
     /// documents: the missing half is reported first, because that is the half a
     /// caller must fix, and a grant that is both short and wide is not repairable
     /// at all.

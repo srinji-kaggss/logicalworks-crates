@@ -336,6 +336,7 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
             "version = \"*\"\n",
             "owner = \"subject\"\n",
             "capability = \"fixture.helper\"\n",
+            "license = \"MIT OR Apache-2.0\"\n",
             "source = \"path\"\n",
             "origin = \"{origin}\"\n",
             "allowed_consumers = \"subject,other\"\n",
@@ -398,8 +399,8 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
         refused
             .stderr
             .contains("duplicate key \"allowed_consumers\"")
-            && refused.stderr.contains("first assignment is at line 11")
-            && refused.stderr.contains("line 12"),
+            && refused.stderr.contains("first assignment is at line 12")
+            && refused.stderr.contains("line 13"),
         "the CLI refusal must name the field and both positions: {:?}",
         refused.stderr
     );
@@ -1245,6 +1246,7 @@ fn hex_approval(tier: &str) -> String {
             "version = \"^0.4\"\n",
             "owner = \"lgwks_ast\"\n",
             "capability = \"encoding.hex\"\n",
+            "license = \"MIT OR Apache-2.0\"\n",
             "source = \"registry\"\n",
             "allowed_consumers = \"lgwks_ast\"\n",
             "allowed_kinds = \"normal\"\n",

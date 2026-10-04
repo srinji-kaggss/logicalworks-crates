@@ -1,6 +1,6 @@
 //! Request-keyed durable submission.
 //!
-//! [`Host::submit`](crate::task::Host::submit) is the explicit durable door a
+//! [`Host::submit`] is the explicit durable door a
 //! client uses when it wants an *idempotent request* rather than one run: the
 //! caller supplies a [`RequestKey`], the host derives the run identity from the
 //! tenant and the key, and the input's canonical [`InputDigest`] is recorded as
@@ -43,7 +43,7 @@
 //! exists) is the very fact a stop recorded as the verdict destroys. So a stop
 //! returns [`Submission::Executed`] for the call that saw it, leaves the
 //! receipt, and leaves the request completable by the next submission or by a
-//! [`Host::resume`](crate::task::Host::resume) under the run it named.
+//! [`Host::resume`] under the run it named.
 //!
 //! Enforced by `tests/request_key.rs`
 //! (`a_host_stop_mid_run_leaves_the_request_resumable`,

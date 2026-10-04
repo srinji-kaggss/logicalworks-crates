@@ -53,7 +53,6 @@ fn digit_byte(value: u32) -> u8 {
 ///
 /// Returns an error when the instant is outside the signed Unix-seconds range.
 pub fn unix_parts(at: SystemTime) -> Result<(i64, u32), UnixTimeError> {
-    #[cfg(feature = "trace")]
     match at.duration_since(UNIX_EPOCH) {
         Ok(duration) => {
             // The narrowing is checked rather than assumed: a whole-second

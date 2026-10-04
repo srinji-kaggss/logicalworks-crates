@@ -233,7 +233,7 @@ impl Control {
 /// it before.
 ///
 /// Crate-private, because it is the ledger's own vocabulary: a caller holds a
-/// [`RepairTicket`](super::RepairTicket) and never a stamp, and a stamp a caller
+/// [`RepairTicket`] and never a stamp, and a stamp a caller
 /// could rewrite would be a way to forge "the same ticket" or "a fresh epoch"
 /// without going through the ticket's content-derived identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

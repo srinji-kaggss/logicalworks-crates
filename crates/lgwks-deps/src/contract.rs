@@ -137,7 +137,7 @@ pub struct Entry {
 impl Entry {
     /// The ladder tier this approval sits in.
     ///
-    /// Public for the same reason [`crate::Tier`] is: the gate reads a tier off
+    /// Public for the same reason [`Tier`] is: the gate reads a tier off
     /// an entry to decide whether a surface may be frozen, and an audit that had
     /// to reach into `pub(crate)` fields could not be written at all.
     #[must_use]
@@ -641,12 +641,13 @@ const REQUIRED: [&str; 13] = [
 /// Keeping it separate from `REQUIRED` is what lets an existing class-only,
 /// policy-free block keep parsing while a block that writes `origin`,
 /// `features` or `target` has it validated and compared.
-const ENTRY_KEYS: [&str; 19] = [
+const ENTRY_KEYS: [&str; 20] = [
     "crate",
     "tier",
     "version",
     "owner",
     "capability",
+    "license",
     "source",
     "origin",
     "features",
@@ -1443,10 +1444,22 @@ fn is_identifier(value: &str) -> bool {
 /// [`crate::accepted_licenses`] in the audit rather than here: an expression can
 /// be perfectly legible and still name a licence this repository does not take.
 fn is_spdx_expression(value: &str) -> bool {
+    // SPDX separates tokens with exactly one space; a doubled, padded or
+    // tab-separated expression is a different string from the one the manifest
+    // declares, so it cannot be recorded as if the two compared equal.
+    if value != value.trim()
+        || value.contains("  ")
+        || value
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() && ch != ' ')
+    {
+        return false;
+    }
     let mut operands = 0_usize;
     let mut depth = 0_usize;
     let mut previous_operand = false;
-    for token in value.split_ascii_whitespace() {
+    let spaced = value.replace('(', " ( ").replace(')', " ) ");
+    for token in spaced.split_ascii_whitespace() {
         if token == "(" {
             if previous_operand {
                 return false;
@@ -1457,7 +1470,9 @@ fn is_spdx_expression(value: &str) -> bool {
                 return false;
             }
             depth = depth.saturating_sub(1);
-            previous_operand = false;
+            // A closed group is an operand, so `(MIT)(Apache-2.0)` is refused at
+            // the second `(` and `(MIT OR Apache-2.0)` is whole.
+            previous_operand = true;
         } else if matches!(token, "AND" | "OR" | "WITH") {
             if !previous_operand {
                 return false;
@@ -1467,7 +1482,7 @@ fn is_spdx_expression(value: &str) -> bool {
             if previous_operand {
                 return false;
             }
-            let identifier = token.trim_matches(['(', ')']);
+            let identifier = token;
             if identifier.is_empty()
                 || !identifier
                     .chars()
@@ -2107,7 +2122,7 @@ mod tests {
             matches!(
                 Contract::parse(&input),
                 Err(ContractError::InvalidString {
-                    line: 11,
+                    line: 12,
                     ref key,
                     ..
                 }) if key == "approved_by"
@@ -2123,21 +2138,21 @@ mod tests {
                 "allowed_consumers = \"lgwks_std\"",
                 "allowed_consumers = \",,,\"",
                 "allowed_consumers",
-                8,
+                9,
             ),
             (
                 "allowed_kinds = \"normal\"",
                 "allowed_kinds = \",,,\"",
                 "allowed_kinds",
-                9,
+                10,
             ),
             (
                 "allowed_kinds = \"normal\"",
                 "allowed_kinds = \"normal,unknown\"",
                 "allowed_kinds",
-                9,
+                10,
             ),
-            ("source = \"registry\"", "source = \"unknown\"", "source", 7),
+            ("source = \"registry\"", "source = \"unknown\"", "source", 8),
             ("crate = \"serde\"", "crate = \"bad package\"", "crate", 2),
             ("owner = \"lgwks_std\"", "owner = \"bad owner\"", "owner", 5),
         ];
@@ -2157,7 +2172,7 @@ mod tests {
             assert!(
                 matches!(
                     Contract::parse(&input),
-                    Err(ContractError::BadDate { line: 12, .. })
+                    Err(ContractError::BadDate { line: 13, .. })
                 ),
                 "impossible date {date} must be refused"
             );
@@ -2376,7 +2391,7 @@ mod tests {
             Contract::parse(&complete(input)),
             Err(ContractError::BadDate {
                 krate: "serde".into(),
-                line: 12,
+                line: 13,
                 value: "19-08-2026".into()
             })
         );
@@ -2649,7 +2664,7 @@ mod tests {
             "MIT or Apache-2.0",
             "MIT/Apache-2.0",
             "see LICENSE for terms",
-            "\"MIT\"",
+            "MIT, Apache-2.0",
         ] {
             let input = entry("").replace(
                 "license = \"MIT OR Apache-2.0\"",

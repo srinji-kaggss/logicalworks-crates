@@ -62,7 +62,7 @@ pub enum BotError {
     /// `n` cost `n` round trips to discover and the repair could not be written
     /// until the last of them. [`Deficit`] is what the check already computed,
     /// reported without discarding the rest of it, and
-    /// [`Deficit::to_grant_set`](crate::Deficit::to_grant_set) turns it back
+    /// [`Deficit::to_grant_set`] turns it back
     /// into the grant set that closes it.
     CapabilityDenied {
         /// Every requirement the check found ungranted, with the domain that
@@ -76,7 +76,7 @@ pub enum BotError {
     /// rather than optional because the field name alone does not say *why* the
     /// value was missing: a threshold that does not parse and a chain list that
     /// is absent are both "missing target", and only the cause tells a caller
-    /// which one it is looking at. Rendered through [`Escaped`] because it
+    /// which one it is looking at. Rendered through `Escaped` because it
     /// originates in the spec document.
     IncompleteSpec {
         /// What is missing.
@@ -173,7 +173,7 @@ pub enum BotError {
         /// two ways this is reached: an identifier outside the vocabulary, and
         /// an identifier in it whose threshold argument does not parse. A
         /// caller repairing a spec needs to know which. Held as a `String` and
-        /// rendered through [`Escaped`], exactly as [`BotError::MalformedSpec`]
+        /// rendered through `Escaped`, exactly as [`BotError::MalformedSpec`]
         /// holds its cause, so a payload that reaches it cannot forge a log
         /// line.
         argument_parse: String,

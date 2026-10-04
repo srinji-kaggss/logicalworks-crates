@@ -247,7 +247,7 @@ impl std::error::Error for FailureCause {}
 
 // ── Options ─────────────────────────────────────────────────────────────────
 
-/// Request options. Start from [`Options::default`](crate::http::Options::default)
+/// Request options. Start from [`Options::default`]
 /// (30s timeout, 8 MiB body ceiling).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -368,7 +368,7 @@ impl Options {
     /// Takes `self` and returns it, so it chains with the rest of the builder.
     /// A limit of `0` is not "unlimited": it returns whatever came back without
     /// reading it, which is the only way to observe a redirect without following
-    /// it. The default is whatever [`Request::get`] and its siblings set.
+    /// it. The default is whatever [`get`] and its siblings set.
     #[must_use]
     pub fn redirect_policy(mut self, redirect_policy: RedirectPolicy) -> Self {
         self.redirect_policy = redirect_policy;
@@ -1144,7 +1144,6 @@ fn origin_of(target: &str) -> Option<Origin> {
 /// is class-only, like [`validate_url`]: a `Location` can carry a token the
 /// caller never saw, so it is not echoed into the error.
 fn resolve_location(base: &str, location: &str) -> Result<String, Error> {
-    #[cfg(feature = "trace")]
     let refused = |detail: &str| {
         failure(
             FailureStage::Redirect,
@@ -1383,7 +1382,6 @@ fn next_hop<'body>(
     hops: u32,
     method: Method<'body>,
 ) -> Result<Hop<'body>, Error> {
-    #[cfg(feature = "trace")]
     let Some(location) = redirect_location(response)? else {
         return Ok(Hop::Final);
     };

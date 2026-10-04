@@ -1,7 +1,7 @@
 //! The durable, file-backed per-step record store behind a resumable run.
 //!
-//! [`HostBuilder::run_store`](crate::task::HostBuilder::run_store) installs one
-//! of these. A step marked [`Scope::remember`](crate::script::Scope::remember)
+//! [`HostBuilder::run_store`] installs one
+//! of these. A step marked [`Scope::remember`]
 //! consults it before running its future and appends to it after; that is the
 //! whole of the durability claim, and it covers exactly the steps an author asked
 //! to be durable.
@@ -12,7 +12,7 @@
 //! holds the length prefix, the 32-byte head, the torn-tail scan and the refusal
 //! of a frame no writer produces, and both this store and `journal::file` call
 //! those same functions. What cannot be reused is the *record*: `journal::file`
-//! frames [`EffectEvent`](crate::journal::EffectEvent) and its head chains effect
+//! frames [`EffectEvent`] and its head chains effect
 //! positions, so a step record smuggled through it would claim to be an effect
 //! event and chain against a sequence that has nothing to do with steps. So this
 //! module states its own record and reuses the frame grammar; the encoding is
@@ -192,7 +192,7 @@ pub enum StoreError {
     /// store's, the other says they were, and were written by a version of this
     /// crate whose records mean something this build cannot reconstruct. A
     /// pre-version store holds records with no
-    /// [`DefinitionIdentity`](super::DefinitionIdentity) in them, and the only
+    /// [`DefinitionIdentity`] in them, and the only
     /// ways to read those are to invent an identity they never carried — which
     /// makes every pre-version resume look exactly compatible — or to discard
     /// evidence a running system is relying on. So the store is refused with both
@@ -845,7 +845,7 @@ impl RunStore {
 /// over archived bytes, with no `lgwks_bot::task` in its own surface.
 ///
 /// The implementation is here; the trait lives in
-/// [`script`](crate::script) because the task module is a *consumer* of a
+/// [`script`] because the task module is a *consumer* of a
 /// durable step, and a step must be markable without the host that runs it.
 impl RunRecords for RunStore {
     fn lookup(

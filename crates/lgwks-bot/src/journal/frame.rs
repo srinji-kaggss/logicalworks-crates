@@ -1,7 +1,7 @@
 //! The frame grammar both file-backed append logs in this crate share.
 //!
-//! Two stores write a disk: [`FileJournal`](super::FileJournal) and
-//! [`RunStore`](crate::task::RunStore). Both put a record on it the same way —
+//! Two stores write a disk: [`FileJournal`] and
+//! [`RunStore`]. Both put a record on it the same way —
 //! a `u32` big-endian payload length, the archived record, then the 32-byte head
 //! the append commits to — and both read it back the same way, classifying the
 //! three ways a frame's bytes can end. That grammar is here, once, so the torn
@@ -12,7 +12,7 @@
 //! # What is *not* here
 //!
 //! What a record *means* and what its head is over. Those are the caller's: the
-//! journal chains effect positions and [`RunStore`](crate::task::RunStore) chains
+//! journal chains effect positions and [`RunStore`] chains
 //! step records, and neither is derivable from the other. So this module is pure
 //! grammar — how many bytes a frame occupies, how a prefix classifies, when a
 //! length is possible — and each store keeps its own loop, its own chain
@@ -255,6 +255,7 @@ where
 /// The grammar's own tests: the round trip, the three prefix endings, the piece
 /// ending, and the two questions about a length.
 /// The bytes of one whole frame: the payload and the head that follows it.
+#[cfg(feature = "script")]
 pub(crate) struct Raw {
     /// The payload bytes, which the chain head is computed over.
     pub(crate) payload: Vec<u8>,
@@ -268,6 +269,7 @@ pub(crate) struct Raw {
 /// never finished: it was never anyone's answer, so the scan stops and the
 /// caller trims. A complete prefix naming a length the writer never produces
 /// cannot be an interrupted append, and is `corrupt`.
+#[cfg(feature = "script")]
 pub(crate) fn read_raw<E>(
     reader: &mut impl Read,
     max_frame_bytes: usize,

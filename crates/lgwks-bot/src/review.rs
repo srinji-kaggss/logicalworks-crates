@@ -80,7 +80,7 @@ pub struct ReviewRequest {
     /// reconciliation.
     ///
     /// Deliberately not a uniqueness proof: two runs of the same request carry
-    /// the same marker, and it is [`ReviewRecord::matches`](crate::domain::gh::ReviewRecord::matches) that decides.
+    /// the same marker, and it is [`ReviewRecord::matches`] that decides.
     ///
     /// Read through [`ReviewRequest::marker`], and private so the payload
     /// cannot be edited after the request it belongs to was declared.

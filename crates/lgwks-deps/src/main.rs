@@ -1532,6 +1532,7 @@ fn print_request_template(krate: &str, version: &str, out: &mut impl io::Write) 
          version = \"{version}\"\n\
          owner = \"\"                 # workspace crate responsible for the capability\n\
          capability = \"\"            # stable semantic capability name\n\
+         license = \"\"              # SPDX expression the package declares\n\
          source = \"registry\"        # registry | git | path\n\
          allowed_consumers = \"\"     # comma-separated workspace crate names\n\
          allowed_kinds = \"normal\"   # normal, build, and/or dev\n\

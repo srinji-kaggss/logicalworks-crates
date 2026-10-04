@@ -18,7 +18,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// One `app` → `engine` edge with the given dependency object body.
 fn edges_for(dependency: &str) -> Result<Vec<DirectEdge>, Box<dyn Error>> {
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{dependency}]}}],"workspace_members":["app"]}}"#
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{dependency}]}},{{"id":"lic-engine","name":"engine","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#
     );
     Ok(metadata::parse(&document)?)
 }
@@ -55,6 +55,7 @@ fn register(source: &str, origin: &str) -> Result<Contract, Box<dyn Error>> {
             "version = \"1.0\"\n",
             "owner = \"app\"\n",
             "capability = \"engine.core\"\n",
+            "license = \"MIT OR Apache-2.0\"\n",
             "source = \"{source}\"\n",
             "origin = \"{origin}\"\n",
             "allowed_consumers = \"app\"\n",

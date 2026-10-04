@@ -11,7 +11,7 @@
 //!
 //! Concurrent work is started two ways, and both own what they start:
 //!
-//! - [`Supervisor`](crate::rt::supervise::Supervisor) — a bounded set of tasks
+//! - [`Supervisor`] — a bounded set of tasks
 //!   that reports every terminal outcome ([`TaskOutcome`]) and stops its tasks
 //!   when it is dropped or cancelled. This is the module a bot's background work
 //!   belongs in, and the only place a subprocess is started (`spawn_process`,
@@ -36,7 +36,7 @@
 //!   it, and `join_next` when you want the result. Dropping the set aborts
 //!   whatever has not finished.
 //! - **Background work that must be cancellable and accounted for.** Use
-//!   [`Supervisor`](crate::rt::supervise::Supervisor): it awaits a permit
+//!   [`Supervisor`]: it awaits a permit
 //!   before it starts anything, reaps finished tasks, and reports how each one
 //!   ended.
 //!

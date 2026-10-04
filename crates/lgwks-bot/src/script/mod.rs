@@ -30,8 +30,8 @@
 //! [`admit`] is the one way a task body crosses untrusted model or tool output
 //! into a run. It enters its step, charges one run-scoped [`Gate`] — a decoder, a
 //! surface, an admission budget and a repair ledger — turns a
-//! [`proposal::Refusal`](crate::proposal::Refusal) or a
-//! [`proposal::Intervention`](crate::proposal::Intervention) into its own
+//! [`proposal::Refusal`] or a
+//! [`proposal::Intervention`] into its own
 //! [`FlowError`] arm carrying the [`Provenance`](crate::proposal::Provenance)
 //! of the exact bytes, and records the refusal through the run store so a run
 //! resumed on a fresh host reads back what this run refused. It admits a

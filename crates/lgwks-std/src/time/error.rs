@@ -114,7 +114,7 @@ impl Error for UnixTimeError {
 
 /// Why canonical RFC 3339 formatting was refused.
 ///
-/// `Clone` but not `Copy`, because [`UnixTimeError`] is not `Copy` once
+/// `Clone` but not `Copy`, because `UnixTimeError` is not `Copy` once
 /// [`UnixTimeError::SystemTimeOutsideI64Range`] carries its cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

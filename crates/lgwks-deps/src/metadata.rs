@@ -1655,6 +1655,9 @@ fn read_resolved_packages(root: &Path) -> Option<Vec<CargoPackage>> {
         &[
             OsString::from("metadata"),
             OsString::from("--locked"),
+            // Every feature: an inactive optional edge is absent from the
+            // default resolve, and an absent package has no licence to audit.
+            OsString::from("--all-features"),
             OsString::from("--format-version"),
             OsString::from("1"),
             OsString::from("--manifest-path"),

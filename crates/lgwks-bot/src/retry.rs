@@ -1,7 +1,7 @@
 //! Whether a failed attempt may be tried again.
 //!
 //! The vocabulary already existed. [`RetryClass`] says what a failure permits
-//! and [`DispatchCertainty`](crate::DispatchCertainty) says what it
+//! and [`DispatchCertainty`] says what it
 //! established, and `BotError::retry_class` is the total map from one to the
 //! other that never inspects a rendered cause. What did not exist is the
 //! decision: a class of `Safe` says the effect did not happen, and it says

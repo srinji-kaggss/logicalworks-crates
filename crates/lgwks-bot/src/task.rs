@@ -363,7 +363,7 @@ pub struct Task<F> {
     /// A task needs nothing by default: a body that reaches nothing declares nothing.
     ///
     /// A step that does reach something asks for it at the step that reaches,
-    /// through [`Scope::require`](crate::script::Scope::require). That is the step
+    /// through [`Scope::require`]. That is the step
     /// that knows what the step is about to do, and it is where a repair is
     /// relevant — a run that has already analyzed something and then finds the
     /// publication blocked is the case a repair exists for, and a whole-task
@@ -391,7 +391,7 @@ impl<F> Task<F> {
 
     /// Declare capabilities this task needs before its body runs at all.
     ///
-    /// The blunt form of [`Scope::require`](crate::script::Scope::require): the
+    /// The blunt form of [`Scope::require`]: the
     /// whole task is refused at admission if any of `caps` is uncovered, so
     /// nothing runs and nothing is recorded. Use it for a task that reaches
     /// something in its very first step; use `require` in the body when the reach
@@ -2989,7 +2989,7 @@ enum TrailSnapshot {
 ///
 /// A handle rather than the concrete type for the same reason [`Records`] is: it
 /// is installed as a `dyn` behind a task-local, and the script module must not
-/// depend on [`Host`](self::Host).
+/// depend on [`Host`].
 /// One run's authority: the host's base grant plus this run's repair delta.
 ///
 /// The two are kept apart rather than merged, because merging loses the question

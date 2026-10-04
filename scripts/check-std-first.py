@@ -183,13 +183,13 @@ EXEMPT: dict[str, tuple[str, str]] = {
         "runtime did not create; the thread is joined on the same line, so "
         "nothing is leaked, and the file already carries an `#[expect]` saying so",
     ),
-    "crates/lgwks-bot/tests/rt_process.rs:140": (
+    "crates/lgwks-bot/tests/rt_process.rs:144": (
         'let path = std::env::temp_dir().join(format!("lgwks-bot-{}-{name}", std::process::id()));',
         "a scratch directory name, not an identity: the per-test `name` argument "
         "is what keeps two tests apart, and the pid only namespaces the directory "
         "under the temp root (re-anchored after PidDir extraction moved the line)",
     ),
-    "crates/lgwks-deps/src/vendor.rs:391": (
+    "crates/lgwks-deps/src/vendor.rs:442": (
         "std::process::id(),",
         "a test fixture's directory name whose real discriminator is the `NEXT` "
         "atomic three lines above; the comment there records that the timestamp "
@@ -386,9 +386,19 @@ def approvals(repo: Path) -> dict[str, dict]:
     """`contract/APPROVED.toml` keyed by crate name, dashes normalised to underscores."""
     with (repo / "contract/APPROVED.toml").open("rb") as handle:
         register = tomllib.load(handle)
-    return {
-        entry["crate"].replace("-", "_"): entry for entry in register.get("approved", [])
-    }
+    # One crate can be approved once per owner (`tracing` is registered for
+    # `lgwks_std` and again for `lgwks_ast`). Keying by name alone made the last
+    # record win and silently dropped the earlier consumer, so the records are
+    # merged: the first keeps its owner and every record's consumers are admitted.
+    merged: dict[str, dict] = {}
+    for entry in register.get("approved", []):
+        key = entry["crate"].replace("-", "_")
+        if key not in merged:
+            merged[key] = dict(entry)
+            continue
+        union = admitted_consumers(merged[key]) | admitted_consumers(entry)
+        merged[key]["allowed_consumers"] = ", ".join(sorted(union))
+    return merged
 
 
 def admitted_consumers(record: dict) -> set[str]:

@@ -55,15 +55,15 @@
 //! through [`admit`](crate::script::admit), which enters its step, charges one
 //! run-scoped [`Gate`](crate::script::Gate) — this decoder, a
 //! [`Surface`](crate::proposal::Surface), a
-//! [`PlanBudget`](crate::proposal::PlanBudget) and a
-//! [`RepairLedger`](crate::proposal::RepairLedger) — turns a
-//! [`Refusal`](crate::proposal::Refusal) or an
-//! [`Intervention`](crate::proposal::Intervention) into its own typed
+//! [`PlanBudget`] and a
+//! [`RepairLedger`] — turns a
+//! [`Refusal`] or an
+//! [`Intervention`] into its own typed
 //! [`FlowError`](crate::script::FlowError) arm carrying the
-//! [`Provenance`](crate::proposal::Provenance), and records the refusal through
+//! [`Provenance`], and records the refusal through
 //! the run store so a run resumed on a fresh host reads back what this run
 //! refused. The examples below drive
-//! [`Decoder::decode`](crate::proposal::Decoder::decode) directly because the
+//! [`Decoder::decode`] directly because the
 //! boundary's own contract does not depend on who calls it;
 //! `tests/proposal.rs` and `tests/sim_proposal.rs` drive the same properties
 //! through a real

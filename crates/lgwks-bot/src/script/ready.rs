@@ -42,7 +42,7 @@
 //! this crate already delivers a stop: the dependant's own
 //! [`CancellationToken`], cancelled at the instant the readiness fails. The
 //! dependant then reports [`FlowError::Cancelled`] at its own path, and the
-//! run's [`Report`](crate::task::Report) carries it. A caller that wants to
+//! run's [`Report`] carries it. A caller that wants to
 //! distinguish "my scope was stopped by the host" from "the service I depended
 //! on failed" reads [`Readiness::outcome`] before waiting, or races the token
 //! against its own work.
@@ -55,7 +55,7 @@
 //!
 //! It does not decide *what* "ready" means for a given service, it does not
 //! supervise the service itself (that is
-//! [`Supervisor`](crate::rt::supervise::Supervisor)), and it does not make a
+//! [`Supervisor`]), and it does not make a
 //! dependant's own work safe once released — a released dependant is told the
 //! service was ready, which is all a readiness fact ever asserts.
 //!

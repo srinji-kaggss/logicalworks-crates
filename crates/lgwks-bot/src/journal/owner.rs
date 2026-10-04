@@ -5,7 +5,7 @@
 //! `sync_all` reached the device from the thread that awaited the append, so the
 //! device's latency became the process's latency. A heartbeat, a timer and every
 //! unrelated task in the same runtime stalled for the length of an `fsync`. That
-//! is the defect #122 removed from [`FileJournal`](super::FileJournal) and that
+//! is the defect #122 removed from [`FileJournal`] and that
 //! the run store inherited when it was written later. This module is the
 //! extraction: one owner thread, one bounded request queue, one poison latch, two
 //! instantiations.

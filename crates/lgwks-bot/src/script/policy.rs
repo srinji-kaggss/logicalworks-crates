@@ -3,7 +3,7 @@
 //! Two numbers are wrong whenever a person types them: how many things to run
 //! at once, and how often to retry. Both depend on the machine and on what
 //! every other call site is doing at the same moment, which no call site can
-//! see. So a flow does not choose them; the root [`Scope`](crate::script::Scope)
+//! see. So a flow does not choose them; the root [`Scope`]
 //! owns one [`Policy`] and every step beneath it shares that policy.
 //!
 //! # Retries are a budget for the run, not a count per call site
@@ -31,7 +31,7 @@
 //!
 //! `each x in xs:` with no bound runs at most [`Policy::fan_out`] bodies at
 //! once: [`FAN_OUT_PER_CORE`] per available core, capped at
-//! [`MAX_IN_FLIGHT`](crate::script::MAX_IN_FLIGHT). A body in `each` spends its
+//! [`MAX_IN_FLIGHT`]. A body in `each` spends its
 //! life waiting, so the bound is a ceiling on outstanding waits rather than on
 //! CPU work; it scales with the host so the same flow neither starves a large
 //! machine nor floods a small one. An external limit (an API that allows four

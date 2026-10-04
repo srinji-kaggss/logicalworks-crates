@@ -1,10 +1,10 @@
 //! The `domain_id -> constructor` registry: what a spec's strings resolve to.
 //!
-//! A [`BotSpec`](crate::BotSpec) carries identifiers, not code. A chain's
+//! A [`BotSpec`] carries identifiers, not code. A chain's
 //! `source` and an action's `domain` are strings such as `"github::pr_status"`,
 //! and the `target` beside each is a parameter whose meaning the domain itself
 //! defines. Something has to turn those strings back into a running
-//! [`Observe`](crate::verb::Observe) or [`Execute`](crate::verb::Execute), and
+//! [`Observe`] or [`Execute`], and
 //! that is this module.
 //!
 //! # One list, in one place
@@ -20,7 +20,7 @@
 //!
 //! A registry answers *which constructor* an identifier names. It never decides
 //! what a bot is permitted to reach: authority still comes from the
-//! [`GrantSet`](crate::GrantSet) the caller holds, and every erased verb checks
+//! [`GrantSet`] the caller holds, and every erased verb checks
 //! its own caps at the call site. A spec therefore cannot grant itself anything
 //! by naming a domain, which is what makes it safe to accept a spec from wire
 //! data at all.
@@ -375,7 +375,7 @@ impl std::fmt::Debug for Action {
 /// constructor is generic over the value it evaluates — as the verb traits are —
 /// and the downcast to that value is checked when the condition runs, so a
 /// condition built for one type and handed a value of another reports
-/// [`BotError::EvaluateError`](crate::BotError::EvaluateError) rather than
+/// [`BotError::EvaluateError`] rather than
 /// answering a false.
 pub struct Condition(Box<dyn EvaluateAny>);
 
@@ -636,7 +636,7 @@ fn first_duplicate<T: PartialEq>(entries: &[(&'static str, T)]) -> Option<(usize
 /// Declare the domains a binary can run, in one place.
 ///
 /// The one entry point for the `domain_id -> constructor` mapping. A worked
-/// example is in [`DomainRegistry`](crate::DomainRegistry)'s documentation.
+/// example is in [`DomainRegistry`]'s documentation.
 ///
 /// The two halves are separate because a source and an action are built into
 /// different erased traits. An empty half is written `{}` and is not an error: a

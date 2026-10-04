@@ -26,7 +26,7 @@ fn edge(source: Option<&str>, path: Option<&str>) -> Result<DirectEdge, Box<dyn 
     let source_json = source.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let path_json = path.map_or("null".to_owned(), |value| format!("\"{value}\""));
     let document = format!(
-        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"engine","source":{source_json},"req":"1.0","kind":null,"optional":false,"path":{path_json}}}]}}],"workspace_members":["app"]}}"#
+        r#"{{"packages":[{{"id":"app","name":"app","repository":null,"manifest_path":"/repo/Cargo.toml","dependencies":[{{"name":"engine","source":{source_json},"req":"1.0","kind":null,"optional":false,"path":{path_json}}}]}},{{"id":"lic-engine","name":"engine","license":"MIT OR Apache-2.0","manifest_path":"/dep/Cargo.toml","dependencies":[]}}],"workspace_members":["app"]}}"#
     );
     let mut edges = metadata::parse(&document)?;
     edges
@@ -41,7 +41,7 @@ fn register(source: &str, origin: &str) -> Result<Contract, Box<dyn Error>> {
             "[policy]\nenforce = true\n\n",
             "[[approved]]\n",
             "crate = \"engine\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
-            "capability = \"engine.core\"\nsource = \"{source}\"\norigin = \"{origin}\"\n",
+            "capability = \"engine.core\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"{source}\"\norigin = \"{origin}\"\n",
             "allowed_consumers = \"app\"\nallowed_kinds = \"normal\"\n",
             "reason = \"The engine supplies a capability the standard library cannot express.\"\n",
             "approved_by = \"reviewer\"\napproved_on = \"2026-09-30\"\nreview = \"tests/sim_origin.rs\"\n",

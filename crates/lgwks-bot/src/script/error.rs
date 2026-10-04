@@ -97,7 +97,7 @@ pub enum FlowError {
         reason: String,
     },
     /// A bot verb failed. Retryable exactly when its
-    /// [`RetryClass`](crate::error::RetryClass) is [`RetryClass::Safe`](crate::error::RetryClass::Safe).
+    /// [`RetryClass`] is [`RetryClass::Safe`].
     Bot {
         /// Where it failed.
         at: Arc<str>,
@@ -224,7 +224,7 @@ impl FlowError {
     /// Whether repeating the step that produced this could succeed.
     ///
     /// `TimedOut` and `Transient` are; a bot error is when its retry class is
-    /// [`RetryClass::Safe`](crate::error::RetryClass::Safe) (the effect definitely did not happen). A
+    /// [`RetryClass::Safe`] (the effect definitely did not happen). A
     /// cancellation, a permanent failure, an exhausted retry, a refused payload,
     /// an intervention, and every validation failure are not: repeating them is a
     /// retry storm.

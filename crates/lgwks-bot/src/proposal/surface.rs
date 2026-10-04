@@ -215,7 +215,7 @@ impl SurfaceBuilder {
 
 /// Whether `name` is a usable operation name.
 ///
-/// The same vocabulary [`Tenant`](crate::script::Tenant) enforces, so an
+/// The same vocabulary [`Tenant`] enforces, so an
 /// operation name and a tenant name are interchangeable in a path and a log line
 /// and neither can smuggle a separator.
 fn is_operation_name(name: &str) -> bool {

@@ -51,7 +51,7 @@ pub(crate) fn name_fault(name: &str, max: usize) -> Option<NameFault> {
 ///
 /// Every [`Scope`] carries one, and every [`StepKey`] hashes it, so data keyed
 /// by a step is keyed by its tenant whether or not the author remembered to.
-/// The name is 1 to [`MAX_TENANT_BYTES`](crate::script::MAX_TENANT_BYTES) bytes of ASCII letters, digits, and
+/// The name is 1 to [`MAX_TENANT_BYTES`] bytes of ASCII letters, digits, and
 /// `-`, `_`, `.`, `:`, which keeps it safe to put in a path, a log line, and a
 /// file name without escaping.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -62,7 +62,7 @@ impl Tenant {
     ///
     /// # Errors
     ///
-    /// [`FlowError::InvalidTenant`](crate::script::FlowError::InvalidTenant) naming what is wrong with the name.
+    /// [`FlowError::InvalidTenant`] naming what is wrong with the name.
     pub fn new(name: &str) -> Result<Self, FlowError> {
         let reason = match name_fault(name, MAX_TENANT_BYTES) {
             None => return Ok(Self(Arc::from(name))),
@@ -191,7 +191,7 @@ impl Scope {
     ///
     /// The declared-clock form. Every step descended from this scope measures
     /// its [`within`](crate::script::within) budget on `clock`, so advancing it
-    /// past a budget produces the same [`FlowError::TimedOut`](crate::script::FlowError::TimedOut)
+    /// past a budget produces the same [`FlowError::TimedOut`]
     /// a real overrun produces — with no real wait, which is the whole point of
     /// having one declared clock rather than three implicit ones.
     ///
@@ -223,8 +223,8 @@ impl Scope {
     /// A root scope for `tenant` that stops when `token` is cancelled and
     /// records the steps it enters into `trail`.
     ///
-    /// The form [`Host`](crate::task::Host) uses: one trail per task run, so a
-    /// [`Report`](crate::task::Report) can answer which steps ran without the
+    /// The form [`Host`] uses: one trail per task run, so a
+    /// [`Report`] can answer which steps ran without the
     /// flow carrying a second ledger. A scope built any other way gets its own
     /// ring, which is exactly right for a flow no report is claimed about.
     ///
@@ -283,8 +283,8 @@ impl Scope {
     ///
     /// # Errors
     ///
-    /// [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) if this scope is already cancelled, so no new
-    /// step starts after a stop; [`FlowError::TooDeep`](crate::script::FlowError::TooDeep) past [`MAX_DEPTH`](crate::script::MAX_DEPTH).
+    /// [`FlowError::Cancelled`] if this scope is already cancelled, so no new
+    /// step starts after a stop; [`FlowError::TooDeep`] past [`MAX_DEPTH`].
     pub fn enter(&self, step: &str) -> Result<Self, FlowError> {
         self.descend(self.join(step), Stop::Own)
     }
@@ -428,7 +428,7 @@ impl Scope {
     ///
     /// # Errors
     ///
-    /// [`FlowError::Cancelled`](crate::script::FlowError::Cancelled) at this scope's path.
+    /// [`FlowError::Cancelled`] at this scope's path.
     pub fn checkpoint(&self) -> Result<(), FlowError> {
         if self.is_cancelled() {
             let refusal = Err(FlowError::Cancelled {
@@ -450,7 +450,7 @@ impl Scope {
     /// Under a host, every capability in `caps` must be covered by the run's
     /// authority: the host's grant plus the delta of any repair this run is
     /// carrying. When any is missing, this returns
-    /// [`FlowError::Blocked`](crate::script::FlowError::Blocked) carrying **every**
+    /// [`FlowError::Blocked`] carrying **every**
     /// unmet capability, not the first — so the run's report names the whole
     /// shortfall at once and the repair ticket is written once against all of it.
     ///
@@ -461,8 +461,8 @@ impl Scope {
     ///
     /// # Errors
     ///
-    /// [`FlowError::Blocked`](crate::script::FlowError::Blocked) naming every
-    /// unmet capability, or [`FlowError::Cancelled`](crate::script::FlowError::Cancelled)
+    /// [`FlowError::Blocked`] naming every
+    /// unmet capability, or [`FlowError::Cancelled`]
     /// if this scope is already stopped.
     pub fn require(&self, caps: &[crate::cap::Cap]) -> Result<(), FlowError> {
         self.checkpoint()?;

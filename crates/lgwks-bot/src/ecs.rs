@@ -1,6 +1,6 @@
 //! The four verbs on a `bevy_ecs` substrate.
 //!
-//! [`Bot`](crate::Bot) executes a spec by polling every source on every tick and
+//! [`Bot`] executes a spec by polling every source on every tick and
 //! evaluating every condition on the freshly polled value. That is correct and
 //! it re-derives an answer it already had: a source that did not move is
 //! evaluated anyway. This module keeps the same four verbs and the same
@@ -40,7 +40,7 @@
 //!
 //! # One semantic delta, stated rather than discovered
 //!
-//! [`Bot::tick`](crate::Bot::tick) evaluates a condition on **every** tick.
+//! [`Bot::tick`] evaluates a condition on **every** tick.
 //! `EcsBot::tick` evaluates it only on a tick where the observed value
 //! **moved**. For a condition that stays true ("status is 500" while the
 //! endpoint stays down) the first fires on every tick and the second fires
@@ -98,7 +98,7 @@
 //! - **Outcome unknown** — nothing established whether the bytes arrived, so
 //!   the action is *held*. The walk stops at it rather than beginning another
 //!   attempt, the tick reports
-//!   [`BotError::PendingTransition`](crate::BotError::PendingTransition), and
+//!   [`BotError::PendingTransition`], and
 //!   the key a caller settles by is on the report.
 //! - **Outcome landed** — the effect is done for the generation its key names,
 //!   so the walk retires the entry rather than dispatching it again. That
@@ -1747,7 +1747,7 @@ impl Committed {
 // ── Non-send state: the verbs and the values ───────────────────────────────
 
 /// One observation chain, holding the same erased halves a
-/// [`Chain`](crate::Chain) does.
+/// [`Chain`] does.
 pub(crate) struct EcsChain {
     /// The observer. `Box<dyn ObserveAny>`'s `poll_any` is not `Send`, which is
     /// why this cannot live in a component.
@@ -1777,7 +1777,7 @@ impl EcsChain {
     ///
     /// The materializer's seam, and the only place a chain's metadata is taken
     /// from something other than a concrete `S` parameter. The four pieces are
-    /// captured by [`Source::new`](crate::Source::new) at the one point where
+    /// captured by [`Source::new`] at the one point where
     /// `S::Output` was still a type parameter, so a chain built this way is the
     /// same value a native chain erases to — the tick path cannot tell them
     /// apart, which is exactly T25's claim.
@@ -2449,7 +2449,7 @@ async fn bounded_wave(
 /// rather than only content — see [`InputIdentity::names_an_event`].
 ///
 /// Keeping them apart is what lets a state watch `0 → 1 → 0` fire three times
-/// while a redelivered [`EventId`](crate::effect::EventId) still retires.
+/// while a redelivered [`EventId`] still retires.
 #[derive(Clone, Copy)]
 pub(crate) struct AdmittedInput {
     /// The content identity a dispatch digest binds.
@@ -2465,7 +2465,7 @@ pub(crate) struct AdmittedInput {
 /// a different value derives different ones (so a restart does not read new
 /// work as already applied). Two *events* with equal content must still be
 /// distinguishable, which is the caller's to express via
-/// [`EventId`](crate::effect::EventId) or their own [`InputIdentity`] impl —
+/// [`EventId`] or their own [`InputIdentity`] impl —
 /// content equality alone is not event identity (issue #101).
 pub(crate) fn identify_output<S>(value: &dyn Any) -> AdmittedInput
 where
@@ -6363,11 +6363,11 @@ impl EcsBuilder {
     /// Append a fully-erased chain, as a materializer builds one.
     ///
     /// The native path finishes a chain through
-    /// [`ObserveBuilder::build`](crate::spec::ObserveBuilder::build), which
+    /// [`ObserveBuilder::build`], which
     /// erases a concrete source and hands the result to
     /// [`EcsBot::assemble`]. This is the other seam into the same list: a chain
     /// whose source and entries are already erased, built from wire data by
-    /// [`Bot::from_spec`](crate::Bot::from_spec). Both reach `assemble`, so a
+    /// [`Bot::from_spec`]. Both reach `assemble`, so a
     /// materialized bot and a native one are the same value and share one
     /// execution path — there is no second interpreter here.
     ///
@@ -10520,7 +10520,7 @@ mod tests {
     /// A durable journal that grades itself `ProcessCrash` but refuses to
     /// reserve settlement capacity, counting the appends it was asked for.
     ///
-    /// The shipped [`FileJournal`](crate::journal::FileJournal) reserves room
+    /// The shipped [`FileJournal`] reserves room
     /// against its own event ceiling; this stands in for the moment that
     /// ceiling is reached, which a test cannot reach without a hundred thousand
     /// real flushes.

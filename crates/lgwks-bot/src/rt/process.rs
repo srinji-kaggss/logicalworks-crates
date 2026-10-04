@@ -478,7 +478,7 @@ impl ProcessRun {
 
     /// What the child wrote to standard output, up to the capture ceiling.
     ///
-    /// Empty unless [`Self::stdout_policy`] was `Capture`. The retained bytes
+    /// Empty unless [`ProcessSpec::stdout_policy`] was `Capture`. The retained bytes
     /// are the *head* of the stream, so [`CapturedStream::truncated`] is how a
     /// caller knows the tail is missing; [`CapturedStream::total_bytes`] says
     /// how much there would have been.
@@ -490,7 +490,7 @@ impl ProcessRun {
     /// What the child wrote to standard error, up to the capture ceiling.
     ///
     /// The same shape as [`Self::stdout`], and empty unless
-    /// [`Self::stderr_policy`] was `Capture`. A child that died before writing
+    /// [`ProcessSpec::stderr_policy`] was `Capture`. A child that died before writing
     /// leaves an empty capture rather than none, so emptiness is never evidence
     /// that the policy was not `Capture`.
     #[must_use]
@@ -613,7 +613,7 @@ pub enum FrameRead {
     /// clean end and the two truncations only — an ending the pass already
     /// reached from a whole prefix, or from the caller's own ceiling, names what
     /// decided it and is not replaced. See
-    /// [`CapturedStream::frames`](crate::rt::process::CapturedStream::frames).
+    /// [`CapturedStream::frames`].
     ///
     /// The one reading not about the bytes at all, and the reason a bounded
     /// reader is honest about having stopped early rather than claiming the

@@ -1299,8 +1299,8 @@ fn next_allowed_of(last: Option<EventKind>) -> Option<EventKind> {
 ///
 /// # Errors
 ///
-/// [`JournalError::TailMismatch`] when `expected_tail` is not `actual`, and
-/// [`JournalError::OutOfOrder`] when the event's kind is not the next one the
+/// `JournalError::TailMismatch` when `expected_tail` is not `actual`, and
+/// `JournalError::OutOfOrder` when the event's kind is not the next one the
 /// ladder allows for its key.
 fn check_append_order(
     expected_tail: JournalPosition,

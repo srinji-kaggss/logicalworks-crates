@@ -42,7 +42,7 @@
 //! know them.
 //!
 //! The identity travels out on the verdict itself, as
-//! [`Provenance::model`](crate::session::Provenance::model), and not only into
+//! [`Provenance::model`], and not only into
 //! this resolver's own accessor. `resolve` calls `identity()` once per decision
 //! and the caller holds the result: a caller that resolved through a trait
 //! object has no way back to `embedder_identity`, and `embedder_identity` is a
@@ -74,8 +74,8 @@
 //!
 //! This module does not log. It reports. The cause travels to the caller in the
 //! verdict, and the verdict reaches the run's declared record — the
-//! [`DecisionReceipt`](crate::session::DecisionReceipt) written to the
-//! [`Journal`](crate::session::Journal) — rather than a session transcript,
+//! [`DecisionReceipt`] written to the
+//! [`Journal`] — rather than a session transcript,
 //! which is a rendering of what was said and not of what was decided. A log line
 //! would be a second, unmanaged copy of the same fact, and this crate has no
 //! logging edge to write one through. An [`Embedder`] that fails is expected to
