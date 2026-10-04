@@ -578,6 +578,118 @@ fn a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome() -> Te
     Ok(())
 }
 
+/// A scratch journal path with its cleanup guard, and the one key the verdict
+/// tests climb, so each test states only what it appends and what it expects.
+fn verdict_fixture(
+    name: &str,
+) -> Result<(TempGuard, std::path::PathBuf, EffectKey), Box<dyn std::error::Error>> {
+    let dir = scratch_dir(name)?;
+    let guard = TempGuard(dir.clone());
+    Ok((guard, dir.join("journal.log"), key("1", DIGEST_A)?))
+}
+
+/// Append a `Verified` event for `key`, at the journal's own tail, saying that the
+/// predicate at `version` over observations specific to that version `result`.
+fn append_verdict(
+    journal: &mut FileJournal,
+    key: EffectKey,
+    version: u64,
+    result: VerificationResult,
+) -> TestResult {
+    journal.compare_and_append(
+        journal.tail(),
+        &EffectEvent::Verified {
+            key,
+            verification: Verification::new(
+                Id128::from_hex(PREDICATE)?,
+                version,
+                lgwks_std::hash::blake3(format!("observed at version {version}").as_bytes()),
+                result,
+            ),
+        },
+    )?;
+    Ok(())
+}
+
+// ── #257: a predicate that did not hold survives a reopen as its own state ──
+
+/// A verification that did not hold is recovered from a real file, after the
+/// handle that wrote it is gone, as a state of its own: not `Applied`, which an
+/// attempt also reads as before any predicate ran, and not uncertainty, because
+/// the effect is known to have landed. The answer comes from `Recovered`, with no
+/// walk through the raw events.
+#[test]
+fn a_failed_verification_survives_a_reopen_as_its_own_state() -> TestResult {
+    let (_guard, path, this_key) = verdict_fixture("failed-verification")?;
+    {
+        let mut journal = FileJournal::open(&path)?;
+        walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
+        append_verdict(&mut journal, this_key, 1, VerificationResult::NotSatisfied)?;
+    }
+
+    let reopened = FileJournal::open(&path)?.recover();
+    assert_eq!(
+        reopened.status(this_key),
+        Some(AttemptStatus::VerificationFailed),
+        "the failure is the recovered answer"
+    );
+    assert_ne!(reopened.status(this_key), Some(AttemptStatus::Applied));
+    assert_eq!(
+        reopened.uncertain().len(),
+        0,
+        "the effect landed, so a failed predicate is not an unknown outcome"
+    );
+    Ok(())
+}
+
+// ── #260: a verdict revised after a restart ────────────────────────────────
+
+/// A `Verified` attempt is reopened after the world has moved, and a later
+/// verification that no longer holds is recorded against the same key. The
+/// recovered status follows it, names the predicate version it was decided at, and
+/// keeps what it superseded, so an operator can read what changed after a restart.
+#[test]
+fn a_verdict_is_revised_by_a_later_verification_after_a_reopen() -> TestResult {
+    let (_guard, path, this_key) = verdict_fixture("revised-verification")?;
+    {
+        let mut journal = FileJournal::open(&path)?;
+        walk_ladder(&mut journal, this_key, RUNG_APPLIED)?;
+        append_verdict(&mut journal, this_key, 1, VerificationResult::Satisfied)?;
+    }
+    {
+        let mut journal = FileJournal::open(&path)?;
+        assert_eq!(
+            journal.recover().status(this_key),
+            Some(AttemptStatus::Verified),
+            "the first verdict survives the reopen"
+        );
+        append_verdict(&mut journal, this_key, 2, VerificationResult::NotSatisfied)?;
+    }
+
+    let recovered = FileJournal::open(&path)?.recover();
+    assert_eq!(
+        recovered.status(this_key),
+        Some(AttemptStatus::VerificationFailed),
+        "the later verdict is the recovered one"
+    );
+    assert_eq!(
+        recovered.verification(this_key).map(|found| found.predicate_version()),
+        Some(2),
+        "and it says which predicate version decided it"
+    );
+    let last = recovered
+        .history(this_key)
+        .last()
+        .ok_or("a recovered attempt has a history")?;
+    assert_eq!(
+        (last.from(), last.to()),
+        (Some(AttemptStatus::Verified), AttemptStatus::VerificationFailed),
+        "the history names what the verdict superseded"
+    );
+    assert_eq!(recovered.uncertain().len(), 0);
+    Ok(())
+}
+
 // ── T14 row 3: killed while recovering ─────────────────────────────────────
 
 /// A kill while a restart is reading the journal leaves the file exactly as the

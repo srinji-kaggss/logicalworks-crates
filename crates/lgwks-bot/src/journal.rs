@@ -280,20 +280,26 @@ impl EventKind {
         }
     }
 
-    /// The kind that may follow this one for the same key, or `None` when the
-    /// key's ladder is complete.
+    /// The kind that may follow this one for the same key.
     ///
-    /// One attempt at one intent walks this ladder exactly once. A retry is a
-    /// new [`crate::effect::AttemptId`] and therefore a new key, which is what
-    /// stops a second `DispatchPrepared` for an existing key from being
+    /// One attempt at one intent walks the *effect* ladder exactly once. A retry
+    /// is a new [`crate::effect::AttemptId`] and therefore a new key, which is
+    /// what stops a second `DispatchPrepared` for an existing key from being
     /// representable at all.
+    ///
+    /// Verification is the one rung that may repeat. It is a statement about the
+    /// world *at the time a predicate ran*, and the world moves: the file is
+    /// edited, the remote state changes, the predicate itself is revised. A
+    /// latched verdict would stay `Verified` forever with nothing able to say it
+    /// no longer holds, so a later `Verified` event supersedes the earlier one and
+    /// the recovered status follows the latest verdict. The effect has still
+    /// happened once; only what is known about its postcondition is revised.
     #[must_use]
     pub const fn next(self) -> Option<Self> {
         match self {
             Self::IntentAdmitted => Some(Self::DispatchPrepared),
             Self::DispatchPrepared => Some(Self::OutcomeObserved),
-            Self::OutcomeObserved => Some(Self::Verified),
-            Self::Verified => None,
+            Self::OutcomeObserved | Self::Verified => Some(Self::Verified),
         }
     }
 }
@@ -1016,6 +1022,16 @@ pub enum AttemptStatus {
     /// A named predicate was evaluated and held over observations newer than
     /// the effect.
     Verified,
+    /// The effect landed, and a named predicate was evaluated and did **not**
+    /// hold.
+    ///
+    /// Distinct from [`Applied`](Self::Applied), which is also what an attempt
+    /// reads as before any predicate has run: folding the two together made a
+    /// failed verification indistinguishable from an unverified success, and the
+    /// failure recoverable only by re-deriving it from the raw events, which is a
+    /// second authority. The effect is still known to have happened, so a
+    /// recovery path must not resend it.
+    VerificationFailed,
 }
 
 impl AttemptStatus {
@@ -1037,6 +1053,7 @@ impl AttemptStatus {
             Self::Applied => "applied",
             Self::NotApplied => "not_applied",
             Self::Verified => "verified",
+            Self::VerificationFailed => "verification_failed",
         }
     }
 }
@@ -1054,13 +1071,32 @@ pub struct Attempt {
     key: EffectKey,
     /// What is known about it.
     status: AttemptStatus,
+    /// The latest verification the journal holds for it, which is what a
+    /// `Verified` or `VerificationFailed` status is qualified by: which predicate,
+    /// at which version, over which observations.
+    verification: Option<Verification>,
 }
 
 impl Attempt {
     /// Build an attempt record.
     #[must_use]
     pub const fn new(key: EffectKey, status: AttemptStatus) -> Self {
-        Self { key, status }
+        Self {
+            key,
+            status,
+            verification: None,
+        }
+    }
+
+    /// The latest verification recorded for this attempt, or `None` when no
+    /// predicate has been evaluated.
+    ///
+    /// A `Verified` status is only as good as the predicate version and
+    /// observation digest it was decided at; this is how a consumer reads them
+    /// and compares them with the state it is about to act on.
+    #[must_use]
+    pub const fn verification(&self) -> Option<Verification> {
+        self.verification
     }
 
     /// The attempt.
@@ -1076,6 +1112,43 @@ impl Attempt {
     }
 }
 
+/// One change of an attempt's recovered status.
+///
+/// `position` is the event's place in the sequence that was folded, counted from
+/// zero. It is a *journal position*, not a wall-clock time, and that is
+/// deliberate: recovery is a pure fold that two replays must agree on, and a
+/// clock read inside it would make them disagree. "When" is answered by the
+/// order of facts, which is the only order a replayed journal has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Transition {
+    /// The status before this change, or `None` for the attempt's first event.
+    from: Option<AttemptStatus>,
+    /// The status after it.
+    to: AttemptStatus,
+    /// The event's position in the folded sequence.
+    position: usize,
+}
+
+impl Transition {
+    /// The status this change superseded, or `None` for the first.
+    #[must_use]
+    pub const fn from(&self) -> Option<AttemptStatus> {
+        self.from
+    }
+
+    /// The status this change produced.
+    #[must_use]
+    pub const fn to(&self) -> AttemptStatus {
+        self.to
+    }
+
+    /// Where in the folded sequence the change happened.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.position
+    }
+}
+
 /// Every attempt a journal's events mention, in the order their intent was
 /// first admitted.
 ///
@@ -1088,6 +1161,9 @@ pub struct Recovered {
     attempts: Vec<Attempt>,
     /// Direct lookup by key while preserving `attempts` as the report order.
     index: HashMap<EffectKey, usize>,
+    /// Every status change of each attempt, parallel to `attempts`. Bounded by
+    /// the number of events folded, which the journal's own ceiling bounds.
+    transitions: Vec<Vec<Transition>>,
 }
 
 impl Recovered {
@@ -1099,6 +1175,30 @@ impl Recovered {
             .get(&key)
             .and_then(|index| self.attempts.get(*index))
             .map(|attempt| attempt.status)
+    }
+
+    /// The latest verification recorded for `key`, or `None` when the journal
+    /// never mentioned it or no predicate has run.
+    #[must_use]
+    pub fn verification(&self, key: EffectKey) -> Option<Verification> {
+        self.index
+            .get(&key)
+            .and_then(|index| self.attempts.get(*index))
+            .and_then(Attempt::verification)
+    }
+
+    /// Every change of `key`'s status in the order it happened, empty when the
+    /// journal never mentioned it.
+    ///
+    /// The answer to "what changed", beside [`status`](Self::status)'s "what is
+    /// true now": the current status stays a cheap closed fold, and the history
+    /// is separate rather than folded into it.
+    #[must_use]
+    pub fn history(&self, key: EffectKey) -> &[Transition] {
+        self.index
+            .get(&key)
+            .and_then(|index| self.transitions.get(*index))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// How many attempts the journal mentions.
@@ -1143,7 +1243,7 @@ impl Recovered {
 #[must_use]
 pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recovered {
     let mut recovered = Recovered::default();
-    for event in events {
+    for (position, event) in events.into_iter().enumerate() {
         let status = match *event {
             EffectEvent::IntentAdmitted { .. } => AttemptStatus::Prepared,
             EffectEvent::DispatchPrepared { .. } => AttemptStatus::OutcomeUnknown,
@@ -1153,19 +1253,40 @@ pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recover
             },
             EffectEvent::Verified { verification, .. } => match verification.result() {
                 VerificationResult::Satisfied => AttemptStatus::Verified,
-                VerificationResult::NotSatisfied => AttemptStatus::Applied,
+                VerificationResult::NotSatisfied => AttemptStatus::VerificationFailed,
             },
+        };
+        let verification = match *event {
+            EffectEvent::Verified { verification, .. } => Some(verification),
+            _ => None,
         };
         let key = event.key();
         match recovered.index.get(&key).copied() {
             Some(index) => {
                 if let Some(attempt) = recovered.attempts.get_mut(index) {
+                    if let Some(trail) = recovered.transitions.get_mut(index) {
+                        trail.push(Transition {
+                            from: Some(attempt.status),
+                            to: status,
+                            position,
+                        });
+                    }
                     attempt.status = status;
+                    if verification.is_some() {
+                        attempt.verification = verification;
+                    }
                 }
             }
             None => {
                 let index = recovered.attempts.len();
-                recovered.attempts.push(Attempt::new(key, status));
+                let mut attempt = Attempt::new(key, status);
+                attempt.verification = verification;
+                recovered.attempts.push(attempt);
+                recovered.transitions.push(vec![Transition {
+                    from: None,
+                    to: status,
+                    position,
+                }]);
                 recovered.index.insert(key, index);
             }
         }
@@ -1815,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_ladder_refuses_anything_further() -> TestResult {
+    fn a_verified_attempt_refuses_everything_but_a_later_verification() -> TestResult {
         let key = key("1", "1")?;
         let mut journal = MemoryJournal::new();
         admit_and_prepare(&mut journal, key)?;
@@ -1844,12 +1965,12 @@ mod tests {
             matches!(
                 refused,
                 Err(JournalError::OutOfOrder {
-                    expected: None,
+                    expected: Some(EventKind::Verified),
                     attempted: EventKind::OutcomeObserved,
                     ..
                 })
             ),
-            "nothing follows a verification"
+            "only a later verification follows a verification; the effect is not re-settled"
         );
         Ok(())
     }
@@ -1975,8 +2096,79 @@ mod tests {
         )?;
 
         let status = journal.recover().status(key);
-        assert_eq!(status, Some(AttemptStatus::Applied));
+        assert_eq!(status, Some(AttemptStatus::VerificationFailed));
+        assert_ne!(status, Some(AttemptStatus::Applied));
         assert_ne!(status, Some(AttemptStatus::Verified));
+        assert!(
+            !status.is_some_and(AttemptStatus::is_uncertain),
+            "the effect is known to have landed, so a failed predicate is not uncertainty"
+        );
+        Ok(())
+    }
+
+    fn verdict(version: u64, result: VerificationResult) -> Result<Verification, Box<dyn std::error::Error>> {
+        Ok(Verification::new(
+            Id128::from_hex(PREDICATE)?,
+            version,
+            blake3(format!("observations at version {version}").as_bytes()),
+            result,
+        ))
+    }
+
+    /// #260: a verdict is revisable. `Verified`, then the world moves and the
+    /// predicate no longer holds, then it holds again: each is recordable, the
+    /// recovered status follows the latest, and the verdict names the predicate
+    /// version it was decided at.
+    #[test]
+    fn a_verification_can_be_revised_in_both_directions() -> TestResult {
+        let key = key("1", "1")?;
+        let mut journal = MemoryJournal::new();
+        admit_and_prepare(&mut journal, key)?;
+        append(
+            &mut journal,
+            EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::Applied,
+            },
+        )?;
+        for (version, result) in [
+            (1, VerificationResult::Satisfied),
+            (2, VerificationResult::NotSatisfied),
+            (3, VerificationResult::Satisfied),
+        ] {
+            append(
+                &mut journal,
+                EffectEvent::Verified {
+                    key,
+                    verification: verdict(version, result)?,
+                },
+            )?;
+        }
+
+        let recovered = journal.recover();
+        assert_eq!(recovered.status(key), Some(AttemptStatus::Verified));
+        assert_eq!(
+            recovered.verification(key).map(|found| found.predicate_version()),
+            Some(3),
+            "the status is qualified by the version it was decided at"
+        );
+        let trail: Vec<_> = recovered
+            .history(key)
+            .iter()
+            .map(|change| (change.from(), change.to(), change.position()))
+            .collect();
+        assert_eq!(
+            trail,
+            vec![
+                (None, AttemptStatus::Prepared, 0),
+                (Some(AttemptStatus::Prepared), AttemptStatus::OutcomeUnknown, 1),
+                (Some(AttemptStatus::OutcomeUnknown), AttemptStatus::Applied, 2),
+                (Some(AttemptStatus::Applied), AttemptStatus::Verified, 3),
+                (Some(AttemptStatus::Verified), AttemptStatus::VerificationFailed, 4),
+                (Some(AttemptStatus::VerificationFailed), AttemptStatus::Verified, 5),
+            ],
+            "what changed, what it superseded, and where in the journal"
+        );
         Ok(())
     }
 
