@@ -1325,14 +1325,58 @@ fn run_saturation_tier(
          would drop a run and one under would run a run nobody bound"
     );
     let host = std::sync::Arc::new(host);
+    // One sample per run: the wall time from the run being polled to its report,
+    // so the percentiles below include queueing behind `in_flight`, not only the
+    // run's own work. The lock is taken after the await, never across it.
+    let latencies = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(concurrency)));
+    let sink = std::sync::Arc::clone(&latencies);
     let futures = work.into_iter().map(move |(gh, request)| {
         let host = std::sync::Arc::clone(&host);
         let job = std::sync::Arc::clone(&job);
-        async move { host.run(&job, (gh, request)).await }
+        let sink = std::sync::Arc::clone(&sink);
+        async move {
+            let begun = std::time::Instant::now();
+            let report = host.run(&job, (gh, request)).await;
+            if let Ok(mut samples) = sink.lock() {
+                samples.push(begun.elapsed());
+            }
+            report
+        }
     });
     let reports = lgwks_bot::Runtime::new()?
         .block_on(lgwks_bot::rt::task::join_all_bounded(in_flight, futures));
     let elapsed = started.elapsed();
+    let mut samples = latencies
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        samples.len(),
+        concurrency,
+        "concurrency {concurrency}: every run must record exactly one latency sample"
+    );
+    samples.sort_unstable();
+    let at = |per_mille: usize| {
+        let rank = samples.len().saturating_mul(per_mille).div_ceil(1000);
+        samples[rank.saturating_sub(1).min(samples.len().saturating_sub(1))]
+    };
+    let ms = |span: Duration| u64::try_from(span.as_millis()).unwrap_or(u64::MAX);
+    // `install_default` fails once a subscriber exists (the second tier in this
+    // binary), which is the expected case, so the failure is a debug record.
+    if let Err(error) = lgwks_std::trace::install_default("lgwks-saturation") {
+        lgwks_std::trace::debug!(error = %error, "saturation: subscriber already installed");
+    }
+    lgwks_std::trace::info!(
+        label = label,
+        runs = concurrency,
+        in_flight = in_flight,
+        wall_ms = ms(elapsed),
+        p50_ms = ms(at(500)),
+        p95_ms = ms(at(950)),
+        p99_ms = ms(at(990)),
+        max_ms = ms(at(1000)),
+        "SATURATION latency per run, queueing included"
+    );
 
     // The output is in input order and the inputs were receiver-major, so one
     // cursor walks both: no size is recomputed here and no slice can drift from
