@@ -185,6 +185,36 @@ pub fn pid_is_alive(pid: i32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// What `ps` reports for `pid` and for every process in the group it leads, one
+/// `pid ppid pgid stat comm` row each, or `absent` when nothing matches.
+///
+/// A failed "this pid is gone" wait can mean three different things: the process
+/// is still running, it is a zombie nobody has reaped (`kill -0` succeeds for
+/// both), or a member of its group outlived it. The `stat` column tells them
+/// apart (`Z` is a zombie), so the assertion carries it instead of a bare
+/// "still alive" that cannot be told from either.
+pub fn describe_pid(pid: i32) -> String {
+    let listing = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,pgid=,stat=,comm="])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let wanted = pid.to_string();
+    let rows: Vec<&str> = listing
+        .lines()
+        .filter(|row| {
+            let mut columns = row.split_whitespace();
+            let (row_pid, _parent, row_group) = (columns.next(), columns.next(), columns.next());
+            row_pid == Some(wanted.as_str()) || row_group == Some(wanted.as_str())
+        })
+        .collect();
+    if rows.is_empty() {
+        "absent".to_owned()
+    } else {
+        rows.join(" | ")
+    }
+}
+
 /// Send SIGKILL to `pid` and reap whatever the platform reports.
 ///
 /// The signal is sent by the `kill` utility rather than by a syscall because

@@ -1,0 +1,26 @@
+name: flake-probe
+on:
+  pull_request:
+    paths: [".github/workflows/flake-probe.yml"]
+jobs:
+  probe:
+    name: process_escape under load
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: taiki-e/install-action@nextest
+      - name: Build the test binary
+        run: cargo nextest run -p lgwks_bot --locked --features full --test process_escape --no-run
+      - name: Stress it under CPU load
+        run: |
+          for i in $(seq 12); do (while :; do :; done) & done
+          cargo nextest run -p lgwks_bot --locked --features full --test process_escape --no-fail-fast --retries 0 --stress-count 120 2>&1 | tail -80

@@ -252,7 +252,9 @@ fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult
 
     assert!(
         wait_for_pid_gone(leader, BUDGET).is_some(),
-        "the supervised group must be gone after shutdown, or cleanup never happened at all"
+        "the supervised group must be gone after shutdown, or cleanup never happened at all; \
+         ps for the leader and its group (stat Z is an unreaped zombie): {}",
+        process_probe::describe_pid(leader)
     );
     assert!(
         pid_is_alive(sibling_pid),
