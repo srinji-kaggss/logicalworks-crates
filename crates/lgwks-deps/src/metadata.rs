@@ -1621,11 +1621,12 @@ pub fn read(root: &Path) -> Result<Collected<Vec<DirectEdge>>, MetadataError> {
     Ok(read_with_members(root)?.map(|(edges, _)| edges))
 }
 
+/// Direct edges and the package name of every workspace member, from one run.
+pub type EdgesAndMembers = (Vec<DirectEdge>, Vec<String>);
+
 /// [`read`], and the package name of every workspace member from the same
 /// Cargo run, so the member list and the edges cannot describe two states.
-pub fn read_with_members(
-    root: &Path,
-) -> Result<Collected<(Vec<DirectEdge>, Vec<String>)>, MetadataError> {
+pub fn read_with_members(root: &Path) -> Result<Collected<EdgesAndMembers>, MetadataError> {
     read_metadata(root)?.try_map(|metadata| {
         let members = located_members(&metadata)?
             .into_iter()
