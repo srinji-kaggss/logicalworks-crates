@@ -163,9 +163,23 @@ group = "bot-full"
 surfaces = "local ci"
 required = true
 # CI runs this as four shards by setting PARTITION=count:N/4; unset, it is the
-# whole suite.
-command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}"
+# whole suite less the saturation tiers, which `tests-bot-saturation` runs. Left
+# in, the three tiers (100, 1,000 and 10,000 concurrent runs) land in one shard:
+# on run 37205854158 that shard's test phase took 229 s against 61-63 s for the
+# other three, and set the whole run's wall at 481 s.
+command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot async runner tests"
+
+[[lane]]
+id = "tests-bot-saturation"
+group = "bot-full"
+surfaces = "local ci"
+required = true
+# The saturation family on its own: it is CPU-bound for about two minutes, so it
+# gets its own runner instead of one shard's tail. Builds only the one test
+# binary it runs.
+command = "cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'"
+ci_step = "Run lgwks-bot saturation tiers"
 
 [[lane]]
 id = "bench-async-fairness"
