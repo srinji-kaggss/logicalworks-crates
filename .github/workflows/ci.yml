@@ -192,7 +192,33 @@ jobs:
       - name: Run lgwks-bot async runner tests
         env:
           PARTITION: count:${{ matrix.shard }}/4
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
+
+  tests_bot_saturation:
+    # The saturation tiers (100, 1,000 and 10,000 concurrent runs) in a job of
+    # their own: in a shard they set the run's wall (481 s on run 37205854158,
+    # test phase 229 s against 61-63 s for the other three shards).
+    name: Tests (lgwks-bot saturation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-bot saturation tiers
+        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
 
   bench_fairness:
     # Its own job: it builds a separate workspace root in release, and run after
