@@ -786,14 +786,17 @@ struct PoolState<W = Work> {
     /// The join handle of every thread this pool started and has not joined.
     ///
     /// Registered under the same lock that counted the start, so a shutdown
-    /// can never observe a thread it cannot join. **At most `ceiling` entries
-    /// at any moment:** a start joins the handles that have already finished
-    /// before it counts its own, and admission only reaches this arm while
-    /// `live < ceiling`, so the list can never hold more than the pool could
-    /// have running. The bound needs the reap: a thread that exits on its
-    /// keep-alive is still held by its handle until something joins it, so a
-    /// pool left to itself across burst/idle cycles would hold one per cycle
-    /// — one per exited thread, growing without bound.
+    /// can never observe a thread it cannot join. **Bounded by `live +
+    /// ceiling + 1`, not by the ceiling.** A thread decrements `live` under
+    /// the lock and only then returns, so between those two the thread has
+    /// left the pool's accounting and not yet been marked finished: a start
+    /// in that window keeps its handle and pushes its own, and the list is
+    /// then larger than the count of live threads. It does not accumulate:
+    /// every start joins the handles that have already returned, so the
+    /// departed-and-unjoined part is at most the threads live at the last
+    /// reap, which is the ceiling, plus the handful mid-exit. Without that
+    /// reap this list would grow by one entry per exited thread for ever,
+    /// and each entry holds the resources std releases on join.
     handles: Vec<ThreadHandle>,
 }
 
@@ -989,6 +992,22 @@ fn pool() -> &'static Arc<Pool> {
     POOL.get_or_init(|| Arc::new(Pool::new(MAX_BLOCKING_THREADS, start_os_thread)))
 }
 
+/// The body every pool thread runs: its handed-off first job, then the pool
+/// loop until the thread is told to leave.
+///
+/// Shared so a starter that adds an epilogue — the seeded lifetime family's,
+/// which holds a thread in the window between leaving the accounting and
+/// being marked finished — composes this instead of repeating the sequence and
+/// drifting from it.
+fn serve_pool(pool: &Pool, first: Handoff) {
+    let work = lock(&first).take();
+    drop(first);
+    if let Some(work) = work {
+        work();
+    }
+    pool.run();
+}
+
 /// Start one named OS thread serving `pool`, and hand back its join handle.
 ///
 /// The thread owns its reference to the pool and runs the job in `first`
@@ -998,14 +1017,7 @@ fn pool() -> &'static Arc<Pool> {
 fn start_os_thread(pool: Arc<Pool>, first: Handoff) -> io::Result<ThreadHandle> {
     thread::Builder::new()
         .name("lgwks-blocking".into())
-        .spawn(move || {
-            let work = lock(&first).take();
-            drop(first);
-            if let Some(work) = work {
-                work();
-            }
-            pool.run();
-        })
+        .spawn(move || serve_pool(&pool, first))
 }
 
 /// A new thread's first job. Shared rather than moved into the thread's
