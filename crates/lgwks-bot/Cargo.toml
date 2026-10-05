@@ -67,18 +67,24 @@ inspect = ["dep:lgwks_ast"]
 # reason there is no cheaper fallback here: a run id derived from a clock or a
 # counter is the shortcut that invariant exists to refuse.
 #
-# Not on by default, and the reason is the target rather than the cost. Minting
-# an identity needs OS entropy, `lgwks_std::random` is linux/macOS/windows only
-# and says so with a `compile_error!`, and this crate's *default* feature set is
-# built for `wasm32-wasip1` by the WASI boundary job. A default-on `ephemeral`
-# therefore makes the default set fail to build on a target the crate supports:
-# observed as `lgwks_std::random supports linux, macOS, and windows only`.
+# Not on by default, and the reason was the target rather than the cost. Minting
+# an identity needs OS entropy, this crate's *default* feature set is built for
+# `wasm32-wasip1` by the WASI boundary job, and `lgwks_std::random` used to be
+# linux/macOS/windows only with a `compile_error!` saying so. #276 withdrew that
+# refusal: `random` now supports every target `getrandom` supports, and the
+# `target-matrix` lane executes `cargo check -p lgwks_std --features random
+# --target wasm32-wasip1`, which passes. **The blocker this default-off rested
+# on is therefore gone, and whether `ephemeral` belongs on the default feature
+# set is now a decision about this crate's default surface rather than about
+# portability.** It stays off here so that decision is taken with its own
+# evidence: the whole-workspace gate for a default-set change is the bot's, not
+# `lgwks_std`'s, and #276 did not run it.
 #
 # This is the same shape as `signal`, which is also host-only, also not default,
-# and also gated in the source. What keeps it from rotting is that the gate
-# exercises it anyway: `full` includes it, and the runner step runs
-# `cargo test -p lgwks_bot --features full`, so `tests/it/ephemeral.rs` executes
-# rather than only compiling.
+# and also gated in the source. What keeps `ephemeral` from rotting meanwhile is
+# that the gate exercises it anyway: `full` includes it, and the runner step
+# runs `cargo test -p lgwks_bot --features full`, so `tests/it/ephemeral.rs`
+# executes rather than only compiling.
 ephemeral = ["lgwks_std/random"]
 full = [
     "rt",
