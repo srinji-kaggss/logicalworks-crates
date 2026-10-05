@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 
 // ── Randomness and the trace ──────────────────────────────────────────────
 
-mod seed;
+pub(crate) mod seed;
 
 pub use seed::{Rng, Trace};
 

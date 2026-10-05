@@ -29,29 +29,33 @@
 #![cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "macros"))]
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
 use std::num::NonZeroUsize;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use lgwks_bot::broker::Broker;
-use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-use lgwks_bot::journal::MemoryJournal;
 use lgwks_bot::rt::sync::{Mutex, mpsc};
 use lgwks_bot::rt::task::JoinSet;
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::spec::{
-    AbandonReason, EffectEvidence, EffectIdentity, EffectKey, EffectScope, PendingWork,
-    RetryPolicy, TransitionHold,
+    AbandonReason, EffectEvidence, EffectKey, PendingWork, RetryPolicy, TransitionHold,
 };
 use lgwks_bot::{
     Auth, Bot, BotError, Builder, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet,
     Observe, block_on,
 };
+
+#[path = "support/effects.rs"]
+mod effects;
+#[path = "support/poll.rs"]
+mod poll;
+#[path = "support/yield_once.rs"]
+mod yield_once;
+
+use effects::memory_scope as test_effects;
+use poll::admit_poll;
+use yield_once::YieldOnce;
 
 /// What a test reports when its precondition did not hold.
 ///
@@ -224,44 +228,6 @@ fn pause_between_polls() {
 }
 
 // ── Futures that need no reactor ───────────────────────────────────────────
-
-/// A future that yields once and then resolves, without a reactor.
-///
-/// This is the shape a runtime-independent future has: it makes progress by
-/// waking its own waker, so any executor that re-polls on a wake completes it —
-/// including the thread-parking one behind the synchronous adapter. It needs no
-/// timer, socket, or driver to do it, which is exactly the property that makes
-/// it a fair subject for the adapter that has none.
-struct YieldOnce {
-    /// Whether this future has returned `Pending` once already.
-    yielded: bool,
-    /// The value it resolves to.
-    value: u32,
-}
-
-impl YieldOnce {
-    /// A future that yields once and then resolves to `value`.
-    fn new(value: u32) -> Self {
-        Self {
-            yielded: false,
-            value,
-        }
-    }
-}
-
-impl Future for YieldOnce {
-    type Output = u32;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<u32> {
-        let this = self.get_mut();
-        if this.yielded {
-            return Poll::Ready(this.value);
-        }
-        this.yielded = true;
-        context.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
 
 // ── Sources ────────────────────────────────────────────────────────────────
 
@@ -1124,7 +1090,7 @@ struct PollProbe {
     /// The value returned after any one-shot refusal.
     value: u32,
     /// Number of calls made through `Bot::tick`.
-    polls: Rc<Cell<usize>>,
+    polls: Rc<Cell<u32>>,
     /// Whether this source's next poll must refuse.
     refuse_next: Rc<Cell<bool>>,
 }
@@ -1137,8 +1103,7 @@ impl Observe for PollProbe {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-        call.0.check(Observe::required_caps(self))?;
-        self.polls.set(self.polls.get().saturating_add(1));
+        admit_poll(&call.0, Observe::required_caps(self), &self.polls)?;
         if self.refuse_next.replace(false) {
             let refusal = Err(BotError::DomainError {
                 domain: self.domain.to_owned(),
@@ -1251,29 +1216,6 @@ fn binding(work: &PendingWork) -> Result<EffectKey, Box<dyn std::error::Error>> 
         )
         .into()
     })
-}
-
-/// The effect scope a test's bot runs under.
-///
-/// A fresh run, environment and flow revision per call, and an in-memory
-/// journal: these tests are about the ledger's behaviour, and a scope that
-/// outlived one test would carry another's uncertainty into it.
-fn test_effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
-    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    let mut broker = Broker::new();
-    broker.register(environment)?;
-    Ok(EffectScope::new(
-        EffectIdentity::new(
-            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-            environment,
-            FlowRevision::from_tagged(
-                "blake3_256",
-                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-            )?,
-        ),
-        broker,
-        Box::new(MemoryJournal::new()),
-    ))
 }
 
 /// A settlement is accepted only for the binding it names.
