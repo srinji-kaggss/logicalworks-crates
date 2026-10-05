@@ -1306,7 +1306,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`every_seed_is_stopped_then_parses_clean_on_the_same_thread`,
   `the_same_seed_replays_to_the_same_deadline_trace`,
   `distinct_seeds_diverge_in_their_deadline_trace`), the `try_parse_within`
-  doctest, and in `lgwks_bot`
+  doctest, and in lgwks_bot
   `inspect::tests::a_parse_stopped_at_its_deadline_is_incomplete_not_an_infrastructure_failure`
   and `tests/it/inspect.rs::a_subject_deeper_than_the_parser_admits_is_a_depth_budget_not_a_fault`,
   which hold that a parse the deadline or the depth bound refused reaches an
