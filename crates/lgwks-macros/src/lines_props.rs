@@ -248,10 +248,13 @@ fn the_property_catches_a_builder_that_snaps_lines_to_the_grid() -> Outcome {
     })?;
     let mut rendered = Vec::new();
     render(&minimal.0, 0, &mut rendered);
+    // `deeper` shrinks to false first, and a line moved shallower needs a
+    // column of at least one indent: a header, its first child, and the
+    // second child moved off the grid.
     assert_eq!(
-        rendered.len(),
-        2,
-        "two top-level lines, the second moved: {minimal:?}"
+        (rendered.len(), minimal.2),
+        (3, false),
+        "a header and two children, the second moved shallower: {minimal:?}"
     );
     Ok(())
 }

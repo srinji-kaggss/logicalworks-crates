@@ -45,7 +45,8 @@ pub fn runner(seed: u64, cases: u32, source_file: &'static str) -> TestRunner {
 /// Run `property` against a mutant and return the minimal input it fails on.
 ///
 /// Nothing is persisted: the mutant is meant to fail, and its seed is not a
-/// regression of the real implementation.
+/// regression of the real implementation. A case that failed in [`setup`]
+/// did not reach the mutant, so it is refused rather than reported as a catch.
 pub fn shrunk<S>(
     seed: u64,
     strategy: &S,
@@ -62,7 +63,12 @@ where
         ..Config::default()
     });
     match mutant_runner.run(strategy, property) {
-        Err(TestError::Fail(_, minimal)) => Ok(minimal),
+        Err(TestError::Fail(reason, minimal)) => {
+            if reason.message().starts_with(SETUP_FAILED) {
+                return Err(format!("the mutant was never reached: {reason}").into());
+            }
+            Ok(minimal)
+        }
         Err(TestError::Abort(reason)) => Err(format!("the mutant run aborted: {reason}").into()),
         Ok(()) => Err("the property did not catch its mutant".into()),
     }
@@ -77,7 +83,10 @@ pub fn check(holds: bool, message: impl FnOnce() -> String) -> Result<(), TestCa
     }
 }
 
+/// How a [`setup`] failure's reason begins, so [`shrunk`] can tell it apart.
+const SETUP_FAILED: &str = "setup failed: ";
+
 /// Lift a setup error into a case failure that names it.
 pub fn setup<T, E: Debug>(result: Result<T, E>) -> Result<T, TestCaseError> {
-    result.map_err(|error| TestCaseError::fail(format!("setup failed: {error:?}")))
+    result.map_err(|error| TestCaseError::fail(format!("{SETUP_FAILED}{error:?}")))
 }

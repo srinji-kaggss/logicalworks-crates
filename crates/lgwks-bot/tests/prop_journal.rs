@@ -38,7 +38,7 @@ const KEYS: u64 = 4;
 /// against a stale tail.
 #[derive(Debug, Clone, Copy)]
 struct Proposal {
-    /// Index into the key pool.
+    /// The attempt id: ids start at 1, and 0 is refused when the key is built.
     key: u64,
     /// 0 intent, 1 dispatch, 2 applied, 3 not applied, 4 verified, 5 failed
     /// verification. Any rung may be proposed at any time.
@@ -49,7 +49,7 @@ struct Proposal {
 
 /// Histories up to 40 proposals long; one in eight is offered stale.
 fn histories() -> impl Strategy<Value = Vec<Proposal>> {
-    let proposal = (0..KEYS, 0u8..6, proptest::bool::weighted(0.125))
+    let proposal = (1..=KEYS, 0u8..6, proptest::bool::weighted(0.125))
         .prop_map(|(key, rung, stale)| Proposal { key, rung, stale });
     vec(proposal, 0..40)
 }
@@ -117,7 +117,11 @@ fn replay(history: &[Proposal]) -> Result<(MemoryJournal, Vec<EffectEvent>), Tes
 
 /// What an attempt's last landed event says about it, independently of the
 /// fold under test: the rule is "the newest fact wins".
-fn oracle(landed: &[EffectEvent]) -> Vec<(EffectKey, AttemptStatus)> {
+///
+/// An event or result this oracle does not know is a failed case, never a
+/// guess: the generator only proposes the rungs below, so one appearing means
+/// the ladder grew and the oracle must be taught it.
+fn oracle(landed: &[EffectEvent]) -> Result<Vec<(EffectKey, AttemptStatus)>, TestCaseError> {
     let mut out: Vec<(EffectKey, AttemptStatus)> = Vec::new();
     for landed_event in landed {
         let status = match *landed_event {
@@ -134,7 +138,17 @@ fn oracle(landed: &[EffectEvent]) -> Vec<(EffectKey, AttemptStatus)> {
             EffectEvent::Verified { verification, .. } => match verification.result() {
                 VerificationResult::Satisfied => AttemptStatus::Verified,
                 VerificationResult::NotSatisfied => AttemptStatus::VerificationFailed,
+                _ => {
+                    return Err(TestCaseError::fail(format!(
+                        "the oracle does not know the verification in {landed_event}"
+                    )));
+                }
             },
+            _ => {
+                return Err(TestCaseError::fail(format!(
+                    "the oracle does not know the event {landed_event}"
+                )));
+            }
         };
         let key = landed_event.key();
         match out.iter_mut().find(|&&mut (seen, _)| seen == key) {
@@ -142,7 +156,7 @@ fn oracle(landed: &[EffectEvent]) -> Vec<(EffectKey, AttemptStatus)> {
             None => out.push((key, status)),
         }
     }
-    out
+    Ok(out)
 }
 
 /// A recovery fold's answer, as (key, status) in report order.
@@ -165,7 +179,7 @@ fn shipped(events: &[EffectEvent]) -> Vec<(EffectKey, AttemptStatus)> {
 fn recovery_property(fold: Fold, history: &[Proposal]) -> Result<(), TestCaseError> {
     let (journal, landed) = replay(history)?;
     let answer = fold(&landed);
-    let expected = oracle(&landed);
+    let expected = oracle(&landed)?;
     check(answer == expected, || {
         format!("folded {answer:?}, expected {expected:?}")
     })?;
@@ -242,14 +256,19 @@ fn the_property_catches_a_fold_that_reads_silence_as_not_applied() -> Outcome {
     let minimal = prop::shrunk(SEED, &histories(), |history| {
         recovery_property(optimistic, &history)
     })?;
-    let shape: Vec<(u64, u8, bool)> = minimal
+    // Which attempt it is does not matter, so the shrinker may leave any key;
+    // the shape is one attempt admitted, then dispatched, both current.
+    let shape: Vec<(u8, bool)> = minimal
         .iter()
-        .map(|proposal| (proposal.key, proposal.rung, proposal.stale))
+        .map(|proposal| (proposal.rung, proposal.stale))
         .collect();
+    let one_attempt = minimal
+        .windows(2)
+        .all(|pair| matches!(pair, [first, second] if first.key == second.key));
     assert_eq!(
-        shape,
-        [(0, 0, false), (0, 1, false)],
-        "the smallest history that exposes it: admit, then dispatch"
+        (shape, one_attempt),
+        (vec![(0, false), (1, false)], true),
+        "the smallest history that exposes it: admit, then dispatch: {minimal:?}"
     );
     Ok(())
 }

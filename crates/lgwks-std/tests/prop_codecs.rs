@@ -81,12 +81,10 @@ fn hex_oracle(input: &[u8]) -> Result<Vec<u8>, hex::DecodeError> {
         .iter()
         .filter_map(|&byte| char::from(byte).to_digit(16))
         .collect();
-    Ok(digits
-        .chunks_exact(2)
-        .filter_map(|pair| match *pair {
-            [high, low] => u8::try_from(high.saturating_mul(16).saturating_add(low)).ok(),
-            _ => None,
-        })
+    let (pairs, _) = digits.as_chunks::<2>();
+    Ok(pairs
+        .iter()
+        .filter_map(|&[high, low]| u8::try_from(high.saturating_mul(16).saturating_add(low)).ok())
         .collect())
 }
 
@@ -135,7 +133,13 @@ fn hex_property_catches_a_decoder_that_drops_a_half_byte() -> Outcome {
     let minimal = shrunk(&text_from(b"0123456789abcdefABCDEF"), |input| {
         hex_property(lenient, &input)
     })?;
-    assert_eq!(minimal, b"0", "the smallest odd input");
+    // The shrinker removes one element at a time, and any one removal from an
+    // odd input makes it even, which the mutant decodes correctly; so the
+    // minimal is an odd run of the smallest digit, not necessarily `b"0"`.
+    assert!(
+        minimal.len() & 1 == 1 && minimal.iter().all(|&digit| digit == b'0'),
+        "an odd run of the smallest digit, got {minimal:?}"
+    );
     Ok(())
 }
 
@@ -320,8 +324,11 @@ struct Width<T: 'static> {
     /// Appends the encoding of a value.
     encode: fn(T, &mut Vec<u8>),
     /// Decodes a prefix, answering the value and the bytes it used.
-    decode: fn(&[u8]) -> Result<(T, usize), leb128::DecodeError>,
+    decode: Leb128Decode<T>,
 }
+
+/// An LEB128 prefix decoder: the value and the bytes it used.
+type Leb128Decode<T> = fn(&[u8]) -> Result<(T, usize), leb128::DecodeError>;
 
 /// Decoding an encoding answers the value and exactly its length, and leaves
 /// whatever follows unread.
@@ -496,10 +503,13 @@ fn rfc3339_round_trips_every_instant_with_a_four_digit_year() -> Outcome {
 fn rfc3339_property_catches_a_renderer_that_rounds_to_milliseconds() -> Outcome {
     /// Renders at millisecond precision, the common shortcut.
     fn coarse(at: std::time::SystemTime) -> Result<String, lgwks_std::time::FormatError> {
-        use lgwks_std::time::format::{from_unix_parts_lossy, to_rfc3339, unix_parts_lossy};
-        let (secs, nanos) = unix_parts_lossy(at);
+        use lgwks_std::time::format::{from_unix_parts, to_rfc3339, unix_parts};
+        let Ok((secs, nanos)) = unix_parts(at) else {
+            return to_rfc3339(at);
+        };
         let sub_milli = nanos.checked_rem(1_000_000).unwrap_or(0);
-        to_rfc3339(from_unix_parts_lossy(secs, nanos.saturating_sub(sub_milli)))
+        from_unix_parts(secs, nanos.saturating_sub(sub_milli))
+            .map_or_else(|_| to_rfc3339(at), to_rfc3339)
     }
     let minimal = shrunk(&(RFC3339_SPAN, 0u32..1_000_000_000), |(secs, nanos)| {
         time_property(coarse, secs, nanos)
@@ -568,7 +578,7 @@ fn wire_round_trip(record: &Record) -> Result<Record, lgwks_std::wire::WireError
 #[cfg(feature = "wire")]
 fn wire_property(round_trip: RoundTrip, record: &Record) -> Result<(), TestCaseError> {
     let back = round_trip(record);
-    check(back.as_ref() == Ok(record), || {
+    check(matches!(back, Ok(ref value) if value == record), || {
         format!("{record:?} came back as {back:?}")
     })
 }
@@ -776,7 +786,10 @@ fn glob_property(matcher: Matcher, pattern: &str, path: &str) -> Result<(), Test
     })?;
     if let Ok(compiled) = lgwks_std::glob::GlobPattern::compile(pattern) {
         let mut scratch = lgwks_std::glob::GlobScratch::new();
-        compiled.is_match_with(path, &mut scratch);
+        let rerun = compiled.is_match_with(path, &mut scratch);
+        check(rerun == expected, || {
+            format!("{pattern:?} on {path:?}: a reused scratch answered {rerun}")
+        })?;
         let scalars = path.chars().count().saturating_add(1);
         check(
             scratch.row_capacity() <= scalars.saturating_mul(2).saturating_add(8),
