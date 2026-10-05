@@ -58,7 +58,7 @@ fn edge(dims: &Dims) -> Result<Vec<DirectEdge>, Box<dyn Error>> {
 fn register(policy: &str) -> Result<Contract, Box<dyn Error>> {
     let text = format!(
         concat!(
-            "[policy]\nschema = 2\nenforce = true\n\n",
+            "[policy]\nschema = 2\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n",
             "[[approved]]\n",
             "crate = \"engine\"\n",
             "tier = \"boundary\"\n",

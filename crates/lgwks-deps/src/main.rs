@@ -1078,6 +1078,21 @@ fn print_check_json(
             None => Value::Null,
         },
     );
+    // The licence policy the verdict was judged by, as the register declared
+    // it, so a consumer reading the receipt sees the set that admitted or
+    // refused each edge rather than inferring one the gate does not hold.
+    contract.insert(
+        "accepted_licenses".to_owned(),
+        match register.and_then(Contract::accepted_licenses) {
+            Some(accepted) => Value::Array(
+                accepted
+                    .iter()
+                    .map(|licence| Value::String(licence.clone()))
+                    .collect(),
+            ),
+            None => Value::Null,
+        },
+    );
     payload.insert("contract".to_owned(), Value::Object(contract));
     let mut subject = Map::new();
     subject.insert(
@@ -1740,6 +1755,19 @@ impl FreshnessResult {
     }
 }
 
+/// The `User-Agent` crates.io's crawler policy asks for: this tool's name and
+/// version and where to reach its maintainers, read from the crate's own
+/// manifest. Compiled from `Cargo.toml` rather than written here, so the
+/// version cannot go stale and no person's address is baked into every copy
+/// of a published binary.
+const USER_AGENT: &str = concat!(
+    "User-Agent: lgwks-deps/",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CARGO_PKG_REPOSITORY"),
+    ")"
+);
+
 /// Queries crates.io for each distinct package name.
 ///
 /// Names are de-duplicated first: a lock file commonly resolves several
@@ -1761,7 +1789,7 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
                 "--max-time",
                 "10",
                 "-H",
-                "User-Agent: lgwks-deps/0.1 (srinji@logicalworks.ca)",
+                USER_AGENT,
                 &format!("https://crates.io/api/v1/crates/{}", package.name),
             ])
             .output();

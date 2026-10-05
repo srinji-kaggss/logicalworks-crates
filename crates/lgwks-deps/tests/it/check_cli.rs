@@ -330,6 +330,7 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
         concat!(
             "[policy]\n",
             "enforce = true\n",
+            "accepted_licenses = \"MIT, Apache-2.0\"\n",
             "[[approved]]\n",
             "crate = \"helper\"\n",
             "tier = \"boundary\"\n",
@@ -399,8 +400,8 @@ fn conflicting_approval_keys_cannot_admit_a_real_path_edge() -> TestResult {
         refused
             .stderr
             .contains("duplicate key \"allowed_consumers\"")
-            && refused.stderr.contains("first assignment is at line 12")
-            && refused.stderr.contains("line 13"),
+            && refused.stderr.contains("first assignment is at line 13")
+            && refused.stderr.contains("line 14"),
         "the CLI refusal must name the field and both positions: {:?}",
         refused.stderr
     );

@@ -26,6 +26,7 @@ mod origin_binding;
 mod prop_parsers;
 mod scan_evidence;
 mod sim_dependency_policy;
+mod sim_license_policy;
 mod sim_metadata_dimensions;
 mod sim_origin;
 mod sim_policy_properties;

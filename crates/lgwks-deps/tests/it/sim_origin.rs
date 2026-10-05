@@ -37,7 +37,7 @@ fn edge(source: Option<&str>, path: Option<&str>) -> Result<DirectEdge, Box<dyn 
 fn register(source: &str, origin: &str) -> Result<Contract, Box<dyn Error>> {
     let text = format!(
         concat!(
-            "[policy]\nenforce = true\n\n",
+            "[policy]\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n",
             "[[approved]]\n",
             "crate = \"engine\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
             "capability = \"engine.core\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"{source}\"\norigin = \"{origin}\"\n",

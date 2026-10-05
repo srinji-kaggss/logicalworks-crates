@@ -22,6 +22,25 @@
 schema = 2
 enforce = true
 repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+# This repository's own policy. The gate is a published crate that audits
+# other repositories too, so none of this is compiled into it: each register
+# declares its own, and a register that approves edges without
+# `accepted_licenses` is refused rather than judged by someone else's set.
+#
+# `accepted_licenses`: the SPDX identifiers an inbound dependency may carry —
+# the set the approved packages here already declare (Apache-2.0 and MIT are
+# also what these crates publish under); Zlib and BSD-3-Clause because Cargo
+# needs every identifier in an expression known, and both are permissive. Not
+# accepted: GPL/AGPL (reciprocal), MPL-2.0 inbound (file-level copyleft), and
+# LicenseRef-* (a text this repository has not read). Widening is a reviewed
+# edit to this line.
+accepted_licenses = "0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib"
+# `surfaces`: INV-DEP-1's closed set of workspace members and approval owners.
+surfaces = "lgwks_std, lgwks_bot, lgwks_deps, lgwks_ast, lgwks_macros"
+# `frozen_surfaces` / `frozen_tier`: the finished, standalone lgwks_ast's
+# approvals stay boundary and its edge set does not grow (INV-DEP-1).
+frozen_surfaces = "lgwks_ast"
+frozen_tier = "boundary"
 
 [[approved]]
 crate = "appcui"
