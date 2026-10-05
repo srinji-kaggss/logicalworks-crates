@@ -1447,7 +1447,9 @@ fn workload_matrix(
         println!("wrote {path}");
     }
     if !failures.is_empty() {
-        return Err(refuse_failed("workload-matrix", "row(s) failed", &failures));
+        let refusal = Err(refuse_failed("workload-matrix", "row(s) failed", &failures));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "workload_matrix: returning an error to the caller");
+        return refusal;
     }
     println!(
         "{} rows, every receipt above was produced by running the row",
@@ -2358,34 +2360,42 @@ fn work_units_match(
 fn open_loop_conserved(label: &str, run: &SideRun) -> Result<(), String> {
     let accounted = run.admitted.saturating_add(run.refused);
     if accounted != run.offered {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: offered {}, admitted {} plus refused {} is {accounted} — an arrival was \
              lost or counted twice",
             run.offered, run.admitted, run.refused
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_conserved: returning an error to the caller");
+        return refusal;
     }
     if run.completed != run.admitted {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: {} of {} admitted bodies completed — work was lost or duplicated",
             run.completed, run.admitted
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_conserved: returning an error to the caller");
+        return refusal;
     }
     let terminal = run
         .completed
         .saturating_add(run.cancelled)
         .saturating_add(run.aborted);
     if terminal != run.admitted {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: {terminal} of {} admitted arrivals reached a terminal state",
             run.admitted
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_conserved: returning an error to the caller");
+        return refusal;
     }
     work_units_match(label, run.completed, run.work_units, "bodies")?;
     if run.in_flight_at_end != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: {} tasks still in flight after the drain",
             run.in_flight_at_end
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_conserved: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
@@ -3287,7 +3297,7 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
     let label = format!("in-flight tier {tier} on the {}", side.as_str());
     let requested = u64::try_from(tier).unwrap_or(u64::MAX);
     if run.reached != requested {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: only {} of {tier} tasks were concurrently admitted within {} s — \
              requested {tier}, reached {}, engine ceiling {}",
             run.reached,
@@ -3296,23 +3306,29 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
             run.ceiling
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "in_flight_tier: returning an error to the caller");
+        return refusal;
     }
     if run.completed.saturating_add(run.aborted) != run.placed {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: {} of {} admitted tasks reached a terminal state",
             run.completed.saturating_add(run.aborted),
             run.placed
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "in_flight_tier: returning an error to the caller");
+        return refusal;
     }
     work_units_match(&label, run.completed, run.work_units, "tasks")
         .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
     if run.in_flight_at_end != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "{label}: {} tasks still in flight after the drain",
             run.in_flight_at_end
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "in_flight_tier: returning an error to the caller");
+        return refusal;
     }
     Ok(run)
 }
@@ -3717,12 +3733,14 @@ async fn overload_run(
     engine.drain().await;
     let (completed, cancelled, aborted) = engine.terminals();
     if cancelled != 0 || aborted != 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "{} overload run ended with {cancelled} cancelled and {aborted} aborted tasks: a \
              recovery that drops work is not a recovery",
             side.as_str()
         )
         .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "overload_run: returning an error to the caller");
+        return refusal;
     }
     let work_units = work.load(Ordering::SeqCst);
     let run = RecoveryRun {
@@ -3753,7 +3771,7 @@ impl RecoveryRun {
     fn conserved(run: &RecoveryRun) -> Result<(), String> {
         let accounted = run.admitted.saturating_add(run.refused);
         if accounted != run.offered {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{}: offered {}, admitted {} plus refused {} is {accounted} — an arrival was \
                  lost or counted twice",
                 run.side.as_str(),
@@ -3761,14 +3779,18 @@ impl RecoveryRun {
                 run.admitted,
                 run.refused
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "conserved: returning an error to the caller");
+            return refusal;
         }
         if run.completed != run.admitted {
-            return Err(format!(
+            let refusal = Err(format!(
                 "{}: {} of {} admitted bodies completed — work was lost or duplicated",
                 run.side.as_str(),
                 run.completed,
                 run.admitted
             ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "conserved: returning an error to the caller");
+            return refusal;
         }
         work_units_match(
             "overload and recovery",
@@ -4338,11 +4360,13 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     if !failures.is_empty() {
-        return Err(refuse_failed(
+        let refusal = Err(refuse_failed(
             "seeded open-loop model",
             "seeded world(s) did not replay",
             &failures,
         ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_simulation: returning an error to the caller");
+        return refusal;
     }
     println!(
         "every seeded world replayed to the same trace hash; the p99-intended and \
@@ -4350,6 +4374,17 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
          two ways"
     );
     Ok(())
+}
+
+/// Parses one numeric flag value, naming what the flag expects on a refusal.
+fn number<T>(value: &str, expectation: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| format!("{expectation}: {error}"))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -4375,61 +4410,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut body_micros: u64 = 0;
     let mut capacity_target: u64 = DEFAULT_CAPACITY_TARGET;
     let mut workers: Option<usize> = None;
+    // The first refusal is carried as a value and returned once after the loop,
+    // so the loop is one decision per argument rather than one `?` per flag.
+    let mut parsed: Result<(), String> = Ok(());
     for arg in std::env::args().skip(1) {
-        if let Some(value) = arg.strip_prefix("--rounds=") {
-            rounds = value
-                .parse()
-                .map_err(|error| format!("rounds must be a number: {error}"))?;
+        if parsed.is_err() {
+            break;
+        }
+        parsed = if let Some(value) = arg.strip_prefix("--rounds=") {
+            number(value, "rounds must be a number").map(|count| rounds = count)
         } else if let Some(value) = arg.strip_prefix("--json=") {
             json = Some(value.to_string());
+            Ok(())
         } else if let Some(value) = arg.strip_prefix("--window=") {
-            window_seconds = value
-                .parse()
-                .map_err(|error| format!("window must be a number of seconds: {error}"))?;
+            number(value, "window must be a number of seconds").map(|seconds| window_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--tier=") {
-            tier = Some(
-                value
-                    .parse()
-                    .map_err(|error| format!("tier must be a number: {error}"))?,
-            );
+            number(value, "tier must be a number").map(|count| tier = Some(count))
         } else if let Some(value) = arg.strip_prefix("--knee=") {
-            knee = value
-                .parse()
-                .map_err(|error| format!("knee must be an offered rate: {error}"))?;
+            number(value, "knee must be an offered rate").map(|rate| knee = rate)
         } else if let Some(value) = arg.strip_prefix("--baseline-seconds=") {
-            baseline_seconds = value
-                .parse()
-                .map_err(|error| format!("baseline-seconds must be a number: {error}"))?;
+            number(value, "baseline-seconds must be a number").map(|seconds| baseline_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--overload-seconds=") {
-            overload_seconds = value
-                .parse()
-                .map_err(|error| format!("overload-seconds must be a number: {error}"))?;
+            number(value, "overload-seconds must be a number").map(|seconds| overload_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--recovery-seconds=") {
-            recovery_seconds = Some(
-                value
-                    .parse()
-                    .map_err(|error| format!("recovery-seconds must be a number: {error}"))?,
-            );
+            number(value, "recovery-seconds must be a number")
+                .map(|seconds| recovery_seconds = Some(seconds))
         } else if let Some(value) = arg.strip_prefix("--body-micros=") {
-            body_micros = value
-                .parse()
-                .map_err(|error| format!("body-micros must be a number: {error}"))?;
+            number(value, "body-micros must be a number").map(|micros| body_micros = micros)
         } else if let Some(value) = arg.strip_prefix("--capacity-target=") {
-            capacity_target = value
-                .parse()
-                .map_err(|error| format!("capacity-target must be a rate: {error}"))?;
+            number(value, "capacity-target must be a rate").map(|rate| capacity_target = rate)
         } else if let Some(value) = arg.strip_prefix("--bound=") {
-            bound = Some(
-                value
-                    .parse()
-                    .map_err(|error| format!("bound must be a number: {error}"))?,
-            );
+            number(value, "bound must be a number").map(|count| bound = Some(count))
         } else if let Some(value) = arg.strip_prefix("--workers=") {
-            workers = Some(
-                value
-                    .parse()
-                    .map_err(|error| format!("workers must be a number: {error}"))?,
-            );
+            number(value, "workers must be a number").map(|count| workers = Some(count))
         } else if let Some(arg) = arg.strip_prefix("--") {
             match arg {
                 "alloc-report" => alloc_report = true,
@@ -4445,13 +4458,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // An unknown flag is refused rather than ignored: a mistyped
                 // `--saturaton` that silently ran the default suite would report a
                 // number for a run nobody asked for.
-                other => {
-                    let refusal = Err(format!("unknown flag --{other}").into());
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: refusing an unknown flag");
-                    return refusal;
-                }
+                other => parsed = Err(format!("unknown flag --{other}")),
             }
-        }
+            parsed
+        } else {
+            Ok(())
+        };
+    }
+    if let Err(reason) = parsed {
+        let refusal = Err(reason.into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: refusing an argument");
+        return refusal;
     }
 
     // The provenance every mode's numbers need, printed before the mode's own table so a
