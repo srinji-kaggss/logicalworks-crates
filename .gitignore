@@ -41,6 +41,10 @@ proofs/.hol/
 __pycache__/
 
 # Acceptance receipts are a database under the state directory, not files in the
-# repository (`scripts/acceptance-receipts.py`); `evidence/` holds only the
-# exported JSON a CI run uploads, which is derived and per-run.
+# repository (`scripts/acceptance-receipts.py`). Everything a run derives -- the
+# database, the exported JSON, the JUnit files a CI shard produced -- is written
+# here and ignored, because a receipt is evidence about one run rather than part
+# of the source.
 evidence/
+acceptance-artifact/
+target/nextest/
