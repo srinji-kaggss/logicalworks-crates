@@ -18,9 +18,9 @@
 //! given number is in. `byte` is always the raw zero-based offset, because that
 //! is what [`str::get`] and slicing take.
 //!
-//! The walk is the same frame-per-active-ancestor walk
-//! [`inspect_ast`] uses, so collecting diagnostics over a
-//! wide tree retains memory proportional to depth rather than to fan-out.
+//! The walk is the same cursor walk [`inspect_ast`] uses, so collecting
+//! diagnostics over a wide tree retains memory proportional to depth rather
+//! than to fan-out.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -344,20 +344,20 @@ pub fn diagnostics<L: LanguageExt>(
     let file = labeled(path.into());
     let index = LineIndex::new(source);
     let mut found = Vec::new();
-    visit_each_node(root, &mut |child| {
-        if child.is_error() || child.is_missing() {
+    visit_each_node(root, &mut |node| {
+        if node.is_error || node.is_missing {
             found.push(
                 Diagnostic::new(
-                    recovery_message(child.is_missing(), &child.kind(), language),
-                    index.span(child.range()),
+                    recovery_message(node.is_missing, node.kind, language),
+                    index.span(node.span.clone()),
                 )
                 .in_file(file.clone()),
             );
         }
     });
-    // The walk is depth-first over children in reverse index order, which is
-    // the order `inspect_ast` preserves and is *not* source order. Sorting is
-    // what makes the result presentable as a list.
+    // The walk already arrives in source order, and this sort keeps the
+    // published order a property of `diagnostics` rather than of the traversal
+    // that happens to feed it.
     found.sort_by_key(|diagnostic| (diagnostic.span.start.byte, diagnostic.span.end.byte));
     found
 }
@@ -372,69 +372,97 @@ pub fn diagnostics<L: LanguageExt>(
 #[must_use]
 pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     let mut count = 0_usize;
-    visit_each_node(root, &mut |child| {
-        if child.is_error() || child.is_missing() {
+    visit_each_node(root, &mut |node| {
+        if node.is_error || node.is_missing {
             count = count.saturating_add(1);
         }
     });
     count
 }
 
-/// Visit every node below `root` exactly once, depth-first, in bounded memory.
+/// What one visited node looked like, detached from the cursor that reached it.
 ///
-/// Frame = (node, next child index), mirroring `inspect_ast_with_pending`: one
-/// frame per *active* ancestor, so retained memory follows depth rather than the
-/// root's fan-out, and a frame is popped at the end of its branch rather than
-/// left pending. A file with N top-level items therefore costs O(depth)
-/// resident memory, not O(N).
+/// The visitor is handed facts rather than a node handle because a handle
+/// borrows the cursor's position, and collecting handles would be the sibling
+/// frontier this traversal exists not to build. Every field is read off the
+/// node before the cursor moves on; `kind` borrows the tree rather than the
+/// node, so it outlives the handle it came from.
+struct Found<'tree> {
+    /// Whether the node is an `ERROR` recovery node.
+    is_error: bool,
+    /// Whether the node is a `MISSING` recovery node.
+    is_missing: bool,
+    /// The node's grammar symbol name.
+    kind: &'tree str,
+    /// Inclusive start and exclusive end byte offsets in the source.
+    span: Range<usize>,
+}
+
+/// Visit every node at or below `root` exactly once, depth-first, in bounded
+/// memory.
 ///
-/// Children are visited in reverse index order, which is the order
-/// [`inspect_ast`] preserves. Callers that present results
-/// in source order sort afterwards.
+/// The walk drives a tree-sitter cursor, whose only retained state is the stack
+/// of ancestors it has descended through, mirroring `inspect_ast_with_pending`
+/// (#277): one entry per *active* ancestor, so retained memory follows depth
+/// rather than the root's fan-out, and a level is popped at the end of its
+/// branch rather than left pending. A file with N top-level items therefore
+/// costs O(depth) resident memory, not O(N).
+///
+/// Children are visited in source order, which is the order
+/// [`inspect_ast`] now reports. Callers that present results in source order
+/// get them in source order; the sort at the end of [`diagnostics`] is retained
+/// so the published order does not depend on it.
 ///
 /// The root is visited first, then every descendant. `inspect_ast` charges and
 /// inspects the root too, so the two walks agree on which nodes exist: a tree
 /// whose root is itself a recovery node is counted here exactly as it is
 /// refused by [`try_parse`].
-fn visit_each_node<'t, L: LanguageExt>(
-    root: &AstNode<'t, L>,
-    visit: &mut dyn FnMut(&AstNode<'t, L>),
-) {
+fn visit_each_node<L: LanguageExt>(root: &AstNode<'_, L>, visit: &mut dyn FnMut(&Found<'_>)) {
     visit_each_node_measuring(root, visit, None);
 }
 
-/// [`visit_each_node`], reporting the high-water mark of retained frames.
+/// [`visit_each_node`], reporting the high-water mark of retained cursor depth.
 ///
 /// The `peak` out-parameter is how INV-AST-1's resource claim is *tested*
 /// against this walk rather than against a second copy of it. A test that
 /// reimplemented the traversal would keep passing if this one regressed, which
 /// is the failure mode a copied walk always has.
-fn visit_each_node_measuring<'t, L: LanguageExt>(
-    root: &AstNode<'t, L>,
-    visit: &mut dyn FnMut(&AstNode<'t, L>),
+fn visit_each_node_measuring<L: LanguageExt>(
+    root: &AstNode<'_, L>,
+    visit: &mut dyn FnMut(&Found<'_>),
     mut peak: Option<&mut usize>,
 ) {
-    visit(root);
-    let mut frames = vec![(root.clone(), root.children().len())];
-    while let Some(frame) = frames.last_mut() {
-        let Some(child_index) = frame.1.checked_sub(1) else {
-            frames.pop();
-            continue;
-        };
-        frame.1 = child_index;
-        let Some(child) = frame.0.child(child_index) else {
-            continue;
-        };
-        visit(&child);
+    let mut cursor = root.get_inner_node().walk();
+    let mut cursor_depth = 0_usize;
+    loop {
+        let node = cursor.node();
+        let range = node.range();
+        visit(&Found {
+            is_error: node.is_error(),
+            is_missing: node.is_missing(),
+            kind: node.kind(),
+            span: range.start_byte..range.end_byte,
+        });
         if let Some(peak) = peak.as_deref_mut() {
-            *peak = (*peak).max(frames.len());
+            *peak = (*peak).max(cursor_depth.saturating_add(1));
         }
-        let child_count = child.children().len();
-        frames.push((child, child_count));
+        if cursor.goto_first_child() {
+            cursor_depth = cursor_depth.saturating_add(1);
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+            cursor_depth = cursor_depth.saturating_sub(1);
+        }
     }
 }
 
-/// Peak frames [`visit_each_node`] retains while walking `root`.
+/// Peak depth [`visit_each_node`] descends to while walking `root`.
 ///
 /// One walk, run for its side effect of measuring. Test-only by construction:
 /// it exists so INV-AST-1's resource claim is asserted against the walk that

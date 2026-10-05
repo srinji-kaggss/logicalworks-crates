@@ -79,6 +79,15 @@
 //! what one parse of a full [`MAX_SOURCE_BYTES`] source costs resident memory;
 //! the two tree bounds are what make the *walk* bounded, not the parser.
 //!
+//! The walk itself is linear in tree size and holds state proportional to
+//! depth. That is a property of *how* it walks rather than of any ceiling: it
+//! drives a tree-sitter cursor, so no node is reached by its index among its
+//! siblings. Indexing is `O(index)` on a recovery-heavy tree, where the visible
+//! children are not the structural ones, and a walk that did it was quadratic
+//! in fan-out — 85 microseconds per node on a 16 KiB source of unbalanced
+//! delimiters, and hours for one file at the byte ceiling. See the walk's own
+//! documentation for the measurement and the regression test that holds it.
+//!
 //! Content sniffing is opt-in for the same reason: [`try_detect_content`]
 //! trial-parses each distinct candidate grammar in full, so the caller names
 //! a small candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
@@ -131,7 +140,8 @@ pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Largest concrete syntax tree admitted; bounds downstream walks, which a
 /// byte bound alone does not price. Measured on the tree after tree-sitter has
-/// built it, so it does not cap the parser's own allocation.
+/// built it, so it does not cap the parser's own allocation. The walk is linear
+/// in tree size, so this ceiling prices its *worst case*, not its running cost.
 pub const MAX_AST_NODES: usize = 2_000_000;
 
 /// Deepest branch a checked parse admits, root counting as 1.
@@ -819,7 +829,7 @@ pub struct AstMetrics {
 }
 
 impl AstMetrics {
-    /// Fold one visited `node`, seen at `depth`, into the running metrics.
+    /// Fold one visited node into the running metrics.
     ///
     /// Called once per node of a walk, so this is where the three accumulators
     /// are kept monotone: `nodes` saturates instead of wrapping (unreachable at
@@ -827,10 +837,10 @@ impl AstMetrics {
     /// `max_depth` keeps the deepest branch seen, and `has_syntax_issues` is
     /// sticky: once an `ERROR` or `MISSING` node is seen, no later clean node
     /// may clear it, because the walk has no way to unsee it.
-    fn including<L: LanguageExt>(mut self, node: &AstNode<'_, L>, depth: usize) -> Self {
+    fn charging(mut self, visit: &Visit) -> Self {
         self.nodes = self.nodes.saturating_add(1);
-        self.max_depth = self.max_depth.max(depth);
-        self.has_syntax_issues = self.has_syntax_issues || node.is_error() || node.is_missing();
+        self.max_depth = self.max_depth.max(visit.depth);
+        self.has_syntax_issues = self.has_syntax_issues || visit.recovery.is_some();
         self
     }
 }
@@ -1105,16 +1115,38 @@ pub fn inspect_ast<'t, L: LanguageExt>(
     inspect_ast_with_pending(root, stop_after_nodes, None).0
 }
 
-/// Inspect without retaining all siblings in one pending vector.
+/// Inspect in one cursor-driven pre-order pass, retaining no sibling frontier.
 ///
-/// Each frame owns one node, its next child index, and depth: at most one
-/// frame per active ancestor, so the retained state is bounded by depth. The
-/// `depth_limit` makes that bound explicit rather than incidental: the frames
-/// live at most `depth_limit` deep, so a source shaped like nested delimiters
-/// is refused at the level past the ceiling instead of retaining a frame per
-/// nesting level. `peak_frames` is kept private as a directly asserted
-/// resource invariant rather than exported as a public metric whose callers
-/// might mistake it for a configured limit.
+/// The walk drives a tree-sitter cursor directly. The cursor owns a stack of the
+/// ancestors it has descended through and nothing else, so the traversal
+/// retains state proportional to active depth and never to a node's fan-out
+/// (#277). The previous hand-rolled frame walk reached each child through
+/// `ast_grep_core::Node::child` by index, and that call is `O(index)` on a node
+/// whose visible children are not its structural ones — which is exactly what a
+/// recovery-heavy parse produces. The measured cost was quadratic in fan-out: a
+/// 16 KiB source of unbalanced delimiters, 16 385 nodes wide and 2 deep, spent
+/// 1.39 s in the walk against 1.06 ms in the parser, and doubling the width
+/// quadrupled the walk. The cursor walk spends 40 ns per node on that same
+/// source, at every width from 2 KiB to 2 MiB.
+///
+/// The cursor is reached through the node the walk was handed, so no
+/// `tree-sitter` type is named and no `tree-sitter` edge is authored: every call
+/// below is an inherent method on a type this crate already holds.
+///
+/// Two properties move with the traversal and are worth stating rather than
+/// leaving to be discovered:
+///
+/// - **Order.** Nodes arrive in source order, not reverse-sibling order. Every
+///   published guarantee survives it: [`AstMetrics`] folds order-independently,
+///   and the retained diagnostics are the earliest ones under
+///   [`MAX_SYNTAX_DIAGNOSTICS`] and are sorted by source position before they
+///   are returned. What changes is only which node is the `limit + 1` witness,
+///   and it is now the one earliest in the file rather than the last.
+/// - **Frames.** The second return value is `peak_depth`: the deepest cursor
+///   stack the walk held, which is the number of active ancestors and therefore
+///   the memory the traversal actually retains. It is kept private as a
+///   directly asserted resource invariant rather than exported as a public
+///   metric whose callers might mistake it for a configured limit.
 fn inspect_ast_with_pending<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
@@ -1130,59 +1162,83 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     };
     let mut diagnostics = Vec::new();
     let mut diagnostics_truncated = false;
-    // Frame = (node, depth, remaining child index). Visiting the next lower
-    // index preserves the former stack walk's reverse-sibling order without
-    // enqueuing the sibling frontier.
-    let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
-    let mut peak_frames = 1;
-    metrics = metrics.including(root, 1);
-    record_syntax_diagnostic(root, &mut diagnostics, &mut diagnostics_truncated);
-    if let Some(reason) = root_stop_reason(&metrics, stop_after_nodes, stop_after_depth) {
-        mark_inspection_incomplete(&mut metrics, Some(reason));
-        return (metrics, peak_frames, diagnostics, diagnostics_truncated);
-    }
-    while let Some(frame) = frames.last_mut() {
-        let Some(child_index) = frame.2.checked_sub(1) else {
-            frames.pop();
-            continue;
+    let mut cursor = root.get_inner_node().walk();
+    // The cursor starts on the root, which counts as depth 1, so its zero-based
+    // depth is always one less than the depth a caller reads.
+    let mut cursor_depth = 0_usize;
+    let mut peak_depth = 0_usize;
+    loop {
+        let node = cursor.node();
+        let span = node.range();
+        let recovery = if node.is_error() {
+            Some(SyntaxIssueKind::Error)
+        } else if node.is_missing() {
+            Some(SyntaxIssueKind::Missing)
+        } else {
+            None
         };
-        frame.2 = child_index;
-        let next_child = frame.0.child(child_index);
-        let Some(child) = next_child else {
-            continue;
+        let visit = Visit {
+            depth: cursor_depth.saturating_add(1),
+            recovery,
+            span,
         };
-        let child_depth = frame.1.saturating_add(1);
-        metrics = metrics.including(&child, child_depth);
-        record_syntax_diagnostic(&child, &mut diagnostics, &mut diagnostics_truncated);
-        if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-            mark_inspection_incomplete(&mut metrics, Some(InspectionStopReason::NodeLimitExceeded));
+        peak_depth = peak_depth.max(visit.depth);
+        metrics = metrics.charging(&visit);
+        // The witness node is charged before the walk ends, so a refusal that
+        // stops at a ceiling still reports the damage it saw on the way to the
+        // ceiling rather than dropping it.
+        push_recovery_span(&visit, &mut diagnostics, &mut diagnostics_truncated);
+        if let Some(reason) = charge_reason(&metrics, stop_after_nodes, stop_after_depth) {
+            mark_inspection_incomplete(&mut metrics, reason);
             break;
         }
-        // The depth witness is recorded before the frame is pushed, so the frame
-        // that would have carried it is never retained: the retained stack stays
-        // within the ceiling rather than one frame past it.
-        if stop_after_depth.is_some_and(|limit| child_depth > limit) {
-            mark_inspection_incomplete(
-                &mut metrics,
-                Some(InspectionStopReason::DepthLimitExceeded),
-            );
-            break;
+        // Descend into the first child, or climb until a sibling exists. The
+        // cursor's own stack is the ancestor record, so unwinding costs one step
+        // per level rather than a search for the parent.
+        if cursor.goto_first_child() {
+            cursor_depth = cursor_depth.saturating_add(1);
+            continue;
         }
-        let child_count = child.children().len();
-        frames.push((child, child_depth, child_count));
-        peak_frames = peak_frames.max(frames.len());
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                diagnostics.sort_unstable_by_key(syntax_position);
+                return (metrics, peak_depth, diagnostics, diagnostics_truncated);
+            }
+            cursor_depth = cursor_depth.saturating_sub(1);
+        }
     }
     diagnostics.sort_unstable_by_key(syntax_position);
-    (metrics, peak_frames, diagnostics, diagnostics_truncated)
+    (metrics, peak_depth, diagnostics, diagnostics_truncated)
 }
 
-/// Which cap the root itself already exceeded, if either.
+/// One node as the walk read it, detached from the cursor that produced it.
 ///
-/// The root is charged before the loop runs, so a ceiling at or below one
-/// stops the walk there. With both ceilings configured the node one is
-/// reported, because the node charge is the first the root trips and a
-/// caller reading one reason wants the one that fired first.
-fn root_stop_reason(
+/// The walk asks three questions of every node and keeps nothing else, so the
+/// facts are copied out here rather than a node handle: a handle borrows the
+/// cursor's position, and a list of them would be the sibling frontier this
+/// traversal exists not to build.
+struct Visit {
+    /// One-based branch depth, the root counting as 1.
+    depth: usize,
+    /// The recovery kind this node carries, or `None` for a clean node.
+    recovery: Option<SyntaxIssueKind>,
+    /// Inclusive start and exclusive end byte offsets in the source, in the
+    /// node type's own range so no conversion sits in the walk's inner loop.
+    span: ast_grep_core::tree_sitter::TSRange,
+}
+
+/// Which cap this observation already exceeded, if either.
+///
+/// Evaluated after every node, the root included, so a ceiling at or below one
+/// stops the walk there and the overflow witness is charged before the walk
+/// ends — the accounting the previous root-only check gave, applied at every
+/// level. With both ceilings configured the node one is reported, because the
+/// node charge is the first the root trips and a caller reading one reason
+/// wants the one that fired first.
+fn charge_reason(
     metrics: &AstMetrics,
     stop_after_nodes: Option<usize>,
     stop_after_depth: Option<usize>,
@@ -1196,33 +1252,26 @@ fn root_stop_reason(
 }
 
 /// Mark a walk as partial after it observes the value beyond its configured cap.
-fn mark_inspection_incomplete(metrics: &mut AstMetrics, reason: Option<InspectionStopReason>) {
+fn mark_inspection_incomplete(metrics: &mut AstMetrics, reason: InspectionStopReason) {
     metrics.complete = false;
-    metrics.stop_reason = reason;
+    metrics.stop_reason = Some(reason);
 }
 
 /// Retain one recovery-node span until the public diagnostic ceiling is reached.
-fn record_syntax_diagnostic<L: LanguageExt>(
-    node: &AstNode<'_, L>,
+fn push_recovery_span(
+    visit: &Visit,
     diagnostics: &mut Vec<SyntaxDiagnostic>,
     diagnostics_truncated: &mut bool,
 ) {
-    let kind = if node.is_error() {
-        Some(SyntaxIssueKind::Error)
-    } else if node.is_missing() {
-        Some(SyntaxIssueKind::Missing)
-    } else {
-        None
-    };
-    let Some(kind) = kind else {
+    let Some(kind) = visit.recovery else {
         return;
     };
-    let span = node.range();
+    let span = visit.span;
     push_syntax_diagnostic(
         SyntaxDiagnostic {
             kind,
-            start_byte: span.start,
-            end_byte: span.end,
+            start_byte: span.start_byte,
+            end_byte: span.end_byte,
         },
         diagnostics,
         diagnostics_truncated,
@@ -1236,12 +1285,14 @@ fn syntax_position(diagnostic: &SyntaxDiagnostic) -> (usize, usize) {
 
 /// Retain a diagnostic under the fixed per-parse ceiling, keeping the earliest.
 ///
-/// The walk visits siblings in reverse order, so "the first
-/// [`MAX_SYNTAX_DIAGNOSTICS`] seen" would be the last ones in the file, and
-/// the error a reader needs first — where the source stopped parsing — would
-/// be the one dropped. At the ceiling a new diagnostic replaces the latest one
-/// retained when it starts earlier; the retained set is always the earliest in
-/// source order, in constant memory.
+/// The ceiling is a constant, so something has to be dropped once it is
+/// reached, and the error a reader needs first — where the source stopped
+/// parsing — is the one that must not be it. At the ceiling a new diagnostic
+/// replaces the latest one retained when it starts earlier; the retained set is
+/// always the earliest in source order, in constant memory, whatever order the
+/// walk reached them in. (The cursor-driven walk reaches them in source order
+/// already; the rule is what keeps the property true of any traversal order,
+/// including a caller-supplied one.)
 fn push_syntax_diagnostic(
     diagnostic: SyntaxDiagnostic,
     diagnostics: &mut Vec<SyntaxDiagnostic>,
@@ -1316,6 +1367,11 @@ mod tests {
 
     #[test]
     fn a_small_node_budget_does_not_retain_a_wide_sibling_frontier() {
+        // INV-AST-1, on the adversarial width: 4 096 immediate siblings under
+        // the root, which is the shape a sibling frontier would have to be
+        // sized for. The walk stops at the cap after two nodes, so the retained
+        // state must be the two levels of cursor stack it descended through and
+        // nothing resembling the 4 096 children behind the first of them.
         let source = (0..4_096)
             .map(|index| format!("fn f{index}() {{}}\n"))
             .collect::<String>();
@@ -1326,7 +1382,7 @@ mod tests {
             "the fixture presents 4,096 immediate siblings to the traversal"
         );
 
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1), None);
+        let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1), None);
 
         assert_eq!(metrics.nodes, 2, "one node beyond the cap proves refusal");
         assert_eq!(
@@ -1335,26 +1391,47 @@ mod tests {
             "the public inspector preserves the budget's overflow witness"
         );
         assert_eq!(
-            peak_frames, 1,
-            "the overflow witness is counted without enqueuing its siblings"
+            peak_depth, 2,
+            "retained a cursor stack {peak_depth} deep for a 4,096-child root, \
+             which is a sibling frontier rather than a depth"
+        );
+        assert!(
+            peak_depth < 16,
+            "the retained depth must not scale with the root's {width} children",
+            width = parsed.root().children().len()
         );
     }
 
     #[test]
-    fn a_node_budget_preserves_the_existing_reverse_sibling_order() {
-        let parsed = parse("fn okay() {}\n@\n", Language::Rust);
+    fn a_node_budget_charges_children_in_source_order() {
+        // Which node is the `limit + 1` witness is the one thing the cursor walk
+        // changed, and it is stated rather than left implicit: children arrive
+        // in source order, so a cap below the tree size charges the *earliest*
+        // children. Both halves matter — a witness taken from the end of the
+        // file could report damage a caller would never see, and one taken from
+        // the front cannot.
+        let parsed = parse(
+            "fn first() {}\nfn second() {}\nfn third() {}\n",
+            Language::Rust,
+        );
         let root = parsed.root();
         assert!(
-            root.children().last().is_some_and(|node| node.is_error()),
-            "the fixture puts a recovery node in the last root-child position"
+            root.children().len() >= 3,
+            "the fixture presents at least three root children to the traversal"
         );
 
         let metrics = inspect_ast(&root, Some(1));
 
         assert_eq!(metrics.nodes, 2, "the overflow witness is counted");
         assert!(
-            metrics.has_syntax_issues,
-            "reverse-sibling traversal encounters the last root child first"
+            !metrics.has_syntax_issues,
+            "the first child of valid source is clean, so the cap charged a clean \
+             witness rather than one from the end of the file"
+        );
+        assert_eq!(
+            metrics.stop_reason,
+            Some(InspectionStopReason::NodeLimitExceeded),
+            "the cap, not a clean tree, is what stopped the walk"
         );
     }
 
@@ -1367,7 +1444,7 @@ mod tests {
         // 2,000,000 nodes and is never hit). This one runs to completion.
         //
         // A deep, narrow tree: each level has one child, so the number of active
-        // ancestors is the depth, and the frames retained must be that depth
+        // ancestors is the depth, and the state retained must be that depth
         // rather than the total node count.
         let depth = 200;
         let source = format!(
@@ -1376,7 +1453,7 @@ mod tests {
             "}".repeat(depth)
         );
         let parsed = parse(&source, Language::Rust);
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), None, None);
+        let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&parsed.root(), None, None);
 
         assert!(
             metrics.max_depth > 50,
@@ -1384,16 +1461,133 @@ mod tests {
             metrics.max_depth
         );
         assert_eq!(
-            peak_frames, metrics.max_depth,
-            "retained {peak_frames} frames for a tree {} deep; the walk is not \
-             retaining exactly the active ancestors",
+            peak_depth, metrics.max_depth,
+            "retained a stack {peak_depth} deep for a tree {} deep; the walk is \
+             not retaining exactly the active ancestors",
             metrics.max_depth
         );
         assert!(
-            metrics.nodes > peak_frames.saturating_mul(4),
-            "retained {peak_frames} frames for a tree of {} nodes, which is a \
-             sibling frontier rather than a depth",
+            metrics.nodes > peak_depth.saturating_mul(4),
+            "retained a stack {peak_depth} deep for a tree of {} nodes, which is \
+             a sibling frontier rather than a depth",
             metrics.nodes
+        );
+    }
+
+    /// The walk this crate replaced, kept as the model the cursor walk is
+    /// checked against.
+    ///
+    /// It is the frame walk from before #277, verbatim in its traversal: a
+    /// stack of `(node, depth, next child index)` with children taken by index,
+    /// descending into the highest index first. It exists so the replacement can
+    /// be shown to visit the same nodes at the same depths rather than merely
+    /// to be shown green, and it is `#[cfg(test)]` because nothing ships it.
+    fn positional_walk<L: LanguageExt>(root: &AstNode<'_, L>) -> (usize, usize, usize, bool) {
+        let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
+        let mut nodes = 1_usize;
+        let mut peak_frames = 1_usize;
+        let mut deepest = 1_usize;
+        let mut issues = root.is_error() || root.is_missing();
+        while let Some(frame) = frames.last_mut() {
+            let Some(child_index) = frame.2.checked_sub(1) else {
+                frames.pop();
+                continue;
+            };
+            frame.2 = child_index;
+            let Some(child) = frame.0.child(child_index) else {
+                continue;
+            };
+            let child_depth = frame.1.saturating_add(1);
+            nodes = nodes.saturating_add(1);
+            deepest = deepest.max(child_depth);
+            issues = issues || child.is_error() || child.is_missing();
+            let child_count = child.children().len();
+            frames.push((child, child_depth, child_count));
+            peak_frames = peak_frames.max(frames.len());
+        }
+        (nodes, deepest, peak_frames, issues)
+    }
+
+    #[test]
+    fn the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did() {
+        // The differential evidence for #277. The traversal changed; what it
+        // must not have changed is the answer. Five trees chosen for the shapes
+        // that separate the two: flat and wide, deep and narrow, recovery-heavy,
+        // empty, and a real function.
+        let wide = (0..4_096)
+            .map(|index| format!("fn f{index}() {{}}\n"))
+            .collect::<String>();
+        let deep = format!("{}fn f() {{}}{}", "fn f() {".repeat(200), "}".repeat(200));
+        let fixtures = [
+            String::new(),
+            String::from("fn main() {}\n"),
+            wide,
+            deep,
+            String::from("@\nfn broken( {\n"),
+        ];
+        for (index, source) in fixtures.iter().enumerate() {
+            let parsed = parse(source.as_str(), Language::Rust);
+            let root = parsed.root();
+            let (model_nodes, model_depth, model_peak, model_issues) = positional_walk(&root);
+            let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&root, None, None);
+
+            assert_eq!(
+                metrics.nodes, model_nodes,
+                "fixture {index}: {} nodes visited against the model's {model_nodes}",
+                metrics.nodes
+            );
+            assert_eq!(
+                metrics.max_depth, model_depth,
+                "fixture {index}: depth {} against the model's {model_depth}",
+                metrics.max_depth
+            );
+            assert_eq!(
+                peak_depth, model_peak,
+                "fixture {index}: retained {peak_depth} against the model's \
+                 {model_peak} active ancestors"
+            );
+            assert_eq!(
+                metrics.has_syntax_issues, model_issues,
+                "fixture {index}: recovery state disagrees with the model"
+            );
+        }
+    }
+
+    #[test]
+    fn the_walk_costs_the_same_per_node_however_wide_the_tree_is() {
+        // The measured regression behind #277, asserted as a bound rather than
+        // a timing: the old walk indexed children, which is `O(index)` on a
+        // recovery-heavy tree, so the per-node cost grew with the root's width.
+        // Four widths of unbalanced delimiters — the shape that produced
+        // 85 microseconds per node — must now cost within a small constant of
+        // each other. The factor is generous on purpose: this asserts a
+        // complexity class, and a wall-clock ratio is evidence of one, not a
+        // benchmark. A regression to index-addressed children would multiply
+        // the wide case by the width ratio (16x here) and fail by an order of
+        // magnitude rather than by a hair.
+        const WIDTHS: [usize; 4] = [1_024, 2_048, 4_096, 16_384];
+        let mut per_node_nanos = Vec::with_capacity(WIDTHS.len());
+        for width in WIDTHS {
+            let source = "(".repeat(width);
+            let parsed = parse(&source, Language::Rust);
+            let root = parsed.root();
+            let nodes = positional_walk(&root).0.max(1);
+            let started = std::time::Instant::now();
+            let metrics = inspect_ast(&root, None);
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(metrics.nodes, nodes, "the model and the walk disagree");
+            per_node_nanos.push(
+                elapsed
+                    .checked_div(u128::try_from(nodes).unwrap_or(1))
+                    .unwrap_or(0),
+            );
+        }
+        let cheapest = per_node_nanos.iter().copied().min().unwrap_or(0);
+        let dearest = per_node_nanos.iter().copied().max().unwrap_or(0);
+        assert!(
+            dearest <= cheapest.saturating_mul(4),
+            "per-node walk cost {cheapest}..={dearest} ns across widths \
+             {WIDTHS:?}; the cost must not scale with fan-out"
         );
     }
 
@@ -1453,11 +1647,20 @@ mod tests {
 
     #[test]
     fn recovery_beyond_the_visit_cap_is_not_reported_as_clean() {
-        let parsed = parse("@\nfn a() {}\nfn b() {}", Language::Rust);
-        let partial = inspect_ast(&parsed.root(), Some(1));
+        // The recovery node has to be *beyond* the cap now that children are
+        // charged in source order: `fn a() {}` on the first line puts two clean
+        // nodes in front of it, so a cap of one stops before the `@`.
+        let parsed = parse("fn a() {}\nfn b() {}\n@\n", Language::Rust);
+        let root = parsed.root();
+        assert!(
+            root.children().last().is_some_and(|node| node.is_error()),
+            "the fixture puts a recovery node in the last root-child position"
+        );
+
+        let partial = inspect_ast(&root, Some(1));
         assert!(
             !partial.complete,
-            "the small cap stops before the early recovery node"
+            "the small cap stops before the late recovery node"
         );
         assert!(
             !partial.has_syntax_issues,
@@ -2085,25 +2288,55 @@ mod tests {
     }
 
     #[test]
-    fn the_depth_witness_is_recorded_without_retaining_a_frame_for_it() {
-        // The resource half of `MAX_AST_DEPTH`: the retained frame stack is the
-        // memory the ceiling exists to bound, so the walk must stop *before*
-        // pushing the witness's frame rather than at it.
+    fn the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more() {
+        // The resource half of `MAX_AST_DEPTH`: the retained cursor stack is the
+        // memory the ceiling exists to bound, so the deepest the walk ever holds
+        // is the ceiling plus the one witness it has to visit to be able to say
+        // the tree is too deep. Before #277 the frame walk stopped *before*
+        // pushing the witness's frame, so it held exactly the ceiling; the
+        // cursor has already descended to reach the witness, so it holds the
+        // witness too. Both are one frame, and the bound is on the order rather
+        // than the identity: what must not happen is a stack that grows with
+        // the tree.
         let parsed = parse(
             &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
             Language::Rust,
         );
-        let (metrics, peak_frames, _, _) =
-            inspect_ast_with_pending(&parsed.root(), Some(MAX_AST_NODES), Some(8));
+        let root = parsed.root();
+        let (metrics, peak_depth, _, _) =
+            inspect_ast_with_pending(&root, Some(MAX_AST_NODES), Some(8));
         assert_eq!(
             metrics.stop_reason,
             Some(InspectionStopReason::DepthLimitExceeded),
             "the metrics name the depth ceiling as the reason"
         );
-        assert_eq!(peak_frames, 8, "retained frames stay within the ceiling");
+        assert_eq!(
+            peak_depth, 9,
+            "the witness is visited, so the stack is the ceiling plus it"
+        );
+        assert_eq!(
+            metrics.max_depth, 9,
+            "and the reported depth is the same witness, not a constant"
+        );
         assert!(
             !metrics.complete,
             "a walk stopped at the depth ceiling did not finish"
+        );
+
+        // The same tree, walked to completion, is where the bound would show if
+        // it were really the tree's depth: this is the control that reads a
+        // ceiling as a ceiling rather than as the whole tree.
+        let (unbounded, unbounded_peak, _, _) =
+            inspect_ast_with_pending(&root, Some(MAX_AST_NODES), None);
+        assert!(
+            unbounded.complete,
+            "the uncapped walk descends the whole tree"
+        );
+        assert!(
+            unbounded_peak > 64,
+            "the fixture is {} deep, so a bounded walk holding only 9 levels is \
+             the ceiling and not the tree",
+            unbounded_peak
         );
     }
 
