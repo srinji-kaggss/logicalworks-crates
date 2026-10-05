@@ -551,7 +551,8 @@ fn unqualified_mentions(file: &str, text: &str) -> Vec<String> {
     flagged
 }
 
-/// Whether `path` is this file.
+/// Whether `path` is this file, `tests/it/authority.rs`: a module of the
+/// crate's one integration binary (#272).
 ///
 /// The scan skips it, and it is the only file that is skipped. This file is
 /// *about* revocation, so it names the operation on nearly every line and the
@@ -563,7 +564,7 @@ fn is_this_file(path: &Path) -> bool {
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str());
-    file == Some("authority.rs") && directory == Some("tests")
+    file == Some("authority.rs") && directory == Some("it")
 }
 
 /// Every first-party text file at or under `root`, sorted, with the walk's
