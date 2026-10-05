@@ -104,5 +104,5 @@ crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:785	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:88	pub mod scan;
-crates/lgwks-std/src/task.rs:265	/// Run `job` on a dedicated OS thread and return a future for its result.
+crates/lgwks-std/src/task.rs:354	/// Run `job` on the blocking pool and return a future for its result.
 docs/guidance-runner-spec.md:193	`review`.

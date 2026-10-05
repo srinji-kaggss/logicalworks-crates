@@ -8,6 +8,26 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std — bounded blocking pool (#264)
+
+- `task::spawn_blocking` runs on one process-wide pool of at most 512 threads
+  instead of one new OS thread per call. A job submitted while every thread is
+  busy waits its turn; a thread idle for ten seconds exits. Its signature and
+  its never-refuses contract are unchanged. Jobs that wait on each other must
+  now number fewer than 512.
+- New `task::try_spawn_blocking` and `task::SpawnError`: the same pool with a
+  wait queue bounded at 16,384, refusing past it as `SpawnError::AtCapacity`,
+  and as `SpawnError::Os` when no thread can be started. A refused job never
+  runs. Before this, an OS refusal to start a thread surfaced only as a panic.
+- `task::join_all` gives each child its own waker: a wake re-polls only the
+  child that woke, so `n` children waking `k` times cost `n·(k+1)` polls
+  rather than a scan of every pending child per wake.
+
+### lgwks_bot
+
+- `domain::net::Endpoint`'s poll uses `try_spawn_blocking`, so a burst of
+  concurrent polls cannot start a thread per poll; a refusal is a
+  `DomainError` with `DispatchCertainty::Refused`.
 ### lgwks_macros — refusals by path, and lints the consumer enforces (#265)
 
 - `script!` now refuses `unwrap`/`expect`/`unwrap_err`/`expect_err` called by
