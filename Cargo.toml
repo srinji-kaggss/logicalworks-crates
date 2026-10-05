@@ -45,6 +45,7 @@ opt-level = 1
 # bot shards each spent 152 s of a 233 s job compiling and linking test
 # binaries on a full dependency-cache hit (#272); line tables shrink what
 # rustc emits and the linker copies. Nothing in the workspace reads debuginfo.
+# CI repeats it as `CARGO_PROFILE_TEST_DEBUG` so its cache keys on it.
 debug = "line-tables-only"
 
 # Shared lint contract: every member opts in with `[lints] workspace = true`.
