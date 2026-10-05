@@ -306,6 +306,43 @@ fn every_budget_has_its_own_refusal() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
+/// A subject nested past the parser's own depth bound is a depth budget
+/// reached, not an infrastructure fault.
+///
+/// The inspection's walk budget defaults to 4 096 levels, but the checked parse
+/// refuses first, at `lgwks_ast::MAX_AST_DEPTH`. Before this was mapped, that
+/// refusal reached the caller as `InfrastructureFailure` — a claim that the
+/// tooling broke, about a file that is merely deep.
+fn a_subject_deeper_than_the_parser_admits_is_a_depth_budget_not_a_fault()
+-> Result<(), Box<dyn std::error::Error>> {
+    let levels = lgwks_ast::MAX_AST_DEPTH;
+    let subject = format!(
+        "{}fn f() {{}}{}",
+        "fn f() {".repeat(levels),
+        "}".repeat(levels)
+    );
+    let report = inspect(&InspectRequest::new("src/lib.rs", &subject));
+    match report.verdict().clone() {
+        Verdict::Incomplete {
+            reason: IncompleteReason::DepthBudgetExceeded { reached, limit },
+        } => {
+            assert_eq!(
+                limit,
+                lgwks_ast::MAX_AST_DEPTH,
+                "the parser's bound is the one named"
+            );
+            assert!(
+                reached > limit,
+                "the witness is past the bound: {reached} > {limit}"
+            );
+        }
+        other => return Err(format!("expected a depth budget, got {other:?}").into()),
+    }
+    assert!(report.findings().is_empty(), "no tree, no finding");
+    Ok(())
+}
+
+#[test]
 fn the_report_round_trips_and_preserves_identity_spans_and_coverage()
 -> Result<(), Box<dyn std::error::Error>> {
     let report = inspect(&InspectRequest::new("src/lib.rs", UNWRAP_SUBJECT));

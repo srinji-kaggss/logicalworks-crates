@@ -283,6 +283,21 @@ approved_on = "2026-09-11"
 review = "https://github.com/srinji-kaggss/logicalworks-crates"
 
 [[approved]]
+crate = "tree-sitter"
+tier = "boundary"
+version = "^0.27"
+license = "MIT"
+owner = "lgwks_ast"
+capability = "parse.tree_sitter_deadline"
+source = "registry"
+allowed_consumers = "lgwks_ast"
+allowed_kinds = "normal"
+reason = "A checked parse must stop at a deadline, and only tree-sitter's own Parser::parse_with_options with a progress callback can stop one; ast-grep-core builds its Parser privately and exposes neither. Same requirement ast-grep-core 0.45 resolves, so no new crate is compiled. Admitted on the Director's word for #277."
+approved_by = "Director"
+approved_on = "2026-10-05"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/277"
+
+[[approved]]
 crate = "ast-grep-language"
 tier = "boundary"
 version = "^0.45"

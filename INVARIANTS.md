@@ -1242,8 +1242,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   source against 1.06 ms of parse, quadrupling on every doubling of the width,
   inside `try_parse`. The cursor walk spends 40 ns per node on the same source at
   every width from 2 KiB to 2 MiB. The cursor is reached through the node the
-  walk was handed, so no `tree-sitter` edge is authored and no `tree-sitter`
-  type is named. Two properties move with it and are stated rather than left
+  walk was handed, so the walk names no `tree-sitter` type (the crate's one
+  direct `tree-sitter` use is the parse deadline, INV-AST-5). Two properties move with it and are stated rather than left
   implicit: nodes arrive in **source order**, not reverse-sibling order, so the
   `limit + 1` witness is the earliest node rather than the last; and a
   depth-capped walk holds the ceiling **plus** the one witness it must visit to
@@ -1268,8 +1268,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   and an assertion in a C parser is `abort()`: `"- "` repeated 255 times — 510
   bytes — ended the process with `SIGABRT` rather than returning anything a
   caller could handle. The crate cannot patch the scanner (the grammar arrives
-  compiled through `ast-grep-language`; forking it is forbidden by #277 and a
-  `tree-sitter` edge needs the Director's word), so it refuses the source first:
+  compiled through `ast-grep-language`, and forking it is forbidden by #277; the
+  deadline of INV-AST-5 does not help, because an `abort()` is not a slow
+  parse), so it refuses the source first:
   `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and
   `ParseError::ContainerNestingTooDeep`, applied by `markdown_containers` in one
   `O(bytes)` pass with `O(1)` state on the markdown path only. **What the bound
@@ -1302,6 +1303,41 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
   nextest `slow-timeout` with `terminate-after`, so a walk that stops making
   progress fails the run instead of holding it open
+
+- **INV-AST-5** A checked parse holds its thread for at most its deadline plus
+  one progress interval. `try_parse` and `try_parse_with` run under
+  `DEFAULT_PARSE_DEADLINE` (10 s) and `try_parse_within` under the caller's:
+  the tree is built by `tree_sitter::Parser::parse_with_options`, whose progress
+  callback the parser calls every hundred operations, and a callback that finds
+  the deadline passed stops the parse, which answers the typed
+  `ParseError::TimedOut { language, after }`. The byte ceiling does not give
+  this, because tree-sitter's GLR parser is super-linear in nesting on some
+  grammars: 256 KiB of nested braces held the Dart parser for 97.5 s. The
+  parser is cached per thread and per grammar (at most `MAX_CACHED_PARSERS`)
+  and is reset before and after every parse, because a stopped parse keeps its
+  state *for resuming* and a cached parser that kept it would continue somebody
+  else's source. The tree is the same `tree_sitter::Tree` ast-grep builds, handed
+  to it through `StrDoc`'s public fields, so callers receive the identical
+  `Parsed`. This is the crate's one direct `tree-sitter` edge, admitted in
+  `contract/APPROVED.toml` on the Director's word (2026-10-05) at the version
+  `ast-grep-core` already resolves, so no crate was added to the build. **Not
+  claimed:** a bound on the validation walk's time (linear, bounded by
+  `MAX_AST_NODES`) or on the parser's allocation (bounded by the byte ceiling and
+  measured per grammar in `bench/README.md`), and a parse small enough to finish
+  before the first progress check completes even under a zero deadline. · why:
+  #277 · enforced by: `tests/it/parse_deadline.rs`
+  (`a_slow_parse_is_stopped_at_its_deadline_and_the_thread_parses_again`,
+  `a_deadline_the_parse_fits_inside_answers_like_try_parse`,
+  `an_unrepresentable_deadline_runs_the_parse_to_completion`),
+  `tests/it/sim_parse_deadline.rs`
+  (`every_seed_is_stopped_then_parses_clean_on_the_same_thread`,
+  `the_same_seed_replays_to_the_same_deadline_trace`,
+  `distinct_seeds_diverge_in_their_deadline_trace`), the `try_parse_within`
+  doctest, and in lgwks_bot
+  `inspect::tests::a_parse_stopped_at_its_deadline_is_incomplete_not_an_infrastructure_failure`
+  and `tests/it/inspect.rs::a_subject_deeper_than_the_parser_admits_is_a_depth_budget_not_a_fault`,
+  which hold that a parse the deadline or the depth bound refused reaches an
+  inspection as an incomplete budget, never as an infrastructure failure
 
 ## Docs
 

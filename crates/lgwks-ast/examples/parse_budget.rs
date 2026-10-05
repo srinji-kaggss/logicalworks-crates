@@ -265,6 +265,7 @@ fn outcome_of(answer: Result<lgwks_ast::Parsed, lgwks_ast::ParseError>) -> Strin
         Err(lgwks_ast::ParseError::ContainerNestingTooDeep { .. }) => {
             "container-nesting-too-deep".to_owned()
         }
+        Err(lgwks_ast::ParseError::TimedOut { .. }) => "timed-out".to_owned(),
         Err(other) => format!("unclassified:{other}"),
     }
 }
@@ -523,7 +524,10 @@ fn measure_tier(
     let workers = threads.max(1);
     let workers_u64 = u64::try_from(workers).unwrap_or(1);
     let share = level.checked_div(workers_u64).unwrap_or(0);
-    let source = std::sync::Arc::new(tile(representative, bytes));
+    let tiled = tile(representative, bytes);
+    let sized = non_empty_tier(&tiled, bytes);
+    sized?;
+    let source = std::sync::Arc::new(tiled);
     let mut reports: Vec<TierWorker> = Vec::with_capacity(workers);
     let started = Instant::now();
     let admitted = std::thread::scope(|scope| -> Result<(), String> {
@@ -588,7 +592,7 @@ fn measure_tier(
     samples.sort_unstable();
     Ok(TierRow {
         level: assigned,
-        bytes,
+        bytes: source.len(),
         workers,
         p50: percentile(&samples, 50),
         p99: percentile(&samples, 99),
@@ -597,6 +601,21 @@ fn measure_tier(
         wall_ns,
         grammar: language.name(),
     })
+}
+
+/// Refuse a tier source that holds nothing.
+///
+/// `tile` takes whole copies only, so a fragment longer than the tier size tiles
+/// to the empty string, and a tier of empty parses reports throughput nobody
+/// measured.
+fn non_empty_tier(source: &str, bytes: usize) -> Result<(), String> {
+    if source.is_empty() {
+        Err(format!(
+            "no whole copy of the fragment fits in {bytes} bytes, so the tier would parse nothing"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// Refuse a tier whose workers admitted fewer parses than the level asked for.
@@ -810,9 +829,12 @@ fn measure_grammar(
         *count = count.saturating_add(1);
     }
     for &level in &options.tiers {
+        // The grammar's own fragment, not the 2 MiB representative: tiling a
+        // source longer than the tier size fits no whole copy, and the tiers once
+        // measured parses of the empty string that way.
         let tier = measure_tier(
             language,
-            &representative,
+            shape.valid,
             level,
             options.tier_bytes,
             options.threads,

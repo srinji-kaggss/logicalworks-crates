@@ -491,12 +491,12 @@ worst rows the validation walk is 10–15 ms and the parse is 25–97 seconds: t
 walk is three to four orders of magnitude cheaper. `dart` at 256 KiB of nested
 braces is the extreme measured case — **97.5 seconds for a quarter of the byte
 ceiling**, and at the ceiling it did not finish in 120 s. tree-sitter's GLR parser
-is super-linear in nesting depth on some grammars, and #277's first item — a
-deadline that actually stops it, through `Parser::parse_with_options` and its
-progress callback — is **NOT DONE**, because `ast-grep-core` 0.45 builds its
-`Parser` inside `parse_lang` and does not expose either, and naming
-`tree-sitter` directly needs the Director's word. Nothing in this crate can
-preempt that parse; a caller can only size its own budget around it.
+is super-linear in nesting depth on some grammars. These are the **bare** parse
+times, with no deadline. A checked parse (`try_parse`) now stops the parser at
+`DEFAULT_PARSE_DEADLINE`, 10 s, and answers `ParseError::TimedOut`; a caller
+names a tighter one through `try_parse_within`. The parser checks every hundred
+operations, so the thread is released within the deadline plus microseconds
+rather than after 97 s (INV-AST-5).
 
 Two rows are recorded as killed rather than finished: `dart` `nested` and
 `unbalanced` at 2 MiB, and `scala` `longline` at 2 MiB, all by the rig's own
