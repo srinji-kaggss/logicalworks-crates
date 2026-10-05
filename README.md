@@ -267,6 +267,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-bot/authority.md`](docs/guides/lgwks-bot/authority.md) | Admission, the `Auth` snapshot, and the no-sandbox boundary. |
 | [`docs/guides/lgwks-bot/failures.md`](docs/guides/lgwks-bot/failures.md) | Poll failure, partial action failure, and unknown effect. |
 | [`docs/guides/lgwks-bot/background-work.md`](docs/guides/lgwks-bot/background-work.md) | Bounded fan-out, supervision, and the cancellation limits. |
+| [`docs/guides/lgwks-bot/migrating-to-1-0.md`](docs/guides/lgwks-bot/migrating-to-1-0.md) | What 1.0.0 removed, what replaces it, and the traps the compiler cannot show. |
 | [`docs/guides/lgwks-bot/sessions.md`](docs/guides/lgwks-bot/sessions.md) | Unreleased: validated guidance flows and the session runner. |
 | [`docs/guides/lgwks-bot/resolution.md`](docs/guides/lgwks-bot/resolution.md) | Unreleased: lexical and semantic resolution, and degraded verdicts. |
 | [`docs/guides/lgwks-bot/domains.md`](docs/guides/lgwks-bot/domains.md) | Unreleased: the domain registry, and what a spec's identifiers resolve to. |

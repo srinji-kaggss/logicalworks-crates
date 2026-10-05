@@ -6801,7 +6801,11 @@ impl EcsBot {
                 // A durable journal needs a positioned receipt before replay
                 // treats a known outcome as settled. The record alone may have
                 // landed below its advertised grade.
-                AttemptStatus::Applied | AttemptStatus::Verified => {
+                // A failed predicate is an effect that landed, so it is never
+                // resent; the failure is read from the status, not from here.
+                AttemptStatus::Applied
+                | AttemptStatus::Verified
+                | AttemptStatus::VerificationFailed => {
                     if ledger.effects.scope.journal().durability() == DurabilityPromise::Ephemeral {
                         ledger.effects.note_applied(key);
                     } else if let Err(cause) = ledger

@@ -63,7 +63,8 @@ use lgwks_bot::effect::{
     RunId,
 };
 use lgwks_bot::journal::{
-    EffectEvent, EffectJournal, FileJournal, JournalError, JournalPosition, MemoryJournal,
+    EffectEvent, EffectJournal, EventKind, FileJournal, JournalError, JournalPosition,
+    MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectEvidence as Settled, EffectIdentity};
 use lgwks_bot::{BotError, GrantSet};
@@ -667,7 +668,14 @@ fn a_refused_settlement_leaves_a_real_file_journal_byte_identical() -> TestResul
     );
 
     // Every refusal the ladder can produce for this key, and nothing written.
+    // `Verified` is the one rung that is not refused after the ladder completes:
+    // a later verification supersedes the verdict by design (#259), and the tests
+    // in `durable_crash_observation` cover that acceptance, so it is not a
+    // refusal to assert here.
     for event in shared::ladder(key, PREDICATE, 1)? {
+        if event.kind() == EventKind::Verified {
+            continue;
+        }
         let tail = journal.tail();
         match journal.compare_and_append(tail, &event) {
             Err(JournalError::OutOfOrder { .. }) => {}

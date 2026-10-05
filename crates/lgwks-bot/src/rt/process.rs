@@ -92,6 +92,10 @@ pub struct ProcessSpec {
     stdout: StdioPolicy,
     /// Standard error policy.
     stderr: StdioPolicy,
+    /// A file standard output is written to, replacing `stdout`'s policy.
+    stdout_file: Option<PathBuf>,
+    /// A file standard error is written to, replacing `stderr`'s policy.
+    stderr_file: Option<PathBuf>,
     /// Optional maximum runtime.
     deadline: Option<Duration>,
 }
@@ -107,6 +111,8 @@ impl ProcessSpec {
             stdin: StdioPolicy::default(),
             stdout: StdioPolicy::default(),
             stderr: StdioPolicy::default(),
+            stdout_file: None,
+            stderr_file: None,
             deadline: None,
         }
     }
@@ -149,12 +155,14 @@ impl ProcessSpec {
     /// Set the stdout policy.
     pub fn stdout(&mut self, policy: StdioPolicy) -> &mut Self {
         self.stdout = policy;
+        self.stdout_file = None;
         self
     }
 
     /// Set the stderr policy.
     pub fn stderr(&mut self, policy: StdioPolicy) -> &mut Self {
         self.stderr = policy;
+        self.stderr_file = None;
         self
     }
 
@@ -165,6 +173,7 @@ impl ProcessSpec {
     /// past the retained ceiling.
     pub fn capture_stdout(&mut self, limit: NonZeroUsize) -> &mut Self {
         self.stdout = StdioPolicy::Capture(limit);
+        self.stdout_file = None;
         self
     }
 
@@ -173,6 +182,29 @@ impl ProcessSpec {
     /// The stderr counterpart of [`ProcessSpec::capture_stdout`].
     pub fn capture_stderr(&mut self, limit: NonZeroUsize) -> &mut Self {
         self.stderr = StdioPolicy::Capture(limit);
+        self.stderr_file = None;
+        self
+    }
+
+    /// Write standard output to the file at `path`, creating it if it is absent
+    /// and truncating it if it is not.
+    ///
+    /// For a tool that writes its result to stdout and has no output-path flag.
+    /// The file is opened when the child starts, so a path that cannot be opened
+    /// refuses the start as an [`io::Error`] and no child runs. The stream is not
+    /// captured: [`ProcessRun::stdout`] is empty. Choosing a stdout policy or a
+    /// capture afterwards replaces this.
+    pub fn stdout_to_file(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.stdout = StdioPolicy::Null;
+        self.stdout_file = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Write standard error to the file at `path`, as
+    /// [`stdout_to_file`](Self::stdout_to_file) does for standard output.
+    pub fn stderr_to_file(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.stderr = StdioPolicy::Null;
+        self.stderr_file = Some(path.as_ref().to_path_buf());
         self
     }
 
@@ -262,7 +294,13 @@ impl ProcessSpec {
     }
 
     /// Configure the private engine command owned by the supervisor.
-    pub(crate) fn configure(&self, command: &mut Command) {
+    ///
+    /// # Errors
+    ///
+    /// The [`io::Error`] from opening a file named by
+    /// [`stdout_to_file`](Self::stdout_to_file) or
+    /// [`stderr_to_file`](Self::stderr_to_file).
+    pub(crate) fn configure(&self, command: &mut Command) -> io::Result<()> {
         command.args(&self.args);
         for delta in &self.env {
             match *delta {
@@ -278,9 +316,26 @@ impl ProcessSpec {
             command.current_dir(cwd);
         }
         command.stdin(self.stdin.into_stdio());
-        command.stdout(self.stdout.into_stdio());
-        command.stderr(self.stderr.into_stdio());
+        command.stdout(match self.stdout_file.as_deref() {
+            Some(path) => file_stdio(path)?,
+            None => self.stdout.into_stdio(),
+        });
+        command.stderr(match self.stderr_file.as_deref() {
+            Some(path) => file_stdio(path)?,
+            None => self.stderr.into_stdio(),
+        });
+        Ok(())
     }
+}
+
+/// Open `path` for a child's output: created if absent, truncated if present.
+fn file_stdio(path: &Path) -> io::Result<std::process::Stdio> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(std::process::Stdio::from(file))
 }
 
 impl StdioPolicy {

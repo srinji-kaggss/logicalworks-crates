@@ -2054,7 +2054,7 @@ impl Drop for Supervisor {
 )]
 fn start(spec: &ProcessSpec) -> io::Result<Child> {
     let mut command = Command::new(spec.program());
-    spec.configure(&mut command);
+    spec.configure(&mut command)?;
     // Two guarantees rather than one, because the group kill is a syscall the
     // platform may not have: `kill_on_drop` reaches the direct child
     // everywhere, and the group kill reaches what that child spawned.
