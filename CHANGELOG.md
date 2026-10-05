@@ -104,6 +104,21 @@ additive: no signature changed and no existing behaviour did.
   directory. `lgwks_std --features random` builds on all seven cross targets;
   nine `full`/`lgwks_ast` checks are exempt for a missing C cross-compiler.
 
+### The gate: the saturation tiers spawn the fake the way a default binding does (#272)
+
+- The `sim_review_path` saturation tiers bound the fake `gh` through a `PATH`
+  override and a bare program name. With that combination `std` cannot hand the
+  child to `posix_spawn`: it searches the `PATH` itself and falls back to
+  `fork` + `execvp`, so each of the 50,000 calls at the 10,000 tier forked a
+  test process holding 64 runs in flight. The tiers now name the fake by its
+  absolute path with no `PATH` override (`gh_spawned_directly`), which is the
+  spawn a default `Gh` binding makes. Every other family keeps the `PATH`
+  binding, so `PATH` resolution stays covered. The assertions are unchanged.
+- Measured on an Apple M5 Pro, the 10,000 tier alone: 65.98 s wall and 466 s
+  CPU (212.6 user, 253.8 system), peak RSS 71.7 MB, before; 46.35 s wall and
+  380 s CPU (221.1 user, 158.5 system), peak RSS 65.6 MB, after, with the
+  machine more loaded for the second run.
+
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
 `lgwks_ast` stays at 1.0.0: its source is unchanged since that tag. Every
