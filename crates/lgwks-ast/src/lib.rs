@@ -14,10 +14,10 @@
 //! ## The README is compiled
 //!
 //! This module documentation is generated from `README.md`, so the usage
-//! example above is built and run as a doctest on every `cargo test` rather
-//! than being prose that can quietly rot. `cargo test -p lgwks_ast --doc`
-//! therefore fails if the example stops compiling or stops asserting what the
-//! text above it claims.
+//! example above is built and run as a doctest on every `cargo test`, so
+//! `cargo test -p lgwks_ast --doc` fails if the example stops compiling or
+//! stops asserting what the text above claims — as it did while `try_parse`
+//! was documented as if it were infallible.
 //!
 //! ## Code observability
 //!

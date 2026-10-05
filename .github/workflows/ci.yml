@@ -25,6 +25,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
+# The same value as `[profile.test] debug` in Cargo.toml, which cargo already
+# reads; it is repeated here for the cache. Swatinem/rust-cache keys on every
+# `CARGO*` variable but drops `[profile]` from the manifests it hashes, so a
+# profile change alone kept the old key: the restore was a full match, nothing
+# was saved, and every run would rebuild its dependencies with the new profile
+# from a cache built with the old one (#272). Change both together.
+env:
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   build:
     name: Build + gate
@@ -487,16 +496,21 @@ jobs:
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
-           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
-            cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Check lgwks-deps
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
@@ -505,6 +519,114 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
+
+  # Every lgwks-std feature alone, executed: one nextest run per feature with
+  # nothing else on. Three shards in parallel, because the twelve runs as one
+  # step took 228 s and put the feature-matrix job at 303 s. (#276)
+  std-per-feature-a:
+    name: lgwks-std per-feature tests (a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features core
+          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
+          cargo nextest run --locked -p lgwks_std --no-default-features --features random
+          cargo nextest run --locked -p lgwks_std --no-default-features --features http
+
+  std-per-feature-b:
+    name: lgwks-std per-feature tests (b)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
+          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
+          cargo nextest run --locked -p lgwks_std --no-default-features --features json
+          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
+
+  std-per-feature-c:
+    name: lgwks-std per-feature tests (c)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --no-default-features --features process
+
+  # Its own job so the matrix runs beside the check jobs instead of after them:
+  # twelve feature sets plus eight targets is several minutes of `cargo check`,
+  # and adding it to the feature-matrix job would have put it on the critical
+  # path of the whole run.
+  target-matrix:
+    name: Target matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check lgwks-std across the declared target matrix
+        # `cargo check --target <t>` for every declared target and crate. The
+        # script installs the target with rustup first, requires the Rust-only
+        # surface everywhere, and records with its exact error any check this
+        # runner has no C toolchain to reach.
+        run: ./scripts/check-target-matrix.sh
 
   feature-matrix:
     name: lgwks-bot and lgwks-ast feature matrix
@@ -613,10 +735,18 @@ jobs:
           # Restore on every run, save only from `main`: a pull request reads the
           # last merged build instead of writing a cache entry per branch.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # The fixture is its own workspace, so it built into its own target
+          # directory, which this cache never saved: every run compiled the
+          # whole GPUI stack again (3 min 03 s, 134 crates). It now builds into
+          # the cached `target`. The key is new so the first `main` run misses
+          # and saves those artifacts; an exact hit skips the save, and the old
+          # key would never have picked them up.
+          key: storefront-fixture-target
       - name: Check GPUI Windows renderer fixture
         run: >
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --target-dir target
           --no-default-features --features gpui --example gpui
 
   gpui-macos:

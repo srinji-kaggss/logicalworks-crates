@@ -6,8 +6,8 @@
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.
-Cargo.toml:124	print_stderr = "forbid"
-Cargo.toml:125	print_stdout = "forbid"
+Cargo.toml:131	print_stderr = "forbid"
+Cargo.toml:132	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
 crates/lgwks-ast/src/lib.rs:3206	assert_eq!(
 crates/lgwks-ast/src/lib.rs:3209	"the fixture table must cover every grammar the manifest declares"
@@ -104,5 +104,5 @@ crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:785	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:88	pub mod scan;
-crates/lgwks-std/src/task.rs:355	/// Run `job` on the blocking pool and return a future for its result.
+crates/lgwks-std/src/task.rs:384	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 docs/guidance-runner-spec.md:193	`review`.
