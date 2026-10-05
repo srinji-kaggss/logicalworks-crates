@@ -394,6 +394,100 @@ mod tests {
         Ok(())
     }
 
+    /// Ten thousand observers against a saturated blocking pool, then against
+    /// a free one.
+    ///
+    /// Saturated: every thread and every queue slot is held by a job parked on
+    /// a gate, so each poll must be refused as `Refused`, naming the pool, and
+    /// must send nothing; the listener having no connection waiting is the
+    /// proof. Free: the gate opens, the parked jobs drain, and the same ten
+    /// thousand polls all run to an answer, none refused. The burst neither
+    /// starts a thread per poll nor panics, at either end.
+    #[test]
+    fn ten_thousand_observers_are_refused_typed_when_the_pool_is_full_and_answered_when_free()
+    -> TestResult {
+        use crate::verb::Observe;
+        use std::sync::{Arc, Condvar, Mutex};
+        const OBSERVERS: usize = 10_000;
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut parked = Vec::new();
+        loop {
+            let held = Arc::clone(&gate);
+            let job = lgwks_std::task::try_spawn_blocking(move || {
+                let (ref open, ref opened) = *held;
+                let mut is_open = open
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*is_open {
+                    is_open = opened
+                        .wait(is_open)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            });
+            match job {
+                Ok(handle) => parked.push(handle),
+                Err(lgwks_std::task::SpawnError::AtCapacity { .. }) => break,
+                Err(other) => return Err(other.into()),
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let live = Endpoint::new(format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr()?.port()
+        ));
+        let auth = net_auth()?;
+        let full = lgwks_std::task::block_on(lgwks_std::task::join_all(
+            (0..OBSERVERS).map(|_| live.poll((auth.clone(), ()))),
+        ));
+        let refused = full
+            .iter()
+            .filter(|outcome| {
+                matches!(outcome, Err(BotError::DomainError {
+                    certainty: DispatchCertainty::Refused,
+                    cause,
+                    ..
+                }) if cause.starts_with("no thread was available"))
+            })
+            .count();
+        assert_eq!(
+            refused, OBSERVERS,
+            "every poll against a full pool is refused, typed"
+        );
+        assert!(
+            matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "a refused poll sent nothing: no connection reached the listener"
+        );
+
+        {
+            let (ref open, ref opened) = *gate;
+            *open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            opened.notify_all();
+        }
+        drop(lgwks_std::task::block_on(lgwks_std::task::join_all(parked)));
+
+        let closed = {
+            let probe = TcpListener::bind("127.0.0.1:0")?;
+            probe.local_addr()?.port()
+        };
+        let free = Endpoint::new(format!("http://127.0.0.1:{closed}/"));
+        let answered = lgwks_std::task::block_on(lgwks_std::task::join_all(
+            (0..OBSERVERS).map(|_| free.poll((auth.clone(), ()))),
+        ));
+        let unreachable = answered
+            .iter()
+            .filter(|outcome| matches!(outcome, Ok(state) if !state.reachable))
+            .count();
+        assert_eq!(
+            unreachable, OBSERVERS,
+            "with the pool free every poll runs to an answer, none refused"
+        );
+        Ok(())
+    }
+
     #[test]
     fn poll_rejects_malformed_url_as_spec_bug() -> TestResult {
         use crate::verb::Observe;
