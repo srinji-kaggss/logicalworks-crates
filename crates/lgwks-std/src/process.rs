@@ -193,7 +193,10 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let group = i32::try_from(child.id())?;
-        assert!(process_group_exists(group)?, "the live child owns its group");
+        assert!(
+            process_group_exists(group)?,
+            "the live child owns its group"
+        );
         child.kill()?;
         child.wait()?;
         assert!(!process_group_exists(group)?, "the reaped group is absent");
