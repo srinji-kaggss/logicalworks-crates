@@ -9,6 +9,17 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### Tests: the entropy replay simulation no longer folds drawn bytes (#276)
+
+- `sim_random_error`'s replay trace folded whether each draw came back
+  entirely equal to the sentinel byte. A one-byte draw from a working source
+  does that one time in 256, so the same seed produced two different traces
+  about 3% of runs, and `untouched_draws == 0` failed about 1.6% of runs (PR
+  #302, run 37355259369). The trace now folds lengths only, a draw is
+  classified untouched only from eight bytes up (`2^-64` by chance), and
+  `the_trace_folds_no_drawn_byte` pins both without entropy. 300 runs of the
+  two tests: 0 failures.
+
 ### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
 
 The two items #286 and #289 left open on the bounded blocking pool. Both are

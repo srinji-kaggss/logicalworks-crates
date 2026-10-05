@@ -38,8 +38,7 @@ mod sim {
     use lgwks_std::random::{self, EntropyError};
 
     use crate::seeded_sweep::{
-        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-        initial_trace,
+        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
     };
 
     /// The concurrency tiers the drawers drive.
@@ -85,6 +84,15 @@ mod sim {
     /// indistinguishable from a byte that was never written, so the completeness
     /// assertions below are reported as a budget rather than as a proof.
     const DISTINGUISHABLE_AT: usize = 4_096;
+
+    /// The shortest draw whose coming back entirely unwritten means something.
+    ///
+    /// A whole draw of `n` bytes equals the sentinel everywhere with probability
+    /// `256^-n`: one draw in 256 at one byte, which is a test that fails on a
+    /// working source, and `2^-64` at eight. Shorter draws are not classified
+    /// as untouched at all, rather than classified with a known false-positive
+    /// rate.
+    const UNTOUCHED_DISTINGUISHABLE_AT: usize = 8;
 
     /// The most sentinel bytes a whole draw of `length` bytes may leave behind.
     ///
@@ -132,16 +140,18 @@ mod sim {
             .map_or_else(String::new, ToString::to_string)
     }
 
-    /// Records one draw's outcomes and folds them into the running trace.
+    /// Records one draw's outcomes and folds its length into the running trace.
     ///
-    /// The buffer is never hashed. What is folded is the length, whether the
-    /// draw came back untouched, and whether the source refused: three facts a
+    /// Nothing derived from the buffer is folded, not even whether it came
+    /// back untouched: a one-byte draw from a working source equals the
+    /// sentinel one time in 256, so a trace that folded that classification
+    /// diverged between two runs of the same seed. The length is the fact a
     /// second run under the same seed reproduces exactly, whatever bytes the
-    /// first run happened to draw.
+    /// first run happened to draw; the refusal is folded by the caller.
     fn observe(trace: &mut SweepTrace, length: usize, buf: &[u8]) {
         let survivors = buf.iter().filter(|byte| **byte == SENTINEL).count();
         let distinct: BTreeSet<u8> = buf.iter().copied().collect();
-        let untouched = !buf.is_empty() && survivors == buf.len();
+        let untouched = length >= UNTOUCHED_DISTINGUISHABLE_AT && survivors == buf.len();
         trace.draws = trace.draws.saturating_add(1);
         trace.sentinel_survivors = trace.sentinel_survivors.saturating_add(survivors);
         let worst = trace.worst_sentinels.entry(length).or_insert(0);
@@ -154,7 +164,6 @@ mod sim {
             .saturating_add(usize::from(length > 1 && distinct.len() == 1));
         trace.trace = trace.trace.wrapping_mul(FNV_PRIME);
         fold(&mut trace.trace, u64::try_from(length).unwrap_or(u64::MAX));
-        fold_usize(&mut trace.trace, usize::from(untouched));
     }
 
     /// Draws one buffer of `length` bytes and records what came back.
@@ -517,6 +526,37 @@ mod sim {
             "a seeded generator predicted {predicted} of {drawn} two-byte draws; the entropy \
              source is not the OS CSPRNG it claims to be"
         );
+    }
+
+    #[test]
+    fn the_trace_folds_no_drawn_byte() {
+        // The replay defect, pinned without entropy: at every declared length,
+        // a buffer that came back all sentinel and one that came back with no
+        // sentinel at all leave the same trace, and a one-byte draw that
+        // happened to equal the sentinel is not reported as unwritten.
+        for length in LENGTHS {
+            let mut all_sentinel = SweepTrace {
+                trace: initial_trace(),
+                ..SweepTrace::default()
+            };
+            let mut no_sentinel = SweepTrace {
+                trace: initial_trace(),
+                ..SweepTrace::default()
+            };
+            observe(&mut all_sentinel, length, &vec![SENTINEL; length]);
+            observe(&mut no_sentinel, length, &vec![!SENTINEL; length]);
+            assert_eq!(
+                all_sentinel.trace, no_sentinel.trace,
+                "a {length}-byte draw folded its bytes into the trace, so the same seed \
+                 cannot replay"
+            );
+            assert_eq!(
+                all_sentinel.untouched_draws,
+                usize::from(length >= UNTOUCHED_DISTINGUISHABLE_AT),
+                "a {length}-byte all-sentinel draw is untouched only where chance cannot \
+                 produce it"
+            );
+        }
     }
 
     #[test]
