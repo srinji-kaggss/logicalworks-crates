@@ -2291,7 +2291,9 @@ impl OwnedChild {
     async fn reap(&mut self) -> io::Result<std::process::ExitStatus> {
         loop {
             let Some(inner) = self.inner.as_mut() else {
-                return Err(io::Error::other("the child was already reaped"));
+                let refusal = Err(io::Error::other("the child was already reaped"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), pid = self.pid, "owned child: reap after reap");
+                return refusal;
             };
             if let Some(status) = inner.try_wait()? {
                 self.inner = None;

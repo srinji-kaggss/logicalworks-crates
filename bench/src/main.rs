@@ -781,7 +781,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (Some(&(first_caps, first_ns)), Some(&(last_caps, last_ns))) =
         (scaling.first(), scaling.last())
     else {
-        return Err("the capability-scaling run produced no points".into());
+        let refusal: Result<(), Box<dyn std::error::Error>> =
+            Err("the capability-scaling run produced no points".into());
+        lgwks_std::trace::warn!(error = ?refusal.as_ref().err(), "capability scaling: no points to report");
+        return refusal;
     };
     let growth = last_caps as f64 / first_caps as f64;
     writeln!(
