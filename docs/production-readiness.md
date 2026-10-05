@@ -90,6 +90,13 @@ still over five minutes, process containment is still Unix-only, the seeded swee
 still have no shrinking, and `process_escape`'s intermittent failure is still
 unexplained. The verdict above is unchanged.
 
+**Update, 2026-10-05.** The hold the journal module documentation named, an
+acknowledged final frame whose length field was changed being truncated on open,
+is closed by a refusal on the stored head
+([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262), §4.6).
+The verdict above is unchanged: #99, #107 and #108 remain unrun and no SLO has been
+measured on the named VPS profile.
+
 Everything below is the reasoning behind that sentence.
 
 ## 2. The claim under test
@@ -320,6 +327,53 @@ the register's observations against it:
 `Until that run exists` no longer describes these rows. It still describes
 #99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
 axis stays ⚠️ and the §1 verdict stands.
+
+**A length prefix that lies about an acknowledged frame is refused, not
+trimmed ([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262)).**
+Until this change the one hold the module documentation itself named was real: an
+acknowledged final frame whose stored length was changed from `L` to `L + k`
+was truncated on open, because a complete prefix over a frame the file cannot
+hold looks like an append cut short, and the head-short shape (`k` in `1..=32`)
+was classified as torn without being asked at all. An open now decides on the
+bytes. Any payload length under the bytes present that reproduces the stored head,
+or a later whole frame that authenticates, was acknowledged, and the file is
+refused with `JournalError::Corrupt` and left byte-identical; only a tail that is a
+prefix of one cut-short append is trimmed. Observed by
+`journal::file::tests::a_lengthened_acknowledged_final_frame_is_refused_not_trimmed`
+(`k` in `1..=1024`, file hash compared),
+`an_inflated_non_final_length_is_refused_and_every_byte_survives`,
+`an_append_cut_at_every_byte_of_the_final_frame_is_repaired` (the control: no
+genuine cut is refused), and by `tests/it/sim_journal_tail.rs`, which sweeps seeded
+journals of one to a thousand frames through inflated, deflated, bit-flipped and
+cut prefixes, two tenants concurrently. **What it does not cover:** a final frame
+whose length and head are both damaged has nothing to authenticate it and is
+trimmed (`a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`),
+and a hand that truncates a file mid-frame is indistinguishable from a crash. The
+journal stays below the unattended-automation bar for the reasons in the ceiling
+paragraph below, not for this one. The run store and the repair ledger shared the
+same defect through `frame::read_raw`, which treated every cut frame as a clean end;
+they now ask the same question of the same bytes, with each store's own head over
+its decoded record (`task::store::tests` and `task::ledger::tests`, including a
+ceiling-sized noise tail decided in bounded time). Their tests were not run against
+the unfixed code, so for those two stores the control is the cut-append test only.
+The cost of the decision is measured, not estimated
+(`cargo run -p lgwks_bot --features script,ephemeral --release --example tail_cost`,
+64-frame files, Apple silicon, one run, peak RSS 6.3 MB for the whole process):
+
+| Open of | journal p50 / p95 / p99 | run store p50 / p95 / p99 |
+|---|---|---|
+| an undamaged file (n=400) | 65 / 100 / 121 µs | 268 / 319 / 370 µs |
+| a final frame lengthened by 1–2048, refused (n=400) | 109 / 130 / 154 µs | 210 / 245 / 360 µs |
+| an append cut at a seeded byte, repaired (n=60, an `fsync` each) | 3,127 / 4,010 / 5,922 µs | 3,806 / 3,930 / 4,687 µs |
+| a ceiling-sized prefix over noise, trimmed (n=8) | 2,266,477 / 2,371,675 / 2,371,675 µs | 5,685 / 5,864 / 5,864 µs |
+
+The last row is the stated worst case and it is slow for the journal: the search
+tries every payload length under the bytes present, each is a blake3 over a
+length-framed payload that cannot be extended from the one before, so a 64 KiB tail
+costs about 2.3 s once, at open. It is bounded and it needs a tail that is a
+maximal-size frame cut mid-write (or a hand-made one); a journal's ordinary frames
+are a few hundred bytes and cost the third row. The run store decodes each candidate
+and a wrong length fails at once, which is why its worst case is milliseconds.
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file
