@@ -53,7 +53,7 @@ library does not intercept arbitrary Cargo invocations.
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | macOS-only. |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | The matching tokenizer stack. |
-| `process-group-probe` | `lgwks_deps::process_group::exists` | Unix-only safe, non-mutating signal-zero observation for process-group cleanup. |
+| `process-group-probe` | `lgwks_deps::process_group::exists` (deprecated) | Forwards to `lgwks_std::process::process_group_exists`, the one process-group backend; kept for 1.x compatibility. |
 | `scan` (default) | — | The gate's Rust source detectors. The one reviewed default-on feature. |
 
 The ML features are default-off, so the default `scan` build compiles none of

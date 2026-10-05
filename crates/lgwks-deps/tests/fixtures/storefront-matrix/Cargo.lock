@@ -3954,7 +3954,6 @@ dependencies = [
  "candle-transformers",
  "gpui",
  "lgwks_std",
- "nix 0.31.3",
  "tokenizers 0.23.2",
  "tokio",
 ]
@@ -3964,6 +3963,7 @@ name = "lgwks_std"
 version = "1.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "tracing",

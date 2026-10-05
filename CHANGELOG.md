@@ -25,6 +25,20 @@ explicitly under that crate.
   must detect. The `digest-timing` gate lane runs it on the release build,
   locally (aarch64-apple-darwin) and in CI (x86_64-unknown-linux-gnu).
 
+### One process-group backend (#263)
+
+- `lgwks_std::process::process_group_exists` (feature `process`) is the
+  signal-zero group probe, on rustix beside `kill_process_group`, so the
+  supervisor's kill and the check that confirms it share one syscall binding
+  and one error mapping. Zero and negative ids are refused as `InvalidInput`;
+  off Unix it reports `Unsupported`.
+- `lgwks_deps::process_group::exists` is deprecated and forwards to it. The
+  `process-group-probe` feature now enables `lgwks_std/process` and no longer
+  pulls in `nix`. That edge is withdrawn from `contract/APPROVED.toml`, and
+  the workspace no longer builds `nix`.
+- `lgwks_bot`'s `process` feature no longer enables
+  `lgwks_deps/process-group-probe`.
+
 ### Property tests with shrinking (#273)
 
 - `proptest` 1.11 is admitted as a dev-only edge (`contract/APPROVED.toml`,

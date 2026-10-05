@@ -4211,7 +4211,6 @@ dependencies = [
  "candle-transformers",
  "gpui",
  "lgwks_std",
- "nix 0.31.3",
  "proc-macro2",
  "proptest",
  "quote",
