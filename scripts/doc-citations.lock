@@ -9,8 +9,8 @@
 Cargo.toml:124	print_stderr = "forbid"
 Cargo.toml:125	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
-crates/lgwks-ast/src/lib.rs:2412	assert_eq!(
-crates/lgwks-ast/src/lib.rs:2415	"the fixture table must cover every grammar the manifest declares"
+crates/lgwks-ast/src/lib.rs:2404	assert_eq!(
+crates/lgwks-ast/src/lib.rs:2407	"the fixture table must cover every grammar the manifest declares"
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {

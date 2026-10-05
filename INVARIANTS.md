@@ -1179,6 +1179,32 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-GOV-1** The gate is defined once in `scripts/gate-lanes.toml`; CI runs
   the same lane commands and `scripts/check-gate-parity.py` refuses drift. ·
   enforced by: `gate-parity` lane
+- **INV-BOT-150** A complete length prefix over a frame the file cannot hold is
+  decided on the bytes, never on the prefix. The two files that look alike there, an
+  append a writer never finished and an acknowledged frame whose prefix was changed
+  afterwards (`L` to `L + k`, a final frame or one with frames behind it), are told
+  apart by the stored head, which only bytes a writer really framed reproduce. An
+  early end after a complete prefix, in the payload **or in the head**, is resolved
+  by `frame::holds_acknowledged_frame`: a payload length under the bytes present that
+  reproduces the stored head, or a later whole frame that authenticates (against the
+  head the cut frame's payload implies, or against the 32 bytes before it), means
+  the prefix lied, and the open is `JournalError::Corrupt` with the file
+  byte-identical. Only a tail that is a prefix of one cut-short append is trimmed.
+  The streaming `Replay` gives the same answer and a refusal ends the stream. The
+  search is bounded by construction, because a short read was short of at most
+  `MAX_FRAME_BYTES` plus a head. **Not claimed:** a final frame whose length and
+  head are both damaged authenticates as nothing and is trimmed, and a file
+  truncated mid-frame by a hand reads as a crash. · why: #262 (orphaned from #143
+  R02) · enforced by: `journal::file::tests`
+  (`a_lengthened_acknowledged_final_frame_is_refused_not_trimmed`,
+  `an_inflated_non_final_length_is_refused_and_every_byte_survives`,
+  `an_append_cut_at_every_byte_of_the_final_frame_is_repaired`,
+  `a_damaged_cut_frame_with_an_acknowledged_frame_behind_it_is_refused`,
+  `a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`,
+  `a_streaming_replay_refuses_a_lengthened_final_frame_and_then_ends`),
+  `journal::frame::tests`, and `tests/it/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
+  `cut_appends_band_04..07`, `damaged_cut_frames_band_08..11`,
+  `tenants_beside_a_refusal_band_12..13`)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is
@@ -2138,3 +2164,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
   INV-BOT-10's real frame (#108) — is where the next regression will come
   from.
+- 2026-10-05 (#280): #109 closed on 2026-09-23 with those three rows repaired
+  and covered by in-process regression tests, not by an external observation.
+  INV-BOT-9's T21 is now observed by `tests/process_escape.rs`, which shows a
+  `setsid` descendant escaping the group and the receipt not claiming it
+  (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
+  path and INV-BOT-10's real frame still have no named external test.
