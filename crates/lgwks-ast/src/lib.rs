@@ -67,24 +67,22 @@
 //! unchecked [`parse`] exists for diagnostics and tests that inspect
 //! malformed trees on purpose.
 //!
-//! The two bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+//! The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
 //! bytes handed to the parser and is what keeps parse work linear in input;
-//! [`MAX_AST_NODES`] is measured on the tree *after* tree-sitter has built it,
-//! so it bounds the validation walk and every downstream walk, not the
-//! parser's own allocation. Neither is a hard memory ceiling.
+//! [`MAX_AST_NODES`] and [`MAX_AST_DEPTH`] are measured on the tree *after*
+//! tree-sitter has built it, so they bound the validation walk and every
+//! downstream walk, not the parser's own allocation. The parser's allocation
+//! is bounded by input, not by a counter in this crate: the worst case at the
+//! byte ceiling is **the measured peak RSS in
+//! [`bench/README.md`](https://github.com/srinji-kaggss/logicalworks-crates/blob/main/bench/README.md),
+//! per grammar**, produced by the `parse_budget` example. Read that number for
+//! what one parse of a full [`MAX_SOURCE_BYTES`] source costs resident memory;
+//! the two tree bounds are what make the *walk* bounded, not the parser.
 //!
 //! Content sniffing is opt-in for the same reason: [`try_detect_content`]
 //! trial-parses each distinct candidate grammar in full, so the caller names
 //! a small candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
 //! extension-only [`detect`] never parses.
-//!
-//! ## The README is compiled
-//!
-//! `README.md` is attached to this crate root as its documentation, so the
-//! usage example it opens with is built and run as a doctest on every
-//! `cargo test -p lgwks_ast --doc` instead of being prose that can rot. When
-//! the example above stops compiling — as it did while `try_parse` was
-//! documented as if it were infallible — that doctest is what catches it.
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
@@ -135,6 +133,22 @@ pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// byte bound alone does not price. Measured on the tree after tree-sitter has
 /// built it, so it does not cap the parser's own allocation.
 pub const MAX_AST_NODES: usize = 2_000_000;
+
+/// Deepest branch a checked parse admits, root counting as 1.
+///
+/// [`MAX_AST_NODES`] prices a *wide* tree; a *deep* one is bounded by neither it
+/// nor the byte ceiling in any useful way, because a source of `(((…` is a few
+/// bytes per nesting level and yields one node per level plus the delimiters. The
+/// node ceiling therefore admits a tree hundreds of thousands of levels deep,
+/// and the traversal retains one frame per active ancestor, so the depth is
+/// bounded explicitly instead.
+///
+/// The bound is on the checked parse ([`try_parse`], [`try_parse_with`]). The
+/// public [`inspect_ast`] walk is uncapped in depth, because a caller inspecting
+/// a tree on purpose may want the real depth of a malformed one; the ceiling's
+/// only producer is the checked parse, which reports it as
+/// [`ParseError::AstTooDeep`].
+pub const MAX_AST_DEPTH: usize = 512;
 
 /// Largest probe source admitted to [`try_detect_content`] (64 KiB). Content
 /// detection costs one full parse per distinct candidate grammar, so it is
@@ -613,6 +627,22 @@ pub enum ParseError {
         /// The applied bound.
         limit: usize,
     },
+    /// The tree is nested deeper than the checked parse admits.
+    ///
+    /// A separate arm from [`ParseError::AstTooLarge`], because a caller acts on
+    /// them differently: a node refusal says *this source is large*, and a depth
+    /// refusal says *this source is shaped like the deeply-nested input a hostile
+    /// parser input is made of*. Both name the bound and the observed value, and
+    /// both are refusals of the whole file rather than located diagnostics.
+    #[error("{language} AST nests deeper than {limit} levels (observed at least {observed})")]
+    AstTooDeep {
+        /// The language name.
+        language: &'static str,
+        /// Branch depth observed up to the bound.
+        observed: usize,
+        /// The applied bound.
+        limit: usize,
+    },
 }
 
 /// Every recovery node in `tree`, as a located diagnostic.
@@ -744,6 +774,14 @@ pub struct SyntaxDiagnostic {
 pub enum InspectionStopReason {
     /// The walk observed one node beyond its configured node limit.
     NodeLimitExceeded,
+    /// The walk descended one level beyond its configured depth limit.
+    ///
+    /// Only the checked parse configures a depth limit — see [`MAX_AST_DEPTH`] —
+    /// and it turns this into [`ParseError::AstTooDeep`] rather than handing a
+    /// caller a partial [`AstMetrics`], so the variant is recorded here rather
+    /// than dropped so the metrics cannot report an incomplete walk with no
+    /// reason.
+    DepthLimitExceeded,
 }
 
 /// Complete content-detection result after every distinct candidate was checked.
@@ -919,28 +957,43 @@ pub fn try_parse(code: &str, language: Language) -> Result<Parsed, ParseError> {
         language.name(),
         MAX_SOURCE_BYTES,
         MAX_AST_NODES,
+        MAX_AST_DEPTH,
     )
 }
 
 /// Checked parse of a caller-registered grammar, held to the same byte bound,
-/// node bound, and recovery refusal as [`try_parse`].
+/// node bound, depth bound, and recovery refusal as [`try_parse`].
 pub fn try_parse_with<L: LanguageExt>(
     code: &str,
     language: &L,
     name: &'static str,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
-    parse_bounded(code, language, name, MAX_SOURCE_BYTES, MAX_AST_NODES)
+    parse_bounded(
+        code,
+        language,
+        name,
+        MAX_SOURCE_BYTES,
+        MAX_AST_NODES,
+        MAX_AST_DEPTH,
+    )
 }
 
 /// The one body behind [`try_parse`] and [`try_parse_with`]: byte bound, then
-/// tree, then node bound, then recovery refusal.
+/// tree, then node bound, then depth bound, then recovery refusal.
 ///
 /// The bounds are parameters rather than constants read in place so both entry
 /// points state the policy they apply at the call site, and so a later caller
 /// with a different budget reuses this ordering instead of restating it. The
 /// order is the point: the byte check runs before the parser allocates, the
-/// node check before any walk of the tree, and both before any tree reaches a
-/// caller.
+/// node and depth checks before any walk of the tree reaches a caller, and both
+/// before the recovery check, so a refusal never describes a tree this walk did
+/// not finish inspecting.
+///
+/// The two tree bounds are separate refusals because they price different
+/// shapes: [`ParseError::AstTooLarge`] is a wide tree, and
+/// [`ParseError::AstTooDeep`] is a narrow one whose source is a few bytes per
+/// nesting level, which the byte ceiling admits in the hundreds of thousands of
+/// levels and the node ceiling admits in full.
 ///
 /// `language` is borrowed and cloned into the `StrDoc` because a grammar may be
 /// a registered [`CustomLang`] or a built-in [`Language`]; `name` is the stable
@@ -951,6 +1004,7 @@ fn parse_bounded<L: LanguageExt>(
     name: &'static str,
     max_source_bytes: usize,
     max_ast_nodes: usize,
+    max_ast_depth: usize,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
     validate_source_size(code, max_source_bytes)?;
     let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
@@ -960,7 +1014,16 @@ fn parse_bounded<L: LanguageExt>(
         }
     })?;
     let (metrics, _, diagnostics, diagnostics_truncated) =
-        inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes));
+        inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes), Some(max_ast_depth));
+    if metrics.stop_reason == Some(InspectionStopReason::DepthLimitExceeded) {
+        let refusal = Err(ParseError::AstTooDeep {
+            language: name,
+            observed: metrics.max_depth,
+            limit: max_ast_depth,
+        });
+        tracing::debug!(error = ?refusal.as_ref().err(), "parse_bounded: returning an error to the caller");
+        return refusal;
+    }
     if !metrics.complete {
         let refusal = Err(ParseError::AstTooLarge {
             language: name,
@@ -1028,24 +1091,34 @@ pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// returned metrics preserve that cap and identify incomplete inspection;
 /// `has_syntax_issues == false` is not evidence of a clean tree unless
 /// `complete` is also true.
+///
+/// This walk is uncapped in depth, so `max_depth` is the real depth of the
+/// tree and a malformed one is measured rather than refused. [`MAX_AST_DEPTH`]
+/// is the checked parse's ceiling and has no parameter here on purpose: a
+/// caller inspecting a tree on purpose is not the hostile-input case, and
+/// refusing it would make the reported depth a constant.
 #[must_use]
 pub fn inspect_ast<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
 ) -> AstMetrics {
-    inspect_ast_with_pending(root, stop_after_nodes).0
+    inspect_ast_with_pending(root, stop_after_nodes, None).0
 }
 
 /// Inspect without retaining all siblings in one pending vector.
 ///
 /// Each frame owns one node, its next child index, and depth: at most one
-/// frame per active ancestor. The bounded path therefore allocates according
-/// to tree depth, not the root's fan-out. `peak_frames` is kept private as a
-/// directly asserted resource invariant rather than exported as a public
-/// metric whose callers might mistake it for a configured limit.
+/// frame per active ancestor, so the retained state is bounded by depth. The
+/// `depth_limit` makes that bound explicit rather than incidental: the frames
+/// live at most `depth_limit` deep, so a source shaped like nested delimiters
+/// is refused at the level past the ceiling instead of retaining a frame per
+/// nesting level. `peak_frames` is kept private as a directly asserted
+/// resource invariant rather than exported as a public metric whose callers
+/// might mistake it for a configured limit.
 fn inspect_ast_with_pending<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
+    stop_after_depth: Option<usize>,
 ) -> (AstMetrics, usize, Vec<SyntaxDiagnostic>, bool) {
     let mut metrics = AstMetrics {
         nodes: 0,
@@ -1064,8 +1137,8 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     let mut peak_frames = 1;
     metrics = metrics.including(root, 1);
     record_syntax_diagnostic(root, &mut diagnostics, &mut diagnostics_truncated);
-    if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-        mark_inspection_incomplete(&mut metrics);
+    if let Some(reason) = root_stop_reason(&metrics, stop_after_nodes, stop_after_depth) {
+        mark_inspection_incomplete(&mut metrics, Some(reason));
         return (metrics, peak_frames, diagnostics, diagnostics_truncated);
     }
     while let Some(frame) = frames.last_mut() {
@@ -1082,7 +1155,17 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
         metrics = metrics.including(&child, child_depth);
         record_syntax_diagnostic(&child, &mut diagnostics, &mut diagnostics_truncated);
         if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-            mark_inspection_incomplete(&mut metrics);
+            mark_inspection_incomplete(&mut metrics, Some(InspectionStopReason::NodeLimitExceeded));
+            break;
+        }
+        // The depth witness is recorded before the frame is pushed, so the frame
+        // that would have carried it is never retained: the retained stack stays
+        // within the ceiling rather than one frame past it.
+        if stop_after_depth.is_some_and(|limit| child_depth > limit) {
+            mark_inspection_incomplete(
+                &mut metrics,
+                Some(InspectionStopReason::DepthLimitExceeded),
+            );
             break;
         }
         let child_count = child.children().len();
@@ -1093,10 +1176,29 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     (metrics, peak_frames, diagnostics, diagnostics_truncated)
 }
 
-/// Mark a walk as partial after it observes the node beyond its configured cap.
-fn mark_inspection_incomplete(metrics: &mut AstMetrics) {
+/// Which cap the root itself already exceeded, if either.
+///
+/// The root is charged before the loop runs, so a ceiling at or below one
+/// stops the walk there. With both ceilings configured the node one is
+/// reported, because the node charge is the first the root trips and a
+/// caller reading one reason wants the one that fired first.
+fn root_stop_reason(
+    metrics: &AstMetrics,
+    stop_after_nodes: Option<usize>,
+    stop_after_depth: Option<usize>,
+) -> Option<InspectionStopReason> {
+    if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
+        return Some(InspectionStopReason::NodeLimitExceeded);
+    }
+    stop_after_depth
+        .is_some_and(|limit| metrics.max_depth > limit)
+        .then_some(InspectionStopReason::DepthLimitExceeded)
+}
+
+/// Mark a walk as partial after it observes the value beyond its configured cap.
+fn mark_inspection_incomplete(metrics: &mut AstMetrics, reason: Option<InspectionStopReason>) {
     metrics.complete = false;
-    metrics.stop_reason = Some(InspectionStopReason::NodeLimitExceeded);
+    metrics.stop_reason = reason;
 }
 
 /// Retain one recovery-node span until the public diagnostic ceiling is reached.
@@ -1224,7 +1326,7 @@ mod tests {
             "the fixture presents 4,096 immediate siblings to the traversal"
         );
 
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1));
+        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1), None);
 
         assert_eq!(metrics.nodes, 2, "one node beyond the cap proves refusal");
         assert_eq!(
@@ -1274,7 +1376,7 @@ mod tests {
             "}".repeat(depth)
         );
         let parsed = parse(&source, Language::Rust);
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), None);
+        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), None, None);
 
         assert!(
             metrics.max_depth > 50,
@@ -1927,6 +2029,7 @@ mod tests {
             "rust",
             MAX_SOURCE_BYTES,
             2,
+            MAX_AST_DEPTH,
         );
         // The gate is this assertion, which reports whatever came back
         // instead. The `if let` below only reads the numbers, and the pattern
@@ -1946,6 +2049,100 @@ mod tests {
             assert_eq!(limit, 2);
             assert!(observed > limit, "observed {observed} must exceed {limit}");
         }
+    }
+
+    #[test]
+    fn a_tree_past_the_depth_bound_refuses_as_ast_too_deep() {
+        // The other half of the checked parse's two tree bounds, and the half
+        // `over_budget_tree_refuses_as_ast_too_large` cannot reach: that fixture
+        // is wide and shallow, so it trips the node ceiling and says nothing
+        // about depth. This one is narrow and deep, which is the adversarial
+        // shape — a few bytes per nesting level, so the byte ceiling admits the
+        // whole source and the node ceiling never charges it.
+        let refusal = parse_bounded(
+            &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
+            &SupportLang::Rust,
+            "rust",
+            MAX_SOURCE_BYTES,
+            MAX_AST_NODES,
+            8,
+        );
+        assert!(
+            matches!(refusal, Err(ParseError::AstTooDeep { .. })),
+            "a tree past the depth bound must refuse as AstTooDeep, got {:?}",
+            refusal.as_ref().err()
+        );
+        if let Err(ParseError::AstTooDeep {
+            observed, limit, ..
+        }) = refusal
+        {
+            assert_eq!(limit, 8);
+            assert_eq!(
+                observed, 9,
+                "the depth witness is one level past the ceiling, like the node one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_depth_witness_is_recorded_without_retaining_a_frame_for_it() {
+        // The resource half of `MAX_AST_DEPTH`: the retained frame stack is the
+        // memory the ceiling exists to bound, so the walk must stop *before*
+        // pushing the witness's frame rather than at it.
+        let parsed = parse(
+            &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
+            Language::Rust,
+        );
+        let (metrics, peak_frames, _, _) =
+            inspect_ast_with_pending(&parsed.root(), Some(MAX_AST_NODES), Some(8));
+        assert_eq!(
+            metrics.stop_reason,
+            Some(InspectionStopReason::DepthLimitExceeded),
+            "the metrics name the depth ceiling as the reason"
+        );
+        assert_eq!(peak_frames, 8, "retained frames stay within the ceiling");
+        assert!(
+            !metrics.complete,
+            "a walk stopped at the depth ceiling did not finish"
+        );
+    }
+
+    #[test]
+    fn the_unbounded_inspection_measures_the_real_depth_of_a_deep_tree() {
+        // Why the depth ceiling is the checked parse's and not `inspect_ast`'s:
+        // a caller inspecting a malformed tree on purpose still learns how deep
+        // it is, rather than reading back the ceiling. 512 nestings of a Rust
+        // block is about 1 030 levels of node depth, measured rather than
+        // assumed — which is also why the ceiling is 512 and not 64.
+        let nestings = 512;
+        let parsed = parse(
+            &format!(
+                "{}fn f() {{}}{}",
+                "fn f() {".repeat(nestings),
+                "}".repeat(nestings)
+            ),
+            Language::Rust,
+        );
+        let metrics = inspect_ast(&parsed.root(), None);
+        assert!(metrics.complete, "an uncapped walk descends the whole tree");
+        assert_eq!(metrics.stop_reason, None, "nothing stopped it");
+        assert!(
+            metrics.max_depth > MAX_AST_DEPTH,
+            "the fixture is {} deep, which is not past the checked parse's ceiling of {MAX_AST_DEPTH}",
+            metrics.max_depth
+        );
+        assert!(
+            try_parse(
+                &format!(
+                    "{}fn f() {{}}{}",
+                    "fn f() {".repeat(nestings),
+                    "}".repeat(nestings)
+                ),
+                Language::Rust
+            )
+            .is_err(),
+            "and the same source is refused by the checked parse"
+        );
     }
 
     #[test]
