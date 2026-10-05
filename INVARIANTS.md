@@ -70,7 +70,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   class-only entry is exact for crates.io — both its Git and sparse spellings —
   and insufficient for a Git or path edge; an unknown scheme is neither
   authorable nor an ordinary admitted origin. · why: #158 A1 · enforced by:
-  `tests/origin_binding.rs`, `tests/sim_origin.rs`, and
+  `tests/it/origin_binding.rs`, `tests/it/sim_origin.rs`, and
   `lgwks_deps::tests::an_approved_git_origin_admits_only_that_repository`,
   `lgwks_deps::tests::a_git_revision_policy_change_is_an_origin_drift`,
   `lgwks_deps::tests::an_approved_registry_origin_refuses_a_different_registry`,
@@ -89,8 +89,8 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `Refusal::{FeatureDrift, DefaultFeaturesDrift, OptionalityDrift, TargetDrift}`;
   a dimension an entry does not author is grandfathered rather than refused.
   Mandatory and allowed features are distinguished, so ordering is never
-  significant. · why: #158 A2 · enforced by: `tests/feature_policy.rs`,
-  `tests/sim_dependency_policy.rs`, and
+  significant. · why: #158 A2 · enforced by: `tests/it/feature_policy.rs`,
+  `tests/it/sim_dependency_policy.rs`, and
   `lgwks_deps::tests::a_class_only_registry_approval_admits_crates_io_only`
 - **INV-DEP-14** Cargo package identity is byte-exact: an approval admits an
   observed package name only when it is that name, or a name the entry lists in
@@ -99,7 +99,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   alias names exactly one package (collision-checked at load, including against
   another package's real name), and a `package =` rename stays a local spelling
   of the upstream identity rather than a second one. · why: #158 A2 · enforced by:
-  `tests/identity_binding.rs`,
+  `tests/it/identity_binding.rs`,
   `contract::tests::lookup_is_exact_and_only_an_explicit_alias_is_tolerated`,
   `contract::tests::aliases_collide_rather_than_share_authority`
 - **INV-DEP-15** A `check` receipt binds the subject root, the contract identity
@@ -108,7 +108,7 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   (`--contract` diagnosis versus committed enforcement) and the assurance scope;
   the `--json` form exposes the same under stable keys. The digest is an identity
   fingerprint, not an adversarial integrity claim. · why: #158 A6 · enforced by:
-  `tests/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
+  `tests/it/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
   `the_json_receipt_has_stable_identity_fields`,
   `the_receipt_changes_when_its_subject_changes`)
 
@@ -192,7 +192,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   real elapsed time says so. Determinism claimed here is about which deadline is
   *eligible*; poll order across workers, observed external order and cross-host
   clock skew are not claimed. · why: #152 §1 · enforced by:
-  `tests/sim_clock.rs` (`the_same_seed_replays_the_same_clock_trace`,
+  `tests/it/sim_clock.rs` (`the_same_seed_replays_the_same_clock_trace`,
   `racing_logical_time_leaves_the_wall_watchdog_independent`,
   `a_restart_restores_the_remaining_budget_and_not_an_instant`,
   `a_wall_clock_refuses_a_caller_advance`,
@@ -210,7 +210,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   read must not hand the caller the right to edit what they believe they
   observed. A caller that never drains loses detail, never memory, and the
   dropped counter says so. · why: #152 §2 · enforced by:
-  `tests/inspect_contract.rs` (`the_snapshot_and_the_admission_decision_agree`,
+  `tests/it/inspect_contract.rs` (`the_snapshot_and_the_admission_decision_agree`,
   `the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated`,
   `cancellation_closes_admission_and_the_terminal_record_stays_readable`,
   `an_undrained_supervisor_reports_dropped_detail_without_growing`,
@@ -241,7 +241,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   already-released readiness resolves without spending its budget. Admission is
   charged **before** a slot is taken against `MAX_DEPENDANTS`, so a refused
   admission leaves capacity exactly as it was. · why: #87 T18 / LC-09 · enforced
-  by: `tests/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report`,
+  by: `tests/it/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report`,
   `a_duplicate_ready_signal_is_refused_and_releases_nothing`,
   `a_stale_generation_is_refused_and_releases_nothing`,
   `a_restarted_service_arms_a_new_readiness`,
@@ -249,7 +249,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_shutdown_is_a_stop_and_not_a_failure`,
   `a_wait_is_budgeted_cancellable_and_immediate_when_already_released`,
   `dependants_are_capped_at_the_declared_bound`,
-  `no_readiness_path_sleeps_or_polls`) and `tests/sim_ready.rs`
+  `no_readiness_path_sleeps_or_polls`) and `tests/it/sim_ready.rs`
   (`an_interleaving_never_releases_a_stale_generation`,
   `a_duplicate_releases_once_in_every_interleaving`,
   `a_failure_after_ready_reaches_every_running_dependant`,
@@ -269,11 +269,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   unbounded buffer the capture ceiling exists to prevent. The observer arms no
   timer, and `Supervisor::run_process` is that same call with `None`: there is no
   second process driver and no second readiness path, on any target. · why: #87
-  T18 / LC-09 · enforced by: `tests/ready.rs::real_process`
+  T18 / LC-09 · enforced by: `tests/it/ready.rs::real_process`
   (`a_child_printing_its_address_releases_the_dependants`,
   `a_child_that_dies_without_printing_never_releases_the_dependants`,
   `a_child_that_dies_after_announcing_stops_the_dependants`) and
-  `tests/ready.rs::no_readiness_path_sleeps_or_polls`, which asserts against the
+  `tests/it/ready.rs::no_readiness_path_sleeps_or_polls`, which asserts against the
   module's own source that neither the wait nor the observer arms one.
 
 - **INV-BOT-32** A reach for authority is checked at the step that reaches, and
@@ -287,7 +287,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   disagree about what the run was missing, and a task that reaches in its *first*
   step may still declare at its admission boundary with `Task::requiring` and be
   refused before anything runs. · why: #87 step 3 (T23) · enforced by:
-  `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
   `a_blocked_run_leaves_its_finished_analysis_recorded`,
   `a_host_without_a_ledger_refuses_every_repair`,
   `the_journey_declares_no_admission_boundary_needs`)
@@ -301,11 +301,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   grant is never widened: the next run on that host is still blocked. A host with
   no repair ledger refuses every repair, because there is no epoch, root budget or
   applied-ticket set to decide one against. · why: #87 step 3 (T23) · enforced by:
-  `tests/repair.rs` (`a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis`,
+  `tests/it/repair.rs` (`a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis`,
   `a_repair_widens_one_run_and_not_the_host`,
   `a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged`,
   `an_over_wide_grant_is_refused_rather_than_narrowed`) and
-  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+  `tests/it/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
 - **INV-BOT-34** A repair ticket is a report, never a grant, and its identity is
   its content. `RepairTicket::stamp` hashes the run, the tenant, the epoch and the
   *sorted* needs, so a caller that rebuilds a ticket from the same facts produces
@@ -315,11 +315,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   ordered step on its own thread, so "applied once" is a fact about bytes rather
   than about the order two threads happened to run in. A refused repair charges
   nothing, mints no epoch and leaves the ledger byte-identical. · why: #87 step 3
-  (T24) · enforced by: `tests/repair.rs`
+  (T24) · enforced by: `tests/it/repair.rs`
   (`the_same_ticket_delivered_twice_applies_once`,
   `a_ticket_from_an_older_epoch_is_refused_as_stale`,
   `a_denied_repair_costs_nothing`) and
-  `tests/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
+  `tests/it/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
 - **INV-BOT-35** A run's root budget is carried in its own ledger, is charged by
   every attempt including a repair, and is never refilled by one. The counters
   are cumulative read-modify-write state rather than a replayed step record, so
@@ -331,8 +331,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   than resetting it (T13). Two tenants over one directory keep separate ledgers,
   separate run ids and separate epochs, and one tenant's ticket is refused by the
   other tenant's host. · why: #87 step 3 (T13, T24) · enforced by:
-  `tests/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
-  `tests/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
+  `tests/it/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
+  `tests/it/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
   `tenants_keep_their_own_tickets_and_budgets_band_*`,
   `saturation_applies_each_ticket_once_band_*`,
   `every_repair_charges_the_root_budget_once`,
@@ -355,9 +355,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   budget, no epoch, no step, and the counters the ceiling was measured against never
   move afterwards. · why: #87 step 3 (T24) — the arms were stated by the type but
   exercised only through the order family, which reads an endpoint and could not
-  say which arm produced it · enforced by: `tests/sim_repair.rs`
+  say which arm produced it · enforced by: `tests/it/sim_repair.rs`
   (`a_mixed_decision_order_pins_each_arm`, `a_custom_capability_is_refused_at_every_width`,
-  `a_ticket_never_names_another_tenants_run`) and `tests/repair.rs`
+  `a_ticket_never_names_another_tenants_run`) and `tests/it/repair.rs`
   (`an_over_wide_grant_is_refused_rather_than_narrowed`,
   `a_custom_capability_outside_the_ticket_is_refused`,
   `a_denied_repair_costs_nothing`)
@@ -373,10 +373,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   other runs sharing the host keep their own budgets and still close. · why: #87
   step 3 (T23, T13) — a replay served from a live handle would pass every assertion
   about poll counts while proving nothing about the store · enforced by:
-  `tests/sim_repair.rs` (`a_repaired_run_survives_a_reopened_host`,
+  `tests/it/sim_repair.rs` (`a_repaired_run_survives_a_reopened_host`,
   `a_reopen_reads_back_the_charged_budget`,
   `a_host_spent_on_one_run_still_repairs_the_next`) and
-  `tests/repair.rs::a_blocked_run_leaves_its_finished_analysis_recorded`
+  `tests/it/repair.rs::a_blocked_run_leaves_its_finished_analysis_recorded`
 - **INV-BOT-38** A first-step reach is refused at the admission boundary with the
   whole shortfall in one pass, and costs nothing to name. A task that reaches in
   its first step declares its need with `Task::requiring` and is `Blocked` before
@@ -387,9 +387,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   width, and the ticket names that run's shortfall in the order the reach named it.
   · why: #87 step 3 (T23) — the blunt form had no end-to-end evidence at all, and
   the one-need case is the only width where the ticket's grant is exactly the run's
-  authority · enforced by: `tests/sim_repair.rs`
+  authority · enforced by: `tests/it/sim_repair.rs`
   (`the_step_that_reaches_is_the_step_that_blocks`, `a_wide_need_set_costs_one_analysis`)
-  and `tests/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  and `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
   `the_journey_declares_no_admission_boundary_needs`)
 
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
@@ -419,14 +419,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   unreaped leader pins the group id; the supervisor holds the native-task
   permit through the bounded termination attempt and never signals that numeric
   id after reaping. · why: #143 R09/R10 identity-reuse and ownerless-cleanup
-  findings · enforced by: `tests/process_ownership.rs`, `tests/rt_process.rs`,
+  findings · enforced by: `tests/it/process_ownership.rs`, `tests/it/rt_process.rs`,
   and `rt::supervise::tests`
 - **INV-BOT-13** Cleanup that remains pending after its process task ends transfers
   its group identity and admission permit to the supervisor's bounded cleanup
   owner; present/error observations retain both, and only observed absence may
   release capacity and emit an attributed terminal receipt. · why: #143 R10
   ownerless-cleanup finding · enforced by: `rt::supervise::tests` and
-  `tests/rt_process.rs`
+  `tests/it/rt_process.rs`
 - **INV-BOT-110** A length-framed record a child's output carries is read through
   the crate's one frame grammar (`journal::frame`, INV-BOT-51), so "what a torn
   tail is" has one answer across the file stores and a subprocess's streams. A
@@ -450,14 +450,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   reading on the `ProcessState` its `Observe`, `Execute` and `Query` calls
   return, so the grammar is reached from the run path rather than only from a
   test. · why: #87 acceptance row T05 (LC-02/11) · enforced by:
-  `tests/sys_process_binding.rs`
+  `tests/it/sys_process_binding.rs`
   (`a_framed_record_cut_off_mid_frame_is_a_typed_refusal`,
   `a_framed_stream_that_ends_cleanly_is_complete`,
   `a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused`,
   `a_prefix_past_the_ceiling_is_refused_before_it_is_allocated`,
   `the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
   `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`) and
-  `tests/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
+  `tests/it/sim_process_output.rs` (`cuts_are_refused_never_decoded_band_00`,
   `cuts_are_refused_never_decoded_band_01`,
   `room_without_a_record_is_the_ceiling_band_00`,
   `room_without_a_record_is_the_ceiling_band_01`,
@@ -485,12 +485,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   reader ceiling reached over an untruncated capture reports the reader's. · why:
   #87 acceptance row T05 (LC-02/11), the capture-ceiling/confusable-child-truncation
   defect and the fail-open override the reviewer found in it · enforced by:
-  `tests/sys_process_binding.rs`
+  `tests/it/sys_process_binding.rs`
   (`a_capture_ceiling_ends_the_framed_read_rather_than_the_child`,
   `an_untruncated_capture_reports_the_child_own_truncation`,
   `a_rot_prefix_before_the_capture_cut_stays_refused`,
   `a_reader_ceiling_over_a_truncated_capture_is_the_readers_own`) and
-  `tests/sim_process_output.rs`
+  `tests/it/sim_process_output.rs`
   (`capture_cuts_end_at_the_capture_ceiling_band_00`,
   `capture_cuts_end_at_the_capture_ceiling_band_01`,
   `capture_cuts_saturate_at_the_declared_tiers`,
@@ -508,12 +508,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   `CapturedStream::frames` — so the capability `INV-BOT-110` and `INV-BOT-114`
   describe has a caller on the real run path rather than only in a test. · why:
   the wired-or-it-does-not-exist defect for T05 (INV-BOT-110 and INV-BOT-114
-  shipped with zero production callers) · enforced by: `tests/sys_process_binding.rs`
+  shipped with zero production callers) · enforced by: `tests/it/sys_process_binding.rs`
   (`the_execute_verb_reports_stdout_frames_two_records_and_a_cut_third`,
   `the_execute_verb_reports_the_capture_ceiling_when_the_child_overruns_it`,
   `a_domain_without_frame_stdout_reports_no_frames_and_unchanged_stdout`,
   `a_binary_record_round_trips_through_frames_while_stdout_is_lossy`) and
-  `tests/sim_process_output.rs`
+  `tests/it/sim_process_output.rs`
   (`verb_framed_reads_agree_with_the_model_band_00`,
   `verb_framed_reads_agree_with_the_model_band_01`,
   `verb_two_tenants_never_cross_band_00`,
@@ -526,10 +526,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   that waits for the child to exit before reading would deadlock on such a child,
   so the deadline-bounded variant is the control that distinguishes a concurrent
   drain from a sequential one. · why: #87 acceptance row T05 (LC-02/11) ·
-  enforced by: `tests/sys_process_binding.rs`
+  enforced by: `tests/it/sys_process_binding.rs`
   (`a_flooding_child_against_a_slow_reader_stays_within_its_ceiling`,
   `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
-  `tests/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
+  `tests/it/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
   `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
 - **INV-BOT-112** `CleanupReceipt::CleanupConfirmed` claims that every process
   still in the supervised group when the group was last observed is gone — an
@@ -589,19 +589,19 @@ Each of these was a shipped defect. Treat the list as the spec.
   `StoreError::FormatVersion { found, expected }` naming both versions rather
   than migrated, because inventing that migration would make every pre-version
   resume look compatible rather than unprovable. · why: T15 · enforced by:
-  `tests/sim_replay_drift.rs` (`drift_kinds_are_refused_typed_band_00..03`,
+  `tests/it/sim_replay_drift.rs` (`drift_kinds_are_refused_typed_band_00..03`,
   `compatible_resume_replays_without_a_new_request_band_04..07`,
   `tenants_drift_independently_band_08..10`, `every_axis_is_distinguishable`,
   `every_axis_is_refused_with_its_exact_drift_band_20..21`,
   `a_refusal_leaves_the_store_byte_identical_band_12..13`,
   `an_unreadable_store_is_refused_as_itself_band_18..19`,
-  `same_seed_same_trace_hash_band_14..15`), `tests/store_read_failure.rs`
+  `same_seed_same_trace_hash_band_14..15`), `tests/it/store_read_failure.rs`
   (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
   `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
   (`a_pre_version_store_is_refused_naming_both_versions`,
   `a_foreign_file_is_still_refused_as_not_a_store`), and
-  `tests/sim_store_faults.rs`
+  `tests/it/sim_store_faults.rs`
   (`only_the_current_format_is_admitted_band_04..07`)
 
 - **INV-BOT-59** The durable run store's refusals reach the caller as
@@ -616,13 +616,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   genuine drift as the flow's typed `FlowError::Incompatible` carrying its
   `Drift` axis, so the one fault an operator must see is never indistinguishable
   from a device that failed to answer. · why: INV-BOT-7, T15 (R1) · enforced by:
-  `tests/store_read_failure.rs`
+  `tests/it/store_read_failure.rs`
   (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
   `a_compatible_resume_still_replays_after_no_fault`) and
-  `tests/sim_replay_drift.rs`
+  `tests/it/sim_replay_drift.rs`
   (`an_unreadable_store_is_refused_as_itself_band_18..19`) and
-  `tests/sim_store_faults.rs`
+  `tests/it/sim_store_faults.rs`
   (`read_fault_reaches_the_report_as_the_store_band_00..03`,
   `same_seed_same_trace_hash_band_08..09`)
 
@@ -648,7 +648,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_generation_and_a_tail_are_two_fences_and_both_answer`,
   `an_acknowledged_position_reads_back_identically_after_a_reopen`,
   `the_current_generation_may_still_settle_its_own_attempt`) and
-  `tests/sim_epoch_identity.rs`
+  `tests/it/sim_epoch_identity.rs`
   (`seeded_takeover_orders_keep_the_generation_on_the_disk_band_04..07`,
   `same_seed_same_trace_hash_band_08..09`)
 
@@ -666,9 +666,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   own format refusal stays exactly as strict, because the fix is isolation and not
   a loosened `check_format_version` — a `\x01` store inside *this* run's own
   directory is still `FormatVersion { found, expected }` (INV-BOT-55). · why: the
-  seven `tests/sim_repair.rs` arms that failed with
+  seven `tests/it/sim_repair.rs` arms that failed with
   `FormatVersion { found: 1, expected: 2 }` on a branch that had never written a
-  `\x01` record · enforced by: `tests/sim_repair.rs`
+  `\x01` record · enforced by: `tests/it/sim_repair.rs`
   (`the_step_that_reaches_is_the_step_that_blocks`,
   `a_wide_need_set_costs_one_analysis`,
   `a_ticket_never_names_another_tenants_run`,
@@ -715,14 +715,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   of its own, and what refuses is a rung that cannot follow what is committed for
   that key. A checked counter's exhaustion answers `None` rather than wrapping
   onto the first identity its sequence issued. · why: T12 · enforced by:
-  `tests/wrong_identity_evidence.rs`
+  `tests/it/wrong_identity_evidence.rs`
   (`every_wrong_identity_field_is_refused_and_the_correct_one_is_not`,
   `a_duplicate_is_idempotent_and_a_contradiction_is_refused`,
   `a_settlement_carrying_another_runs_identity_is_refused`,
   `a_refused_settlement_leaves_a_real_file_journal_byte_identical`,
   `a_checked_counter_exhaustion_never_aliases_an_issued_identity`,
   `a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable`) and
-  `tests/sim_epoch_identity.rs`
+  `tests/it/sim_epoch_identity.rs`
   (`every_identity_field_is_refused_by_its_own_check_band_00..03`)
 
 ## lgwks_std
@@ -741,7 +741,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   the *normalized* unit — the lower-case-expanded scalar count — and a set
   budget is charged before dedup and before the quadratic scan. The lossy path
   heuristic is not reachable as an exact-match proof. · why: #160 S1/S2/S4 ·
-  enforced by: `tests/similarity_evidence_contract.rs`
+  enforced by: `tests/it/similarity_evidence_contract.rs`
   (`cosine_trait_impl_stays_inside_the_documented_unit_interval`,
   `a_refused_component_is_not_accepted_at_threshold_zero`,
   `all_zero_weight_refuses_regardless_of_threshold`,
@@ -751,10 +751,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count`,
   `the_heuristic_path_score_is_never_an_exact_match_proof`), `similarity.rs`
   (`every_evidence_error_variant_is_exercised_by_a_test`), and
-  `tests/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
+  `tests/it/sim_similarity_sweep.rs` (`the_same_seed_replays_to_the_same_trace`)
 - **INV-STD-SIM-1** The documented `Geometry::score` accepts both `[f64; 4]`
   and `BoundingBox`. · why: #160 S3 · enforced by:
-  `tests/similarity_public_api.rs`
+  `tests/it/similarity_public_api.rs`
 - **INV-STD-RETRY** `RetryPolicy` remains a pure, allocation-free policy:
   `delay(0)` is the backoff after the first failure, exponential scaling
   reaches the exact `max_delay` cap for every retry index without work
@@ -767,7 +767,7 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-HEX-1** `hex::decode_into` requires exact destination length and validates
   the entire input before writing, so every refusal leaves the destination
   unchanged. · enforced by: `hex::tests::decode_into_validates_exact_length_and_preserves_output_on_failure`
-  and `tests/sim_hex.rs`
+  and `tests/it/sim_hex.rs`
   (`a_seeded_payload_round_trips_through_encode_and_decode`,
   `decode_into_requires_the_exact_destination_length`,
   `a_refused_decode_into_never_writes_a_prefix_of_the_destination`,
@@ -785,7 +785,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   UTF-8 errors name offsets in decoded bytes and never present them as source
   coordinates. · enforced by: `encoding::tests::percent_refuses_a_non_hex_escape`,
   `encoding::tests::percent_refuses_escapes_that_decode_to_invalid_utf8`,
-  and `tests/sim_encoding.rs`
+  and `tests/it/sim_encoding.rs`
   (`a_seeded_component_round_trips_through_percent_encoding`,
   `multi_byte_scalars_are_escaped_one_byte_at_a_time`,
   `a_malformed_escape_is_reported_at_its_original_input_offset`,
@@ -805,7 +805,7 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
   construction preserve arbitrary UUID values, and malformed hex reports both
   group start and invalid character offsets. · enforced by: `id::tests` and
-  `tests/sim_id.rs`
+  `tests/it/sim_id.rs`
   (`arbitrary_bytes_round_trip_through_parse_and_display`,
   `the_rendered_form_has_the_documented_hyphen_layout`,
   `generated_identifiers_carry_the_v4_masks`,
@@ -825,7 +825,7 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-LEB128-1** Integer decoders accept only minimal encodings and return the
   consumed prefix length; trailing input remains with the caller. · enforced by:
   `leb128::tests::distinguishes_prefix_trailing_bytes_from_nonminimal_and_truncated_input`
-  and `tests/sim_leb128.rs`
+  and `tests/it/sim_leb128.rs`
   (`a_seeded_unsigned_value_round_trips_at_both_widths`,
   `a_seeded_signed_value_round_trips_at_both_widths`,
   `every_boundary_value_is_encoded_minimally`,
@@ -848,7 +848,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   stream of variable-length parts is unambiguous where a plain concatenation is
   not. · why: the `hash` module had no deterministic simulation family at all,
   its whole coverage being nine unit tests on one hand-written message each ·
-  enforced by: `hash::tests` and `tests/sim_hash.rs`
+  enforced by: `hash::tests` and `tests/it/sim_hash.rs`
   (`the_same_bytes_always_produce_the_same_digest`,
   `incremental_hashing_equals_one_shot_at_every_seeded_chunking`,
   `a_trailing_byte_changes_the_digest`,
@@ -871,7 +871,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   conversion and canonical formatting report range failures instead of
   manufacturing the epoch or extended-year RFC text. Civil-to-day conversion
   narrows only after the complete mathematical count is computed. · why: #153
-  T1–T5 · enforced by: `tests/sim_time_profile.rs`
+  T1–T5 · enforced by: `tests/it/sim_time_profile.rs`
   (`invalid_numeric_offsets_name_the_field_and_byte`,
   `leap_second_labels_are_explicitly_unsupported`,
   `checked_unix_conversion_never_substitutes_epoch`,
@@ -914,7 +914,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   ceiling; and an eager reader that reserves the declared length and drains the
   transport is measurably outside that bound. · why: #163 A5 · enforced by:
   `http::tests::the_read_window_is_a_fixed_chunk_and_capacity_is_clamped_to_the_ceiling`,
-  `tests/sim_http.rs` (`seeded_ceiling_families_match_the_declared_outcome`,
+  `tests/it/sim_http.rs` (`seeded_ceiling_families_match_the_declared_outcome`,
   `a_seeded_torn_transport_is_never_a_complete_body`,
   `two_tenants_on_one_endpoint_stay_isolated`), and `tests/http_alloc.rs`
   (`the_read_path_retains_the_ceiling_not_the_body`).
@@ -944,7 +944,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   callers; the mutable half is the caller-owned `GlobScratch`, which
   `is_match_with` takes by `&mut`. · enforced by: `glob::tests` work-growth,
   scratch capacity, Unicode, strict-error and exact double-star cases, plus
-  `tests/glob_public.rs` and `tests/sim_shared_policy_tiers.rs`
+  `tests/it/glob_public.rs` and `tests/it/sim_shared_policy_tiers.rs`
   (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
   `the_shared_values_are_reachable_through_an_arc_clone`)
 - **INV-STD-SHARED-POLICY** One compiled matcher, one evidence policy and one
@@ -957,11 +957,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   sharing claim is on the types rather than inferred from a run that did not
   crash; two tenants' policies over one input never cross. · why: the reviewer
   note on #154 item 7 and the hyperscale axis · enforced by:
-  `tests/sim_shared_policy_tiers.rs`
+  `tests/it/sim_shared_policy_tiers.rs`
   (`one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier`,
   `the_shared_values_are_reachable_through_an_arc_clone`),
   `glob::tests::a_compiled_pattern_is_shareable_across_threads_by_construction`,
-  and `tests/sim_tenant_isolation.rs`
+  and `tests/it/sim_tenant_isolation.rs`
 - **INV-CODEC-1** JSON and RON text/slice decoders preserve input borrowing
   where their decoders support it; escaped text that needs allocation is not
   reported as borrowed. RON writer failures distinguish serialization from I/O
@@ -971,7 +971,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `json::tests::escaped_string_cannot_be_returned_as_a_borrowed_str`,
   `ron::tests::unescaped_string_fields_borrow_from_text_and_slice`,
   `ron::tests::writer_preserves_serialization_and_io_failures`,
-  `tests/serde_facade_consumers.rs`, and `tests/sim_codec.rs`
+  `tests/it/serde_facade_consumers.rs`, and `tests/it/sim_codec.rs`
   (`a_seeded_value_round_trips_through_json_text`,
   `a_seeded_value_round_trips_through_ron_text`,
   `an_unescaped_json_field_borrows_from_the_supplied_text`,
@@ -1000,8 +1000,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   schema and format and is read on every target whose format matches; a
   feature-unification probe selects an alternate pointer width and proves the
   descriptor and the emitted bytes move with it. · why: #167 · enforced by:
-  `tests/wire_consumer.rs`, `tests/wire_fixture.rs`, `tests/sim_wire.rs` and
-  `tests/wire_feature_unification.rs`
+  `tests/it/wire_consumer.rs`, `tests/it/wire_fixture.rs`, `tests/it/sim_wire.rs` and
+  `tests/it/wire_feature_unification.rs`
 - **INV-PATTERN-SAFE** A single regex search costs worst-case `O(m * n)`, but
   complete greedy match, split, and replacement iteration may cost `O(m * n^2)`;
   iterator laziness does not promise prefix-only search work. Checked patterns
@@ -1014,7 +1014,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `pattern::tests::configured_pattern_compile_size_and_nesting_limits_are_enforced`,
   `pattern::tests::greedy_adversary_and_literal_control_keep_exact_match_workloads`,
   `pattern::tests::bounded_replacement_expands_exactly_like_the_engine`,
-  `tests/pattern_external.rs`, and `tests/sim_pattern.rs`
+  `tests/it/pattern_external.rs`, and `tests/it/sim_pattern.rs`
   (`a_bounded_match_agrees_with_the_unbounded_engine`,
   `an_input_past_the_ceiling_is_refused_by_every_operation`,
   `the_input_ceiling_admits_its_own_boundary_and_refuses_one_byte_past`,
@@ -1039,7 +1039,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   unresolved root is always refused. Path-based identity rechecks are
   best-effort only and do not promise race-safe containment against hostile
   concurrent replacement. · why: #143 R15/R16 · enforced by:
-  `lgwks_std::fs::tests` and `tests/sim_fs_walk.rs`
+  `lgwks_std::fs::tests` and `tests/it/sim_fs_walk.rs`
   (`strict_refuses_the_first_unreadable_directory`,
   `tolerant_reports_unreadable_directories_and_keeps_the_rest`,
   `an_unresolvable_root_is_refused_by_every_entry_point`)
@@ -1055,7 +1055,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   out, does. Strict failures preserve path, stage and
   the original I/O source. `available_space` is an advisory snapshot, never a
   reservation or write guarantee. · why: #166 · enforced by:
-  `lgwks_std::fs::tests`, the public API doctest, and `tests/sim_fs_walk.rs`,
+  `lgwks_std::fs::tests`, the public API doctest, and `tests/it/sim_fs_walk.rs`,
   which checks 48 seeded on-disk trees per family against a model of the
   admitted set, preorder and budget charge
   (`completeness_does_not_depend_on_sorting`,
@@ -1131,7 +1131,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
   `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
   `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
-  `tests/content_detection.rs`, and `tests/sim_diagnostics.rs`, which checks 64
+  `tests/it/content_detection.rs`, and `tests/it/sim_diagnostics.rs`, which checks 64
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
   `a_syntax_refusal_points_at_the_earliest_recovery_node`)
@@ -1185,7 +1185,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_damaged_cut_frame_with_an_acknowledged_frame_behind_it_is_refused`,
   `a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`,
   `a_streaming_replay_refuses_a_lengthened_final_frame_and_then_ends`),
-  `journal::frame::tests`, and `tests/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
+  `journal::frame::tests`, and `tests/it/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
   `cut_appends_band_04..07`, `damaged_cut_frames_band_08..11`,
   `tenants_beside_a_refusal_band_12..13`)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
@@ -1196,12 +1196,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   recovered by reopening, which replays to the same facts and never a second
   effect. · enforced by: `journal::file::a_stalled_device_does_not_stop_the_
   task_waiting_on_it`, `journal::file::a_dropped_waiter_poisons_the_handle_and_a_
-  reopen_does_not_duplicate`, and the `tests/sim_journal` torn-tail, replay and
+  reopen_does_not_duplicate`, and the `tests/it/sim_journal` torn-tail, replay and
   chain families
 - **INV-BOT-16** The journal's event cap is a reported bound, not a hidden one.
   A scale measurement that had to clamp to the cap records the requested level,
   the level reached and the ceiling together, so a reader is never told a
-  concurrency number nobody ran. · enforced by: `tests/sim_scale::tier_r*`
+  concurrency number nobody ran. · enforced by: `tests/it/sim_scale::tier_r*`
   (`tier-requested`, `tier-reached`, `tier-ceiling` in the trace)
 - **INV-BOT-17** A `BotSpec` materializes into a runnable bot only through the same
   `assemble`/`build` path a native bot uses, so the two produce the same operation
@@ -1212,7 +1212,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   to its chain and action; a duplicate registry identifier and an unsupported spec
   version are typed refusals; and a refused materialization polls nothing and
   executes nothing. · why: #87 step 3 · enforced by:
-  `tests/spec_materialize.rs` and `tests/sim_spec_materialize.rs`
+  `tests/it/spec_materialize.rs` and `tests/it/sim_spec_materialize.rs`
 - **INV-GOV-2** A product requirement is superseded, never edited: a changed
   normative sentence with no Supersession log entry fails the gate. · enforced
   by: `python3 scripts/check-requirements.py` (`requirements` lane)
@@ -1234,9 +1234,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   no bounded fix preserves INV-BOT-12, because after the leader is reaped the
   numeric id may be reused and the cleanup owner is observation-only by design.
   · why: #151 sys part, T05/T19/T20/T35 · enforced by:
-  `tests/sys_process_binding.rs` (including
-  `concurrent_calls_on_one_process_share_its_ceiling`), `tests/sim_process.rs`,
-  `tests/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
+  `tests/it/sys_process_binding.rs` (including
+  `concurrent_calls_on_one_process_share_its_ceiling`), `tests/it/sim_process.rs`,
+  `tests/it/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
@@ -1266,7 +1266,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   the artifact-read source is admitted, or refused, exactly like any other
   capped domain.
   · why: #150 (R8) · enforced by:
-  `tests/inspect_non_execution.rs` (independent filesystem, process-liveness and
+  `tests/it/inspect_non_execution.rs` (independent filesystem, process-liveness and
   TCP-listener observers over a hostile corpus),
   `a_parser_fault_is_an_infrastructure_failure_not_a_clean_report`,
   `an_eager_traversal_mutant_fails_the_node_budget_oracle`,
@@ -1277,14 +1277,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   `host_bounded_admission_holds_at_every_tier`,
   `retained_counters_grow_with_the_input`,
   `a_match_longer_than_the_preview_budget_is_truncated_with_its_full_span_kept`,
-  `tests/inspect.rs::every_budget_has_its_own_refusal`,
-  `tests/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
-  `tests/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
-  `tests/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
+  `tests/it/inspect.rs::every_budget_has_its_own_refusal`,
+  `tests/it/inspect.rs::invalid_syntax_is_incomplete_and_never_a_clean_report`,
+  `tests/it/inspect.rs::a_declared_language_version_is_undecidable_not_clean`,
+  `tests/it/inspect.rs::the_report_round_trips_and_preserves_identity_spans_and_coverage`,
   `sim_seeded_subjects_agree_across_every_entry_point`,
   `sim_same_seed_same_trace_hash`,
   `sim_seeded_multitenant_reports_stay_isolated`,
-  and `tests/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
+  and `tests/it/sim_inspect.rs` (`sim_seeded_fragments_match_the_rule_model`,
   `sim_same_seed_same_trace`, `sim_node_budget_tiers_refuse_deterministically`)
 - **INV-BOT-20** A task run on a `Host` takes at most one admission permit per
   host for its whole tree: a nested `host.run` from inside a body that already
@@ -1296,7 +1296,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   is a bounded ring whose overflow is counted and never changes the
   disposition, output or located error, and every report says no external
   effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
-  `tests/task_front_door.rs` and `tests/sim_task.rs`
+  `tests/it/task_front_door.rs` and `tests/it/sim_task.rs`
 - **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
   so no executor thread ever waits inside a flush. The whole ordered step — the
   in-memory checks, the length fence, the write, the `sync_all` and the fold into
@@ -1307,7 +1307,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   because the bytes may be on the disk under no acknowledgment and only a reopen
   settles that. · why: #87 step 5, the blocking-write defect #122 removed from
   `FileJournal` and the run store inherited · enforced by:
-  `tests/resume_liveness.rs` (`a_parked_record_device_lets_the_runtime_turn`,
+  `tests/it/resume_liveness.rs` (`a_parked_record_device_lets_the_runtime_turn`,
   `an_abandoned_record_leaves_the_store_consistent`,
   `a_parked_store_still_serves_its_own_records_only`,
   `the_parked_device_probe_measures_turns`), whose watchdog is an independent OS
@@ -1324,7 +1324,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   unchanged by the extraction. · why: #87 step 5 (duplicated estate capability)
   · enforced by: `journal::frame::tests` (six properties, including the three
   prefix endings and the frame round trip), `journal::file::tests` unchanged and
-  green, and the `tests/sim_journal.rs` and `tests/sim_journal_liveness.rs`
+  green, and the `tests/it/sim_journal.rs` and `tests/it/sim_journal_liveness.rs`
   binaries
 - **INV-BOT-52** A durable step's cost is a stated number, not an adjective. The
   run store's per-step cost is measured against the two things it could be: a
@@ -1345,7 +1345,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   thread lose nothing, a repeated submission commits one frame, and a replayed
   step is never re-recorded. · why: #87 step 5 (hyperscale) · enforced by:
   `tests/task_resume.rs::concurrent_runs_across_tiers` and
-  `tests/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
+  `tests/it/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
   `an_interrupted_step_records_exactly_once`,
   `tenants_interleaved_stay_isolated`, `same_seed_replays`)
 - **INV-BOT-54** A durable claim is backed by a store that outlives the process, and
@@ -1370,7 +1370,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_store_corrupt_before_the_tail_is_refused_not_trimmed`,
   `an_oversized_record_is_refused_naming_the_ceiling`,
   `a_duplicate_append_of_the_same_record_is_a_no_op`) and
-  `tests/sim_task_resume.rs` (`crash_points_resume_to_the_same_output`,
+  `tests/it/sim_task_resume.rs` (`crash_points_resume_to_the_same_output`,
   `finished_steps_run_once`, `tenants_stay_isolated`, `same_seed_replays`),
   which sweeps every step boundary of every seeded run twice for an identical
   trace hash.
@@ -1424,7 +1424,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   which refuses the covering flush of a three-member batch on the shipped store
   and observes every member refused, no member folded into the handle's index, one
   poison latched, every later submit refused, and a reopen that replays exactly the
-  file's complete frames; `tests/sim_group_commit.rs`
+  file's complete frames; `tests/it/sim_group_commit.rs`
   (`acknowledged_equals_replayed`, `submission_order_is_layout_order`,
   `every_flushed_batch_acknowledges_every_member` — the control: no seeded
   simulation can reach the `#[cfg(test)]` flush switch, so a sim proves only that
@@ -1434,7 +1434,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `two_tenants_on_one_store_stay_isolated`,
   `saturation_reaches_every_tier_and_records_the_ceiling`,
   `the_batch_bounds_are_declared_and_never_silent`, `same_seed_replays`),
-  `tests/resume_liveness.rs::a_grouped_batch_still_lets_the_runtime_turn`,
+  `tests/it/resume_liveness.rs::a_grouped_batch_still_lets_the_runtime_turn`,
   `tests/durable_crash_group_commit.rs`
   (`a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`,
   `a_killed_run_with_no_acknowledgment_leaves_no_record`), and
@@ -1452,7 +1452,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   counts, and that is the point rather than a disappointment: a sequential store has
   no company to batch with, so paying one flush per record is correct and is the
   control against which the concurrent tier's 0.09 is a measurement.
-  · why: #152 §group commit · enforced by: `tests/sim_group_commit.rs`
+  · why: #152 §group commit · enforced by: `tests/it/sim_group_commit.rs`
   (`acknowledged_equals_replayed`, `saturation_reaches_every_tier_and_records_the_ceiling`),
   `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`
   (the failed batch's durable reality is read from a reopen of the file, not the
@@ -1470,8 +1470,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   and `StorageOwner::enqueue_awaiting` returns the concrete `Send` future the
   host's own path needs, unboxed, without weakening the erased `BoxFuture` a task
   body awaits. · why: #152 §group commit merged with the repair ledger (#87
-  T13/T23/T24) · enforced by: the ledger's own families (`tests/repair.rs`,
-  `tests/sim_repair.rs`), which charge through the owner's unboxed awaiting future
+  T13/T23/T24) · enforced by: the ledger's own families (`tests/it/repair.rs`,
+  `tests/it/sim_repair.rs`), which charge through the owner's unboxed awaiting future
   and answer `Committed`, and
   `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`,
   which drives the `Settled`/`Unsynced` failure path on the same owner
@@ -1490,7 +1490,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   distinct keys derive distinct runs and are never collapsed; one key under two
   tenants derives two runs over a shared store file. A host with no store
   refuses with `RequestError::NoStore` rather than downgrading to a plain run.
-  · why: #87 step 7 (T30) · enforced by: `tests/request_key.rs`
+  · why: #87 step 7 (T30) · enforced by: `tests/it/request_key.rs`
   (`a_duplicate_identical_request_reattaches_without_rerunning`,
   `a_reattach_survives_a_reopened_store`,
   `same_key_with_a_different_payload_is_a_typed_conflict`,
@@ -1499,7 +1499,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_submission_without_a_store_is_refused`,
   `a_recorded_request_answers_over_a_changed_body`,
   `an_expired_deadline_is_the_requests_recorded_outcome`) and
-  `tests/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
+  `tests/it/sim_request_key.rs` (`collisions_across_two_tenants`, `same_seed_replays`,
   `expired_deadlines_are_recorded_band_16..23`,
   `concurrent_submissions_across_tiers`).
 - **INV-BOT-101** A durable submission's receipt outlives the client that
@@ -1515,10 +1515,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   a `resume` of that run, never the client's to hold. The crate deliberately does
   not drive a dropped non-`Send` body in the background; what survives is the
   durable record, which is what a resume needs. · why: #87 step 7 (T17) ·
-  enforced by: `tests/request_key.rs`
+  enforced by: `tests/it/request_key.rs`
   (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client`,
   `a_host_stop_mid_run_leaves_the_request_resumable`) and
-  `tests/sim_request_key.rs` (`drop_and_reattach`,
+  `tests/it/sim_request_key.rs` (`drop_and_reattach`,
   `host_stops_never_poison_a_key_band_00..03`).
 - **INV-BOT-102** A host-side stop is not the request's outcome, so it is never
   recorded as one. `Host::submit` records `@terminal` for exactly the three
@@ -1555,14 +1555,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   step before the overrun survives it. A refused settlement records **nothing**,
   so the request stays unsettled and a later client reads `InFlight` rather than
   a verdict that was never written. · why: #87 step 7 (T30), the review defect
-  where one shutdown poisoned a key permanently · enforced by: `tests/request_key.rs`
+  where one shutdown poisoned a key permanently · enforced by: `tests/it/request_key.rs`
   (`a_host_stop_mid_run_leaves_the_request_resumable`,
   `a_refusal_before_admission_is_not_recorded_as_the_outcome`,
   `a_failed_run_is_the_requests_recorded_outcome`,
   `an_expired_deadline_is_the_requests_recorded_outcome`,
   `a_store_that_refuses_the_terminal_write_reports_the_refusal`,
   `a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
-  `tests/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
+  `tests/it/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
   `same_seed_replays_host_stops_band_00..03`,
   `expired_deadlines_are_recorded_band_16..23`,
   `settle_refusals_are_reported_and_leave_the_request_unsettled_seed_a..p`).
@@ -1571,7 +1571,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   retaining at most one event, applies the same frame validation and event
   ceiling `open` does, and yields exactly the acknowledged history. The
   materialized `events()` view and the stream agree on every seed. · why: #122
-  item 2 · enforced by: `tests/sim_journal_liveness.rs`
+  item 2 · enforced by: `tests/it/sim_journal_liveness.rs`
   (`streaming_replay_r00..r15`)
 - **INV-BOT-41** A durable journal reserves room for the whole external handoff
   — intent, preparation and settlement — before the first rung is written, so
@@ -1592,7 +1592,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   the thread that awaits the append: a parked device leaves the runtime and an
   unrelated ready task free to progress, and a release from an independent
   thread is what lets the append finish. A dropped waiter still poisons the
-  handle. · why: #122 item 4 / #156 · enforced by: `tests/journal_liveness.rs`
+  handle. · why: #122 item 4 / #156 · enforced by: `tests/it/journal_liveness.rs`
   (`a_slow_store_lets_the_runtime_and_the_release_progress`,
   `a_cancelled_append_leaves_the_runtime_and_the_handle_live`)
 - **INV-BOT-140** An awaited answer registers its waker before it reads the
@@ -1601,7 +1601,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   decides the answer is absent, the publish finds no waker, and the task parks
   for ever; registering first and reading second means whichever side moves
   second observes the other. · why: GitHub CI parked
-  `tests/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
+  `tests/it/sim_repair.rs::saturation_applies_each_ticket_once_band_09` (PR #239)
   and `_band_03` (PR #241) past 600 s and cancelled the job at its 15-minute
   timeout; the run ledger's charge goes through this owner (INV-BOT-35/51).
   · enforced by:
@@ -1621,16 +1621,16 @@ Each of these was a shipped defect. Treat the list as the spec.
   process really can, and the requested, reached and ceiling levels are recorded
   together with the p50/p95/p99 append latency and the peak RSS, so no reader is
   told a concurrency number nobody ran (the INV-BOT-16 rule). · why: #122 item 2
-  / #156 · enforced by: `tests/journal_scale.rs`
+  / #156 · enforced by: `tests/it/journal_scale.rs`
   (`concurrent_tenant_appends_scale_with_isolation`,
-  `append_latency_tails_are_bounded`) and `tests/sim_journal_liveness.rs`
+  `append_latency_tails_are_bounded`) and `tests/it/sim_journal_liveness.rs`
   (`tenant_tiers_replay_at_the_level_the_sim_can_drive`)
 - **INV-BOT-46** A registry identifier declared twice in one role has one
   meaning: refused. `DomainRegistry::validate` names the identifier, role and
   both positions before any build, and the raw `source`/`action` lookups never
   resolve an ambiguous identifier to its first declaration, so dispatch never
   depends on declaration order. One identifier used once per role stays valid.
-  · why: #122 item 1 · enforced by: `tests/registry.rs`
+  · why: #122 item 1 · enforced by: `tests/it/registry.rs`
   (`an_ambiguous_identifier_is_not_resolved_by_declaration_order`,
   `a_duplicate_source_identifier_is_refused_with_both_positions`,
   `refusal_is_independent_of_declaration_order`)
@@ -1638,7 +1638,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   reconciled by readback and settled, never resent and never stalled on; an
   append that may have committed and did not reports the occurrence as certain
   and lands its record on the retry without re-entering the action.
-  · why: #118 item 1 · enforced by: `tests/ambiguous_commit.rs`
+  · why: #118 item 1 · enforced by: `tests/it/ambiguous_commit.rs`
   (`a_committed_outcome_with_a_lost_reply_settles_without_resending`,
   `an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry`)
 - **INV-BOT-70** The task front door's nine-axis evidence: a drawn scale of
@@ -1649,7 +1649,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   releases every permit and leaves nothing in flight; and task names, inputs
   and host limits are accepted or refused exactly on their declared boundaries.
   · why: #203 nine-axis review · enforced by:
-  `tests/sim_task_axes.rs` (`saturation_conserves_permits`,
+  `tests/it/sim_task_axes.rs` (`saturation_conserves_permits`,
   `saturation_reaches_100_1000_and_10000_with_recovery`,
   `two_tenants_stay_isolated`, `a_dropped_run_releases_everything`,
   `names_inputs_and_limits`) and `examples/compare_orchestration.rs`
@@ -1678,14 +1678,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   feature refuses every call with `GhError::NoRunner` and returns no snapshot,
   review list or review id at all. · why: #151, #87 step 6 (PR-06, PR-07,
   PR-09) · enforced by:
-  `tests/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
+  `tests/it/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
   `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
   `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
   `a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read`,
   `a_non_zero_exit_is_not_a_published_review`,
   `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
   `two_identities_on_one_repository_stay_isolated`) and
-  `tests/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
+  `tests/it/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
   `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`),
   `tests/sim_review_path.rs` (`verified_and_not_observed_r32`,
   `gh_exit_failures_r32`, `deadline_stop_r32`,
@@ -1696,7 +1696,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `saturation_r32_tier_1000`, `saturation_r32_tier_10000`,
   `two_tenants_on_one_pull_request_r32`, `cancellation_under_faults_r16`,
   `duplicate_submission_r16`, `two_repositories_on_one_host_r16`) and
-  `tests/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
+  `tests/it/gh_binding.rs` (`a_review_list_past_the_ceiling_is_refused_not_truncated`,
   `a_review_list_exactly_at_the_ceiling_is_read`,
   `a_malformed_review_list_is_refused_rather_than_decoded_into_a_partial_answer`)
 - **INV-BOT-120** A source declares when its own cached baseline is unsound, and
@@ -1719,12 +1719,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   private behind an accessor: a caller that could edit the record of what a tick
   observed could make a bot that went quiet for the wrong reason look like one
   that went quiet for the right one. · why: #87 step 3 (T08, LC-04) · enforced by:
-  `tests/observe_refresh.rs`
+  `tests/it/observe_refresh.rs`
   (`a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state`,
   `a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet`,
   `a_failed_refresh_keeps_the_baseline_marked`,
   `two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain`),
-  `tests/sim_observe_refresh.rs` (`forced_refresh_matches_the_schedule` and
+  `tests/it/sim_observe_refresh.rs` (`forced_refresh_matches_the_schedule` and
   `a_refresh_that_never_lands_stays_marked`, each swept over bands 00–05 and
   06–09 by the shared `band_family!` declaration, and
   `a_seeded_reason_per_chain_is_reported_against_its_own_chain`,
@@ -1747,10 +1747,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   claim about a value that was already owed work. A forced refresh is not a
   supersession and a supersession is not a forced refresh; neither is counted
   among the other's. · why: #87 step 3 (T09, DX-07) · enforced by:
-  `tests/observe_refresh.rs`
+  `tests/it/observe_refresh.rs`
   (`an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired`,
   `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
-  and `tests/sim_observe_refresh.rs` (`event_identities_are_per_event` and
+  and `tests/it/sim_observe_refresh.rs` (`event_identities_are_per_event` and
   `tenants_never_cross`, swept over bands 14–17 and 10–13 by the shared
   `band_family!` declaration, and
   `a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once`,
@@ -1766,10 +1766,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   them still completes, every held chain still reaches its own action once, and
   every one is still **reported** as held — a dropped hold is a lost effect
   nobody would ever see. The tier reached is recorded rather than clamped.
-  · why: #87 step 3 (T06, LC-03), first half · enforced by: `tests/observe_refresh.rs`
+  · why: #87 step 3 (T06, LC-03), first half · enforced by: `tests/it/observe_refresh.rs`
   (`a_chain_held_at_capacity_does_not_starve_an_independent_chain`,
   `a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier`) and
-  `tests/sim_observe_refresh.rs`
+  `tests/it/sim_observe_refresh.rs`
   (`a_seeded_mass_of_held_chains_never_starves_an_independent_chain`)
 - **INV-BOT-123** One slow source cannot hold the tick. Every source poll in the
   observation wave runs under a **declared per-poll deadline** — the wall watchdog
@@ -1795,11 +1795,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `spawn_blocking` has its handle released and its thread runs to completion — the
   stall is about this bot's observation, not about the source's work. · why:
   #87 step 3 (T06, LC-03), slow-source half, closing the gap INV-BOT-122 named ·
-  enforced by: `tests/observe_refresh.rs`
+  enforced by: `tests/it/observe_refresh.rs`
   (`a_slow_source_does_not_block_an_independent_chain`,
   `a_stalled_chain_is_re_polled_and_commits_when_it_answers`,
   `a_poll_deadline_that_bounds_nothing_is_refused_at_build`) and
-  `tests/sim_observe_refresh.rs`
+  `tests/it/sim_observe_refresh.rs`
   (`a_wedged_source_is_reported_and_costs_its_neighbours_nothing`,
   `a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit`,
   `the_same_seed_replays_a_stalled_wave`,
@@ -1830,9 +1830,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   160646/191745/193909; the wedged run 127945/137216/140410. A 1,000-chain tick
   therefore paid ~19 ms of thread churn per ordinary tick before and ~0.16 ms
   after. · why: #87 step 3 (T06, LC-03) · enforced by:
-  `tests/observe_refresh.rs`
+  `tests/it/observe_refresh.rs`
   (`a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each`) and
-  `tests/sim_observe_refresh.rs`, whose `band_family!` declaration runs
+  `tests/it/sim_observe_refresh.rs`, whose `band_family!` declaration runs
   (`a_wave_spends_one_watchdog_and_a_fast_wave_spends_none`), and its
   source-visible deadline-watchdog families
   (`a_fast_wave_spends_no_watchdog_across_seeded_widths`,
@@ -1862,7 +1862,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   no HTTP status stays a transport failure rather than being guessed into a
   permission one. · why: #151, #87 step 6 (PR-02, PR-03, PR-04, PR-07, PR-08,
   PR-09, PR-10), T31/T33/T34 · enforced by:
-  `tests/pr_review_journey.rs`
+  `tests/it/pr_review_journey.rs`
   (`an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing`,
   `a_diff_past_the_file_ceiling_is_an_incomplete_coverage`,
   `a_diff_past_the_byte_ceiling_is_an_incomplete_coverage`,
@@ -1871,7 +1871,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_pending_draft_is_reconciled_as_a_draft_and_never_reposted`,
   `a_partial_submission_is_reconciled_as_partial_and_never_reposted`,
   `a_lost_read_permission_reports_unverified_and_retains_the_review_id`),
-  `tests/gh_binding.rs`
+  `tests/it/gh_binding.rs`
   (`a_renamed_repository_is_a_typed_move_naming_both_names`,
   `a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure`,
   `a_failure_naming_no_status_stays_a_transport_failure`,
@@ -1881,7 +1881,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
   through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
   11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
-  `tests/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
+  `tests/it/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
 - **INV-BOT-96** Each refusal arm of a review is a *seeded property of its own*,
   not one point in a sweep that checks outcome shapes. `subject_coverage_and_partial_faults`
   asserts that every fault reaches *some* correct variant; that assertion is
@@ -1976,7 +1976,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `script::admit`, so a refusal a task body sees is located at that step like
   every other `FlowError`, carries the `Provenance` of the exact bytes, and
   keeps its typed arm rather than arriving as a string a caller must parse.
-  · why: #87 T26 · enforced by: `tests/proposal.rs`
+  · why: #87 T26 · enforced by: `tests/it/proposal.rs`
   (`a_malformed_payload_never_becomes_work`,
   `an_injected_instruction_is_refused_by_name`,
   `a_tool_install_is_refused_and_the_surface_is_unchanged`,
@@ -1989,7 +1989,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `an_injected_instruction_is_refused_at_its_step_on_a_real_run`,
   `a_well_formed_proposal_is_admitted_on_a_real_run`,
   `a_capability_the_run_does_not_hold_is_refused_by_name_on_a_real_run`) and
-  `tests/sim_proposal.rs`
+  `tests/it/sim_proposal.rs`
   (`seeded_shapes_match_the_declared_outcome_band_00..07`,
   `seeded_runs_reach_the_declared_disposition_band_20..23`)
 
@@ -2007,13 +2007,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   `Abandoned`, visibly not the same thing as a finish. A claim is settled inside a
   task body on the run path, so the three outcomes reach a caller through the run
   that produced them rather than through a call only a test made. · why: #87
-  T27/T35 · enforced by: `tests/proposal.rs`
+  T27/T35 · enforced by: `tests/it/proposal.rs`
   (`the_three_untrue_successes_report_distinct_outcomes`,
   `an_abandoned_run_is_not_a_finished_one`,
   `an_over_long_evidence_claim_is_refused_whole`,
   `a_truncated_payload_never_becomes_a_full_coverage_claim`,
   `a_well_formed_proposal_is_admitted_on_a_real_run`) and
-  `tests/sim_proposal.rs`
+  `tests/it/sim_proposal.rs`
   (`same_seed_same_trace_hash_band_16..19`,
   `seeded_runs_reach_the_declared_disposition_band_20..23`)
 
@@ -2037,7 +2037,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   untrusted producer — a fact it cannot re-derive, having never seen the
   payload. A resumed run reads it back from a *reopened* store through
   `RunStore::lookup`, not from the handle that wrote it. · why: #87 T27 ·
-  enforced by: `tests/proposal.rs`
+  enforced by: `tests/it/proposal.rs`
   (`a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`,
   `a_checkpoint_round_trips_through_the_run_store`,
   `a_checkpoint_refuses_to_grow_past_its_ceiling`,
@@ -2055,11 +2055,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   store never hands out a *prefix* of an artifact, and every ceiling
   (per-artifact bytes, artifacts per tenant, tenant-name length) is a typed
   refusal that leaves the store byte-identical. · why: #87 T28 · enforced by:
-  `tests/proposal.rs` (`two_tenants_on_one_digest_stay_isolated`,
+  `tests/it/proposal.rs` (`two_tenants_on_one_digest_stay_isolated`,
   `conflicting_writes_to_one_key_are_serialized_and_idempotent`,
   `reads_progress_while_a_write_is_in_flight`,
   `an_oversized_artifact_is_refused_and_the_store_is_unchanged`) and
-  `tests/sim_proposal.rs`
+  `tests/it/sim_proposal.rs`
   (`two_tenants_on_one_digest_stay_isolated_band_08..11`,
   `concurrent_readers_and_conflicting_writers_band_12..15`,
   `saturation_reaches_100_1000_and_10000`,
@@ -2087,12 +2087,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   *not* recorded against the ledger, because no payload was tried and there is no
   unchanged failure to count. The lock is held across the charge, the decode and
   the ledger update and never across an `.await`. · why: #87 T29 · enforced
-  by: `tests/proposal.rs`
+  by: `tests/it/proposal.rs`
   (`repeated_unchanged_failure_reaches_a_finite_intervention`,
   `a_ledger_of_distinct_failures_reaches_its_own_intervention`,
   `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`,
   `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`,
-  `a_plan_budget_bounds_repair_across_runs`) and `tests/sim_proposal.rs`
+  `a_plan_budget_bounds_repair_across_runs`) and `tests/it/sim_proposal.rs`
   (`saturation_over_admit_conserves_the_budget`,
   `seeded_runs_reach_the_declared_disposition_band_20..23`)
 
@@ -2116,14 +2116,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   performing a plan's operations is the caller's job through the existing verbs,
   and a run whose plan is admitted has still performed no external effect, which is
   what `EffectKnowledge` continues to report. · why: #87 T26/T27/T29 (the
-  no-production-caller defect) · enforced by: `tests/proposal.rs`
+  no-production-caller defect) · enforced by: `tests/it/proposal.rs`
   (`an_injected_instruction_is_refused_at_its_step_on_a_real_run`,
   `a_well_formed_proposal_is_admitted_on_a_real_run`,
   `a_capability_the_run_does_not_hold_is_refused_by_name_on_a_real_run`,
   `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`,
   `a_plan_budget_bounds_repair_across_runs`,
   `a_resumed_run_reads_back_the_refusal_the_first_run_recorded`) and
-  `tests/sim_proposal.rs` (`seeded_runs_reach_the_declared_disposition_band_20..23`,
+  `tests/it/sim_proposal.rs` (`seeded_runs_reach_the_declared_disposition_band_20..23`,
   `two_tenants_admitting_on_one_host_stay_isolated_band_24..27`,
   `saturation_over_admit_conserves_the_budget`)
 - **INV-SCAN-ZERO** No file this workspace ships carries a source finding: no

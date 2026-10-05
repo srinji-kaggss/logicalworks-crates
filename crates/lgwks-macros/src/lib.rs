@@ -42,11 +42,24 @@
 //!
 //! Each of these is a compile error naming the replacement: a concurrency
 //! bound typed as a number (the runtime sizes fan-out to the host); attempts
-//! outside `1..=1000`; zero durations; `unwrap`, `expect`, `panic!` and friends;
-//! `loop`, `while`, `spawn`, `unbounded_channel`, `block_on`, `thread::sleep`,
-//! `unsafe`; absolute paths from one machine; `give back` from inside a block
-//! whose value is its own last line; and a flow that promises an output but
-//! ends without one.
+//! outside `1..=1000`; zero durations; `unwrap`, `expect`, `unwrap_err` and
+//! `expect_err`, as a method or by path (`Option::unwrap(x)`); `panic!`,
+//! every `assert*!` and `debug_assert*!`, and the rest of the panicking
+//! macros; indexing and slicing (`xs[i]`); `loop`, `while`, `spawn`,
+//! `unbounded_channel`, `block_on`, `thread::sleep`, `process::exit`,
+//! `process::abort`, `mem::forget`, `unsafe`; a `use` inside a flow that would
+//! rename any of those; absolute paths from one machine anywhere in a string;
+//! `give back` from inside a block whose value is its own last line; and a
+//! flow that promises an output but ends without one.
+//!
+//! A macro sees tokens, not resolved names, so a call imported *outside* the
+//! script under another spelling is invisible to those refusals. Every
+//! generated flow therefore also carries `#[forbid(..)]` on `unsafe_code` and
+//! on the clippy lints for the same defects (`unwrap_used`, `expect_used`,
+//! `panic`, `indexing_slicing`, `exit`, `mem_forget`, `panic_in_result_fn`,
+//! ...), which the consumer's own compiler and `cargo clippy` enforce by path.
+//! It is placed after the author's attributes, so an `#[allow]` written above
+//! a flow cannot lower it.
 //!
 //! Every script also emits `ARCHITECTURE`: the flows it declares and the tree
 //! of blocks inside each, compiled from the same tokens.
@@ -74,3 +87,6 @@ pub fn script(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lines_props;

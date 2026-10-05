@@ -6,10 +6,10 @@ release gate [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/
 A passing existing workflow does not execute tests that have not been added.
 
 Candidate regressions now exist near T07, T09–T12, T14, T19 and T20, in
-`crates/lgwks-bot/tests/durable_dispatch.rs` and
-`crates/lgwks-bot/tests/process_ownership.rs`, and the design they enforce is
+`crates/lgwks-bot/tests/it/durable_dispatch.rs` and
+`crates/lgwks-bot/tests/it/process_ownership.rs`, and the design they enforce is
 described in [effect-kernel.md](effect-kernel.md). **T22 additionally has
-candidate tests** in `crates/lgwks-bot/tests/t22_process_surface.rs`
+candidate tests** in `crates/lgwks-bot/tests/it/t22_process_surface.rs`
 (`public_process_description_rejects_direct_execution`,
 `the_guaranteed_task_set_does_not_expose_detach_all` and
 `supervisor_is_the_sanctioned_process_runner`). Those are unit and

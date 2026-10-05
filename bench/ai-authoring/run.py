@@ -30,6 +30,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -170,17 +171,49 @@ def cargo_env(work: pathlib.Path) -> dict:
     return environment
 
 
+#: How long the oracle's own test process may run before it is killed. The
+#: oracles finish in about a second; a solution that leaks a task, or waits on
+#: something that never resolves, is a failed trial, not a reason to hold the
+#: whole matrix for half an hour.
+ORACLE_TIMEOUT_S = 180
+
+
+def run_group(argv, cwd: pathlib.Path, env, timeout: int, stdin_text=None):
+    """`subprocess.run`, except that a timeout kills the whole process group.
+
+    `subprocess.run` kills only the direct child on a timeout. Here the direct
+    child is `cargo` (or `/usr/bin/time`), and the process that is actually stuck
+    is the oracle's test binary underneath it, so a plain timeout left that
+    binary running with its parent gone: three of them were found parented to
+    pid 1 more than a day later. Each command runs in its own session so the
+    group can be killed as one.
+    """
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=env,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(input=stdin_text, timeout=timeout)
+    except subprocess.TimeoutExpired as expired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from expired
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def run_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = 1800):
     """Run one cargo command under the gate. Returns the completed process."""
     with cargo_gate(work):
-        return subprocess.run(
-            ["cargo", *args],
-            cwd=str(cwd),
-            env=cargo_env(work),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        return run_group(["cargo", *args], cwd, cargo_env(work), timeout)
 
 
 #: The cleanup clause of each task: the oracle test that says a dropped future
@@ -215,7 +248,7 @@ def cleanup_ok(task: str, oracle: dict) -> bool:
 TIME_BIN = "/usr/bin/time"
 
 
-def run_timed_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = 1800):
+def run_timed_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = ORACLE_TIMEOUT_S):
     """Run one cargo command under `/usr/bin/time -l`, under the same gate.
 
     The timer wraps cargo, so what is measured is the cargo invocation that runs
@@ -228,14 +261,7 @@ def run_timed_cargo(args, cwd: pathlib.Path, work: pathlib.Path, timeout: int = 
     if not pathlib.Path(TIME_BIN).exists():
         return run_cargo(args, cwd, work, timeout)
     with cargo_gate(work):
-        return subprocess.run(
-            [TIME_BIN, "-l", "cargo", *args],
-            cwd=str(cwd),
-            env=cargo_env(work),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        return run_group([TIME_BIN, "-l", "cargo", *args], cwd, cargo_env(work), timeout)
 
 
 def parse_peak_rss(stderr: str):
@@ -382,14 +408,7 @@ def call_model(
         "--output-format",
         "json",
     ]
-    done = subprocess.run(
-        argv,
-        input=prompt,
-        cwd=str(scratch),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    done = run_group(argv, scratch, None, timeout, stdin_text=prompt)
     return done.stdout, done.stderr
 
 
@@ -651,18 +670,32 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
         # oracle's cost as "whatever cargo printed", which is not a measurement of
         # anything the task cares about.
         started = time.monotonic()
-        test = run_timed_cargo(
-            ["test", "--locked", "--offline", "--", "--test-threads=1"], trial_dir, work
-        )
+        timed_out = False
+        try:
+            test = run_timed_cargo(
+                ["test", "--locked", "--offline", "--", "--test-threads=1"], trial_dir, work
+            )
+            test_stdout, test_stderr = test.stdout or "", test.stderr or ""
+        except subprocess.TimeoutExpired as expired:
+            # A hung oracle is this solution's failure, recorded as one: the clauses
+            # that finished keep their verdicts and the rest are `timeout`.
+            timed_out = True
+            test_stdout = (expired.output or b"").decode() if isinstance(expired.output, bytes) else (expired.output or "")
+            test_stderr = (expired.stderr or b"").decode() if isinstance(expired.stderr, bytes) else (expired.stderr or "")
         oracle_wall_ms = (time.monotonic() - started) * 1000.0
-        test_output = (test.stdout or "") + (test.stderr or "")
-        oracle_peak_rss_bytes = parse_peak_rss(test.stderr or "")
+        test_output = test_stdout + test_stderr
+        oracle_peak_rss_bytes = parse_peak_rss(test_stderr)
         for line in test_output.splitlines():
             match = TEST_LINE.match(line.strip())
             if match and match.group("name") in oracle:
                 oracle[match.group("name")] = (
                     "pass" if match.group("status") == "ok" else "fail"
                 )
+        if timed_out:
+            oracle = {
+                name: ("timeout" if status == "not_run" else status)
+                for name, status in oracle.items()
+            }
 
     pass_count = sum(1 for value in oracle.values() if value == "pass")
     sites = count_orchestration_sites(code)

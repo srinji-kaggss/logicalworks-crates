@@ -2,6 +2,10 @@
 # holds that many tenant journals open. On Linux the thread limit is per user,
 # so a sibling test forked meanwhile can fail to spawn with EAGAIN (main CI run
 # 37091933076). It runs with every test slot to itself.
+#
+# It is a module of lgwks_bot's one integration binary (#272), so the filter
+# names the module path inside `it`. nextest still runs each test as its own
+# process, so the override applies per test exactly as it did per binary.
 [[profile.default.overrides]]
-filter = 'binary(journal_scale)'
+filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'

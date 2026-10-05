@@ -376,8 +376,12 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStr
     } else {
         TokenStream::new()
     };
+    // After the author's own attributes, so an `#[allow(..)]` written above the
+    // flow cannot lower what the flow forbids.
+    let forbids = refuse::lint_forbids();
     let code = quote! {
         #attributes
+        #forbids
         #doc
         #visibility async fn #name(#inputs) -> ::core::result::Result<#output, #script::FlowError> {
             #helpers

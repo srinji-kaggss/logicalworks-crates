@@ -59,7 +59,7 @@ by the gate as second edges.
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | off |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | off |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | off |
-| `process-group-probe` | `lgwks_deps::process_group::exists` (Unix only) | off |
+| `process-group-probe` | `lgwks_deps::process_group::exists`, deprecated: forwards to `lgwks_std::process::process_group_exists` | off |
 | `scan` | the gate's Rust source detectors | on |
 
 The facade-only consumer matrix compiles GPUI examples on Linux, macOS, and

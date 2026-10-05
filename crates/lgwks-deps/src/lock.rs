@@ -49,6 +49,18 @@ pub enum LockError {
         /// Line where the offending block opened.
         line: usize,
     },
+    /// A package block assigned one of the keys the audit reads twice.
+    ///
+    /// Refused rather than resolved, because either answer is a guess: the
+    /// first assignment is what a reader scanning from the top believes, the
+    /// last is what a reader that overwrites believes, and an audit that picks
+    /// one can be shown a different package than the build resolved.
+    DuplicateKey {
+        /// The repeated key.
+        key: String,
+        /// One-based line of the second assignment.
+        line: usize,
+    },
 }
 
 impl std::fmt::Display for LockError {
@@ -58,6 +70,12 @@ impl std::fmt::Display for LockError {
         match *self {
             Self::NamelessPackage { line } => {
                 write!(f, "[[package]] block at line {line} has no name")
+            }
+            Self::DuplicateKey { ref key, line } => {
+                write!(
+                    f,
+                    "line {line}: {key:?} is assigned twice in one [[package]] block"
+                )
             }
         }
     }
@@ -128,14 +146,31 @@ fn handle_header(
 /// `dependencies` rows and `[metadata]`-era keys, and the lock format is
 /// Cargo's to extend, so refusing an unrecognised key would refuse a lockfile
 /// Cargo itself wrote.
-fn apply_key_value(key: &str, value: &str, pending: &mut Pending) {
-    match key {
-        "name" => pending.name = Some(value.to_owned()),
-        "version" => pending.version = Some(value.to_owned()),
-        "source" => pending.has_source = true,
-        "checksum" => pending.checksum = Some(value.to_owned()),
-        _ => {}
+///
+/// A second assignment of a key the audit reads is refused at its own line
+/// (`line` is one-based): see [`LockError::DuplicateKey`].
+fn apply_key_value(
+    key: &str,
+    value: &str,
+    line: usize,
+    pending: &mut Pending,
+) -> Result<(), LockError> {
+    let already = match key {
+        "name" => pending.name.replace(value.to_owned()).is_some(),
+        "version" => pending.version.replace(value.to_owned()).is_some(),
+        "source" => core::mem::replace(&mut pending.has_source, true),
+        "checksum" => pending.checksum.replace(value.to_owned()).is_some(),
+        _ => false,
+    };
+    if already {
+        let refusal = Err(LockError::DuplicateKey {
+            key: key.to_owned(),
+            line,
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_key_value: a package key is assigned twice");
+        return refusal;
     }
+    Ok(())
 }
 
 /// Feeds one raw lockfile line into the reader.
@@ -159,7 +194,9 @@ fn process_line(
         return Ok(());
     }
     if let Some((key, value)) = key_and_value(line) {
-        apply_key_value(key, value, pending);
+        // `index` is zero-based and bounded by the input length (see
+        // `handle_header`), so the one-based line cannot saturate.
+        apply_key_value(key, value, index.saturating_add(1), pending)?;
     }
     Ok(())
 }

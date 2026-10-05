@@ -1,6 +1,6 @@
 //! Deterministic simulation of the **real** review path, across many seeds.
 //!
-//! [`sim_review_pr`](./sim_review_pr.rs) simulates the decision the
+//! [`sim_review_pr`](./it/sim_review_pr.rs) simulates the decision the
 //! reconciliation makes, with no process anywhere in the picture. This file
 //! simulates the same decisions *through the path a caller runs*: every family
 //! here drives [`lgwks_bot::review::review_pr`] on a [`Host`], with the adapter
@@ -63,6 +63,9 @@ use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
 use lgwks_bot::script::Scope;
 use lgwks_bot::task::{Host, Report, Task, task};
 
+// Its own binary rather than a module of `it` (#272): the saturation CI job
+// runs only this file's tiers, and building the whole `it` binary for them put
+// 80 s of compile on the gate's critical path.
 #[path = "support/fake_gh.rs"]
 mod fake_gh;
 
@@ -1002,30 +1005,44 @@ fn a_publication_the_ceiling_cannot_verify_stays_unknown() -> TestResult {
 #[test]
 fn same_seed_same_trace_hash_r32() -> TestResult {
     for index in 0..SEEDS {
-        let (first_fault, first) = run_seed(index, 0)?;
-        let (second_fault, second) = run_seed(index, 0)?;
-        assert_eq!(
-            first_fault, second_fault,
-            "seed {index} must select the same fault twice"
-        );
-        assert_eq!(
-            trace_hash(&first.trace()),
-            trace_hash(&second.trace()),
-            "seed {index} ({}) must replay exactly: {:?} vs {:?}",
-            first_fault.label(),
-            first.trace(),
-            second.trace()
-        );
-        // The argv comparison is the stronger claim: the receiver was told the
-        // same things, in the same order, by both runs.
-        assert_eq!(
-            first.argv,
-            second.argv,
-            "seed {index} ({}) must issue the same calls twice",
-            first_fault.label()
+        assert_replays(
+            index,
+            Fault::label,
+            run_seed(index, 0)?,
+            run_seed(index, 0)?,
         );
     }
     Ok(())
+}
+
+/// Two runs of seed `index` selected the same fault, hashed to the same trace
+/// and issued the same argv: the replay is exact, not approximate.
+fn assert_replays<F: Copy + PartialEq + std::fmt::Debug>(
+    index: u64,
+    label: fn(F) -> &'static str,
+    (first_fault, first): (F, Run),
+    (second_fault, second): (F, Run),
+) {
+    assert_eq!(
+        first_fault, second_fault,
+        "seed {index} must select the same fault twice"
+    );
+    assert_eq!(
+        trace_hash(&first.trace()),
+        trace_hash(&second.trace()),
+        "seed {index} ({}) must replay exactly: {:?} vs {:?}",
+        label(first_fault),
+        first.trace(),
+        second.trace()
+    );
+    // The argv comparison is the stronger claim: the receiver was told the
+    // same things, in the same order, by both runs.
+    assert_eq!(
+        first.argv,
+        second.argv,
+        "seed {index} ({}) must issue the same calls twice",
+        label(first_fault)
+    );
 }
 
 /// Every fault the journey names is reachable, so the families are not
@@ -1447,6 +1464,55 @@ fn saturation_r32_tier_10000() -> TestResult {
     Ok(())
 }
 
+/// One identity's review of pull request 7 through `fake`: it publishes
+/// `body`, marked with `body`, and returns the outcome it verified.
+///
+/// The body is bound at declaration: the closure is what a real consumer
+/// supplies, so the cross-talk question is "does this identity verify its own
+/// review", not "does the harness remember which body it passed".
+fn run_tenant(
+    fake: &FakeGh,
+    host: &Host,
+    path: &std::ffi::OsStr,
+    body: &'static str,
+) -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+    let job = task(
+        "review-pr",
+        move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
+            lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
+                Ok(String::from(body))
+            })
+            .await
+        },
+    )?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
+        .deadline(Some(Duration::from_secs(20)))
+        .env("PATH", path);
+    let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
+    let report = host.block_on(&job, (gh, request))?;
+    report
+        .output()
+        .cloned()
+        .ok_or_else(|| "each identity must produce an outcome".into())
+}
+
+/// A fresh `gh` fixture named `tag` on which the first and then the second
+/// identity each review pull request 7: the fixture, for its read-back, and
+/// the two outcomes, in that order.
+fn two_identities(
+    tag: &str,
+) -> Result<(FakeGh, ReviewOutcome, ReviewOutcome), Box<dyn std::error::Error>> {
+    let fake = FakeGh::install(tag, HEAD)?;
+    fake.configure(Scenario::new(HEAD))?;
+    let host = host()?;
+    let path = fake.search_path()?;
+    let first = run_tenant(&fake, &host, &path, "first identity")?;
+    let second = run_tenant(&fake, &host, &path, "second identity")?;
+    Ok((fake, first, second))
+}
+
 /// The tenant family: two identities on one pull request number.
 ///
 /// Each identity publishes a different body, so a read-back that matched the
@@ -1456,40 +1522,7 @@ fn saturation_r32_tier_10000() -> TestResult {
 #[test]
 fn two_tenants_on_one_pull_request_r32() -> TestResult {
     for index in 0..SEEDS {
-        let fake = FakeGh::install("tenants", HEAD)?;
-        fake.configure(Scenario::new(HEAD))?;
-        let host = host()?;
-        let path = fake.search_path()?;
-
-        let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
-            // One body per identity, bound at declaration: the closure is
-            // what a real consumer supplies, so the cross-talk question is
-            // "does this identity verify its own review", not "does the
-            // harness remember which body it passed".
-            let job = task(
-                "review-pr",
-                move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
-                    lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
-                        Ok(String::from(body))
-                    })
-                    .await
-                },
-            )?;
-            let gh = Gh::new(Repository::new("acme/widgets")?)
-                .program(fake.program())
-                .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
-                .deadline(Some(Duration::from_secs(20)))
-                .env("PATH", &path);
-            let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
-            let report = host.block_on(&job, (gh, request))?;
-            report
-                .output()
-                .cloned()
-                .ok_or_else(|| "each identity must produce an outcome".into())
-        };
-
-        let first = run_tenant("first identity")?;
-        let second = run_tenant("second identity")?;
+        let (fake, first, second) = two_identities("tenants")?;
 
         assert!(
             first.is_published() && second.is_published(),
@@ -2057,25 +2090,11 @@ fn subject_coverage_and_partial_faults(band: sim::Band) -> TestResult {
 /// The same seed must produce the same subject trace, through the real path.
 fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
     for index in band.seeds() {
-        let (first_fault, first) = run_subject_seed(index)?;
-        let (second_fault, second) = run_subject_seed(index)?;
-        assert_eq!(
-            first_fault, second_fault,
-            "seed {index} selects one fault twice"
-        );
-        assert_eq!(
-            trace_hash(&first.trace()),
-            trace_hash(&second.trace()),
-            "seed {index} ({}) must replay exactly: {:?} vs {:?}",
-            first_fault.label(),
-            first.trace(),
-            second.trace()
-        );
-        assert_eq!(
-            first.argv,
-            second.argv,
-            "seed {index} ({}) must issue the same calls twice",
-            first_fault.label()
+        assert_replays(
+            index,
+            SubjectFault::label,
+            run_subject_seed(index)?,
+            run_subject_seed(index)?,
         );
     }
     Ok(())
@@ -2083,36 +2102,7 @@ fn same_seed_same_trace_hash_subject(band: sim::Band) -> TestResult {
 
 /// One seed of the two-identity sweep: each identity publishes and verifies only its own review.
 fn identities_seed(index: u64) -> TestResult {
-    let fake = FakeGh::install("subject-tenants", HEAD)?;
-    fake.configure(Scenario::new(HEAD))?;
-    let host = host()?;
-    let path = fake.search_path()?;
-
-    let run_tenant = |body: &'static str| -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
-        let job = task(
-            "review-pr",
-            move |scope: Scope, (gh, request): (Gh, ReviewRequest)| async move {
-                lgwks_bot::review::review_pr(scope, gh, request, move |_s, _scope| {
-                    Ok(String::from(body))
-                })
-                .await
-            },
-        )?;
-        let gh = Gh::new(Repository::new("acme/widgets")?)
-            .program(fake.program())
-            .capture_limit(NonZeroUsize::new(CAPTURE).ok_or("a non-zero limit")?)
-            .deadline(Some(Duration::from_secs(20)))
-            .env("PATH", &path);
-        let request = ReviewRequest::new(pull(7)?, "COMMENT", body).with_marker(body);
-        let report = host.block_on(&job, (gh, request))?;
-        report
-            .output()
-            .cloned()
-            .ok_or_else(|| "each identity must produce an outcome".into())
-    };
-
-    let first = run_tenant("first identity")?;
-    let second = run_tenant("second identity")?;
+    let (fake, first, second) = two_identities("subject-tenants")?;
     assert!(
         first.is_published() && second.is_published(),
         "seed {index}: both identities publish independently: {first:?} {second:?}"

@@ -125,6 +125,7 @@ you to discover.
 | [Authority](authority.md) | Admission, the `Auth` snapshot, and the no-revocation boundary |
 | [Failures](failures.md) | Poll failure, partial action failure, unknown effect |
 | [Background work](background-work.md) | Bounded fan-out, supervision, and the cancellation limits |
+| [Migrating to 1.0.0](migrating-to-1-0.md) | What `spawn`, `JoinHandle`, `Child` and `Command` became, and the traps the compiler cannot show |
 | [Sessions](sessions.md) | Unreleased. Validated guidance flows |
 | [Resolution](resolution.md) | Unreleased. Lexical and semantic resolution, and what `Degraded` means |
 | [Domains](domains.md) | Unreleased. The `domain_id -> constructor` registry a spec's identifiers resolve through |

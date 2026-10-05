@@ -38,6 +38,31 @@ pub fn compile_probe(
     dependency: &str,
     main: &str,
 ) -> Result<Output, Box<dyn std::error::Error>> {
+    probe("check", name, dependency, main)
+}
+
+/// [`compile_probe`] under `cargo clippy` with every warning denied: the
+/// consumer's own lint pass, which is what enforces a lint an expansion
+/// declares at `forbid` but rustc alone does not know.
+///
+/// # Errors
+///
+/// As [`compile_probe`].
+pub fn clippy_probe(
+    name: &str,
+    dependency: &str,
+    main: &str,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    probe("clippy", name, dependency, main)
+}
+
+/// Write the one-file consumer and run `cargo <subcommand>` over it.
+fn probe(
+    subcommand: &str,
+    name: &str,
+    dependency: &str,
+    main: &str,
+) -> Result<Output, Box<dyn std::error::Error>> {
     static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -60,7 +85,7 @@ pub fn compile_probe(
     )?;
     fs::write(root.join("src/main.rs"), main)?;
     let output = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--manifest-path"])
+        .args([subcommand, "--offline", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", workspace_target_dir()?)
         .output();
@@ -110,5 +135,28 @@ pub fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
     assert!(
         text.contains(&format!("error[{code}]")) && text.contains(symbol),
         "the probe failed, but not with {code} naming `{symbol}`:\n{text}"
+    );
+}
+
+/// The probe was refused by the named lint, at error level, and not for some
+/// other reason. A lint error carries no `E` code, so the lint's own name in
+/// the diagnostic is what identifies it.
+///
+/// # Panics
+///
+/// When the probe compiled, or failed without naming `lint`.
+pub fn assert_refused_by_lint(output: &Output, lint: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the probe unexpectedly compiled:\n{text}"
+    );
+    assert!(
+        text.contains("error") && text.contains(lint),
+        "the probe failed, but not by `{lint}`:\n{text}"
     );
 }

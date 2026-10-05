@@ -14,8 +14,7 @@
 
 /// The deterministic simulation substrate, re-included so this module can build
 /// a real effect scope without a second copy of the construction.
-#[path = "../sim/mod.rs"]
-pub mod sim;
+pub(crate) use crate::sim;
 
 use std::cell::RefCell;
 use std::error::Error;

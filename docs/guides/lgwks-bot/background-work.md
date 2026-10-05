@@ -135,7 +135,7 @@ and the run reports the same `CleanupReceipt` a supervised task would.
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:421`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process.rs:476`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
@@ -189,7 +189,7 @@ the payload bytes one pass keeps, and the capture's own
 can actually refuse. Prefer `frames()` when the bytes are already in hand.
 
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:1061`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:1116`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.
@@ -240,21 +240,29 @@ The retained `JoinSet` never exceeds `limit` entries. Only the output vector
 grows with input length, so fanning out over thousands of inputs needs no manual
 chunking.
 
-## `spawn_blocking`: one thread per call
+## `spawn_blocking`: a bounded pool
 
-`lgwks_std::task::spawn_blocking` runs a closure on a dedicated OS thread and
-returns a future for its result. Its documented bound
-(`crates/lgwks-std/src/task.rs:265`) is one OS thread per call while the closure
-runs, with no pooled thread between calls. The doc says the quiet part out loud:
-"callers that need a ceiling on simultaneous threads (for example
-`lgwks_bot::Bot::tick`) bound their own fan-out."
+`lgwks_std::task::spawn_blocking` runs a closure on a process-wide blocking
+pool and returns a future for its result
+(`crates/lgwks-std/src/task.rs:355`). At most 512 pool threads run at once;
+a job submitted while all of them are busy waits its turn, and a thread with
+no work for ten seconds exits, so an idle process holds none. Jobs that wait
+on each other must number fewer than the ceiling, or the waiters hold every
+thread the awaited job needs.
 
-The tick does exactly that, on both adapters, because the wave loop lives in the
-`observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
-is 32 (`crates/lgwks-bot/src/ecs.rs:1805`), and `observe_fold` polls sources in
-waves of that size, because a source poll may occupy one `spawn_blocking` thread.
-Chains beyond 32 are polled in additional waves, so the cap holds regardless of
-how many chains a spec declares.
+`spawn_blocking` keeps its 1.0 contract: its wait queue is not bounded and it
+never refuses. `try_spawn_blocking` is the bounded form. When 16,384 jobs are
+already waiting it refuses with `SpawnError::AtCapacity`, and when no thread
+can be started it refuses with `SpawnError::Os`; either way the job never ran.
+`lgwks_bot`'s `net::Endpoint` poll uses the bounded form and reports a refusal
+as a `Refused` domain error, because nothing was sent.
+
+The tick still bounds its own fan-out on both adapters, because the wave loop
+lives in the `observe_fold` system rather than in either entry point.
+`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1805`), and
+`observe_fold` polls sources in waves of that size. Chains beyond 32 are polled
+in additional waves, so the cap holds regardless of how many chains a spec
+declares.
 
 ## The limits
 
@@ -272,9 +280,9 @@ implementation races each iteration with `token.run_until_cancelled(body(...))`
 (`crates/lgwks-bot/src/rt/supervise.rs:2859`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
-spawns an OS thread and offers no abort, and its documented bound is a thread per
-call, not a deadline. If your body blocks a thread, treat the supervisor's cancel
-as a request, not as an interruption.
+hands the closure to a pool thread and offers no abort, and its bound is a
+thread ceiling, not a deadline. If your body blocks a thread, treat the
+supervisor's cancel as a request, not as an interruption.
 
 **`spawn` can deadlock with itself.** The module documents this one
 (`crates/lgwks-bot/src/rt/supervise.rs:92`): `spawn` awaits a permit, so a caller
@@ -314,12 +322,12 @@ not reported as one that finished, cooperative cancellation and abort are told
 apart, and a shutdown that outlives the report cap still hands every outcome
 over.
 
-`crates/lgwks-bot/tests/rt_process.rs` is the black-box acceptance for
+`crates/lgwks-bot/tests/it/rt_process.rs` is the black-box acceptance for
 `spawn_process`, run with `--features full`: a zero exit reports `Completed`, a
 non-zero exit reports `Failed` with its status and counts in `Stats::failed`, a
 cancelled command is killed **with its grandchild** — a shell records both its own
 and its backgrounded `sleep`'s pid, and the test asserts both are gone — and a
 command that cannot start returns `NotFound` without consuming a slot.
-`crates/lgwks-bot/tests/rt_async_tier.rs` holds the drain regression: on a real
+`crates/lgwks-bot/tests/it/rt_async_tier.rs` holds the drain regression: on a real
 multi-threaded runtime, a body that returns on its cancellation is reported
 `Cancelled` and not `Aborted`.

@@ -159,7 +159,7 @@ to abandon it.
 **Status.** `met` for the current surface, argued and partially measured. The
 crate's thesis is that no verb starts work and hands back a handle to it;
 `spawn_local` was withdrawn for exactly this reason, and
-`tests/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned` is
+`tests/it/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned` is
 the discriminating case.
 
 ## C. Call shapes
@@ -200,7 +200,7 @@ edge detector beside the bot.
 
 **Status.** `partial`, measured. Change detection and `revisions()` exist and
 are tested in `tests/ecs_tick.rs`; the identity split is tested in
-`tests/durable_dispatch.rs`. A calling convention for an external agent is
+`tests/it/durable_dispatch.rs`. A calling convention for an external agent is
 **unmet**.
 
 ### R8. An AI that needs risky code checked calls the bot to check it in process.
@@ -241,7 +241,7 @@ permits it, for any grant, any environment, any entry list.
 **Status.** `met` at the design level, **proved for the model and argued for
 the implementation**. `proofs/README.md` states the refinement gap plainly: the
 theorems are about the abstract model, and nothing proves `spec.rs` implements
-it. `tests/authority.rs` covers the Rust surface.
+it. `tests/it/authority.rs` covers the Rust surface.
 
 ### R10. The record decides what happened.
 
@@ -257,9 +257,9 @@ effect leaves when the record cannot outlive the process.
 **Callers.** Every effect that leaves the process.
 
 **Falsifier.**
-`tests/durable_dispatch.rs::a_transient_journal_read_failure_is_not_reported_as_no_such_work`
+`tests/it/durable_dispatch.rs::a_transient_journal_read_failure_is_not_reported_as_no_such_work`
 and
-`tests/durable_dispatch.rs::a_reconstructed_bot_retires_an_unchanged_state_rather_than_firing_again`.
+`tests/it/durable_dispatch.rs::a_reconstructed_bot_retires_an_unchanged_state_rather_than_firing_again`.
 Either regressing refutes R10.
 
 **Status.** `partial`, measured against an in-memory journal and — for the five
@@ -308,12 +308,12 @@ requirement's register, not a quiet edit.
 
 | # | Class | Judgment | Evidence |
 |---|---|---|---|
-| M1 | The request may or may not have landed before the process died | handled | `tests/durable_dispatch.rs`, unknown-outcome barrier |
-| M2 | The record itself cannot be read | handled | `tests/durable_dispatch.rs`, read failure is refusal |
-| M3 | An event returns, or a payload is equal but the event is new | handled | `tests/durable_dispatch.rs`, identity split |
-| M4 | A spawned process left orphans | partial | `tests/process_ownership.rs` (T19/T20); T21/T22 open |
-| M5 | A locator resolved to the wrong frame or wrong kind | handled | `tests/locator_eligibility.rs` |
-| M6 | A contradictory outcome arrives after settlement | handled | `tests/durable_dispatch.rs`, refused |
+| M1 | The request may or may not have landed before the process died | handled | `tests/it/durable_dispatch.rs`, unknown-outcome barrier |
+| M2 | The record itself cannot be read | handled | `tests/it/durable_dispatch.rs`, read failure is refusal |
+| M3 | An event returns, or a payload is equal but the event is new | handled | `tests/it/durable_dispatch.rs`, identity split |
+| M4 | A spawned process left orphans | partial | `tests/it/process_ownership.rs` (T19/T20); T21/T22 open |
+| M5 | A locator resolved to the wrong frame or wrong kind | handled | `tests/it/locator_eligibility.rs` |
+| M6 | A contradictory outcome arrives after settlement | handled | `tests/it/durable_dispatch.rs`, refused |
 | M7 | A retrying intermediary re-sends a non-idempotent effect | partial | designed (second `OutcomeObserved` with different evidence is refused); untested against a real intermediary |
 | M8 | The target is gone, not moved | unjudged | studied in `docs/frontier.md`; false-heal 40.5 to 57.1 per cent on removed elements, and the decoy and drift score ranges overlap so no threshold separates them |
 | M9 | A dialog or another application stole focus mid-flow | out of scope, unreasoned | no evidence |

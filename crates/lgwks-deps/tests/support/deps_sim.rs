@@ -4,8 +4,7 @@
 //! `sim_policy_properties.rs`, so the edge/register builders, the verdict model
 //! and the generator are written once rather than copied between suites.
 
-#[path = "sim.rs"]
-mod sim;
+use crate::sim;
 
 use std::error::Error;
 

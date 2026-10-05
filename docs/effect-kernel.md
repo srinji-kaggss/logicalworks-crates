@@ -192,13 +192,13 @@ remains unchanged.
 
 | Claim | Test |
 |---|---|
-| Live settlement is journaled before acknowledged | `tests/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged` |
-| Recording failure does not become a refusal | `tests/durable_dispatch.rs` (issue #102 regressions) |
-| Fingerprint and value commit together | `tests/durable_dispatch.rs` (issue #100 regressions) |
-| Returning landed event retires | `tests/durable_dispatch.rs::a_returning_landed_event_is_retired_not_refused` |
-| No false `Unrecorded` barrier on refusal | `tests/durable_dispatch.rs::a_refused_handoff_leaves_no_unrecorded_barrier` |
-| Weak ack never records `DispatchPrepared` | `tests/durable_dispatch.rs::a_weak_ack_does_not_record_dispatch_prepared` |
-| An unrelated durable outcome receipt is refused without re-entering the action | `tests/durable_dispatch.rs::an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect` |
+| Live settlement is journaled before acknowledged | `tests/it/durable_dispatch.rs::a_live_settlement_is_journaled_before_it_is_acknowledged` |
+| Recording failure does not become a refusal | `tests/it/durable_dispatch.rs` (issue #102 regressions) |
+| Fingerprint and value commit together | `tests/it/durable_dispatch.rs` (issue #100 regressions) |
+| Returning landed event retires | `tests/it/durable_dispatch.rs::a_returning_landed_event_is_retired_not_refused` |
+| No false `Unrecorded` barrier on refusal | `tests/it/durable_dispatch.rs::a_refused_handoff_leaves_no_unrecorded_barrier` |
+| Weak ack never records `DispatchPrepared` | `tests/it/durable_dispatch.rs::a_weak_ack_does_not_record_dispatch_prepared` |
+| An unrelated durable outcome receipt is refused without re-entering the action | `tests/it/durable_dispatch.rs::an_unrelated_outcome_receipt_is_refused_without_reentering_the_effect` |
 
 Acceptance falsifiers T09–T16 and T35 in
 [orchestration-acceptance.spec.md](orchestration-acceptance.spec.md) are the

@@ -109,6 +109,10 @@ const MIN_REVISION: usize = 7;
 /// Longest revision string accepted, covering a full SHA-256 object name.
 const MAX_REVISION: usize = 64;
 
+mod binding;
+
+pub use binding::EvidenceGap;
+
 // ── Enforcement kind ────────────────────────────────────────────────────────
 
 /// How an invariant claims it is enforced.
@@ -364,9 +368,11 @@ fn valid_lint_name(name: &str) -> bool {
 ///
 /// Constructed only by `build_evidence`, which refuses an incomplete triple,
 /// a revision that is not a Git-style object name, a result that is not
-/// `pass`, or an invocation that does not name the entry's own enforcer. What
-/// is stored is therefore already bound to the reviewed revision and the exact
-/// selector, which is what makes [`Status::Attested`] mean something.
+/// `pass`, or an invocation that does not name the entry's own enforcer. That
+/// fixes the *selector*. It does not fix the *revision*, which at parse time is
+/// only a well-shaped hex string: [`audit`] binds it, by asking Git whether it is
+/// a commit in the history of `HEAD` and whether the enforcer is unchanged since,
+/// and refuses [`Status::Attested`] with [`Refusal::EvidenceNotBound`] when not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Evidence {
@@ -644,6 +650,18 @@ pub enum Refusal {
         /// One-based line where the invariant opened.
         line: usize,
     },
+    /// The recorded run is not about the tree under review: its revision is
+    /// unknown or foreign, or the enforcer changed after it, or Git could not say.
+    EvidenceNotBound {
+        /// Invariant identifier.
+        id: String,
+        /// The revision the evidence names.
+        revision: String,
+        /// Why it does not bind.
+        gap: EvidenceGap,
+        /// One-based line where the invariant opened.
+        line: usize,
+    },
     /// An identifier was authored more than once.
     DuplicateId {
         /// Repeated invariant identifier.
@@ -672,6 +690,7 @@ impl Refusal {
             | Self::ScopeModuleNotFound { ref id, .. }
             | Self::LintNotDeclared { ref id, .. }
             | Self::LintDisabled { ref id, .. }
+            | Self::EvidenceNotBound { ref id, .. }
             | Self::DuplicateId { ref id, .. }
             | Self::MalformedId { ref id, .. } => id,
         }
@@ -741,6 +760,16 @@ impl fmt::Display for Refusal {
                 formatter,
                 "line {line}: invariant {id:?} names lint {lint}, which this repository declares \
                  at {level:?}; nothing below `warn` can fail a build"
+            ),
+            Self::EvidenceNotBound {
+                ref id,
+                ref revision,
+                ref gap,
+                line,
+            } => write!(
+                formatter,
+                "line {line}: invariant {id:?} records a run at {revision}, which does not bind \
+                 to this tree: {gap}"
             ),
             Self::DuplicateId { ref id, line } => {
                 write!(formatter, "line {line}: invariant id {id:?} is duplicated")
@@ -1465,6 +1494,20 @@ pub fn audit(register: &Register, root: &Path, members: &[crate::metadata::Membe
         }
         check_scope(entry, members, &mut refusals);
         check_enforcer(entry, root, &lints, &mut refusals);
+        // Only an entry that is otherwise sound is asked to bind: a run recorded
+        // against an enforcer that does not resolve is already refused, and a
+        // second refusal for the same entry would hide which one to fix first.
+        if let Some(ref evidence) = entry.evidence
+            && refusals.len() == before
+            && let Err(gap) = binding::bind(root, evidence.revision(), entry.enforced_by.as_ref())
+        {
+            refusals.push(Refusal::EvidenceNotBound {
+                id: entry.id.clone(),
+                revision: evidence.revision().to_owned(),
+                gap,
+                line: entry.line,
+            });
+        }
         let status = match refusals.len() {
             len if len > before => Status::Refused,
             _ if entry.evidence.is_some() => Status::Attested,
@@ -2203,22 +2246,174 @@ mod tests {
         Ok(())
     }
 
+    /// A throwaway Git repository holding one enforcer file, so evidence can be
+    /// bound against a history the test controls rather than this checkout's.
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        const ENFORCER: &'static str = "tests/guard.rs";
+
+        fn git(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()?;
+            if !output.status.success() {
+                let refusal: Result<String, Box<dyn std::error::Error>> =
+                    Err(
+                        format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into(),
+                    );
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "git: returning an error to the caller");
+                return refusal;
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        }
+
+        fn commit(&self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
+            self.git(&["add", "-A"])?;
+            self.git(&["commit", "--allow-empty", "-m", message])?;
+            self.git(&["rev-parse", "HEAD"])
+        }
+
+        fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            // Nanos plus a counter, never a process id: the OS reuses pids, and a
+            // reused id would make two runs share one repository.
+            static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let unique = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("lgwks-deps-binding-{name}-{nanos}-{unique}"));
+            std::fs::create_dir_all(root.join("tests"))?;
+            let scratch = Self { root };
+            scratch.git(&["init", "--quiet", "--initial-branch=main"])?;
+            std::fs::write(
+                scratch.root.join(Self::ENFORCER),
+                "#[test]\nfn holds() {}\n",
+            )?;
+            Ok(scratch)
+        }
+
+        fn audit(&self, revision: &str) -> Result<Audit, Box<dyn std::error::Error>> {
+            let text = format!(
+                "{}evidence_revision = \"{revision}\"\n\
+                 evidence_invocation = \"cargo test -- {}\"\n\
+                 evidence_result = \"pass\"\n",
+                entry("INV-BOT-FOUR-VERBS", "lgwks_bot", Self::ENFORCER),
+                Self::ENFORCER
+            );
+            let members = [crate::metadata::Member {
+                name: "lgwks_bot".to_owned(),
+                manifest_dir: self.root.clone(),
+            }];
+            Ok(audit(&Register::parse(&text)?, &self.root, &members))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    fn only_gap(audit: &Audit) -> Option<&EvidenceGap> {
+        match *audit.refusals() {
+            [Refusal::EvidenceNotBound { ref gap, .. }] => Some(gap),
+            _ => None,
+        }
+    }
+
+    /// #258: a run recorded at a real ancestor, with the enforcer untouched since,
+    /// is the one case that attests.
     #[test]
-    fn a_resolved_entry_with_a_recorded_run_is_attested() -> TestResult {
-        let text = format!(
-            "{}evidence_revision = \"5e1b437\"\n\
-             evidence_invocation = \"cargo test --all-targets -- crates/lgwks-deps/src/invariants.rs\"\n\
-             evidence_result = \"pass\"\n",
-            entry(
-                "INV-BOT-FOUR-VERBS",
-                "lgwks_bot",
-                "crates/lgwks-deps/src/invariants.rs"
-            )
-        );
-        let audit = audit_text(&text)?;
+    fn a_run_at_an_ancestor_with_an_unchanged_enforcer_is_attested() -> TestResult {
+        let scratch = Scratch::new("attested")?;
+        let observed = scratch.commit("the run is observed here")?;
+        scratch.commit("the register is committed after it")?;
+        let audit = scratch.audit(&observed)?;
+        assert!(audit.refusals().is_empty(), "{:?}", audit.refusals());
         assert_eq!(audit.attested(), 1);
-        assert_eq!(audit.resolved(), 0);
         assert_eq!(audit.outcomes()[0].status, Status::Attested);
+        Ok(())
+    }
+
+    /// #258: the falsifier as filed. A well-shaped revision that names nothing in
+    /// this repository used to certify any commit; it is now refused.
+    #[test]
+    fn a_fabricated_revision_does_not_attest() -> TestResult {
+        let scratch = Scratch::new("fabricated")?;
+        scratch.commit("work")?;
+        let audit = scratch.audit("deadbee")?;
+        assert_eq!(only_gap(&audit), Some(&EvidenceGap::UnknownRevision));
+        assert_eq!(audit.attested(), 0);
+        assert_eq!(audit.outcomes()[0].status, Status::Refused);
+        Ok(())
+    }
+
+    /// #258: a real commit that `HEAD` does not descend from is a run of other work.
+    #[test]
+    fn a_run_on_a_foreign_branch_does_not_attest() -> TestResult {
+        let scratch = Scratch::new("foreign")?;
+        scratch.commit("base")?;
+        scratch.git(&["checkout", "--quiet", "-b", "elsewhere"])?;
+        let foreign = scratch.commit("work nobody merged")?;
+        scratch.git(&["checkout", "--quiet", "main"])?;
+        scratch.commit("main moves on")?;
+        let audit = scratch.audit(&foreign)?;
+        assert_eq!(only_gap(&audit), Some(&EvidenceGap::NotInHistory));
+        Ok(())
+    }
+
+    /// #258: a true run of an enforcer that has since been edited, committed or not,
+    /// says nothing about the enforcer as it now stands.
+    #[test]
+    fn a_run_before_the_enforcer_changed_does_not_attest() -> TestResult {
+        let scratch = Scratch::new("changed")?;
+        let observed = scratch.commit("run observed")?;
+        std::fs::write(
+            scratch.root.join(Scratch::ENFORCER),
+            "#[test]\nfn holds() { assert!(true); }\n",
+        )?;
+        let uncommitted = scratch.audit(&observed)?;
+        assert!(
+            matches!(
+                only_gap(&uncommitted),
+                Some(EvidenceGap::EnforcerChanged { .. })
+            ),
+            "an uncommitted edit counts: {:?}",
+            uncommitted.refusals()
+        );
+        scratch.commit("edit committed")?;
+        let committed = scratch.audit(&observed)?;
+        assert!(matches!(
+            only_gap(&committed),
+            Some(EvidenceGap::EnforcerChanged { .. })
+        ));
+        Ok(())
+    }
+
+    /// #258: where Git cannot answer, the answer is a refusal, never an attestation.
+    #[test]
+    fn evidence_that_cannot_be_checked_does_not_attest() -> TestResult {
+        let scratch = Scratch::new("no-repo")?;
+        scratch.commit("work")?;
+        std::fs::remove_dir_all(scratch.root.join(".git"))?;
+        let audit = scratch.audit("deadbee")?;
+        assert!(
+            matches!(only_gap(&audit), Some(EvidenceGap::Unverifiable { .. })),
+            "{:?}",
+            audit.refusals()
+        );
+        assert_eq!(audit.attested(), 0);
         Ok(())
     }
 
