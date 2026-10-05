@@ -400,19 +400,32 @@ def committed_table(spec_text: str) -> str:
 
 
 def latest_receipt(out_dir: Path) -> dict:
-    """The receipt in the tree that the committed table should agree with."""
+    """The most recently *generated* receipt in the tree.
+
+    By the receipt's own `generated_at`, not by filename: receipts are named for
+    the revision they describe, and revision shas do not sort into run order. A
+    filename sort would silently check the table against whichever run happened
+    to end in the highest hex digits, which is a receipt about code that may no
+    longer be the map's code.
+    """
     if not out_dir.is_dir():
         raise Failure(f"no receipt directory at {out_dir}")
-    receipts = sorted(path for path in out_dir.glob("*.json"))
-    if not receipts:
+    loaded: list[tuple[str, dict]] = []
+    for path in sorted(out_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise Failure(f"{path} is not JSON: {error}") from error
+        generated = str(payload.get("generated_at", ""))
+        if not generated:
+            raise Failure(f"{path} carries no generated_at, so it cannot be ordered")
+        loaded.append((generated, payload))
+    if not loaded:
         raise Failure(
             f"no receipt in {out_dir}; run without --check to record one, and commit it"
         )
-    latest = receipts[-1]
-    try:
-        return json.loads(latest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise Failure(f"{latest} is not JSON: {error}") from error
+    loaded.sort(key=lambda entry: entry[0])
+    return loaded[-1][1]
 
 
 def first_difference(found: str, wanted: str) -> list[str]:
