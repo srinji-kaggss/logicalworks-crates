@@ -3,10 +3,19 @@
 All notable changes to the four crates are recorded here. Versions move
 independently; each release lists per-crate deltas. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
-`0.x`, so any minor may carry breaking changes, which are then listed
-explicitly under that crate.
+semantic from 1.0.0: a major bump breaks, a minor adds, a patch fixes
+(`docs/releasing.md` §3). Before 1.0.0 any minor could break, and those
+breaks are listed explicitly under the crate.
 
 ## [Unreleased]
+
+## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
+
+`lgwks_ast` stays at 1.0.0: its source is unchanged since that tag. Every
+other change below is additive, and every enum that gained a variant is
+`#[non_exhaustive]`. The exception is `lgwks_macros`: a script that relied on
+a refusal now added (#265) no longer compiles. That is a correction to the
+guard, recorded here as a minor bump rather than hidden in a patch.
 
 ### lgwks_std — Digest equality measured constant-time (#275)
 
@@ -38,6 +47,27 @@ explicitly under that crate.
   the workspace no longer builds `nix`.
 - `lgwks_bot`'s `process` feature no longer enables
   `lgwks_deps/process-group-probe`.
+
+### lgwks_bot — fan-out, journal status, process stdio (#257, #259, #260)
+
+- `FanOut` and `FanOutError`: a one-call fan-out over `script::each`, bounded
+  by `at_most(limit)` and `within(deadline)`, whose error names the failing
+  item or the timeout.
+- `journal::AttemptStatus::VerificationFailed`: a failed verification
+  recovers as its own status instead of collapsing into `Applied` (#257).
+  `Verified` is no longer terminal, so a later verdict revises it (#260).
+  Recovered status exposes the latest verification and a per-attempt history
+  of `Transition`s, each with its position in the journal (#259).
+- `rt::process::ProcessSpec::stdout_to_file` and `stderr_to_file`.
+- `rt::runtime::Builder::thread_stack_size`, bounded by
+  `MAX_THREAD_STACK_SIZE` (256 MiB).
+
+### lgwks_deps — attestation bound to the tree under review (#258)
+
+- `invariants::Status::Attested` is refused unless the recorded revision is
+  in the history of `HEAD` and the enforcer is unchanged since then. The
+  refusal is `InvariantError::EvidenceNotBound`, carrying an `EvidenceGap`.
+  Before this, any well-formed hex revision certified any commit.
 
 ### Property tests with shrinking (#273)
 
@@ -101,6 +131,8 @@ explicitly under that crate.
   clippy lints for the same defects, after the author's own attributes, so a
   name imported outside the script is refused by the consumer's `cargo clippy`
   and an `#[allow]` above a flow cannot lower it.
+
+## [lgwks_std 1.0.0 / lgwks_ast 1.0.0 / lgwks_deps 1.0.0 / lgwks_bot 1.0.0 / lgwks_macros 1.0.0] - 2026-10-04
 
 ### 1.0.0 — lgwks_std, lgwks_bot, lgwks_ast, lgwks_deps, lgwks_macros
 

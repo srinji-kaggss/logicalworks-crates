@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "0.10.0"
+version = "1.1.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",

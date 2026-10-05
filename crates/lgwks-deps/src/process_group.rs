@@ -14,7 +14,7 @@ use std::io;
 /// negative id is refused as [`io::ErrorKind::InvalidInput`]. Off Unix it
 /// reports [`io::ErrorKind::Unsupported`].
 #[deprecated(
-    since = "1.0.1",
+    since = "1.1.0",
     note = "use lgwks_std::process::process_group_exists, the one process-group backend"
 )]
 pub fn exists(pgid: i32) -> io::Result<bool> {

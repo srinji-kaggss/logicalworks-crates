@@ -19,14 +19,14 @@ resolver = "2"
 # crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "1.0.0", path = "crates/lgwks-std" }
-lgwks_bot = { version = "1.0.0", path = "crates/lgwks-bot" }
+lgwks_std = { version = "1.1.0", path = "crates/lgwks-std" }
+lgwks_bot = { version = "1.1.0", path = "crates/lgwks-bot" }
 lgwks_ast = { version = "1.0.0", path = "crates/lgwks-ast" }
-lgwks_macros = { version = "1.0.0", path = "crates/lgwks-macros" }
+lgwks_macros = { version = "1.1.0", path = "crates/lgwks-macros" }
 # Dependents reach the storefront without its `scan` default (the gate tool's
 # Rust parser is not a runtime dependency); they opt into storefront features
 # such as `tokio` explicitly.
-lgwks_deps = { version = "1.0.0", path = "crates/lgwks-deps", default-features = false }
+lgwks_deps = { version = "1.1.0", path = "crates/lgwks-deps", default-features = false }
 
 [profile.release]
 opt-level = 3

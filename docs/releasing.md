@@ -102,10 +102,15 @@ version table in the root `README.md`, and `Cargo.lock` (`cargo update
 --workspace`). The `CHANGELOG.md` entry follows, per crate, and records the
 behavioural changes a consumer will encounter, not only the signatures.
 
-Version position: this workspace is `0.x`, so **the minor position is the
-breaking one**. A removed or renamed public item takes a minor bump; compatible
-additions take a patch. `lgwks_bot 0.4.0` and `lgwks_ast 0.2.0` in the 2026-09-20
-train were both breaking; the other two took patches.
+Version position: every crate is at `1.x` since 2026-10-04, so semantic
+versioning applies as written. A removed or renamed public item, or a new
+variant on an enum that is not `#[non_exhaustive]`, takes a **major** bump. New
+public items, and new variants on `#[non_exhaustive]` enums, take a **minor**
+bump. Fixes that change no public item take a **patch**. A refusal made
+stricter is a minor bump, not a patch: code that compiled may stop compiling,
+and the changelog says so (`lgwks_macros 1.1.0`, #265). Before 1.0 the minor
+position was the breaking one; `lgwks_bot 0.4.0` and `lgwks_ast 0.2.0` in the
+2026-09-20 train were breaking for that reason.
 
 ## 4. Tag and release: after the upload, not before
 
