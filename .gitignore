@@ -40,5 +40,7 @@ proofs/.hol/
 # get exercised while it is being written — leaves a cache beside it.
 __pycache__/
 
-# local gate receipts: derived from a run, not tree content
-evidence/
+# `evidence/` is *not* ignored. A receipt is the record the spec's per-row
+# table is generated from, and `scripts/acceptance-receipts.py --check`
+# compares that table against the receipt in the tree, so a receipt that is not
+# committed is a receipt nothing can check.
