@@ -2332,10 +2332,14 @@ impl Supervisor {
     /// `None` is a refusal, already counted. A cancelled supervisor refuses
     /// before the wait, during the wait, and at the moment a permit lands:
     /// cancellation is the terminal admission state, and a slot freeing after
-    /// it is not an admission offer. The poll below races the permit against
-    /// the token, and reads cancellation first on every wake, so the race
-    /// between "a slot freed" and "the supervisor was cancelled" is decided
-    /// for cancellation on ties.
+    /// it is not an admission offer. The pool's own fair queue holds the
+    /// waiter's place, so the acquire is pinned for the whole wait and raced
+    /// against the token rather than re-created: a dropped acquire future
+    /// forfeits its place in that queue, which is what lets a caller that
+    /// arrived later take the permit a longer-waiting caller was queued for.
+    /// `run_until_cancelled` polls the acquire first on every wake, so the race
+    /// between "a slot freed" and "the supervisor was cancelled" is decided for
+    /// cancellation on ties.
     async fn claim(&mut self) -> Option<Lease> {
         // The gate before the wait: a cancelled supervisor never parks on a
         // full pool, because there is nothing it would do with a slot.
@@ -2358,33 +2362,29 @@ impl Supervisor {
                 }
             };
         }
-        loop {
-            self.reap();
-            let token = &self.token;
-            let acquire = Arc::clone(&self.permits).acquire_owned();
-            match token
-                .run_until_cancelled(crate::rt::time::timeout(
-                    Duration::from_millis(100),
-                    acquire,
-                ))
-                .await
-            {
-                None => {
-                    self.refused = self.refused.saturating_add(1);
-                    return None;
-                }
-                Some(Ok(Ok(permit))) if !self.token.is_cancelled() => {
-                    return Some(Lease::plain(permit));
-                }
-                Some(Ok(Ok(_))) => {
-                    self.refused = self.refused.saturating_add(1);
-                    return None;
-                }
-                Some(Ok(Err(_))) => {
-                    self.refused = self.refused.saturating_add(1);
-                    return None;
-                }
-                Some(Err(_)) => {}
+        self.reap();
+        let mut acquire = std::pin::pin!(Arc::clone(&self.permits).acquire_owned());
+        let token = self.token.clone();
+        match token.run_until_cancelled(acquire.as_mut()).await {
+            None => {
+                self.refused = self.refused.saturating_add(1);
+                None
+            }
+            Some(Ok(permit)) if !self.token.is_cancelled() => Some(Lease::plain(permit)),
+            // A permit that landed in the same instant as a cancellation. The
+            // bare permit drops back to the pool, which is where it came from:
+            // the untenanted path charges no tenant, so there is no round to
+            // hand it to.
+            Some(Ok(_)) => {
+                self.refused = self.refused.saturating_add(1);
+                None
+            }
+            // The semaphore is closed, which this module never does; a refusal
+            // says so rather than waiting on a pool that will never hand out
+            // another permit.
+            Some(Err(_)) => {
+                self.refused = self.refused.saturating_add(1);
+                None
             }
         }
     }
@@ -3971,7 +3971,7 @@ mod tests {
     #[cfg(all(unix, feature = "process"))]
     use super::SupervisorCancelled;
     use super::{
-        Budget, Lease, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
+        Budget, Clock, Lease, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
         TrySpawnRefusal, repeat, truncate_panic_message,
     };
     #[cfg(feature = "process")]
@@ -3979,12 +3979,14 @@ mod tests {
     use crate::rt::cancel::CancellationToken;
     use crate::rt::runtime::block_on;
     use crate::rt::task::yield_now;
+    use std::future::Future;
     use std::future::pending;
     use std::num::NonZeroU64;
     use std::sync::Arc;
     #[cfg(feature = "process")]
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::task::Poll;
     use std::time::Duration;
 
     #[cfg(all(not(unix), feature = "process"))]
@@ -5795,6 +5797,109 @@ mod tests {
                 shell.retained_waiters(&tenant),
                 0,
                 "every waiter left the queue once it was served"
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+    }
+
+    /// A waiting spawn keeps its place in the pool's own fair queue.
+    ///
+    /// Two supervisors share ONE pool of a single permit, built through the
+    /// private `assembled` constructor, so the queue under test is the pool's
+    /// and both waiters can be parked at once — a supervisor's `&mut self` is
+    /// what stops two of its own waiters from existing, not the semaphore's
+    /// fairness.
+    ///
+    /// The timing is the assertion, and it is arithmetic rather than hope. The
+    /// first claim registers at t = 0; the second registers at t = 90, so under
+    /// the old loop the first claim's acquire expires at t = 100 and it re-queues
+    /// *behind* the second, leaving the pool's queue ordered second-then-first
+    /// for the next ninety milliseconds. The release sits at t = 140, inside
+    /// that ninety-millisecond window and two orders of magnitude clear of
+    /// either end of it.
+    #[test]
+    fn a_waiting_spawn_keeps_its_place_in_the_pool_queue() -> Result<(), Box<dyn std::error::Error>>
+    {
+        /// When the second claim starts being polled, ninety milliseconds in.
+        const REGISTER_AT: Duration = Duration::from_millis(90);
+        /// When the pool's only permit goes back, half a period after the first
+        /// claim's acquire would have expired.
+        const RELEASE_AT: Duration = Duration::from_millis(150);
+        /// A ceiling on a failure, not a budget the assertion must finish inside.
+        const LIMIT: Duration = Duration::from_secs(2);
+
+        block_on(async {
+            let pool = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1));
+            let mut first = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
+            let mut second = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
+            let mut held = match Arc::clone(&pool).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => return Err("the shared pool did not start with its one permit".into()),
+            };
+
+            let mut first_claim = std::pin::pin!(first.claim());
+            let mut second_claim = std::pin::pin!(second.claim());
+            let mut first_out: Option<Option<Lease>> = None;
+            let mut second_out: Option<Option<Lease>> = None;
+
+            // The driver is a real-clock spin rather than a chain of timed waits,
+            // because the assertion is about two events a hundred milliseconds
+            // apart: the first claim's acquire expiring, and the permit being
+            // released. Timed slices drift by a millisecond or two each, and a
+            // driver that drifts cannot place a release inside a window it is
+            // trying to hit.
+            let started = std::time::Instant::now();
+            let mut second_started = false;
+            let mut released = false;
+            std::future::poll_fn(|context| {
+                let now = started.elapsed();
+                if !second_started && now >= REGISTER_AT {
+                    second_started = true;
+                }
+                if first_out.is_none()
+                    && let Poll::Ready(value) = first_claim.as_mut().poll(context)
+                {
+                    first_out = Some(value);
+                }
+                if second_started
+                    && second_out.is_none()
+                    && let Poll::Ready(value) = second_claim.as_mut().poll(context)
+                {
+                    second_out = Some(value);
+                }
+                if !released && now >= RELEASE_AT {
+                    if let Some(permit) = held.take() {
+                        // The permit goes back to the pool, and the pool hands it
+                        // to the head of its own fair queue.
+                        drop(permit);
+                    }
+                    released = true;
+                }
+                if first_out.is_some() || second_out.is_some() || now >= LIMIT {
+                    return Poll::Ready(());
+                }
+                // Re-poll immediately: the driver is measuring elapsed real time
+                // and has nothing to wait on.
+                context.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+
+            assert!(
+                released,
+                "the driver never reached the release moment within {LIMIT:?}"
+            );
+            assert!(
+                first_out.is_some(),
+                "the caller that arrived first never received the released permit, so \
+                 its place in the pool's queue was forfeited; the caller that arrived \
+                 second was served instead (second resolved: {})",
+                second_out.is_some()
+            );
+            assert!(
+                second_out.is_none(),
+                "the permit went to the caller that arrived second: a waiter that keeps \
+                 its place is served in arrival order"
             );
             Ok::<(), Box<dyn std::error::Error>>(())
         })
