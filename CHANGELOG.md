@@ -95,6 +95,39 @@ runnable thing, `--workers=2`, produced knees identical to `--workers=15` becaus
 every body in the sweep is a timer, so a thread count is not a vCPU count and
 this workload would not separate them.
 
+### Acceptance evidence is now executable (#271)
+
+Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
+the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
+previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
+those tests through one anchored nextest filter and records each row's outcome
+in a SQLite database under the state directory, one row per revision, row, test,
+platform and feature set.
+
+The receipt can lower a row's claimed state and never raise one, so a green run
+cannot promote `present` to `exercised`, and it exits non-zero when a named test
+is absent, failing, or a row claims more than the run shows. The one promotion,
+`accepted`, requires the receipt's revision to be the head being rendered. The
+spec's per-row table is rendered from the database for one exact revision between
+`<!-- acceptance-table: start -->` markers, `--check` fails when the committed
+table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
+`--test` runs the generator's own fifteen regression cases. No new dependency:
+the database is Python's standard-library `sqlite3`.
+
+CI builds the receipt from what the suite already ran. The `ci` nextest profile
+writes a JUnit report per shard, and a job with no Rust toolchain merges the four
+with `--from-junit` in about 0.2 s, rather than executing the 215 named tests a
+second time.
+
+Every row now also answers to its own id in a test name: 15 new row-addressed
+tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
+`crates/lgwks-bot/tests/it/sim_t_rows.rs`, so
+`cargo nextest list --workspace -E 'test(/_t07$/)'` says which tests address a
+row without reading the map. Six of them are seeded sweeps replay-checked against
+their trace hash. They are new tests rather than renames precisely so that every
+existing citation of an existing test keeps resolving. No crate's public API
+changed.
+
 ### lgwks_ast — the parse had no time bound, and the walk was quadratic (#277)
 
 Two bounds the crate already claimed, and the numbers behind them.
@@ -316,6 +349,38 @@ additive: no signature changed and no existing behaviour did.
   critical path. CI sets the same value as `CARGO_PROFILE_TEST_DEBUG`, because
   Swatinem/rust-cache ignores `[profile]` when it hashes manifests: without
   it the restore stayed a full match on the old key and nothing was saved.
+
+## [lgwks_deps 2.0.0] - 2026-10-05
+
+### lgwks_deps — the gate compiles in no repository's policy (breaking)
+
+`lgwks_deps` is published and audits other repositories, but it compiled in
+this repository's licence set (`ACCEPTED_LICENSES`), its five surface names and
+URL (`SURFACES`, `SURFACE_REPOSITORY`), its frozen surface and tier
+(`FROZEN_SURFACES`, `FROZEN_TIER`), and a maintainer's e-mail address in the
+crates.io `User-Agent`. No consumer could change any of them, so the estate's
+own MPL-2.0 `lgwks_bot` was refused in every repository that ran the gate.
+All of it now comes from the register's `[policy]` (INV-DEP-16).
+
+- **Removed** `lgwks_deps::accepted_licenses()`: the accepted set is a register
+  decision, read back with `Contract::accepted_licenses()`.
+- **Added** `[policy]` keys `accepted_licenses`, `surfaces`, `frozen_surfaces`
+  and `frozen_tier`, each a comma-separated string refused whole on an empty,
+  repeated or malformed member; `Refusal::LicensePolicyUndeclared`;
+  `ContractError::IncompletePolicy` (a freeze written without its tier, or the
+  reverse); the `check --json` receipt's `contract.accepted_licenses`.
+- **Changed**: a register that approves an observed edge and declares no
+  `accepted_licenses` is refused once, naming the line to add, rather than
+  judged by a set compiled into the gate. A register that declares no
+  `surfaces` or freeze binds none, which is what every repository other than
+  this one already got.
+- **Fixed**: the `freshness` crates.io lookup's `User-Agent` is the tool's name,
+  its real version and its repository, read from the manifest (it said `0.1`
+  and carried a personal address).
+- **Migration**: add one line to `[policy]`, e.g.
+  `accepted_licenses = "MIT, Apache-2.0, MPL-2.0"`. This repository's register
+  declares exactly the set the gate used to compile in, plus its surfaces and
+  `lgwks_ast`'s freeze, so its own verdict is unchanged.
 
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 

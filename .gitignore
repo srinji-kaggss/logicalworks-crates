@@ -40,5 +40,11 @@ proofs/.hol/
 # get exercised while it is being written — leaves a cache beside it.
 __pycache__/
 
-# local gate receipts: derived from a run, not tree content
+# Acceptance receipts are a database under the state directory, not files in the
+# repository (`scripts/acceptance-receipts.py`). Everything a run derives -- the
+# database, the exported JSON, the JUnit files a CI shard produced -- is written
+# here and ignored, because a receipt is evidence about one run rather than part
+# of the source.
 evidence/
+acceptance-artifact/
+target/nextest/

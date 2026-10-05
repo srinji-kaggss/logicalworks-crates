@@ -48,7 +48,7 @@ fn path_dependency(path: &str) -> String {
 fn register(source: &str, origin: &str) -> Result<Contract, Box<dyn Error>> {
     let text = format!(
         concat!(
-            "[policy]\nenforce = true\n\n",
+            "[policy]\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n",
             "[[approved]]\n",
             "crate = \"engine\"\n",
             "tier = \"boundary\"\n",

@@ -342,17 +342,17 @@ pub enum Refusal {
         /// Capability the approval claims to supply.
         capability: String,
     },
-    /// A frozen surface's external edge was re-tiered out of the register's own
-    /// approved tier, which is how `lgwks_ast` is refused the growth
-    /// INV-DEP-1 forbids.
+    /// A frozen surface's external edge was re-tiered out of the tier the
+    /// register freezes it at, which is how this repository refuses `lgwks_ast`
+    /// the growth INV-DEP-1 forbids.
     ///
-    /// `invariants.rs` reads INV-DEP-1 as *the finished, standalone `lgwks_ast`*:
-    /// it is a closed surface whose register entries must keep saying `boundary`.
-    /// A growth attempt that promotes the new edge to `vendor` — or demotes it
-    /// out of the register entirely, which this crate separately refuses as
+    /// The register names both halves: `[policy] frozen_surfaces` (here,
+    /// `lgwks_ast`) and `frozen_tier` (here, `boundary`). A growth attempt that
+    /// promotes the new edge out of that tier — or demotes it out of the
+    /// register entirely, which this crate separately refuses as
     /// [`Refusal::UnregisteredEdge`] — is how the freeze is expressed. No name
-    /// is hardcoded and no exemption is invented: the freeze covers exactly the
-    /// edges a register says a surface owns, and it covers no more.
+    /// is compiled in: the freeze covers exactly the surfaces a register
+    /// declares and the edges it says they own.
     FrozenSurfaceTier {
         /// Frozen surface package that owns the edge.
         consumer: String,
@@ -361,8 +361,20 @@ pub enum Refusal {
         /// Tier the approval now claims.
         tier: String,
     },
+    /// The register approves external edges the tree really has but declares
+    /// no `[policy] accepted_licenses`, so there is no licence policy to judge
+    /// them by.
+    ///
+    /// The gate is a published crate that audits other repositories; a set
+    /// compiled into it would be one repository's choice imposed on every
+    /// other. One refusal for the whole register, because the fix is one line
+    /// in it.
+    LicensePolicyUndeclared {
+        /// Approvals with an observed edge that went unjudged.
+        approvals: usize,
+    },
     /// The licence the package's own manifest declares is not the licence the
-    /// register approved, or is not one this repository accepts.
+    /// register approved, or is not one the register accepts.
     ///
     /// Two refusals share one variant because they are the same question asked
     /// in two directions — *is the approved licence still true, and is it one we
@@ -370,8 +382,8 @@ pub enum Refusal {
     /// shape for the other. `approved` is what the register recorded and
     /// `declared` is what `cargo metadata` reports: when they differ, upstream
     /// changed the licence without a re-approval; when they agree and still
-    /// name something outside [`accepted_licenses`], the approval itself is out
-    /// of policy. `"<none>"` stands for a manifest that declares no `license`
+    /// name something outside the register's `accepted_licenses`, the approval
+    /// itself is out of policy. `"<none>"` stands for a manifest that declares no `license`
     /// key at all, so an absence reads as an absence and not as a permission.
     LicenseNotAccepted {
         /// Package whose declared licence was refused.
@@ -380,7 +392,7 @@ pub enum Refusal {
         approved: String,
         /// Licence expression the package's manifest declares.
         declared: String,
-        /// Licence identifiers outside this repository's accepted set, in the
+        /// Licence identifiers outside the register's accepted set, in the
         /// order they appear in `declared`.
         rejected: Vec<String>,
     },
@@ -401,7 +413,8 @@ pub enum Refusal {
         source: String,
     },
     /// A workspace member or an approval owner names a surface outside the
-    /// closed set INV-DEP-1 enumerates.
+    /// closed set the register's `[policy] surfaces` declares (INV-DEP-1 for
+    /// this repository).
     ///
     /// The gate is membership-driven, so a sixth crate would otherwise be
     /// audited like any other and an `owner = "lgwks_rogue"` approval would
@@ -574,10 +587,15 @@ impl fmt::Display for Refusal {
                 ref role,
             } => write!(
                 formatter,
-                "{krate} is a {role} but not one of the surfaces INV-DEP-1 \
-                 enumerates ({}); a new surface is a decision to record there, \
-                 not a crate to add",
-                SURFACES.join(", ")
+                "{krate} is a {role} but not one of the surfaces the register's \
+                 [policy] surfaces declares; a new surface is a decision to record \
+                 there, not a crate to add"
+            ),
+            Self::LicensePolicyUndeclared { approvals } => write!(
+                formatter,
+                "the register approves {approvals} external edge(s) but declares no \
+                 [policy] accepted_licenses; name the SPDX identifiers this repository \
+                 accepts (for example `accepted_licenses = \"MIT, Apache-2.0\"`)"
             ),
             Self::AdoptionModeRefusals { refusals } => write!(
                 formatter,
@@ -594,7 +612,8 @@ impl Refusal {
     ///
     /// An adoption-mode refusal is not about any one crate: it is about the
     /// register's own `[policy]` block standing down a count of edge
-    /// violations, so it carries no crate name and answers `"<policy>"`. A
+    /// violations, so it carries no crate name and answers `"<policy>"`; so
+    /// does a register with no licence policy, which is about the block too. A
     /// caller that wants to distinguish the two shapes matches on the variant
     /// rather than on this label.
     #[must_use]
@@ -616,7 +635,7 @@ impl Refusal {
             | Self::LicenseNotAccepted { ref krate, .. }
             | Self::VendorTierConflict { ref krate, .. }
             | Self::UnknownSurface { ref krate, .. } => krate,
-            Self::AdoptionModeRefusals { .. } => "<policy>",
+            Self::AdoptionModeRefusals { .. } | Self::LicensePolicyUndeclared { .. } => "<policy>",
         }
     }
 
@@ -629,7 +648,10 @@ impl Refusal {
     /// carrying a policy-shaped name.
     #[must_use]
     pub const fn is_policy(&self) -> bool {
-        matches!(*self, Self::AdoptionModeRefusals { .. })
+        matches!(
+            *self,
+            Self::AdoptionModeRefusals { .. } | Self::LicensePolicyUndeclared { .. }
+        )
     }
 }
 
@@ -897,21 +919,6 @@ fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
         && target_matches(entry, edge)
 }
 
-/// Surfaces whose external edges are frozen: the finished, standalone crates
-/// INV-DEP-1 closes.
-///
-/// This is *not* a list of surfaces to audit — that question is answered
-/// generically, from Cargo's own `workspace_members`, so a newly declared
-/// member is audited from its first commit and nothing has to be listed here to
-/// be classified. It is only the subset whose approved edge set may not grow.
-/// The registry of what is frozen is the register: a crate is frozen once some
-/// `[[approved]]` entry names it as `owner`, and freezing therefore cannot be
-/// smuggled past this gate by editing this array.
-const FROZEN_SURFACES: [&str; 1] = ["lgwks_ast"];
-
-/// The tier an approval for a frozen surface must keep claiming.
-const FROZEN_TIER: contract::Tier = contract::Tier::Boundary;
-
 // ── Licence audit (#208) ────────────────────────────────────────────────────
 
 /// What a manifest with no `license` key is reported as.
@@ -921,63 +928,8 @@ const FROZEN_TIER: contract::Tier = contract::Tier::Boundary;
 /// permission.
 const NO_LICENSE: &str = "<none>";
 
-/// The SPDX identifiers this repository admits an external dependency under.
-///
-/// Provenance, because this table is not a preference: it is the closed set
-/// spanned by what the repository already does.
-///
-/// - Every entry is a licence one of the 32 approved packages already declares
-///   under `cargo metadata`. Widening the set would be a decision the register
-///   has not made; narrowing it would refuse a tree the maintainers shipped.
-/// - `Apache-2.0` and `MIT` are the licences four of the five workspace crates
-///   declare (`crates/*/Cargo.toml`), and `MPL-2.0` is the fifth
-///   (`crates/lgwks-bot`), so these are the licences this repository has already
-///   chosen to publish under.
-/// - `Zlib` and `BSD-3-Clause` are added for one reason: Cargo *requires* every
-///   identifier in an SPDX expression to be known, so a package offering
-///   `MIT OR Apache-2.0 OR Zlib` cannot be approved at all without it. Both are
-///   permissive, non-copyleft licences, so admitting them adds no obligation a
-///   repository publishing under Apache-2.0 has not already taken on.
-///
-/// Not accepted, and refused: `GPL-*` and `AGPL-*` (reciprocal terms that would
-/// reach this repository's own files through the link), `MPL-2.0` as an
-/// *inbound* dependency licence (file-level copyleft imposed on us by an
-/// upstream is not a decision this table makes), `Unicode-3.0` and
-/// `CDLA-Permissive-2.0` (they appear in the transitive closure, and a
-/// transitive edge is not a register entry), and `LicenseRef-*` (a reference to
-/// a licence text this repository has never read).
-///
-/// **This set is not ratified policy.** `LICENSING.md` records what this
-/// repository publishes *itself* under and `docs/dependency-doctrine.md` names
-/// licence obligations exactly once, in its preamble; neither states which
-/// licences an inbound dependency may carry. The table above is therefore the
-/// set the repository currently satisfies, adopted so the audit has something
-/// to refuse with — an explicit, documented and minimal reading rather than a
-/// silent one. Widening it (to admit `BSD-3-Clause`-only or `Unlicense`
-/// packages, for instance) is a Director decision; the honest way to record one
-/// is an edit to this constant plus the register entries it admits.
-const ACCEPTED_LICENSES: [&str; 7] = [
-    "0BSD",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-3-Clause",
-    "CC0-1.0",
-    "MIT",
-    "Zlib",
-];
-
-/// Licence identifiers this repository accepts, as a sorted, borrowable slice.
-///
-/// The accessor exists so the table above has one reader in this module and
-/// every other reader — refusals, tests, an embedder asking what it may admit —
-/// goes through the same name.
-#[must_use]
-pub fn accepted_licenses() -> &'static [&'static str] {
-    &ACCEPTED_LICENSES
-}
-
-/// The licence identifiers in `expression` that this repository does not
-/// accept, in the order they appear.
+/// The licence identifiers in `expression` outside the register's `accepted`
+/// set, in the order they appear.
 ///
 /// The expression is scanned for SPDX *identifiers*, not split on whitespace.
 /// The difference decides whether two real licences pass. `Apache-2.0 WITH
@@ -999,7 +951,7 @@ pub fn accepted_licenses() -> &'static [&'static str] {
 /// table lists `Apache-2.0 WITH LLVM-exception` in full and matching it is what
 /// "accepted" means; a bare `Apache-2.0 WITH GPL-exception` is refused on the
 /// `GPL-exception` token, which is the case the exception arm exists to catch.
-fn rejected_license_identifiers(expression: &str) -> Vec<String> {
+fn rejected_license_identifiers(expression: &str, accepted: &[String]) -> Vec<String> {
     let mut rejected = Vec::new();
     // Walk left to right, taking the longest accepted identifier that matches
     // here. Longest-first is what lets `Apache-2.0 WITH LLVM-exception` win over
@@ -1012,9 +964,9 @@ fn rejected_license_identifiers(expression: &str) -> Vec<String> {
     let mut index = 0;
     while index < tokens.len() {
         let rest = tokens[index..].join(" ");
-        if let Some(accepted) = ACCEPTED_LICENSES
+        if let Some(accepted) = accepted
             .iter()
-            .filter(|candidate| rest.starts_with(**candidate))
+            .filter(|candidate| starts_with_term(&rest, candidate))
             .max_by_key(|candidate| candidate.len())
         {
             // Consume exactly the words this identifier occupies.
@@ -1031,8 +983,22 @@ fn rejected_license_identifiers(expression: &str) -> Vec<String> {
     rejected
 }
 
+/// Whether `rest` begins with the whole licence term `term`, ending at a word
+/// boundary, so an accepted `MIT` does not also accept `MIT-0`.
+fn starts_with_term(rest: &str, term: &str) -> bool {
+    rest.strip_prefix(term)
+        .is_some_and(|after| after.is_empty() || after.starts_with(' '))
+}
+
 /// Every approval whose recorded licence no longer says what the package
-/// declares, or names a licence outside [`ACCEPTED_LICENSES`].
+/// declares, or names a licence outside the register's `accepted_licenses`.
+///
+/// The accepted set is the register's own `[policy] accepted_licenses`. A
+/// register that approves an observed edge and declares no accepted set is one
+/// [`Refusal::LicensePolicyUndeclared`]: this crate is published and audits
+/// other repositories, so it has no licence policy of its own to fall back on,
+/// and admitting every licence because none was declared would be the gate
+/// failing open.
 ///
 /// One pass over the approvals, and each approval is asked about the *declared*
 /// licence of its target rather than the licence the register recorded: the
@@ -1047,6 +1013,21 @@ fn rejected_license_identifiers(expression: &str) -> Vec<String> {
 /// dependency cannot honestly be approved under two licences and the gate has
 /// no evidence to pick one.
 fn license_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
+    let Some(accepted) = register.policy.accepted_licenses.as_deref() else {
+        let approvals = register
+            .approvals()
+            .filter(|entry| {
+                edges
+                    .iter()
+                    .any(|edge| !edge.workspace && entry.admits(&edge.package))
+            })
+            .count();
+        return if approvals == 0 {
+            Vec::new()
+        } else {
+            vec![Refusal::LicensePolicyUndeclared { approvals }]
+        };
+    };
     register
         .approvals()
         .filter_map(|entry| {
@@ -1078,7 +1059,9 @@ fn license_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             let rejected = observed
                 .iter()
                 .copied()
-                .flat_map(|candidate| rejected_license_identifiers(declared_value(candidate)))
+                .flat_map(|candidate| {
+                    rejected_license_identifiers(declared_value(candidate), accepted)
+                })
                 .collect::<Vec<_>>();
             if !drift && rejected.is_empty() {
                 return None;
@@ -1160,8 +1143,12 @@ fn vendor_tier_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusa
 /// disagree about which tier is being policed.
 const VENDOR_TIER: contract::Tier = contract::Tier::Vendor;
 
-/// Every approval that re-tiers a frozen surface's own edge away from
-/// [`FROZEN_TIER`], as one refusal each.
+/// Every approval that re-tiers a frozen surface's own edge away from the
+/// register's `frozen_tier`, as one refusal each.
+///
+/// Which surfaces are frozen, and at what tier, is the register's
+/// `[policy] frozen_surfaces` and `frozen_tier`; a register that declares
+/// neither freezes nothing.
 ///
 /// The second, structural half of INV-DEP-1's *never grow `lgwks_ast`*: adding
 /// the edge at all is already refused as [`Refusal::UnregisteredEdge`], and
@@ -1169,10 +1156,13 @@ const VENDOR_TIER: contract::Tier = contract::Tier::Vendor;
 /// would reach for next. Both refusals name the surface, so a refusal says which
 /// surface is in violation rather than only which crate is unowned.
 fn frozen_surface_tier_refusals(register: &Contract) -> Vec<Refusal> {
+    let Some(frozen) = register.policy.frozen.as_ref() else {
+        return Vec::new();
+    };
     register
         .approvals()
-        .filter(|entry| entry.tier() != FROZEN_TIER)
-        .filter(|entry| FROZEN_SURFACES.contains(&entry.owner()))
+        .filter(|entry| entry.tier() != frozen.tier)
+        .filter(|entry| frozen.surfaces.iter().any(|name| name == entry.owner()))
         .map(|entry| Refusal::FrozenSurfaceTier {
             consumer: entry.owner().to_owned(),
             krate: entry.krate().to_owned(),
@@ -1181,28 +1171,18 @@ fn frozen_surface_tier_refusals(register: &Contract) -> Vec<Refusal> {
         .collect()
 }
 
-/// The closed set of workspace surfaces INV-DEP-1 enumerates: the three
-/// dependency surfaces, the standalone parser and the proc-macro crate.
-const SURFACES: [&str; 5] = [
-    "lgwks_std",
-    "lgwks_bot",
-    "lgwks_deps",
-    "lgwks_ast",
-    "lgwks_macros",
-];
-
-/// The repository whose workspace [`SURFACES`] describes. The vocabulary is this
-/// repository's own, so it binds only a register that declares it; the gate also
-/// audits other repositories, whose members are theirs to name.
-const SURFACE_REPOSITORY: &str = "https://github.com/srinji-kaggss/logicalworks-crates";
-
-/// Every workspace member and every approval owner outside [`SURFACES`], as
-/// one refusal each, for the register that declares [`SURFACE_REPOSITORY`].
+/// Every workspace member and every approval owner outside the register's
+/// `[policy] surfaces`, as one refusal each.
+///
+/// The closed set is the register's: INV-DEP-1's five surfaces are what this
+/// repository's own register declares, and another repository declares its own
+/// or none. A register that declares none keeps no closed set, and no member or
+/// owner is refused for its name.
 fn surface_refusals(members: &[String], register: &Contract) -> Vec<Refusal> {
-    if register.repository.as_deref() != Some(SURFACE_REPOSITORY) {
+    let Some(surfaces) = register.policy.surfaces.as_deref() else {
         return Vec::new();
-    }
-    let unknown = |name: &str| !SURFACES.contains(&name);
+    };
+    let unknown = |name: &str| !surfaces.iter().any(|surface| surface == name);
     let members = members
         .iter()
         .filter(|name| unknown(name))
@@ -1632,7 +1612,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const REGISTER: &str = concat!(
-        "[policy]\nenforce = true\n\n",
+        "[policy]\nenforce = true\naccepted_licenses = \"0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib\"\n\n",
         "[[approved]]\n",
         "crate = \"serde\"\n",
         "tier = \"boundary\"\n",
@@ -1693,7 +1673,7 @@ mod tests {
             .unwrap_or_default();
         Contract::parse(&format!(
             concat!(
-                "[policy]\nenforce = true\n\n",
+                "[policy]\nenforce = true\naccepted_licenses = \"0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib\"\n\n",
                 "[[approved]]\n",
                 "crate = \"engine\"\n",
                 "tier = \"{tier}\"\n",
@@ -1723,11 +1703,20 @@ mod tests {
         edge
     }
 
-    /// [`REGISTER`] declaring the repository the surface vocabulary binds.
+    /// The five surfaces this repository's register declares (INV-DEP-1).
+    const SURFACES: [&str; 5] = [
+        "lgwks_std",
+        "lgwks_bot",
+        "lgwks_deps",
+        "lgwks_ast",
+        "lgwks_macros",
+    ];
+
+    /// [`REGISTER`] declaring a closed surface set in its own `[policy]`.
     fn surface_register() -> String {
         REGISTER.replacen(
             "enforce = true\n",
-            &format!("enforce = true\nrepository = \"{SURFACE_REPOSITORY}\"\n"),
+            &format!("enforce = true\nsurfaces = \"{}\"\n", SURFACES.join(", ")),
             1,
         )
     }
@@ -1736,7 +1725,9 @@ mod tests {
     /// refused by name, where the identifier check alone admitted it.
     #[test]
     fn a_rogue_approval_owner_is_refused_by_name() -> TestResult {
-        let register = Contract::parse(&surface_register().replace("lgwks_std", "lgwks_rogue"))?;
+        let register = Contract::parse(
+            &surface_register().replace("owner = \"lgwks_std\"", "owner = \"lgwks_rogue\""),
+        )?;
         let refusals = surface_refusals(&[], &register);
         assert_eq!(
             refusals,
@@ -1771,6 +1762,52 @@ mod tests {
             }]
         );
         Ok(())
+    }
+
+    /// No closed surface set is compiled in: a register that declares no
+    /// `surfaces` refuses no member or owner for its name, whatever it is.
+    #[test]
+    fn a_register_without_surfaces_keeps_no_closed_set() -> TestResult {
+        let register = Contract::parse(&REGISTER.replace("lgwks_std", "lgwks_rogue"))?;
+        let members = vec!["anything".to_owned(), "lgwks_sixth".to_owned()];
+        assert!(surface_refusals(&members, &register).is_empty());
+        Ok(())
+    }
+
+    /// The freeze is the register's: `frozen_surfaces` and `frozen_tier` name
+    /// what is frozen and at what tier, and without them nothing is.
+    #[test]
+    fn the_freeze_is_declared_by_the_register() -> TestResult {
+        let vendored = REGISTER
+            .replace("lgwks_std", "lgwks_ast")
+            .replace("tier = \"boundary\"", "tier = \"vendor\"");
+        let unfrozen = Contract::parse(&vendored)?;
+        assert!(frozen_surface_tier_refusals(&unfrozen).is_empty());
+        let frozen = Contract::parse(&vendored.replacen(
+            "enforce = true\n",
+            "enforce = true\nfrozen_surfaces = \"lgwks_ast\"\nfrozen_tier = \"boundary\"\n",
+            1,
+        ))?;
+        assert_eq!(
+            frozen_surface_tier_refusals(&frozen),
+            vec![Refusal::FrozenSurfaceTier {
+                consumer: "lgwks_ast".into(),
+                krate: "serde".into(),
+                tier: "vendor".into(),
+            }]
+        );
+        Ok(())
+    }
+
+    /// Accepting `MIT` does not accept `MIT-0`: a term matches whole.
+    #[test]
+    fn an_accepted_term_does_not_accept_its_prefix_extension() {
+        let accepted = vec!["MIT".to_owned()];
+        assert_eq!(
+            rejected_license_identifiers("MIT-0", &accepted),
+            vec!["MIT-0".to_owned()]
+        );
+        assert!(rejected_license_identifiers("MIT OR MIT", &accepted).is_empty());
     }
 
     /// Issue #210: `tier` is read. A `vendor` approval over an edge that
@@ -2139,7 +2176,7 @@ mod tests {
     #[test]
     fn multiple_approvals_report_the_relevant_failed_dimension() -> TestResult {
         let text = concat!(
-            "[policy]\nenforce = true\n\n",
+            "[policy]\nenforce = true\naccepted_licenses = \"0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib\"\n\n",
             "[[approved]]\n",
             "crate = \"engine\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
             "capability = \"engine.git\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"git\"\n",

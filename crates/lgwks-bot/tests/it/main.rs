@@ -27,6 +27,9 @@ mod band_family;
 #[path = "../support/compile.rs"]
 mod compile;
 
+#[path = "../support/declarable.rs"]
+mod declarable;
+
 #[path = "../support/effects.rs"]
 mod effects;
 
@@ -149,6 +152,7 @@ mod sim_source_matrix;
 mod sim_spec_materialize;
 mod sim_store_faults;
 mod sim_store_scale;
+mod sim_t_rows;
 mod sim_task;
 mod sim_task_axes;
 mod sim_task_resume;
@@ -158,6 +162,7 @@ mod sys_process_binding;
 mod sys_process_portable;
 mod t02_compile_surface;
 mod t22_process_surface;
+mod t_rows;
 mod task_front_door;
 mod task_million;
 mod wrong_identity_evidence;

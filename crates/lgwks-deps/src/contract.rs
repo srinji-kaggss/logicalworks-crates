@@ -210,8 +210,42 @@ pub struct Contract {
     /// from, so a CLI receipt can bind a run to the exact contract revision it
     /// read. See [`Contract::digest`] for what this does and does not claim.
     pub(crate) digest: String,
+    /// The repository's own policy, read from `[policy]`. Nothing in it has a
+    /// built-in default: this crate is published, so any value compiled into it
+    /// would bind every repository that runs the gate to one repository's
+    /// choices, with no way to change them short of a new release.
+    pub(crate) policy: Policy,
     /// Every approved dependency.
     pub(crate) entries: Vec<Entry>,
+}
+
+/// What a register declares about its own repository, beyond the approvals.
+///
+/// Each field is the register's decision, and an absent field is a decision
+/// not made — never a fallback to some other repository's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Policy {
+    /// SPDX licence identifiers an external dependency may be under
+    /// (`accepted_licenses`). `None` means the register has not said, and the
+    /// licence audit refuses rather than guesses (`LicensePolicyUndeclared`).
+    pub(crate) accepted_licenses: Option<Vec<String>>,
+    /// The closed set of workspace members and approval owners this repository
+    /// has (`surfaces`). `None` means the repository keeps no closed set, and no
+    /// member or owner is refused for its name.
+    pub(crate) surfaces: Option<Vec<String>>,
+    /// Members whose approved edge set is closed (`frozen_surfaces`), and the
+    /// tier every approval they own must keep claiming (`frozen_tier`). The two
+    /// are declared together or not at all.
+    pub(crate) frozen: Option<Frozen>,
+}
+
+/// The frozen-surface half of [`Policy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Frozen {
+    /// Members whose edges may not grow or be re-tiered.
+    pub(crate) surfaces: Vec<String>,
+    /// The tier their approvals must keep.
+    pub(crate) tier: Tier,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -269,6 +303,15 @@ pub enum ContractError {
         key: String,
         /// The offending value, verbatim, quotes included.
         value: String,
+    },
+    /// A `[policy]` key that only means something beside another was written
+    /// without it: `frozen_surfaces` names what is frozen and `frozen_tier` what
+    /// it is frozen at, and either alone is half a rule.
+    IncompletePolicy {
+        /// The key that was written.
+        present: &'static str,
+        /// The key it needs beside it.
+        missing: &'static str,
     },
     /// The same `[policy]` key was written more than once.
     DuplicatePolicyKey {
@@ -564,6 +607,11 @@ impl fmt::Display for ContractError {
                 fmt_duplicate_policy_key(formatter, line, key)
             }
             Self::DuplicatePolicySection { line } => fmt_duplicate_policy_section(formatter, line),
+            Self::IncompletePolicy { present, missing } => write!(
+                formatter,
+                "[policy] declares `{present}` without `{missing}`; the two keys are one rule \
+                 and are written together"
+            ),
             Self::BadDate {
                 ref krate,
                 line,
@@ -682,13 +730,13 @@ pub(crate) struct RawEntry {
 }
 
 /// One schema-approved field with decoded value and source location.
-struct RawField {
+pub(crate) struct RawField {
     /// Key selected from the register-specific schema.
-    key: &'static str,
+    pub(crate) key: &'static str,
     /// Decoded TOML basic-string value.
     value: String,
     /// One-based source line.
-    line: usize,
+    pub(crate) line: usize,
 }
 
 impl RawEntry {
@@ -761,6 +809,8 @@ struct Reader<'a> {
     repository: Option<String>,
     /// Register schema version, defaulting to 1 when `[policy] schema` is absent.
     schema: u32,
+    /// Repository-policy declarations, decoded later by the register that owns them.
+    policy_fields: Vec<RawField>,
     /// Raw entries in source order.
     entries: Vec<RawEntry>,
 }
@@ -811,8 +861,20 @@ fn handle_section_header(
     }
 }
 
-/// Every key the `[policy]` block defines.
+/// Every scalar key the `[policy]` block defines.
 const POLICY_KEYS: [&str; 3] = ["enforce", "repository", "schema"];
+
+/// The repository-policy keys a dependency register may declare in `[policy]`.
+///
+/// Read as strings and decoded by [`Contract::parse`], because what they mean
+/// is the dependency register's: the invariant register shares the line reader
+/// and refuses every one of them.
+const POLICY_DECLARATION_KEYS: [&str; 4] = [
+    "accepted_licenses",
+    "surfaces",
+    "frozen_surfaces",
+    "frozen_tier",
+];
 
 /// The register schema versions this build reads.
 ///
@@ -965,12 +1027,14 @@ fn apply_policy_pair(
     key: &str,
     value: &str,
     line_no: usize,
-    seen_keys: &mut Vec<String>,
-    enforce: &mut bool,
-    repository: &mut Option<String>,
-    schema: &mut u32,
+    reader: &mut Reader<'_>,
 ) -> Result<(), ContractError> {
-    if !POLICY_KEYS.contains(&key) {
+    let seen_keys = &mut reader.policy_keys;
+    let declaration = POLICY_DECLARATION_KEYS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == key);
+    if !POLICY_KEYS.contains(&key) && declaration.is_none() {
         let refusal = Err(ContractError::UnknownKey {
             line: line_no,
             key: key.to_owned(),
@@ -986,23 +1050,33 @@ fn apply_policy_pair(
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_policy_pair: returning an error to the caller");
         return refusal;
     }
+    if let Some(declared) = declaration {
+        let decoded = decode_string(value, key, line_no)?;
+        seen_keys.push(key.to_owned());
+        reader.policy_fields.push(RawField {
+            key: declared,
+            value: decoded,
+            line: line_no,
+        });
+        return Ok(());
+    }
     match key {
         "enforce" => {
             let decoded = decode_enforce(value, line_no)?;
             seen_keys.push(key.to_owned());
-            *enforce = decoded;
+            reader.enforce = decoded;
             Ok(())
         }
         "schema" => {
             let decoded = decode_schema(value, line_no)?;
             seen_keys.push(key.to_owned());
-            *schema = decoded;
+            reader.schema = decoded;
             Ok(())
         }
         _ => {
             let decoded = decode_string(value, key, line_no)?;
             seen_keys.push(key.to_owned());
-            *repository = Some(decoded);
+            reader.repository = Some(decoded);
             Ok(())
         }
     }
@@ -1064,15 +1138,7 @@ fn process_pair(
             line: line_no,
             key: key.to_owned(),
         }),
-        Section::Policy => apply_policy_pair(
-            key,
-            value,
-            line_no,
-            &mut reader.policy_keys,
-            &mut reader.enforce,
-            &mut reader.repository,
-            &mut reader.schema,
-        ),
+        Section::Policy => apply_policy_pair(key, value, line_no, reader),
         Section::Entry => {
             // `Section::Entry` is only ever entered by `handle_section_header`
             // pushing a draft, and a draft is never popped, so this is a failure
@@ -1140,6 +1206,8 @@ pub(crate) struct RawRegister {
     pub(crate) repository: Option<String>,
     /// Register schema version; 1 when absent.
     pub(crate) schema: u32,
+    /// `[policy]` declarations from [`POLICY_DECLARATION_KEYS`], in source order.
+    pub(crate) policy_fields: Vec<RawField>,
     /// Repeated blocks in source order.
     pub(crate) entries: Vec<RawEntry>,
 }
@@ -1164,6 +1232,7 @@ pub(crate) fn parse_register(
         enforce: true,
         repository: None,
         schema: 1,
+        policy_fields: Vec::new(),
         entries: Vec::new(),
     };
 
@@ -1175,6 +1244,7 @@ pub(crate) fn parse_register(
         enforce: reader.enforce,
         repository: reader.repository,
         schema: reader.schema,
+        policy_fields: reader.policy_fields,
         entries: reader.entries,
     })
 }
@@ -1261,13 +1331,22 @@ impl Contract {
             entries.push(entry);
         }
         check_aliases(&entries)?;
+        let policy = build_policy(&raw.policy_fields)?;
         Ok(Self {
             enforce: raw.enforce,
             repository: raw.repository,
             schema: raw.schema,
             digest: fingerprint(text),
+            policy,
             entries,
         })
+    }
+
+    /// The SPDX licence identifiers this register accepts, or `None` when it
+    /// has not declared any.
+    #[must_use]
+    pub fn accepted_licenses(&self) -> Option<&[String]> {
+        self.policy.accepted_licenses.as_deref()
     }
 
     /// The register schema version this contract was written under.
@@ -1441,7 +1520,7 @@ fn is_identifier(value: &str) -> bool {
 ///   SPDX identifier and licence-reference suffix this repository can meet.
 ///
 /// Whether the identifiers are *accepted* is a separate question, answered by
-/// [`crate::accepted_licenses`] in the audit rather than here: an expression can
+/// [`Contract::accepted_licenses`] in the audit rather than here: an expression can
 /// be perfectly legible and still name a licence this repository does not take.
 fn is_spdx_expression(value: &str) -> bool {
     // SPDX separates tokens with exactly one space; a doubled, padded or
@@ -1752,6 +1831,144 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         review,
         line: draft.line,
     })
+}
+
+/// Decodes the repository-policy declarations of a dependency register.
+///
+/// Every list is a comma-separated basic string, refused whole when a member is
+/// empty, repeated, or not in its vocabulary — a list that silently dropped a
+/// malformed member would admit less, or more, than the reviewer read.
+fn build_policy(fields: &[RawField]) -> Result<Policy, ContractError> {
+    let mut policy = Policy::default();
+    let mut frozen_surfaces: Option<(Vec<String>, usize)> = None;
+    let mut frozen_tier: Option<Tier> = None;
+    for field in fields {
+        let decoded = decode_policy_field(field);
+        let value = match decoded {
+            Ok(value) => value,
+            Err(error) => {
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_policy: returning an error to the caller");
+                return refusal;
+            }
+        };
+        match value {
+            PolicyValue::Licences(list) => policy.accepted_licenses = Some(list),
+            PolicyValue::Surfaces(list) => policy.surfaces = Some(list),
+            PolicyValue::Frozen(list) => frozen_surfaces = Some((list, field.line)),
+            PolicyValue::Tier(tier) => frozen_tier = Some(tier),
+        }
+    }
+    let missing = match (frozen_surfaces.is_some(), frozen_tier.is_some()) {
+        (true, false) => Some(("frozen_surfaces", "frozen_tier")),
+        (false, true) => Some(("frozen_tier", "frozen_surfaces")),
+        _ => None,
+    };
+    if let Some((present, missing)) = missing {
+        let refusal = Err(ContractError::IncompletePolicy { present, missing });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_policy: returning an error to the caller");
+        return refusal;
+    }
+    if let (Some((surfaces, line)), Some(tier)) = (frozen_surfaces, frozen_tier) {
+        let checked = check_frozen_are_surfaces(&surfaces, policy.surfaces.as_deref(), line);
+        checked?;
+        policy.frozen = Some(Frozen { surfaces, tier });
+    }
+    Ok(policy)
+}
+
+/// One decoded `[policy]` declaration, before the freeze's two halves are
+/// paired.
+enum PolicyValue {
+    /// `accepted_licenses`.
+    Licences(Vec<String>),
+    /// `surfaces`.
+    Surfaces(Vec<String>),
+    /// `frozen_surfaces`.
+    Frozen(Vec<String>),
+    /// `frozen_tier`.
+    Tier(Tier),
+}
+
+/// Decodes one declaration against its own vocabulary.
+fn decode_policy_field(field: &RawField) -> Result<PolicyValue, ContractError> {
+    match field.key {
+        "accepted_licenses" => policy_list(field, is_spdx_term).map(PolicyValue::Licences),
+        "surfaces" => policy_list(field, is_identifier).map(PolicyValue::Surfaces),
+        "frozen_surfaces" => policy_list(field, is_identifier).map(PolicyValue::Frozen),
+        _ => Tier::parse(&field.value)
+            .map(PolicyValue::Tier)
+            .ok_or_else(|| ContractError::BadTier {
+                line: field.line,
+                value: field.value.clone(),
+            }),
+    }
+}
+
+/// A frozen surface the register's own closed surface set does not name is a
+/// contradiction in one block, refused at load rather than audited around.
+fn check_frozen_are_surfaces(
+    frozen: &[String],
+    surfaces: Option<&[String]>,
+    line: usize,
+) -> Result<(), ContractError> {
+    let Some(surfaces) = surfaces else {
+        return Ok(());
+    };
+    match frozen.iter().find(|name| !surfaces.contains(name)) {
+        Some(outside) => Err(ContractError::BadPolicyValue {
+            line,
+            key: "frozen_surfaces".to_owned(),
+            value: format!("{outside} (not one of the declared surfaces)"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Splits one policy list and refuses it whole on an empty, repeated or
+/// out-of-vocabulary member.
+fn policy_list(field: &RawField, member: fn(&str) -> bool) -> Result<Vec<String>, ContractError> {
+    let refuse = || ContractError::BadPolicyValue {
+        line: field.line,
+        key: field.key.to_owned(),
+        value: field.value.clone(),
+    };
+    let items = split_csv(&field.value);
+    let malformed = items.is_empty()
+        || items.iter().enumerate().any(|(index, item)| {
+            items.iter().take(index).any(|earlier| earlier == item) || !member(item)
+        });
+    if malformed {
+        let refusal = Err(refuse());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "policy_list: returning an error to the caller");
+        return refusal;
+    }
+    Ok(items)
+}
+
+/// Tests whether `term` is one SPDX licence term: an identifier, or an
+/// identifier `WITH` an exception identifier.
+///
+/// An identifier is ASCII letters, digits, `.`, `-` and `+`, which spans every
+/// SPDX list identifier and `LicenseRef-*`. This is the shape, not the SPDX
+/// list: which identifiers a repository accepts is exactly the decision this
+/// list records, so the reader admits any well-formed one.
+fn is_spdx_term(term: &str) -> bool {
+    let identifier = |word: &str| {
+        !word.is_empty()
+            && word
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+            && !matches!(word, "AND" | "OR" | "WITH")
+    };
+    let mut words = term.split(' ');
+    match (words.next(), words.next(), words.next(), words.next()) {
+        (Some(single), None, None, None) => identifier(single),
+        (Some(licence), Some("WITH"), Some(exception), None) => {
+            identifier(licence) && identifier(exception)
+        }
+        _ => false,
+    }
 }
 
 /// Splits a comma-separated list, retaining empty members for schema refusal.

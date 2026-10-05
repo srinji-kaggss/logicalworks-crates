@@ -10,7 +10,9 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   finished, standalone `lgwks_ast`, and the proc-macro crate `lgwks_macros`: five
   workspace members. Never grow `lgwks_ast`; never add a new owner or top-level
   crate for third-party code. A workspace member or approval owner outside those
-  five is refused by name as `UnknownSurface`. · why: #207 · enforced by:
+  five is refused by name as `UnknownSurface`; the five are this repository's
+  register's `[policy] surfaces`, not a list compiled into the gate
+  (INV-DEP-16). · why: #207 · enforced by:
   `lgwks_deps::tests::a_rogue_approval_owner_is_refused_by_name`,
   `lgwks_deps::tests::a_sixth_workspace_member_is_refused_by_name`, and
   `lgwks-deps check .`
@@ -111,6 +113,31 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `tests/it/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
   `the_json_receipt_has_stable_identity_fields`,
   `the_receipt_changes_when_its_subject_changes`)
+- **INV-DEP-16** The gate holds no repository's policy. Which licences an
+  inbound dependency may carry (`accepted_licenses`), the closed set of
+  workspace members and approval owners (`surfaces`), and which surfaces are
+  frozen at which tier (`frozen_surfaces`, `frozen_tier`) are each register's
+  `[policy]`, because `lgwks_deps` is published and audits other repositories:
+  a value compiled into it is one repository's choice imposed on every other,
+  with no way to change it short of a release. A register that approves an
+  observed edge and declares no accepted set is refused as
+  `LicensePolicyUndeclared` and never judged by a default; a register that
+  declares no surfaces or freeze binds none. INV-DEP-1's five surfaces and
+  `lgwks_ast`'s freeze are this repository's register declaring exactly that.
+  · why: Director 2026-10-05 — the compiled-in licence set refused the estate's
+  own MPL-2.0 `lgwks_bot` in every consuming repository · enforced by:
+  `tests/it/sim_license_policy.rs`
+  (`the_register_set_decides_every_seeded_expression`,
+  `an_undeclared_policy_is_refused_for_every_seeded_licence`,
+  `two_registers_judge_one_edge_each_by_its_own_set`,
+  `an_mpl_dependency_is_the_registers_decision`,
+  `the_same_seed_replays_and_distinct_seeds_diverge`),
+  `lgwks_deps::tests::a_register_without_surfaces_keeps_no_closed_set`,
+  `lgwks_deps::tests::the_freeze_is_declared_by_the_register`,
+  `lgwks_deps::tests::an_accepted_term_does_not_accept_its_prefix_extension`,
+  `tests/it/contract_schema_compat.rs`
+  (`a_policy_list_is_refused_whole_on_a_bad_member`,
+  `a_half_written_freeze_is_refused`)
 
 ## lgwks_bot — durable execution
 
