@@ -618,7 +618,7 @@ pub enum PoolShutdown {
 
 /// Fix the blocking pool's thread ceiling, once, before the pool first runs.
 ///
-/// The pool is built on its first use at [`MAX_BLOCKING_THREADS`] (512)
+/// The pool is built on its first use at its default ceiling of 512
 /// threads. This is the startup door on that choice: called before any
 /// [`spawn_blocking`] or [`try_spawn_blocking`], it builds the pool at
 /// `threads` instead. The arbitration is the pool's own creation — whichever
