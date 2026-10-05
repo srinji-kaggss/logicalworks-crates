@@ -54,7 +54,11 @@ pub(crate) fn name_fault(name: &str, max: usize) -> Option<NameFault> {
 /// The name is 1 to [`MAX_TENANT_BYTES`] bytes of ASCII letters, digits, and
 /// `-`, `_`, `.`, `:`, which keeps it safe to put in a path, a log line, and a
 /// file name without escaping.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Ordered by name, which is what lets per-tenant capacity state live in an
+/// ordered map: the round scheduler reads and writes it, and an ordered map is
+/// the only collection whose iteration order two processes agree on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tenant(Arc<str>);
 
 impl Tenant {
@@ -73,6 +77,18 @@ impl Tenant {
             }
         };
         Err(FlowError::InvalidTenant { reason })
+    }
+
+    /// Hold a name this crate validated at its own definition site.
+    ///
+    /// Crate-private on purpose. A caller builds a tenant through
+    /// [`Tenant::new`], which refuses an illegal name; the crate's own reserved
+    /// names — the supervisor's implicit tenant, for one — are literals this
+    /// module knows are legal, and routing them through `new` would mean either
+    /// an `expect` on a constant the compiler already checked by eye, or a panic
+    /// path for a value that cannot be wrong.
+    pub(crate) fn assumed(name: &'static str) -> Self {
+        Self(Arc::from(name))
     }
 
     /// The validated name.

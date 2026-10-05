@@ -126,6 +126,16 @@ use super::process::ProcessSpec;
 use super::process::{CapturedStream, ProcessRun, ProcessRunError};
 use super::task::{JoinSet, yield_now};
 
+// Per-tenant admission needs `script::Tenant` — the estate's one tenant
+// identity, shared with step keys, `Host` and every run store — and
+// `crate::task`, which needs it too, is gated the same way. The policy and the
+// refusal are re-exported here because a caller reaches them through the
+// supervisor that enforces them, and `rt::tenancy` is where they are defined.
+#[cfg(feature = "script")]
+pub use super::tenancy::{SpawnRefused, TenancyPolicy};
+#[cfg(feature = "script")]
+use crate::script::Tenant;
+
 /// Iterations one poll of [`repeat`] may complete before it hands the executor
 /// back.
 ///
@@ -256,6 +266,46 @@ impl fmt::Display for SupervisorCancelled {
 }
 
 impl std::error::Error for SupervisorCancelled {}
+
+/// Why a tenant-scoped process run ([`Supervisor::run_process_for`]) produced no
+/// report.
+///
+/// Two arms because the caller has two different repairs: [`Self::Refused`] is
+/// the tenant's own load to fix — the bounded queue was full, or the supervisor
+/// had stopped admitting — and [`Self::Run`] is everything
+/// [`ProcessRunError`](super::process::ProcessRunError) already says about the
+/// process itself, carried unchanged rather than flattened. A single arm would
+/// make "your tenant is loud" and "the platform could not start the program"
+/// the same value, and they are not.
+#[cfg(feature = "process")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RunForError {
+    /// The run was refused before anything started.
+    Refused(SpawnRefused),
+    /// The run was admitted and the process itself failed, one way or another.
+    Run(ProcessRunError),
+}
+
+#[cfg(feature = "process")]
+impl fmt::Display for RunForError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Refused(ref refusal) => write!(formatter, "{refusal}"),
+            Self::Run(ref error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+#[cfg(feature = "process")]
+impl std::error::Error for RunForError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Refused(ref refusal) => Some(refusal),
+            Self::Run(ref error) => Some(error),
+        }
+    }
+}
 
 /// Stable identity of one task a [`Supervisor`] started.
 ///
@@ -706,6 +756,483 @@ impl Stats {
     }
 }
 
+/// One in-flight admission: the permit, and — when the supervisor was built
+/// with a [`TenancyPolicy`] — the tenant the permit is charged to.
+///
+/// The permit and the tenant travel together because their lifetimes are one
+/// fact: a task that ends returns its permit *to the round* rather than to the
+/// pool, and the round needs to know which tenant just freed a slot. A
+/// supervisor without a policy never charges a tenant, so its leases carry no
+/// charge and their drop is exactly the bare permit's drop.
+struct Lease {
+    /// The pool permit, taken out of the pool when the admission was granted.
+    permit: Option<OwnedSemaphorePermit>,
+    /// The tenant this admission is charged to, when the supervisor installed a
+    /// policy. `None` for every untenanted supervisor.
+    #[cfg(feature = "script")]
+    charge: Option<TenantCharge>,
+}
+
+/// The tenant half of a [`Lease`], handed to the round when the lease drops.
+#[cfg(feature = "script")]
+struct TenantCharge {
+    /// The shell that admitted this lease.
+    shell: Arc<tenancy_support::TenancyShell>,
+    /// The tenant charged for the permit.
+    tenant: Tenant,
+}
+
+#[cfg(feature = "script")]
+impl Lease {
+    /// A lease for a supervisor with no policy: dropping it returns the permit
+    /// to the pool, exactly as the raw permit did.
+    fn plain(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit: Some(permit),
+            charge: None,
+        }
+    }
+
+    /// A lease charged to `tenant`, so its drop returns the permit to the round
+    /// rather than to the pool.
+    fn tenanted(
+        permit: OwnedSemaphorePermit,
+        shell: Arc<tenancy_support::TenancyShell>,
+        tenant: Tenant,
+    ) -> Self {
+        Self {
+            permit: Some(permit),
+            charge: Some(TenantCharge { shell, tenant }),
+        }
+    }
+}
+
+/// The plain constructor for a `sync`-only build, where there is no tenancy and
+/// the lease is the permit and nothing else.
+impl Lease {
+    /// A lease for a supervisor with no policy.
+    #[cfg(not(feature = "script"))]
+    fn plain(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit: Some(permit),
+        }
+    }
+}
+
+impl Drop for Lease {
+    /// Hand the permit back — to the round when the lease is tenanted, to the
+    /// pool when it is not.
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        #[cfg(feature = "script")]
+        if let Some(charge) = self.charge.take() {
+            charge.shell.release(&charge.tenant, permit);
+        }
+    }
+}
+
+/// The tenant a call that named none is charged to.
+///
+/// One reserved name, so the untenanted calls share a ceiling and a queue rather
+/// than reaching every tenant's permit — which is what "untenanted calls behave
+/// as one implicit tenant" has to mean for the accounting to be readable. The
+/// leading underscore marks it as the crate's own rather than any caller's.
+///
+/// Only consulted when a [`TenancyPolicy`] is installed: without one there is no
+/// per-tenant state at all and every call shares the single pool, exactly as it
+/// always did.
+#[cfg(feature = "script")]
+const IMPLICIT_TENANT: &str = "_implicit";
+
+/// The tenant an untenanted call is charged to.
+#[cfg(feature = "script")]
+fn implicit_tenant() -> Tenant {
+    Tenant::assumed(IMPLICIT_TENANT)
+}
+
+/// How long a waiting admission sleeps before re-reading cancellation.
+///
+/// A permit frees through the completion hook, which hands it to the waiter and
+/// wakes it directly, so this poll is not how a grant arrives — it is how a
+/// *cancellation* is noticed by a waiter whose pool will never hand out another
+/// permit. It bounds how late that is, never whether it is, and it is the same
+/// interval [`Supervisor::claim`] uses for the untenanted pool.
+#[cfg(feature = "script")]
+const TENANT_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The async half of per-tenant admission: one lock over the pure round
+/// scheduler, plus the parked waiters it hands permits to.
+///
+/// Beside [`Supervisor`] rather than inside [`rt::tenancy`](super::tenancy)
+/// because it needs the supervisor's own permit pool and cancellation token,
+/// and passing those across a module boundary would make them `pub(crate)` for a
+/// type that already owns them privately. The scheduling decision itself lives
+/// in [`rt::tenancy`](super::tenancy) and is untouched by any of this.
+#[cfg(feature = "script")]
+mod tenancy_support {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+    use super::Lease;
+    use crate::rt::tenancy::{Arrival, DeficitRoundRobin, GrantOutcome, TryArrival};
+    use crate::script::Tenant;
+
+    /// The permit pool and the round scheduler, with the two directions a
+    /// permit travels: out of a completed task into the next eligible tenant's
+    /// waiter.
+    pub(super) struct TenancyShell {
+        /// The supervisor's own pool. The tenancy layer never makes a permit; it
+        /// decides which tenant an existing one belongs to.
+        permits: Arc<Semaphore>,
+        /// The pure round scheduler, and through it every parked waiter.
+        round: std::sync::Mutex<DeficitRoundRobin<Arc<WaitSlot>>>,
+    }
+
+    /// One parked admission: where a waiter learns that a permit is coming.
+    ///
+    /// The state is behind its own mutex rather than the shell's, because the
+    /// lock order is shell then slot: a permit is handed to a slot while the
+    /// scheduler is held, and a waiter that goes away touches its slot alone
+    /// and then, separately, the scheduler. Nested in the other order the two
+    /// would deadlock.
+    struct WaitSlot {
+        /// The permit, the abandonment mark, the handover mark and the waker.
+        state: std::sync::Mutex<SlotState>,
+    }
+
+    /// The fields behind a [`WaitSlot`].
+    struct SlotState {
+        /// The permit, once a grant has arrived.
+        permit: Option<OwnedSemaphorePermit>,
+        /// The owner went away before a permit arrived.
+        abandoned: bool,
+        /// A permit was handed over, so this slot is spent.
+        handed: bool,
+        /// The task waiting for the handover.
+        waker: Option<Waker>,
+    }
+
+    impl WaitSlot {
+        /// A slot nobody is waiting on yet.
+        fn fresh() -> Arc<Self> {
+            Arc::new(Self {
+                state: std::sync::Mutex::new(SlotState {
+                    permit: None,
+                    abandoned: false,
+                    handed: false,
+                    waker: None,
+                }),
+            })
+        }
+
+        /// Take the lock. A poisoned lock still guards a consistent value: each
+        /// critical section is a few plain writes that cannot be left half done,
+        /// so a panic elsewhere is not a reason to strand a waiter.
+        fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        /// Whether a grant may still be handed to this slot.
+        ///
+        /// The round scheduler asks this of every queue head it reaches and
+        /// abandons the ones that answer no, so a waiter whose caller has gone
+        /// costs one skip rather than a blocked pool.
+        fn is_live(&self) -> bool {
+            let state = self.lock();
+            !state.abandoned && !state.handed
+        }
+
+        /// Hand `permit` to the waiter, or refuse it and return the permit.
+        ///
+        /// `Some(permit)` means the owner left between the round's liveness
+        /// check and this handoff; the caller recycles the permit rather than
+        /// dropping it, because a permit is capacity and capacity is what the
+        /// next eligible tenant is waiting for.
+        fn deliver(&self, permit: OwnedSemaphorePermit) -> Option<OwnedSemaphorePermit> {
+            let mut state = self.lock();
+            if state.abandoned || state.handed {
+                return Some(permit);
+            }
+            state.permit = Some(permit);
+            state.handed = true;
+            // The waker is taken rather than cloned and kept: it is woken once,
+            // and a stale waker retained for a second wake would wake a task
+            // that has already left.
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+            None
+        }
+
+        /// Take the permit, if one has arrived.
+        fn take_permit(&self) -> Option<OwnedSemaphorePermit> {
+            self.lock().permit.take()
+        }
+
+        /// Record the waiting task, keeping the one already registered.
+        fn register(&self, waker: &Waker) {
+            let mut state = self.lock();
+            let stale = state
+                .waker
+                .as_ref()
+                .is_none_or(|current| !current.will_wake(waker));
+            if stale {
+                state.waker = Some(waker.clone());
+            }
+        }
+    }
+
+    /// The future a parked admission awaits: the permit the round will hand it.
+    ///
+    /// The only way a queued waiter learns of its grant is being woken by
+    /// [`WaitSlot::deliver`], which runs on whichever task released the permit —
+    /// so a grant is delivered by the completion hook rather than polled for, and
+    /// the interval in [`TENANT_CLAIM_POLL_INTERVAL`](super::TENANT_CLAIM_POLL_INTERVAL)
+    /// exists for the stop, not for the permit.
+    pub(super) struct WaitPermit {
+        /// Where the grant is delivered.
+        slot: Arc<WaitSlot>,
+        /// The shell, for the release that a collected permit or an abandoned
+        /// waiter owes.
+        shell: Arc<TenancyShell>,
+        /// The tenant this waiter belongs to.
+        tenant: Tenant,
+    }
+
+    impl WaitPermit {
+        /// A waiter for `tenant`, parked on `slot`.
+        fn new(slot: Arc<WaitSlot>, shell: Arc<TenancyShell>, tenant: Tenant) -> Self {
+            Self {
+                slot,
+                shell,
+                tenant,
+            }
+        }
+    }
+
+    impl Future for WaitPermit {
+        /// The permit, handed over by the round.
+        type Output = OwnedSemaphorePermit;
+
+        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            // Register before reading, never after: the round may hand the
+            // permit over between the read and the registration, and a lost
+            // wakeup here parks a waiter that has already been granted.
+            this.slot.register(context.waker());
+            match this.slot.take_permit() {
+                Some(permit) => Poll::Ready(permit),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for WaitPermit {
+        /// Give back whatever this waiter was owed, or record that it is owed
+        /// nothing.
+        ///
+        /// Two cases, and both owe the pool an exact answer. A waiter dropped
+        /// *after* a permit was handed to it but before it was taken back
+        /// returns the permit through the release path — the same path a
+        /// completed task takes, because a grant nobody collects is capacity
+        /// nobody else may reach. A waiter dropped with no permit is marked
+        /// abandoned, which stops it counting against its tenant's queue bound
+        /// and lets the next round skip it.
+        ///
+        /// The slot lock is released before the scheduler lock is taken, so the
+        /// two critical sections nest only in the order the shell uses.
+        fn drop(&mut self) {
+            let (collected, abandoned) = {
+                let mut state = self.slot.lock();
+                if state.handed {
+                    (state.permit.take(), false)
+                } else {
+                    state.abandoned = true;
+                    (None, true)
+                }
+            };
+            if let Some(permit) = collected {
+                self.shell.release(&self.tenant, permit);
+            }
+            if abandoned {
+                self.shell.lock().note_abandoned(&self.tenant);
+            }
+        }
+    }
+
+    /// What one admission attempt decided.
+    pub(super) enum Admission {
+        /// Admitted at once; the caller owns the lease.
+        Admitted(Lease),
+        /// Parked; the caller owns the waiter and must await it.
+        Queued(WaitPermit),
+        /// Not admitted: the tenant's bounded queue is at its bound, or nothing
+        /// could take a permit right now. `limit` is the tenant's declared queue
+        /// bound in both cases, so the caller can name it.
+        Refused {
+            /// The bound the tenant's queue reached.
+            limit: usize,
+        },
+    }
+
+    impl TenancyShell {
+        /// A shell over `permits`, enforcing `policy`.
+        pub(super) fn new(permits: Arc<Semaphore>, policy: super::TenancyPolicy) -> Self {
+            Self {
+                permits,
+                round: std::sync::Mutex::new(DeficitRoundRobin::new(policy)),
+            }
+        }
+
+        /// Take the lock. A poisoned lock still guards a consistent value: every
+        /// critical section is a handful of plain writes over queues and
+        /// counters, so a panic elsewhere is not a reason to strand permits.
+        fn lock(&self) -> std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>> {
+            self.round
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        /// One permit from the pool, if the pool has one free.
+        fn take_from_pool(&self) -> Option<OwnedSemaphorePermit> {
+            Arc::clone(&self.permits).try_acquire_owned().ok()
+        }
+
+        /// A lease charged to `tenant`, so its drop returns the permit to the
+        /// round rather than to the pool.
+        fn lease(self: &Arc<Self>, permit: OwnedSemaphorePermit, tenant: &Tenant) -> Lease {
+            Lease::tenanted(permit, Arc::clone(self), tenant.clone())
+        }
+
+        /// Admit one arrival for `tenant`, park it, or refuse it.
+        ///
+        /// Every step that could change the answer happens under the scheduler
+        /// lock, so an arrival cannot observe a half-completed round. The
+        /// receiver is `self: &Arc<Self>` because an admitted lease has to keep
+        /// the shell alive for as long as it holds the permit.
+        pub(super) fn admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
+            let slot = WaitSlot::fresh();
+            let mut round = self.lock();
+            let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
+            match outcome {
+                Arrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
+                Arrival::Queued => {
+                    // An arrival that could not take a permit may still be
+                    // servable right now — the ring may have drained between its
+                    // check and this one — so the round is pumped before the
+                    // caller parks. A pump that grants to this very waiter wakes
+                    // it, and the caller's poll collects the permit.
+                    self.pump(&mut round, None);
+                    Admission::Queued(WaitPermit::new(
+                        Arc::clone(&slot),
+                        Arc::clone(self),
+                        tenant.clone(),
+                    ))
+                }
+                Arrival::Refused { limit } => Admission::Refused { limit },
+            }
+        }
+
+        /// Admit one arrival for `tenant` that refuses rather than waits.
+        ///
+        /// The non-blocking door: no tenant is added to any queue, so a caller
+        /// that keeps hammering a full supervisor accumulates no waiters. The
+        /// refusal path has to cost nothing as well as say so.
+        pub(super) fn try_admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
+            let mut round = self.lock();
+            let outcome = round.try_arrive(tenant, || self.take_from_pool());
+            match outcome {
+                TryArrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
+                TryArrival::Contended => Admission::Refused {
+                    limit: round.policy().queue_per_tenant(),
+                },
+            }
+        }
+
+        /// One of this supervisor's in-flight admissions ended, carrying its
+        /// permit back into the round.
+        ///
+        /// The one place a permit is handed to another tenant: the completed
+        /// task's own lease calls it, so a task that ends hands its capacity
+        /// straight to the next eligible waiter rather than returning it to a
+        /// pool for the next arrival to win.
+        pub(super) fn release(&self, tenant: &Tenant, permit: OwnedSemaphorePermit) {
+            let mut round = self.lock();
+            round.note_release(tenant);
+            self.pump(&mut round, Some(permit));
+        }
+
+        /// Hand permits to eligible tenants until none can take one.
+        ///
+        /// `spare` is a permit already off the pool — a completed task's — and
+        /// the loop reaches for another only when the round says a queued tenant
+        /// could take it. A contended pool is therefore drained exactly as far
+        /// as the queued work justifies and no further.
+        fn pump(
+            &self,
+            round: &mut std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>>,
+            spare: Option<OwnedSemaphorePermit>,
+        ) {
+            let mut spare = spare;
+            loop {
+                let permit = match spare.take() {
+                    Some(permit) => permit,
+                    None if round.has_eligible() => match self.take_from_pool() {
+                        Some(permit) => permit,
+                        None => return,
+                    },
+                    None => return,
+                };
+                let mut is_live = |slot: &Arc<WaitSlot>| slot.is_live();
+                match round.grant(permit, &mut is_live) {
+                    GrantOutcome::Idle(permit) => {
+                        // Nobody could take it. Dropping the permit returns it to
+                        // the pool, which is what it was before this release, and
+                        // the loop stops because an idle round says no tenant is
+                        // waiting under a ceiling.
+                        drop(permit);
+                        return;
+                    }
+                    GrantOutcome::Granted(grant) => {
+                        if let Some(returned) = grant.waiter.deliver(grant.permit) {
+                            // The owner left between the liveness check and the
+                            // handoff. The admission is charged back and the
+                            // permit recycles into the same round, so a grant
+                            // that lost its waiter still reaches a live one.
+                            round.note_grant_abandoned(&grant.tenant);
+                            round.note_release(&grant.tenant);
+                            spare = Some(returned);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// How many admissions `tenant` holds, and how many it is waiting for.
+        ///
+        /// Read from the scheduler's own fields, so the report cannot disagree
+        /// with the admission that produced it (INV-BOT-31's rule, applied to
+        /// the per-tenant axis).
+        pub(super) fn counts_of(&self, tenant: &Tenant) -> (usize, usize) {
+            let round = self.lock();
+            (round.in_flight_of(tenant), round.queued_of(tenant))
+        }
+
+        /// How many tenants hold at least one waiter.
+        pub(super) fn tenants_waiting(&self) -> usize {
+            self.lock().tenants_with_queues()
+        }
+    }
+}
+
 /// Owns a bounded set of background tasks and stops them when it goes away.
 ///
 /// See the [module docs](self) for the four mechanisms that keep a task from
@@ -767,6 +1294,17 @@ pub struct Supervisor {
     /// drive anything; a virtual one makes every budget in this supervisor exact
     /// and instant.
     clock: Clock,
+    /// Per-tenant capacity, when the caller installed a [`TenancyPolicy`].
+    ///
+    /// `None` is the default and the exact behaviour this module always had: one
+    /// pool, one ceiling, every caller sharing it. `Some` means admission runs
+    /// through the shell, which charges each permit to a named tenant, bounds
+    /// every tenant's in-flight share, and shares freed permits by deficit round
+    /// robin. Both the untenanted and the tenant-scoped calls take the same path
+    /// when it is `Some` — the untenanted ones as one implicit tenant — so there
+    /// is no second admission implementation to drift.
+    #[cfg(feature = "script")]
+    tenancy: Option<Arc<tenancy_support::TenancyShell>>,
 }
 
 /// What a supervised body reported when it returned.
@@ -917,10 +1455,78 @@ impl Supervisor {
     #[must_use]
     pub fn with_clock(max_in_flight: usize, clock: Clock) -> Self {
         let bound = max_in_flight.clamp(1, Semaphore::MAX_PERMITS);
+        Self::assembled(bound, Arc::new(Semaphore::new(bound)), clock)
+    }
+
+    /// Create a supervisor that runs at most `max_in_flight` tasks at once
+    /// **and** isolates each tenant's share of them under `policy`.
+    ///
+    /// The additive 1.x form of [`Supervisor::new`]: the same supervisor, the
+    /// same report stream, the same terminal outcomes, plus the per-tenant
+    /// ceiling, queue bound and weights a [`TenancyPolicy`] declares.
+    ///
+    /// # What changes for a caller that installs one
+    ///
+    /// - **The untenanted calls are one implicit tenant.**
+    ///   [`Supervisor::spawn`], [`Supervisor::try_spawn`],
+    ///   [`Supervisor::spawn_repeating`], [`Supervisor::spawn_process`] and
+    ///   [`Supervisor::run_process`] are charged to one reserved tenant, so a
+    ///   caller that predates tenancy shares that tenant's ceiling with every
+    ///   other untenanted caller instead of reaching every tenant's permit. No
+    ///   signature changes, and the one behavioural difference is a *visible*
+    ///   refusal rather than an unbounded wait: a full implicit-tenant queue
+    ///   refuses the call and counts it in [`Stats::refused`], where an
+    ///   untenanted supervisor without tenancy still waits.
+    /// - **The tenant-scoped calls answer with a typed refusal.**
+    ///   [`Supervisor::spawn_for`] and [`Supervisor::run_process_for`] name the
+    ///   tenant that is at capacity and the bound it reached, so a caller can
+    ///   tell one loud tenant from a stopped supervisor.
+    ///
+    /// A supervisor built without a policy takes the path it always took: the
+    /// same semaphore, the same waits, the same refusals. That is what makes this
+    /// additive rather than a behaviour change for existing callers.
+    ///
+    /// ```
+    /// use lgwks_bot::rt::supervise::Supervisor;
+    /// use lgwks_bot::rt::tenancy::TenancyPolicy;
+    /// use lgwks_bot::script::Tenant;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let quiet = Tenant::new("quiet")?;
+    /// // 64 permits in total, 32 per tenant: one tenant can strand at most 32
+    /// // of them, so 32 stay reachable for everyone else however loud it is.
+    /// let mut supervisor = Supervisor::with_tenancy(64, TenancyPolicy::new(32, 1_024));
+    /// supervisor
+    ///     .spawn_for(&quiet, |_token| async { /* one unit of work */ })
+    ///     .await?;
+    /// let report = supervisor.shutdown().await;
+    /// assert!(report.is_clean(), "the quiet tenant's task ran to completion");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "script")]
+    #[must_use]
+    pub fn with_tenancy(max_in_flight: usize, policy: TenancyPolicy) -> Self {
+        let bound = max_in_flight.clamp(1, Semaphore::MAX_PERMITS);
+        let permits = Arc::new(Semaphore::new(bound));
+        let mut supervisor = Self::assembled(bound, Arc::clone(&permits), Clock::wall());
+        supervisor.tenancy = Some(Arc::new(tenancy_support::TenancyShell::new(
+            permits, policy,
+        )));
+        supervisor
+    }
+
+    /// The one constructor, so a supervisor differs only by what its admission
+    /// needs.
+    ///
+    /// A private constructor rather than two struct literals: a second spelling
+    /// of the counters would be a second place for one of them to be forgotten,
+    /// and every report a caller reads is built from these fields.
+    fn assembled(bound: usize, permits: Arc<Semaphore>, clock: Clock) -> Self {
         Self {
             token: CancellationToken::new(),
             set: JoinSet::new(),
-            permits: Arc::new(Semaphore::new(bound)),
+            permits,
             #[cfg(all(unix, feature = "process"))]
             cleanup_owners: Arc::new(CleanupOwners::default()),
             identities: BTreeMap::new(),
@@ -938,6 +1544,8 @@ impl Supervisor {
             refused: 0,
             reports_dropped: 0,
             clock,
+            #[cfg(feature = "script")]
+            tenancy: None,
         }
     }
 
@@ -1190,6 +1798,92 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Place `body` on this supervisor under `tenant`, waiting for a free slot if
+    /// the bound is reached.
+    ///
+    /// The tenant-scoped counterpart of [`Supervisor::spawn`], and the only
+    /// door that *charges* a tenant: the admission this call waits for counts
+    /// against `tenant`'s own ceiling under the supervisor's [`TenancyPolicy`],
+    /// and the slot it is given was offered by the deficit round robin because
+    /// `tenant` had work waiting when a permit freed. That is the whole
+    /// contract — one tenant cannot hold more than its share of the supervisor,
+    /// so it cannot starve another.
+    ///
+    /// `body` is called **after** the admission is granted and before the task
+    /// is placed, exactly as [`Supervisor::spawn`] calls it, so it need not be
+    /// `Send` or `'static` itself; only the future it returns is.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnRefused::TenantAtCapacity`] when `tenant` already holds its full
+    /// queue of waiting admissions, naming the tenant and the bound;
+    /// [`SpawnRefused::Cancelled`] once the supervisor has stopped admitting.
+    /// Other tenants are unaffected by either refusal.
+    #[cfg(feature = "script")]
+    pub async fn spawn_for<F, Fut>(&mut self, tenant: &Tenant, body: F) -> Result<(), SpawnRefused>
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        // A supervisor with no policy admits this exactly as `spawn` does — the
+        // implicit tenant is the whole story, and there is no per-tenant ceiling
+        // to charge it to.
+        let Some(shell) = self.tenancy.clone() else {
+            self.spawn(body).await;
+            return Ok(());
+        };
+        self.reap();
+        let lease = match self.claim_tenanted(&shell, tenant).await {
+            Ok(lease) => lease,
+            Err(refusal) => {
+                self.refused = self.refused.saturating_add(1);
+                let refused = Err(refusal);
+                lgwks_std::trace::debug!(error = ?refused.as_ref().err(), "spawn_for: returning an error to the caller");
+                return refused;
+            }
+        };
+        let token = self.child_token();
+        let future = body(token.clone());
+        self.place(lease, async move {
+            future.await;
+            if token.is_cancelled() {
+                TaskEnd::Cancelled
+            } else {
+                TaskEnd::Completed
+            }
+        });
+        Ok(())
+    }
+
+    /// How many of `tenant`'s admissions this supervisor holds, and how many it
+    /// has waiting.
+    ///
+    /// `(in flight, queued)`, read from the same per-tenant counters admission
+    /// charges and the round serves (INV-BOT-31's rule: inspection reads the
+    /// admission's own state, never a second ledger). `(0, 0)` for a tenant that
+    /// has never arrived, for an untenanted supervisor, and for one whose entry
+    /// the scheduler has already retired as idle.
+    #[cfg(feature = "script")]
+    #[must_use]
+    pub fn tenant_capacity(&self, tenant: &Tenant) -> (usize, usize) {
+        self.tenancy
+            .as_ref()
+            .map_or((0, 0), |shell| shell.counts_of(tenant))
+    }
+
+    /// How many tenants currently hold at least one waiting admission.
+    ///
+    /// The load the round is carrying, for a report or an assertion about
+    /// whether a fleet of tenants is actually backed up. Zero for an untenanted
+    /// supervisor, which has no per-tenant queues at all.
+    #[cfg(feature = "script")]
+    #[must_use]
+    pub fn tenants_waiting(&self) -> usize {
+        self.tenancy
+            .as_ref()
+            .map_or(0, |shell| shell.tenants_waiting())
+    }
+
     /// Start a task that repeats under `budget` until the budget or the
     /// supervisor ends it.
     ///
@@ -1392,17 +2086,84 @@ impl Supervisor {
         spec: &ProcessSpec,
         on_line: Option<LineObserver<'_>>,
     ) -> Result<ProcessRun, ProcessRunError> {
-        let Some(permit) = self.claim().await else {
+        let Some(lease) = self.claim().await else {
             let refusal = Err(ProcessRunError::Refused);
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
             return refusal;
         };
+        self.drive_run(lease, spec, on_line).await
+    }
+
+    /// Run `spec` to completion under `tenant`, charging the admission to that
+    /// tenant, and return its captured report.
+    ///
+    /// The tenant-scoped counterpart of [`Supervisor::run_process`]: the same
+    /// one process driver, the same ownership, deadline and cleanup, with the
+    /// admission charged to `tenant` and a typed refusal when that tenant's
+    /// bounded queue is full. The supervisor's global ceiling still bounds the
+    /// total in-flight processes; `tenant`'s own share of them is what this pins.
+    ///
+    /// # Errors
+    ///
+    /// [`RunForError::Refused`] carrying [`SpawnRefused::TenantAtCapacity`] when
+    /// `tenant`'s queue is at its bound, or [`SpawnRefused::Cancelled`] when the
+    /// supervisor has stopped admitting — in both cases nothing ran. Otherwise
+    /// [`RunForError::Run`] carrying exactly what [`Supervisor::run_process`]
+    /// returns: [`ProcessRunError::NotStarted`] also establishes that nothing
+    /// ran, and [`ProcessRunError::AfterStart`] the opposite.
+    ///
+    /// Two arms rather than one because "this tenant is at its bound" and "the
+    /// command could not start" are different facts for the same caller: the
+    /// first is the caller's own load to fix, the second is the platform's.
+    #[cfg(all(unix, feature = "process", feature = "script"))]
+    pub async fn run_process_for(
+        &mut self,
+        tenant: &Tenant,
+        spec: &ProcessSpec,
+    ) -> Result<ProcessRun, RunForError> {
+        let Some(shell) = self.tenancy.clone() else {
+            // No policy: this run is the implicit tenant's, admitted exactly as
+            // `run_process` admits it.
+            return self.run_process(spec).await.map_err(RunForError::Run);
+        };
+        self.reap();
+        let lease = match self.claim_tenanted(&shell, tenant).await {
+            Ok(lease) => lease,
+            Err(refusal) => {
+                self.refused = self.refused.saturating_add(1);
+                let refused = Err(RunForError::Refused(refusal));
+                lgwks_std::trace::debug!(error = ?refused.as_ref().err(), "run_process_for: returning an error to the caller");
+                return refused;
+            }
+        };
+        self.drive_run(lease, spec, None)
+            .await
+            .map_err(RunForError::Run)
+    }
+
+    /// The process driver every runner shares, from an admitted lease to a
+    /// report.
+    ///
+    /// Split out of [`Supervisor::run_process_observed`] so the untenanted and
+    /// the tenant-scoped runners are one body rather than two: a caller that
+    /// named a tenant and a caller that did not fork the same child, cleaned up
+    /// the same process group and reported the same receipt. The lease carries
+    /// the permit — and, under a policy, the tenant it is charged to — through
+    /// the whole run, so capacity comes back through the same door whether the
+    /// call named a tenant or not.
+    #[cfg(all(unix, feature = "process"))]
+    async fn drive_run(
+        &mut self,
+        lease: Lease,
+        spec: &ProcessSpec,
+        on_line: Option<LineObserver<'_>>,
+    ) -> Result<ProcessRun, ProcessRunError> {
         // The same owned admission point `spawn_process` rechecks: a cancelled
         // supervisor never forks, so the first instruction does not run.
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
             let refusal = Err(ProcessRunError::Refused);
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive_run: returning an error to the caller");
             return refusal;
         }
         let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
@@ -1411,12 +2172,12 @@ impl Supervisor {
             Ok(child) => child,
             Err(source) => {
                 let refusal = Err(ProcessRunError::NotStarted { source });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive_run: returning an error to the caller");
                 return refusal;
             }
         };
         let task = self.allocate_task_id();
-        let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
+        let group = ProcessGroup::of(&child, task, lease, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
         let end = drive_process_observed(
             &clock, child, deadline, &token, group, out_limit, err_limit, on_line,
@@ -1453,7 +2214,7 @@ impl Supervisor {
                     "the supervisor was cancelled while the process ran",
                 ),
             });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive_run: returning an error to the caller");
             return refusal;
         }
         // A status is the command's *own* exit. A deadline kill reaps the group
@@ -1485,6 +2246,22 @@ impl Supervisor {
         Err(ProcessRunError::NotStarted {
             source: Self::no_process_group(),
         })
+    }
+
+    /// Process-group containment is unavailable on non-Unix targets, so no
+    /// tenant's run ever starts and the admission is never charged.
+    #[cfg(all(not(unix), feature = "process", feature = "script"))]
+    pub async fn run_process_for(
+        &mut self,
+        tenant: &Tenant,
+        spec: &ProcessSpec,
+    ) -> Result<ProcessRun, RunForError> {
+        let _ = (tenant, spec);
+        let refusal = Err(RunForError::Run(ProcessRunError::NotStarted {
+            source: Self::no_process_group(),
+        }));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_for: returning an error to the caller");
+        refusal
     }
 
     /// Process-group containment is unavailable on non-Unix targets.
@@ -1589,12 +2366,27 @@ impl Supervisor {
     /// the token, and reads cancellation first on every wake, so the race
     /// between "a slot freed" and "the supervisor was cancelled" is decided
     /// for cancellation on ties.
-    async fn claim(&mut self) -> Option<OwnedSemaphorePermit> {
+    async fn claim(&mut self) -> Option<Lease> {
         // The gate before the wait: a cancelled supervisor never parks on a
         // full pool, because there is nothing it would do with a slot.
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
             return None;
+        }
+        // With a policy installed, the untenanted calls are one implicit tenant
+        // and the round — not the pool — decides who a freed permit belongs to.
+        #[cfg(feature = "script")]
+        if let Some(shell) = self.tenancy.clone() {
+            // The untenanted path keeps its silence: a refusal counts and returns,
+            // which is exactly what it did before a tenant could be named. The
+            // typed refusal belongs to the tenant-scoped doors.
+            return match self.claim_tenanted(&shell, &implicit_tenant()).await {
+                Ok(lease) => Some(lease),
+                Err(_) => {
+                    self.refused = self.refused.saturating_add(1);
+                    None
+                }
+            };
         }
         loop {
             self.reap();
@@ -1611,7 +2403,9 @@ impl Supervisor {
                     self.refused = self.refused.saturating_add(1);
                     return None;
                 }
-                Some(Ok(Ok(permit))) if !self.token.is_cancelled() => return Some(permit),
+                Some(Ok(Ok(permit))) if !self.token.is_cancelled() => {
+                    return Some(Lease::plain(permit));
+                }
                 Some(Ok(Ok(_))) => {
                     self.refused = self.refused.saturating_add(1);
                     return None;
@@ -1625,16 +2419,110 @@ impl Supervisor {
         }
     }
 
+    /// The tenanted counterpart of [`Supervisor::claim`]: the same wait, against
+    /// the round instead of the pool, and a typed refusal instead of a silent
+    /// `None` so [`Supervisor::spawn_for`] can hand the caller the tenant that
+    /// was at capacity.
+    ///
+    /// A cancelled supervisor refuses before the wait, during the wait, and at
+    /// the moment a permit lands, exactly as the untenanted path does: the token
+    /// is read before every wait and again on the permit.
+    #[cfg(feature = "script")]
+    async fn claim_tenanted(
+        &mut self,
+        shell: &Arc<tenancy_support::TenancyShell>,
+        tenant: &Tenant,
+    ) -> Result<Lease, SpawnRefused> {
+        loop {
+            if self.token.is_cancelled() {
+                return Err(SpawnRefused::Cancelled);
+            }
+            self.reap();
+            match shell.admit(tenant) {
+                tenancy_support::Admission::Admitted(lease) => {
+                    return if self.token.is_cancelled() {
+                        // Cancellation wins the race for a permit that landed in
+                        // the same instant, and the lease's drop returns the
+                        // capacity to the round either way.
+                        Err(SpawnRefused::Cancelled)
+                    } else {
+                        Ok(lease)
+                    };
+                }
+                tenancy_support::Admission::Refused { limit } => {
+                    return Err(SpawnRefused::TenantAtCapacity {
+                        tenant: tenant.clone(),
+                        limit,
+                    });
+                }
+                tenancy_support::Admission::Queued(waiter) => {
+                    // Park. The permit arrives through the completion hook, which
+                    // wakes this waiter directly; the interval is here so a stop
+                    // is noticed even when no further permit will ever be
+                    // granted, and its loop re-reads cancellation every turn.
+                    // The waiter is scoped to this arm so its `Drop` — which
+                    // records the abandonment — runs on every exit from here,
+                    // rather than living past the match.
+                    let settled = {
+                        let mut waiter = std::pin::pin!(waiter);
+                        let token = self.token.clone();
+                        token
+                            .run_until_cancelled(crate::rt::time::timeout(
+                                TENANT_CLAIM_POLL_INTERVAL,
+                                waiter.as_mut(),
+                            ))
+                            .await
+                    };
+                    match settled {
+                        None => return Err(SpawnRefused::Cancelled),
+                        Some(Ok(permit)) if !self.token.is_cancelled() => {
+                            return Ok(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
+                        }
+                        // Timed out without a permit, or the supervisor was
+                        // cancelled with one in hand. The waiter drops here and
+                        // records its abandonment, so the round stops holding it;
+                        // the next turn re-reads the token and asks again.
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// The non-blocking counterpart of [`Supervisor::claim`].
     ///
     /// Cancellation is checked before the pool and again on the permit, so a
     /// cancelled supervisor refuses even when the pool has room.
-    fn claim_now(&mut self) -> Option<OwnedSemaphorePermit> {
+    fn claim_now(&mut self) -> Option<Lease> {
         if self.token.is_cancelled() {
             self.refused = self.refused.saturating_add(1);
             return None;
         }
         self.reap();
+        #[cfg(feature = "script")]
+        if let Some(shell) = self.tenancy.clone() {
+            return match shell.try_admit(&implicit_tenant()) {
+                tenancy_support::Admission::Admitted(lease) if !self.token.is_cancelled() => {
+                    Some(lease)
+                }
+                tenancy_support::Admission::Admitted(_) => {
+                    // The lease drops here, returning the permit it just took.
+                    self.refused = self.refused.saturating_add(1);
+                    None
+                }
+                tenancy_support::Admission::Refused { .. } => {
+                    self.refused = self.refused.saturating_add(1);
+                    None
+                }
+                tenancy_support::Admission::Queued(_) => {
+                    // `try_admit` never queues; a queued answer would be a defect
+                    // in the door, and it is reported as the capacity refusal it
+                    // must never be mistaken for.
+                    self.refused = self.refused.saturating_add(1);
+                    None
+                }
+            };
+        }
         let acquired = Arc::clone(&self.permits).try_acquire_owned();
         if self.token.is_cancelled() {
             // The permit, if it landed, drops here: refusal wins the race.
@@ -1642,7 +2530,7 @@ impl Supervisor {
             return None;
         }
         match acquired {
-            Ok(permit) => Some(permit),
+            Ok(permit) => Some(Lease::plain(permit)),
             Err(_) => {
                 self.refused = self.refused.saturating_add(1);
                 None
@@ -1660,13 +2548,13 @@ impl Supervisor {
     /// name the task it just started — [`Supervisor::spawn_process`] reports it
     /// so the process's terminal outcome can be matched to the spawn — and the
     /// id is not a handle: it cannot join, abort or observe the task.
-    fn place<Fut>(&mut self, permit: OwnedSemaphorePermit, future: Fut) -> TaskId
+    fn place<Fut>(&mut self, lease: Lease, future: Fut) -> TaskId
     where
         Fut: Future<Output = TaskEnd> + Send + 'static,
     {
         let task = self.allocate_task_id();
         self.place_owned(task, async move {
-            let _permit = permit;
+            let _lease = lease;
             future.await
         });
         task
@@ -2085,7 +2973,11 @@ struct ProcessGroup<'ops> {
     /// Attribution for a later cleanup receipt.
     task: TaskId,
     /// The process admission lease, transferred to `owners` if cleanup remains.
-    permit: Option<OwnedSemaphorePermit>,
+    ///
+    /// A [`Lease`] rather than a bare permit, so a cleanup obligation that
+    /// outlives its task returns the capacity to the tenant it was charged to,
+    /// not merely to a pool nobody is waiting on.
+    permit: Option<Lease>,
     /// Supervisor-owned destination for unresolved cleanup.
     owners: Arc<CleanupOwners>,
     /// Whether a kill is still owed to the group.
@@ -2119,8 +3011,10 @@ struct PendingCleanup {
     task: TaskId,
     /// Process-group id, used only for non-mutating existence observation.
     group: i32,
-    /// Capacity remains charged until terminal absence is observed.
-    _permit: OwnedSemaphorePermit,
+    /// Capacity remains charged until terminal absence is observed. A
+    /// [`Lease`], so a retained obligation is still charged to the tenant whose
+    /// admission it holds.
+    _lease: Lease,
     /// Absence was observed before its task's terminal report was joined.
     absence_observed: bool,
 }
@@ -2138,14 +3032,14 @@ struct CleanupOwners {
 #[cfg(all(unix, feature = "process"))]
 impl CleanupOwners {
     /// Transfer a live task's lease and cleanup obligation to this registry.
-    fn register(&self, task: TaskId, group: i32, permit: OwnedSemaphorePermit) {
+    fn register(&self, task: TaskId, group: i32, lease: Lease) {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(PendingCleanup {
                 task,
                 group,
-                _permit: permit,
+                _lease: lease,
                 absence_observed: false,
             });
     }
@@ -2667,7 +3561,7 @@ impl<'ops> ProcessGroup<'ops> {
     fn of(
         child: &Child,
         task: TaskId,
-        permit: OwnedSemaphorePermit,
+        lease: Lease,
         owners: Arc<CleanupOwners>,
     ) -> ProcessGroup<'static> {
         let group = match child.id() {
@@ -2680,7 +3574,7 @@ impl<'ops> ProcessGroup<'ops> {
         ProcessGroup {
             group,
             task,
-            permit: Some(permit),
+            permit: Some(lease),
             owners,
             armed: true,
             leader_reaped: false,
@@ -3080,8 +3974,8 @@ mod tests {
     #[cfg(all(unix, feature = "process"))]
     use super::SupervisorCancelled;
     use super::{
-        Budget, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome, TrySpawnRefusal,
-        repeat, truncate_panic_message,
+        Budget, Lease, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
+        TrySpawnRefusal, repeat, truncate_panic_message,
     };
     #[cfg(feature = "process")]
     use super::{CleanupReceipt, GroupObserver, GroupSignaller, ProcessGroup};
@@ -3218,10 +4112,11 @@ mod tests {
     }
 
     #[cfg(all(unix, feature = "process"))]
-    fn test_lease() -> Option<lgwks_deps::tokio::sync::OwnedSemaphorePermit> {
-        Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
+    fn test_lease() -> Option<Lease> {
+        let permit = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
             .try_acquire_owned()
-            .ok()
+            .ok()?;
+        Some(Lease::plain(permit))
     }
 
     #[cfg(all(unix, feature = "process"))]
@@ -3391,7 +4286,7 @@ mod tests {
             task,
             armed: true,
             leader_reaped: false,
-            permit: Some(permit),
+            permit: Some(Lease::plain(permit)),
             owners: Arc::clone(&owners),
             signaller: &signaller,
             observer: &cleanup_observer,
@@ -3477,7 +4372,7 @@ mod tests {
             task,
             armed: true,
             leader_reaped: true,
-            permit: Some(permit),
+            permit: Some(Lease::plain(permit)),
             owners: Arc::clone(&owners),
             signaller: &signaller,
             observer: &observer,
@@ -3509,7 +4404,9 @@ mod tests {
         };
         let task = TaskId(11);
         let report = block_on(Supervisor::new(1).shutdown());
-        report.cleanup_owners.register(task, 44, permit);
+        report
+            .cleanup_owners
+            .register(task, 44, Lease::plain(permit));
         assert_eq!(report.pending_cleanup_count(), 1);
         assert!(
             !report.is_clean(),
