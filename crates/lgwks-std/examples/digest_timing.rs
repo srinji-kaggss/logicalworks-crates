@@ -109,10 +109,15 @@ fn schedule(samples_per_class: u32) -> Vec<bool> {
     let mut block: u64 = 0;
     while classes.len() < total {
         let mut hasher = Hasher::new();
-        hasher.update(b"digest_timing schedule").update(&block.to_le_bytes());
+        hasher
+            .update(b"digest_timing schedule")
+            .update(&block.to_le_bytes());
         for byte in hasher.finalize().as_bytes() {
             for bit in 0..8_u32 {
-                classes.push(byte.checked_shr(bit).is_some_and(|shifted| shifted & 1 == 1));
+                classes.push(
+                    byte.checked_shr(bit)
+                        .is_some_and(|shifted| shifted & 1 == 1),
+                );
             }
         }
         block = block.saturating_add(1);
@@ -121,9 +126,20 @@ fn schedule(samples_per_class: u32) -> Vec<bool> {
     classes
 }
 
+/// One comparator's result: Welch's t over the cropped samples, and each
+/// class's mean in nanoseconds per comparison.
+struct Measured {
+    /// Welch's t between the equal and the differing class.
+    welch: f64,
+    /// Mean time per comparison against an equal digest.
+    equal_ns: f64,
+    /// Mean time per comparison against a digest differing in byte 0.
+    differ_ns: f64,
+}
+
 /// Time `compare` over the two classes and return Welch's t on the cropped
 /// samples, with the class means in nanoseconds per comparison.
-fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> (f64, f64, f64) {
+fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured {
     let base = blake3(b"digest_timing base");
     let equal = Digest::from_bytes(*base.as_bytes());
     let mut differing_bytes = *base.as_bytes();
@@ -168,14 +184,16 @@ fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> (f64, f64
             equal_moments.push(per_compare);
         }
     }
-    (
-        welch_t(&equal_moments, &differ_moments),
-        equal_moments.mean,
-        differ_moments.mean,
-    )
+    Measured {
+        welch: welch_t(&equal_moments, &differ_moments),
+        equal_ns: equal_moments.mean,
+        differ_ns: differ_moments.mean,
+    }
 }
 
-fn main() -> Result<ExitCode, Box<dyn Error>> {
+/// `--samples N` (per class) and `--json`, each refusal logged before it
+/// is returned.
+fn parse_args() -> Result<(u32, bool), Box<dyn Error>> {
     let mut samples: u32 = 1_000_000;
     let mut json = false;
     let mut args = std::env::args().skip(1);
@@ -188,58 +206,86 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
                     .map_err(|err| format!("--samples {value:?}: {err}"))?;
             }
             "--json" => json = true,
-            other => return Err(format!("unknown argument {other:?}").into()),
+            other => {
+                let refusal = format!("unknown argument {other:?}");
+                lgwks_std::trace::warn!(%refusal, "digest_timing: refusing the command line");
+                return Err(refusal.into());
+            }
         }
     }
     if samples < 2 {
+        lgwks_std::trace::warn!(samples, "digest_timing: fewer than two samples per class");
         return Err("--samples must be at least 2".into());
     }
+    Ok((samples, json))
+}
 
-    let classes = schedule(samples);
-    let (digest_t, digest_equal_ns, digest_differ_ns) = measure(digest_eq, &classes);
-    let (control_t, control_equal_ns, control_differ_ns) = measure(early_exit_eq, &classes);
-    let (fold_t, fold_equal_ns, fold_differ_ns) = measure(xor_fold_eq, &classes);
-    let digest_ok = digest_t.abs() < THRESHOLD;
-    let control_ok = control_t.abs() >= THRESHOLD;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+/// The report, as one JSON line or as four human lines.
+fn render(samples: u32, json: bool, results: [&Measured; 3]) -> String {
+    let [digest, control, fold] = results;
     let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let digest_ok = digest.welch.abs() < THRESHOLD;
+    let control_ok = control.welch.abs() >= THRESHOLD;
     if json {
-        writeln!(
-            out,
-            "{{\"target\":\"{target}\",\"samples_per_class\":{samples},\"batch\":{BATCH},\"threshold\":{THRESHOLD},\
-             \"digest_eq\":{{\"t\":{digest_t:.3},\"equal_ns\":{digest_equal_ns:.3},\"differ_ns\":{digest_differ_ns:.3},\"pass\":{digest_ok}}},\
-             \"early_exit_control\":{{\"t\":{control_t:.3},\"equal_ns\":{control_equal_ns:.3},\"differ_ns\":{control_differ_ns:.3},\"detected\":{control_ok}}},\
-             \"xor_fold_pre_275\":{{\"t\":{fold_t:.3},\"equal_ns\":{fold_equal_ns:.3},\"differ_ns\":{fold_differ_ns:.3}}}}}"
-        )?;
-    } else {
-        writeln!(
-            out,
+        let row = |name: &str, measured: &Measured, verdict: &str| {
+            format!(
+                "\"{name}\":{{\"t\":{:.3},\"equal_ns\":{:.3},\"differ_ns\":{:.3}{verdict}}}",
+                measured.welch, measured.equal_ns, measured.differ_ns
+            )
+        };
+        return format!(
+            "{{\"target\":\"{target}\",\"samples_per_class\":{samples},\"batch\":{BATCH},\"threshold\":{THRESHOLD},{},{},{}}}",
+            row("digest_eq", digest, &format!(",\"pass\":{digest_ok}")),
+            row(
+                "early_exit_control",
+                control,
+                &format!(",\"detected\":{control_ok}")
+            ),
+            row("xor_fold_pre_275", fold, ""),
+        );
+    }
+    let line = |name: &str, measured: &Measured, verdict: &str| {
+        format!(
+            "{name:<20} t = {:>9.3}  equal {:.3} ns  differ {:.3} ns  {verdict}",
+            measured.welch, measured.equal_ns, measured.differ_ns
+        )
+    };
+    [
+        format!(
             "target {target}: {samples} samples per class, {BATCH} comparisons per sample, threshold |t| < {THRESHOLD}"
-        )?;
-        writeln!(
-            out,
-            "digest_eq          t = {digest_t:>9.3}  equal {digest_equal_ns:.3} ns  differ {digest_differ_ns:.3} ns  {}",
-            if digest_ok { "no leak detected" } else { "LEAK" }
-        )?;
-        writeln!(
-            out,
-            "early_exit control t = {control_t:>9.3}  equal {control_equal_ns:.3} ns  differ {control_differ_ns:.3} ns  {}",
+        ),
+        line(
+            "digest_eq",
+            digest,
+            if digest_ok { "no leak detected" } else { "LEAK" },
+        ),
+        line(
+            "early_exit control",
+            control,
             if control_ok {
                 "leak detected, as it must be"
             } else {
                 "NOT DETECTED: the harness cannot see a leak"
-            }
-        )?;
-        writeln!(
-            out,
-            "xor_fold (pre-#275) t = {fold_t:>9.3}  equal {fold_equal_ns:.3} ns  differ {fold_differ_ns:.3} ns  (recorded, not gated)"
-        )?;
-    }
-    Ok(if digest_ok && control_ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+            },
+        ),
+        line("xor_fold (pre-#275)", fold, "(recorded, not gated)"),
+    ]
+    .join("\n")
+}
+
+fn main() -> Result<ExitCode, Box<dyn Error>> {
+    let (samples, json) = parse_args()?;
+    let classes = schedule(samples);
+    let digest = measure(digest_eq, &classes);
+    let control = measure(early_exit_eq, &classes);
+    let fold = measure(xor_fold_eq, &classes);
+    let report = render(samples, json, [&digest, &control, &fold]);
+    writeln!(io::stdout().lock(), "{report}")?;
+    Ok(
+        if digest.welch.abs() < THRESHOLD && control.welch.abs() >= THRESHOLD {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        },
+    )
 }

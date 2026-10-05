@@ -98,7 +98,7 @@ required-features = ["pattern"]
 
 [[example]]
 name = "digest_timing"
-required-features = ["hash"]
+required-features = ["hash", "trace"]
 
 [[test]]
 name = "pattern_external"
