@@ -159,19 +159,16 @@ fn refuse_declared(
 /// exactly those bytes behind.
 fn refuse_bytes(path: &Path, lied: &[u8], why: &str) -> TestResult {
     std::fs::write(path, lied)?;
-    match FileJournal::open(path) {
-        Err(JournalError::Corrupt(_)) => {}
-        Err(other) => {
-            return Err(format!("{why}: expected a corruption refusal, got {other}").into());
-        }
-        Ok(opened) => {
-            return Err(format!(
-                "{why}: reopened with {} events, so an acknowledged frame was lost",
-                opened.events().count()
-            )
-            .into());
-        }
-    }
+    let outcome: TestResult = match FileJournal::open(path) {
+        Err(JournalError::Corrupt(_)) => Ok(()),
+        Err(other) => Err(format!("{why}: expected a corruption refusal, got {other}").into()),
+        Ok(opened) => Err(format!(
+            "{why}: reopened with {} events, so an acknowledged frame was lost",
+            opened.events().count()
+        )
+        .into()),
+    };
+    outcome?;
     assert_eq!(
         std::fs::read(path)?,
         lied,
@@ -324,6 +321,41 @@ fn cut_appends(band: Band) -> TestResult {
     })
 }
 
+/// The journal with frame `index` declaring `declared`, and one byte of that
+/// frame's own payload or head damaged as well.
+fn damaged_lie(
+    sim: &mut sim::Sim,
+    written: &Written,
+    index: usize,
+    declared: u32,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut lied = written.with_declared(index, declared);
+    let span = usize::try_from(written.declared(index))?.saturating_add(HEAD_BYTES);
+    let reach = u32::try_from(span)?;
+    let into_frame = usize::try_from(sim.rng().below(reach))?;
+    let hit = written
+        .start_of(index)
+        .saturating_add(LENGTH_BYTES)
+        .saturating_add(into_frame);
+    if let Some(byte) = lied.get_mut(hit) {
+        *byte ^= 0xa5;
+    }
+    Ok(lied)
+}
+
+/// Lengthen one seeded frame past the end, damage it too, and require the refusal.
+/// `false` when the draw left no room to lie, so no case ran.
+fn damage_one(sim: &mut sim::Sim, path: &Path, written: &Written) -> Result<bool, Box<dyn Error>> {
+    let index = some_frame(sim, written.frames().saturating_sub(1))?;
+    let Some(declared) = inflated_past_the_end(sim, written, index)? else {
+        return Ok(false);
+    };
+    let lied = damaged_lie(sim, written, index, declared)?;
+    let why = format!("seed {} frame {index} damaged and lengthened", sim.seed);
+    refuse_bytes(path, &lied, &why)?;
+    Ok(true)
+}
+
 /// A lying length over a damaged frame is still refused while an acknowledged
 /// frame follows it: failing to authenticate one candidate is not proof that none
 /// exists in the suffix.
@@ -339,26 +371,7 @@ fn damaged_cut_frames(band: Band) -> TestResult {
         let frames = written.frames();
         let mut cases = 0u64;
         for _ in 0..16 {
-            let index = some_frame(sim, frames.saturating_sub(1))?;
-            let Some(declared) = inflated_past_the_end(sim, &written, index)? else {
-                continue;
-            };
-            let mut lied = written.with_declared(index, declared);
-            // One byte of the cut frame's own payload or head, damaged as well.
-            let span = usize::try_from(written.declared(index))?.saturating_add(HEAD_BYTES);
-            let hit = written
-                .start_of(index)
-                .saturating_add(LENGTH_BYTES)
-                .saturating_add(usize::try_from(sim.rng().below(u32::try_from(span)?))?);
-            if let Some(byte) = lied.get_mut(hit) {
-                *byte ^= 0xa5;
-            }
-            refuse_bytes(
-                &path,
-                &lied,
-                &format!("seed {} frame {index} damaged and lengthened", sim.seed),
-            )?;
-            cases = cases.saturating_add(1);
+            cases = cases.saturating_add(u64::from(damage_one(sim, &path, &written)?));
         }
         sim.record("damaged-cut-frames-refused");
         sim.trace.record_count("damaged-frames", frames);
@@ -384,11 +397,11 @@ fn open_concurrently(tenants: &[Tenant]) -> Vec<Result<usize, JournalError>> {
         }
         let mut outcomes = Vec::new();
         for handle in handles {
-            outcomes.push(handle.join().unwrap_or_else(|_| {
-                Err(JournalError::Storage(std::io::Error::other(
-                    "an opener panicked",
-                )))
-            }));
+            outcomes.push(
+                handle
+                    .join()
+                    .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked)),
+            );
         }
         outcomes
     })

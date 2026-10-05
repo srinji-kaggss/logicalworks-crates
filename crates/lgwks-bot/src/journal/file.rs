@@ -282,10 +282,16 @@ fn resolve_ambiguous_tail(
     if behind > ceiling {
         // A short read was short of at most one frame, so this is not the tail the
         // scan saw: someone wrote past the advisory lock. Nothing is decided on it.
-        return Err(JournalError::Storage(std::io::Error::new(
+        let grew = Err(JournalError::Storage(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the journal file grew while its tail was being resolved; reopen it",
         )));
+        lgwks_std::trace::debug!(
+            behind,
+            ceiling,
+            "resolve_ambiguous_tail: more behind the prefix than a cut frame leaves"
+        );
+        return grew;
     }
     file.seek(SeekFrom::Start(start))
         .map_err(JournalError::Storage)?;
@@ -2290,7 +2296,7 @@ pub(super) mod tests {
     /// Open `path` and require a refusal as `Corrupt` at frame `at`, leaving the
     /// file byte-identical to `before`.
     fn require_refused_untouched(path: &Path, before: &[u8], at: u64, why: &str) -> TestResult {
-        match FileJournal::open(path) {
+        let outcome: TestResult = match FileJournal::open(path) {
             Err(JournalError::Corrupt(corruption)) => {
                 assert_eq!(corruption.at(), at, "{why}: the lying frame is named");
                 assert!(
@@ -2298,18 +2304,16 @@ pub(super) mod tests {
                     "{why}: the refusal names the framing, got {:?}",
                     corruption.kind()
                 );
+                Ok(())
             }
-            Err(other) => {
-                return Err(format!("{why}: expected a corruption refusal, got {other}").into());
-            }
-            Ok(opened) => {
-                return Err(format!(
-                    "{why}: reopened as a journal of {} events, so an acknowledged frame was lost",
-                    opened.events().count()
-                )
-                .into());
-            }
-        }
+            Err(other) => Err(format!("{why}: expected a corruption refusal, got {other}").into()),
+            Ok(opened) => Err(format!(
+                "{why}: reopened as a journal of {} events, so an acknowledged frame was lost",
+                opened.events().count()
+            )
+            .into()),
+        };
+        outcome?;
         assert_eq!(
             lgwks_std::hash::blake3(&std::fs::read(path)?),
             lgwks_std::hash::blake3(before),
