@@ -23,5 +23,8 @@ lgwks_deps = { workspace = true, default-features = false, features = ["macro"] 
 # The diagnostics `unlogged-err-return` requires come from the estate facade.
 lgwks_std = { workspace = true }
 
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

@@ -8,6 +8,23 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### Property tests with shrinking (#273)
+
+- `proptest` 1.11 is admitted as a dev-only edge (`contract/APPROVED.toml`,
+  default features off). No shipped artifact links it.
+- New property targets, each from one fixed seed with failures persisted
+  under `proptest-regressions/`, and each paired with a mutant it must catch
+  and shrink: `lgwks_std` `prop_codecs` (hex, base64, percent, leb128,
+  RFC 3339, wire, and glob against a regex oracle); `lgwks_bot` `prop_journal`
+  (`recover()` over arbitrary proposal histories, refused appends, reopen)
+  and `prop_each` (order, in-flight bound, fail-fast); `lgwks_deps`
+  `prop_parsers` (register and lockfile round trips, duplicate keys); and
+  `lgwks_macros`' line splitter and indentation tree.
+- `lgwks_deps::lock::parse` refused nothing when a `[[package]]` block
+  assigned `name`, `version`, `source` or `checksum` twice: the last
+  assignment won. It now refuses with the new `LockError::DuplicateKey`, at
+  the line of the second assignment.
+
 ### lgwks_std — bounded blocking pool (#264)
 
 - `task::spawn_blocking` runs on one process-wide pool of at most 512 threads

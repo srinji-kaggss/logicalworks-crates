@@ -82,6 +82,7 @@ iri-string = { version = "0.7", optional = true }
 rustix = { version = "1", default-features = false, features = ["std", "fs"], optional = true }
 
 [dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 tempfile = "3.20"
 
 [lints]

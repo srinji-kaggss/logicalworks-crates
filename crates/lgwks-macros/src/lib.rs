@@ -87,3 +87,6 @@ pub fn script(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lines_props;

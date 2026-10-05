@@ -140,6 +140,9 @@ path = "src/main.rs"
 name = "lgwks_deps"
 path = "src/lib.rs"
 
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true
 

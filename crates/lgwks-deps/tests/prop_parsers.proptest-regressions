@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 089754b44c42dc82fa054fbb62b7a1e9705b9e4559339c1937fdc1a1da7b5b75 # shrinks to ([Package { name: "p", version: "0.0.0", checksum: Some("00000000"), dependency: false }], 0, "version")
+cc 2dfbded832db75355d58b430607630d523e12256e656a0986003ea339f15a9fe # shrinks to ([Package { name: "p", version: "0.0.0", checksum: None, dependency: false }, Package { name: "p", version: "0.0.0", checksum: None, dependency: false }, Package { name: "p", version: "0.0.0", checksum: None, dependency: false }, Package { name: "p", version: "0.0.0", checksum: Some("00000000"), dependency: false }], 1930148400147327711, "source")
