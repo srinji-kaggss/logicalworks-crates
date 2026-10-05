@@ -350,28 +350,62 @@ service can run indefinitely on a single store".
 
 ### 4.7 Portable — same semantics on all declared targets
 
-**⚠️ — three operating systems are built in CI; one of them runs the tests that
-carry the containment claim.**
+**⚠️ — one operating system is executed, and eight targets are built. A build
+receipt is not an execution receipt, and this section says which is which.**
 
-Twenty hosted job definitions. Their `runs-on` distribution is **14
+Twenty-two hosted job definitions. Their `runs-on` distribution is **18
 `ubuntu-latest`, 2 `macos-14`, 1 `windows-latest`, 1 `matrix.os`**, and that
 single `matrix.os` job is `appcui-native` — so "three operating systems" is
 true of that one storefront feature and not of the estate. The `lgwks_std` /
-`lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only. A
-`wasm32-wasip1` boundary lane checks that the default feature set compiles for
-WASI — a build check, not an executed containment test. `os.uname` and other
-host-only calls are behind `platform` dispatch.
+`lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only.
+`os.uname` and other host-only calls are behind `platform` dispatch.
+
+**The executed target matrix (#276).** `scripts/check-target-matrix.sh` is a
+required lane that runs `cargo check --locked --target <t>` per declared target
+and per crate. On `aarch64-apple-darwin` (rustc 1.99.0), 42 checks in 69 s from
+an empty target directory:
+
+| Target | `lgwks_std` | `lgwks_std` `--no-default-features` | `lgwks_std` `--features random` | `lgwks_deps` | `lgwks_std` `--features full` | `lgwks_ast` |
+|---|---|---|---|---|---|---|
+| `aarch64-apple-darwin` (host) | builds | builds | builds | builds | builds | builds |
+| `aarch64-unknown-linux-gnu` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `x86_64-unknown-linux-musl` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `wasm32-wasip1` | builds | builds | builds | builds | builds | **not exercised** |
+| `x86_64-unknown-freebsd` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-linux-android` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-apple-ios` | builds | builds | builds | builds | builds | builds |
+
+**"Builds" is a build receipt and "not exercised" is a named gap, not a pass.**
+The nine not-exercised cells each fail with the exact error
+`failed to find tool "aarch64-linux-gnu-gcc"` (or the musl, Android, FreeBSD or
+`clang` equivalent): `ring`, reached through `http`'s rustls, and the
+tree-sitter grammars under `lgwks_ast` compile C per target, and this runner has
+no cross C toolchain for them. The lane accepts that one failure reason by name
+and fails on any other, so the exemption cannot become a lid. **Support is
+therefore claimed for `lgwks_std` on seven targets with the `full` feature set
+only where the row says `builds`, and for `lgwks_ast` and `lgwks_deps` on the
+targets where their row says `builds` — never for a target that was not
+exercised.**
+
+`random` was the module that made the gap load-bearing: it carried a
+three-target `compile_error!` while the backend it wraps supported dozens more,
+so `lgwks_std` with `random` or `http` could not be built for iOS, Android, a
+BSD or WASI at all. It now holds no target list of its own, and its typed
+`EntropyError` is what a caller on any of these targets gets when the source
+fails.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a
 green `windows-latest` job is a *build* receipt for the Windows target and
 never a *containment* receipt: no Windows run in CI can have killed a process
 group. A build check and an executed containment test are different facts, and
-only the second one is a portability claim about the runtime.
+only the second one is a portability claim about the runtime. The eight-target
+matrix above is itself a build receipt: every row was executed by `cargo check`
+and none of them ran a test.
 
-*Not covered:* ARM Linux, musl, 32-bit, and any target outside the hosted
-runners. The performance numbers in §4.9 are from one machine and are explicitly
-not a cross-platform claim.
+*Not covered:* 32-bit, any target outside the eight rows, and any executed test
+on a non-hosted-runner target. The performance numbers in §4.9 are from one
+machine and are explicitly not a cross-platform claim.
 
 ### 4.8 Multi-tenant — isolated under concurrent use
 

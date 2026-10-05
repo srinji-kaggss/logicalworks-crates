@@ -9,6 +9,51 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — `random` reaches every target its backend does, and says why it failed (#276)
+
+- `random` no longer refuses to compile on every target but Linux, macOS and
+  Windows. The three-target `compile_error!` was a narrower claim than the
+  backend it wraps, so it refused FreeBSD, the other BSDs, illumos, Solaris,
+  Android, iOS, `wasm32-wasip1` and every other target `getrandom` already
+  supported. The backend is the one authority on where an entropy source
+  exists, so its own refusal is now the single compile-time gate and this crate
+  holds no target list that could drift narrower.
+- `EntropyError` carries the cause as data instead of a `String`: a
+  `#[non_exhaustive]` `EntropyErrorKind`, `raw_os_error()` for the OS's own
+  code, and `io_error_kind()` for its portable `std::io` classification. A UEFI
+  status wider than `i32` is dropped rather than truncated into a code naming a
+  different failure. Additive for 1.x: `backend()` and the `Display` rendering
+  are unchanged, and the `String` was never in the public surface.
+- `fill_bytes` documents that a refused draw leaves the buffer **unspecified**
+  and must not be read; `bytes` has no such window, since a failed draw returns
+  no array. A test drives the refused path through a crate-private seam, because
+  `getrandom` offers no constructor for a backend failure carrying an OS code
+  and an integration test cannot reach a private seam.
+- New `tests/it/sim_random_error.rs`: seeded sweeps over draw lengths from empty
+  to a mebibyte, concurrent drawers at 100, 1 000, 10 000 and 100 000, the UUID
+  version and variant masks, and a seeded generator that must not be able to
+  predict a draw.
+
+### The gate: every `lgwks_std` feature alone, and the declared target matrix (#276)
+
+- The `feat-std` lane now builds all twelve non-`full` features, each alone.
+  `core`, `trace`, `random`, `ron` and `process` were built by nothing except
+  the rustdoc lane, so a feature that quietly depended on a second feature was
+  invisible to every build receipt.
+- New required lane `tests-std-per-feature`: one
+  `cargo nextest run --no-default-features --features <f>` per feature, because
+  a build receipt is not an execution receipt.
+- New required lane `target-matrix`, running the new
+  `scripts/check-target-matrix.sh`. It installs each declared target with
+  `rustup` and checks `lgwks_std`, `lgwks_ast` and `lgwks_deps` against it: the
+  Rust-only surface is required everywhere, and a check that needs a C
+  toolchain the runner lacks is recorded with its exact error and a named
+  reason instead of being dropped. A failure that is not that reason fails the
+  lane. It runs as its own CI job rather than on the critical path.
+- Measured on aarch64-apple-darwin: 42 checks, 69 s from an empty target
+  directory. `lgwks_std --features random` builds on all seven cross targets;
+  nine `full`/`lgwks_ast` checks are exempt for a missing C cross-compiler.
+
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
 `lgwks_ast` stays at 1.0.0: its source is unchanged since that tag. Every

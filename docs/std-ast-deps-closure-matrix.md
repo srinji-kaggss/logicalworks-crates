@@ -59,7 +59,7 @@ without a row is a coverage failure, and
 | 10 | `online` | `online` | exercised | `open_port_probes_true`, `closed_port_probes_false` | One remaining connection budget, explicit resolver timing scope → [#163](https://github.com/srinji-kaggss/logicalworks-crates/issues/163). **A boolean TCP probe is not a health check** and carries no TLS or universal-connectivity guarantee. |
 | 11 | `pattern` | `pattern` | exercised | `producer_counter_detects_eager_collection_mutant`, `configured_limits_refuse_input_and_amplified_output`; `pattern_external.rs` | Per-operation complexity, producer/resource controls, borrowed replacement → [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168). The discriminating laziness oracle is [#122](https://github.com/srinji-kaggss/logicalworks-crates/issues/122) item 3. |
 | 12 | `process` | `process` (**Unix-only**, `cfg`-gated) | exercised, platform-scoped | `invalid_pgid_is_rejected`, `invalid_pid_is_rejected_for_the_exit_observation` | Real owned-child boundary tests and docs → X4. **Non-Unix returns `std::io::ErrorKind::Unsupported` rather than a fabricated success**; the raw primitives are not managed lifecycle acceptance, and bot owns that. |
-| 13 | `random` | `random` | exercised + **assurance-gap** | `fills_the_whole_buffer`, `successive_draws_differ` | Typed backend failure/cause, defined output validity after failure → X3. **No histogram here is a proof of cryptographic strength.** |
+| 13 | `random` | `random` | exercised (X3 closed by #276) | `fills_the_whole_buffer`, `an_injected_os_code_round_trips_through_the_typed_error`, `a_refused_fill_returns_the_typed_error_and_leaves_the_buffer_alone`; `sim_random_error.rs` (10 tests, four tiers to 100 000 callers) | ~~Typed backend failure/cause, defined output validity after failure~~ → closed by #276: the cause is a kind plus the raw OS code plus its `io::ErrorKind`, and the refused-fill buffer is documented as unspecified and driven by a test. **The typed cause is not a proof that any target's entropy source is sound, and no histogram here is a proof of cryptographic strength.** Builds for seven cross targets (`target-matrix` lane); only `full` and `lgwks_ast` need a C toolchain this runner lacks. |
 | 14 | `retry` | `core` | exercised | `backoff_doubles_and_caps`, `jitter_only_shrinks` | Growth after attempt 31, `Duration`/`u64` jitter boundaries, effective-policy invariants → [#164](https://github.com/srinji-kaggss/logicalworks-crates/issues/164). **Not an executor, and not evidence an effect is retry-safe.** |
 | 15 | `ron` | `ron` | exercised | `struct_roundtrips_through_string`, `enum_roundtrips` | Borrowed types, RON-only derive path, typed partial-writer failure → [#162](https://github.com/srinji-kaggss/logicalworks-crates/issues/162). **Buffered serialization is not an atomic external write.** |
 | 16 | `similarity` | `core` | exercised | `edit_distance_handles_empty_and_identical_inputs`, `edit_distance_normalizes_known_distance`; `similarity_public_api.rs` | Coherent domains, refusal-preserving composition, valid `Geometry` input, normalization units → [#160](https://github.com/srinji-kaggss/logicalworks-crates/issues/160). **Heuristic normalization is not exact identity**, and missing evidence is not a zero. |
@@ -125,10 +125,13 @@ independently.
 [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168),
 [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169).
 
-**Assurance workstreams X1–X4** (constant-time hashing — X1 measured by #275, fallible thread
-admission, entropy failure meaning, feature-isolated ergonomics) remain open
-against the four rows marked **assurance-gap** above and the `process`/`trace`
-rows.
+**Assurance workstreams X1–X4.** X1 (constant-time hashing) was measured by
+#275. X3 (entropy failure meaning) was closed by #276: the refusal carries the
+OS's own code, its portable `io::ErrorKind` and a kind that distinguishes "no
+source on this target" from "the OS refused", and the output buffer's state
+after a refusal is documented and tested rather than assumed. X2 (fallible
+thread admission) and X4 (feature-isolated ergonomics) remain open against the
+rows marked **assurance-gap** above and the `process`/`trace` rows.
 
 **Nothing here converts an unresolved promise into a green checkbox.** A row
 marked `unexercised-gap` or `assurance-gap` is a real, named, owned gap, and
