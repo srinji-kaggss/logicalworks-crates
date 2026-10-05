@@ -123,6 +123,11 @@ additive: no signature changed and no existing behaviour did.
   directory the CI cache never saved and recompiled the GPUI stack on every
   run (3 min 03 s, 134 crates, the run's critical path at 242 s). The CI cache
   step takes a new key so the first `main` run saves those artifacts.
+- The `test` profile emits line tables instead of full debuginfo
+  (`debug = "line-tables-only"`). Backtraces still name function, file and
+  line. Each `Tests (lgwks-bot full)` shard spent 152 s of a 233 s job compiling
+  and linking on a full dependency-cache hit, and the four shards are the run's
+  critical path.
 
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
