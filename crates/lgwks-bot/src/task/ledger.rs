@@ -921,12 +921,18 @@ mod tests {
         for extra in (1u32..=40).chain([100, 1024]) {
             let lied = with_prefix(&bytes, last, declared + extra);
             std::fs::write(scratch.path(), &lied)?;
-            match RunLedger::open(scratch.path()) {
-                Err(StoreError::Corrupt { at }) => assert_eq!(at, 2, "L+{extra}"),
-                Err(other) => return Err(format!("L+{extra}: got {other}").into()),
-                Ok(_) => return Err(format!("L+{extra}: an acknowledged entry was lost").into()),
-            }
-            assert_eq!(std::fs::read(scratch.path())?, lied, "L+{extra}: bytes move");
+            assert!(
+                matches!(
+                    RunLedger::open(scratch.path()),
+                    Err(StoreError::Corrupt { at: 2 })
+                ),
+                "L+{extra}: an acknowledged entry must be refused as corrupt at 2"
+            );
+            assert_eq!(
+                std::fs::read(scratch.path())?,
+                lied,
+                "L+{extra}: bytes move"
+            );
         }
         Ok(())
     }
@@ -961,7 +967,10 @@ mod tests {
         let last = frame_starts(&bytes, LEDGER_MAGIC.len())?[2];
         let whole = bytes.len() - last;
         for cut in [1, 3, 4, 5, whole >> 1, whole - 33, whole - 32, whole - 1] {
-            std::fs::write(scratch.path(), bytes.get(..last + cut).ok_or("past the end")?)?;
+            std::fs::write(
+                scratch.path(),
+                bytes.get(..last + cut).ok_or("past the end")?,
+            )?;
             drop(RunLedger::open(scratch.path())?);
             assert_eq!(
                 std::fs::metadata(scratch.path())?.len(),

@@ -414,10 +414,16 @@ where
     let behind = len.saturating_sub(start);
     let ceiling = u64::try_from(max_frame_bytes.saturating_add(HEAD_BYTES)).unwrap_or(u64::MAX);
     if behind > ceiling {
-        return Err(storage(std::io::Error::new(
+        let grew = Err(storage(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the file grew while its tail was being resolved; reopen it",
         )));
+        lgwks_std::trace::debug!(
+            behind,
+            ceiling,
+            "cut_holds_acknowledged: more behind the prefix than a cut frame leaves"
+        );
+        return grew;
     }
     file.seek(SeekFrom::Start(start)).map_err(storage)?;
     let mut suffix = vec![0u8; usize::try_from(behind).unwrap_or(usize::MAX)];
@@ -542,19 +548,24 @@ where
 #[cfg(test)]
 pub(crate) mod probe {
     use super::{LENGTH_BYTES, framed_len};
+    #[cfg(feature = "script")]
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "script")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Gives concurrent tests distinct scratch names.
+    #[cfg(feature = "script")]
     static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// A scratch file path unique to one test, removed when the test ends.
     ///
     /// Best effort on removal: a scratch file the system refuses to remove is
     /// litter, not a failed observation, so the error does not mask the test's own
-    /// verdict.
+    /// verdict. Only the run store and ledger tests (the `script` feature) use it.
+    #[cfg(feature = "script")]
     pub(crate) struct Scratch(PathBuf);
 
+    #[cfg(feature = "script")]
     impl Scratch {
         /// A fresh path under the temp directory, named for `name`.
         pub(crate) fn new(name: &str) -> Self {
@@ -572,6 +583,7 @@ pub(crate) mod probe {
         }
     }
 
+    #[cfg(feature = "script")]
     impl Drop for Scratch {
         fn drop(&mut self) {
             drop(std::fs::remove_file(&self.0));
@@ -588,9 +600,9 @@ pub(crate) mod probe {
         let mut at = header;
         while at < bytes.len() {
             starts.push(at);
-            at = at.saturating_add(usize::try_from(framed_len(usize::try_from(
-                declared_at(bytes, at),
-            )?))?);
+            at = at.saturating_add(usize::try_from(framed_len(usize::try_from(declared_at(
+                bytes, at,
+            ))?))?);
         }
         Ok(starts)
     }

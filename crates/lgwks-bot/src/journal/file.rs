@@ -2238,7 +2238,7 @@ pub(super) mod tests {
     /// Open `path` and require a refusal as `Corrupt` at frame `at`, leaving the
     /// file byte-identical to `before`.
     fn require_refused_untouched(path: &Path, before: &[u8], at: u64, why: &str) -> TestResult {
-        match FileJournal::open(path) {
+        let outcome: TestResult = match FileJournal::open(path) {
             Err(JournalError::Corrupt(corruption)) => {
                 assert_eq!(corruption.at(), at, "{why}: the lying frame is named");
                 assert!(
@@ -2246,18 +2246,16 @@ pub(super) mod tests {
                     "{why}: the refusal names the framing, got {:?}",
                     corruption.kind()
                 );
+                Ok(())
             }
-            Err(other) => {
-                return Err(format!("{why}: expected a corruption refusal, got {other}").into());
-            }
-            Ok(opened) => {
-                return Err(format!(
-                    "{why}: reopened as a journal of {} events, so an acknowledged frame was lost",
-                    opened.events().count()
-                )
-                .into());
-            }
-        }
+            Err(other) => Err(format!("{why}: expected a corruption refusal, got {other}").into()),
+            Ok(opened) => Err(format!(
+                "{why}: reopened as a journal of {} events, so an acknowledged frame was lost",
+                opened.events().count()
+            )
+            .into()),
+        };
+        outcome?;
         assert_eq!(
             lgwks_std::hash::blake3(&std::fs::read(path)?),
             lgwks_std::hash::blake3(before),

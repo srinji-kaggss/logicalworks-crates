@@ -1587,12 +1587,8 @@ mod tests {
     /// The store file of `count` records, written to `path`, and its bytes.
     fn written(path: &Path, count: u8) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let run = RunId::from_hex(&format!("a{}", "0".repeat(31)))?;
-        let identity = DefinitionIdentity::new(
-            "tail",
-            1,
-            Digest::from_bytes([1; 32]),
-            usize::from(count),
-        );
+        let identity =
+            DefinitionIdentity::new("tail", 1, Digest::from_bytes([1; 32]), usize::from(count));
         let mut bytes = STORE_HEADER.to_vec();
         let mut previous = genesis_head();
         for step in 0..count {
@@ -1615,17 +1611,19 @@ mod tests {
     /// Open `path` and require a refusal as `Corrupt` at frame `at`, with the file
     /// byte-identical to `before`.
     fn require_refused(path: &Path, before: &[u8], at: u64, why: &str) -> TestResult {
-        match RunStore::open(path) {
-            Err(StoreError::Corrupt { at: named }) => assert_eq!(named, at, "{why}"),
-            Err(other) => return Err(format!("{why}: expected Corrupt, got {other}").into()),
-            Ok(opened) => {
-                return Err(format!(
-                    "{why}: reopened at {} committed bytes, so an acknowledged frame was lost",
-                    opened.committed_bytes()
-                )
-                .into());
+        let outcome: TestResult = match RunStore::open(path) {
+            Err(StoreError::Corrupt { at: named }) => {
+                assert_eq!(named, at, "{why}");
+                Ok(())
             }
-        }
+            Err(other) => Err(format!("{why}: expected Corrupt, got {other}").into()),
+            Ok(opened) => Err(format!(
+                "{why}: reopened at {} committed bytes, so an acknowledged frame was lost",
+                opened.committed_bytes()
+            )
+            .into()),
+        };
+        outcome?;
         assert_eq!(std::fs::read(path)?, before, "{why}: refused bytes move");
         Ok(())
     }
@@ -1688,10 +1686,27 @@ mod tests {
         let last = frame_starts(&bytes, STORE_HEADER.len())?[2];
         let kept = u64::try_from(last)?;
         let whole = bytes.len() - last;
-        for cut in [1, 3, 4, 5, whole >> 1, whole - 33, whole - 32, whole - 31, whole - 1] {
-            std::fs::write(scratch.path(), bytes.get(..last + cut).ok_or("cut past the end")?)?;
+        for cut in [
+            1,
+            3,
+            4,
+            5,
+            whole >> 1,
+            whole - 33,
+            whole - 32,
+            whole - 31,
+            whole - 1,
+        ] {
+            std::fs::write(
+                scratch.path(),
+                bytes.get(..last + cut).ok_or("cut past the end")?,
+            )?;
             let store = RunStore::open(scratch.path())?;
-            assert_eq!(store.committed_bytes(), kept, "cut {cut}: the two records survive");
+            assert_eq!(
+                store.committed_bytes(),
+                kept,
+                "cut {cut}: the two records survive"
+            );
             drop(store);
             assert_eq!(std::fs::metadata(scratch.path())?.len(), kept, "cut {cut}");
         }
@@ -1709,14 +1724,20 @@ mod tests {
         bytes.extend_from_slice(&u32::try_from(MAX_RECORD_BYTES)?.to_be_bytes());
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..MAX_RECORD_BYTES + HEAD_BYTES - 1 {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             bytes.push(state.to_be_bytes()[0]);
         }
         std::fs::write(scratch.path(), &bytes)?;
         let started = std::time::Instant::now();
         let store = RunStore::open(scratch.path())?;
         let elapsed = started.elapsed();
-        assert_eq!(store.committed_bytes(), kept, "noise holds no acknowledged record");
+        assert_eq!(
+            store.committed_bytes(),
+            kept,
+            "noise holds no acknowledged record"
+        );
         assert!(elapsed.as_secs() < 5, "the search took {elapsed:?}");
         Ok(())
     }
