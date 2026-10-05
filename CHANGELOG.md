@@ -14,16 +14,19 @@ breaks are listed explicitly under the crate.
 Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
 the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
 previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
-those tests through one anchored nextest filter and writes
-`evidence/<revision>.json`, per row, with each test's observed outcome and the
-row's gap sentence.
+those tests through one anchored nextest filter and records each row's outcome
+in a SQLite database under the state directory, one row per revision, row, test,
+platform and feature set.
 
 The receipt can lower a row's claimed state and never raise one, so a green run
 cannot promote `present` to `exercised`, and it exits non-zero when a named test
-is absent, failing, or a row claims more than the run shows. `evidence/` is
-committed, the spec's per-row table is generated from it between
-`<!-- acceptance-table: start -->` markers, and `--check` fails when the
-committed table disagrees with the map and the receipt in the tree.
+is absent, failing, or a row claims more than the run shows. The one promotion,
+`accepted`, requires the receipt's revision to be the head being rendered. The
+spec's per-row table is rendered from the database for one exact revision between
+`<!-- acceptance-table: start -->` markers, `--check` fails when the committed
+table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
+`--test` runs the generator's own seven regression cases. No new dependency: the
+database is Python's standard-library `sqlite3`.
 
 Every row now also answers to its own id in a test name: 15 new row-addressed
 tests across `crates/lgwks-bot/tests/it/t_rows.rs` and

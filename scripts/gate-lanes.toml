@@ -171,6 +171,17 @@ command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full
 ci_step = "Run lgwks-bot async runner tests"
 
 [[lane]]
+id = "acceptance-receipts"
+surfaces = "ci"
+required = true
+# One filtered nextest run over the tests the acceptance map names, recorded into
+# SQLite and exported as one JSON artifact for the run to upload. It is a step of
+# the lgwks-bot full job on shard 1, not a job of its own: that job already built
+# the test binary, so this costs the run and not another compile.
+command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json"
+ci_step = "Record acceptance receipts"
+
+[[lane]]
 id = "tests-bot-saturation"
 group = "bot-full"
 surfaces = "local ci"

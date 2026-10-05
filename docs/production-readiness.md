@@ -68,16 +68,22 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   tests in `lgwks_deps::invariants`.
 - **All 36 acceptance rows now name the tests that address them**, in
   `docs/acceptance/t-rows.toml`, and `scripts/acceptance-receipts.py` ran exactly
-  those tests against the checked-out head, writing `evidence/<revision>.json`.
+  those tests against the checked-out head into a SQLite database under the
+  state directory (`$XDG_STATE_HOME/lgwks-acceptance/receipts.sqlite`, or
+  `~/.local/state/...`), one row per revision, row, test, platform and feature
+  set, so a re-run is idempotent and two revisions coexist.
   The run at `740d3c68` passed 215 of 215 named tests in 44.4s: 30 rows observed
   `exercised`, and six still `present` with the gap written down rather than
   rounded up — T10, T11, T14, T17, T21 and T31. Fifteen of the named tests are
   row-addressed, so `cargo nextest list --workspace -E 'test(/_t07$/)'` answers
   which tests address a row without reading the map. The receipt can lower a
-  row's claim and never raise one, `evidence/` is committed, and
-  `scripts/acceptance-receipts.py --check` fails when the spec's generated table
-  disagrees with the map and the receipt in the tree. No row is `accepted`; the
-  externally bounded subprocess and per-backend OS campaign has not run.
+  row's claim and never raise one, and `scripts/acceptance-receipts.py --check`
+  fails when the spec's generated table disagrees with the map and the receipt
+  for one exact revision. A row reads `accepted` only when that revision is the
+  head being rendered. No row is `accepted`; the externally bounded subprocess
+  and per-backend OS campaign has not run. `--check` reads the local database, so
+  it is a local gate rather than a CI step: a CI checkout has no receipt for its
+  own head until the run records one.
 - **The authoring contract (#87, §7 item 6) was measured four ways**, not argued:
   160 fixed-model trials across the old surface, the facade, the facade plus
   `FanOut`, and the `futures` crate. See `bench/ai-authoring/README.md`. The finding
