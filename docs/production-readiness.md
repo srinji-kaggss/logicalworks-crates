@@ -319,6 +319,24 @@ they now ask the same question of the same bytes, with each store's own head ove
 its decoded record (`task::store::tests` and `task::ledger::tests`, including a
 ceiling-sized noise tail decided in bounded time). Their tests were not run against
 the unfixed code, so for those two stores the control is the cut-append test only.
+The cost of the decision is measured, not estimated
+(`cargo run -p lgwks_bot --features script,ephemeral --release --example tail_cost`,
+64-frame files, Apple silicon, one run, peak RSS 6.3 MB for the whole process):
+
+| Open of | journal p50 / p95 / p99 | run store p50 / p95 / p99 |
+|---|---|---|
+| an undamaged file (n=400) | 65 / 100 / 121 µs | 268 / 319 / 370 µs |
+| a final frame lengthened by 1–2048, refused (n=400) | 109 / 130 / 154 µs | 210 / 245 / 360 µs |
+| an append cut at a seeded byte, repaired (n=60, an `fsync` each) | 3,127 / 4,010 / 5,922 µs | 3,806 / 3,930 / 4,687 µs |
+| a ceiling-sized prefix over noise, trimmed (n=8) | 2,266,477 / 2,371,675 / 2,371,675 µs | 5,685 / 5,864 / 5,864 µs |
+
+The last row is the stated worst case and it is slow for the journal: the search
+tries every payload length under the bytes present, each is a blake3 over a
+length-framed payload that cannot be extended from the one before, so a 64 KiB tail
+costs about 2.3 s once, at open. It is bounded and it needs a tail that is a
+maximal-size frame cut mid-write (or a hand-made one); a journal's ordinary frames
+are a few hundred bytes and cost the third row. The run store decodes each candidate
+and a wrong length fails at once, which is why its worst case is milliseconds.
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file
