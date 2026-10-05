@@ -118,6 +118,11 @@ additive: no signature changed and no existing behaviour did.
   CPU (212.6 user, 253.8 system), peak RSS 71.7 MB, before; 46.35 s wall and
   380 s CPU (221.1 user, 158.5 system), peak RSS 65.6 MB, after, with the
   machine more loaded for the second run.
+- The `gpui-windows` lane builds its fixture into the workspace `target` with
+  `--target-dir target`. The fixture is its own workspace, so it built into a
+  directory the CI cache never saved and recompiled the GPUI stack on every
+  run (3 min 03 s, 134 crates, the run's critical path at 242 s). The CI cache
+  step takes a new key so the first `main` run saves those artifacts.
 
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
