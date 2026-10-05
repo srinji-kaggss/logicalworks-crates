@@ -14,10 +14,10 @@
 //! ## The README is compiled
 //!
 //! This module documentation is generated from `README.md`, so the usage
-//! example above is built and run as a doctest on every `cargo test` rather
-//! than being prose that can quietly rot. `cargo test -p lgwks_ast --doc`
-//! therefore fails if the example stops compiling or stops asserting what the
-//! text above it claims.
+//! example above is built and run as a doctest on every `cargo test`, so
+//! `cargo test -p lgwks_ast --doc` fails if the example stops compiling or
+//! stops asserting what the text above claims — as it did while `try_parse`
+//! was documented as if it were infallible.
 //!
 //! ## Code observability
 //!
@@ -77,14 +77,6 @@
 //! trial-parses each distinct candidate grammar in full, so the caller names
 //! a small candidate set and the probe source is held to [`MAX_DETECT_BYTES`]. The
 //! extension-only [`detect`] never parses.
-//!
-//! ## The README is compiled
-//!
-//! `README.md` is attached to this crate root as its documentation, so the
-//! usage example it opens with is built and run as a doctest on every
-//! `cargo test -p lgwks_ast --doc` instead of being prose that can rot. When
-//! the example above stops compiling — as it did while `try_parse` was
-//! documented as if it were infallible — that doctest is what catches it.
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.

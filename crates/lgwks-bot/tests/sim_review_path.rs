@@ -364,6 +364,30 @@ fn gh_for(fake: &FakeGh, capture: usize) -> Result<Gh, Box<dyn std::error::Error
         .env("PATH", path))
 }
 
+/// The `Gh` binding the saturation tiers drive: the fake named by its absolute
+/// path, with no `PATH` override.
+///
+/// That is the spawn a default binding makes, and it is not the spawn
+/// [`gh_for`] makes. `std` hands a child to `posix_spawn` unless the caller
+/// overrides `PATH` and names a bare program, in which case it must search that
+/// `PATH` itself and falls back to `fork` + `execvp`. Forking a test process
+/// with sixty-four runs in flight copies its page tables and, on macOS, takes
+/// every malloc zone lock, once per call — five calls a run, fifty thousand at
+/// the 10,000 tier — so the tier timed the harness's fork rather than the
+/// adapter. `PATH` resolution itself is still exercised by every other family
+/// through [`gh_for`]; the tiers measure concurrency through the adapter, which
+/// this binding leaves unchanged.
+fn gh_spawned_directly(fake: &FakeGh, capture: usize) -> Result<Gh, Box<dyn std::error::Error>> {
+    let program = fake.dir().join(fake.program());
+    let program = program
+        .to_str()
+        .ok_or("the fixture directory is not valid UTF-8")?;
+    Ok(Gh::new(Repository::new("acme/widgets")?)
+        .program(program)
+        .capture_limit(NonZeroUsize::new(capture).ok_or("a non-zero limit")?)
+        .deadline(Some(Duration::from_secs(20))))
+}
+
 /// The future a task body returns.
 type ReviewFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<ReviewOutcome, lgwks_bot::script::FlowError>>>,
@@ -1154,7 +1178,7 @@ fn saturation_inputs(
     let mut work = Vec::new();
     for (fake, shard) in fakes.iter().zip(sizes) {
         for _ in 0..*shard {
-            work.push((gh_for(fake, capture)?, request(7)?));
+            work.push((gh_spawned_directly(fake, capture)?, request(7)?));
         }
     }
     Ok(work)

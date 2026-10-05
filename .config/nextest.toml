@@ -25,3 +25,14 @@ threads-required = 'num-test-threads'
 [profile.ci.junit]
 path = "junit.xml"
 store-success-output = false
+
+# sim_random_error drives concurrent entropy drawers at 100, 1 000, 10 000 and
+# 100 000 OS threads — the same per-user thread ceiling as above, on a crate
+# whose tests run in the same binary as every other lgwks_std suite. A refusal
+# is recorded and reported rather than failed, so the tier is named either way,
+# but a refusal caused by a sibling test is not a measurement of this contract.
+# It is a module of lgwks_std's one integration binary (#272), like the entry
+# above.
+[[profile.default.overrides]]
+filter = 'package(lgwks_std) & binary(it) & test(/^sim_random_error::/)'
+threads-required = 'num-test-threads'
