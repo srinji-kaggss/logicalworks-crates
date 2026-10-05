@@ -59,6 +59,7 @@ import sys
 import time
 import tomllib
 import unittest
+import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -232,29 +233,39 @@ def record_run(
 
 
 def read_run(
-    connection: sqlite3.Connection, revision: str, feature_set: str = "full"
+    connection: sqlite3.Connection,
+    revision: str,
+    feature_set: str = "full",
+    platform_name: str | None = None,
 ) -> sqlite3.Row:
     """The run recorded for `revision` on this machine and feature set, or a refusal.
 
     The feature set is a parameter rather than a lookup because the database may
     legitimately hold several for one revision -- a full-feature run and a
     `--no-default-features` run are different evidence about the same code -- and
-    resolving that by picking one would let the wrong run satisfy the claim.
+    resolving that by picking one would let the wrong run satisfy the claim. The
+    platform is a parameter for the same reason and for one more: a CI job reads
+    back a Linux receipt from a machine that is not Linux, and a lookup keyed on
+    the reader would find nothing.
     """
+    wanted = platform_name or current_platform()
     row = connection.execute(
         "SELECT * FROM run WHERE revision = ? AND platform = ? AND feature_set = ?",
-        (revision, current_platform(), feature_set),
+        (revision, wanted, feature_set),
     ).fetchone()
     if row is None:
         raise Failure(
-            f"no receipt for revision {revision} on {current_platform()} with features "
-            f"{feature_set}; run without --check to record one"
+            f"no receipt for revision {revision} on {wanted} with features {feature_set}; "
+            "run without --check to record one"
         )
     return row
 
 
 def read_results(
-    connection: sqlite3.Connection, revision: str, feature_set: str = "full"
+    connection: sqlite3.Connection,
+    revision: str,
+    feature_set: str = "full",
+    platform_name: str | None = None,
 ) -> dict[tuple[str, str], sqlite3.Row]:
     """Every `(row_id, test)` outcome the revision recorded."""
     found = connection.execute(
@@ -263,7 +274,7 @@ def read_results(
           FROM test_result
          WHERE revision = ? AND platform = ? AND feature_set = ?
         """,
-        (revision, current_platform(), feature_set),
+        (revision, platform_name or current_platform(), feature_set),
     ).fetchall()
     if not found:
         raise Failure(
@@ -299,6 +310,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--package", default="lgwks_bot", help="package under test")
     parser.add_argument("--features", default="full", help="features under test")
     parser.add_argument("--export", default=None, help="write this run's receipt as JSON here")
+    parser.add_argument(
+        "--from-junit",
+        nargs="+",
+        default=None,
+        metavar="FILE",
+        help="record the results CI already ran, from its JUnit reports, instead of running",
+    )
+    parser.add_argument(
+        "--platform",
+        default=None,
+        help="the platform a --from-junit run reports for (default: this machine)",
+    )
     parser.add_argument(
         "--write-table",
         action="store_true",
@@ -456,6 +479,85 @@ def match_outcome(outcomes: dict, entry: str) -> tuple[str, float] | None:
             ):
                 return observed
     return None
+
+
+# ── reading what CI already ran ─────────────────────────────────────────────
+
+
+def parse_junit(path: Path) -> dict[str, tuple[str, float]]:
+    """Read one JUnit file into `{test name: (status, duration_ms)}`.
+
+    nextest writes one `<testcase>` per test, named `binary::module::test` for
+    this crate's shape, with a `<failure>`, `<skipped>` or `<error>` child
+    carrying the outcome. Parsed with the standard library's `xml.etree`, so a CI
+    job with no Rust toolchain can read what the shards produced.
+
+    A malformed file is a refusal rather than a partial parse: a JUnit file this
+    reader could not finish is evidence of nothing, and treating it as an empty
+    one would turn every row's named test into "not run" while looking like a
+    clean report.
+    """
+    try:
+        tree = ElementTree.parse(path)
+    except (ElementTree.ParseError, OSError) as error:
+        raise Failure(f"{path} is not readable JUnit XML: {error}") from error
+    root = tree.getroot()
+    # nextest emits `<testsuites>` wrapping one or more `<testsuite>`; a bare
+    # `<testsuite>` is also valid JUnit and appears in plenty of tools' output.
+    cases: dict[str, tuple[str, float]] = {}
+    elements = (
+        root.findall(".//testcase")
+        if root.tag == "testsuites"
+        else root.findall(".//testcase")
+    )
+    if not elements:
+        raise Failure(f"{path} holds no <testcase> elements; it is not a test report")
+    for case in elements:
+        name = case.get("name")
+        if not name:
+            continue
+        seconds = case.get("time")
+        duration = (float(seconds) * 1000.0) if seconds else 0.0
+        if case.find("failure") is not None or case.find("error") is not None:
+            status = "failed"
+        elif case.find("skipped") is not None:
+            status = "ignored"
+        else:
+            status = "ok"
+        cases[name] = (status, duration)
+    if not cases:
+        raise Failure(f"{path} names no testcase, so it cannot answer for any row")
+    return cases
+
+
+def merge_junit(paths: list[Path]) -> dict[str, tuple[str, float]]:
+    """Every shard's results in one map, with a duplicate named rather than merged.
+
+    The four shards partition one suite, so a name appearing twice means the
+    partitioning is wrong -- and silently keeping the first would make the
+    receipt describe a run that could not have happened.
+    """
+    merged: dict[str, tuple[str, float]] = {}
+    origin: dict[str, Path] = {}
+    for path in paths:
+        for name, observed in parse_junit(path).items():
+            if name in merged:
+                raise Failure(
+                    f"{name} appears in both {origin[name]} and {path}; the shards partition "
+                    "one suite, so a name may not be reported twice"
+                )
+            merged[name] = observed
+            origin[name] = path
+    return merged
+
+
+def junit_command(paths: list[Path], package: str, features: str) -> str:
+    """What the CI job it is reading from actually ran."""
+    names = ", ".join(str(path) for path in paths)
+    return (
+        f"cargo nextest run --locked -p {package} --features {features} --profile ci "
+        f"--partition count:4 (JUnit reports: {names})"
+    )
 
 
 # ── rendering ──────────────────────────────────────────────────────────────
@@ -691,6 +793,25 @@ def seed(
     return read_run(connection, revision, feature_set)
 
 
+def junit_document(cases: list[tuple[str, str]]) -> str:
+    """A nextest-shaped JUnit report for `cases`, each `(name, status)`."""
+    parts = []
+    for name, status in cases:
+        child = {
+            "ok": "",
+            "failed": "<failure message=\"failed\">assertion failed</failure>",
+            "ignored": "<skipped message=\"ignored\"/>",
+        }[status]
+        parts.append(
+            f'    <testcase classname="lgwks_bot::it" name="{name}" time="0.010">{child}</testcase>'
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<testsuites><testsuite name="lgwks_bot" tests="%d">\n%s\n  </testsuite></testsuites>\n'
+        % (len(cases), "\n".join(parts))
+    )
+
+
 class GeneratorRegression(unittest.TestCase):
     """The properties the receipt store has to hold, proved rather than asserted.
 
@@ -795,6 +916,132 @@ class GeneratorRegression(unittest.TestCase):
             read_run(self.connection, "rev-absent")
         self.assertIn("rev-absent", str(caught.exception))
 
+    # ── the CI path: reading what four shards already ran ──
+
+    def write_junit(self, name: str, cases: list[tuple[str, str]]) -> Path:
+        path = Path(self._tmp.name) / name
+        path.write_text(junit_document(cases), encoding="utf-8")
+        return path
+
+    def record_from_junit(self, paths: list[Path], revision: str = "rev-junit") -> dict:
+        """Drive the recording path a CI job takes, without running cargo."""
+        outcomes = merge_junit(paths)
+        results = []
+        for row in fake_rows():
+            rid = str(row["id"])
+            for entry in row["tests"]:
+                observed = match_outcome(outcomes, str(entry))
+                status, duration = observed if observed is not None else ("missing", 0.0)
+                results.append((rid, str(entry), status, duration))
+        record_run(
+            self.connection,
+            revision=revision,
+            platform_name="linux-x86_64",
+            feature_set="full",
+            package="lgwks_bot",
+            command=junit_command(paths, "lgwks_bot", "full"),
+            wall_seconds=1.0,
+            run_at="2026-10-05T00:00:00Z",
+            artifact_path="",
+            results=results,
+        )
+        return read_results(self.connection, revision, "full", "linux-x86_64")
+
+    def test_a_malformed_junit_file_is_refused(self):
+        """A file this reader cannot finish is evidence of nothing."""
+        path = Path(self._tmp.name) / "broken.xml"
+        path.write_text("<testsuites><testsuite><testcase name=\"a\"", encoding="utf-8")
+        with self.assertRaises(Failure) as caught:
+            parse_junit(path)
+        self.assertIn("not readable JUnit", str(caught.exception))
+
+    def test_junit_without_a_testcase_is_refused(self):
+        """A JUnit file with no testcase cannot answer for any row."""
+        path = Path(self._tmp.name) / "empty.xml"
+        path.write_text('<?xml version="1.0"?><testsuites/>', encoding="utf-8")
+        with self.assertRaises(Failure) as caught:
+            parse_junit(path)
+        self.assertIn("no <testcase>", str(caught.exception))
+
+    def test_a_missing_named_test_is_recorded_not_run(self):
+        """A test no shard reported is `missing`, never `ok`."""
+        path = self.write_junit("one.xml", [("a::one_t01", "ok")])
+        stored = self.record_from_junit([path])
+        self.assertEqual(stored[("T01", "it::a::one_t01")]["status"], "ok")
+        self.assertEqual(
+            stored[("T01", "it::a::two_t01")]["status"],
+            "missing",
+            "a named test absent from every shard is not-run, and must never read as passed",
+        )
+        self.assertEqual(stored[("T02", "it::b::one_t02")]["status"], "missing")
+
+    def test_a_failed_testcase_lowers_the_row(self):
+        """A `<failure>` in the report lowers the row that names it."""
+        path = self.write_junit(
+            "one.xml",
+            [
+                ("a::one_t01", "ok"),
+                ("a::two_t01", "failed"),
+                ("b::one_t02", "ok"),
+            ],
+        )
+        stored = self.record_from_junit([path])
+        table = render_table(
+            fake_rows(),
+            read_run(self.connection, "rev-junit", "full", "linux-x86_64"),
+            stored,
+            head="rev-junit",
+        )
+        self.assertIn("| T01 | present | 1/2 |", table)
+        self.assertNotIn("| T01 | exercised |", table)
+
+    def test_four_shards_merge_into_one_receipt(self):
+        """One suite across four partition reports is one receipt, not four."""
+        shards = [
+            self.write_junit("shard-1.xml", [("a::one_t01", "ok")]),
+            self.write_junit("shard-2.xml", [("a::two_t01", "ok")]),
+            self.write_junit("shard-3.xml", [("b::one_t02", "ok")]),
+            self.write_junit("shard-4.xml", [("unrelated::elsewhere", "ok")]),
+        ]
+        stored = self.record_from_junit(shards)
+        self.assertEqual(stored[("T01", "it::a::one_t01")]["status"], "ok")
+        self.assertEqual(stored[("T01", "it::a::two_t01")]["status"], "ok")
+        self.assertEqual(stored[("T02", "it::b::one_t02")]["status"], "ok")
+        runs = self.connection.execute(
+            "SELECT COUNT(*) AS n FROM run WHERE revision = ?", ("rev-junit",)
+        ).fetchone()["n"]
+        self.assertEqual(runs, 1, "four shard reports record one run")
+
+    def test_a_duplicate_test_across_shards_is_refused(self):
+        """Two shards reporting one name means the partitioning is wrong."""
+        first = self.write_junit("shard-1.xml", [("a::one_t01", "ok")])
+        second = self.write_junit("shard-2.xml", [("a::one_t01", "ok")])
+        with self.assertRaises(Failure) as caught:
+            merge_junit([first, second])
+        self.assertIn("may not be reported twice", str(caught.exception))
+
+    def test_a_junit_rerun_is_idempotent(self):
+        """Recording the same shard reports twice leaves one run and one row per test."""
+        shards = [
+            self.write_junit("shard-1.xml", [("a::one_t01", "ok")]),
+            self.write_junit("shard-2.xml", [("a::two_t01", "ok"), ("b::one_t02", "ok")]),
+        ]
+        self.record_from_junit(shards)
+        self.record_from_junit(shards)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) AS n FROM run WHERE revision = ?", ("rev-junit",)
+            ).fetchone()["n"],
+            1,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) AS n FROM test_result WHERE revision = ?", ("rev-junit",)
+            ).fetchone()["n"],
+            3,
+            "a re-run must overwrite its own rows rather than duplicate them",
+        )
+
     def test_a_green_run_never_promotes_a_partial_row(self):
         """Every named test passing does not turn a `present` row into `exercised`.
 
@@ -857,8 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
             spec_text = spec_path.read_text(encoding="utf-8")
             wanted = render_table(
                 rows,
-                read_run(connection, revision, args.features),
-                read_results(connection, revision, args.features),
+                read_run(connection, revision, args.features, args.platform),
+                read_results(connection, revision, args.features, args.platform),
                 head,
             )
             found = committed_table(spec_text)
@@ -878,7 +1125,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
-        outcomes, elapsed = run_nextest(expression, args.package, args.features)
+        if args.from_junit:
+            # The CI path: the tests already ran, once, across four shards. This
+            # job records what they reported rather than running them again, so
+            # the receipt costs seconds and the suite is not executed twice.
+            paths = [Path(entry) for entry in args.from_junit]
+            outcomes = merge_junit(paths)
+            elapsed = float(
+                sum(duration for _, duration in outcomes.values())
+            ) / 1000.0
+            platform_name = args.platform or current_platform()
+            command_text = junit_command(paths, args.package, args.features)
+        else:
+            outcomes, elapsed = run_nextest(expression, args.package, args.features)
+            platform_name = current_platform()
+            command_text = command
         results = []
         failures = []
         for row in rows:
@@ -899,17 +1160,17 @@ def main(argv: list[str] | None = None) -> int:
         record_run(
             connection,
             revision=revision,
-            platform_name=current_platform(),
+            platform_name=platform_name,
             feature_set=args.features,
             package=args.package,
-            command=command,
+            command=command_text,
             wall_seconds=round(elapsed, 3),
             run_at=run_at,
             artifact_path=artifact,
             results=results,
         )
-        run = read_run(connection, revision, args.features)
-        stored = read_results(connection, revision, args.features)
+        run = read_run(connection, revision, args.features, platform_name)
+        stored = read_results(connection, revision, args.features, platform_name)
     except (Failure, sqlite3.DatabaseError) as error:
         print(f"acceptance-receipts: {error}", file=sys.stderr)
         return 2
@@ -938,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         }
     )
-    if unrequested:
+    if unrequested and not args.from_junit:
         print(
             f"acceptance-receipts: {len(unrequested)} test(s) the filter ran that no row names: "
             f"{', '.join(unrequested)}",

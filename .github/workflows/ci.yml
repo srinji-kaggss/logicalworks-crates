@@ -204,23 +204,47 @@ jobs:
       - name: Run lgwks-bot async runner tests
         env:
           PARTITION: count:${{ matrix.shard }}/4
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
-      # Shard 1 only: the receipt names every acceptance row's tests, so one run
-      # records all of them and three more would record the same rows three more
-      # times. A step of this job rather than a job of its own because the test
-      # binary it runs is already built and cached here, so the cost is the run
-      # (37 s measured locally) and not another compile.
-      - name: Record acceptance receipts
-        if: matrix.shard == 1
-        run: |
-          mkdir -p acceptance-artifact
-          python3 scripts/acceptance-receipts.py --db acceptance-artifact/receipts.sqlite \
-            --export acceptance-artifact/acceptance-receipts.json
-      - name: Upload acceptance receipt
-        if: matrix.shard == 1
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
+      # The JUnit report of what this shard actually ran, uploaded per shard so
+      # the acceptance job can build one receipt from the suite's own output.
+      # Writing the report costs the run nothing: the `ci` profile only adds a
+      # serialiser. Each shard uploads into its own directory, because all four
+      # reports are called junit.xml and four artifacts with one path collide on
+      # download.
+      - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: acceptance-receipts-${{ matrix.shard }}
+          name: lgwks-bot-junit-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+
+  acceptance_receipts:
+    # The receipt, built from the four JUnit reports the shards already wrote.
+    # No Rust toolchain and no cargo build: this job runs a Python script over
+    # four XML files, so it costs seconds rather than adding a second execution
+    # of the 215 tests the shards already ran between them.
+    name: Acceptance receipts
+    needs: tests_bot_full
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download lgwks-bot JUnit reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lgwks-bot-junit-*
+          path: acceptance-artifact
+      - name: Record acceptance receipts
+        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform linux-x86_64
+      - name: Upload acceptance receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-receipts
           path: acceptance-artifact/
           retention-days: 30
 
