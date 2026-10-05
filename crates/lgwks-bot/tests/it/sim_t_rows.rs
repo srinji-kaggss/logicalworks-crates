@@ -626,6 +626,7 @@ fn an_indeterminate_predecessor_is_never_resent(band: Band) -> TestResult {
 /// T12: a drawn number of tenants, each holding the *same bytes*, commit one
 /// artifact each and read back only their own -- identical digests across tenants
 /// must not become a shared shelf, a shared count, or a shared read.
+#[cfg(feature = "script")]
 fn identical_digests_never_cross_tenants(band: Band) -> TestResult {
     use lgwks_bot::proposal::ArtifactStore;
 
@@ -634,7 +635,9 @@ fn identical_digests_never_cross_tenants(band: Band) -> TestResult {
         let store = ArtifactStore::new();
         let bytes = b"the same bytes from many tenants".to_vec();
         let digest = ArtifactStore::digest_of(&bytes)?;
-        let names: Vec<String> = (0..tenants).map(|index| format!("tenant-{index}")).collect();
+        let names: Vec<String> = (0..tenants)
+            .map(|index| format!("tenant-{index}"))
+            .collect();
 
         for tenant in &names {
             store.write(tenant, &bytes)?;
@@ -675,5 +678,10 @@ band_family! {
     a_held_mass_never_starves_an_independent_chain_t06 => a_held_mass_never_starves_an_independent_chain, 38;
     a_required_predecessor_holds_its_dependent_t10 => a_required_predecessor_holds_its_dependent, 39;
     an_indeterminate_predecessor_is_never_resent_t11 => an_indeterminate_predecessor_is_never_resent, 40;
+}
+
+// `ArtifactStore` lives in `proposal`, which is gated on `script`.
+#[cfg(feature = "script")]
+band_family! {
     identical_digests_never_cross_tenants_t12 => identical_digests_never_cross_tenants, 41;
 }

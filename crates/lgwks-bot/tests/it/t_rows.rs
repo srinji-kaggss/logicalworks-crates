@@ -31,8 +31,8 @@
 
 #![cfg(feature = "script")]
 
-use std::error::Error;
 use std::cell::Cell;
+use std::error::Error;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::time::Duration;
@@ -247,7 +247,8 @@ fn an_unknown_operation_is_refused_by_name_t26() -> TestResult {
     match outcome.refusal().cloned() {
         Some(Refusal::UnknownOperation { name }) => {
             assert_eq!(
-                name.as_str(), "definitely-not-registered",
+                name.as_str(),
+                "definitely-not-registered",
                 "the refusal names the operation it refused, so a caller can register it \
                  deliberately rather than guess"
             );
@@ -337,6 +338,7 @@ fn a_same_digest_artifact_stays_inside_its_tenant_t28() -> TestResult {
 /// T30: the same request key plus a different payload is a typed conflict that
 /// runs no body, and a duplicate identical request reattaches rather than
 /// rerunning -- so one key serves one payload.
+#[cfg(feature = "ephemeral")]
 #[test]
 fn one_request_key_serves_one_payload_t30() -> TestResult {
     use crate::request_fixtures as request;
