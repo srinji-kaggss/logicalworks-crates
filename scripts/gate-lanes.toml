@@ -200,6 +200,21 @@ command = "cargo run --release --manifest-path bench/async/Cargo.toml -- --mutan
 ci_step = "Async fairness gate and concurrency ladder"
 
 [[lane]]
+id = "digest-timing"
+group = "std-full"
+surfaces = "local ci"
+required = true
+# #275: Welch's t over `Digest` equality, a digest against an equal copy and
+# against one differing in its first byte, 1,000,000 samples per class on the
+# release build. It fails when |t| >= 4.5 (dudect's threshold), and also when
+# the early-exit negative control is NOT detected, because a harness that
+# cannot see a leak proves nothing. Locally this is aarch64-apple-darwin; the CI
+# job is x86_64-unknown-linux-gnu, so the two targets the issue names are both
+# measured on every change.
+command = "cargo run --release --locked -p lgwks_std --features hash --example digest_timing"
+ci_step = "Digest constant-time equality (dudect)"
+
+[[lane]]
 id = "doc-tests"
 group = "workspace"
 surfaces = "local ci"

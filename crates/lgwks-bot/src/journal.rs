@@ -1470,10 +1470,13 @@ pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBr
             }
         };
         let recomputed = JournalPosition { sequence, head };
-        if recomputed != entry.position() {
+        // The recorded head may have been written by an adversary, so the
+        // comparison is the named constant-time one rather than an ordering.
+        let recorded = entry.position();
+        if recorded.sequence() != sequence || !recorded.head().ct_eq(&head) {
             let refusal = Err(ChainBreak::Disagreement {
                 at: sequence,
-                recorded: entry.position(),
+                recorded,
                 recomputed,
             });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify_chain: returning an error to the caller");
