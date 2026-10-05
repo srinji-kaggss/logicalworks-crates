@@ -160,6 +160,11 @@ path = "examples/review_pr.rs"
 required-features = ["script", "process"]
 
 [[example]]
+name = "tail_cost"
+path = "examples/tail_cost.rs"
+required-features = ["script", "ephemeral"]
+
+[[example]]
 name = "script_tenants"
 path = "examples/script_tenants.rs"
 required-features = ["script"]

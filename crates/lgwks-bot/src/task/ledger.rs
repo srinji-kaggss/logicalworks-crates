@@ -49,7 +49,7 @@ use lgwks_std::hash::{Digest, Hasher};
 use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
-use crate::journal::frame::{self, HEAD_BYTES};
+use crate::journal::frame::{self, Cursor, HEAD_BYTES};
 use crate::journal::owner::{self, Stage, StorageOwner, SubmitError};
 
 use super::store::{StoreError, StoreLimitKind};
@@ -729,10 +729,26 @@ struct Framed {
 /// never finished: it was never anyone's answer, so the scan stops and the
 /// caller trims to `committed`. A complete prefix that names a frame this
 /// ledger never writes, or a payload that does not decode, cannot be an
-/// interrupted append and is refused.
-fn next_frame(file: &mut File, at: u64) -> Result<Option<Framed>, StoreError> {
+/// interrupted append and is refused, and so is a cut whose bytes hold an entry
+/// this ledger acknowledged under another length (#262).
+fn next_frame(file: &mut File, cursor: &Cursor<'_>) -> Result<Option<Framed>, StoreError> {
+    let at = cursor.at;
     let corrupt = || StoreError::Corrupt { at };
-    let Some(raw) = frame::read_raw(file, MAX_LEDGER_RECORD_BYTES, StoreError::storage, corrupt)?
+    let ceiling = MAX_LEDGER_RECORD_BYTES;
+    let entry_head = |previous: &Digest, payload: &[u8]| {
+        let copy = frame::misaligned_copy(payload);
+        from_bytes::<Entry, WireError>(copy.as_deref().unwrap_or(payload))
+            .ok()
+            .map(|entry| entry.head_from(previous))
+    };
+    let Some(raw) = frame::read_raw(
+        file,
+        cursor,
+        ceiling,
+        StoreError::storage,
+        corrupt,
+        entry_head,
+    )?
     else {
         return Ok(None);
     };
@@ -768,7 +784,7 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
         entry,
         head,
         declared,
-    }) = next_frame(file, at)?
+    }) = next_frame(file, &Cursor::new(at, index.committed, &previous))?
     {
         if entry.head_from(&previous) != Digest::from_bytes(head) {
             let refusal = Err(StoreError::Corrupt { at });
@@ -860,5 +876,108 @@ impl fmt::Debug for RunLedger {
             .field("path", &self.inner.path)
             .field("runs", &owner::lock(&self.inner.index).runs.len())
             .finish()
+    }
+}
+
+/// An entry whose length prefix lies is refused, and an append that was cut is
+/// repaired (#262), on the same grammar the run store reads.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::frame::probe::{Scratch, declared_at, frame_starts, with_prefix};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// The ledger file of `count` charges, written to `path`, and its bytes.
+    fn written(path: &Path, count: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let run = RunId::from_hex(&format!("b{}", "0".repeat(31)))?;
+        let mut bytes = LEDGER_MAGIC.to_vec();
+        let mut previous = genesis_head();
+        for charge in 1..=count {
+            let entry = Entry {
+                run,
+                tenant: "acme".to_owned(),
+                attempts: charge,
+                spend: charge.saturating_mul(3),
+                epoch: charge,
+                applied: Some(vec![u8::try_from(charge)?; 24]),
+            };
+            let (framed, head) = frame(&entry, &previous)?;
+            bytes.extend_from_slice(&framed);
+            previous = head;
+        }
+        std::fs::write(path, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// An acknowledged final entry whose prefix grows is refused as `Corrupt` at
+    /// its index, and the file is byte-identical afterwards.
+    #[test]
+    fn a_lengthened_acknowledged_final_entry_is_refused_not_trimmed() -> TestResult {
+        let scratch = Scratch::new("ledger-lengthened");
+        let bytes = written(scratch.path(), 3)?;
+        let last = frame_starts(&bytes, LEDGER_MAGIC.len())?[2];
+        let declared = declared_at(&bytes, last);
+        for extra in (1u32..=40).chain([100, 1024]) {
+            let lied = with_prefix(&bytes, last, declared + extra);
+            std::fs::write(scratch.path(), &lied)?;
+            assert!(
+                matches!(
+                    RunLedger::open(scratch.path()),
+                    Err(StoreError::Corrupt { at: 2 })
+                ),
+                "L+{extra}: an acknowledged entry must be refused as corrupt at 2"
+            );
+            assert_eq!(
+                std::fs::read(scratch.path())?,
+                lied,
+                "L+{extra}: bytes move"
+            );
+        }
+        Ok(())
+    }
+
+    /// A lying prefix over an entry that is itself damaged still refuses: the entry
+    /// behind it authenticates, from the head stored before it, at a payload offset
+    /// the archive was not written at.
+    #[test]
+    fn a_damaged_lengthened_entry_with_an_acknowledged_one_behind_it_is_refused() -> TestResult {
+        let scratch = Scratch::new("ledger-damaged");
+        let bytes = written(scratch.path(), 3)?;
+        let middle = frame_starts(&bytes, LEDGER_MAGIC.len())?[1];
+        let mut lied = with_prefix(&bytes, middle, u32::try_from(bytes.len() - middle)? + 9);
+        if let Some(byte) = lied.get_mut(middle + 10) {
+            *byte ^= 0x55;
+        }
+        std::fs::write(scratch.path(), &lied)?;
+        assert!(matches!(
+            RunLedger::open(scratch.path()),
+            Err(StoreError::Corrupt { at: 1 })
+        ));
+        assert_eq!(std::fs::read(scratch.path())?, lied, "refused bytes move");
+        Ok(())
+    }
+
+    /// The control: an append cut inside the final entry is repaired to exactly the
+    /// acknowledged prefix.
+    #[test]
+    fn an_append_cut_inside_the_final_entry_is_repaired() -> TestResult {
+        let scratch = Scratch::new("ledger-cut");
+        let bytes = written(scratch.path(), 3)?;
+        let last = frame_starts(&bytes, LEDGER_MAGIC.len())?[2];
+        let whole = bytes.len() - last;
+        for cut in [1, 3, 4, 5, whole >> 1, whole - 33, whole - 32, whole - 1] {
+            std::fs::write(
+                scratch.path(),
+                bytes.get(..last + cut).ok_or("past the end")?,
+            )?;
+            drop(RunLedger::open(scratch.path())?);
+            assert_eq!(
+                std::fs::metadata(scratch.path())?.len(),
+                u64::try_from(last)?,
+                "cut {cut}: repaired to the acknowledged prefix"
+            );
+        }
+        Ok(())
     }
 }
