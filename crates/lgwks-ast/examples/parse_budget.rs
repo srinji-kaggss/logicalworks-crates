@@ -579,9 +579,8 @@ fn measure_tier(
     let assigned = reports
         .iter()
         .fold(0_u64, |total, row| total.saturating_add(row.assigned));
-    if assigned != level {
-        return Err(format!("{assigned} of {level} parses were admitted"));
-    }
+    let complete = all_admitted(assigned, level);
+    complete?;
     let refused = reports
         .iter()
         .fold(0_u64, |total, row| total.saturating_add(row.refused));
@@ -598,6 +597,19 @@ fn measure_tier(
         wall_ns,
         grammar: language.name(),
     })
+}
+
+/// Refuse a tier whose workers admitted fewer parses than the level asked for.
+///
+/// A worker that panicked reports zero admitted, so a short count is the one
+/// place a lost worker becomes visible; a tier row over fewer parses than its
+/// level names would be a concurrency number nobody ran.
+fn all_admitted(assigned: u64, level: u64) -> Result<(), String> {
+    if assigned == level {
+        Ok(())
+    } else {
+        Err(format!("{assigned} of {level} parses were admitted"))
+    }
 }
 
 /// The line one tier row prints.
@@ -657,73 +669,81 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         threads: 8,
         list: false,
     };
-    let mut index = 0_usize;
-    while index < args.len() {
-        let flag = args.get(index).map(String::as_str).unwrap_or("");
-        let mut value = || {
-            index = index.saturating_add(1);
-            args.get(index)
-                .cloned()
-                .ok_or(format!("{flag} needs a value"))
-        };
-        match flag {
-            "--grammar" => options.grammar = Some(value()?),
-            "--shape" => options.kind = Some(value()?),
-            "--bytes" => {
-                options.bytes = value()?
-                    .parse()
-                    .map_err(|error| format!("--bytes: {error}"))?
-            }
-            "--shape-bytes" => {
-                options.shape_bytes = value()?
-                    .parse()
-                    .map_err(|error| format!("--shape-bytes: {error}"))?
-            }
-            "--rounds" => {
-                options.rounds = value()?
-                    .parse::<usize>()
-                    .map_err(|error| format!("--rounds: {error}"))?
-                    .max(1)
-            }
-            "--tier" => options.tiers.push(
-                value()?
-                    .parse()
-                    .map_err(|error| format!("--tier: {error}"))?,
-            ),
-            "--tier-bytes" => {
-                options.tier_bytes = value()?
-                    .parse()
-                    .map_err(|error| format!("--tier-bytes: {error}"))?
-            }
-            "--threads" => {
-                options.threads = value()?
-                    .parse::<usize>()
-                    .map_err(|error| format!("--threads: {error}"))?
-                    .max(1)
-            }
-            "--list-grammars" => options.list = true,
-            other => return Err(format!("unknown argument `{other}`")),
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let applied = apply_flag(&mut options, flag, &mut rest);
+        applied?;
+    }
+    validated(options)
+}
+
+/// Apply one flag, taking its value from `rest` when it has one.
+///
+/// Every arm answers a `Result` rather than returning early, so the one caller
+/// propagates exactly one refusal per flag and a flag with no value, an
+/// unparseable value and an unknown flag are three distinct messages.
+fn apply_flag<'arg>(
+    options: &mut Options,
+    flag: &str,
+    rest: &mut impl Iterator<Item = &'arg String>,
+) -> Result<(), String> {
+    let mut value = || rest.next().ok_or(format!("{flag} needs a value"));
+    match flag {
+        "--grammar" => value().map(|raw| options.grammar = Some(raw.clone())),
+        "--shape" => value().map(|raw| options.kind = Some(raw.clone())),
+        "--bytes" => value()
+            .and_then(|raw| number(flag, raw))
+            .map(|bytes| options.bytes = bytes),
+        "--shape-bytes" => value()
+            .and_then(|raw| number(flag, raw))
+            .map(|bytes| options.shape_bytes = bytes),
+        "--rounds" => value()
+            .and_then(|raw| number::<usize>(flag, raw))
+            .map(|rounds| options.rounds = rounds.max(1)),
+        "--tier" => value()
+            .and_then(|raw| number(flag, raw))
+            .map(|level| options.tiers.push(level)),
+        "--tier-bytes" => value()
+            .and_then(|raw| number(flag, raw))
+            .map(|bytes| options.tier_bytes = bytes),
+        "--threads" => value()
+            .and_then(|raw| number::<usize>(flag, raw))
+            .map(|threads| options.threads = threads.max(1)),
+        "--list-grammars" => {
+            options.list = true;
+            Ok(())
         }
-        index = index.saturating_add(1);
+        other => Err(format!("unknown argument `{other}`")),
     }
+}
+
+/// Parse one flag's numeric value, naming the flag in the refusal.
+fn number<T>(flag: &str, raw: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    raw.parse().map_err(|error| format!("{flag}: {error}"))
+}
+
+/// Refuse a byte budget of zero: a zero-byte source measures nothing and would
+/// print a row of throughput over no input.
+fn validated(options: Options) -> Result<Options, String> {
     if options.bytes == 0 {
-        return Err("--bytes must be at least one".to_owned());
+        Err("--bytes must be at least one".to_owned())
+    } else if options.shape_bytes == 0 {
+        Err("--shape-bytes must be at least one".to_owned())
+    } else {
+        Ok(options)
     }
-    if options.shape_bytes == 0 {
-        return Err("--shape-bytes must be at least one".to_owned());
-    }
-    Ok(options)
 }
 
 /// Report the measurement, or the refusal that stopped it.
 fn run(options: &Options) -> Result<(), String> {
-    let mut stdout = std::io::stdout();
-    let mut write = |line: String| -> Result<(), String> {
-        writeln!(stdout, "{line}").map_err(|error| error.to_string())
-    };
+    let mut out = std::io::stdout().lock();
     if options.list {
         for &language in Language::ALL {
-            write(language.name().to_owned())?;
+            emit(&mut out, language.name())?;
         }
         return Ok(());
     }
@@ -731,63 +751,100 @@ fn run(options: &Options) -> Result<(), String> {
         || KINDS.iter().map(|one| (*one).to_owned()).collect(),
         |one| vec![one.to_owned()],
     );
-    let mut rows = 0_usize;
-    let mut grammars = 0_usize;
-    let mut outcomes: BTreeMap<String, u64> = BTreeMap::new();
-    write(format!("peak_rss_bytes\t{:?}", peak_rss_bytes()))?;
+    let mut tally = Tally {
+        rows: 0,
+        grammars: 0,
+        outcomes: BTreeMap::new(),
+    };
+    emit(&mut out, &format!("peak_rss_bytes\t{:?}", peak_rss_bytes()))?;
     if !options.tiers.is_empty() {
-        write(TIER_HEADER.to_owned())?;
+        emit(&mut out, TIER_HEADER)?;
     }
     for &language in Language::ALL {
         let wanted = options.grammar.as_deref();
         if wanted.is_some_and(|one| one != language.name()) {
             continue;
         }
-        grammars = grammars.saturating_add(1);
-        let shape = shape_of(language)?;
-        let representative = tile(shape.valid, options.bytes);
-        for kind in &kinds {
-            let row = measure(
-                language,
-                shape,
-                kind,
-                &representative,
-                options.bytes_for(kind),
-                options.rounds,
-            )?;
-            if rows == 0 {
-                write(HEADER.to_owned())?;
-            }
-            write(measured_line(&row))?;
-            rows = rows.saturating_add(1);
-            let count = outcomes.entry(row.outcome.clone()).or_insert(0);
-            *count = count.saturating_add(1);
-        }
-        for &level in &options.tiers {
-            let tier = measure_tier(
-                language,
-                &representative,
-                level,
-                options.tier_bytes,
-                options.threads,
-            )?;
-            write(tier_line(&tier))?;
-        }
+        let measured = measure_grammar(&mut out, options, language, &kinds, &mut tally);
+        measured?;
     }
-    // Counted grammars, not rows: an unknown `--grammar` next to a `--tier`
-    // measured nothing at all, and a header with no data under it reads as a
-    // result rather than as a name this build does not compile.
-    if grammars == 0 {
-        return Err(match options.grammar.as_deref() {
+    finish(&mut out, options, &tally)
+}
+
+/// What a run has measured so far, across grammars.
+struct Tally {
+    /// Shape rows printed; the header goes before the first.
+    rows: usize,
+    /// Grammars selected and measured.
+    grammars: usize,
+    /// How many rows ended in each outcome.
+    outcomes: BTreeMap<String, u64>,
+}
+
+/// Measure every selected shape and tier of one grammar.
+fn measure_grammar(
+    out: &mut impl Write,
+    options: &Options,
+    language: Language,
+    kinds: &[String],
+    tally: &mut Tally,
+) -> Result<(), String> {
+    tally.grammars = tally.grammars.saturating_add(1);
+    let shape = shape_of(language)?;
+    let representative = tile(shape.valid, options.bytes);
+    for kind in kinds {
+        let row = measure(
+            language,
+            shape,
+            kind,
+            &representative,
+            options.bytes_for(kind),
+            options.rounds,
+        )?;
+        if tally.rows == 0 {
+            emit(out, HEADER)?;
+        }
+        emit(out, &measured_line(&row))?;
+        tally.rows = tally.rows.saturating_add(1);
+        let count = tally.outcomes.entry(row.outcome.clone()).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    for &level in &options.tiers {
+        let tier = measure_tier(
+            language,
+            &representative,
+            level,
+            options.tier_bytes,
+            options.threads,
+        )?;
+        emit(out, &tier_line(&tier))?;
+    }
+    Ok(())
+}
+
+/// Print the outcome counts and the closing RSS, or refuse a run that measured
+/// no grammar at all.
+///
+/// Counted grammars, not rows: an unknown `--grammar` next to a `--tier`
+/// measured nothing at all, and a header with no data under it reads as a
+/// result rather than as a name this build does not compile.
+fn finish(out: &mut impl Write, options: &Options, tally: &Tally) -> Result<(), String> {
+    if tally.grammars == 0 {
+        Err(match options.grammar.as_deref() {
             Some(wanted) => format!("`{wanted}` is not a compiled grammar"),
             None => "no grammar compiled; run with --features full".to_owned(),
-        });
+        })
+    } else {
+        for (outcome, count) in &tally.outcomes {
+            emit(out, &format!("outcomes\t{outcome}\t{count}"))?;
+        }
+        emit(out, &format!("peak_rss_bytes_end\t{:?}", peak_rss_bytes()))
     }
-    for (outcome, count) in &outcomes {
-        write(format!("outcomes\t{outcome}\t{count}"))?;
-    }
-    write(format!("peak_rss_bytes_end\t{:?}", peak_rss_bytes()))?;
-    Ok(())
+}
+
+/// Write one report line, naming the write in the refusal.
+fn emit(out: &mut impl Write, line: &str) -> Result<(), String> {
+    writeln!(out, "{line}").map_err(|error| format!("writing the report: {error}"))
 }
 
 impl Options {

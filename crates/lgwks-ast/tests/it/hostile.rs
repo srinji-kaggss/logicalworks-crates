@@ -639,7 +639,9 @@ mod markdown {
     /// Re-run this binary as the child that parses one case.
     fn run_markdown_child() -> TestResult {
         let index = std::env::var(CASE_ENV)
-            .map_err(|_| "the child branch needs CASE_ENV to know which case to parse")?
+            .map_err(|error| {
+                format!("the child branch needs CASE_ENV to know which case to parse: {error}")
+            })?
             .parse::<usize>()
             .map_err(|error| format!("CASE_ENV is not an index: {error}"))?;
         let cases = markdown_cases();
