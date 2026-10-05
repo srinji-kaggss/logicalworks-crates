@@ -4,7 +4,18 @@
 
 /// A 32-byte BLAKE3 digest.
 ///
-/// Equality is constant-time to prevent timing side-channels.
+/// **Equality is constant-time; ordering is not.** `==`, `!=` and
+/// [`Digest::ct_eq`] compare all 32 bytes through `blake3::Hash`'s equality,
+/// which is the `constant_time_eq` routine behind an optimisation barrier, so
+/// the time taken does not depend on where two digests first differ. The
+/// `examples/digest_timing.rs` dudect harness measures that on the release
+/// build, beside an early-exit negative control it must catch.
+///
+/// `Ord`/`PartialOrd` are a lexicographic byte compare that stops at the first
+/// differing byte. They exist so a digest can key a `BTreeMap` or be sorted,
+/// and are **variable-time**: never order, sort, `binary_search` or `max`
+/// digests where one side is secret-derived. Compare such values with `==` or
+/// [`Digest::ct_eq`] only.
 ///
 /// Under `wire` the archive is derived too, so a digest can sit inside an
 /// archived record and be read back in place. [`rkyv(compare(PartialEq))`]
@@ -29,12 +40,12 @@ impl std::hash::Hash for Digest {
 }
 
 impl PartialEq for Digest {
+    /// Delegated to `blake3::Hash`'s equality rather than a byte loop written
+    /// here: an XOR/OR fold has no optimisation barrier, so the compiler may
+    /// legally turn it into an early-exit compare, while `blake3` routes
+    /// through `constant_time_eq`, whose maintainers check the generated code.
     fn eq(&self, other: &Self) -> bool {
-        let mut acc = 0u8;
-        for (left, right) in self.0.iter().zip(other.0.iter()) {
-            acc |= left ^ right;
-        }
-        acc == 0
+        blake3::Hash::from_bytes(self.0) == blake3::Hash::from_bytes(other.0)
     }
 }
 
@@ -51,6 +62,18 @@ impl Digest {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Constant-time equality, by name.
+    ///
+    /// The same comparison as `==`. It exists so a check against a
+    /// secret-derived or adversary-supplied value (a stored chain head, a
+    /// receipt's commitment, an artifact key) says at the call site that its
+    /// timing matters, and so a later edit cannot quietly swap it for an
+    /// ordering or a comparison of the raw bytes.
+    #[must_use]
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        self == other
     }
 
     /// The raw 32-byte digest.
@@ -268,6 +291,28 @@ mod tests {
         let mut repeat = Hasher::new();
         repeat.write_framed(b"ab").write_framed(b"c");
         assert_eq!(framed_left.finalize(), repeat.finalize());
+    }
+
+    /// Equality sees every byte: a digest differing from another at any one
+    /// of the 32 positions, by any single bit, is unequal to it, under `==`,
+    /// `!=` and `ct_eq` alike, and equal to an unchanged copy of itself.
+    #[test]
+    fn equality_sees_each_of_the_32_bytes() {
+        let base = blake3(b"position");
+        assert!(base.ct_eq(&Digest::from_bytes(*base.as_bytes())));
+        for position in 0..32 {
+            for mask in [0x01_u8, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80] {
+                let mut bytes = *base.as_bytes();
+                if let Some(byte) = bytes.get_mut(position) {
+                    *byte ^= mask;
+                }
+                let flipped = Digest::from_bytes(bytes);
+                assert!(
+                    base != flipped && !base.ct_eq(&flipped) && !flipped.ct_eq(&base),
+                    "a flip of mask {mask:#04x} at byte {position} compared equal"
+                );
+            }
+        }
     }
 
     #[test]

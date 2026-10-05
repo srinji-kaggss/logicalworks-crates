@@ -124,9 +124,6 @@ fn minimal_external_consumers_exercise_each_storefront_family() -> TestResult {
     if !cfg!(target_os = "macos") {
         selections.retain(|&(feature, _)| feature != "ml-candle-metal");
     }
-    if !cfg!(unix) {
-        selections.retain(|&(feature, _)| feature != "process-group-probe");
-    }
 
     for (feature, example) in selections {
         let output = cargo_check(

@@ -322,12 +322,12 @@ not reported as one that finished, cooperative cancellation and abort are told
 apart, and a shutdown that outlives the report cap still hands every outcome
 over.
 
-`crates/lgwks-bot/tests/rt_process.rs` is the black-box acceptance for
+`crates/lgwks-bot/tests/it/rt_process.rs` is the black-box acceptance for
 `spawn_process`, run with `--features full`: a zero exit reports `Completed`, a
 non-zero exit reports `Failed` with its status and counts in `Stats::failed`, a
 cancelled command is killed **with its grandchild** — a shell records both its own
 and its backgrounded `sleep`'s pid, and the test asserts both are gone — and a
 command that cannot start returns `NotFound` without consuming a slot.
-`crates/lgwks-bot/tests/rt_async_tier.rs` holds the drain regression: on a real
+`crates/lgwks-bot/tests/it/rt_async_tier.rs` holds the drain regression: on a real
 multi-threaded runtime, a body that returns on its cancellation is reported
 `Cancelled` and not `Aborted`.

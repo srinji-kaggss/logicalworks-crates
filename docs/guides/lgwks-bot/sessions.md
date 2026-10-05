@@ -146,7 +146,7 @@ JSON, and `{"say": {"text": "hello"}}` there. Every enum a flow document carries
 is tagged this way — `NodeKind`, `FlowEdge`, `Terminal`, `Predicate`,
 `ValueExpr`, `Value` and `VarType` — so no part of a document has a `kind` field.
 `from_ron` says so in its own documentation, and
-`crates/lgwks-bot/tests/flow_ron.rs` pins it in both directions, including that
+`crates/lgwks-bot/tests/it/flow_ron.rs` pins it in both directions, including that
 the older `(kind: "end")` spelling no longer decodes.
 
 `NodeKind` is a closed set: `Say`, `Ask`, `Branch`, `Handoff`, `Refer`, `Route`,

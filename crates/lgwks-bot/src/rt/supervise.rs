@@ -2218,7 +2218,7 @@ struct NativeGroupObserver;
 #[cfg(all(unix, feature = "process"))]
 impl GroupObserver for NativeGroupObserver {
     fn exists(&self, group: i32) -> io::Result<bool> {
-        lgwks_deps::process_group::exists(group)
+        lgwks_std::process::process_group_exists(group)
     }
 }
 

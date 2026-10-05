@@ -17,6 +17,37 @@ other change below is additive, and every enum that gained a variant is
 a refusal now added (#265) no longer compiles. That is a correction to the
 guard, recorded here as a minor bump rather than hidden in a patch.
 
+### lgwks_std — Digest equality measured constant-time (#275)
+
+- `Digest`'s `==` now delegates to `blake3::Hash`'s equality, the
+  `constant_time_eq` routine behind an optimisation barrier, instead of a
+  hand-written XOR/OR fold that the compiler was free to turn into an
+  early exit. No new dependency: `constant_time_eq` was already in the graph
+  through `blake3`.
+- New `Digest::ct_eq`, the same comparison by name, for checks against a
+  secret-derived or adversary-written value. `lgwks_bot`'s `verify_chain`
+  compares recorded chain heads through it.
+- `Digest`'s `Ord`/`PartialOrd` are documented as variable-time, for
+  collections only. They are kept, because removing them would break 1.x.
+- `examples/digest_timing.rs` is a dudect-style Welch's t test over two
+  classes at 1,000,000 samples each, with an early-exit negative control it
+  must detect. The `digest-timing` gate lane runs it on the release build,
+  locally (aarch64-apple-darwin) and in CI (x86_64-unknown-linux-gnu).
+
+### One process-group backend (#263)
+
+- `lgwks_std::process::process_group_exists` (feature `process`) is the
+  signal-zero group probe, on rustix beside `kill_process_group`, so the
+  supervisor's kill and the check that confirms it share one syscall binding
+  and one error mapping. Zero and negative ids are refused as `InvalidInput`;
+  off Unix it reports `Unsupported`.
+- `lgwks_deps::process_group::exists` is deprecated and forwards to it. The
+  `process-group-probe` feature now enables `lgwks_std/process` and no longer
+  pulls in `nix`. That edge is withdrawn from `contract/APPROVED.toml`, and
+  the workspace no longer builds `nix`.
+- `lgwks_bot`'s `process` feature no longer enables
+  `lgwks_deps/process-group-probe`.
+
 ### lgwks_bot — fan-out, journal status, process stdio (#257, #259, #260)
 
 - `FanOut` and `FanOutError`: a one-call fan-out over `script::each`, bounded
