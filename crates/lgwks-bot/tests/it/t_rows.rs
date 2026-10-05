@@ -426,9 +426,10 @@ fn walk_pages(
             |step, item| async move {
                 step.checkpoint()?;
                 if Some(item) == failing {
-                    return Err(FlowError::failed("page refused"));
+                    Err(FlowError::failed("page refused"))
+                } else {
+                    Ok(item)
                 }
-                Ok(item)
             },
         )
         .await

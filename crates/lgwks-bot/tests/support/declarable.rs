@@ -106,13 +106,14 @@ impl Observe for Declarable {
     async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
         crate::poll::admit_poll(&call.0, Observe::required_caps(self), &self.polls)?;
         if self.refusing.get() {
-            return Err(BotError::DomainError {
+            Err(BotError::DomainError {
                 domain: self.domain.to_owned(),
                 certainty: DispatchCertainty::NotDelivered,
                 cause: "the source refused to read".to_owned(),
-            });
+            })
+        } else {
+            Ok(self.value.get())
         }
-        Ok(self.value.get())
     }
 
     fn cache_state(&self) -> Option<RefreshReason> {

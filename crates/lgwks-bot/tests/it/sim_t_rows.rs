@@ -270,72 +270,80 @@ fn record_values(sim: &mut sim::Sim, label: &str, values: impl Iterator<Item = u
 fn every_declared_reason_forces_a_refresh(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         for (cause, spelling) in CAUSES {
-            let source = Declarable::new(1, "test::t08_source");
-            let (_value, reason, _refusing, polls) = source.handles();
-            let store = Rc::new(RefCell::new(MemoryJournal::new()));
-            let action = Acting::lands();
-            let ran = action.record();
-            let mut bot = Bot::builder("sim-t08")
-                .observe(source)
-                .on(|observed: &u32| *observed > 0, action)
-                .with_effects(scope_of(&store)?)
-                .build(&GrantSet::empty())?;
-
-            // A clean baseline tick, so nothing is armed and nothing should be
-            // forced: a bot that forced every source would satisfy this row
-            // without reading anything.
-            tick_as(&mut bot, Expect::Settled)?;
-            let baseline = polls.get();
-            assert!(
-                baseline >= 1,
-                "{spelling}: the baseline tick must have polled the source"
-            );
-            assert!(
-                !bot.tick_report().forced_any(),
-                "{spelling}: an undeclared source is not forced"
-            );
-            let fired_before = ran.borrow().len();
-            assert!(
-                fired_before >= 1,
-                "{spelling}: the baseline tick must have fired its entry once"
-            );
-
-            // The value has not moved at all, and the baseline is declared
-            // unsound. A correct implementation re-reads anyway.
-            reason.set(Some(cause));
-            tick_as(&mut bot, Expect::Settled)?;
-            assert!(
-                polls.get() > baseline,
-                "{spelling}: the declared-unsound source was re-read"
-            );
-            assert_eq!(
-                bot.tick_report()
-                    .forced()
-                    .first()
-                    .map(|forced| forced.reason()),
-                Some(cause),
-                "{spelling}: the report names the cause it forced for"
-            );
-            assert_eq!(
-                ran.borrow().len(),
-                fired_before,
-                "{spelling}: a refresh of an unchanged value commits nothing and fires nothing, \
-                 so the repair is not 're-read forever'"
-            );
-
-            // The declaration is spent by the read it forced, so the next tick
-            // has a sound baseline and is not forced.
-            reason.set(None);
-            tick_as(&mut bot, Expect::Settled)?;
-            assert!(
-                !bot.tick_report().forced_any(),
-                "{spelling}: a source that declared nothing is not forced, so the previous \
-                 declaration was spent by the read it forced"
-            );
-            sim.record(spelling);
+            let forced = forced_once_by(sim, cause, spelling);
+            forced?;
         }
         Ok(())
     })
+}
+
+/// One declared reason, end to end: a settled baseline, a forced re-read of an
+/// unchanged value that fires nothing, and the declaration spent by that read.
+fn forced_once_by(sim: &mut sim::Sim, cause: RefreshReason, spelling: &str) -> TestResult {
+    let source = Declarable::new(1, "test::t08_source");
+    let (_value, reason, _refusing, polls) = source.handles();
+    let store = Rc::new(RefCell::new(MemoryJournal::new()));
+    let action = Acting::lands();
+    let ran = action.record();
+    let mut bot = Bot::builder("sim-t08")
+        .observe(source)
+        .on(|observed: &u32| *observed > 0, action)
+        .with_effects(scope_of(&store)?)
+        .build(&GrantSet::empty())?;
+
+    // A clean baseline tick, so nothing is armed and nothing should be
+    // forced: a bot that forced every source would satisfy this row
+    // without reading anything.
+    tick_as(&mut bot, Expect::Settled)?;
+    let baseline = polls.get();
+    assert!(
+        baseline >= 1,
+        "{spelling}: the baseline tick must have polled the source"
+    );
+    assert!(
+        !bot.tick_report().forced_any(),
+        "{spelling}: an undeclared source is not forced"
+    );
+    let fired_before = ran.borrow().len();
+    assert!(
+        fired_before >= 1,
+        "{spelling}: the baseline tick must have fired its entry once"
+    );
+
+    // The value has not moved at all, and the baseline is declared
+    // unsound. A correct implementation re-reads anyway.
+    reason.set(Some(cause));
+    tick_as(&mut bot, Expect::Settled)?;
+    assert!(
+        polls.get() > baseline,
+        "{spelling}: the declared-unsound source was re-read"
+    );
+    assert_eq!(
+        bot.tick_report()
+            .forced()
+            .first()
+            .map(|forced| forced.reason()),
+        Some(cause),
+        "{spelling}: the report names the cause it forced for"
+    );
+    assert_eq!(
+        ran.borrow().len(),
+        fired_before,
+        "{spelling}: a refresh of an unchanged value commits nothing and fires nothing, \
+         so the repair is not 're-read forever'"
+    );
+
+    // The declaration is spent by the read it forced, so the next tick
+    // has a sound baseline and is not forced.
+    reason.set(None);
+    tick_as(&mut bot, Expect::Settled)?;
+    assert!(
+        !bot.tick_report().forced_any(),
+        "{spelling}: a source that declared nothing is not forced, so the previous \
+         declaration was spent by the read it forced"
+    );
+    sim.record(spelling);
+    Ok(())
 }
 
 // ── T07: one chain's failed group never rolls back another's commit ─────────
