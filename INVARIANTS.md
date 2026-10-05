@@ -2121,3 +2121,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
   INV-BOT-10's real frame (#108) — is where the next regression will come
   from.
+- 2026-10-05 (#280): #109 closed on 2026-09-23 with those three rows repaired
+  and covered by in-process regression tests, not by an external observation.
+  INV-BOT-9's T21 is now observed by `tests/process_escape.rs`, which shows a
+  `setsid` descendant escaping the group and the receipt not claiming it
+  (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
+  path and INV-BOT-10's real frame still have no named external test.
