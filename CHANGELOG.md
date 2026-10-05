@@ -24,12 +24,17 @@ was the whole of the 3–5x p99 gap `bench/async` reported on its quiet rows.
   100 ms, and a newly registered cleanup owner wakes the waiter.
 - `bench/async` drains through `wait_idle`; its output goes through
   `lgwks_std::trace`.
+- **Supervised processes start through the std form of the engine's
+  `Command`** and are owned by a private `OwnedChild` that reaps with
+  `try_wait`, and kills and parks the child if dropped unreaped — so
+  `tokio::process::Command::spawn` stays banned with no exception in the crate.
 
 Measured on an Apple M5 Pro, `bench/async --rounds=15 --alloc-report`, load
-average 10.02: facade/raw-Tokio p50 ratio 1.07x (quiet-async-bot), 1.10x
-(high-fanout), 1.12x (at-capacity), 1.09x (single-permit), each with a 95% CI
-that distinguishes; before, 4.87x / 4.50x / 4.58x on the quiet row. Peak memory
-footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
+average 11.60, on the committed tree: facade/raw-Tokio p99 ratio 1.25x
+(quiet-async-bot), 1.00x (high-fanout), 1.14x (at-capacity), 1.07x
+(single-permit); p50 ratio 1.18x / 1.02x / 1.09x / 1.08x. Before, 4.87x on the
+quiet row. The `--tiers` ladder to 100,000 tasks ends at facade p99 104 ms
+against raw Tokio's 107 ms. Peak memory footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
 64 at a time, so it exercises batching and finishes in 10–12 s alone instead of
 83–116 s.
 
