@@ -623,6 +623,14 @@ fn sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_t
 }
 
 #[test]
+fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
+    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    for _ in 0..SEEDS {
+        journey(next_seed(&mut state));
+    }
+}
+
+#[test]
 fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
     let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
     for _ in 0..SEEDS {
@@ -630,20 +638,17 @@ fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
     }
 }
 
+/// The replay oracle, over both journeys: one seed, one trace, each way.
 #[test]
 fn sim_a_seed_replays_its_pool_lifetime_trace() {
     for seed in SWEEP_SEEDS {
         assert_same_seed_replays(journey, seed);
         assert_same_seed_replays(cycles, seed);
-    }
-}
-#[test]
-fn sim_the_same_seed_replays_the_same_pool_lifetime_trace() {
-    for seed in SWEEP_SEEDS {
-        assert_same_seed_replays(journey, seed);
+        assert_same_seed_replays(mid_exit, seed);
     }
 }
 
+/// Two seeds, two traces, for both journeys.
 #[test]
 fn sim_distinct_seeds_diverge_in_their_pool_lifetime_trace() {
     let [first, second, ..] = SWEEP_SEEDS;
