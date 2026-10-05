@@ -8,4 +8,17 @@
 //! directory; the crate's Cargo.toml or the PR names each and why.
 
 mod content_detection;
+mod hostile;
 mod sim_diagnostics;
+mod sim_parse_bounds;
+
+/// The seed substrate every `sim_*` module in this binary drives.
+///
+/// One copy per binary rather than one per module: `#[path]` includes resolve to
+/// the same file, and loading it twice makes the generator a second definition
+/// of `Rng` in one crate -- two types with one name, so a seed recorded against
+/// one module would not mean the same draw sequence in the other. Declared here
+/// so there is exactly one, and it is `std` only, so it compiles in a build with
+/// no grammar feature.
+#[path = "../../../lgwks-bot/tests/sim/seed.rs"]
+mod seed;
