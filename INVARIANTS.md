@@ -802,6 +802,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   `refusals_fold_their_arm_and_both_of_their_coordinates`,
   `the_same_seed_replays_to_the_same_encoding_trace`,
   `distinct_encoding_seeds_diverge_in_their_trace`)
+- **INV-RANDOM-1** `lgwks_std::random` holds no target list of its own: it
+  supports every target its `getrandom` backend supports, and the backend's own
+  refusal is the single compile-time gate, because a second list can only be
+  narrower and a narrower list refuses targets whose entropy source exists. All
+  randomness comes from that one source (INV-RANDOM-ONE-SOURCE), and a refused
+  read substitutes nothing. `EntropyError` carries the cause as data rather than
+  as a rendered `String`: a `#[non_exhaustive]` kind, the raw OS code where the
+  OS gave one, and its `std::io` classification. A code this crate cannot
+  represent at the declared width is dropped, never truncated into a code
+  naming a different failure. `fill_bytes` leaves its buffer **unspecified** on
+  a refusal and a caller must not read it; `bytes` returns no array at all.
+  · why: #276 · enforced by:
+  `random::tests::an_injected_os_code_round_trips_through_the_typed_error`,
+  `random::tests::an_injected_interruption_is_distinguished_from_a_missing_device`,
+  `random::tests::a_status_wider_than_the_declared_code_is_not_truncated`,
+  `random::tests::a_refused_fill_returns_the_typed_error_and_leaves_the_buffer_alone`,
+  `tests/it/sim_random_error.rs`, and the `target-matrix` lane
 - **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
   construction preserve arbitrary UUID values, and malformed hex reports both
   group start and invalid character offsets. · enforced by: `id::tests` and

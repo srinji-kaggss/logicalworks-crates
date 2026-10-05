@@ -69,7 +69,7 @@ without a row is a coverage failure, and
 | 10 | `online` | `online` | exercised | `open_port_probes_true`, `closed_port_probes_false` | One remaining connection budget, explicit resolver timing scope → [#163](https://github.com/srinji-kaggss/logicalworks-crates/issues/163) (closed 2026-10-02). **A boolean TCP probe is not a health check** and carries no TLS or universal-connectivity guarantee. |
 | 11 | `pattern` | `pattern` | exercised | `producer_counter_detects_eager_collection_mutant`, `configured_limits_refuse_input_and_amplified_output`; `pattern_external.rs`; seeded family `tests/it/sim_pattern.rs` | Per-operation complexity, producer/resource controls, borrowed replacement → [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168) (closed 2026-09-30). The discriminating laziness oracle is [#122](https://github.com/srinji-kaggss/logicalworks-crates/issues/122) (closed 2026-10-03) item 3. |
 | 12 | `process` | `process` (**Unix-only**, `cfg`-gated) | exercised, platform-scoped | `invalid_pgid_is_rejected`, `invalid_pid_is_rejected_for_the_exit_observation`; seeded family `tests/it/sim_process_group.rs` | Real owned-child boundary tests and docs → X4; descendant containment beyond the group → [#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) (open). **Non-Unix returns `std::io::ErrorKind::Unsupported` rather than a fabricated success**; the raw primitives are not managed lifecycle acceptance, and bot owns that. |
-| 13 | `random` | `random` | exercised + **assurance-gap** | `fills_the_whole_buffer`, `successive_draws_differ` | Typed backend failure/cause, defined output validity after failure, and every `getrandom` target → [#276](https://github.com/srinji-kaggss/logicalworks-crates/issues/276) (open; was X3). **No histogram here is a proof of cryptographic strength.** |
+| 13 | `random` | `random` | exercised | `fills_the_whole_buffer`, `an_injected_os_code_round_trips_through_the_typed_error`, `a_refused_fill_returns_the_typed_error_and_leaves_the_buffer_alone`; seeded family `tests/it/sim_random_error.rs` (10 tests, four tiers to 100 000 callers) | Typed backend failure/cause, defined output validity after failure, and every `getrandom` target → [#276](https://github.com/srinji-kaggss/logicalworks-crates/issues/276) (closed 2026-10-05; was X3): the cause is a kind plus the raw OS code plus its `io::ErrorKind`, and the refused-fill buffer is documented as unspecified and driven by a test. **The typed cause is not a proof that any target's entropy source is sound, and no histogram here is a proof of cryptographic strength.** Builds for seven cross targets (`target-matrix` lane); only `full` and `lgwks_ast` need a C toolchain this runner lacks. |
 | 14 | `retry` | `core` | exercised | `backoff_doubles_and_caps`, `jitter_only_shrinks`; seeded family `tests/it/sim_retry_arithmetic.rs` | Growth after attempt 31, `Duration`/`u64` jitter boundaries, effective-policy invariants → [#164](https://github.com/srinji-kaggss/logicalworks-crates/issues/164) (closed 2026-10-02). **Not an executor, and not evidence an effect is retry-safe.** |
 | 15 | `ron` | `ron` | exercised | `struct_roundtrips_through_string`, `enum_roundtrips`; seeded family `tests/it/sim_codec.rs` | Borrowed types, RON-only derive path, typed partial-writer failure → [#162](https://github.com/srinji-kaggss/logicalworks-crates/issues/162) (closed 2026-09-30). **Buffered serialization is not an atomic external write.** |
 | 16 | `similarity` | `core` | exercised | `edit_distance_handles_empty_and_identical_inputs`, `edit_distance_normalizes_known_distance`; `similarity_public_api.rs`; seeded family `tests/it/sim_similarity_sweep.rs` | Coherent domains, refusal-preserving composition, valid `Geometry` input, normalization units → [#160](https://github.com/srinji-kaggss/logicalworks-crates/issues/160) (closed 2026-10-02). **Heuristic normalization is not exact identity**, and missing evidence is not a zero. |
@@ -140,10 +140,13 @@ Every issue in both lists above is closed as of 2026-10-05.
 **Assurance workstreams X1–X4:** X1 (constant-time hashing) was measured and closed
 by #275; X2 (fallible thread admission) was closed by #264 — the `task` row now
 carries a typed admission result on both entry points and an owned, joinable
-blocking pool — leaving X3 (entropy failure meaning), which is #276 and still
-open; X4 (feature-isolated ergonomics) has no issue of its own and stays open
-against the `process` and `trace` rows. The rows marked **assurance-gap** stay
-marked until their owners close.
+blocking pool; X3 (entropy failure meaning) was closed by #276: the refusal
+carries the OS's own code, its portable `io::ErrorKind` and a kind that
+distinguishes "no source on this target" from "the OS refused", and the output
+buffer's state after a refusal is documented and tested rather than assumed. X4
+(feature-isolated ergonomics) has no issue of its own and stays open against the
+`process` and `trace` rows. The rows marked **assurance-gap** stay marked until
+their owners close.
 
 **Nothing here converts an unresolved promise into a green checkbox.** A row
 marked `unexercised-gap` or `assurance-gap` is a real, named, owned gap, and

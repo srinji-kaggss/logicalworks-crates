@@ -152,7 +152,7 @@ lgwks_std = { version = "1", default-features = false, features = ["core"] }
 | `retry` | Retry budgets: attempts, exponential backoff with caller jitter, deadlines | — |
 | `task` | Executor that drives futures on the current thread: `block_on`, interleaved `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
-| `random` | OS entropy via `getrandom` | `getrandom` |
+| `random` | OS entropy via `getrandom`, typed OS cause | `getrandom` |
 | `id` | UUID v4 generation and parsing | `uuid` |
 | `hash` | BLAKE3 content-addressable hashing | `blake3` |
 | `pattern` | Compiled regex matching: single search is O(m*n); complete greedy iteration may be O(m*n^2). `Regex::with_config` bounds source-pattern bytes, compiled size, nesting, input bytes and replacement output bytes. | `regex` |
@@ -164,6 +164,25 @@ lgwks_std = { version = "1", default-features = false, features = ["core"] }
 | `similarity` | Edit-distance and cosine scorers, weighted composition, acceptance thresholds | — |
 | `process` | Process-group signalling and unreaped exit observation (Unix-only) | — |
 | `fs::capability` | Handle-relative `openat`/`statat`/`unlinkat`/`mkdirat` access (Unix-only) | — |
+
+## Targets and the one entropy source
+
+`random` supports every target `getrandom` supports and holds no target list of
+its own, so a target the backend already supported is not refused here. It is
+also the only randomness source: a refused read returns `EntropyError` and
+substitutes nothing, and the error carries the OS's own code
+(`raw_os_error`), a `#[non_exhaustive]` `EntropyErrorKind`, and the portable
+`io::ErrorKind` that code maps to. A caller can tell an interruption from a host
+with no entropy device instead of reading a message.
+
+On a refusal the buffer passed to `fill_bytes` is **unspecified** — partly
+written, wholly written, or untouched — and must not be read. `bytes::N` has no
+such window: a failed draw returns no array.
+
+`scripts/check-target-matrix.sh` is the gate lane that runs `cargo check` across
+the declared target set (Linux glibc and musl, aarch64 and x86_64, WASI,
+FreeBSD, Android, iOS, and the host), so "supported" means a build that was
+executed rather than a `cfg` that was read.
 
 ## Threat models: which walk to use
 
