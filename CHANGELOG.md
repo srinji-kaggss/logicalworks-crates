@@ -39,12 +39,25 @@ explicitly under that crate.
 - `task::join_all` gives each child its own waker: a wake re-polls only the
   child that woke, so `n` children waking `k` times cost `n·(k+1)` polls
   rather than a scan of every pending child per wake.
+- A job that starts a pool thread is handed to it directly instead of through
+  the queue, so under the ceiling a job starts as fast as a thread of its own
+  (p50 11 µs, p99 20–60 µs at 500 concurrent jobs, against 10–11 µs and
+  19–20 µs before the pool). Past the ceiling a job waits for a thread: at
+  10,000 × 20 ms jobs, p50 238 ms and p99 484 ms to start.
+- The pool's accounting (queued, live, idle, claimed wakeups) is a set of
+  transitions a seeded simulation drives through every interleaving of
+  submit, thread start and start failure, lost notify, spurious wake and
+  keep-alive expiry: every admitted job runs exactly once, a refused one
+  never, and the pool drains to nothing.
 
 ### lgwks_bot
 
 - `domain::net::Endpoint`'s poll uses `try_spawn_blocking`, so a burst of
   concurrent polls cannot start a thread per poll; a refusal is a
-  `DomainError` with `DispatchCertainty::Refused`.
+  `DomainError` with `DispatchCertainty::Refused`. Ten thousand concurrent
+  polls against a full pool are all refused this way and send nothing; once
+  the pool frees, the same ten thousand all run.
+
 ### lgwks_macros — refusals by path, and lints the consumer enforces (#265)
 
 - `script!` now refuses `unwrap`/`expect`/`unwrap_err`/`expect_err` called by
