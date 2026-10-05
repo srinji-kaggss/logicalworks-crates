@@ -23,7 +23,8 @@
 //!   Priority and Fairness builds on: each backlogged tenant holds a *deficit*
 //!   that grows by its weight on its turn and is spent one permit at a time, so
 //!   a tenant's share of freed permits converges on its share of the total
-//!   weight while any tenant has work waiting. A decision is O(1) amortized.
+//!   weight while any tenant has work waiting. A decision is O(log T) work over
+//!   the tenant map plus amortized-O(1) work over the ring.
 //! - [`SpawnRefused`] — the typed refusal a tenant past its queue bound
 //!   receives, naming the tenant and the bound, so a caller learns which tenant
 //!   is loud and what easing it would take.
@@ -178,7 +179,8 @@ pub struct TenancyPolicy {
     queue_total: usize,
     /// The DRR weight per tenant, defaulting to 1. A `BTreeMap` so the policy
     /// iterates in one order everywhere, which is what makes the seeded
-    /// simulation of the scheduler reproducible.
+    /// simulation of the scheduler reproducible -- and so the scheduler's own
+    /// per-tenant state can use the same map, at O(log T) a lookup.
     weights: BTreeMap<Tenant, NonZeroU32>,
 }
 
@@ -499,16 +501,32 @@ impl<W> Entry<W> {
 /// tenant reaches its ceiling, the turn closes and the tenant moves to the back
 /// or off the ring.
 ///
-/// # The O(1) claim
+/// # What one decision costs
 ///
-/// Per permit handed out, the ring work is bounded: a ring member is there
-/// because it had a live waiter and room, so a step past a member happens only
-/// when that member's entry is retired or its abandoned heads are skipped — both
-/// paid for by the arrival or the abandonment that created them. Tenants at
-/// their ceilings are *not* on the ring; they are re-armed by
-/// [`note_release`](Self::note_release), the one other event that can make a
-/// tenant servable. So a decision walks the ring only to hand out permits, and
-/// the walk is amortized O(1) in the number of tenants.
+/// **O(log T) plus amortized O(1)**, where `T` is the number of tenants with
+/// state. The two halves are separate and neither is hidden in the other:
+///
+/// - The *ring* work is amortized O(1) in `T`. A ring member is there because it
+///   had a live waiter and room, so a step past a member happens only when that
+///   member's entry is retired or its abandoned heads are skipped — both paid
+///   for by the arrival or the abandonment that created them. Tenants at their
+///   ceilings are *not* on the ring; they are re-armed by
+///   [`note_release`](Self::note_release), the one other event that can make a
+///   tenant servable.
+/// - The *map* work is O(log T) per lookup, and every decision does one: the
+///   entries map is a [`BTreeMap`], so a tenant name costs a descent rather
+///   than a hash. That is the price of an order two runs agree on, which is what
+///   makes this scheduler reproducible, and it is paid deliberately rather than
+///   avoided. Two orders of magnitude separate the two terms at the estate's
+///   largest declared fleet (5,000 tenants: a descent is about thirteen
+///   comparisons against a thirteen-step ring walk), so the ring is not what
+///   dominates at the tiers this crate is built for.
+///
+/// `arrive` and `grant` additionally clone the tenant name onto the ring and
+/// into the grant, which is a copy of the name rather than a constant, and
+/// [`note_release`](Self::note_release) and [`note_abandoned`](Self::note_abandoned)
+/// do one lookup each. A caller measuring this measures a name copy as well as
+/// the comparisons.
 ///
 /// # What it does not decide
 ///
