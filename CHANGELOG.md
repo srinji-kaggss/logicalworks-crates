@@ -9,6 +9,42 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a change tick, and the sources that can report one (#279)
+
+`Observe::revision` is a source's own answer to "has anything moved?", read on
+the calling thread **before** the poll it may skip. A source that reports the
+revision its committed value was read at is not polled at all: no future is
+built, no value is boxed, nothing is allocated, and the observation wave is
+narrower by however many sources are quiet. One vtable call and one `u64`
+comparison is the whole cost of an unchanged check.
+
+- The default is `None`, which is the value-comparison path every source took
+  before and every source this crate ships still takes: a revision only pays
+  when something *other than the poll* maintains it, and a source whose poll is
+  how it learns everything about the world has no revision to report.
+  `docs/bot-on-ecs.md` §4.1 carries the table of which shipped source takes
+  which path and the reason for each.
+- **A revision is committed together with its value, or not at all** — the
+  fingerprint-commit rule (#99 / INV-BOT-5) with a change tick in place of a
+  digest. The commit is the one arm of `observe_fold`'s second pass that put a
+  new value in the observation slot, so a poll that failed, was cancelled at its
+  deadline, or produced a value equal to the one already held leaves the
+  revision where it was and the next tick asks again.
+- **Comparison is equality only**, so a revision that wraps (`u64::MAX` → 0) or
+  regresses is a change rather than an ordering a wrap could invalidate. A
+  revision that moved while the value did is the one broken promise and is
+  deliberately the cheap direction: a spare poll, never a suppressed effect.
+- A source that declares its cached baseline unsound is polled regardless of its
+  revision: the substrate has been told its held value is not what the source
+  would report now, and a revision is a claim about a value rather than a repair
+  of one. `TickReport::forced` and INV-BOT-120 are unchanged.
+- Two defects the path exposed and this change repairs: a freshly spawned
+  `Revision` reads as changed with nothing committed behind it, and a transition
+  opened over no observation is never walked — so its entries stayed `NotStarted`
+  and every one of them was reported pending. A transition is now opened **over
+  an observation** or not at all.
+
+
 ### lgwks_bot — a tick is measured stage by stage, and the rig that measures it runs again (#279)
 
 `bench/` publishes a ratio between this crate's tick and a hand-rolled loop

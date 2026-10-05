@@ -7,7 +7,7 @@ boundary is worth reading before you design around it.
 ## Admission happens at build, and reports the whole shortfall
 
 `EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs.rs:6308`):
+(`crates/lgwks-bot/src/ecs.rs:6444`):
 
 ```rust
 let mut shortages: Vec<Shortage> = Vec::new();
@@ -87,7 +87,7 @@ never thread an `Auth` through your own call sites for the chained path.
 ## The grant set is a snapshot
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:6325`):
+the world (`crates/lgwks-bot/src/ecs.rs:7056`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));
@@ -136,17 +136,17 @@ from there — is **not implemented, and the reason is not effort. An action
 cannot be denied for want of a capability at run time.** Two facts make that so:
 
 - `EcsBot::assemble` admits every declared requirement before the world is built
-  (`crates/lgwks-bot/src/ecs.rs:6308`), so a bot whose declared requirements are
+  (`crates/lgwks-bot/src/ecs.rs:6444`), so a bot whose declared requirements are
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` calls
-  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:785`),
+  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:797`),
   and the action then checks `call.0.check(self.required_caps())`. The two cannot
   disagree, and nothing narrows `Grants` after `assemble` — the only writer is
   `assemble` itself.
 
 So `Auth::check` cannot fail inside a running bot.
 `BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:4380`) is
+that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:4440`) is
 defensive rather than live. A hold was built on top of that arm and then removed,
 because machinery whose only caller is a contrived test is not a feature.
 

@@ -115,18 +115,24 @@ impl Observe for Source {
         Ok(self.clock.0.get() / period)
     }
 
-    /// The value itself, which is the cheapest faithful key this source has.
+    /// The value, as a revision.
     ///
-    /// It is what the source already computes, so it costs nothing extra and it
-    /// is exactly the digest the contract asks for: equal fingerprints imply
-    /// equal values, because it *is* the value. A real source would use an ETag
-    /// or an `mtime` — something cheaper than the value — and the point of this
-    /// one is that the rig measures the seam's overhead with no such shortcut
-    /// available, so the number it reports is a floor on the gain and not a
-    /// best case.
-    fn fingerprint(&self) -> Option<u128> {
+    /// This is the change-tick path: the substrate compares this against the
+    /// revision it last committed for the chain and **skips the poll entirely**
+    /// when they match, so an unchanged tick costs one integer comparison per
+    /// source and allocates nothing. A real source would report something its
+    /// world maintains for it — an ETag, an `mtime`, a subscription sequence — and
+    /// this one reports the counter it already holds, which is the same contract
+    /// with a cheaper witness.
+    ///
+    /// Reporting the value is honest here and is not the same as the digest the
+    /// rig used to implement: the deprecated `fingerprint` was read *beside* the
+    /// poll and could describe a value the poll never returned, whereas this is
+    /// read before the poll it may skip, so it can only ever describe the value
+    /// the substrate commits (`docs/bot-on-ecs.md` §4).
+    fn revision(&self) -> Option<u64> {
         let period = if self.period == 0 { 1 } else { self.period };
-        Some(u128::from(self.clock.0.get() / period))
+        Some(self.clock.0.get() / period)
     }
 
     fn domain_id(&self) -> &'static str {

@@ -1383,6 +1383,48 @@ struct TickError(Option<BotError>);
 #[derive(Resource, Debug, Default)]
 struct Order(Vec<Entity>);
 
+/// The change ticks: the revision each chain's committed value was read at, and
+/// the revision each source reported on this tick.
+///
+/// Two buffers rather than one because they answer two different questions, and
+/// conflating them is the mistake that makes a poll look like a commit: `seen` is
+/// what the substrate **holds**, and moves only where a value was committed;
+/// `polled` is what the source **said** on the tick the value was read. A poll
+/// that failed, was cancelled at its deadline, or produced a value equal to the
+/// one already held writes `polled` and leaves `seen` alone, so the next tick
+/// asks again — the fingerprint-commit rule (#99 / INV-BOT-5) applied to a change
+/// tick rather than to a digest.
+#[derive(Debug, Default)]
+struct ChangeTicks {
+    /// The revision of the value the substrate currently holds, per chain.
+    seen: Vec<Option<u64>>,
+    /// The revision each source reported on this tick, per chain.
+    polled: Vec<Option<u64>>,
+}
+
+impl ChangeTicks {
+    /// Whether `chain`'s source reported the revision its committed value was
+    /// read at, so the poll can be skipped.
+    ///
+    /// Equality is the whole comparison. A revision that wraps, or regresses, is a
+    /// *different* revision and therefore a change: there is no ordering here that
+    /// a wrap could invalidate, and a source is free to use a saturating counter,
+    /// a timestamp in its own units, or a content digest as its revision.
+    fn quiet(&self, chain: usize, reported: Option<u64>) -> bool {
+        reported.is_some() && self.seen.get(chain).copied().flatten() == reported
+    }
+
+    /// Commit the revision a value was read at, and only then.
+    ///
+    /// Called from the commit pass of [`observe_fold`] and nowhere else, which is
+    /// what makes the rule a fact about one place rather than an intention.
+    fn commit(&mut self, chain: usize, polled: Option<u64>) {
+        if let Some(slot) = self.seen.get_mut(chain) {
+            *slot = polled;
+        }
+    }
+}
+
 /// The decision phase's per-tick scratch: which chains moved, what the walk will
 /// do with each chain's live transition, and the admitted input each binding
 /// takes.
@@ -4226,7 +4268,25 @@ fn plan_admissions(world: &World, moving: &[bool], kinds: &mut [AdmitKind]) {
                     AdmitKind::Keep
                 }
             }
-            None if moving.get(chain).copied().unwrap_or(false) => AdmitKind::Open,
+            // A transition is opened **over an observation** or not at all. The
+            // change filter alone is not enough to open one: a component is
+            // "changed" from the moment it is spawned, so a freshly assembled bot
+            // reports every chain as moved with no committed observation behind
+            // it, and a transition bound to nothing is never walked — its entries
+            // stay `NotStarted` and the tick reports all of them pending.
+            //
+            // The change-tick skip is what makes this reachable rather than
+            // theoretical: a quiet source commits nothing, so its slot stays empty
+            // however many ticks the filter keeps calling it moved.
+            None if moving.get(chain).copied().unwrap_or(false)
+                && world
+                    .non_send::<Observed>()
+                    .0
+                    .get(chain)
+                    .is_some_and(|slot| slot.is_some()) =>
+            {
+                AdmitKind::Open
+            }
             None => AdmitKind::Idle,
         };
     }
@@ -4527,6 +4587,13 @@ fn observe_fold(world: &mut World) {
     changed.clear();
     changed.resize(polled.len(), false);
     let mut superseded: Vec<SupersededObservation> = Vec::new();
+    // The change tick commits **here and only here**: beside the arm that put a
+    // new value in the slot. A tick that parked, stopped on a failure, or left a
+    // result equal to the value it already held reaches none of it, so the
+    // revision stays where it was and the next tick asks again — the
+    // fingerprint-commit rule (#99 / INV-BOT-5) applied to a change tick rather
+    // than to a digest.
+    let revisions = std::mem::take(&mut world.non_send_mut::<ChangeTicks>().polled);
     {
         let mut observed = world.non_send_mut::<Observed>();
         for (index, result) in polled.iter_mut().enumerate() {
@@ -4546,6 +4613,17 @@ fn observe_fold(world: &mut World) {
             }
         }
     }
+    // A second pass, with the observation slot released, so the commit reads the
+    // same `changed` the revision walk below reads. One flag is one chain: a
+    // chain that took a value commits the revision that value was read at, and
+    // every other chain's revision stays exactly where it was.
+    for index in 0..changed.len() {
+        if changed.get(index).copied().unwrap_or(false) {
+            let reported = revisions.get(index).copied().flatten();
+            world.non_send_mut::<ChangeTicks>().commit(index, reported);
+        }
+    }
+    world.non_send_mut::<ChangeTicks>().polled = revisions;
     put_polled(world, polled);
 
     // Walked by index rather than over a cloned `Order`: the entity is one
@@ -5317,12 +5395,20 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
+        // The revisions the sources reported, taken out with the rest of the
+        // observation phase's scratch: this method holds `&self` across every
+        // poll, so it cannot write the world it is reading.
+        let mut revisions = std::mem::take(&mut self.world.non_send_mut::<ChangeTicks>().polled);
         #[cfg(feature = "profile")]
         let poll_charge = Charge::new(TickStage::Poll);
-        let (invalidations, stalled, watchdogs) = self.poll_sources(&mut polled).await;
+        let (invalidations, stalled, watchdogs) =
+            self.poll_sources(&mut polled, &mut revisions).await;
         #[cfg(feature = "profile")]
         drop(poll_charge);
         self.world.non_send_mut::<Polled>().0 = polled;
+        // Handed back before the schedule runs, because `observe_fold` commits
+        // each chain's revision from it and that commit is the whole rule.
+        self.world.non_send_mut::<ChangeTicks>().polled = revisions;
 
         // Published before the schedule runs, so the report describes this tick's
         // observation phase even when the schedule step stops on a failure and
@@ -5565,6 +5651,19 @@ impl EcsBot {
     /// the change filter re-evaluates the entries against the value that is
     /// actually current rather than against the one the failure left behind.
     ///
+    /// # The change-tick skip, and what it is not
+    ///
+    /// A source that implements [`Observe::revision`](crate::verb::Observe::revision)
+    /// and reports the revision its committed value was read at is **not polled
+    /// at all**. No future is built, no value is boxed, nothing is allocated, and
+    /// the wave is narrower by however many sources are quiet. The check is one
+    /// `&self` call and one integer comparison.
+    ///
+    /// The skip is suppressed for a chain that declared its baseline unsound,
+    /// which is the case where believing a revision would be exactly wrong: the
+    /// substrate has been told its held value is not what the source would report
+    /// now, and a revision is a claim about the value rather than a repair of it.
+    ///
     /// # Where the reason comes from
     ///
     /// Read from the source itself, after its poll resolves, never guessed by
@@ -5586,10 +5685,13 @@ impl EcsBot {
     async fn poll_sources(
         &self,
         polled: &mut Vec<Result<Option<Erased>, BotError>>,
+        revisions: &mut Vec<Option<u64>>,
     ) -> (Vec<Option<RefreshReason>>, Vec<usize>, u32) {
         let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
+        revisions.clear();
+        revisions.resize(count, None);
 
         // What each chain declares about its own caching, one entry per chain and
         // read once per tick. Copied out of the world rather than borrowed across
@@ -5628,20 +5730,49 @@ impl EcsBot {
                 .take(MAX_IN_FLIGHT_POLLS)
                 .collect();
 
+            // Which chains in this wave must be polled. A chain is **skipped**
+            // when it reported a revision equal to the one its committed value
+            // was read at and did not declare its baseline unsound: it keeps its
+            // slot in `polled` as `Ok(None)` — "this source did not move" — and no
+            // future is built for it, which is the whole saving.
+            //
+            // The indices are the *wave's* own slots, not positions in `polls`,
+            // so each `WavePoll::slot` is still its own index in the wave's wakers
+            // and the results below land on the chains that produced them.
+            let slots: Vec<usize> = {
+                let ticks = self.world.non_send::<ChangeTicks>();
+                (0..wave.len())
+                    .filter(|slot| {
+                        let (index, chain) = wave[*slot];
+                        let unsound = declared
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|reason| reason.invalidates_baseline());
+                        let reported = chain.source.revision();
+                        if let Some(slot) = revisions.get_mut(index) {
+                            *slot = reported;
+                        }
+                        // `None` from a source that cannot report a revision is
+                        // never quiet: that is the value-comparison path, and it
+                        // runs on every tick as it always has.
+                        !(ticks.quiet(index, reported) && !unsound)
+                    })
+                    .collect()
+            };
+
             // One watchdog for the wave rather than one per poll, and one
             // deadline the whole wave shares: `bounded_wave` owns it and reports
             // whether it really did start a thread, which is the number the tick
-            // report names.
-            let wave_watchdog = PollWatchdog::new(self.poll_deadline, wave.len());
+            // report names. Its width is the number of polls that will actually
+            // run, so a wave of entirely-skipped sources never arms a watcher.
+            let wave_watchdog = PollWatchdog::new(self.poll_deadline, slots.len());
             let (results, armed) = {
-                let polls: Vec<WavePoll<'_>> = wave
+                let polls: Vec<WavePoll<'_>> = slots
                     .iter()
-                    .enumerate()
-                    .map(|(slot, &(index, chain))| {
-                        // `chunks` gives no index, so the chain's position is the
-                        // wave's start plus the offset within it. This is the same
-                        // index `Observed` and `Ledger` are keyed by, which is what
-                        // makes the baseline below the right one to hand over.
+                    .map(|slot| {
+                        let slot = *slot;
+                        let (index, chain) = wave[slot];
                         let seen = self.world.non_send::<Observed>();
                         let ledger = self.world.non_send::<Ledger>();
                         let grants = self.world.resource::<Grants>();
@@ -5679,7 +5810,13 @@ impl EcsBot {
             };
             watchdogs = watchdogs.saturating_add(u32::from(armed));
 
-            for (&(index, _), result) in wave.iter().zip(results) {
+            // Zipped against the slots that were polled, not against the wave:
+            // `results` has one entry per built future, so pairing it with the
+            // wave would put every result after the first skip on the wrong
+            // chain — a mis-pairing the rendezvous would then refuse as a type
+            // mismatch, or, worse, commit one chain's value to another's.
+            for (&slot, result) in slots.iter().zip(results) {
+                let (index, _) = wave[slot];
                 let Some(slot) = polled.get_mut(index) else {
                     continue;
                 };
@@ -7064,6 +7201,14 @@ impl EcsBot {
         // what that means, and there is no answer that is better than "this
         // cannot happen".
         world.insert_non_send(Polled::default());
+        // The change ticks, sized here so neither buffer is ever resized on the
+        // observation path. `seen` starts empty of revisions: a chain with no
+        // committed value has nothing a source's revision could equal, so its
+        // first tick is a poll like any other.
+        world.insert_non_send(ChangeTicks {
+            seen: vec![None; count],
+            polled: vec![None; count],
+        });
         // The change flags and the plan's buffers are per-tick scratch, inserted
         // here so the first tick allocates them once and every later tick reuses
         // the same allocations. Nothing else writes them.
@@ -7283,6 +7428,113 @@ mod tests {
         fn domain_id(&self) -> &str {
             "test::counted"
         }
+    }
+
+    /// A source that reports a change tick as well as a value.
+    struct Rev {
+        value: Rc<Cell<u64>>,
+        rev: Rc<Cell<u64>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl Observe for Rev {
+        type Output = u64;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u64, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            Ok(self.value.get())
+        }
+
+        fn revision(&self) -> Option<u64> {
+            Some(self.rev.get())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::rev"
+        }
+    }
+
+    /// An action over a `u64`, counting its own calls.
+    struct CountU64(Rc<Cell<usize>>);
+
+    impl Execute for CountU64 {
+        type Input = u64;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
+        async fn execute_action(&self, call: (Auth, &u64)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &'static str {
+            "test::count_u64"
+        }
+    }
+
+    #[test]
+    fn a_change_tick_source_fires_once_per_movement_and_is_not_polled_otherwise() -> TestResult {
+        let value = Rc::new(Cell::new(0u64));
+        let rev = Rc::new(Cell::new(0u64));
+        let polls = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(Cell::new(0usize));
+        let mut bot = EcsBot::builder("revs")
+            .observe(Rev {
+                value: Rc::clone(&value),
+                rev: Rc::clone(&rev),
+                polls: Rc::clone(&polls),
+                caps: Vec::new(),
+            })
+            .on(
+                |value: &u64| value.is_multiple_of(2),
+                CountU64(Rc::clone(&counter)),
+            )
+            .with_effects(test_effects()?)
+            .build(&GrantSet::empty())?;
+        let mut fired = Vec::new();
+        for step in 0..6u64 {
+            // The value and the revision move together, every other tick: the
+            // promise `Observe::revision` asks for, kept in both directions.
+            let held = step.checked_div(2).unwrap_or(0);
+            value.set(held);
+            rev.set(held);
+            fired.push(bot.tick()?);
+        }
+        // The value steps 0, 0, 1, 1, 2, 2 and the revision steps with it. Tick 2
+        // moves to an **odd** value, so the condition runs and answers false —
+        // which is the half the skip must not lose: a movement is evaluated, and
+        // only a tick that did not move is skipped.
+        assert_eq!(
+            fired,
+            vec![1, 0, 0, 0, 1, 0],
+            "one fire per even movement and nothing while the revision holds: {fired:?}"
+        );
+        assert_eq!(
+            polls.get(),
+            3,
+            "a skipped chain is not polled at all, so three movements are three polls"
+        );
+        assert_eq!(
+            bot.pending(),
+            Vec::new(),
+            "a value that moves must be acted on, and a chain with nothing outstanding \
+             must not be reported"
+        );
+        Ok(())
     }
 
     /// A source that fails once its script runs out.

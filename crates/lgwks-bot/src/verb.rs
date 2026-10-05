@@ -137,6 +137,80 @@ pub trait Observe {
         None
     }
 
+    /// This source's own revision of its value, when it has one.
+    ///
+    /// The cheap answer to "has anything moved?", and the substrate's second
+    /// change-detection path beside the value comparison it always does. When a
+    /// source reports `Some(revision)` and that revision is the one the substrate
+    /// last **committed** for this chain, the substrate **skips the poll
+    /// entirely**: no future is built, no value is boxed, and nothing is
+    /// allocated. The check is one call and one integer comparison.
+    ///
+    /// # The contract, which is the whole of the method
+    ///
+    /// **A revision moves if and only if the value moves.** Both directions, and
+    /// the cost of each failure is different:
+    ///
+    /// - A revision that does **not** move while the value does is a **missed
+    ///   effect**: the bot goes quiet about a change that happened. That is the
+    ///   failure this substrate exists to avoid, and nothing downstream can
+    ///   recover it.
+    /// - A revision that moves while the value does is a **spare poll**: the
+    ///   source is polled, the value compares equal, nothing commits, and the
+    ///   substrate asks again next tick. It costs a poll and never suppresses
+    ///   work — which is why the substrate does not "correct" it by committing
+    ///   the revision anyway: believing a revision that lied once is how a later
+    ///   real change is skipped.
+    ///
+    /// So the substrate believes a reported revision, and a source that cannot
+    /// keep that promise returns `None`.
+    ///
+    /// # When `None` is the right answer, and it usually is
+    ///
+    /// **`None` is the default, and most sources are correct to leave it.** A
+    /// revision only pays when something *other than the poll* maintains it. A
+    /// source whose poll is how it learns everything about the world — an HTTP
+    /// `GET`, a file read, a `gh` snapshot, a process dispatch — has no revision
+    /// to report: the poll is what would discover that anything moved, so asking
+    /// first asks the question the poll answers. Those sources take the
+    /// comparison path, which is what the substrate does anyway.
+    ///
+    /// A revision is for a source whose world is pushed at it: a subscription, a
+    /// socket, a filesystem watcher, or a counter another component already
+    /// maintains. For those, one comparison per tick replaces a poll.
+    ///
+    /// Every source this crate ships takes the comparison path, and the table of
+    /// which takes which, with the reason for each, is in
+    /// [`docs/bot-on-ecs.md`](https://github.com/srinji-kaggss/logicalworks-crates/blob/main/docs/bot-on-ecs.md)
+    /// §4.1. It is a table rather than a claim because the answer is a property of
+    /// each domain's poll, and a reader deciding whether to implement this is
+    /// deciding whether their own source has a cheaper question to ask.
+    ///
+    /// # What it is compared against
+    ///
+    /// The revision of the value the substrate last **committed** for this chain,
+    /// and the commitment is the only thing that moves it. A poll that failed, was
+    /// cancelled at its deadline, or produced a value equal to the one already
+    /// held commits no revision — so the next tick asks again. That is the
+    /// fingerprint-commit rule (#99 / INV-BOT-5) applied to a change tick instead
+    /// of a digest: **a revision is committed together with its value, or not at
+    /// all**, and a revision committed alone would make a failed read look like
+    /// "nothing changed" for ever.
+    ///
+    /// Equality is the only comparison. A revision that wraps, or regresses, is a
+    /// *different* revision and is therefore a change: there is no ordering here
+    /// to get wrong, and a source is free to use a saturating counter, a
+    /// timestamp in its own units, or a content digest as its revision.
+    ///
+    /// Read on the calling thread before the poll it may skip, and never while a
+    /// poll of this source is in flight: the revision belongs to the value the
+    /// substrate holds, so a revision read beside a pending poll could describe a
+    /// value the poll never returns.
+    #[must_use]
+    fn revision(&self) -> Option<u64> {
+        None
+    }
+
     /// A legacy, detached digest of the source state.
     ///
     /// # What this is for
