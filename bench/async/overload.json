@@ -1,0 +1,4 @@
+{"tool":"lgwks-bench-async-overload","bound":64,"knee_offered_rate":10000,"baseline_window_ms":5000,"overload_window_ms":30000,"recovery_window_ms":90000,"runs":[
+{"side":"facade","bound":64,"baseline_p99_nanos":6742015,"overload_offered_rate":20000,"overload_peak_queue":229554,"drain_millis":0,"recovered_millis":500,"phase":"recovery","recovered_p99_nanos":6463487,"offered":845586,"admitted":845586,"refused":0,"completed":845586,"work_units":845586},
+{"side":"baseline","bound":64,"baseline_p99_nanos":6397951,"overload_offered_rate":20000,"overload_peak_queue":229172,"drain_millis":4,"recovered_millis":505,"phase":"recovery","recovered_p99_nanos":6316031,"offered":845959,"admitted":845959,"refused":0,"completed":845959,"work_units":845959}
+]}
