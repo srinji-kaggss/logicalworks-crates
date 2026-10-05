@@ -668,8 +668,10 @@ pub fn configure_blocking_pool(threads: usize) -> Result<(), PoolConfigError> {
     // a configure and a first use, and neither can miss the other's write.
     let pool = POOL.get_or_init(|| Arc::new(Pool::at_configured(threads, start_os_thread)));
     let decision = configure_decision(pool, threads);
+    // The whole `if` is behind the feature, so a build without `trace` never
+    // binds the error at all.
+    #[cfg(feature = "trace")]
     if let Err(ref error) = decision {
-        #[cfg(feature = "trace")]
         crate::trace::debug!(
             error = ?error,
             "configure_blocking_pool: the ceiling stands as it was"
@@ -786,17 +788,25 @@ struct PoolState<W = Work> {
     /// The join handle of every thread this pool started and has not joined.
     ///
     /// Registered under the same lock that counted the start, so a shutdown
-    /// can never observe a thread it cannot join. **Bounded by `live +
-    /// ceiling + 1`, not by the ceiling.** A thread decrements `live` under
-    /// the lock and only then returns, so between those two the thread has
-    /// left the pool's accounting and not yet been marked finished: a start
-    /// in that window keeps its handle and pushes its own, and the list is
-    /// then larger than the count of live threads. It does not accumulate:
-    /// every start joins the handles that have already returned, so the
-    /// departed-and-unjoined part is at most the threads live at the last
-    /// reap, which is the ceiling, plus the handful mid-exit. Without that
-    /// reap this list would grow by one entry per exited thread for ever,
-    /// and each entry holds the resources std releases on join.
+    /// can never observe a thread it cannot join. What the list holds is
+    /// exactly:
+    ///
+    /// ```text
+    /// handles.len() == live + (threads that have left the accounting and not
+    ///                          yet returned)
+    /// ```
+    ///
+    /// A thread decrements `live` under the lock and only then returns, so
+    /// every entry beyond `live` is a real OS thread still executing its last
+    /// instructions. **There is no constant bound on that second group.** Each
+    /// departure frees a slot immediately while the thread keeps running, so
+    /// a scheduler that deschedules every departing thread in turn admits the
+    /// next one; at a ceiling of one the list can hold several handles with a
+    /// single thread live. What is true is the identity above and what the
+    /// reap does with it: every thread that *has* returned is joined at the
+    /// next start or at a shutdown, so the list never holds a
+    /// finished-but-unjoined thread past one of those, and it does not grow
+    /// across idle cycles.
     handles: Vec<ThreadHandle>,
 }
 
@@ -945,14 +955,14 @@ impl<W> PoolState<W> {
         self.draining = true;
     }
 
-    /// Join every thread that has already left.
+    /// Join every thread that has already returned.
     ///
-    /// A thread that exits on its keep-alive is still held by its handle: the
-    /// resources std reclaims on join stay held until then, and the handle
-    /// itself is one more entry. `is_finished` never blocks and a finished
-    /// thread's `join` returns at once, so this is a reap rather than a wait,
-    /// and calling it where a thread is about to be started is what keeps the
-    /// list within the pool's ceiling.
+    /// A thread that exits on its keep-alive is still held by its handle until
+    /// something joins it, so a start is where the exits of earlier bursts are
+    /// released — the property the list's doc rests on. `is_finished` never
+    /// blocks and a returned thread's `join` returns at once, so this is a reap
+    /// and not a wait: a thread still in its last instructions keeps its handle
+    /// and is reaped by a later start or by a shutdown.
     fn reap_finished_threads(&mut self) {
         let mut kept = Vec::with_capacity(self.handles.len());
         let mut reaped = 0usize;

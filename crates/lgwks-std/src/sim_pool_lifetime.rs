@@ -22,8 +22,14 @@
 //! - **Parked then shutdown.** One instant job, so its thread parks; the
 //!   shutdown must then come back inside the pool's keep-alive rather than
 //!   waiting the thread out — the wake, measured in wall time.
+//!
 //! - **Configure after use.** A running pool refuses a later ceiling by name,
 //!   at any ceiling, and still drains.
+//!
+//! On top of those, the handle identity: a start cannot reap a thread that has
+//! left the accounting but not yet returned, and the fixture holds that window
+//! open on purpose, so the identity `handles == live + held` is checked
+//! exactly rather than bounded.
 //!
 //! In every scenario admission is closed afterwards: both entry points refuse
 //! the job, the never-refusing one with the typed refusal as its awaiter's
@@ -36,7 +42,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -316,26 +322,37 @@ fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
     );
 }
 
-/// What the pool may be holding, checked wherever the simulation looks: the
-/// live threads, plus the threads that have left the accounting without their
-/// handles being joined yet, plus the one a start is in the middle of adding.
+/// Two facts about the handle list that hold of any pool, at any step.
 ///
-/// The middle term is why this is not "at most the ceiling". A thread
-/// decrements `live` under the lock and only then returns, so a start in that
-/// window keeps the departing handle and pushes its own. The bound holds
-/// because every start reaps first: what is left over is at most the threads
-/// live at that reap, which the ceiling bounds.
-fn assert_handles_bounded(pool: &Arc<Pool>, where_: &str, seed: u64) {
-    let ceiling = pool.ceiling;
+/// `handles.len() == live + (threads that have left the accounting and not yet
+/// returned)` is an identity, and there is no constant on the second term: each
+/// departure frees a slot immediately while the thread keeps running its last
+/// instructions, so a scheduler that deschedules every departing thread in turn
+/// admits the next one. What is checkable is that every live thread is present
+/// and unreturned — a thread that has returned has already decremented `live` —
+/// and, at a reap point, that no returned thread is still held.
+fn assert_handles_accounted(pool: &Arc<Pool>, reap_point: bool, where_: &str, seed: u64) {
     let state = lock(&pool.state);
     let live = state.live;
     let held = state.handles.len();
-    let bound = live.saturating_add(ceiling).saturating_add(1);
+    let unreturned = state
+        .handles
+        .iter()
+        .filter(|handle| !handle.is_finished())
+        .count();
     assert!(
-        held <= bound,
-        "seed {seed:#x} {where_}: {held} join handles for {live} live threads at a ceiling of \
-         {ceiling}; the bound is live + ceiling + 1 = {bound}"
+        unreturned >= live,
+        "seed {seed:#x} {where_}: {live} live threads but only {unreturned} unreturned handles \
+         of {held}; a live thread cannot have returned, since it decrements `live` first"
     );
+    if reap_point {
+        let returned = held.saturating_sub(unreturned);
+        assert_eq!(
+            unreturned, held,
+            "seed {seed:#x} {where_}: {returned} returned threads were still held at a \
+             reap point; a start joins what has returned"
+        );
+    }
 }
 
 /// One seed's burst/idle cycles, as its trace hash.
@@ -363,7 +380,7 @@ fn cycles(seed: u64) -> u64 {
         let mut handles = Vec::with_capacity(burst);
         for index in 0..burst {
             handles.push(spawn_blocking_on(&pool, move || index));
-            assert_handles_bounded(&pool, &format!("cycle {cycle} submit {index}"), seed);
+            assert_handles_accounted(&pool, true, &format!("cycle {cycle} submit {index}"), seed);
         }
         for (index, value) in block_on(join_all(handles)).into_iter().enumerate() {
             assert_eq!(
@@ -372,7 +389,7 @@ fn cycles(seed: u64) -> u64 {
             );
             fold_usize(&mut trace, value);
         }
-        assert_handles_bounded(&pool, &format!("cycle {cycle} drained"), seed);
+        assert_handles_accounted(&pool, false, &format!("cycle {cycle} drained"), seed);
         wait_until_empty(&pool, seed);
         // With every thread gone and no start to reap them, what the list holds
         // is exactly the threads this cycle started — never more, however many
@@ -384,7 +401,7 @@ fn cycles(seed: u64) -> u64 {
              a thread that exits on its keep-alive must be reaped, not held"
         );
         fold(&mut trace, u64::from(held <= ceiling));
-        assert_handles_bounded(&pool, &format!("cycle {cycle} idle"), seed);
+        assert_handles_accounted(&pool, false, &format!("cycle {cycle} idle"), seed);
 
         // The next cycle's first submit reaps what has finished, so the list is
         // exactly its own handle at that point.
@@ -397,7 +414,7 @@ fn cycles(seed: u64) -> u64 {
              the ones that had already left were not joined"
         );
         fold(&mut trace, u64::try_from(after_reap).unwrap_or(u64::MAX));
-        assert_handles_bounded(&pool, &format!("cycle {cycle} after the reap"), seed);
+        assert_handles_accounted(&pool, true, &format!("cycle {cycle} after the reap"), seed);
     }
     // The pool has nothing left to run: a shutdown still joins whatever the
     // last cycle's reap did not already take, and reports the threads it
@@ -433,8 +450,49 @@ fn start_lingering(pool: Arc<Pool>, first: Handoff) -> io::Result<super::ThreadH
         .name("lgwks-blocking".into())
         .spawn(move || {
             serve_pool(&pool, first);
+            HELD_IN_WINDOW.fetch_add(1, Ordering::SeqCst);
             hold.wait_past(held);
+            HELD_IN_WINDOW.fetch_sub(1, Ordering::SeqCst);
         })
+}
+
+/// How many threads [`start_lingering`] is holding between leaving the
+/// accounting and returning: the second term of the handle identity, counted by
+/// the threads themselves rather than inferred from a bound.
+static HELD_IN_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+/// Wait until exactly `count` threads are held in the window, or fail naming
+/// the seed. The identity is checked against this count, so the check waits for
+/// the threads rather than racing them.
+fn wait_until_held(count: usize, seed: u64) {
+    for _ in 0..IDLE_POLLS {
+        if HELD_IN_WINDOW.load(Ordering::SeqCst) == count {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let held = HELD_IN_WINDOW.load(Ordering::SeqCst);
+    assert!(
+        held == count,
+        "seed {seed:#x}: {held} threads were held in the mid-exit window, not {count}, after \
+         {} polls",
+        IDLE_POLLS
+    );
+}
+
+/// The handle identity, against the count the fixture keeps: the list is the
+/// live threads plus exactly the threads the fixture is holding.
+fn assert_handles_equal_live_plus_held(pool: &Arc<Pool>, where_: &str, seed: u64) {
+    let state = lock(&pool.state);
+    let live = state.live;
+    let held = state.handles.len();
+    let in_window = HELD_IN_WINDOW.load(Ordering::SeqCst);
+    assert_eq!(
+        held,
+        live.saturating_add(in_window),
+        "seed {seed:#x} {where_}: {held} handles are not {live} live plus {in_window} threads \
+         held between leaving the accounting and returning"
+    );
 }
 
 /// Wait until every handle the pool still holds names a thread that has
@@ -466,11 +524,11 @@ fn wait_until_all_returned(pool: &Arc<Pool>, seed: u64) {
 
 /// One deterministic pass through the mid-exit window, as its trace hash.
 ///
-/// The window is why the handle bound is `live + ceiling + 1` and not the
-/// ceiling: a thread that has left the accounting still holds its handle, and a
-/// start keeps it while adding its own. Here that is not a race but the
-/// fixture — the thread waits on the gate after `live` is already zero, so the
-/// simulation can put a start inside the window and read the list.
+/// The window is the second term of the handle identity: a thread that has left
+/// the accounting still holds its handle, and a start keeps it while adding its
+/// own. Here that is not a race but the fixture — a thread waits after `live` is
+/// already decremented, and counts itself while it waits, so the identity
+/// `handles == live + held` can be checked exactly rather than bounded.
 fn mid_exit(seed: u64) -> u64 {
     let mut trace = initial_trace();
     fold(&mut trace, seed);
@@ -482,6 +540,7 @@ fn mid_exit(seed: u64) -> u64 {
     let first = spawn_blocking_on(&pool, || 1u32);
     assert_eq!(block_on(first), 1, "seed {seed:#x}: the first job must run");
     wait_until_empty(&pool, seed);
+    wait_until_held(1, seed);
     {
         let state = lock(&pool.state);
         assert_eq!(
@@ -491,7 +550,7 @@ fn mid_exit(seed: u64) -> u64 {
              accounting, still unjoined"
         );
     }
-    assert_handles_bounded(&pool, "mid-exit window", seed);
+    assert_handles_equal_live_plus_held(&pool, "in the mid-exit window", seed);
     fold(&mut trace, 60);
 
     // A start inside the window cannot reap the departing handle: that thread
@@ -512,7 +571,8 @@ fn mid_exit(seed: u64) -> u64 {
         2,
         "seed {seed:#x}: the second job must run"
     );
-    assert_handles_bounded(&pool, "after the start in the window", seed);
+    wait_until_held(2, seed);
+    assert_handles_equal_live_plus_held(&pool, "after the start in the window", seed);
     fold(&mut trace, 61);
 
     // Release both, wait for both to return, and start once more: now the two
@@ -530,7 +590,8 @@ fn mid_exit(seed: u64) -> u64 {
             "seed {seed:#x}: a start after the threads returned reaps every departed handle"
         );
     }
-    assert_handles_bounded(&pool, "after the reap", seed);
+    wait_until_held(0, seed);
+    assert_handles_equal_live_plus_held(&pool, "after the reap", seed);
     fold(&mut trace, 62);
 
     // The last thread lingers too: release it, and the shutdown joins it rather
