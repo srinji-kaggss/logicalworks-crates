@@ -802,6 +802,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   `refusals_fold_their_arm_and_both_of_their_coordinates`,
   `the_same_seed_replays_to_the_same_encoding_trace`,
   `distinct_encoding_seeds_diverge_in_their_trace`)
+- **INV-RANDOM-1** `lgwks_std::random` holds no target list of its own: it
+  supports every target its `getrandom` backend supports, and the backend's own
+  refusal is the single compile-time gate, because a second list can only be
+  narrower and a narrower list refuses targets whose entropy source exists. All
+  randomness comes from that one source (INV-RANDOM-ONE-SOURCE), and a refused
+  read substitutes nothing. `EntropyError` carries the cause as data rather than
+  as a rendered `String`: a `#[non_exhaustive]` kind, the raw OS code where the
+  OS gave one, and its `std::io` classification. A code this crate cannot
+  represent at the declared width is dropped, never truncated into a code
+  naming a different failure. `fill_bytes` leaves its buffer **unspecified** on
+  a refusal and a caller must not read it; `bytes` returns no array at all.
+  · why: #276 · enforced by:
+  `random::tests::an_injected_os_code_round_trips_through_the_typed_error`,
+  `random::tests::an_injected_interruption_is_distinguished_from_a_missing_device`,
+  `random::tests::a_status_wider_than_the_declared_code_is_not_truncated`,
+  `random::tests::a_refused_fill_returns_the_typed_error_and_leaves_the_buffer_alone`,
+  `tests/it/sim_random_error.rs`, and the `target-matrix` lane
 - **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
   construction preserve arbitrary UUID values, and malformed hex reports both
   group start and invalid character offsets. · enforced by: `id::tests` and
@@ -1109,12 +1126,64 @@ Each of these was a shipped defect. Treat the list as the spec.
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
 
+- **INV-TASK-POOL-1** The blocking pool's ceiling is decided once and its
+  threads all have an owner. `configure_blocking_pool` fixes the ceiling
+  before the pool first runs, arbitrated by the pool's own creation, so a
+  configure and a first use race to build it and neither can miss the other's
+  write; every later attempt is refused typed (`InUse`, `AlreadyConfigured`,
+  `InvalidCeiling`) rather than silently ignored, and asking again for the
+  ceiling in force succeeds because the pool is at it. `shutdown_blocking_pool`
+  closes admission first, so a submit racing it is either admitted before the
+  flag or refused as `SpawnError::Shutdown` and there is no third outcome;
+  queued and running jobs are never cancelled — a thread with no job leaves
+  instead of parking, and a parked thread is woken to take a waiting job or
+  leave — and every thread's join handle is registered under the same lock that
+  counted the thread, so `PoolShutdown::Drained` means no thread outlives the
+  call and `DeadlineExceeded` reports, by count, the threads still executing
+  and the jobs still waiting, with those handles left for a later shutdown to
+  join. The handle list holds exactly `live + (threads that have left the
+  accounting and not yet returned)`; the second group has **no constant
+  bound**, because a departure frees its slot while the thread keeps running
+  its last instructions, and what bounds accumulation is that every thread
+  that has returned is joined at the next start or at a shutdown — without
+  that reap a bursty process keeps one handle per exited thread for ever.
+  A dropped `JoinHandle` still does not stop its thread, and cooperative
+  polling is not preemption: a closure that never returns is only detectable
+  from outside the process. · why: #264 (assurance gap X2, and the ceiling
+  and ownership items #286 and #289 left open) · enforced by:
+  `tests/sim_task_pool_public.rs`
+  (`the_public_pool_journey_configures_drains_joins_and_then_refuses`),
+  `task::tests` (`a_configure_after_the_pool_has_run_is_refused_with_the_running_ceiling`,
+  `a_second_configure_is_refused_named_or_is_the_ceiling_already_in_force`,
+  `a_ceiling_below_one_is_refused_before_the_pool_is_touched`,
+  `after_a_shutdown_admission_is_refused_and_the_job_never_runs`,
+  `a_thread_that_cannot_start_refuses_the_job_and_it_never_runs`,
+  `spawn_blocking_reports_a_refusal_to_its_awaiter_as_the_job_failing`,
+  `a_failed_start_beside_a_live_thread_leaves_the_job_to_that_thread`,
+  `no_more_than_the_ceiling_run_at_once_and_every_job_completes`,
+  `past_the_queue_bound_a_job_is_refused_with_a_typed_reason`,
+  `a_panicking_job_does_not_cost_the_pool_its_thread`), `sim_task_pool.rs`
+  (`sim_every_admitted_job_runs_once_under_every_interleaving`,
+  `sim_a_seed_replays_its_trace_and_distinct_seeds_diverge`), and
+  `sim_pool_lifetime.rs` (`sim_every_scenario_drains_joins_and_never_loses_a_job`,
+  `sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_takes_one`,
+  `sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles`,
+  `sim_a_seed_replays_its_pool_lifetime_trace`,
+  `sim_distinct_seeds_diverge_in_their_pool_lifetime_trace`).
+
 ## lgwks_ast
 
 - **INV-AST-1** Checked AST inspection charges nodes before descending and
   retains pending traversal state proportional to active depth, not sibling
   fan-out; the byte and node ceilings remain separate from parser allocation.
-  · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
+  A checked parse also bounds *depth* (`MAX_AST_DEPTH`), because a source of
+  `(((…` is a few bytes per level and produces one node per level, which the
+  byte and node ceilings admit in the hundreds of thousands of levels.
+  · why: #143 R17, #277 · enforced by:
+  `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
+  `lgwks_ast::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
+  `lgwks_ast::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
+  `lgwks_ast::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
 - **INV-AST-2** Content detection parses each distinct compiled candidate once;
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
@@ -1135,6 +1204,77 @@ Each of these was a shipped defect. Treat the list as the spec.
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
   `a_syntax_refusal_points_at_the_earliest_recovery_node`)
+- **INV-AST-3** The tree walk is linear in tree size, and it gets there by not
+  addressing a node's children by index. `inspect_ast` and
+  `diagnostic::diagnostics` drive a tree-sitter cursor; the only state either
+  retains is the cursor's own ancestor stack, so time is `O(nodes)` and resident
+  state is `O(depth)`. A walk that reached child *i* through
+  `ast_grep_core::Node::child(i)` is `O(i)` on a node whose visible children are
+  not its structural children, which is what a recovery-heavy parse produces,
+  and it was measured at 85 microseconds per node — 1.39 s of walk for a 16 KiB
+  source against 1.06 ms of parse, quadrupling on every doubling of the width,
+  inside `try_parse`. The cursor walk spends 40 ns per node on the same source at
+  every width from 2 KiB to 2 MiB. The cursor is reached through the node the
+  walk was handed, so no `tree-sitter` edge is authored and no `tree-sitter`
+  type is named. Two properties move with it and are stated rather than left
+  implicit: nodes arrive in **source order**, not reverse-sibling order, so the
+  `limit + 1` witness is the earliest node rather than the last; and a
+  depth-capped walk holds the ceiling **plus** the one witness it must visit to
+  be able to say the tree is too deep. Every published guarantee survives both:
+  `AstMetrics` folds order-independently, the retained diagnostics are the
+  earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before they are
+  returned, and `diagnostics` sorts its own output. · why: #277 · enforced by:
+  `lgwks_ast::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
+  (the replaced walk is kept as a test-only model and the replacement must visit
+  the same nodes at the same depths with the same recovery state on five tree
+  shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
+  `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
+  `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
+- **INV-AST-4** Hostile input earns a typed refusal, and the input that could
+  not is refused *before* the grammar sees it. Four generators per compiled
+  grammar — a full-ceiling tiling of the grammar's own source, one line of
+  megabytes, a nesting run past the depth ceiling with and without its closers —
+  answer with a tree inside the crate's bounds or with a `ParseError` that names
+  itself. The **markdown** grammar needed one more, because
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`: `"- "` repeated 255 times — 510
+  bytes — ended the process with `SIGABRT` rather than returning anything a
+  caller could handle. The crate cannot patch the scanner (the grammar arrives
+  compiled through `ast-grep-language`; forking it is forbidden by #277 and a
+  `tree-sitter` edge needs the Director's word), so it refuses the source first:
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and
+  `ParseError::ContainerNestingTooDeep`, applied by `markdown_containers` in one
+  `O(bytes)` pass with `O(1)` state on the markdown path only. **What the bound
+  is measured against:** seventeen container shapes bisected from a child
+  process — unordered and ordered list markers, blockquotes of one, two and
+  three `>`, tabs, list-in-quote, quote-in-list, list-in-quote-in-list, fenced
+  and indented code inside containers, and containers nested by indentation —
+  and *every* shape that aborts does so at **255 open containers**, whether it
+  spells them one per repetition (255 of `- `), two (128 of `> - `) or three
+  (85 of `>>> `). Three shapes never abort, because markdown does not nest a
+  blockquote, an ordered list or a tab run by indentation. The count is an
+  over-estimate wherever indentation and markers both carry depth, so a count of
+  64 cannot be 255 open containers: the margin is about 4x and it is on the safe
+  side. Known limit, stated rather than hidden: the guard runs on the **checked**
+  parse only. `parse` and `parse_with` return a `Parsed` rather than a
+  `Result`, so a refusal has nowhere to go in them, and their documentation says
+  so. · why: #277 · enforced by:
+  `tests/it/hostile.rs` (`markdown_never_reaches_the_scanner_past_its_bound`
+  proves from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes of
+  container prefixes, 1 065 children and zero aborts — plus
+  `every_adversarial_shape_answers_typed`,
+  `the_byte_ceiling_is_refused_before_any_tree_exists`,
+  `every_refusal_renders_as_a_located_diagnostic`,
+  `the_unchecked_parse_of_the_same_shapes_still_answers`,
+  `multibyte_and_truncated_sources_are_answered`) and
+  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `the_container_count_does_not_charge_prose_or_a_thematic_break`,
+  `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
+  `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
+  nextest `slow-timeout` with `terminate-after`, so a walk that stops making
+  progress fails the run instead of holding it open
 
 ## Docs
 
@@ -1162,6 +1302,32 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-GOV-1** The gate is defined once in `scripts/gate-lanes.toml`; CI runs
   the same lane commands and `scripts/check-gate-parity.py` refuses drift. ·
   enforced by: `gate-parity` lane
+- **INV-BOT-150** A complete length prefix over a frame the file cannot hold is
+  decided on the bytes, never on the prefix. The two files that look alike there, an
+  append a writer never finished and an acknowledged frame whose prefix was changed
+  afterwards (`L` to `L + k`, a final frame or one with frames behind it), are told
+  apart by the stored head, which only bytes a writer really framed reproduce. An
+  early end after a complete prefix, in the payload **or in the head**, is resolved
+  by `frame::holds_acknowledged_frame`: a payload length under the bytes present that
+  reproduces the stored head, or a later whole frame that authenticates (against the
+  head the cut frame's payload implies, or against the 32 bytes before it), means
+  the prefix lied, and the open is `JournalError::Corrupt` with the file
+  byte-identical. Only a tail that is a prefix of one cut-short append is trimmed.
+  The streaming `Replay` gives the same answer and a refusal ends the stream. The
+  search is bounded by construction, because a short read was short of at most
+  `MAX_FRAME_BYTES` plus a head. **Not claimed:** a final frame whose length and
+  head are both damaged authenticates as nothing and is trimmed, and a file
+  truncated mid-frame by a hand reads as a crash. · why: #262 (orphaned from #143
+  R02) · enforced by: `journal::file::tests`
+  (`a_lengthened_acknowledged_final_frame_is_refused_not_trimmed`,
+  `an_inflated_non_final_length_is_refused_and_every_byte_survives`,
+  `an_append_cut_at_every_byte_of_the_final_frame_is_repaired`,
+  `a_damaged_cut_frame_with_an_acknowledged_frame_behind_it_is_refused`,
+  `a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`,
+  `a_streaming_replay_refuses_a_lengthened_final_frame_and_then_ends`),
+  `journal::frame::tests`, and `tests/it/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
+  `cut_appends_band_04..07`, `damaged_cut_frames_band_08..11`,
+  `tenants_beside_a_refusal_band_12..13`)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is
@@ -2121,3 +2287,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
   INV-BOT-10's real frame (#108) — is where the next regression will come
   from.
+- 2026-10-05 (#280): #109 closed on 2026-09-23 with those three rows repaired
+  and covered by in-process regression tests, not by an external observation.
+  INV-BOT-9's T21 is now observed by `tests/process_escape.rs`, which shows a
+  `setsid` descendant escaping the group and the receipt not claiming it
+  (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
+  path and INV-BOT-10's real frame still have no named external test.

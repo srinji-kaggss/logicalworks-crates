@@ -95,6 +95,228 @@ runnable thing, `--workers=2`, produced knees identical to `--workers=15` becaus
 every body in the sweep is a timer, so a thread count is not a vCPU count and
 this workload would not separate them.
 
+### lgwks_ast — the parse had no time bound, and the walk was quadratic (#277)
+
+Two bounds the crate already claimed, and the numbers behind them.
+
+- **The validation walk is linear now, and was not.** `inspect_ast` and
+  `diagnostic::diagnostics` reached each child through
+  `ast_grep_core::Node::child(i)` by index, which is `O(i)` on a node whose
+  visible children are not its structural children — exactly what a
+  recovery-heavy parse produces. Measured on Rust source of unbalanced
+  delimiters: 16 385 nodes wide and 2 deep spent **1.39 s in the walk against
+  1.06 ms in the parser**, and doubling the width quadrupled the walk, inside
+  `try_parse`. At the crate's 2 MiB ceiling that is hours of CPU for one file.
+  Both walks now drive a tree-sitter cursor, whose only retained state is its
+  own ancestor stack: **40 ns per node on the same source, at every width from
+  2 KiB to 2 MiB**. No `tree-sitter` edge is authored and no `tree-sitter` type
+  is named; the cursor is reached through the node the walk already holds.
+- **`MAX_AST_DEPTH` (512), with `ParseError::AstTooDeep`.** A source of `(((…` is
+  a few bytes per nesting level, so the byte and node ceilings admit a tree
+  hundreds of thousands of levels deep. A checked parse now refuses that, and
+  the public `inspect_ast` walk stays uncapped in depth on purpose: a caller
+  inspecting a malformed tree on purpose learns how deep it is rather than
+  reading back the ceiling.
+- **A deadline that stops tree-sitter mid-parse: NOT DONE.** It needs
+  `Parser::parse_with_options` and its progress callback, which
+  `ast-grep-core` 0.45 does not expose (`parse_lang` builds the `Parser`
+  internally). Naming `tree-sitter` directly is the only route, and #277
+  reserves that for the Director's word. Nothing here fakes it with a thread
+  that cannot be stopped.
+- **Measured, per grammar, in `bench/README.md` and
+  `bench/ast-budget.tsv`** (224 rows): throughput p50/p99 and peak RSS at the
+  2 MiB ceiling on representative and adversarial input, the share of a checked
+  parse spent in the validation walk, and p99 plus peak RSS for a bounded
+  fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced by
+  `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`. Three
+  findings from it:
+  - **The documented memory ceiling is 723 MiB resident** for one parse of a
+    2 MiB file with the Ruby grammar, against a 2.1 MiB process floor; the
+    cheapest grammar at the same size is `solidity` at 100 MiB, so a caller
+    cannot size a parser from the input alone.
+  - **The parser, not the walk, is the unbounded work on hostile input.** The
+    validation walk is 10–15 ms on the three worst adversarial rows and the parse
+    is 25–97 seconds — 256 KiB of nested braces takes the Dart grammar
+    **97.5 seconds**, and at the 2 MiB ceiling it did not finish in 120 s. This
+    is precisely what the missing deadline would bound and cannot be bounded from
+    inside this crate.
+  - **Peak RSS is flat in the concurrency level** — 195 to 198 MiB for `rust`
+    across 100 to 100 000 concurrent 64 KiB parses — because the per-parse bound
+    is what makes a fleet of them bounded.
+- **The markdown grammar no longer aborts the process.** It did:
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`, so `"- "` repeated 255 times
+  (510 bytes) ended the process with `SIGABRT` rather than returning anything —
+  reachable from a hostile PR that adds a nested list to a README. The grammar
+  arrives compiled through `ast-grep-language`, so the crate cannot patch the
+  scanner; it refuses the source before the scanner sees it.
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and the new
+  `ParseError::ContainerNestingTooDeep` apply
+  `lgwks_ast::markdown_containers` on the markdown path only, in one `O(bytes)`
+  pass with `O(1)` state. The bound is measured, not guessed: seventeen
+  container shapes were bisected from a child process, and **every shape that
+  aborts does so at 255 open containers** — 255 repetitions of `- `, 128 of
+  `> - `, 85 of `>>> `, and the same 255 for indentation-nested lists, fenced
+  and indented code inside quotes. Three shapes never abort, because markdown
+  does not nest blockquotes, ordered lists or tab runs by indentation. The
+  count over-estimates where indentation and markers both carry depth, so 64
+  cannot be 255: a margin of about 4x, on the safe side. `tests/it/hostile.rs`
+  proves it from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes, 1 065
+  children, zero `SIGABRT`. An exhaustive sweep of all seventeen shapes through
+  every depth from 1 to 512 (8 704 pairs) also exits cleanly.
+  Residual, stated rather than hidden: the guard is on the **checked** parse.
+  `parse` and `parse_with` return a `Parsed` rather than a `Result`, so a refusal
+  has nowhere to go there, and their documentation now says so.
+- Two test modules: `tests/it/hostile.rs` (four adversarial generators per
+  compiled grammar, every answer typed or a tree inside the bounds) and
+  `tests/it/sim_parse_bounds.rs` (96 seeds per test over four generated shapes,
+  same seed same trace hash, the shape-to-arm map pinned). Both run under a
+  nextest `slow-timeout` with `terminate-after`, because they exist to catch a
+  walk that stops making progress.
+
+Order changes with the traversal and is additive to the API: nodes arrive in
+source order rather than reverse-sibling order, so the node cap's `limit + 1`
+witness is the earliest node rather than the last. Every published guarantee
+survives it — `AstMetrics` folds order-independently, retained diagnostics are
+the earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before being
+returned — and `diagnostics` sorts its own output. `try_parse` keeps its
+signature.
+
+### Tests: the entropy replay simulation no longer folds drawn bytes (#276)
+
+- `sim_random_error`'s replay trace folded whether each draw came back
+  entirely equal to the sentinel byte. A one-byte draw from a working source
+  does that one time in 256, so the same seed produced two different traces
+  about 3% of runs, and `untouched_draws == 0` failed about 1.6% of runs (PR
+  #302, run 37355259369). The trace now folds lengths only, a draw is
+  classified untouched only from eight bytes up (`2^-64` by chance), and
+  `the_trace_folds_no_drawn_byte` pins both without entropy. 300 runs of the
+  two tests: 0 failures.
+
+### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
+
+The two items #286 and #289 left open on the bounded blocking pool. Both are
+additive: no signature changed and no existing behaviour did.
+
+- `task::configure_blocking_pool(threads)` fixes the pool's thread ceiling
+  once, before the pool first runs a job. The pool's own creation is the
+  arbitration — a configure and a first use race to build it, so neither can
+  miss the other's write — and a ceiling is therefore never silently ignored.
+  A later attempt is refused with the new `PoolConfigError`: `InUse` once the
+  pool has run work, `AlreadyConfigured` naming the ceiling in force,
+  `InvalidCeiling` for a ceiling below one. Asking again for the ceiling
+  already in force succeeds: the pool is at it.
+- `task::shutdown_blocking_pool(within)` closes admission, lets the queued
+  and running jobs finish, and joins every pool thread inside the deadline.
+  A thread with no job leaves instead of parking, and a parked thread is woken
+  to take a waiting job or leave, so the pool empties by finishing its work
+  rather than by cancelling it. The new `PoolShutdown` reports what the wait
+  found: `Drained { threads }` means every thread was joined and none outlives
+  the call; `DeadlineExceeded { joined, running, queued }` names the threads
+  still executing and the jobs still waiting, and their handles stay
+  registered so a later shutdown joins them.
+- `task::SpawnError::Shutdown` is the refusal both entry points give after a
+  shutdown. `try_spawn_blocking` returns it; `spawn_blocking`, whose 1.0
+  contract is that it never refuses, fails its awaiter with it as the
+  payload, as it already did for an `Os` refusal. The closure never runs.
+- A thread is no longer detached. Each start registers its handle under the
+  same lock that counted the thread, so a shutdown can never observe a thread
+  it cannot join.
+- **A start now joins the threads that have already returned**, so a process
+  whose load is bursty — a burst, an idle period, a burst — no longer keeps
+  one handle per exited thread for ever. What the handle list holds is exactly
+  `live + (threads that have left the accounting and not yet returned)`: every
+  entry beyond `live` is a real thread still executing its last instructions,
+  and that second group has no constant bound, because a departure frees its
+  slot immediately. What is bounded is the accumulation: every thread that
+  *has* returned is joined at the next start or at a shutdown.
+- The pool is an `Arc`, so a thread owns its own reference and a caller can own
+  and drop a pool; the tests' last `Box::leak` is gone.
+- Two seeded simulation families cover the new paths: `sim_pool` drives the
+  accounting through configure attempts that move nothing and a shutdown
+  closing admission mid-schedule (2,000 seeds × 2,000 steps), and
+  `sim_pool_lifetime` drives real OS threads through burst drains, an expired
+  deadline, a parked thread, a refused ceiling, and burst/idle cycles that
+  would grow the handle list if nothing reaped it. A process-owning test
+  binary exercises the two public functions against the real process-wide
+  pool, because a shutdown closes admission for the life of its process.
+
+### lgwks_std — `random` reaches every target its backend does, and says why it failed (#276)
+
+- `random` no longer refuses to compile on every target but Linux, macOS and
+  Windows. The three-target `compile_error!` was a narrower claim than the
+  backend it wraps, so it refused FreeBSD, the other BSDs, illumos, Solaris,
+  Android, iOS, `wasm32-wasip1` and every other target `getrandom` already
+  supported. The backend is the one authority on where an entropy source
+  exists, so its own refusal is now the single compile-time gate and this crate
+  holds no target list that could drift narrower.
+- `EntropyError` carries the cause as data instead of a `String`: a
+  `#[non_exhaustive]` `EntropyErrorKind`, `raw_os_error()` for the OS's own
+  code, and `io_error_kind()` for its portable `std::io` classification. A UEFI
+  status wider than `i32` is dropped rather than truncated into a code naming a
+  different failure. Additive for 1.x: `backend()` and the `Display` rendering
+  are unchanged, and the `String` was never in the public surface.
+- `fill_bytes` documents that a refused draw leaves the buffer **unspecified**
+  and must not be read; `bytes` has no such window, since a failed draw returns
+  no array. A test drives the refused path through a crate-private seam, because
+  `getrandom` offers no constructor for a backend failure carrying an OS code
+  and an integration test cannot reach a private seam.
+- New `tests/it/sim_random_error.rs`: seeded sweeps over draw lengths from empty
+  to a mebibyte, concurrent drawers at 100, 1 000, 10 000 and 100 000, the UUID
+  version and variant masks, and a seeded generator that must not be able to
+  predict a draw.
+
+### The gate: every `lgwks_std` feature alone, and the declared target matrix (#276)
+
+- The `feat-std` lane now builds all twelve non-`full` features, each alone.
+  `core`, `trace`, `random`, `ron` and `process` were built by nothing except
+  the rustdoc lane, so a feature that quietly depended on a second feature was
+  invisible to every build receipt.
+- New required lanes `tests-std-per-feature-a`, `-b` and `-c`: one
+  `cargo nextest run --no-default-features --features <f>` per feature, because
+  a build receipt is not an execution receipt. Three shards of four features,
+  each its own CI job: the twelve runs as one step took 228 s on GitHub and put
+  the run at 307 s, past the five-minute budget.
+- New required lane `target-matrix`, running the new
+  `scripts/check-target-matrix.sh`. It installs each declared target with
+  `rustup` and checks `lgwks_std`, `lgwks_ast` and `lgwks_deps` against it: the
+  Rust-only surface is required everywhere, and a check that needs a C
+  toolchain the runner lacks is recorded with its exact error and a named
+  reason instead of being dropped. A failure that is not that reason fails the
+  lane. It runs as its own CI job rather than on the critical path.
+- Measured on aarch64-apple-darwin: 42 checks, 69 s from an empty target
+  directory. `lgwks_std --features random` builds on all seven cross targets;
+  nine `full`/`lgwks_ast` checks are exempt for a missing C cross-compiler.
+
+### The gate: the saturation tiers spawn the fake the way a default binding does (#272)
+
+- The `sim_review_path` saturation tiers bound the fake `gh` through a `PATH`
+  override and a bare program name. With that combination `std` cannot hand the
+  child to `posix_spawn`: it searches the `PATH` itself and falls back to
+  `fork` + `execvp`, so each of the 50,000 calls at the 10,000 tier forked a
+  test process holding 64 runs in flight. The tiers now name the fake by its
+  absolute path with no `PATH` override (`gh_spawned_directly`), which is the
+  spawn a default `Gh` binding makes. Every other family keeps the `PATH`
+  binding, so `PATH` resolution stays covered. The assertions are unchanged.
+- Measured on an Apple M5 Pro, the 10,000 tier alone: 65.98 s wall and 466 s
+  CPU (212.6 user, 253.8 system), peak RSS 71.7 MB, before; 46.35 s wall and
+  380 s CPU (221.1 user, 158.5 system), peak RSS 65.6 MB, after, with the
+  machine more loaded for the second run.
+- The `gpui-windows` lane builds its fixture into the workspace `target` with
+  `--target-dir target`. The fixture is its own workspace, so it built into a
+  directory the CI cache never saved and recompiled the GPUI stack on every
+  run (3 min 03 s, 134 crates, the run's critical path at 242 s). The CI cache
+  step takes a new key so the first `main` run saves those artifacts.
+- The `test` profile emits line tables instead of full debuginfo
+  (`debug = "line-tables-only"`). Backtraces still name function, file and
+  line. Each `Tests (lgwks-bot full)` shard spent 152 s of a 233 s job compiling
+  and linking on a full dependency-cache hit, and the four shards are the run's
+  critical path. CI sets the same value as `CARGO_PROFILE_TEST_DEBUG`, because
+  Swatinem/rust-cache ignores `[profile]` when it hashes manifests: without
+  it the restore stayed a full match on the old key and nothing was saved.
+
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
 `lgwks_ast` stays at 1.0.0: its source is unchanged since that tag. Every

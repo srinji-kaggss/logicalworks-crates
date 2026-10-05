@@ -15,14 +15,12 @@
 //! disagrees with it for some seed.
 //!
 //! The seed substrate (`Rng`, `Trace`) is the one the `lgwks_bot` simulation
-//! families run on, included by path, so a seed means the same draw sequence
-//! in every suite.
+//! families run on, included by path from this binary's root so a seed means
+//! the same draw sequence in every module and in every suite.
 
 #![cfg(feature = "lang-rust")]
 
-#[path = "../../../lgwks-bot/tests/sim/seed.rs"]
-mod seed;
-
+use crate::seed;
 use std::collections::BTreeSet;
 use std::error::Error;
 

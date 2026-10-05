@@ -23,17 +23,24 @@ numbers.
 ## 1. The headline, before the method
 
 **This does not currently pass its own release gate.** Issue
-[#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109) holds
-eight invariants. The code for most of them has landed and is unit-tested
-against an in-memory journal. As of `tests/durable_crash_observation.rs`,
-**five of the eight have had their external observation run**: the journal-
-ladder rows (#100, #101, #102, #104, #106) were driven against a real
-file-backed journal, killed mid-ladder with a real `SIGKILL`, restarted, and
-the recovered answer asserted against the one the design names. Three remain
-unrun — #99 (the ECS poll path under a real store), #107 T21/T22 (a real
-descendant tree), #108 (a real frame) — and a green observation of the
-ladder is not a green observation of the machine: the verdict below stands
-until every row has one and the mess rows of §4.4 close.
+[#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109) held
+eight invariants. Every repair landed by 2026-09-22 (#99 as #110, #107 as #117,
+#108 as #116, and the five ladder rows), and #109 was closed on 2026-09-23 by
+commit `7d9ad29f` (#142). That commit ran **five of the eight external
+observations** in `tests/durable_crash_observation.rs`: the journal-ladder rows
+(#100, #101, #102, #104, #106) were driven against a real file-backed journal,
+killed mid-ladder with a real `SIGKILL`, restarted, and the recovered answer
+asserted against the one the design names. The other three closed on their
+repair and its in-process regression tests, not on an external observation:
+#99 (the ECS poll path) has no real-store run and #108 (`locator_eligibility`)
+has no real frame. Of #107's rows, T21 is now observed by
+`tests/process_escape.rs`, which drives a real descendant that calls `setsid`
+out of the group and asserts the receipt does not claim the tree was cleaned
+(INV-BOT-112) — an honest report of a containment gap, open as
+[#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) — and
+T22's `ProcessSpec` surface landed in #128. A closed issue is not a green
+observation of the machine: the verdict below stands until those rows have one
+and the mess rows of §4.4 close.
 
 Stated plainly: you can ship this today for attended, inspectable automation
 where a human is watching and can intervene. You cannot ship it yet for the
@@ -98,6 +105,26 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
 What did not move: CI is still over five minutes, process containment is still
 Unix-only, the seeded sweeps still have no shrinking, and `process_escape`'s
 intermittent failure is still unexplained. The verdict above is unchanged.
+
+**Update, 2026-10-05.** The hold the journal module documentation named, an
+acknowledged final frame whose length field was changed being truncated on open,
+is closed by a refusal on the stored head
+([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262), §4.6).
+The verdict above is unchanged, and no SLO has been measured on the named VPS
+profile.
+
+**Regenerated, 2026-10-05
+([#280](https://github.com/srinji-kaggss/logicalworks-crates/issues/280)).** This
+pass corrected what had gone stale rather than what had moved, each from the tree
+at `977c79d4` or the GitHub API, with the command in the PR: the #109 rows (§1,
+§4.6, §7 item 1) are described by how each one closed rather than as "unrun"; the
+async runtime has a matched benchmark (§4.9, §7 item 3); every crate is tagged at
+`1.0.0` or later (§4.5); the CI job count is 21 (§4.7); the authoring contract
+was measured (§4.1, §6, §7 item 6). No ❌ row was upgraded. What still holds the
+verdict at NO-GO: the hyperscale saturation curve (§4.2, #269), the real-world
+mess rows (§4.4), Unix-only and `setsid`-escapable containment (§4.7, #263),
+capacity isolation (§4.8, #268), and the three #109 rows with no external
+observation.
 
 Everything below is the reasoning behind that sentence.
 
@@ -167,6 +194,28 @@ The design position is one axis nobody in the sample occupies: **authority
 bounded at the invocation, with decision provenance a third party can verify.**
 `GrantSet` mints the only `Auth`, `Auth` travels with the call, and `T4` is the
 gate-soundness theorem.
+
+**Scored against the ecosystem standard on authoring, the facade loses.** The
+2026-10-04 fixed-model runs (`bench/ai-authoring/README.md`) put the facade, the
+facade plus `FanOut`, the old `rt` surface and the `futures` crate on the same
+two oracle tasks, 40 trials per arm:
+
+| arm | full pass | sheet API used | hand-rolled `std::thread` | mean repairs | mean lines |
+|---|---:|---:|---:|---:|---:|
+| `futures` combinators | 39/40 | 40/40 | 0/40 | 0.15 | 37 |
+| old `lgwks_bot::rt` | 38/40 | 38/40 | 1/40 | 0.85 | 68 |
+| `script`/`task` facade | 37/40 | 12/40 | 24/40 | 0.75 | 140 |
+| facade + `FanOut` | 37/40 | 31/40 | 8/40 | 1.07 | 70 |
+
+Pass rate does not separate the arms at ten trials per cell; what does is that
+only 12 of 40 facade solutions used the facade, and `futures` did the same work in
+about a quarter of the facade's lines.
+
+The oracle does not ask for what `lgwks_bot` adds over `futures` (durable steps,
+authority, repair), so this does not say the crate has no case; it says the case
+has not been measured on tasks that ask for it
+([#270](https://github.com/srinji-kaggss/logicalworks-crates/issues/270)). Until
+it is, the frontier claim rests on the authority axis above and not on authoring.
 
 *Not covered:* the survey sample is eight systems and one patent reading, not
 the whole market. A rival that occupies the same axis would falsify the
@@ -324,7 +373,7 @@ The state of that, honestly:
 | The request may or may not have landed before the process died | ✅ tested | `durable_dispatch`, `OutcomeUnknown` barrier |
 | The journal itself cannot be read | ✅ tested | `durable_dispatch`, `#123` |
 | An event returns, or a payload is equal but the event is new | ✅ tested | `durable_dispatch`, `#129` |
-| A spawned process left orphans | ✅ tested | `process_ownership`, `#107` (T19/T20 landed; T21/T22 open) |
+| A spawned process left orphans | ⚠️ partly | `process_ownership` (T19/T20); `process_escape` observes a `setsid` descendant escaping and the receipt not claiming it (T21) — containment of that descendant is open as #263 |
 | A locator resolved to the wrong frame or wrong kind | ✅ tested | `locator_eligibility`, `#108` |
 | Two equal payloads, distinct event ids | ✅ tested | `durable_dispatch` |
 | A contradictory outcome overwriting a settled one | ✅ tested | `durable_dispatch`, refused |
@@ -361,20 +410,21 @@ Generalized axis is the bulk of the remaining work on this crate.
 - `state` and `authority` are separate: `GrantSet` does not own the schedule, the
   journal does not own the effects, the verbs do not own the runtime.
 
-*Not covered:* no downstream compatibility evidence. A workspace caller search
-proves nothing about external consumers, and the published tags trail `main`:
-the newest tag of each crate sits 35 commits behind `origin/main` (`lgwks_std-v0.9.0`,
-`lgwks_bot-v0.7.0`, `lgwks_deps-v0.3.0`, `lgwks_macros-v0.1.1`) or 53 behind it
-(`lgwks_ast-v0.3.0`), while the manifests already read 0.10.0 / 0.8.0 / 0.4.0 /
-0.4.0 / 0.1.2. See the version-boundary note in the crate README; a source tag
-is also not a registry upload.
+*Not covered:* downstream compatibility rests on one consumer. Keel's migration
+to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
+external caller with evidence; a workspace caller search proves nothing about
+others. The newest tags (`git tag --sort=-creatordate`) are `lgwks_std-v1.1.0`,
+`lgwks_bot-v1.1.0`, `lgwks_deps-v1.1.0`, `lgwks_macros-v1.1.0` and
+`lgwks_ast-v1.0.0`, and the manifests at `977c79d4` read the same versions. A
+source tag is not a registry upload.
 
 ### 4.6 Ephemeral — survives process loss
 
-**⚠️ — the design is right and the proof of it has not been run.**
+**⚠️ — the design is right; five of #109's eight observations ran against a real
+store, and three rows closed without one.**
 
-This is the axis the effect kernel exists for, and it is the axis #109 is
-blocking on.
+This is the axis the effect kernel exists for, and the axis #109's register
+covered until it closed on 2026-09-23.
 
 Landed and unit-tested against `MemoryJournal`:
 
@@ -411,9 +461,57 @@ the register's observations against it:
   real store admits the handoff its promise earns (`ProcessCrash`, honestly
   below `PowerLoss`).
 
-`Until that run exists` no longer describes these rows. It still describes
-#99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
-axis stays ⚠️ and the §1 verdict stands.
+`Until that run exists` no longer describes these rows. #99 and #108 closed on
+their repair and in-process tests without an external observation, and #107's
+T21 is observed only as an honest non-containment (§1); with rows of its own
+axis unobserved, this axis stays ⚠️ and the §1 verdict stands.
+
+**A length prefix that lies about an acknowledged frame is refused, not
+trimmed ([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262)).**
+Until this change the one hold the module documentation itself named was real: an
+acknowledged final frame whose stored length was changed from `L` to `L + k`
+was truncated on open, because a complete prefix over a frame the file cannot
+hold looks like an append cut short, and the head-short shape (`k` in `1..=32`)
+was classified as torn without being asked at all. An open now decides on the
+bytes. Any payload length under the bytes present that reproduces the stored head,
+or a later whole frame that authenticates, was acknowledged, and the file is
+refused with `JournalError::Corrupt` and left byte-identical; only a tail that is a
+prefix of one cut-short append is trimmed. Observed by
+`journal::file::tests::a_lengthened_acknowledged_final_frame_is_refused_not_trimmed`
+(`k` in `1..=1024`, file hash compared),
+`an_inflated_non_final_length_is_refused_and_every_byte_survives`,
+`an_append_cut_at_every_byte_of_the_final_frame_is_repaired` (the control: no
+genuine cut is refused), and by `tests/it/sim_journal_tail.rs`, which sweeps seeded
+journals of one to a thousand frames through inflated, deflated, bit-flipped and
+cut prefixes, two tenants concurrently. **What it does not cover:** a final frame
+whose length and head are both damaged has nothing to authenticate it and is
+trimmed (`a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`),
+and a hand that truncates a file mid-frame is indistinguishable from a crash. The
+journal stays below the unattended-automation bar for the reasons in the ceiling
+paragraph below, not for this one. The run store and the repair ledger shared the
+same defect through `frame::read_raw`, which treated every cut frame as a clean end;
+they now ask the same question of the same bytes, with each store's own head over
+its decoded record (`task::store::tests` and `task::ledger::tests`, including a
+ceiling-sized noise tail decided in bounded time). Their tests were not run against
+the unfixed code, so for those two stores the control is the cut-append test only.
+The cost of the decision is measured, not estimated
+(`cargo run -p lgwks_bot --features script,ephemeral --release --example tail_cost`,
+64-frame files, Apple silicon, one run, peak RSS 6.3 MB for the whole process):
+
+| Open of | journal p50 / p95 / p99 | run store p50 / p95 / p99 |
+|---|---|---|
+| an undamaged file (n=400) | 65 / 100 / 121 µs | 268 / 319 / 370 µs |
+| a final frame lengthened by 1–2048, refused (n=400) | 109 / 130 / 154 µs | 210 / 245 / 360 µs |
+| an append cut at a seeded byte, repaired (n=60, an `fsync` each) | 3,127 / 4,010 / 5,922 µs | 3,806 / 3,930 / 4,687 µs |
+| a ceiling-sized prefix over noise, trimmed (n=8) | 2,266,477 / 2,371,675 / 2,371,675 µs | 5,685 / 5,864 / 5,864 µs |
+
+The last row is the stated worst case and it is slow for the journal: the search
+tries every payload length under the bytes present, each is a blake3 over a
+length-framed payload that cannot be extended from the one before, so a 64 KiB tail
+costs about 2.3 s once, at open. It is bounded and it needs a tail that is a
+maximal-size frame cut mid-write (or a hand-made one); a journal's ordinary frames
+are a few hundred bytes and cost the third row. The run store decodes each candidate
+and a wrong length fails at once, which is why its worst case is milliseconds.
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file
@@ -444,28 +542,66 @@ service can run indefinitely on a single store".
 
 ### 4.7 Portable — same semantics on all declared targets
 
-**⚠️ — three operating systems are built in CI; one of them runs the tests that
-carry the containment claim.**
+**⚠️ — one operating system is executed, and eight targets are built. A build
+receipt is not an execution receipt, and this section says which is which.**
 
-Twenty hosted job definitions. Their `runs-on` distribution is **14
-`ubuntu-latest`, 2 `macos-14`, 1 `windows-latest`, 1 `matrix.os`**, and that
+Twenty-two hosted job definitions in `.github/workflows/ci.yml`, the
+twenty-one at `977c79d4` plus #276's `target-matrix`. Their `runs-on`
+distribution is **18 `ubuntu-latest`, 2 `macos-14` (`gpui-macos`,
+`candle-macos`), 1 `windows-latest` (`gpui-windows`), 1 `matrix.os`**, and that
 single `matrix.os` job is `appcui-native` — so "three operating systems" is
-true of that one storefront feature and not of the estate. The `lgwks_std` /
+true of those storefront features and not of the estate. The `lgwks_std` /
 `lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only. A
 `wasm32-wasip1` boundary lane checks that the default feature set compiles for
 WASI — a build check, not an executed containment test. `os.uname` and other
 host-only calls are behind `platform` dispatch.
+
+**The executed target matrix (#276).** `scripts/check-target-matrix.sh` is a
+required lane that runs `cargo check --locked --target <t>` per declared target
+and per crate. On `aarch64-apple-darwin` (rustc 1.99.0), 42 checks in 69 s from
+an empty target directory:
+
+| Target | `lgwks_std` | `lgwks_std` `--no-default-features` | `lgwks_std` `--features random` | `lgwks_deps` | `lgwks_std` `--features full` | `lgwks_ast` |
+|---|---|---|---|---|---|---|
+| `aarch64-apple-darwin` (host) | builds | builds | builds | builds | builds | builds |
+| `aarch64-unknown-linux-gnu` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `x86_64-unknown-linux-musl` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `wasm32-wasip1` | builds | builds | builds | builds | builds | **not exercised** |
+| `x86_64-unknown-freebsd` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-linux-android` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-apple-ios` | builds | builds | builds | builds | builds | builds |
+
+**"Builds" is a build receipt and "not exercised" is a named gap, not a pass.**
+The nine not-exercised cells each fail with the exact error
+`failed to find tool "aarch64-linux-gnu-gcc"` (or the musl, Android, FreeBSD or
+`clang` equivalent): `ring`, reached through `http`'s rustls, and the
+tree-sitter grammars under `lgwks_ast` compile C per target, and this runner has
+no cross C toolchain for them. The lane accepts that one failure reason by name
+and fails on any other, so the exemption cannot become a lid. **Support is
+therefore claimed for `lgwks_std` on seven targets with the `full` feature set
+only where the row says `builds`, and for `lgwks_ast` and `lgwks_deps` on the
+targets where their row says `builds` — never for a target that was not
+exercised.**
+
+`random` was the module that made the gap load-bearing: it carried a
+three-target `compile_error!` while the backend it wraps supported dozens more,
+so `lgwks_std` with `random` or `http` could not be built for iOS, Android, a
+BSD or WASI at all. It now holds no target list of its own, and its typed
+`EntropyError` is what a caller on any of these targets gets when the source
+fails.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a
 green `windows-latest` job is a *build* receipt for the Windows target and
 never a *containment* receipt: no Windows run in CI can have killed a process
 group. A build check and an executed containment test are different facts, and
-only the second one is a portability claim about the runtime.
+only the second one is a portability claim about the runtime. The eight-target
+matrix above is itself a build receipt: every row was executed by `cargo check`
+and none of them ran a test.
 
-*Not covered:* ARM Linux, musl, 32-bit, and any target outside the hosted
-runners. The performance numbers in §4.9 are from one machine and are explicitly
-not a cross-platform claim.
+*Not covered:* 32-bit, any target outside the eight rows, and any executed test
+on a non-hosted-runner target. The performance numbers in §4.9 are from one
+machine and are explicitly not a cross-platform claim.
 
 ### 4.8 Multi-tenant — isolated under concurrent use
 
@@ -489,8 +625,7 @@ and data is tested; isolation of *capacity* is not.
 
 ### 4.9 Performance — fastest correct implementation
 
-**⚠️ — measured honestly, against the wrong comparator for the "fast" claim, and
-not at all on the async path.**
+**⚠️ — measured honestly on both paths, and the facade loses on both.**
 
 Full method, raw numbers, fairness gate and exclusions are in
 [`../bench/README.md`](../bench/README.md). The summary, with the loss stated at
@@ -519,8 +654,21 @@ term. `Auth::check` was quadratic in the capability count and is now
 unnoticed later:**
 
 1. The rig withdraws `rt`. It measures the **synchronous** `Bot::tick` adapter.
-   The async runtime — the thing `docs/async-parity.md` describes and the thing
-   most consumers will actually run — has **no benchmark at all**.
+   The async runtime is measured separately, by `bench/async/`
+   ([`../bench/async/README.md`](../bench/async/README.md)), against pinned raw
+   Tokio doing identical work behind a fairness gate that aborts on any
+   work-count mismatch, in the required `bench-async-fairness` lane:
+
+   | scenario | tasks | bound | facade / raw p50 | 95% CI |
+   |---|---:|---:|---:|---|
+   | `quiet-async-bot` | 256 | 8 | 5.25x | [3.33, 5.62] |
+   | `at-capacity` | 512 | 4 | 2.47x | [1.97, 2.94] |
+   | `high-fanout` | 2,048 | 32 | 2.21x | [1.98, 2.26] |
+   | `single-permit` | 512 | 1 | 1.37x | [1.28, 1.63] |
+
+   and 15.33 allocations per task against raw Tokio's 2.02 (7.6x). This is a
+   closed-loop measurement at one bound per scenario; the open-loop saturation
+   curve is #269.
 2. The comparator is a hand-rolled loop in the same process. There is no
    measurement against UiPath, n8n, Node-RED or Temporal. Such a measurement
    would be a category error dressed as a result, and this document does not
@@ -580,12 +728,13 @@ direction of bias.
   this crate. It is excluded because counting connectors is not an engineering
   comparison, and because the claim being tested is about the mechanism, not the
   catalogue.
-- **No usability or authoring-time measurement.** [`async-sdk-shape.md`](async-sdk-shape.md)
-  states the contract — a task author supplies the script, not the machinery —
-  and notes that a tiny call site hiding hundreds of orchestration lines fails
-  it as surely as a verbose one. That contract is **unimplemented** (issue
-  #87). Excluding authoring time favours this crate heavily and is the single
-  largest unmeasured risk to the replacement claim.
+- **No human usability measurement.** [`async-sdk-shape.md`](async-sdk-shape.md)
+  states the contract — a task author supplies the script, not the machinery.
+  #87 implemented it (closed 2026-10-03), and `bench/ai-authoring/runs/` holds
+  324 fixed-model trials across six model runs plus 38 dry and mutant control
+  trials (`results.jsonl` line counts), including the four-arm comparison against
+  `futures` that §4.1 scores. A fixed model is not a person (INV-BOT-141), so
+  human authoring time is still unmeasured, and excluding it favours this crate.
 - **No cost-per-outcome numbers.** RPA is bought on cost per successful
   transaction. Nothing here measures that.
 - **No AI-in-the-loop comparison.** The claim is scoped to non-full-AI
@@ -605,16 +754,18 @@ world mess is one of the seven covered rows in §4.4.
 To change the verdict, in the order that matters:
 
 1. **Finish #109's eight external observations.** Five are run
-   (`tests/durable_crash_observation.rs`): the journal-ladder rows now have a
-   real store, a real kill, a restart and the designed answer. #99, #107
-   T21/T22 and #108 still need theirs, and the difference they measure — "the
-   bot survives its own machine dying" — is still open. Nothing else in this
-   list matters until all eight have run.
+   (`tests/durable_crash_observation.rs`): the journal-ladder rows have a real
+   store, a real kill, a restart and the designed answer. #109 closed with the
+   other three repaired but not externally observed: #99 needs the poll path
+   under a real store, #108 a real frame, and #107's T21 a descendant the
+   supervisor actually stops (#263) rather than one it honestly reports as
+   escaped. The difference they measure — "the bot survives its own machine
+   dying" — is still open.
 2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, torn reads,
    clock skew, credential expiry, locale, concurrent editors, selector drift.
    This is the long pole and the reason RPA is hard.
-3. **Measure the async path.** §4.9's numbers are the sync adapter. The runtime
-   consumers will actually run has no benchmark.
+3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
+   and 7.6x the allocations per task (#269).
 4. **Multi-tenant negative tests.** §4.8.
 5. **Hyperscale, on the profile the estate names.** §4.2 has the saturation
    curve, the declared knees, a million concurrent tasks and the recovery
@@ -623,8 +774,10 @@ To change the verdict, in the order that matters:
    CPU-bound body — macOS offers no cgroup, no `taskset` and no `taskpolicy` CPU
    set, and the two-thread run this host *can* do produces identical knees to a
    fifteen-thread one because the workload is timer-bound.
-6. **The authoring contract from #87.** §6's largest unmeasured risk: the
-   call site that looks simple while hiding the orchestration.
+6. **Measure the authoring case on tasks that ask for it.** #87's contract is
+   built and the fixed-model run says `futures` is the better surface on the
+   tasks it asked (§4.1); the tasks that exercise what this crate adds are
+   #270.
 
 Six items. The first is a measurement campaign rather than a design problem,
 and the second is most of the product.
