@@ -176,7 +176,7 @@ pub const MAX_AST_DEPTH: usize = 512;
 /// code inside containers, and containers nested by indentation — **every
 /// aborting shape reaches its abort at the same 255 open containers**, whether
 /// it spells them one per repetition (255 repetitions), two per repetition
-/// (128) or three (85). [`markdown_containers`](crate::markdown_containers)
+/// (128) or three (85). [`markdown_containers`]
 /// counts that quantity directly, so the margin is `255 / 64`, about 4x, and
 /// the count is additionally an over-estimate wherever indentation and markers
 /// both contribute depth.

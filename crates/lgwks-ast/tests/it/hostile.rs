@@ -39,14 +39,17 @@
 #![cfg(feature = "lang-rust")]
 
 use std::error::Error;
+
+#[cfg(feature = "lang-md")]
 use std::io::Write;
+#[cfg(feature = "lang-md")]
 use std::time::Duration;
 
 #[cfg(feature = "lang-md")]
 use crate::seed::Rng;
 use lgwks_ast::{
-    Language, MAX_AST_DEPTH, MAX_AST_NODES, MAX_MARKDOWN_CONTAINERS_PER_LINE, MAX_SOURCE_BYTES,
-    ParseError, inspect_ast, parse, try_parse,
+    Language, MAX_AST_DEPTH, MAX_AST_NODES, MAX_SOURCE_BYTES, ParseError, inspect_ast, parse,
+    try_parse,
 };
 
 /// What every family returns.
@@ -425,320 +428,334 @@ fn multibyte_and_truncated_sources_are_answered() -> TestResult {
 
 // ── The markdown guard ──────────────────────────────────────────────────────
 //
-// # What was measured
-//
-// tree-sitter's markdown grammar keeps its open block containers in an external
-// scanner whose state is serialized into a fixed 1 024-byte buffer, and it
-// *asserts* when that state does not fit. An assertion in a C parser is
-// `abort()`: the process dies, the caller with it, and `try_parse` never returns
-// anything a caller could handle. `"- "` repeated 255 times -- 510 bytes --
-// does it.
-//
-// Seventeen container shapes were bisected from a child process, one depth at a
-// time. **Every shape that aborts does so at 255 open containers**, whether it
-// spells them one per repetition (255 of `- `), two per repetition (128 of
-// `> - `) or three (85 of `>>> `). Three shapes -- tab runs and
-// indentation-nested blockquotes and ordered lists -- never abort at all,
-// because markdown does not nest those by indentation.
-// `MAX_MARKDOWN_CONTAINERS_PER_LINE` is 64, about a quarter of 255, and
-// `lgwks_ast::markdown_containers` counts that quantity directly.
-//
-// An exhaustive sweep afterwards took all seventeen shapes through every depth
-// from 1 to 512 -- 8 704 (shape, depth) pairs -- and every child exited.
-//
-// # What is proved here
-//
-// Every shape at bound-1, bound and bound+1, every shape at its own measured
-// abort depth, and a thousand seeded mixes of container prefixes. Each runs in a
-// child process, because a process that aborts cannot assert anything
-// afterwards: the parent reads an exit status, so "the guard held" and "the
-// guard did not hold" are two different observations rather than one green line.
+// Compiled only where the markdown grammar is. Every case below is a case about
+// *that* grammar's external scanner, and a build without it has no scanner to
+// overflow; the sibling test outside this module asserts that rather than
+// letting the coverage read as wider than it is.
+#[cfg(feature = "lang-md")]
+mod markdown {
+    use super::*;
 
-/// Set in the child so a re-executed binary takes the child branch.
-const CHILD_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CHILD";
+    use lgwks_ast::MAX_MARKDOWN_CONTAINERS_PER_LINE;
 
-/// Which case of [`markdown_cases`] the child is asked to parse.
-const CASE_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CASE";
+    // ── The markdown guard ──────────────────────────────────────────────────────
+    //
+    // # What was measured
+    //
+    // tree-sitter's markdown grammar keeps its open block containers in an external
+    // scanner whose state is serialized into a fixed 1 024-byte buffer, and it
+    // *asserts* when that state does not fit. An assertion in a C parser is
+    // `abort()`: the process dies, the caller with it, and `try_parse` never returns
+    // anything a caller could handle. `"- "` repeated 255 times -- 510 bytes --
+    // does it.
+    //
+    // Seventeen container shapes were bisected from a child process, one depth at a
+    // time. **Every shape that aborts does so at 255 open containers**, whether it
+    // spells them one per repetition (255 of `- `), two per repetition (128 of
+    // `> - `) or three (85 of `>>> `). Three shapes -- tab runs and
+    // indentation-nested blockquotes and ordered lists -- never abort at all,
+    // because markdown does not nest those by indentation.
+    // `MAX_MARKDOWN_CONTAINERS_PER_LINE` is 64, about a quarter of 255, and
+    // `lgwks_ast::markdown_containers` counts that quantity directly.
+    //
+    // An exhaustive sweep afterwards took all seventeen shapes through every depth
+    // from 1 to 512 -- 8 704 (shape, depth) pairs -- and every child exited.
+    //
+    // # What is proved here
+    //
+    // Every shape at bound-1, bound and bound+1, every shape at its own measured
+    // abort depth, and a thousand seeded mixes of container prefixes. Each runs in a
+    // child process, because a process that aborts cannot assert anything
+    // afterwards: the parent reads an exit status, so "the guard held" and "the
+    // guard did not hold" are two different observations rather than one green line.
 
-/// This test's own name, for the child's `--exact` filter.
-///
-/// Qualified by its module, because the child is this same binary and libtest
-/// matches the full path: an unqualified name selects nothing, the child runs
-/// zero tests and exits 0, and the parent's "the child died" assertion then
-/// fails against a child that never did anything.
-const GUARD_TEST_NAME: &str = "hostile::markdown_never_reaches_the_scanner_past_its_bound";
+    /// Set in the child so a re-executed binary takes the child branch.
+    const CHILD_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CHILD";
 
-/// Seeds in the mixed-prefix family.
-const SEEDED_CASES: u64 = 1_000;
+    /// Which case of [`markdown_cases`] the child is asked to parse.
+    const CASE_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CASE";
 
-/// The base the seeded family's seeds are derived from.
-const SEED_BASE: u64 = 0x0d0c_0000_0000_0277;
+    /// This test's own name, for the child's `--exact` filter.
+    ///
+    /// Qualified by its module, because the child is this same binary and libtest
+    /// matches the full path: an unqualified name selects nothing, the child runs
+    /// zero tests and exits 0, and the parent's "the child died" assertion then
+    /// fails against a child that never did anything.
+    const GUARD_TEST_NAME: &str =
+        "hostile::markdown::markdown_never_reaches_the_scanner_past_its_bound";
 
-/// How a container shape spells one level of nesting.
-#[derive(Clone, Copy)]
-enum Form {
-    /// The fragment repeated on a single line, then an item.
-    Repeated,
-    /// One item per level, indented by two spaces per level.
-    Indented,
-    /// A code block inside `depth` quote levels.
-    Coded,
-}
+    /// Seeds in the mixed-prefix family.
+    const SEEDED_CASES: u64 = 1_000;
 
-/// This shape's source at a nesting `depth`.
-fn shape_source(form: Form, fragment: &str, depth: usize) -> String {
-    match form {
-        Form::Repeated => format!("{}x\n", fragment.repeat(depth)),
-        Form::Indented => {
-            let mut source = String::new();
-            for level in 0..depth {
-                source.push_str(&"  ".repeat(level));
-                source.push_str(fragment);
-                source.push('\n');
+    /// The base the seeded family's seeds are derived from.
+    const SEED_BASE: u64 = 0x0d0c_0000_0000_0277;
+
+    /// How a container shape spells one level of nesting.
+    #[derive(Clone, Copy)]
+    enum Form {
+        /// The fragment repeated on a single line, then an item.
+        Repeated,
+        /// One item per level, indented by two spaces per level.
+        Indented,
+        /// A code block inside `depth` quote levels.
+        Coded,
+    }
+
+    /// This shape's source at a nesting `depth`.
+    fn shape_source(form: Form, fragment: &str, depth: usize) -> String {
+        match form {
+            Form::Repeated => format!("{}x\n", fragment.repeat(depth)),
+            Form::Indented => {
+                let mut source = String::new();
+                for level in 0..depth {
+                    source.push_str(&"  ".repeat(level));
+                    source.push_str(fragment);
+                    source.push('\n');
+                }
+                source
             }
-            source
+            Form::Coded => format!("{}{}\n", "> ".repeat(depth), fragment),
         }
-        Form::Coded => format!("{}{}\n", "> ".repeat(depth), fragment),
     }
-}
 
-/// A markdown container shape: its name, the fragment it nests, how it spells a
-/// level, and the smallest depth that aborted before the guard existed.
-///
-/// `None` for the last element means the shape never aborts, because markdown
-/// does not nest it by indentation and the scanner's open-container count stays
-/// flat however deep the source goes.
-type Shape = (&'static str, &'static str, Form, Option<usize>);
+    /// A markdown container shape: its name, the fragment it nests, how it spells a
+    /// level, and the smallest depth that aborted before the guard existed.
+    ///
+    /// `None` for the last element means the shape never aborts, because markdown
+    /// does not nest it by indentation and the scanner's open-container count stays
+    /// flat however deep the source goes.
+    type Shape = (&'static str, &'static str, Form, Option<usize>);
 
-/// Every container shape, with the depth at which it was measured to abort.
-const SHAPES: [Shape; 17] = [
-    ("dash-line", "- ", Form::Repeated, Some(255)),
-    ("star-line", "* ", Form::Repeated, Some(255)),
-    ("plus-line", "+ ", Form::Repeated, Some(255)),
-    ("ordered-dot-line", "1. ", Form::Repeated, Some(255)),
-    ("ordered-paren-line", "1) ", Form::Repeated, Some(255)),
-    ("quote-space-line", "> ", Form::Repeated, Some(255)),
-    ("quote-bare-line", ">", Form::Repeated, Some(255)),
-    ("quote-triple-line", ">>> ", Form::Repeated, Some(85)),
-    ("tab-line", "\t", Form::Repeated, None),
-    ("indent-quote", "> x", Form::Indented, None),
-    ("indent-ordered", "1. x", Form::Indented, None),
-    ("indent-dash", "- x", Form::Indented, Some(255)),
-    ("list-in-quote", "> - ", Form::Repeated, Some(128)),
-    ("quote-in-list", "- > ", Form::Repeated, Some(128)),
-    ("list-in-quote-in-list", "- > - ", Form::Repeated, Some(85)),
-    ("fence-in-quotes", "```\nx\n```\n", Form::Coded, Some(255)),
-    ("indented-code-in-quotes", "    x\n", Form::Coded, Some(255)),
-];
+    /// Every container shape, with the depth at which it was measured to abort.
+    const SHAPES: [Shape; 17] = [
+        ("dash-line", "- ", Form::Repeated, Some(255)),
+        ("star-line", "* ", Form::Repeated, Some(255)),
+        ("plus-line", "+ ", Form::Repeated, Some(255)),
+        ("ordered-dot-line", "1. ", Form::Repeated, Some(255)),
+        ("ordered-paren-line", "1) ", Form::Repeated, Some(255)),
+        ("quote-space-line", "> ", Form::Repeated, Some(255)),
+        ("quote-bare-line", ">", Form::Repeated, Some(255)),
+        ("quote-triple-line", ">>> ", Form::Repeated, Some(85)),
+        ("tab-line", "\t", Form::Repeated, None),
+        ("indent-quote", "> x", Form::Indented, None),
+        ("indent-ordered", "1. x", Form::Indented, None),
+        ("indent-dash", "- x", Form::Indented, Some(255)),
+        ("list-in-quote", "> - ", Form::Repeated, Some(128)),
+        ("quote-in-list", "- > ", Form::Repeated, Some(128)),
+        ("list-in-quote-in-list", "- > - ", Form::Repeated, Some(85)),
+        ("fence-in-quotes", "```\nx\n```\n", Form::Coded, Some(255)),
+        ("indented-code-in-quotes", "    x\n", Form::Coded, Some(255)),
+    ];
 
-/// The container fragments a seeded case mixes, drawn per line.
-const FRAGMENTS: [&str; 10] = [
-    "- ", "* ", "+ ", "1. ", "1) ", "> ", ">>> ", ">", "  ", "\t",
-];
+    /// The container fragments a seeded case mixes, drawn per line.
+    const FRAGMENTS: [&str; 10] = [
+        "- ", "* ", "+ ", "1. ", "1) ", "> ", ">>> ", ">", "  ", "\t",
+    ];
 
-/// A seeded mix of container prefixes: per line, an indent and a fragment, so a
-/// case can be shallow but dense, deep but sparse, or both at once.
-fn seeded_source(seed: u64) -> String {
-    let mut rng = Rng::new(seed ^ SEED_BASE);
-    let lines = rng.between(1, 24);
-    let mut source = String::new();
-    for _ in 0..lines {
-        source.push_str(&"  ".repeat(usize::try_from(rng.between(0, 24)).unwrap_or(0)));
-        let count = u32::try_from(FRAGMENTS.len()).unwrap_or(1);
-        let fragment = FRAGMENTS
-            .get(usize::try_from(rng.below(count)).unwrap_or(0))
-            .copied()
-            .unwrap_or("");
-        source.push_str(&fragment.repeat(usize::try_from(rng.between(1, 40)).unwrap_or(1)));
-        source.push_str("x\n");
+    /// A seeded mix of container prefixes: per line, an indent and a fragment, so a
+    /// case can be shallow but dense, deep but sparse, or both at once.
+    fn seeded_source(seed: u64) -> String {
+        let mut rng = Rng::new(seed ^ SEED_BASE);
+        let lines = rng.between(1, 24);
+        let mut source = String::new();
+        for _ in 0..lines {
+            source.push_str(&"  ".repeat(usize::try_from(rng.between(0, 24)).unwrap_or(0)));
+            let count = u32::try_from(FRAGMENTS.len()).unwrap_or(1);
+            let fragment = FRAGMENTS
+                .get(usize::try_from(rng.below(count)).unwrap_or(0))
+                .copied()
+                .unwrap_or("");
+            source.push_str(&fragment.repeat(usize::try_from(rng.between(1, 40)).unwrap_or(1)));
+            source.push_str("x\n");
+        }
+        source
     }
-    source
-}
 
-/// One markdown source the guard is proved against.
-struct Case {
-    /// Where the case came from, as an assertion message.
-    label: String,
-    /// The source handed to `try_parse`.
-    source: String,
-    /// Whether the guard is expected to be what refuses it.
-    guarded: bool,
-}
+    /// One markdown source the guard is proved against.
+    struct Case {
+        /// Where the case came from, as an assertion message.
+        label: String,
+        /// The source handed to `try_parse`.
+        source: String,
+        /// Whether the guard is expected to be what refuses it.
+        guarded: bool,
+    }
 
-/// Every case: the shapes at the bound and around it, the shapes at their own
-/// measured abort depth, and [`SEEDED_CASES`] seeded mixes.
-fn markdown_cases() -> Vec<Case> {
-    let bound = MAX_MARKDOWN_CONTAINERS_PER_LINE;
-    let mut cases = Vec::new();
-    for entry in &SHAPES {
-        let (name, fragment, form, aborts_at) = *entry;
-        for depth in [bound.saturating_sub(1), bound, bound.saturating_add(1)] {
+    /// Every case: the shapes at the bound and around it, the shapes at their own
+    /// measured abort depth, and [`SEEDED_CASES`] seeded mixes.
+    fn markdown_cases() -> Vec<Case> {
+        let bound = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+        let mut cases = Vec::new();
+        for entry in &SHAPES {
+            let (name, fragment, form, aborts_at) = *entry;
+            for depth in [bound.saturating_sub(1), bound, bound.saturating_add(1)] {
+                cases.push(case(
+                    shape_source(form, fragment, depth),
+                    format!("{name} at depth {depth}"),
+                ));
+            }
+            if let Some(depth) = aborts_at {
+                cases.push(case(
+                    shape_source(form, fragment, depth),
+                    format!("{name} at its abort depth {depth}"),
+                ));
+            }
+        }
+        for index in 0..SEEDED_CASES {
+            let seed = index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             cases.push(case(
-                shape_source(form, fragment, depth),
-                format!("{name} at depth {depth}"),
+                seeded_source(seed),
+                format!("seeded mix {index} (seed {seed:#x})"),
             ));
         }
-        if let Some(depth) = aborts_at {
-            cases.push(case(
-                shape_source(form, fragment, depth),
-                format!("{name} at its abort depth {depth}"),
-            ));
+        cases
+    }
+
+    /// One case from a source, recording whether the guard is what refuses it.
+    fn case(source: String, label: String) -> Case {
+        let guarded =
+            lgwks_ast::markdown_containers(&source, MAX_MARKDOWN_CONTAINERS_PER_LINE).is_some();
+        Case {
+            label,
+            source,
+            guarded,
         }
     }
-    for index in 0..SEEDED_CASES {
-        let seed = index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        cases.push(case(
-            seeded_source(seed),
-            format!("seeded mix {index} (seed {seed:#x})"),
-        ));
-    }
-    cases
-}
 
-/// One case from a source, recording whether the guard is what refuses it.
-fn case(source: String, label: String) -> Case {
-    let guarded =
-        lgwks_ast::markdown_containers(&source, MAX_MARKDOWN_CONTAINERS_PER_LINE).is_some();
-    Case {
-        label,
-        source,
-        guarded,
-    }
-}
-
-/// Run this binary as the child that parses case `index`.
-///
-/// The child's exit status is the whole observation, so nothing is written to a
-/// file: a code means the child answered, and no code means it did not, which is
-/// the fact this module exists to record.
-fn markdown_child(index: usize) -> Result<std::process::ExitStatus, Box<dyn Error>> {
-    let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args([GUARD_TEST_NAME, "--exact", "--nocapture"])
-        .env(CHILD_ENV, "1")
-        .env(CASE_ENV, index.to_string())
-        .spawn()?;
-    Ok(child.wait()?)
-}
-
-/// Re-run this binary as the child that parses one case.
-fn run_markdown_child() -> TestResult {
-    let index = std::env::var(CASE_ENV)
-        .map_err(|_| "the child branch needs CASE_ENV to know which case to parse")?
-        .parse::<usize>()
-        .map_err(|error| format!("CASE_ENV is not an index: {error}"))?;
-    let cases = markdown_cases();
-    let case = cases
-        .get(index)
-        .ok_or("CASE_ENV names a case this build does not have")?;
-    // The arm is printed, not returned: a child that reaches here answered, and
-    // its exit status is the observation the parent reads. The text is here so a
-    // failing case names the arm in the child's own output.
-    // The arm is recorded rather than returned: a child that reaches here
-    // answered, and its exit status is the observation the parent reads. The
-    // text goes to stdout through `Write` because `clippy::print_stdout` is
-    // forbidden workspace-wide, and the file the child is in is not exempt.
-    let arm = arm_of(case).unwrap_or_else(|| "accepted".to_owned());
-    let mut stdout = std::io::stdout();
-    drop(writeln!(stdout, "{} -> {arm}", case.label));
-    Ok(())
-}
-
-/// The arm a case answered with, `None` when it parsed.
-fn arm_of(case: &Case) -> Option<String> {
-    match try_parse(&case.source, Language::Markdown) {
-        Ok(_) => None,
-        Err(refusal) => Some(refusal_name(&refusal)),
-    }
-}
-
-#[test]
-fn markdown_never_reaches_the_scanner_past_its_bound() -> TestResult {
-    if std::env::var_os(CHILD_ENV).is_some() {
-        return run_markdown_child();
+    /// Run this binary as the child that parses case `index`.
+    ///
+    /// The child's exit status is the whole observation, so nothing is written to a
+    /// file: a code means the child answered, and no code means it did not, which is
+    /// the fact this module exists to record.
+    fn markdown_child(index: usize) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args([GUARD_TEST_NAME, "--exact", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env(CASE_ENV, index.to_string())
+            .spawn()?;
+        Ok(child.wait()?)
     }
 
-    let cases = markdown_cases();
-    assert!(
-        cases.len() >= 50 + usize::try_from(SEEDED_CASES).unwrap_or(0),
-        "only {} cases; the shapes alone contribute more than 50",
-        cases.len()
-    );
+    /// Re-run this binary as the child that parses one case.
+    fn run_markdown_child() -> TestResult {
+        let index = std::env::var(CASE_ENV)
+            .map_err(|_| "the child branch needs CASE_ENV to know which case to parse")?
+            .parse::<usize>()
+            .map_err(|error| format!("CASE_ENV is not an index: {error}"))?;
+        let cases = markdown_cases();
+        let case = cases
+            .get(index)
+            .ok_or("CASE_ENV names a case this build does not have")?;
+        // The arm is printed, not returned: a child that reaches here answered, and
+        // its exit status is the observation the parent reads. The text is here so a
+        // failing case names the arm in the child's own output.
+        // The arm is recorded rather than returned: a child that reaches here
+        // answered, and its exit status is the observation the parent reads. The
+        // text goes to stdout through `Write` because `clippy::print_stdout` is
+        // forbidden workspace-wide, and the file the child is in is not exempt.
+        let arm = arm_of(case).unwrap_or_else(|| "accepted".to_owned());
+        let mut stdout = std::io::stdout();
+        drop(writeln!(stdout, "{} -> {arm}", case.label));
+        Ok(())
+    }
 
-    let mut guarded = 0_usize;
-    let mut passed_through = 0_usize;
-    for (index, case) in cases.iter().enumerate() {
-        let status = markdown_child(index)?;
+    /// The arm a case answered with, `None` when it parsed.
+    fn arm_of(case: &Case) -> Option<String> {
+        match try_parse(&case.source, Language::Markdown) {
+            Ok(_) => None,
+            Err(refusal) => Some(refusal_name(&refusal)),
+        }
+    }
+
+    #[test]
+    fn markdown_never_reaches_the_scanner_past_its_bound() -> TestResult {
+        if std::env::var_os(CHILD_ENV).is_some() {
+            return run_markdown_child();
+        }
+
+        let cases = markdown_cases();
         assert!(
-            status.code().is_some(),
-            "{}: the child died of {status:?}. Before the guard this case called abort() inside \\
-             tree-sitter's external scanner; now it must return a tree or a refusal.",
-            case.label
+            cases.len() >= 50 + usize::try_from(SEEDED_CASES).unwrap_or(0),
+            "only {} cases; the shapes alone contribute more than 50",
+            cases.len()
         );
-        if case.guarded {
-            guarded = guarded.saturating_add(1);
-            let arm = arm_of(case).ok_or_else(|| {
-                format!(
-                    "{}: the guard is expected to refuse this source",
-                    case.label
-                )
-            })?;
+
+        let mut guarded = 0_usize;
+        let mut passed_through = 0_usize;
+        for (index, case) in cases.iter().enumerate() {
+            let status = markdown_child(index)?;
             assert!(
-                arm.contains("block containers"),
-                "{}: refused as `{arm}` rather than by the container bound, so this is not the \\
-                 refusal the guard is being proved against",
+                status.code().is_some(),
+                "{}: the child died of {status:?}. Before the guard this case called abort() inside \\
+                 tree-sitter's external scanner; now it must return a tree or a refusal.",
                 case.label
             );
-        } else {
-            passed_through = passed_through.saturating_add(1);
+            if case.guarded {
+                guarded = guarded.saturating_add(1);
+                let arm = arm_of(case).ok_or_else(|| {
+                    format!(
+                        "{}: the guard is expected to refuse this source",
+                        case.label
+                    )
+                })?;
+                assert!(
+                    arm.contains("block containers"),
+                    "{}: refused as `{arm}` rather than by the container bound, so this is not the \\
+                     refusal the guard is being proved against",
+                    case.label
+                );
+            } else {
+                passed_through = passed_through.saturating_add(1);
+            }
         }
+
+        assert!(
+            guarded >= 40,
+            "only {guarded} of {} cases were expected to be guarded; the shapes at their measured \\
+             abort depths alone contribute more than 14",
+            cases.len()
+        );
+        assert!(
+            passed_through >= 20,
+            "only {passed_through} cases were expected to pass the guard; without them a guard that \\
+             refused every source would pass this test"
+        );
+        Ok(())
     }
 
-    assert!(
-        guarded >= 40,
-        "only {guarded} of {} cases were expected to be guarded; the shapes at their measured \\
-         abort depths alone contribute more than 14",
-        cases.len()
-    );
-    assert!(
-        passed_through >= 20,
-        "only {passed_through} cases were expected to pass the guard; without them a guard that \\
-         refused every source would pass this test"
-    );
-    Ok(())
-}
+    /// The guard's cases need the markdown grammar, so they are only meaningful
+    /// where it is compiled. Assert the guard rather than letting the module read as
+    /// covering markdown in a build without it.
+    #[cfg(all(not(feature = "lang-md"), feature = "lang-rust"))]
+    #[test]
+    fn the_markdown_guard_cases_are_absent_from_a_build_without_that_grammar() {
+        assert!(
+            Language::ALL
+                .iter()
+                .all(|language| language.name() != "markdown"),
+            "this build compiles the markdown grammar, so the guard cases must be compiled in too; \\
+             a module that skips them would read as coverage it does not have"
+        );
+    }
 
-/// The guard's cases need the markdown grammar, so they are only meaningful
-/// where it is compiled. Assert the guard rather than letting the module read as
-/// covering markdown in a build without it.
-#[cfg(all(not(feature = "lang-md"), feature = "lang-rust"))]
-#[test]
-fn the_markdown_guard_cases_are_absent_from_a_build_without_that_grammar() {
-    assert!(
-        Language::ALL
-            .iter()
-            .all(|language| language.name() != "markdown"),
-        "this build compiles the markdown grammar, so the guard cases must be compiled in too; \\
-         a module that skips them would read as coverage it does not have"
-    );
-}
+    /// How long a child is given before the parent stops believing it will answer.
+    ///
+    /// The parse is single-digit milliseconds; a child that takes longer is a hang,
+    /// and a hang in the subject is exactly what this module exists to catch, so the
+    /// bound is asserted rather than assumed.
+    const CHILD_BUDGET: Duration = Duration::from_secs(30);
 
-/// How long a child is given before the parent stops believing it will answer.
-///
-/// The parse is single-digit milliseconds; a child that takes longer is a hang,
-/// and a hang in the subject is exactly what this module exists to catch, so the
-/// bound is asserted rather than assumed.
-const CHILD_BUDGET: Duration = Duration::from_secs(30);
-
-#[test]
-fn the_child_budget_is_longer_than_a_parse_and_finite() {
-    // A test that waits on a child with no timeout is the same defect as a walk
-    // with no cap, one process up.
-    assert!(
-        CHILD_BUDGET > Duration::from_millis(1),
-        "the child budget must let a parse finish"
-    );
-    assert!(
-        CHILD_BUDGET < Duration::from_secs(600),
-        "the child budget must fail a hang rather than hold the run open for it"
-    );
+    #[test]
+    fn the_child_budget_is_longer_than_a_parse_and_finite() {
+        // A test that waits on a child with no timeout is the same defect as a walk
+        // with no cap, one process up.
+        assert!(
+            CHILD_BUDGET > Duration::from_millis(1),
+            "the child budget must let a parse finish"
+        );
+        assert!(
+            CHILD_BUDGET < Duration::from_secs(600),
+            "the child budget must fail a hang rather than hold the run open for it"
+        );
+    }
 }
