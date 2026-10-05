@@ -2,18 +2,20 @@
 //! for CLI tools, DAG interpreters, polling loops, and test runners, enforcing
 //! INV-TASK-ZERO-RUNTIME: futures are driven to completion on the current
 //! thread using `std::task::Wake` and OS thread parking, with zero background
-//! reactors, zero persistent worker threadpools, and zero external
-//! dependencies.
+//! reactors and zero external dependencies. The one pool is for blocking work:
+//! it is bounded (512 threads), created on first use, and its threads exit
+//! after ten idle seconds, so a process with no blocking work holds no thread.
 //!
 //! Three primitives compose:
 //!
 //! - [`block_on`] drives one future to completion on the calling thread.
 //! - [`join_all`] drives many futures concurrently on the calling thread and
 //!   returns their outputs in input order.
-//! - [`spawn_blocking`] runs one blocking closure on a dedicated OS thread and
-//!   returns a future for its result, so a blocking syscall (file read, HTTP)
-//!   does not stall the sibling futures driven by [`join_all`] or
-//!   [`block_on`].
+//! - [`spawn_blocking`] runs one blocking closure on the bounded blocking pool
+//!   and returns a future for its result, so a blocking syscall (file read,
+//!   HTTP) does not stall the sibling futures driven by [`join_all`] or
+//!   [`block_on`]. [`try_spawn_blocking`] is the same with a bounded queue
+//!   and a typed [`SpawnError`] instead of an unbounded wait.
 //!
 //! Together these replace `tokio`, `futures`, `pollster`, and `async-trait`
 //! for applications that only need to await futures, await a bounded set of
@@ -24,13 +26,16 @@
 //! [`spawn_blocking`]: crate::task::spawn_blocking
 
 use std::any::Any;
+use std::collections::VecDeque;
+use std::fmt;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::Duration;
 
 // ── block_on ───────────────────────────────────────────────────────────────
 
@@ -92,11 +97,11 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Drive `futures` concurrently to completion on the current thread and return
 /// their outputs in input order.
 ///
-/// Every poll of the returned future polls each incomplete child with the same
-/// waker. When any child wakes the group, every incomplete child is polled
-/// again, so one wake costs one scan of the incomplete set (`O(n)` for `n`
-/// futures). That is the right trade for the small fan-outs a CLI, DAG
-/// interpreter, or polling loop drives; it is not a work-stealing scheduler.
+/// Each child gets its own waker. A child's wake queues that child alone, and
+/// the next poll of the group polls only the children that woke, so one wake
+/// costs one child poll however many children are still pending. The first
+/// poll polls every child once. It is still one thread: concurrency here is
+/// interleaving, not parallelism, and it is not a work-stealing scheduler.
 ///
 /// Completion order never affects the result: index `i` is the output of the
 /// `i`-th input whichever finishes first. A future is dropped as soon as it
@@ -106,8 +111,8 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Cancellation: dropping the returned future drops every child that has not
 /// resolved, which cancels a child only if that child is cancel-safe on drop.
 /// It does not stop work already handed to [`spawn_blocking`]: a dropped
-/// `JoinHandle` drops the handle, not the dedicated OS thread, which runs its
-/// closure to completion. A caller that must stop in-flight blocking work has
+/// `JoinHandle` drops the handle, not the pool thread, which runs its closure
+/// to completion. A caller that must stop in-flight blocking work has
 /// to arrange that cooperatively inside the closure.
 pub async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
     join_all_boxed(futures.into_iter().map(Box::pin)).await
@@ -127,29 +132,62 @@ pub async fn join_all_boxed<F: Future + ?Sized>(
     let mut pending: Vec<Option<Pin<Box<F>>>> = futures.into_iter().map(Some).collect();
     let count = pending.len();
     let mut done: Vec<Option<F::Output>> = (0..count).map(|_| None).collect();
+    let ready = Arc::new(ReadySet {
+        inner: Mutex::new(ReadyInner {
+            // Every child starts queued: the first poll polls each one once.
+            order: (0..count).collect(),
+            queued: vec![true; count],
+            group: None,
+        }),
+    });
+    let wakers: Vec<Waker> = (0..count)
+        .map(|index| {
+            Waker::from(Arc::new(ChildWaker {
+                index,
+                ready: Arc::clone(&ready),
+            }))
+        })
+        .collect();
+    let mut remaining = count;
 
     std::future::poll_fn(move |cx| {
-        let mut remaining = 0usize;
-        for (slot, output) in pending.iter_mut().zip(done.iter_mut()) {
+        let woken = {
+            let mut inner = lock(&ready.inner);
+            let replace = inner
+                .group
+                .as_ref()
+                .is_none_or(|existing| !existing.will_wake(cx.waker()));
+            if replace {
+                inner.group = Some(cx.waker().clone());
+            }
+            std::mem::take(&mut inner.order)
+        };
+        for index in woken {
+            // Cleared before the poll, so a child that wakes itself while it
+            // is being polled is queued again rather than lost.
+            if let Some(flag) = lock(&ready.inner).queued.get_mut(index) {
+                *flag = false;
+            }
+            let (Some(slot), Some(output), Some(waker)) = (
+                pending.get_mut(index),
+                done.get_mut(index),
+                wakers.get(index),
+            ) else {
+                continue;
+            };
             let Some(future) = slot.as_mut() else {
                 continue;
             };
-            match future.as_mut().poll(cx) {
-                Poll::Ready(value) => {
-                    *output = Some(value);
-                    *slot = None;
-                }
-                // Bounded by `pending.len()`, which is a live `Vec` length and
-                // so cannot exceed `isize::MAX`: the saturating form states the
-                // bound rather than relying on it, and is the identity
-                // everywhere the count is reachable.
-                Poll::Pending => remaining = remaining.saturating_add(1),
+            if let Poll::Ready(value) = future.as_mut().poll(&mut Context::from_waker(waker)) {
+                *output = Some(value);
+                *slot = None;
+                // Bounded by `count`: a slot is emptied once, here.
+                remaining = remaining.saturating_sub(1);
             }
         }
         if remaining == 0 {
-            // `remaining` counts every slot still holding a future, and a slot
-            // is cleared in the same arm that fills its output, so zero here
-            // means every output slot was filled above. `flatten` therefore
+            // `remaining` falls by one exactly when a slot's output is filled,
+            // so zero means every output slot was filled. `flatten` therefore
             // drops nothing; it is the panic-free spelling of the invariant,
             // and it keeps the result the same length as the input.
             Poll::Ready(done.drain(..).flatten().collect())
@@ -158,6 +196,56 @@ pub async fn join_all_boxed<F: Future + ?Sized>(
         }
     })
     .await
+}
+
+/// The children of one [`join_all_boxed`] that have woken since its last poll.
+struct ReadySet {
+    /// Guarded together, so a wake cannot land between the group reading the
+    /// queue and registering its own waker.
+    inner: Mutex<ReadyInner>,
+}
+
+/// The state behind [`ReadySet`]'s lock.
+struct ReadyInner {
+    /// Woken children, in wake order, each at most once.
+    order: Vec<usize>,
+    /// Whether each child is already in `order`, so a child that wakes twice
+    /// before the next poll is polled once.
+    queued: Vec<bool>,
+    /// The waker of the task driving the group.
+    group: Option<Waker>,
+}
+
+/// One child's waker: queue the child, then wake the group.
+struct ChildWaker {
+    /// The child's position in the input.
+    index: usize,
+    /// The group's queue.
+    ready: Arc<ReadySet>,
+}
+
+impl Wake for ChildWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let group = {
+            let mut inner = lock(&self.ready.inner);
+            let newly = inner
+                .queued
+                .get_mut(self.index)
+                .is_some_and(|flag| !std::mem::replace(flag, true));
+            if newly {
+                inner.order.push(self.index);
+            }
+            inner.group.clone()
+        };
+        // Outside the lock: the group's waker may run its task inline.
+        if let Some(group) = group {
+            group.wake();
+        }
+    }
 }
 
 // ── spawn_blocking ─────────────────────────────────────────────────────────
@@ -262,20 +350,27 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// Run `job` on a dedicated OS thread and return a future for its result.
+/// Run `job` on the blocking pool and return a future for its result.
 ///
-/// The thread is spawned immediately; the returned future is what carries the
-/// result back to the driving task. Awaiting it inside [`join_all`] therefore
-/// overlaps the blocking job with its siblings instead of serializing them.
+/// The job is handed to a pool thread at once; the returned future is what
+/// carries the result back to the driving task. Awaiting it inside
+/// [`join_all`] therefore overlaps the blocking job with its siblings instead
+/// of serializing them.
 ///
-/// Bound: one OS thread per call while the closure runs, reclaimed on
-/// completion. There is no pooled or background thread between calls; callers
-/// that need a ceiling on simultaneous threads (for example
-/// `lgwks_bot::Bot::tick`) bound their own fan-out.
+/// Bound: at most 512 threads run jobs at once,
+/// process-wide. A job submitted while all of them are busy waits in a queue
+/// and runs when one frees up, in submission order. A thread that has had no
+/// work for 10 seconds exits, so an idle process holds no pool
+/// thread. Jobs that wait on *each other* must therefore number fewer than
+/// the ceiling, or the waiters hold every thread the awaited job needs.
 ///
-/// Failure: a panicking closure, or an OS refusal to spawn the thread, is
-/// resumed as a panic on the task that awaits the handle. Success, panic, and
-/// spawn failure all wake the task exactly once.
+/// This entry point keeps its 1.0 contract: its queue is not bounded and it
+/// never refuses. [`try_spawn_blocking`] is the bounded form, and the one to
+/// use where callers are not already bounding their own fan-out.
+///
+/// Failure: a panicking closure, or an OS refusal to start the first pool
+/// thread, is resumed as a panic on the task that awaits the handle. Success,
+/// panic, and refusal all wake the task exactly once.
 pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -286,33 +381,233 @@ where
     // and a library that prints what its caller did cannot be silenced by that
     // caller. A caller that wants to reconstruct the spawn already holds the
     // call site: it made the call, so it can trace it before making this one.
+    let (handle, work) = prepare(job);
+    if let Err(error) = pool().submit(work, None) {
+        lock(&handle.shared).job = Job::Panicked(Box::new(error));
+    }
+    handle
+}
+
+/// Run `job` on the blocking pool, or refuse it with a typed reason.
+///
+/// The same pool and the same thread ceiling as [`spawn_blocking`], with a
+/// bounded queue: when 16,384 jobs are already waiting,
+/// the job is refused as [`SpawnError::AtCapacity`] and never runs. An OS
+/// refusal to start a thread, when no pool thread is alive to run the job
+/// later, is [`SpawnError::Os`]. A refused job is dropped without running.
+///
+/// # Errors
+///
+/// [`SpawnError::AtCapacity`] when the queue is full, and [`SpawnError::Os`]
+/// when no thread could be started to run the job.
+pub fn try_spawn_blocking<F, T>(job: F) -> Result<JoinHandle<T>, SpawnError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (handle, work) = prepare(job);
+    pool().submit(work, Some(MAX_QUEUED_BLOCKING_JOBS))?;
+    Ok(handle)
+}
+
+/// The handle a caller awaits and the type-erased work that fills it.
+fn prepare<F, T>(job: F) -> (JoinHandle<T>, Work)
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
     let shared = Arc::new(Mutex::new(Shared {
         job: Job::Running,
         waker: None,
     }));
     let worker = Arc::clone(&shared);
+    let work: Work = Box::new(move || {
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(job));
+        let mut state = lock(&worker);
+        state.job = match outcome {
+            Ok(value) => Job::Done(value),
+            Err(payload) => Job::Panicked(payload),
+        };
+        if let Some(waker) = state.waker.take() {
+            drop(state);
+            waker.wake();
+        }
+    });
+    (JoinHandle { shared }, work)
+}
 
-    let spawned = thread::Builder::new()
-        .name("lgwks-blocking".into())
-        .spawn(move || {
-            let outcome = std::panic::catch_unwind(AssertUnwindSafe(job));
-            let mut state = lock(&worker);
-            state.job = match outcome {
-                Ok(value) => Job::Done(value),
-                Err(payload) => Job::Panicked(payload),
-            };
-            if let Some(waker) = state.waker.take() {
-                drop(state);
-                waker.wake();
+// ── the blocking pool ──────────────────────────────────────────────────────
+
+/// Most pool threads running jobs at once, process-wide.
+///
+/// Tokio's blocking pool uses the same default ceiling. It bounds what a burst
+/// of blocking work can take from the OS: without it, ten thousand concurrent
+/// calls were ten thousand threads, each reserving its own stack.
+const MAX_BLOCKING_THREADS: usize = 512;
+
+/// Most jobs [`try_spawn_blocking`] lets wait for a thread before it refuses.
+const MAX_QUEUED_BLOCKING_JOBS: usize = 16_384;
+
+/// How long a pool thread with no work waits for some before it exits.
+const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
+
+/// Why [`try_spawn_blocking`] did not accept a job. The job did not run.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SpawnError {
+    /// Every pool thread is busy and the wait queue is full.
+    AtCapacity {
+        /// The thread ceiling (512).
+        threads: usize,
+        /// The queue bound that was reached (16,384).
+        queued: usize,
+    },
+    /// The OS refused to start a thread, and no pool thread was alive to run
+    /// the job later.
+    Os(std::io::Error),
+}
+
+impl fmt::Display for SpawnError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::AtCapacity { threads, queued } => write!(
+                formatter,
+                "the blocking pool is at capacity: {threads} threads busy and {queued} jobs waiting"
+            ),
+            Self::Os(ref error) => write!(formatter, "could not start a blocking thread: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Os(ref error) => Some(error),
+            Self::AtCapacity { .. } => None,
+        }
+    }
+}
+
+/// One job, with its result already wired to its handle.
+type Work = Box<dyn FnOnce() + Send>;
+
+/// The process-wide pool.
+struct Pool {
+    /// Queue and thread accounting, under one lock.
+    state: Mutex<PoolState>,
+    /// Signalled once per job handed to an idle thread.
+    work_ready: Condvar,
+}
+
+/// What the pool's lock guards.
+struct PoolState {
+    /// Jobs waiting for a thread, oldest first.
+    queue: VecDeque<Work>,
+    /// Threads alive, running or idle.
+    live: usize,
+    /// Threads waiting for work that no submitter has claimed yet.
+    idle: usize,
+    /// Wakeups claimed by submitters and not yet taken by a thread. Counted
+    /// rather than inferred from the condvar, which may wake spuriously.
+    wakeups: usize,
+}
+
+/// The pool, created on first use.
+fn pool() -> &'static Pool {
+    static POOL: OnceLock<Pool> = OnceLock::new();
+    POOL.get_or_init(|| Pool {
+        state: Mutex::new(PoolState {
+            queue: VecDeque::new(),
+            live: 0,
+            idle: 0,
+            wakeups: 0,
+        }),
+        work_ready: Condvar::new(),
+    })
+}
+
+impl Pool {
+    /// Queue `work` and make sure a thread will run it.
+    ///
+    /// An idle thread is woken if there is one; otherwise a thread is started
+    /// while the pool is under its ceiling; otherwise the job waits for the
+    /// next thread to finish. `queue_limit` bounds the wait queue.
+    fn submit(&'static self, work: Work, queue_limit: Option<usize>) -> Result<(), SpawnError> {
+        let mut state = lock(&self.state);
+        if let Some(limit) = queue_limit
+            && state.queue.len() >= limit
+        {
+            let refusal = Err(SpawnError::AtCapacity {
+                threads: MAX_BLOCKING_THREADS,
+                queued: limit,
+            });
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: the blocking pool refused a job");
+            return refusal;
+        }
+        state.queue.push_back(work);
+        if state.idle > 0 {
+            state.idle = state.idle.saturating_sub(1);
+            state.wakeups = state.wakeups.saturating_add(1);
+            self.work_ready.notify_one();
+            return Ok(());
+        }
+        if state.live >= MAX_BLOCKING_THREADS {
+            return Ok(());
+        }
+        let started = thread::Builder::new()
+            .name("lgwks-blocking".into())
+            .spawn(move || self.run());
+        match started {
+            Ok(_detached) => {
+                state.live = state.live.saturating_add(1);
+                Ok(())
             }
-        });
-
-    if let Err(error) = spawned {
-        let mut state = lock(&shared);
-        state.job = Job::Panicked(Box::new(error));
+            // A live thread will reach the job when it finishes its own.
+            Err(_) if state.live > 0 => Ok(()),
+            Err(error) => {
+                drop(state.queue.pop_back());
+                let refusal = Err(SpawnError::Os(error));
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: no blocking thread could be started");
+                refusal
+            }
+        }
     }
 
-    JoinHandle { shared }
+    /// One pool thread: run queued jobs, wait for more, exit when idle for
+    /// [`BLOCKING_KEEP_ALIVE`].
+    fn run(&self) {
+        let mut state = lock(&self.state);
+        loop {
+            if let Some(work) = state.queue.pop_front() {
+                drop(state);
+                // `prepare` catches the job's panic, so a failing job cannot
+                // take the thread down with it.
+                work();
+                state = lock(&self.state);
+                continue;
+            }
+            state.idle = state.idle.saturating_add(1);
+            loop {
+                let (guard, waited) = self
+                    .work_ready
+                    .wait_timeout(state, BLOCKING_KEEP_ALIVE)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = guard;
+                if state.wakeups > 0 {
+                    // The submitter already moved this thread out of `idle`.
+                    state.wakeups = state.wakeups.saturating_sub(1);
+                    break;
+                }
+                if waited.timed_out() {
+                    state.idle = state.idle.saturating_sub(1);
+                    state.live = state.live.saturating_sub(1);
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl<T> core::fmt::Debug for JoinHandle<T> {
@@ -537,6 +832,211 @@ mod tests {
 
         let empty: Vec<Pin<Box<dyn Future<Output = i32>>>> = Vec::new();
         assert_eq!(block_on(join_all_boxed(empty)), Vec::<i32>::new());
+    }
+
+    /// Wakers parked on one latch, released together when it opens.
+    #[derive(Default)]
+    struct Latch {
+        open: AtomicBool,
+        parked: Mutex<Vec<Waker>>,
+    }
+
+    /// Pends until the latch opens, counting every poll.
+    struct Waiter {
+        latch: Arc<Latch>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for Waiter {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, AtomicOrdering::SeqCst);
+            if self.latch.open.load(AtomicOrdering::SeqCst) {
+                return Poll::Ready(());
+            }
+            lock(&self.latch.parked).push(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    /// Wakes itself `wakes` times, then opens the latch and resolves.
+    struct Busy {
+        wakes: usize,
+        latch: Arc<Latch>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for Busy {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, AtomicOrdering::SeqCst);
+            if self.wakes == 0 {
+                self.latch.open.store(true, AtomicOrdering::SeqCst);
+                for waker in lock(&self.latch.parked).drain(..) {
+                    waker.wake();
+                }
+                return Poll::Ready(());
+            }
+            self.wakes = self.wakes.saturating_sub(1);
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_wake_polls_only_the_child_that_woke() {
+        // One busy child wakes itself `wakes` times while `waiters` children
+        // sit silent, then releases them. Polling only the woken child costs
+        // `wakes + 1` busy polls plus two per waiter. A group that re-polls
+        // every pending child on every wake costs about `waiters · wakes`,
+        // which is what this count refuses.
+        for (waiters, wakes) in [(1usize, 0usize), (10, 3), (1_000, 50), (10_000, 20)] {
+            let latch = Arc::new(Latch::default());
+            let polls = Arc::new(AtomicUsize::new(0));
+            // The busy child goes last, so every waiter has parked before it
+            // first runs, whatever `wakes` is.
+            let mut children: Vec<Pin<Box<dyn Future<Output = ()>>>> = (0..waiters)
+                .map(|_| -> Pin<Box<dyn Future<Output = ()>>> {
+                    Box::pin(Waiter {
+                        latch: Arc::clone(&latch),
+                        polls: Arc::clone(&polls),
+                    })
+                })
+                .collect();
+            children.push(Box::pin(Busy {
+                wakes,
+                latch: Arc::clone(&latch),
+                polls: Arc::clone(&polls),
+            }));
+            let output = block_on(join_all_boxed(children));
+            assert_eq!(output.len(), waiters.saturating_add(1));
+            assert_eq!(
+                polls.load(AtomicOrdering::SeqCst),
+                wakes
+                    .saturating_add(1)
+                    .saturating_add(waiters.saturating_mul(2)),
+                "{waiters} waiters beside a child waking {wakes} times"
+            );
+        }
+    }
+
+    /// A gate every job waits on, and the peak number of jobs inside it.
+    #[derive(Default)]
+    struct Gate {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+        inside: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Gate {
+        fn pass(&self) {
+            let now = self
+                .inside
+                .fetch_add(1, AtomicOrdering::SeqCst)
+                .saturating_add(1);
+            self.peak.fetch_max(now, AtomicOrdering::SeqCst);
+            let mut open = lock(&self.open);
+            while !*open {
+                open = self
+                    .opened
+                    .wait(open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            drop(open);
+            self.inside.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+
+        fn release(&self) {
+            *lock(&self.open) = true;
+            self.opened.notify_all();
+        }
+    }
+
+    #[test]
+    fn no_more_than_the_ceiling_run_at_once_and_every_job_completes() -> Result<(), SpawnError> {
+        for jobs in [100usize, 1_000, 10_000] {
+            let gate = Arc::new(Gate::default());
+            let mut handles = Vec::with_capacity(jobs);
+            for index in 0..jobs {
+                let gate = Arc::clone(&gate);
+                handles.push(try_spawn_blocking(move || {
+                    gate.pass();
+                    index
+                })?);
+            }
+            // Let the pool fill every thread it may before the gate opens.
+            thread::sleep(Duration::from_millis(200));
+            gate.release();
+            let output = block_on(join_all(handles));
+            assert_eq!(output, (0..jobs).collect::<Vec<_>>(), "{jobs} jobs");
+            let peak = gate.peak.load(AtomicOrdering::SeqCst);
+            assert!(
+                peak <= MAX_BLOCKING_THREADS,
+                "{jobs} jobs: {peak} ran at once, over the ceiling"
+            );
+            assert!(
+                peak >= jobs.min(MAX_BLOCKING_THREADS).min(64),
+                "{jobs} jobs: only {peak} ran at once; the pool is not running in parallel"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn past_the_queue_bound_a_job_is_refused_with_a_typed_reason() {
+        const OFFERED: usize = 100_000;
+        let gate = Arc::new(Gate::default());
+        let mut accepted = Vec::new();
+        let mut refused = 0usize;
+        for _ in 0..OFFERED {
+            let gate = Arc::clone(&gate);
+            match try_spawn_blocking(move || gate.pass()) {
+                Ok(handle) => accepted.push(handle),
+                Err(error) => {
+                    assert!(
+                        matches!(
+                            error,
+                            SpawnError::AtCapacity {
+                                threads: MAX_BLOCKING_THREADS,
+                                queued: MAX_QUEUED_BLOCKING_JOBS,
+                            }
+                        ),
+                        "refused for the wrong reason: {error}"
+                    );
+                    refused = refused.saturating_add(1);
+                }
+            }
+        }
+        gate.release();
+        let ceiling = MAX_QUEUED_BLOCKING_JOBS.saturating_add(MAX_BLOCKING_THREADS);
+        assert!(
+            (MAX_QUEUED_BLOCKING_JOBS..=ceiling).contains(&accepted.len()),
+            "{} accepted, outside [{MAX_QUEUED_BLOCKING_JOBS}, {ceiling}]",
+            accepted.len()
+        );
+        assert_eq!(accepted.len().saturating_add(refused), OFFERED);
+        let completed = block_on(join_all(accepted)).len();
+        assert!(
+            completed >= MAX_QUEUED_BLOCKING_JOBS,
+            "every accepted job ran"
+        );
+        assert!(gate.peak.load(AtomicOrdering::SeqCst) <= MAX_BLOCKING_THREADS);
+    }
+
+    #[test]
+    fn a_panicking_job_does_not_cost_the_pool_its_thread() {
+        // One thread's worth of panics, then work: the pool must still answer,
+        // because the job's panic is caught inside the job, not the thread.
+        for _ in 0..4 {
+            let handle = spawn_blocking(|| -> u32 {
+                assert_eq!(1, 2, "deliberate");
+                0
+            });
+            let caught = std::panic::catch_unwind(AssertUnwindSafe(|| block_on(handle)));
+            assert!(caught.is_err(), "the panic reaches the awaiter");
+        }
+        assert_eq!(block_on(spawn_blocking(|| 5u32)), 5);
     }
 
     #[test]
