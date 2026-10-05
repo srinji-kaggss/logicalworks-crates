@@ -85,10 +85,19 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   concurrency**: sixteen threads, two grant sets, 256 rounds, and the proof-cover
   checks in both directions.
 
-What did not move: hyperscale (§4.2) is still not measured at any level, CI is
-still over five minutes, process containment is still Unix-only, the seeded sweeps
-still have no shrinking, and `process_escape`'s intermittent failure is still
-unexplained. The verdict above is unchanged.
+- **Hyperscale moved off ❌** (#269). An open-loop saturation curve at six
+  in-flight bounds from 64 to 131,072 with the knee declared on both the facade
+  and a raw Tokio baseline; 1,048,576 tasks concurrently admitted with peak RSS
+  per in-flight task reported; a 30-second overload at twice the knee that
+  recovered with nothing lost; and the facade's per-task allocations cut from
+  15.33 to 3.61 against the issue's ≤ 6 target. §4.2 is ⚠️, not ✅: the
+  1–2 vCPU / 1–2 GB VPS profile the estate asks for is **not measured** and
+  cannot be on this host, and the async path's per-task overhead is still
+  1.4x–4.5x raw Tokio on a short body.
+
+What did not move: CI is still over five minutes, process containment is still
+Unix-only, the seeded sweeps still have no shrinking, and `process_escape`'s
+intermittent failure is still unexplained. The verdict above is unchanged.
 
 Everything below is the reasoning behind that sentence.
 
@@ -165,15 +174,100 @@ position, and no one has looked for one since the survey ran.
 
 ### 4.2 Hyperscale — more than a million concurrent, correct
 
-**❌ — not measured at any level.**
+**⚠️ — measured at a million concurrent and through a saturation curve on this
+host; the estate's VPS profile is still not measured, and the async path's
+per-task overhead against raw Tokio is still 1.4x–4.5x on short bodies.**
 
-The measurement rig runs one process on one machine and reports `ns/tick` for a
-schedule of up to 256 sources. There is no load test, no burst test, no
-saturation curve, no queue-depth histogram, and no p99 under concurrency.
+Every number is from `bench/async`, is this host, this toolchain and this run,
+and is read with its condition beside it. Host: **Apple M5 Pro, 15 cores, 24 GB,
+macOS 27.0, rustc 1.99.0.** That host is **shared** and its one-minute load
+average ran from 2 to 97 across the work, so the rig now reads and prints the
+load with every run: a scenario table taken with three other builds running on
+it reported the *baseline* at 1.08 ms where an idle host reported 0.35 ms, a 3x
+shift in the control leg of a paired comparison. Each table below carries its
+load, and the paired facade-versus-baseline columns are not contaminated by it
+because both sides of a point see the same load.
 
-*To close it:* a stated concurrency target, then a saturation curve with the
-declared bound where it starts dropping work. Until that exists, "runs for
-weeks" is a design intent and not a measurement.
+**The knee, at six in-flight bounds** (backpressure door, load 79.13, 6:48.56
+wall, peak RSS 250,953,728 bytes). Offered rate against a derived per-bound body
+cost so every ceiling's declared capacity is 20,000 arrivals/s; knee read against
+`max(50 ms, one further service time)`:
+
+| bound | facade knee offered/s | achieved/s | p99 at knee | baseline knee | baseline achieved/s |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 5,000 | 4,987 | 6.5 ms | 5,000 | 4,979 |
+| 1,024 | 5,000 | 4,763 | 59.7 ms | 5,000 | 4,754 |
+| 10,000 | 20,000 | 13,340 | 504.9 ms | 20,000 | 13,329 |
+| 16,384 | 20,000 | 10,968 | 831.5 ms | 20,000 | 11,009 |
+| 100,000 | 80,000 | 13,331 | 5,008.0 ms | 80,000 | 13,339 |
+| 131,072 | 80,000 | 10,589 | 6,551.5 ms | 80,000 | 10,593 |
+
+**The facade and the raw baseline declare the same knee at every bound**, to
+within 0.5% on achieved rate at five of the six. At a service time of 3.2 ms or
+more the ceiling is the binding constraint, not the accounting.
+
+**Past the knee it refuses, and it refuses at exactly the declared bound.**
+`try_spawn` at 320,000 arrivals/s: bound 16,384 admitted **exactly 16,384**,
+bound 100,000 admitted **exactly 100,000**, bound 131,072 admitted **exactly
+131,072**, both sides, to the same number; 59% of arrivals refused and counted in
+`Stats::refused`; peak RSS unchanged at the bound's worth of state; the p99 of
+what *was* admitted still one service time.
+
+**A million concurrent, reached.** 1,048,576 tasks **concurrently admitted** —
+the tier is the bound and every body parks until the whole tier is admitted, so
+the peak is observed rather than inferred — all completed, on both sides:
+
+| tier | facade peak RSS | facade RSS per in-flight task | baseline RSS/task | facade p50 | baseline p50 |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 27,115,520 B | 2,712 B | 3,267 B | 16.3 ms | 12.2 ms |
+| 100,000 | 210,501,632 B | 2,105 B | 2,672 B | 100.8 ms | 72.0 ms |
+| 1,048,576 | 2,137,751,552 B | **2,039 B** | 2,595 B | 1,007.7 ms | 726.7 ms |
+
+**Peak RSS per in-flight task at the million tier: 2,039 bytes**, against the raw
+baseline's 2,595 — memory favours the facade, by 21%. Admission latency does not:
+1.39x the baseline's at both wide tiers.
+
+**Overload and recovery** (load 19.88): a 30-second overload at twice the knee
+built a 229,554-arrival queue and took the served p99 from 6.7 ms to 11.4 s, with
+**nothing refused and nothing lost** — offered = admitted = completed on both
+sides, checked by the rig's conservation gate. The facade drained in 0.023 ms
+against the baseline's 4.801 ms; both sides' served p99 was back inside its own
+baseline at the first recovery window, 500.7 ms and 505.1 ms after the overload
+stopped. The recovery figure is a **bound at one 500 ms window's resolution**, not
+a point estimate.
+
+**Allocations, per supervised task**, 1,024 tasks at bound 8, one harness:
+**15.33 before, 3.61 after**, against a raw baseline's 2.02 — the issue's ≤ 6
+target met, by cutting an eagerly-built `watch` channel per cancellation token
+and a 100 ms timer armed on every uncontended spawn. The remaining 3.61 is
+itemised in `bench/async/README.md` with the guarantee each allocation pays for.
+
+**The latency target was not met, and that is the finding.** The issue asks for
+≤ 2x the baseline at p99 on every scenario; `quiet-async-bot` is **4.49x**. The
+same 76% cut in allocations moved the paired ratios not at all — the remaining
+gap is work (the per-spawn reap, the identity map, the `TaskOutcome` the wrapper
+builds), not allocation, and closing it is a different change.
+
+*Not covered, and named:*
+
+- **The 1–2 vCPU / 1–2 GB VPS profile is NOT measured.** macOS exposes no
+  cgroup, no `taskset`, no `taskpolicy` CPU set and no `cpulimit` — all four
+  checked on the reference host, all four absent — so no run here can be
+  presented as that profile's. The closest runnable thing, `--workers=2`,
+  produced **identical knees at every bound**, because every body in the sweep is
+  a timer: a thread count is not a vCPU count, and this workload would not
+  separate them. A CPU-bound profile needs a CPU-bound body and a machine whose
+  cores are 1–2, and neither exists here.
+- The synchronous rig still reports only `ns/tick` for a schedule of up to 256
+  sources, and `Bot::tick` beyond 256 sources is still unmeasured.
+- The per-task overhead against raw Tokio is still 1.4x–4.5x on a ~1 µs body,
+  with the 4.49x worst case named above rather than averaged away.
+- Every figure is one host. Nothing here is a cross-platform claim.
+
+*To close the axis:* the VPS profile on a real 1–2 vCPU box with a CPU-bound
+body, and the per-task overhead reduced on the short-body path. "Runs for weeks"
+is now a measured knee and a measured recovery rather than a design intent, and
+it is still not a measured week.
 
 ### 4.3 Idiomatic — ownership, errors, lifetimes sound
 
@@ -522,7 +616,13 @@ To change the verdict, in the order that matters:
 3. **Measure the async path.** §4.9's numbers are the sync adapter. The runtime
    consumers will actually run has no benchmark.
 4. **Multi-tenant negative tests.** §4.8.
-5. **Hyperscale.** §4.2. A stated concurrency target and a saturation curve.
+5. **Hyperscale, on the profile the estate names.** §4.2 has the saturation
+   curve, the declared knees, a million concurrent tasks and the recovery
+   measurement. What it does not have is the **1–2 vCPU / 1–2 GB VPS** figure
+   the axis asks for, which needs a machine whose cores are one or two and a
+   CPU-bound body — macOS offers no cgroup, no `taskset` and no `taskpolicy` CPU
+   set, and the two-thread run this host *can* do produces identical knees to a
+   fifteen-thread one because the workload is timer-bound.
 6. **The authoring contract from #87.** §6's largest unmeasured risk: the
    call site that looks simple while hiding the orchestration.
 

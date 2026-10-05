@@ -1633,6 +1633,11 @@ impl Side {
     const ALL: [Side; 2] = [Side::Facade, Side::Baseline];
 }
 
+/// The length of an overload run's recovery phase: what the caller asked for, clamped.
+fn recovery_window_of(shape: OverloadShape) -> Duration {
+    shape.recovery_seconds.min(RECOVERY_LIMIT)
+}
+
 /// The floor of the p99 budget a knee is declared against.
 ///
 /// A declared number rather than a discovered one, because "the knee" is only meaningful
@@ -3313,15 +3318,25 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
 }
 
 /// One tier's row in the results file.
+///
+/// **Numbers, not the rendered cells.** The table's `rss_cell()` and
+/// `rss_per_task_cell()` carry their units for a human reader, and using them here wrote
+/// `"peak_rss_bytes":3407872 B` into the record — which is not JSON, so every row of
+/// `inflight.json` was unparseable. A results file that only parses for some readers is a
+/// record nobody can rely on, and this one did not parse at all.
 fn tier_json(run: &TierRun) -> String {
     let (p50, _, p99) = run.percentiles();
     let per_task = run
         .rss_per_task()
         .map_or_else(|| "null".to_string(), |bytes| bytes.to_string());
+    let rss = run
+        .rss_bytes
+        .map_or_else(|| "null".to_string(), |bytes| bytes.to_string());
     format!(
         "{{\"tier\":{},\"side\":\"{}\",\"reached\":{},\"ceiling\":{},\"placed\":{},\
           \"completed\":{},\"aborted\":{},\"work_units\":{},\"p50_nanos\":{p50},\
-          \"p99_nanos\":{p99},\"peak_rss_bytes\":{},\"rss_bytes_per_in_flight_task\":{per_task},\
+          \"p99_nanos\":{p99},\"peak_rss_bytes\":{rss},\
+          \"rss_bytes_per_in_flight_task\":{per_task},\
           \"rss_source\":\"{}\",\"wall_millis\":{}}}",
         run.requested,
         run.side.as_str(),
@@ -3331,7 +3346,6 @@ fn tier_json(run: &TierRun) -> String {
         run.completed,
         run.aborted,
         run.work_units,
-        run.rss_cell(),
         run.rss_source,
         run.wall.as_millis()
     )
@@ -3468,8 +3482,39 @@ const RECOVERY_MIN_SAMPLES: u64 = 64;
 /// How long the recovery phase may run before the run reports it did not recover.
 ///
 /// The overload left a queue behind; draining it is bounded work, and an unbounded
-/// wait for a p99 that never returns would turn a slow host into a hung rig.
+/// wait for a p99 that never returns would turn a slow host into a hung rig. It is
+/// applied as a **clamp on the caller's recovery window** rather than as a timer of its
+/// own, because a second timer beside the phase's own window would be a second place for
+/// the two to disagree about when the phase ends.
 const RECOVERY_LIMIT: Duration = Duration::from_secs(120);
+
+/// The shape of one overload-and-recovery run, shared by both of its functions.
+///
+/// One struct rather than six parameters repeated across two signatures: the two
+/// functions that take it differ only in whether they drive one side or both, and a
+/// six-name list duplicated in two signatures is two places for a phase window to drift.
+#[derive(Clone, Copy, Debug)]
+struct OverloadShape {
+    /// The in-flight ceiling, which is a parameter because the recovery time is a property
+    /// of the ceiling a reader chose and not of the runtime.
+    bound: usize,
+    /// The rate the run treats as the knee: the recovery phase offers half of it and the
+    /// overload phase twice it.
+    knee_rate: u64,
+    /// The service cost each body runs, resolved once by `body_for_bound`.
+    body_micros: u64,
+    /// How long the baseline phase offers 0.5x the knee.
+    baseline_window: Duration,
+    /// How long the overload phase offers 2x the knee.
+    overload_window: Duration,
+    /// How long the recovery phase offers 0.5x the knee again. Its own length, because the
+    /// two phases measure different things: the baseline only has to hold enough samples
+    /// for one p99, while the recovery has to outlast the queue the overload built. A 30 s
+    /// overload at 2x the knee, dropped to 0.5x, drains its backlog at (capacity - 0.5x
+    /// knee) a second — about 51 s at bound 64 — so a recovery window shorter than that
+    /// reports a recovery that had not happened yet.
+    recovery_seconds: Duration,
+}
 
 /// Drive one side through a baseline phase, an overload phase and a recovery phase,
 /// and report what it took to come back.
@@ -3482,15 +3527,19 @@ const RECOVERY_LIMIT: Duration = Duration::from_secs(120);
 /// assumed.
 async fn overload_run(
     side: Side,
-    bound: usize,
-    knee_rate: u64,
-    body_micros: u64,
-    baseline_window: Duration,
-    overload_window: Duration,
+    shape: OverloadShape,
 ) -> Result<RecoveryRun, Box<dyn std::error::Error>> {
+    let OverloadShape {
+        bound,
+        knee_rate,
+        body_micros,
+        baseline_window,
+        overload_window,
+        recovery_seconds: _,
+    } = shape;
     let half = (knee_rate / 2).max(1);
     let twice = knee_rate.saturating_mul(2);
-    let recovery_window = baseline_window;
+    let recovery_window = recovery_window_of(shape);
     let phases = [
         Phase {
             label: PhaseLabel::Baseline,
@@ -3541,15 +3590,27 @@ async fn overload_run(
     for phase in phases {
         let period = period_nanos(phase.offered_rate);
         let t0 = Instant::now();
+        // **The arrival index restarts at every phase**, while the tallies do not.
+        //
+        // The schedule is `phase_t0 + index x period` and `phase_t0` is this phase's
+        // start, so a *cumulative* index would place every arrival in a later phase that
+        // far into its future: after a 30 s overload at 20,000/s the cumulative index was
+        // 357,726, and the recovery phase — which offers at 5,000/s, so one arrival every
+        // 200 us — scheduled its first arrival 71.5 s ahead. The phase offered exactly one
+        // arrival in its five seconds, its window never reached `RECOVERY_MIN_SAMPLES`,
+        // and the run reported "the p99 did not return to the baseline". The engine had
+        // recovered; the rig had stopped offering.
+        let mut phase_offered = 0_u64;
         while t0.elapsed() < phase.window {
             engine.reap();
-            let intended = intended_at(t0, offered, period);
+            let intended = intended_at(t0, phase_offered, period);
             wait_until(intended).await;
+            phase_offered = phase_offered.saturating_add(1);
             offered = offered.saturating_add(1);
             let arrival = Arrival::mint(&work, &recorders, intended, body_micros);
             let placed = engine.admit(arrival).await;
             count_arrival(placed, &mut admitted, &mut refused);
-            let next_intended = intended_at(t0, offered, period);
+            let next_intended = intended_at(t0, phase_offered, period);
             sample_queue(
                 Instant::now(),
                 next_intended,
@@ -3565,15 +3626,21 @@ async fn overload_run(
                 // The baseline phase has nothing to watch for: it is the reading the
                 // other two are compared against.
                 PhaseLabel::Baseline => {}
-                // The recovery phase watches for the two facts it is measuring: the
-                // queue is empty, and a whole window has served a p99 inside the
-                // baseline's. The window is bounded by `RECOVERY_LIMIT` so a host
-                // that never recovers reports that rather than hanging.
+                // The recovery phase watches for the one fact it is measuring: a whole
+                // window has served a p99 inside the baseline's. The window is bounded by
+                // the phase's own end, which `RECOVERY_LIMIT` clamps, so a host that never
+                // recovers reports that rather than hanging.
+                //
+                // **It does not wait for an empty engine.** That condition was here and it
+                // is unsatisfiable by construction: the phase keeps offering load at
+                // `0.5x` the knee, so the engine is never idle and the check could never
+                // fire. The drain is measured separately and timed, immediately after the
+                // overload stops, and *including* the drain in this reading is the whole
+                // point of measuring recovery from `overload_stopped` — so requiring the
+                // engine to be empty as well made the one reading that should include the
+                // drain the one reading that excluded it.
                 PhaseLabel::Recovery => {
-                    if recovered_p99 == 0
-                        && engine.in_flight() == 0
-                        && t0.elapsed() >= RECOVERY_WINDOW
-                    {
+                    if recovered_p99 == 0 && t0.elapsed() >= RECOVERY_WINDOW {
                         let window = Recorder::merged(recorders.shards());
                         // A window below `RECOVERY_MIN_SAMPLES` has a p99 that is the
                         // maximum of a handful of samples; reading it as "recovered"
@@ -3601,7 +3668,7 @@ async fn overload_run(
                 baseline_p99 = p99;
                 println!(
                     "  baseline  {} offered  {} admitted  p99 {:.3} ms",
-                    offered,
+                    phase_offered,
                     admitted,
                     p99 as f64 / 1_000_000.0
                 );
@@ -3610,7 +3677,7 @@ async fn overload_run(
                 println!(
                     "  overload  {} offered  {} admitted  {} refused  p99 {:.3} ms  peak \
                      queue {overload_peak_queue}",
-                    offered,
+                    phase_offered,
                     admitted,
                     refused,
                     p99 as f64 / 1_000_000.0
@@ -3625,10 +3692,10 @@ async fn overload_run(
                 if recovered_p99 == 0 {
                     println!(
                         "  recovery  drained in {:.3} ms  p99 did NOT return to the baseline \
-                         {} ms within the {} s phase — reported as not recovered rather \
+                         {:.3} ms within the {} s phase — reported as not recovered rather \
                          than as a number",
                         drain.as_secs_f64() * 1_000.0,
-                        RECOVERY_LIMIT.as_secs(),
+                        baseline_p99 as f64 / 1_000_000.0,
                         phase.window.as_secs()
                     );
                 } else {
@@ -3767,35 +3834,29 @@ impl EngineBox {
 }
 
 /// Drive the overload-and-recovery run on both sides at one bound.
-///
-/// The bound is a parameter rather than a constant because the recovery time is a
-/// property of the ceiling a reader chose, not of the runtime: the same recovery at
-/// bound 64 and at bound 1,024 are different claims.
 async fn overload_and_recovery(
-    bound: usize,
-    knee_rate: u64,
-    body_micros: u64,
-    baseline_window: Duration,
-    overload_window: Duration,
+    shape: OverloadShape,
     json: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let OverloadShape {
+        bound,
+        knee_rate,
+        body_micros: _,
+        baseline_window,
+        overload_window,
+        recovery_seconds: _,
+    } = shape;
     println!(
-        "overload and recovery — {baseline_window:?} baseline, {overload_window:?} at 2x the knee, then back down"
+        "overload and recovery — {baseline_window:?} baseline, {overload_window:?} at 2x the knee, \
+         then {:?} back down",
+        recovery_window_of(shape)
     );
     println!("drain time and time-to-baseline-p99 are both measured, and the conservation gate");
     println!("checks that nothing was lost or duplicated on either side of the transition\n");
 
     let mut rows = Vec::new();
     for side in Side::ALL {
-        let run = overload_run(
-            side,
-            bound,
-            knee_rate,
-            body_micros,
-            baseline_window,
-            overload_window,
-        )
-        .await?;
+        let run = overload_run(side, shape).await?;
         print_row(&[
             side.as_str().to_string(),
             bound.to_string(),
@@ -3815,9 +3876,11 @@ async fn overload_and_recovery(
         let body = format!(
             "{{\"tool\":\"lgwks-bench-async-overload\",\"bound\":{bound},\
               \"knee_offered_rate\":{knee_rate},\"baseline_window_ms\":{},\
-              \"overload_window_ms\":{},\"runs\":[\n{}\n]}}",
+              \"overload_window_ms\":{},\"recovery_window_ms\":{},\
+              \"runs\":[\n{}\n]}}",
             baseline_window.as_millis(),
             overload_window.as_millis(),
+            recovery_window_of(shape).as_millis(),
             rows.iter()
                 .map(recovery_json)
                 .collect::<Vec<_>>()
@@ -4307,6 +4370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut knee: u64 = 32_768;
     let mut baseline_seconds: u64 = 4;
     let mut overload_seconds: u64 = 30;
+    let mut recovery_seconds: Option<u64> = None;
     let mut bound: Option<usize> = None;
     let mut body_micros: u64 = 0;
     let mut capacity_target: u64 = DEFAULT_CAPACITY_TARGET;
@@ -4340,6 +4404,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             overload_seconds = value
                 .parse()
                 .map_err(|error| format!("overload-seconds must be a number: {error}"))?;
+        } else if let Some(value) = arg.strip_prefix("--recovery-seconds=") {
+            recovery_seconds = Some(
+                value
+                    .parse()
+                    .map_err(|error| format!("recovery-seconds must be a number: {error}"))?,
+            );
         } else if let Some(value) = arg.strip_prefix("--body-micros=") {
             body_micros = value
                 .parse()
@@ -4445,11 +4515,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let at_body = body_for_bound(at_bound, capacity_target, body_micros);
         return block_on_mode(workers, || {
             overload_and_recovery(
-                at_bound,
-                knee,
-                at_body,
-                Duration::from_secs(baseline_seconds),
-                Duration::from_secs(overload_seconds),
+                OverloadShape {
+                    bound: at_bound,
+                    knee_rate: knee,
+                    body_micros: at_body,
+                    baseline_window: Duration::from_secs(baseline_seconds),
+                    overload_window: Duration::from_secs(overload_seconds),
+                    // Defaulting to the baseline length keeps the short form short, and a
+                    // run that wants to observe a long recovery names its own length.
+                    recovery_seconds: Duration::from_secs(
+                        recovery_seconds.unwrap_or(baseline_seconds),
+                    ),
+                },
                 json.as_deref(),
             )
         });
