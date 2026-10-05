@@ -244,7 +244,7 @@ chunking.
 
 `lgwks_std::task::spawn_blocking` runs a closure on a process-wide blocking
 pool and returns a future for its result
-(`crates/lgwks-std/src/task.rs:353`). At most 512 pool threads run at once;
+(`crates/lgwks-std/src/task.rs:354`). At most 512 pool threads run at once;
 a job submitted while all of them are busy waits its turn, and a thread with
 no work for ten seconds exits, so an idle process holds none. Jobs that wait
 on each other must number fewer than the ceiling, or the waiters hold every
