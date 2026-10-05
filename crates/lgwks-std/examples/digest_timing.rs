@@ -31,6 +31,8 @@ const BATCH: u32 = 512;
 /// Samples above this percentile of the pooled distribution are interrupts
 /// and context switches, not the comparison; dudect crops them the same way.
 const CROP_PERCENT: usize = 95;
+/// Samples discarded at the start of each comparator's run.
+const WARM_UP: usize = 10_000;
 
 /// Running mean and variance of one class (Welford).
 #[derive(Default)]
@@ -141,28 +143,32 @@ struct Measured {
 /// samples, with the class means in nanoseconds per comparison.
 fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured {
     let base = blake3(b"digest_timing base");
-    let equal = Digest::from_bytes(*base.as_bytes());
-    let mut differing_bytes = *base.as_bytes();
-    if let Some(first) = differing_bytes.first_mut() {
-        *first ^= 0x01;
-    }
-    let differ = Digest::from_bytes(differing_bytes);
+    let base_bytes = *base.as_bytes();
 
-    // Each class's operand is copied into the one slot the comparison reads,
-    // as dudect does, so the two classes differ only in the bytes compared and
-    // never in the address they are read from: two separate operands put a
-    // cache-line or alignment difference between the classes that a timing
-    // test reports as a leak (x86_64 CI, t = -17.8 at equal means to 0.001 ns).
+    // Both classes run one instruction stream and differ only in data, as
+    // dudect requires. The operand is built in the one slot the comparison
+    // reads, and the class decides only the value XORed into its first byte
+    // (`u8::from` is branchless), so no class-dependent branch, path or
+    // address precedes the timed region. Two separate operands selected by a
+    // branch reported t = -17.8 and then +32.3 on x86_64 CI at class means
+    // equal to 0.001 ns: a code-path artifact whose sign moved with the build.
+    // The first samples are discarded while caches and the predictor settle.
     let mut timed: Vec<(bool, u32)> = Vec::with_capacity(classes.len());
-    for &is_differ in classes {
-        let mut right = if is_differ { differ } else { equal };
+    for (index, &is_differ) in classes.iter().enumerate() {
+        let mut bytes = base_bytes;
+        if let Some(first) = bytes.first_mut() {
+            *first ^= u8::from(black_box(is_differ));
+        }
+        let mut right = Digest::from_bytes(bytes);
         black_box(&mut right);
         let started = Instant::now();
         for _ in 0..BATCH {
             black_box(compare(black_box(&base), black_box(&right)));
         }
         let nanos = u32::try_from(started.elapsed().as_nanos()).unwrap_or(u32::MAX);
-        timed.push((is_differ, nanos));
+        if index >= WARM_UP {
+            timed.push((is_differ, nanos));
+        }
     }
 
     let mut sorted: Vec<u32> = timed.iter().map(|&(_, nanos)| nanos).collect();
@@ -219,9 +225,12 @@ fn parse_args() -> Result<(u32, bool), Box<dyn Error>> {
             }
         }
     }
-    if samples < 2 {
-        lgwks_std::trace::warn!(samples, "digest_timing: fewer than two samples per class");
-        return Err("--samples must be at least 2".into());
+    // The warm-up is discarded from both classes together, so fewer samples
+    // per class than it would leave a class with nothing measured, and a
+    // t of zero over no data would read as a pass.
+    if usize::try_from(samples).unwrap_or(usize::MAX) < WARM_UP {
+        lgwks_std::trace::warn!(samples, "digest_timing: fewer samples than the warm-up");
+        return Err(format!("--samples must be at least {WARM_UP} per class").into());
     }
     Ok((samples, json))
 }
