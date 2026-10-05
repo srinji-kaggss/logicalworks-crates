@@ -11,25 +11,23 @@
 //! of answer it is supposed to get, so a refusal that arrives for the wrong
 //! reason fails.
 //!
-//! The second body is the one input that does not answer at all. tree-sitter's
-//! markdown external scanner serializes its own state into a fixed 1 024-byte
-//! buffer and asserts when the state is larger, which `"- "` repeated 255 times
-//! does it. An assertion in a C parser is `abort()`, so the *process* dies: not
-//! a typed refusal, not a catchable error, a `SIGABRT` that takes the caller
-//! with it. 254 levels is refused as `InvalidSyntax`; 255 aborts. That boundary
-//! is measured, not remembered, and it is proved here from a child process
-//! because a process that aborts cannot assert anything afterwards.
+//! The second body is the markdown guard. tree-sitter's markdown external
+//! scanner serializes its open block containers into a fixed 1 024-byte buffer
+//! and asserts when they do not fit, and an assertion in a C parser is
+//! `abort()`: the process dies, the caller with it, and `try_parse` returns
+//! nothing at all. `"- "` repeated 255 times — 510 bytes — does it. The crate
+//! cannot patch the scanner, but it can refuse the source before the scanner
+//! sees it, and `MAX_MARKDOWN_CONTAINERS_PER_LINE` is that refusal. The
+//! seventeen shapes, their measured abort depths and the thousand-seed proof are
+//! in the section at the foot of this file.
 //!
-//! # What this does not claim
+//! # What the guard does not cover
 //!
-//! The abort is upstream, in `tree-sitter-markdown` 0.5.3's scanner, and this
-//! crate cannot fix it: the grammar arrives as a compiled C library through
-//! `ast-grep-language`, and both routes out are closed by the issue — forking
-//! the grammar is forbidden, and the one option this crate has no authority
-//! over is a `tree-sitter` edge. So this module records it as a limit with an
-//! exact reproducer rather than pretending the crate survives it, and the
-//! script-level evidence is a `SIGABRT` observed from outside, never a green
-//! run of the parse itself.
+//! It runs on the **checked** parse. `parse` and `parse_with` return a `Parsed`
+//! rather than a `Result`, so a refusal has nowhere to go in them and this change
+//! moved neither signature; the unchecked path carries the exposure and says so
+//! on its own documentation. A caller accepting untrusted input uses
+//! [`try_parse`].
 //!
 //! # Why a hard per-test timeout
 //!
@@ -41,36 +39,18 @@
 #![cfg(feature = "lang-rust")]
 
 use std::error::Error;
+use std::io::Write;
 use std::time::Duration;
 
+#[cfg(feature = "lang-md")]
+use crate::seed::Rng;
 use lgwks_ast::{
-    Language, MAX_AST_DEPTH, MAX_AST_NODES, MAX_SOURCE_BYTES, ParseError, inspect_ast, parse,
-    try_parse,
+    Language, MAX_AST_DEPTH, MAX_AST_NODES, MAX_MARKDOWN_CONTAINERS_PER_LINE, MAX_SOURCE_BYTES,
+    ParseError, inspect_ast, parse, try_parse,
 };
 
 /// What every family returns.
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// Set in the child so a re-executed binary takes the child branch.
-const CHILD_ENV: &str = "LGWKS_AST_MARKDOWN_ABORT_CHILD";
-
-/// This test's own name, for the child's `--exact` filter.
-///
-/// Qualified by its module, because the child is this same binary and libtest
-/// matches the full path: an unqualified name selects nothing, the child runs
-/// zero tests and exits 0, and the parent's "the child died" assertion fails
-/// against a child that never did anything.
-const ABORT_TEST_NAME: &str =
-    "hostile::a_nested_markdown_list_aborts_the_process_rather_than_refusing";
-
-/// The number of `- ` markers at which the markdown scanner's serialized state
-/// crosses tree-sitter's 1 024-byte buffer. Measured by bisection on this
-/// machine: 254 markers (508 bytes) is refused as `InvalidSyntax`, 255 markers
-/// (510 bytes) aborts. The child's own count is the lower one by default, and
-/// the parent raises it, so one binary proves both halves of the boundary.
-const SAFE_MARKDOWN_LEVELS: usize = 254;
-/// The first count that aborts.
-const ABORTING_MARKDOWN_LEVELS: usize = 255;
 
 /// One shape of hostile input, and what it is supposed to earn.
 struct Adversarial {
@@ -443,146 +423,316 @@ fn multibyte_and_truncated_sources_are_answered() -> TestResult {
     Ok(())
 }
 
-// ── The one input that does not answer ─────────────────────────────────────
+// ── The markdown guard ──────────────────────────────────────────────────────
+//
+// # What was measured
+//
+// tree-sitter's markdown grammar keeps its open block containers in an external
+// scanner whose state is serialized into a fixed 1 024-byte buffer, and it
+// *asserts* when that state does not fit. An assertion in a C parser is
+// `abort()`: the process dies, the caller with it, and `try_parse` never returns
+// anything a caller could handle. `"- "` repeated 255 times -- 510 bytes --
+// does it.
+//
+// Seventeen container shapes were bisected from a child process, one depth at a
+// time. **Every shape that aborts does so at 255 open containers**, whether it
+// spells them one per repetition (255 of `- `), two per repetition (128 of
+// `> - `) or three (85 of `>>> `). Three shapes -- tab runs and
+// indentation-nested blockquotes and ordered lists -- never abort at all,
+// because markdown does not nest those by indentation.
+// `MAX_MARKDOWN_CONTAINERS_PER_LINE` is 64, about a quarter of 255, and
+// `lgwks_ast::markdown_containers` counts that quantity directly.
+//
+// An exhaustive sweep afterwards took all seventeen shapes through every depth
+// from 1 to 512 -- 8 704 (shape, depth) pairs -- and every child exited.
+//
+// # What is proved here
+//
+// Every shape at bound-1, bound and bound+1, every shape at its own measured
+// abort depth, and a thousand seeded mixes of container prefixes. Each runs in a
+// child process, because a process that aborts cannot assert anything
+// afterwards: the parent reads an exit status, so "the guard held" and "the
+// guard did not hold" are two different observations rather than one green line.
 
-/// Re-run this binary as the child that performs one markdown parse.
+/// Set in the child so a re-executed binary takes the child branch.
+const CHILD_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CHILD";
+
+/// Which case of [`markdown_cases`] the child is asked to parse.
+const CASE_ENV: &str = "LGWKS_AST_MARKDOWN_GUARD_CASE";
+
+/// This test's own name, for the child's `--exact` filter.
 ///
-/// The child records the arm it reached in a file rather than in its exit
-/// status, because the two facts this test needs are different and neither is
-/// the status: at one level fewer the child *answers*, and at the next it dies
-/// before it can answer anything at all. A file the parent reads is the only
-/// place the answered arm can come from.
-#[cfg(feature = "lang-md")]
-fn run_markdown_child() -> TestResult {
-    let levels = std::env::var("LGWKS_AST_MARKDOWN_LEVELS")
-        .ok()
-        .and_then(|one| one.parse::<usize>().ok())
-        .ok_or("the child branch needs LGWKS_AST_MARKDOWN_LEVELS to know what to parse")?;
-    let outcome = std::env::var("LGWKS_AST_MARKDOWN_OUTCOME")
-        .map_err(|_| "the child branch needs LGWKS_AST_MARKDOWN_OUTCOME to record its arm")?;
-    let source = "- ".repeat(levels);
-    let answer = try_parse(&source, Language::Markdown);
-    let recorded = match answer {
-        Ok(_) => "accepted".to_owned(),
-        Err(ref error) => refusal_name(error),
-    };
+/// Qualified by its module, because the child is this same binary and libtest
+/// matches the full path: an unqualified name selects nothing, the child runs
+/// zero tests and exits 0, and the parent's "the child died" assertion then
+/// fails against a child that never did anything.
+const GUARD_TEST_NAME: &str = "hostile::markdown_never_reaches_the_scanner_past_its_bound";
 
-    std::fs::write(outcome, format!("{levels}\t{}\t{recorded}", source.len()))?;
+/// Seeds in the mixed-prefix family.
+const SEEDED_CASES: u64 = 1_000;
+
+/// The base the seeded family's seeds are derived from.
+const SEED_BASE: u64 = 0x0d0c_0000_0000_0277;
+
+/// How a container shape spells one level of nesting.
+#[derive(Clone, Copy)]
+enum Form {
+    /// The fragment repeated on a single line, then an item.
+    Repeated,
+    /// One item per level, indented by two spaces per level.
+    Indented,
+    /// A code block inside `depth` quote levels.
+    Coded,
+}
+
+/// This shape's source at a nesting `depth`.
+fn shape_source(form: Form, fragment: &str, depth: usize) -> String {
+    match form {
+        Form::Repeated => format!("{}x\n", fragment.repeat(depth)),
+        Form::Indented => {
+            let mut source = String::new();
+            for level in 0..depth {
+                source.push_str(&"  ".repeat(level));
+                source.push_str(fragment);
+                source.push('\n');
+            }
+            source
+        }
+        Form::Coded => format!("{}{}\n", "> ".repeat(depth), fragment),
+    }
+}
+
+/// A markdown container shape: its name, the fragment it nests, how it spells a
+/// level, and the smallest depth that aborted before the guard existed.
+///
+/// `None` for the last element means the shape never aborts, because markdown
+/// does not nest it by indentation and the scanner's open-container count stays
+/// flat however deep the source goes.
+type Shape = (&'static str, &'static str, Form, Option<usize>);
+
+/// Every container shape, with the depth at which it was measured to abort.
+const SHAPES: [Shape; 17] = [
+    ("dash-line", "- ", Form::Repeated, Some(255)),
+    ("star-line", "* ", Form::Repeated, Some(255)),
+    ("plus-line", "+ ", Form::Repeated, Some(255)),
+    ("ordered-dot-line", "1. ", Form::Repeated, Some(255)),
+    ("ordered-paren-line", "1) ", Form::Repeated, Some(255)),
+    ("quote-space-line", "> ", Form::Repeated, Some(255)),
+    ("quote-bare-line", ">", Form::Repeated, Some(255)),
+    ("quote-triple-line", ">>> ", Form::Repeated, Some(85)),
+    ("tab-line", "\t", Form::Repeated, None),
+    ("indent-quote", "> x", Form::Indented, None),
+    ("indent-ordered", "1. x", Form::Indented, None),
+    ("indent-dash", "- x", Form::Indented, Some(255)),
+    ("list-in-quote", "> - ", Form::Repeated, Some(128)),
+    ("quote-in-list", "- > ", Form::Repeated, Some(128)),
+    ("list-in-quote-in-list", "- > - ", Form::Repeated, Some(85)),
+    ("fence-in-quotes", "```\nx\n```\n", Form::Coded, Some(255)),
+    ("indented-code-in-quotes", "    x\n", Form::Coded, Some(255)),
+];
+
+/// The container fragments a seeded case mixes, drawn per line.
+const FRAGMENTS: [&str; 10] = [
+    "- ", "* ", "+ ", "1. ", "1) ", "> ", ">>> ", ">", "  ", "\t",
+];
+
+/// A seeded mix of container prefixes: per line, an indent and a fragment, so a
+/// case can be shallow but dense, deep but sparse, or both at once.
+fn seeded_source(seed: u64) -> String {
+    let mut rng = Rng::new(seed ^ SEED_BASE);
+    let lines = rng.between(1, 24);
+    let mut source = String::new();
+    for _ in 0..lines {
+        source.push_str(&"  ".repeat(usize::try_from(rng.between(0, 24)).unwrap_or(0)));
+        let count = u32::try_from(FRAGMENTS.len()).unwrap_or(1);
+        let fragment = FRAGMENTS
+            .get(usize::try_from(rng.below(count)).unwrap_or(0))
+            .copied()
+            .unwrap_or("");
+        source.push_str(&fragment.repeat(usize::try_from(rng.between(1, 40)).unwrap_or(1)));
+        source.push_str("x\n");
+    }
+    source
+}
+
+/// One markdown source the guard is proved against.
+struct Case {
+    /// Where the case came from, as an assertion message.
+    label: String,
+    /// The source handed to `try_parse`.
+    source: String,
+    /// Whether the guard is expected to be what refuses it.
+    guarded: bool,
+}
+
+/// Every case: the shapes at the bound and around it, the shapes at their own
+/// measured abort depth, and [`SEEDED_CASES`] seeded mixes.
+fn markdown_cases() -> Vec<Case> {
+    let bound = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+    let mut cases = Vec::new();
+    for entry in &SHAPES {
+        let (name, fragment, form, aborts_at) = *entry;
+        for depth in [bound.saturating_sub(1), bound, bound.saturating_add(1)] {
+            cases.push(case(
+                shape_source(form, fragment, depth),
+                format!("{name} at depth {depth}"),
+            ));
+        }
+        if let Some(depth) = aborts_at {
+            cases.push(case(
+                shape_source(form, fragment, depth),
+                format!("{name} at its abort depth {depth}"),
+            ));
+        }
+    }
+    for index in 0..SEEDED_CASES {
+        let seed = index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        cases.push(case(
+            seeded_source(seed),
+            format!("seeded mix {index} (seed {seed:#x})"),
+        ));
+    }
+    cases
+}
+
+/// One case from a source, recording whether the guard is what refuses it.
+fn case(source: String, label: String) -> Case {
+    let guarded =
+        lgwks_ast::markdown_containers(&source, MAX_MARKDOWN_CONTAINERS_PER_LINE).is_some();
+    Case {
+        label,
+        source,
+        guarded,
+    }
+}
+
+/// Run this binary as the child that parses case `index`.
+///
+/// The child's exit status is the whole observation, so nothing is written to a
+/// file: a code means the child answered, and no code means it did not, which is
+/// the fact this module exists to record.
+fn markdown_child(index: usize) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args([GUARD_TEST_NAME, "--exact", "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .env(CASE_ENV, index.to_string())
+        .spawn()?;
+    Ok(child.wait()?)
+}
+
+/// Re-run this binary as the child that parses one case.
+fn run_markdown_child() -> TestResult {
+    let index = std::env::var(CASE_ENV)
+        .map_err(|_| "the child branch needs CASE_ENV to know which case to parse")?
+        .parse::<usize>()
+        .map_err(|error| format!("CASE_ENV is not an index: {error}"))?;
+    let cases = markdown_cases();
+    let case = cases
+        .get(index)
+        .ok_or("CASE_ENV names a case this build does not have")?;
+    // The arm is printed, not returned: a child that reaches here answered, and
+    // its exit status is the observation the parent reads. The text is here so a
+    // failing case names the arm in the child's own output.
+    // The arm is recorded rather than returned: a child that reaches here
+    // answered, and its exit status is the observation the parent reads. The
+    // text goes to stdout through `Write` because `clippy::print_stdout` is
+    // forbidden workspace-wide, and the file the child is in is not exempt.
+    let arm = arm_of(case).unwrap_or_else(|| "accepted".to_owned());
+    let mut stdout = std::io::stdout();
+    drop(writeln!(stdout, "{} -> {arm}", case.label));
     Ok(())
 }
 
-/// One child process: how it ended, and the file it would have recorded its arm
-/// in if it reached one.
-struct Child {
-    /// How the child ended.
-    status: std::process::ExitStatus,
-    /// Where the child records the arm it reached.
-    outcome: std::path::PathBuf,
+/// The arm a case answered with, `None` when it parsed.
+fn arm_of(case: &Case) -> Option<String> {
+    match try_parse(&case.source, Language::Markdown) {
+        Ok(_) => None,
+        Err(refusal) => Some(refusal_name(&refusal)),
+    }
 }
 
-/// Run this binary as a child that parses `levels` nested markdown list markers.
-///
-/// The outcome path carries the caller's own label rather than a fixed name, so
-/// two children in one test cannot read each other's record.
-#[cfg(feature = "lang-md")]
-fn markdown_child(levels: usize, label: &str) -> Result<Child, Box<dyn Error>> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let outcome = std::env::temp_dir().join(format!("lgwks-ast-md-{label}-{nanos}-{seq}.outcome"));
-    let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args([ABORT_TEST_NAME, "--exact", "--nocapture"])
-        .env(CHILD_ENV, "1")
-        .env("LGWKS_AST_MARKDOWN_LEVELS", levels.to_string())
-        .env("LGWKS_AST_MARKDOWN_OUTCOME", &outcome)
-        .spawn()?;
-    let status = child.wait()?;
-    Ok(Child { status, outcome })
-}
-
-#[cfg(feature = "lang-md")]
 #[test]
-fn a_nested_markdown_list_aborts_the_process_rather_than_refusing() -> TestResult {
+fn markdown_never_reaches_the_scanner_past_its_bound() -> TestResult {
     if std::env::var_os(CHILD_ENV).is_some() {
         return run_markdown_child();
     }
 
-    // The control, from outside and through the same binary and the same path:
-    // one marker fewer, and it answers. The difference between the two arms is
-    // therefore the input and nothing else.
-    let control = markdown_child(SAFE_MARKDOWN_LEVELS, "control")?;
-    assert_eq!(
-        control.status.code(),
-        Some(0),
-        "the {SAFE_MARKDOWN_LEVELS}-marker child did not exit cleanly: {:?}",
-        control.status
-    );
-    let answered = std::fs::read_to_string(&control.outcome)
-        .map_err(|error| format!("the control child recorded no arm: {error}"))?;
+    let cases = markdown_cases();
     assert!(
-        answered.contains("ERROR or MISSING"),
-        "the {SAFE_MARKDOWN_LEVELS}-marker child answered `{answered}` rather than refusing for \
-         syntax; if that has changed the boundary has moved and the abort arm below is measuring a \
-         different input than this test claims"
+        cases.len() >= 50 + usize::try_from(SEEDED_CASES).unwrap_or(0),
+        "only {} cases; the shapes alone contribute more than 50",
+        cases.len()
     );
 
-    // The subject: an assertion inside a C parser calls `abort`, so the only
-    // thing that can observe it is a parent.
-    let subject = markdown_child(ABORTING_MARKDOWN_LEVELS, "subject")?;
-    assert_eq!(
-        subject.status.code(),
-        None,
-        "the {ABORTING_MARKDOWN_LEVELS}-marker child exited cleanly: {:?}. The markdown scanner's \
-         overflow has been fixed upstream, so this limit can be retired.",
-        subject.status
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
-        assert_eq!(
-            subject.status.signal(),
-            Some(6),
-            "the child must have died of SIGABRT from tree-sitter's external-scanner assertion, \
-             not of some other signal: {:?}",
-            subject.status
+    let mut guarded = 0_usize;
+    let mut passed_through = 0_usize;
+    for (index, case) in cases.iter().enumerate() {
+        let status = markdown_child(index)?;
+        assert!(
+            status.code().is_some(),
+            "{}: the child died of {status:?}. Before the guard this case called abort() inside \\
+             tree-sitter's external scanner; now it must return a tree or a refusal.",
+            case.label
         );
+        if case.guarded {
+            guarded = guarded.saturating_add(1);
+            let arm = arm_of(case).ok_or_else(|| {
+                format!(
+                    "{}: the guard is expected to refuse this source",
+                    case.label
+                )
+            })?;
+            assert!(
+                arm.contains("block containers"),
+                "{}: refused as `{arm}` rather than by the container bound, so this is not the \\
+                 refusal the guard is being proved against",
+                case.label
+            );
+        } else {
+            passed_through = passed_through.saturating_add(1);
+        }
     }
+
     assert!(
-        !subject.outcome.exists(),
-        "the aborting child recorded an arm, so it answered rather than dying"
+        guarded >= 40,
+        "only {guarded} of {} cases were expected to be guarded; the shapes at their measured \\
+         abort depths alone contribute more than 14",
+        cases.len()
+    );
+    assert!(
+        passed_through >= 20,
+        "only {passed_through} cases were expected to pass the guard; without them a guard that \\
+         refused every source would pass this test"
     );
     Ok(())
 }
 
-/// The shape the abort needs is the grammar's own nesting fragment, so this test
-/// is only meaningful where that grammar is compiled. Assert the guard rather
-/// than letting the module read as covering markdown in a build without it.
+/// The guard's cases need the markdown grammar, so they are only meaningful
+/// where it is compiled. Assert the guard rather than letting the module read as
+/// covering markdown in a build without it.
 #[cfg(all(not(feature = "lang-md"), feature = "lang-rust"))]
 #[test]
-fn the_markdown_abort_case_is_absent_from_a_build_without_that_grammar() {
+fn the_markdown_guard_cases_are_absent_from_a_build_without_that_grammar() {
     assert!(
         Language::ALL
             .iter()
             .all(|language| language.name() != "markdown"),
-        "this build compiles the markdown grammar, so the abort case must be compiled in too; \\
-         a module that skips it would read as coverage it does not have"
+        "this build compiles the markdown grammar, so the guard cases must be compiled in too; \\
+         a module that skips them would read as coverage it does not have"
     );
 }
 
 /// How long a child is given before the parent stops believing it will answer.
 ///
-/// The abort happens in the parse, well inside this; a child that takes longer
-/// is a hang, and a hang in the subject is exactly what this module exists to
-/// catch, so the parent bounds its own waiting rather than blocking forever.
-const CHILD_BUDGET: Duration = Duration::from_secs(60);
+/// The parse is single-digit milliseconds; a child that takes longer is a hang,
+/// and a hang in the subject is exactly what this module exists to catch, so the
+/// bound is asserted rather than assumed.
+const CHILD_BUDGET: Duration = Duration::from_secs(30);
 
 #[test]
 fn the_child_budget_is_longer_than_a_parse_and_finite() {
-    // The bound itself, asserted: a test that waits on a child with no timeout
-    // is the same defect as a walk with no cap, one process up.
+    // A test that waits on a child with no timeout is the same defect as a walk
+    // with no cap, one process up.
     assert!(
         CHILD_BUDGET > Duration::from_millis(1),
         "the child budget must let a parse finish"

@@ -160,6 +160,39 @@ pub const MAX_AST_NODES: usize = 2_000_000;
 /// [`ParseError::AstTooDeep`].
 pub const MAX_AST_DEPTH: usize = 512;
 
+/// Largest number of block containers one line of markdown may declare (64).
+///
+/// **This is a process-safety bound, not a quality bound.** tree-sitter's
+/// markdown grammar keeps its open block containers in an external scanner whose
+/// state is serialized into a fixed 1 024-byte buffer, and it *asserts* — which
+/// is `abort()`, not a catchable error — when that state does not fit. A source
+/// that opens 255 containers does not return a `ParseError`: it ends the
+/// process, with the caller inside it. `- ` repeated 255 times is 510 bytes.
+///
+/// The bound therefore sits well below the smallest measured abort. Bisected
+/// from a child process across seventeen container shapes — unordered and
+/// ordered list markers, blockquotes of one, two and three `>`, tabs,
+/// list-in-quote, quote-in-list, list-in-quote-in-list, fenced and indented
+/// code inside containers, and containers nested by indentation — **every
+/// aborting shape reaches its abort at the same 255 open containers**, whether
+/// it spells them one per repetition (255 repetitions), two per repetition
+/// (128) or three (85). [`markdown_containers`](crate::markdown_containers)
+/// counts that quantity directly, so the margin is `255 / 64`, about 4x, and
+/// the count is additionally an over-estimate wherever indentation and markers
+/// both contribute depth.
+///
+/// The cost of the margin is a refusal, not a crash: a document nested more
+/// than 64 containers deep on one line is refused as
+/// [`ParseError::ContainerNestingTooDeep`] before the scanner sees it. A
+/// document nested 30 deep, which is already past what any real file contains,
+/// still parses.
+///
+/// Only a grammar registered under the name `markdown` is measured against it,
+/// and only on the checked parse. The count needs no grammar and no cargo
+/// feature, so the rule is present in every build rather than appearing only
+/// where `lang-md` happens to be on.
+pub const MAX_MARKDOWN_CONTAINERS_PER_LINE: usize = 64;
+
 /// Largest probe source admitted to [`try_detect_content`] (64 KiB). Content
 /// detection costs one full parse per distinct candidate grammar, so it is
 /// bounded far below [`MAX_SOURCE_BYTES`]; a language probe only needs enough bytes to
@@ -653,6 +686,30 @@ pub enum ParseError {
         /// The applied bound.
         limit: usize,
     },
+    /// One line declares more block containers than the checked parse admits.
+    ///
+    /// A *pre-parse* refusal, and a separate arm from
+    /// [`ParseError::AstTooDeep`] because it measures something else about
+    /// something else. `AstTooDeep` counts the depth of a tree that was built;
+    /// this counts containers declared by the *text*, before any grammar runs,
+    /// because the grammar cannot be run at all: the markdown scanner's own
+    /// serialization buffer overflows first and takes the process with it. See
+    /// [`MAX_MARKDOWN_CONTAINERS_PER_LINE`].
+    ///
+    /// Reported before the parse rather than after it, so a caller sees a
+    /// refusal it can act on instead of a process that is no longer there.
+    #[error(
+        "{language} declares at least {observed} block containers on one line; \
+         the limit is {limit}"
+    )]
+    ContainerNestingTooDeep {
+        /// The language name.
+        language: &'static str,
+        /// Containers counted on the offending line.
+        observed: usize,
+        /// The applied bound.
+        limit: usize,
+    },
 }
 
 /// Every recovery node in `tree`, as a located diagnostic.
@@ -1017,6 +1074,13 @@ fn parse_bounded<L: LanguageExt>(
     max_ast_depth: usize,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
     validate_source_size(code, max_source_bytes)?;
+    // Before the parser, and only for the markdown grammar: its external scanner
+    // serializes open block containers into a fixed buffer and asserts when they
+    // do not fit, which ends the process rather than returning an error. Every
+    // other grammar reaches `try_new` on any source inside the byte bound.
+    if name == MARKDOWN {
+        validate_markdown_containers(code, name, MAX_MARKDOWN_CONTAINERS_PER_LINE)?;
+    }
     let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
         ParseError::ParserUnavailable {
             language: name,
@@ -1057,6 +1121,13 @@ fn parse_bounded<L: LanguageExt>(
 
 /// Unchecked parse for diagnostics and tests that intentionally inspect
 /// malformed trees. Production call sites use [`try_parse`].
+///
+/// **This path does not run [`MAX_MARKDOWN_CONTAINERS_PER_LINE`].** It returns a
+/// [`Parsed`] rather than a `Result`, so a refusal has nowhere to go here, and a
+/// markdown source past that bound will abort the process inside the grammar's
+/// external scanner rather than return anything. It also runs neither
+/// [`MAX_AST_NODES`] nor [`MAX_AST_DEPTH`]. A caller accepting untrusted input
+/// uses [`try_parse`], which is the path every bound lives on.
 #[must_use]
 pub fn parse(code: &str, language: Language) -> Parsed {
     parse_with(code, &language.support_lang())
@@ -1079,6 +1150,167 @@ fn validate_source_size(source: &str, limit: usize) -> Result<(), ParseError> {
     (actual <= limit)
         .then_some(())
         .ok_or(ParseError::SourceTooLarge { actual, limit })
+}
+
+/// The name the markdown guard is keyed on.
+///
+/// A caller registering its own grammar chooses this name, so a custom grammar
+/// called `markdown` is measured by the same rule. That is the intended reading:
+/// the name is the stable identity a caller matches findings on, and a caller who
+/// claims to be markdown gets markdown's bound.
+const MARKDOWN: &str = "markdown";
+
+/// The containers declared on the first line of `source` that exceeds `limit`,
+/// or `None` when no line does.
+///
+/// The count is an **upper bound** on the scanner's open containers, for two
+/// reasons, and both push the same way:
+///
+/// - Indentation and markers can both carry nesting, so their depths are added
+///   rather than the larger taken. A list nested by indentation opens one
+///   container per line and adds depth through its indent; a line carrying both
+///   is charged for both.
+/// - A marker is counted wherever it appears in a line, not only where it could
+///   legally open a container. `a - b - c` counts two. That is prose, not
+///   nesting, and refusing it costs nothing because the bound is 64; the point
+///   is that a count which is *too high* is a refusal and a count which is too
+///   low is a crash.
+///
+/// One pass over the bytes, and four `usize`s of state: no line is buffered, no
+/// allocation is made, and the walk stops at the first line over the bound, so a
+/// hostile source costs `O(bytes)` and nothing else. Returning `None` for a
+/// source inside the bound is the whole contract — the deepest count *within* the
+/// bound is not interesting to a caller, who has already been told it passed.
+#[must_use]
+pub fn markdown_containers(source: &str, limit: usize) -> Option<usize> {
+    for line in source.split('\n') {
+        let (indent_columns, rest) = split_indent(line);
+        // Two spaces per level of indentation-nested container: the narrowest
+        // indent a real nested list carries. A tab is four columns, which is the
+        // width every markdown tool agrees on for one.
+        let from_indent = indent_columns.checked_div(2).unwrap_or(0);
+        let counted = from_indent.saturating_add(count_markers(rest));
+        if counted > limit {
+            return Some(counted);
+        }
+    }
+    None
+}
+
+/// The leading whitespace of `line` in columns, and the line without it.
+fn split_indent(line: &str) -> (usize, &str) {
+    let mut columns = 0_usize;
+    for (at, character) in line.char_indices() {
+        match character {
+            ' ' => columns = columns.saturating_add(1),
+            '\t' => columns = columns.saturating_add(4),
+            _ => return (columns, &line[at..]),
+        }
+    }
+    (columns, "")
+}
+
+/// The block containers `line` declares, after its indentation.
+///
+/// Counts, per markdown's block grammar: every `>` (a run of them is that many
+/// levels of blockquote), every `-`, `*` or `+` immediately followed by a space
+/// or the end of the line (a list marker needs that space; `---` is a thematic
+/// break and `*emphasis*` is not a list), every digit run followed by `.` or `)`
+/// and then that same space, and one for a line that opens a code fence.
+///
+/// Markers are counted **anywhere** in the line, not only where one could
+/// legally open a container. `1. 1. 1. x` is three nested ordered lists and
+/// `a - b - c` is prose that happens to contain two dashes; the second is
+/// counted and the bound is 64, so the price of the over-count is a refusal on
+/// a line nobody writes, while the price of an under-count is a process that is
+/// no longer there.
+fn count_markers(line: &str) -> usize {
+    if opens_code_fence(line) {
+        return 1;
+    }
+    let mut counted = 0_usize;
+    let mut rest = line;
+    while let Some(character) = rest.chars().next() {
+        let tail = &rest[character.len_utf8()..];
+        if character == '>' {
+            counted = counted.saturating_add(1);
+        } else if matches!(character, '-' | '*' | '+') {
+            if is_marker_end(tail) {
+                counted = counted.saturating_add(1);
+            }
+        } else if character.is_ascii_digit() {
+            counted = counted.saturating_add(ordered_marker_len(rest));
+        }
+        rest = tail;
+    }
+    counted
+}
+
+/// Whether `tail` begins the space or end of line a list marker needs.
+fn is_marker_end(tail: &str) -> bool {
+    tail.is_empty() || tail.starts_with([' ', '\t'])
+}
+
+/// How many containers one ordered-list marker at the head of `rest` declares.
+///
+/// `1.` and `1)` open a list; `1.5` is a number, `v1.2` is prose, and `1234567.`
+/// is a list whose item number is seven digits long. The marker is one
+/// container however long its number is, which is why this counts a container
+/// and not the digits it consumed.
+fn ordered_marker_len(rest: &str) -> usize {
+    let digits = rest
+        .char_indices()
+        .find(|entry| !entry.1.is_ascii_digit())
+        .map_or(rest.len(), |(offset, _)| offset);
+    let after_digits = &rest[digits..];
+    if after_digits
+        .strip_prefix(['.', ')'])
+        .is_some_and(is_marker_end)
+    {
+        1
+    } else {
+        0
+    }
+}
+
+/// Whether `line` opens a fenced code block.
+fn opens_code_fence(line: &str) -> bool {
+    let fence = line.trim_start();
+    let run = fence
+        .chars()
+        .take_while(|marker| *marker == '`' || *marker == '~')
+        .count();
+    run >= 3
+}
+
+/// Refuse a markdown source whose container nesting the scanner could not
+/// serialize, before the scanner is handed it.
+///
+/// The refusal is [`ParseError::ContainerNestingTooDeep`]; `None` means the
+/// source is inside [`MAX_MARKDOWN_CONTAINERS_PER_LINE`] and the grammar may see
+/// it. The check is `O(bytes)` with `O(1)` state, and it runs after the byte
+/// bound so an oversized source is still refused as oversized.
+fn validate_markdown_containers(
+    source: &str,
+    name: &'static str,
+    limit: usize,
+) -> Result<(), ParseError> {
+    let Some(observed) = markdown_containers(source, limit) else {
+        return Ok(());
+    };
+    let refusal = Err(ParseError::ContainerNestingTooDeep {
+        language: name,
+        observed,
+        limit,
+    });
+    tracing::warn!(
+        language = name,
+        observed,
+        limit,
+        "validate_markdown_containers: refusing before the grammar's external scanner, whose \
+         serialization buffer would overflow and abort the process"
+    );
+    refusal
 }
 
 /// Whether the tree holds an `ERROR` or `MISSING` node. Ask before reporting:
@@ -2375,6 +2607,138 @@ mod tests {
             )
             .is_err(),
             "and the same source is refused by the checked parse"
+        );
+    }
+
+    #[test]
+    fn the_container_count_names_the_shapes_the_scanner_overflows_on() {
+        // The counting rules against the sources the scanner was measured to
+        // abort on: at that depth the guard must refuse, and at a depth inside
+        // the bound it must not. The count is the number of containers the
+        // source opens, which is why the shapes nesting two or three per
+        // repetition cross the bound in a quarter or a third of the depth.
+        //
+        // (fragment, containers per repetition, the repetition that aborts)
+        let shapes: [(&str, usize, usize); 8] = [
+            ("- ", 1, 255),
+            ("> ", 1, 255),
+            (">", 1, 255),
+            ("1. ", 1, 255),
+            ("1) ", 1, 255),
+            ("> - ", 2, 128),
+            (">>> ", 3, 85),
+            ("- > - ", 3, 85),
+        ];
+        let limit = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+        for (fragment, per_repetition, aborts_at) in shapes {
+            let inside = limit.saturating_div(per_repetition);
+            assert!(
+                markdown_containers(&format!("{}x\n", fragment.repeat(inside)), limit).is_none(),
+                "{fragment:?} at {inside} repetitions opens {} containers, inside the bound of \
+                 {limit}, and must pass",
+                per_repetition.saturating_mul(inside)
+            );
+            let counted = markdown_containers(&format!("{}x\n", fragment.repeat(aborts_at)), limit)
+                .unwrap_or(0);
+            assert!(
+                counted >= per_repetition.saturating_mul(aborts_at),
+                "{fragment:?} at {aborts_at} repetitions opens {} containers, which the \
+                 scanner cannot serialize, but the count said {counted}",
+                per_repetition.saturating_mul(aborts_at)
+            );
+        }
+    }
+
+    #[test]
+    fn the_container_count_does_not_charge_prose_or_a_thematic_break() {
+        // The over-count is deliberate and bounded, but the *under*-count would
+        // be a crash, so the things that are not containers must not be read as
+        // containers and the things that are must not be missed.
+        let limit = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+        for source in [
+            "# Title\n\nSome prose with a -- dash and a 1.5 number.\n",
+            "***\n\n___\n\n- - -\n",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "*emphasis* and _underscore_ and `code`\n",
+            "```rust\nfn main() {}\n```\n",
+            "See https://example.com/a?q=1> for the details.\n",
+        ] {
+            assert!(
+                markdown_containers(source, limit).is_none(),
+                "{source:?} was read as deeply nested containers"
+            );
+        }
+        // And the shapes that are containers, read as containers.
+        assert_eq!(markdown_containers("> ", 0), Some(1), "a blockquote is one");
+        assert_eq!(markdown_containers("- ", 0), Some(1), "a list item is one");
+        assert_eq!(
+            markdown_containers("1) ", 0),
+            Some(1),
+            "an ordered item is one"
+        );
+        assert_eq!(
+            markdown_containers("```\n", 0),
+            Some(1),
+            "a fence is one container"
+        );
+        assert_eq!(
+            markdown_containers(&" ".repeat(8), 0),
+            Some(4),
+            "eight columns of indent is four levels of container"
+        );
+        assert_eq!(
+            markdown_containers("\t\t", 0),
+            Some(4),
+            "two tabs are eight columns, which is also four levels"
+        );
+    }
+
+    #[test]
+    fn the_container_count_is_linear_in_the_bytes_and_holds_no_line() {
+        // The bound is a process-safety bound on untrusted input, so its own cost
+        // has to be bounded too: one pass, and no allocation proportional to the
+        // source. 4 MiB is past the crate's byte ceiling, which is the point --
+        // the counter is what a caller runs *instead of* the parser when the
+        // source is too large for it.
+        let wide = "> ".repeat(2 * 1024 * 1024);
+        let started = std::time::Instant::now();
+        let counted = markdown_containers(&wide, MAX_MARKDOWN_CONTAINERS_PER_LINE);
+        let elapsed = started.elapsed();
+        assert!(
+            counted.is_some(),
+            "a 4 MiB run of blockquote markers is refused"
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "counting 4 MiB took {elapsed:?}; the guard must be cheaper than the parse it \
+             replaces"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_container_bound_and_where_it_was_applied() {
+        // The refusal is a pre-parse answer, so it must name the bound and the
+        // count and render as a report a caller can show.
+        let refusal = ParseError::ContainerNestingTooDeep {
+            language: "markdown",
+            observed: 255,
+            limit: MAX_MARKDOWN_CONTAINERS_PER_LINE,
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "markdown declares at least 255 block containers on one line; the limit is 64",
+            "the refusal names the grammar, the count and the bound in one line"
+        );
+        let rendered = refusal.to_diagnostic("README.md", "- x\n");
+        assert!(
+            rendered.render().starts_with("README.md:"),
+            "the rendered refusal is located: {}",
+            rendered.render()
+        );
+        assert!(
+            rendered.message().contains("255") && rendered.message().contains("64"),
+            "the refusal names the observed count and the bound: {}",
+            rendered.message()
         );
     }
 

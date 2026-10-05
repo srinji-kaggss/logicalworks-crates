@@ -42,17 +42,32 @@ Two bounds the crate already claimed, and the numbers behind them.
   a checked parse spent in the validation walk, and p99 plus peak RSS for a
   bounded fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced
   by `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`.
-- **Known limit, not fixed: the markdown grammar aborts the process.**
-  `tree-sitter-markdown` 0.5.3's external scanner serializes its state into a
-  fixed 1 024-byte buffer and asserts when the state is larger; `"- "` repeated
-  255 times (510 bytes) does it. An assertion in a C parser is `abort()`, so
-  `try_parse` on that source ends the process with `SIGABRT` rather than
-  returning anything — reachable from a hostile PR that adds a nested list to a
-  README. 254 levels (508 bytes) is refused as `InvalidSyntax`. The grammar
-  arrives compiled through `ast-grep-language`, so forking it is forbidden by
-  #277 and a `tree-sitter` edge is not this crate's to author. The boundary is
-  proved from a child process in `tests/it/hostile.rs`, because a process that
-  aborts cannot assert anything afterwards.
+- **The markdown grammar no longer aborts the process.** It did:
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`, so `"- "` repeated 255 times
+  (510 bytes) ended the process with `SIGABRT` rather than returning anything —
+  reachable from a hostile PR that adds a nested list to a README. The grammar
+  arrives compiled through `ast-grep-language`, so the crate cannot patch the
+  scanner; it refuses the source before the scanner sees it.
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and the new
+  `ParseError::ContainerNestingTooDeep` apply
+  `lgwks_ast::markdown_containers` on the markdown path only, in one `O(bytes)`
+  pass with `O(1)` state. The bound is measured, not guessed: seventeen
+  container shapes were bisected from a child process, and **every shape that
+  aborts does so at 255 open containers** — 255 repetitions of `- `, 128 of
+  `> - `, 85 of `>>> `, and the same 255 for indentation-nested lists, fenced
+  and indented code inside quotes. Three shapes never abort, because markdown
+  does not nest blockquotes, ordered lists or tab runs by indentation. The
+  count over-estimates where indentation and markers both carry depth, so 64
+  cannot be 255: a margin of about 4x, on the safe side. `tests/it/hostile.rs`
+  proves it from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes, 1 065
+  children, zero `SIGABRT`. An exhaustive sweep of all seventeen shapes through
+  every depth from 1 to 512 (8 704 pairs) also exits cleanly.
+  Residual, stated rather than hidden: the guard is on the **checked** parse.
+  `parse` and `parse_with` return a `Parsed` rather than a `Result`, so a refusal
+  has nowhere to go there, and their documentation now says so.
 - Two test modules: `tests/it/hostile.rs` (four adversarial generators per
   compiled grammar, every answer typed or a tree inside the bounds) and
   `tests/it/sim_parse_bounds.rs` (96 seeds per test over four generated shapes,

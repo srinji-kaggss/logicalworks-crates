@@ -1168,28 +1168,49 @@ Each of these was a shipped defect. Treat the list as the spec.
   shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
   `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
   `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
-- **INV-AST-4** Hostile input earns a typed refusal, and the one input that does
-  not is named with an exact reproducer rather than discovered later. Two
-  generators — a full-ceiling tiling of the grammar's own source, one line of
+- **INV-AST-4** Hostile input earns a typed refusal, and the input that could
+  not is refused *before* the grammar sees it. Four generators per compiled
+  grammar — a full-ceiling tiling of the grammar's own source, one line of
   megabytes, a nesting run past the depth ceiling with and without its closers —
   answer with a tree inside the crate's bounds or with a `ParseError` that names
-  itself. Known limit, stated rather than left to be discovered: the **markdown**
-  grammar aborts the process. `tree-sitter-markdown` 0.5.3's external scanner
-  serializes its state into a fixed 1 024-byte buffer and asserts when the state
-  is larger; `"- "` repeated 255 times (510 bytes) does it, and an assertion in a
-  C parser is `abort()`, so `try_parse` on that source ends the process with
-  `SIGABRT` rather than returning anything. 254 levels (508 bytes) is refused as
-  `InvalidSyntax`. This crate cannot fix it: the grammar arrives compiled through
-  `ast-grep-language`, and both routes out are closed — forking the grammar is
-  forbidden by #277 and a `tree-sitter` edge needs the Director's word. The
-  boundary is proved from a child process, because a process that aborts cannot
-  assert anything afterwards. · why: #277 · enforced by:
-  `tests/it/hostile.rs` (`every_adversarial_shape_answers_typed`,
+  itself. The **markdown** grammar needed one more, because
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`: `"- "` repeated 255 times — 510
+  bytes — ended the process with `SIGABRT` rather than returning anything a
+  caller could handle. The crate cannot patch the scanner (the grammar arrives
+  compiled through `ast-grep-language`; forking it is forbidden by #277 and a
+  `tree-sitter` edge needs the Director's word), so it refuses the source first:
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and
+  `ParseError::ContainerNestingTooDeep`, applied by `markdown_containers` in one
+  `O(bytes)` pass with `O(1)` state on the markdown path only. **What the bound
+  is measured against:** seventeen container shapes bisected from a child
+  process — unordered and ordered list markers, blockquotes of one, two and
+  three `>`, tabs, list-in-quote, quote-in-list, list-in-quote-in-list, fenced
+  and indented code inside containers, and containers nested by indentation —
+  and *every* shape that aborts does so at **255 open containers**, whether it
+  spells them one per repetition (255 of `- `), two (128 of `> - `) or three
+  (85 of `>>> `). Three shapes never abort, because markdown does not nest a
+  blockquote, an ordered list or a tab run by indentation. The count is an
+  over-estimate wherever indentation and markers both carry depth, so a count of
+  64 cannot be 255 open containers: the margin is about 4x and it is on the safe
+  side. Known limit, stated rather than hidden: the guard runs on the **checked**
+  parse only. `parse` and `parse_with` return a `Parsed` rather than a
+  `Result`, so a refusal has nowhere to go in them, and their documentation says
+  so. · why: #277 · enforced by:
+  `tests/it/hostile.rs` (`markdown_never_reaches_the_scanner_past_its_bound`
+  proves from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes of
+  container prefixes, 1 065 children and zero aborts — plus
+  `every_adversarial_shape_answers_typed`,
   `the_byte_ceiling_is_refused_before_any_tree_exists`,
   `every_refusal_renders_as_a_located_diagnostic`,
   `the_unchecked_parse_of_the_same_shapes_still_answers`,
-  `multibyte_and_truncated_sources_are_answered`,
-  `a_nested_markdown_list_aborts_the_process_rather_than_refusing`) under a
+  `multibyte_and_truncated_sources_are_answered`) and
+  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `the_container_count_does_not_charge_prose_or_a_thematic_break`,
+  `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
+  `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
   nextest `slow-timeout` with `terminate-after`, so a walk that stops making
   progress fails the run instead of holding it open
 
