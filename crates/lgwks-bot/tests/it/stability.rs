@@ -15,13 +15,13 @@
 //! writer's discipline to fix and is stated as such in `lgwks_bot::stability`.
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::scratch::Scratch;
 
 use lgwks_bot::domain::data::JsonStore;
 use lgwks_bot::error::BotError;
-use lgwks_bot::stability::Drift;
 use lgwks_bot::verb::{Observe, Query};
 use lgwks_bot::{Cap, GrantSet};
 
@@ -40,51 +40,16 @@ const SWEEP_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
 /// How long a store nobody is writing is given to settle.
 const SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// A scratch directory named by this process, a monotone sequence and the
-/// clock's own reading, removed when the test ends.
+/// How long a sweep keeps polling a rewriting writer waiting for the protocol to
+/// fire.
 ///
-/// Not the estate's `shared::Scratch`, which draws its tag from
-/// `lgwks_std::random` behind this crate's `ephemeral` feature: this file has
-/// to run in the default-feature build the gate runs, and a fixed name would be
-/// a directory two concurrent runs share (INV-BOT-116).
-struct Scratch {
-    /// The directory itself.
-    path: PathBuf,
-}
-
-/// The per-process sequence, so two scratch directories in one binary never
-/// share a path.
-static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-impl Scratch {
-    /// Create a scratch directory for a test named `tag`.
-    fn new(tag: &str) -> Result<Self, Box<dyn Error>> {
-        let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let path = std::env::temp_dir().join(format!(
-            "lgwks-stability-{tag}-{}-{now}-{sequence}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    /// A path inside the directory.
-    fn join(&self, tail: &str) -> PathBuf {
-        self.path.join(tail)
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory, best effort: every assertion has already been
-    /// made by the time this runs.
-    fn drop(&mut self) {
-        let _ignored = std::fs::remove_dir_all(&self.path);
-    }
-}
+/// A budget rather than a fixed window because the property is a *rate*: the
+/// writer is a real child process on a host that may be running six other tests
+/// beside it, and a starved writer writes rarely enough that a short window can
+/// end before any read of the bot's straddles a write. The budget bounds the
+/// wait; it does not decide the answer, because the loop still returns what it
+/// saw when the budget runs out and the assertion still reads *that*.
+const PENDING_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Return a typed test failure, emitting it first.
 ///
@@ -172,12 +137,27 @@ fn start_writer(path: &Path, protocol: Protocol) -> Result<Child, Box<dyn Error>
             "sleep 0.001; ",
         ),
     };
-    // Rounds bound the writer in both cases: a rewrite loop that never ended
-    // would outlive the test on a host that lost the race to kill it, and a
-    // rename loop that never ended would leave the temporary file behind.
+    // The round budget is the writer's bound and nothing else may be relied on:
+    // the rewrite loop rewrites the same handful of bytes, so a budget of twenty
+    // million rounds costs no disk and cannot finish before the test kills it —
+    // which is the whole reason the property under test survives a loaded host,
+    // where a smaller budget can complete before the first poll.
+    //
+    // The parent check is what stops a *killed* test from orphaning the loop.
+    // `Drop` handles every path this process takes, and it cannot handle the one
+    // where the process itself is gone: a `SIGKILL`ed test binary runs no
+    // destructors, and a twenty-million-round writer would then outlive it by
+    // hours. So the writer checks every thousand rounds whether its parent is
+    // still there, and stops when it is not. Sampled rather than every round
+    // because `kill -0` is a syscall and the loop's whole job is to be fast.
+    //
+    // **Known limit:** the check identifies the parent by pid, and a pid the
+    // operating system has since handed to some other process reads as alive.
+    // `Drop` is the primary defence and this is the one that survives losing it.
     let script = format!(
-        "i=0; while [ $i -lt {rounds} ]; do {step}; {pause}i=$((i+1)); done",
-        rounds = 200_000u32
+        "i=0; while [ $i -lt {rounds} ]; do {step}; {pause}i=$((i+1)); \
+         if [ $((i % 1000)) -eq 0 ]; then kill -0 $PPID 2>/dev/null || exit 0; fi; done",
+        rounds = 20_000_000u32
     );
     Ok(Command::new("/bin/sh")
         .arg("-c")
@@ -195,12 +175,11 @@ enum Polled {
     Settled(String),
     /// The subject was moving: no reading was committed, and the observation is
     /// pending the next tick.
-    Pending {
-        /// Reads the protocol took before giving up.
-        reads: u32,
-        /// The axis that kept moving.
-        drift: Drift,
-    },
+    ///
+    /// Carries the refusal itself rather than a copy of its fields, because the
+    /// refusal *is* what a caller matches on, and a test that read a
+    /// classification would be asserting about its own fixture instead.
+    Pending(BotError),
     /// The subject could not be read at all.
     Unreadable(BotError),
 }
@@ -209,10 +188,7 @@ enum Polled {
 /// pending answer rather than each decoding it.
 fn classify(failure: BotError) -> Result<Polled, Box<dyn Error>> {
     match failure {
-        BotError::UnstableObservation { unstable, .. } => Ok(Polled::Pending {
-            reads: unstable.reads(),
-            drift: unstable.drift(),
-        }),
+        failure @ BotError::UnstableObservation { .. } => Ok(Polled::Pending(failure)),
         other => Ok(Polled::Unreadable(other)),
     }
 }
@@ -247,7 +223,7 @@ fn tally(polls: impl IntoIterator<Item = Polled>) -> Result<(u32, u32), Box<dyn 
     for polled in polls {
         match polled {
             Polled::Settled(_) => settled = settled.saturating_add(1),
-            Polled::Pending { .. } => pending = pending.saturating_add(1),
+            Polled::Pending(_) => pending = pending.saturating_add(1),
             Polled::Unreadable(other) => {
                 let refusal =
                     Err::<(u32, u32), _>(Box::<dyn Error>::from(std::io::Error::other(format!(
@@ -274,7 +250,7 @@ fn tally(polls: impl IntoIterator<Item = Polled>) -> Result<(u32, u32), Box<dyn 
 #[test]
 fn a_store_being_rewritten_is_pending_until_it_settles() -> TestResult {
     let mut live = LiveStore::new("concurrent-write", Protocol::Rewrite)?;
-    let readings = live.sweep(SWEEP_WINDOW)?;
+    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
     for polled in &readings {
         if let Polled::Settled(ref raw) = *polled {
             // Whatever settled is a state the file actually held. A value the
@@ -351,7 +327,7 @@ impl LiveStore {
     /// A store holding [`BEFORE`], being rewritten under `protocol`.
     fn new(tag: &str, protocol: Protocol) -> Result<Self, Box<dyn Error>> {
         let scratch = Scratch::new(tag)?;
-        let path = scratch.join("store.json");
+        let path = scratch.path().join("store.json");
         std::fs::write(&path, BEFORE)?;
         let writer = start_writer(&path, protocol)?;
         Ok(Self {
@@ -382,6 +358,29 @@ impl LiveStore {
         Ok(readings)
     }
 
+    /// Poll the store until it reports an unsettled reading, or give up after
+    /// `budget`.
+    ///
+    /// The first refusal is what these scenarios are about, so the loop stops
+    /// there rather than sweeping a fixed count: a count is a rate the host
+    /// decides and a budget is a bound this file declares.
+    fn sweep_until_pending(
+        &self,
+        budget: std::time::Duration,
+    ) -> Result<Vec<Polled>, Box<dyn Error>> {
+        let started = std::time::Instant::now();
+        let mut readings = Vec::new();
+        while started.elapsed() < budget {
+            let polled = lgwks_bot::block_on(poll_once(&self.store))?;
+            let unsettled = matches!(polled, Polled::Pending(_));
+            readings.push(polled);
+            if unsettled {
+                return Ok(readings);
+            }
+        }
+        Ok(readings)
+    }
+
     /// Poll the store until it settles, or give up after `window`.
     ///
     /// The recovery path: a store nobody is writing has to settle, and a
@@ -399,36 +398,110 @@ impl LiveStore {
     /// Stop the writer and wait for it, so the subject is quiescent.
     ///
     /// Kill first, then wait: waiting alone would block for as long as the
-    /// writer's own round budget, and the point of this call is that the
-    /// subject stops moving *now*.
+    /// writer's own round budget, and the point of this call is that the subject
+    /// stops moving *now*. Idempotent, because [`Drop`] calls it too and a
+    /// second `kill` on a reaped child is an error this method ignores.
     fn quiesce(&mut self) {
         let _ignored = self.writer.kill();
         let _ignored = self.writer.wait();
     }
+
+    /// The writer's process id, for a test that has to observe the process
+    /// itself rather than the file it writes.
+    fn writer_id(&self) -> u32 {
+        self.writer.id()
+    }
+}
+
+/// The writer dies with the store, on every path out of a test.
+///
+/// Without this the child outlives a test that returns early on a `?`, one that
+/// panics on a failed assertion, and — the case `Drop` cannot cover — a test
+/// binary that is killed outright, which is what the writer's own parent check
+/// exists for. The struct's `Drop` runs before its fields drop, so the writer is
+/// stopped and reaped while the scratch directory it writes to still exists,
+/// rather than being left writing into a path another run has taken.
+impl Drop for LiveStore {
+    fn drop(&mut self) {
+        self.quiesce();
+    }
+}
+
+/// How long a dropped store is given to take its writer with it.
+const GONE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a process is still running, probed the way the shell probes it.
+///
+/// `kill -0` sends no signal and asks only whether the process exists, so this
+/// is an observation rather than a second kill. It is answered by a child of its
+/// own so the test needs no `unsafe` and no libc edge of its own.
+fn alive(pid: u32) -> bool {
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("kill -0 {pid} 2>/dev/null"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A store that is dropped takes its writer with it.
+///
+/// The regression this pins is a *process* leak: the writer is a twenty-million
+/// round loop, so a test that returns through `?`, panics, or loses its process
+/// to a signal used to leave one behind writing into a scratch directory nobody
+/// owns any more. The assertion is on the pid rather than on a file, because a
+/// leaked writer is invisible in the test's own results.
+#[test]
+fn a_dropped_store_takes_its_writer_with_it() -> TestResult {
+    let pid = {
+        let live = LiveStore::new("drop-leak", Protocol::Rewrite)?;
+        assert!(
+            alive(live.writer_id()),
+            "the control: the writer is running while the store is alive"
+        );
+        live.writer_id()
+    };
+
+    let started = std::time::Instant::now();
+    while alive(pid) && started.elapsed() < GONE_BUDGET {
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !alive(pid),
+        "a dropped store must not leave its writer running: pid {pid} outlived it"
+    );
+    Ok(())
 }
 
 /// Every refusal names at least two reads and an axis the caller can triage on.
 #[test]
 fn an_unsettled_reading_names_its_reads_and_its_axis() -> TestResult {
     let mut live = LiveStore::new("named-refusal", Protocol::Rewrite)?;
-    let mut seen = 0u32;
-    for polled in live.sweep(SWEEP_WINDOW)? {
-        let Polled::Pending { reads, drift } = polled else {
+    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
+    let mut named = 0u32;
+    for polled in &readings {
+        let Polled::Pending(ref failure) = *polled else {
             continue;
         };
-        seen = seen.saturating_add(1);
+        named = named.saturating_add(1);
+        let BotError::UnstableObservation { ref unstable, .. } = *failure else {
+            return refuse("a pending poll must carry the unsettled reading itself");
+        };
         assert!(
-            reads >= 2,
-            "one reading is not evidence of stability, so a refusal must take at least two: {reads}"
+            unstable.reads() >= 2,
+            "one reading is not evidence of stability, so a refusal must take at least two: \
+             {unstable}"
         );
         assert!(
-            !drift.as_str().is_empty(),
-            "the axis that moved is what a caller triages on"
+            !unstable.drift().as_str().is_empty(),
+            "the axis that moved is what a caller triages on: {unstable}"
         );
     }
     live.quiesce();
     assert!(
-        seen > 0,
+        named > 0,
         "the writer was rewriting the subject for the whole sweep"
     );
     Ok(())
@@ -464,7 +537,7 @@ fn a_store_written_by_rename_is_never_read_half_written() -> TestResult {
 #[test]
 fn an_absent_store_is_unreadable_rather_than_unsettled() -> TestResult {
     let scratch = Scratch::new("absent")?;
-    let path = scratch.join("never-written.json");
+    let path = scratch.path().join("never-written.json");
     let store = JsonStore::new(&path);
 
     match lgwks_bot::block_on(poll_once(&store))? {
@@ -490,56 +563,48 @@ fn an_absent_store_is_unreadable_rather_than_unsettled() -> TestResult {
 #[test]
 fn an_unsettled_reading_is_pending_rather_than_a_committed_change() -> TestResult {
     let mut live = LiveStore::new("pending-semantics", Protocol::Rewrite)?;
-    // First the rate: the protocol has to be firing at all, or the three facts
-    // below would be read off a refusal this test provoked some other way.
-    let (_, pending) = tally(live.sweep(SWEEP_WINDOW)?)?;
-    assert!(
-        pending > 0,
-        "a sweep against a rewriting writer must observe unsettled readings, or the facts \
-         below would be read off a provoked refusal rather than an observed one"
-    );
-    // Then the refusal itself, polled through the verb rather than through the
-    // sweep's classification: the three facts are read off the error the bot
-    // would be handed.
-    let mut refusal = None;
-    let started = std::time::Instant::now();
-    while refusal.is_none() && started.elapsed() < SWEEP_WINDOW {
-        match lgwks_bot::block_on(Observe::poll(&live.store, (proof()?, ()))) {
-            Ok(_) => {}
-            Err(failure) => refusal = Some(failure),
-        }
-    }
+    // One pass: the sweep polls until the protocol fires and hands back the
+    // refusal the bot would have been given. A second pass would be a second
+    // chance at the same race, which is how a test that depends on a writer's
+    // timing turns into a test that depends on how loaded the host is.
+    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
     let recovered = live.settle(SETTLE_WINDOW)?;
-    // Named so the recovery assertion below can read what the store held, whether or
-    // not the sweep ever refused anything.
     live.quiesce();
-    let Some(failure) = refusal else {
-        return refuse(format!(
-            "the writer was rewriting the subject for the whole sweep, so a poll must have \
-             been refused (the store did settle afterwards, on {recovered:?})"
-        ));
-    };
+
+    let mut asserted = 0u32;
+    for polled in &readings {
+        let Polled::Pending(ref failure) = *polled else {
+            continue;
+        };
+        asserted = asserted.saturating_add(1);
+        assert!(
+            matches!(failure, BotError::UnstableObservation { .. }),
+            "the sweep must produce the unsettled refusal, not another failure: {failure}"
+        );
+        assert_eq!(
+            failure.dispatch_certainty(),
+            lgwks_bot::DispatchCertainty::NotDelivered,
+            "nothing was read and nothing was committed, so a later tick is a plain retry"
+        );
+        assert_eq!(
+            failure.retry_class(),
+            lgwks_bot::RetryClass::Safe,
+            "a refused reading is safe to retry precisely because it committed nothing"
+        );
+        assert!(
+            failure.to_string().contains("pending"),
+            "the refusal says in its own words that the observation is pending: {failure}"
+        );
+        break;
+    }
+    assert!(
+        asserted > 0,
+        "the writer was rewriting the subject for the whole sweep, so a poll must have been \
+         refused (the store did settle afterwards, on {recovered:?})"
+    );
     assert!(
         recovered.is_some(),
         "and once the writer has stopped, the same store settles"
-    );
-    assert!(
-        matches!(failure, BotError::UnstableObservation { .. }),
-        "the sweep must produce the unsettled refusal, not another failure: {failure}"
-    );
-    assert_eq!(
-        failure.dispatch_certainty(),
-        lgwks_bot::DispatchCertainty::NotDelivered,
-        "nothing was read and nothing was committed, so a later tick is a plain retry"
-    );
-    assert_eq!(
-        failure.retry_class(),
-        lgwks_bot::RetryClass::Safe,
-        "a refused reading is safe to retry precisely because it committed nothing"
-    );
-    assert!(
-        failure.to_string().contains("pending"),
-        "the refusal says in its own words that the observation is pending: {failure}"
     );
     Ok(())
 }
