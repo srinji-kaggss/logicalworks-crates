@@ -197,23 +197,40 @@ are dominated by `act` — the durable record each dispatched effect is written
 through — and only the three quiet scenarios are poll-dominated. Naming that is
 the point of measuring it rather than extrapolating from two scenarios.
 
-**Zero heap allocations is not yet true of this tick.** The counting allocator
-(`--alloc-report`, one shared instrument with `bench/async`) measures, on a
-warmed bot and outside every timed window:
+**Zero heap allocations is still not true of this tick, and the part that is
+left is not the substrate's.** The counting allocator (`--alloc-report`, one
+shared instrument with `bench/async`) measures, on a warmed bot and outside
+every timed window:
 
 | scenario | allocs/tick | bytes/tick | mean bytes | baseline allocs/tick |
 |---|---:|---:|---:|---:|
-| `poll-only-64x100` | 317.6 | 42 389.0 | 133.5 | 0.0 |
-| `steady-64x100` | 321.1 | 43 845.5 | 136.5 | 0.0 |
-| `churn-64x1` | 797.0 | 205 792.1 | 258.2 | 0.0 |
-| `fanout-1x64` | 333.0 | 165 363.1 | 496.6 | 0.0 |
-| `wide-256x10` | 1 394.0 | 240 720.1 | 172.7 | 0.0 |
+| `poll-only-64x100` | 23.6 | 1 485.2 | 63.0 | 0.0 |
+| `steady-64x100` | 27.1 | 2 941.8 | 108.6 | 0.0 |
+| `churn-64x1` | 802.0 | 207 904.1 | 259.2 | 0.0 |
+| `fanout-1x64` | 332.0 | 165 498.1 | 498.5 | 0.0 |
+| `wide-256x10` | 329.4 | 92 716.3 | 281.5 | 0.0 |
 
 The baseline's zero is the control: a hand-rolled loop over the same workload
 allocates nothing, so a non-zero count on that side would mean the counter was
-picking up something other than the bot. 317.6 allocations on a tick that fires
-nothing is 4.96 per source, and the per-tick trace says it is flat: the same
-317 on every quiet tick and 509 on the one tick in a hundred where a value moves.
+picking up something other than the bot.
+
+The change-tick path is what took `poll-only-64x100` from 317.6 to 23.6. The
+per-tick trace is flat at **20 allocations on every quiet tick** and 514 on the
+one tick in a hundred where a value moves, and the residual is *flat in the size
+of the world* — measured at 20.2 with one source, 20.6 with eight, and 23.6 with
+sixty-four. A cost that does not move when the number of chains moves by sixty-
+three is not per-source work, and the observation path no longer contributes a
+per-chain term: `PollScratch` keeps the phase's buffers across ticks, a wave whose
+every source was skipped builds no future and arms no watchdog, and the wave's
+`(chain, source)` pairs come from one guard held across the awaits rather than a
+`Vec` built per wave. One of the twenty is `block_on`'s `Arc<ThreadWaker>`, which
+the rig measures directly at 1.0 for an immediately-ready future; the rest is a
+fixed per-tick cost outside the six profiled stages. It is **not** the schedule:
+`sched` measures 63 ns, and nineteen allocator round trips cannot happen in
+63 ns. Attributing the rest needs an allocation-site profiler, which this
+repository cannot host — `unsafe` is denied by the crate's lint contract and a
+`bevy_ecs` edge in `bench/` is a dependency the register does not carry — so it
+is reported as measured rather than guessed.
 
 ## Method
 
