@@ -42,6 +42,42 @@ pub fn kill_process_group(pgid: i32) -> io::Result<()> {
     Err(unsupported("process kill_process_group is Unix-only"))
 }
 
+/// Whether `pgid` currently names a process group.
+///
+/// This is `kill(-pgid, 0)`: signal zero checks the group without delivering
+/// anything to it. `EPERM` means the group exists but this process may not
+/// signal it, so it counts as present; `ESRCH` means no process is in it. A
+/// supervisor confirms a cleanup with this after `kill_process_group`, so a
+/// group that cannot be observed is reported as an error, never as absent.
+///
+/// `pgid` must be positive: 0 names the caller's own group and a negative id
+/// names a process, so both are refused as [`std::io::ErrorKind::InvalidInput`].
+#[cfg(all(unix, feature = "process"))]
+pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
+    if pgid <= 0 {
+        let refusal = Err(invalid_pgid());
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "process_group_exists: returning an error to the caller");
+        return refusal;
+    }
+    let pid = pid_from_raw(pgid)?;
+    match rustix::process::test_kill_process_group(pid) {
+        Ok(()) | Err(rustix::io::Errno::PERM) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(errno) => Err(errno_to_io(errno)),
+    }
+}
+
+/// Whether `pgid` currently names a process group.
+///
+/// The `process` capability is Unix-only; other targets report
+/// [`std::io::ErrorKind::Unsupported`] rather than a fabricated answer.
+#[cfg(all(not(unix), feature = "process"))]
+pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
+    let _ = pgid;
+    Err(unsupported("process process_group_exists is Unix-only"))
+}
+
 /// Whether child `pid` has exited, leaving it un-reaped.
 ///
 /// This is `waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)`: it reports the
@@ -143,6 +179,37 @@ mod tests {
     fn nonexistent_group_surfs_os_error() {
         // i32::MAX is not a live group; the OS must refuse, not succeed.
         assert!(kill_process_group(i32::MAX).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_live_group_is_present_and_a_reaped_one_is_absent() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let group = i32::try_from(child.id())?;
+        assert!(process_group_exists(group)?, "the live child owns its group");
+        child.kill()?;
+        child.wait()?;
+        assert!(!process_group_exists(group)?, "the reaped group is absent");
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_callers_group_and_nonpositive_ids_are_not_probed() {
+        for refused in [0, -1] {
+            assert_eq!(
+                process_group_exists(refused).map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::InvalidInput),
+                "group id {refused} names the caller or a process, not a group"
+            );
+        }
     }
 
     #[test]

@@ -50,7 +50,7 @@ net = ["io", "lgwks_deps/tokio-net"]
 # group-kill syscall (`contract/APPROVED.toml` records rustix under `lgwks_std`
 # with exactly this reason: killing a shell must reach its grandchildren, which
 # `Child::kill` cannot do); this enables it, and adds no dependency.
-process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process", "lgwks_deps/process-group-probe"]
+process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 # `inspect`: typed in-process structural code inspection (R8). Host-only, like

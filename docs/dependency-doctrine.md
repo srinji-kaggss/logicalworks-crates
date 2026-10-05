@@ -112,7 +112,7 @@ Import from the in-tree column. "Feature" is the `lgwks_std` cargo feature.
 | `syn`, `proc-macro2` (source scanning) | `lgwks_deps::scan` | `scan` | owned exception; see §5 |
 | `cargo-deny`-style admission | `lgwks_deps` | — | `check`, `tiers`, `request`, `vendor`, `freshness` |
 | `rustix`, `libc` (OS syscalls) | extend `lgwks_std` behind a feature | — | `rustix` is the approved syscall layer (`fs-raw`); add the primitive to the facade, do not import rustix from a consumer |
-| `nix` process-group signal-zero probe | `lgwks_deps::process_group::exists` | `process-group-probe` | The safe `killpg(..., None)` storefront wrapper observes group existence without signalling it; selected by `lgwks_bot/process` |
+| `nix`, raw `killpg(pgid, 0)` (process-group probe) | `lgwks_std::process::process_group_exists` | `process` | rustix signal-zero beside `kill_process_group`, one backend for the kill and its confirmation (#263); `lgwks_deps::process_group::exists` is a deprecated forward |
 | `once_cell`, `lazy_static` | `std::sync::{OnceLock, LazyLock}` | — | in `std` since 1.80 |
 | `num_cpus` | `std::thread::available_parallelism` | — | in `std` |
 | `tempfile` (tests only) | `tempfile` | — | dev-kind edge, already approved (`test.atomic-tempdir`) |
