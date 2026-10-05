@@ -32,6 +32,9 @@
 #   AST_BUDGET_TIER_BYTES  65536     bytes per parse inside a tier
 #   AST_BUDGET_THREADS     8         workers a tier may admit
 #   AST_BUDGET_TIMEOUT     180       seconds one run may take before it is recorded as unfinished
+#   AST_BUDGET_SECTIONS    "shapes tiers"  which sections to run; "tiers" re-measures the fan-out alone
+#   AST_BUDGET_RESUME      0         1 keeps every run in the output directory that already finished
+#                                    with exit 0, so an interrupted sweep continues instead of restarting
 
 set -eu
 
@@ -58,6 +61,14 @@ tiers=${AST_BUDGET_TIERS:-"100 1000 10000 100000"}
 tier_bytes=${AST_BUDGET_TIER_BYTES:-65536}
 threads=${AST_BUDGET_THREADS:-8}
 timeout=${AST_BUDGET_TIMEOUT:-180}
+sections=${AST_BUDGET_SECTIONS:-"shapes tiers"}
+resume=${AST_BUDGET_RESUME:-0}
+case " $sections " in *" shapes "*) run_shapes=1 ;; *) run_shapes=0 ;; esac
+case " $sections " in *" tiers "*) run_tiers=1 ;; *) run_tiers=0 ;; esac
+if [ "$run_shapes" -eq 0 ] && [ "$run_tiers" -eq 0 ]; then
+    echo "AST_BUDGET_SECTIONS names no section (expected shapes, tiers or both): $sections" >&2
+    exit 2
+fi
 
 # `time -l` on macOS, `time -v` on GNU. Both print the peak; the label differs, so
 # both spellings are parsed when a table is built from these files.
@@ -73,14 +84,22 @@ fi
 # The run is also bounded. A GLR parser given deeply nested delimiters at the
 # byte ceiling can take hours, and a sweep that stops at the first one reports
 # fewer grammars than it claims to rather than reporting the one that does not
-# finish -- which is itself the measurement (#277 item 1, a parse deadline, is
-# not available: ast-grep-core 0.45 builds its parser internally and does not
-# expose tree-sitter's progress callback). A run that reaches the bound is killed
-# and recorded as unfinished, with the elapsed time, so the table has a row for
-# it instead of a hole.
+# finish -- which is itself the measurement. `try_parse` now stops at its
+# deadline (INV-AST-5) and its row says `timed-out`, but the example also times
+# the bare parse, which has no deadline because it is the cost being measured.
+# A run that reaches the bound is killed and recorded as unfinished, with the
+# elapsed time, so the table has a row for it instead of a hole.
 timed() {
     name=$1
     shift
+    # A run that already finished cleanly is kept rather than repeated. Only exit
+    # 0: an unfinished or crashed run is measured again, because its row is the
+    # absence of a result rather than one.
+    if [ "$resume" -eq 1 ] && [ -f "$out/$name.tsv" ] \
+        && grep -q "^run	$name	exit	0	" "$out/$name.tsv"; then
+        printf '%-28s kept from an earlier run\n' "$name" >&2
+        return 0
+    fi
     set +e
     # Job control puts the runner in its own process group, so the timeout can
     # signal the *whole* group. Signalling only `/usr/bin/time` leaves the
@@ -137,7 +156,7 @@ fi
 sed -n -E 's/^[[:space:]]*([0-9]+)[[:space:]]*(maximum resident set size|Maximum resident set size \(kbytes\)).*/floor_peak_rss_bytes\t\1/p' "$out/00-floor.time" >> "$out/00-floor.tsv"
 
 index=0
-for grammar in $grammars; do
+[ "$run_shapes" -eq 1 ] && for grammar in $grammars; do
     index=$((index + 1))
     for shape in $shapes; do
         timed "$(printf '%02d-%s-%s' "$index" "$grammar" "$shape")" \
@@ -150,7 +169,7 @@ for grammar in $grammars; do
 done
 
 index=0
-for grammar in $grammars; do
+[ "$run_tiers" -eq 1 ] && for grammar in $grammars; do
     index=$((index + 1))
     level=0
     for tier in $tiers; do
@@ -166,5 +185,5 @@ done
 
 printf '\n%s run(s) written under %s\n' "$(ls "$out" | grep -c '\.tsv$')" "$out"
 printf 'host: %s %s, %s cores\n' "$(uname -s)" "$(uname -r)" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')"
-printf 'bytes=%s shape_bytes=%s rounds=%s tiers=%s tier_bytes=%s threads=%s timeout=%ss\n' \
-    "$bytes" "$shape_bytes" "$rounds" "$tiers" "$tier_bytes" "$threads" "$timeout"
+printf 'sections=%s bytes=%s shape_bytes=%s rounds=%s tiers=%s tier_bytes=%s threads=%s timeout=%ss\n' \
+    "$sections" "$bytes" "$shape_bytes" "$rounds" "$tiers" "$tier_bytes" "$threads" "$timeout"
