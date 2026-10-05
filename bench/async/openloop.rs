@@ -121,7 +121,7 @@ pub fn slot_range(slot: usize) -> (u64, u64) {
     let shift = relative / SUB_BUCKETS;
     let index = relative % SUB_BUCKETS;
     let width = 1_u64 << shift;
-    let low = (1_u64 << (SUB_BITS + shift as u32)) + u64::try_from(index).unwrap_or(0) * width;
+    let low = (1_u64 << (SUB_BITS + shift as u32)) + index as u64 * width;
     (low, low + width - 1)
 }
 
@@ -446,13 +446,12 @@ pub fn period_nanos(rate_per_second: u64) -> u64 {
 /// proved nothing.
 #[must_use]
 pub fn period_picos(rate_per_second: u64) -> u64 {
+    // A zero rate has no period: there is no next arrival.
     if rate_per_second == 0 {
         return 0;
     }
-    (1_000_000_000_u128 * 1_000)
-        .checked_div(u128::from(rate_per_second))
-        .and_then(|picos| u64::try_from(picos).ok())
-        .unwrap_or(u64::MAX)
+    // A second is 10^12 ps, which fits a `u64`, and so does every quotient of it.
+    1_000_000_000_000 / rate_per_second
 }
 
 /// When arrival `index` was **intended** to start, in nanoseconds.
@@ -661,10 +660,8 @@ pub fn simulate(spec: &SimSpec) -> SimTrace {
         let lag = start.saturating_sub(intended);
         max_lag = max_lag.max(lag);
         let backlog = lag / period.max(1);
-        let queue = u64::try_from(in_flight)
-            .unwrap_or(0)
-            .saturating_add(backlog);
-        peak_queue = peak_queue.max(usize::try_from(queue).unwrap_or(usize::MAX));
+        let queue = (in_flight as u64).saturating_add(backlog);
+        peak_queue = peak_queue.max(queue as usize);
 
         admitted = admitted.saturating_add(1);
         completed = completed.saturating_add(1);

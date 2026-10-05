@@ -92,16 +92,16 @@ Four real asymmetries were found and fixed *in the harness*, not in the crate:
   side place more arrivals, and the offered work becomes a property of each
   engine's speed. A sweep point now offers the **arrival count** its rate and
   window define, and both sides are offered exactly that.
-- **The facade's API has no blocking join.** `Supervisor::reap` joins only what
-  has already finished, so a drain through it must poll, and the poll's wait
-  quantum was the harness's choice. Five call sites used two different waits
-  (50 µs in three, 200 µs in two); they now share one declared
-  `REAP_TIMER_INTERVAL`. The alternative — a scheduler round-trip instead of the
-  timer — was built and measured paired over three rounds and **lost**
-  (2.98x / 3.12x / 2.70x for the timer against 3.49x / 5.09x / 3.50x for the
-  round-trip), because a round-trip reschedules the draining task behind the
-  workers it is waiting for. That measurement is recorded on the constant so the
-  next person does not make the same attempt.
+- **The facade had no blocking join, and the drain's timer was the gap (#269).**
+  `Supervisor::reap` joins only what has already finished, so a drain through it
+  had to poll, and every poll slept on Tokio's timer. Tokio's timer wheel has a
+  1 ms granularity, so each drain paid a fixed 1.3–1.6 ms that raw Tokio, which
+  awaits `JoinSet::join_next`, never paid: that was the whole 3–5x p99 gap the
+  gate reported on the quiet rows. `Supervisor::wait_idle` now joins on the task
+  set's own wakeup, and every drain here awaits it, so both sides wait on the same
+  primitive and no timer is left in the drain path. A scheduler round-trip in
+  place of the timer was built and measured earlier and lost (3.49x / 5.09x /
+  3.50x), because it reschedules the draining task behind the workers it waits on.
 
 The gate is not decoration: it refused during development on each of the first
 three, each time on a real difference between the two sides.

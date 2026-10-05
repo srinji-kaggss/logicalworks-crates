@@ -9,6 +9,30 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
+
+`Supervisor` had no awaitable join, so a caller that wanted every task finished
+polled `reap()` in a sleep loop, and Tokio's 1 ms timer granularity charged each
+drain 1.3–1.6 ms that raw Tokio (awaiting `JoinSet::join_next`) never paid. That
+was the whole of the 3–5x p99 gap `bench/async` reported on its quiet rows.
+
+- **`Supervisor::wait_idle().await`** joins every task on the set's own wakeup,
+  cancels nothing, returns how many it joined, and leaves the supervisor usable.
+- **`spawn` at a full bound waits on the task set**, the semaphore or the
+  supervisor's token — whichever resolves first — instead of a timed retry. A
+  permit held by a process group still being cleaned up is rechecked every
+  100 ms, and a newly registered cleanup owner wakes the waiter.
+- `bench/async` drains through `wait_idle`; its output goes through
+  `lgwks_std::trace`.
+
+Measured on an Apple M5 Pro, `bench/async --rounds=15 --alloc-report`, load
+average 10.02: facade/raw-Tokio p50 ratio 1.07x (quiet-async-bot), 1.10x
+(high-fanout), 1.12x (at-capacity), 1.09x (single-permit), each with a 95% CI
+that distinguishes; before, 4.87x / 4.50x / 4.58x on the quiet row. Peak memory
+footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
+64 at a time, so it exercises batching and finishes in 10–12 s alone instead of
+83–116 s.
+
 ### lgwks_bot — the supervisor's per-task cost, measured and cut (#269)
 
 Measured on an Apple M5 Pro with `bench/async`'s allocation attribution, 1,024
