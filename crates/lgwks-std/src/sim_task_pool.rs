@@ -31,12 +31,11 @@
 //!
 //! A failure names its seed and step; the same seed replays the same trace.
 
-#[path = "../tests/support/rng.rs"]
-mod rng;
-#[path = "../tests/support/seeded_sweep.rs"]
-mod seeded_sweep;
-
+// The seeded generator and replay harness are declared once, by the parent
+// module, and shared with the pool-lifetime family: a file loaded as a module
+// twice is two copies of every type in it, which clippy refuses.
 use super::{Admitted, PoolState, Refused, Woken};
+use super::{rng, seeded_sweep};
 use rng::Rng;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,

@@ -1208,9 +1208,33 @@ impl<T> core::fmt::Debug for JoinHandle<T> {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+// The seeded generator and replay harness the simulation families share,
+// declared here once: a file loaded as a module twice is two copies of every
+// type in it, which clippy refuses. Each family uses them under the names they
+// already had, so a new family cannot diverge in how it seeds or replays.
+#[cfg(test)]
+#[path = "../tests/support/rng.rs"]
+mod rng;
+#[cfg(test)]
+#[path = "../tests/support/seeded_sweep.rs"]
+mod seeded_sweep;
+
 #[cfg(test)]
 #[path = "sim_task_pool.rs"]
 mod sim_pool;
+
+#[cfg(test)]
+// The workspace ban list (`clippy.toml`) forbids `std::thread::sleep` because
+// it blocks the executor thread. One scenario here is about the pause: a
+// shutdown has to release a *parked* thread, and only a real sleep lets the
+// thread reach the park first. That wait is the subject under test, in a
+// test binary whose only executor is the one under test.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the parked-thread scenario must let a real thread reach its park before the shutdown wakes it"
+)]
+#[path = "sim_pool_lifetime.rs"]
+mod sim_pool_lifetime;
 
 #[cfg(test)]
 // The workspace ban list (`clippy.toml`) forbids `std::thread::spawn` and
