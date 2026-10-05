@@ -31,6 +31,7 @@ mod pattern_external;
 mod prop_codecs;
 mod serde_facade_consumers;
 mod sim_codec;
+mod sim_descendants;
 mod sim_encoding;
 mod sim_fs_capability;
 mod sim_fs_walk;

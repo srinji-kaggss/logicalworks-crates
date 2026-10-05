@@ -9,6 +9,55 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — `process`: descendant capture, per-process signals, running-set observation (#263)
+
+The `process` feature could stop a group and could not stop a tree. These four
+primitives are the other half, and every one of them is additive.
+
+- `process::capture_descendants(root)` returns a `DescendantSet`: every process
+  descended from `root` at the instant of the call, sorted, deduplicated, and
+  bounded by the new `MAX_CAPTURED_DESCENDANTS` (4096) with an
+  `is_truncated()` flag rather than a short answer. Linux reads each process's
+  own child list from `/proc/<pid>/task/<tid>/children` — one read per process
+  in the tree, not one per process on the host — and falls back to a single
+  `pid`/`ppid` `ps` snapshot (`ContainmentMechanism::ProcessTableSnapshot`)
+  where no such list exists; the mechanism is reported, because "every process
+  the supervisor started is gone" is a claim about a mechanism and not only about
+  an outcome. The snapshot is also the Linux fallback for a kernel built without
+  `CONFIG_PROC_CHILDREN`.
+- `process::kill_process(pid)` signals one process, for a descendant that has
+  left the group: `killpg` cannot reach it and a pid can. Non-positive ids are
+  refused before any signal leaves the process, exactly as the group primitives
+  refuse them.
+- `process::process_exists(pid)` is signal zero against one pid, so it can be
+  used on a process this supervisor does not own without disturbing it.
+- `process::running_processes(&[pid])` is the batch form, and the difference
+  between *present* and *running* is why it exists: a process that has exited
+  and awaits its reap still holds its id and answers `kill -0`, so a cleanup
+  that reported such a pid as a survivor would report every shell that forked
+  one child as a leak. An unreadable state for a pid the table says exists is
+  reported running, because a receipt that claims less than it established is
+  the honest one.
+
+**What is not claimed.** The capture is a snapshot of the parent relation taken
+while `root` is alive, so a descendant orphaned before the call has been adopted
+by the platform's init and is no longer reachable through the root. On Linux
+`PR_SET_CHILD_SUBREAPER` would re-parent such an orphan to *this* process, which
+makes it findable and unattributable: a process never observed under this root
+cannot be proved to have come from this root rather than from another supervisor
+in the same process, and signalling it would break the never-signal-outside rule.
+The read is therefore a tree walk and not an orphan adoption, and this is the
+residual `lgwks_bot::rt::supervise` records on the receipt.
+
+Seeded family: `tests/it/sim_descendants.rs`
+(`a_seeded_sweep_agrees_with_the_model_at_every_step`,
+`the_same_seed_replays_the_same_sweep_trace`,
+`distinct_seeds_drive_distinct_sweeps`,
+`a_seeded_descendant_is_captured_and_stopped_whatever_the_seed_draws`,
+`two_trees_never_capture_each_other`,
+`a_vacant_root_captures_nothing_and_names_its_mechanism`), over real forked
+trees with `setsid` escapees.
+
 ### lgwks_bot — row 3 of #278: a credential that expires mid-run
 
 The credential-expiry row of `docs/production-readiness.md` §4.4. A grant that
