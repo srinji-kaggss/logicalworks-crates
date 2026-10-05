@@ -53,6 +53,13 @@ gate still does not pass: #99, #107 and #108 remain unrun, and no p50/p95/p99
 SLO has been measured on the named VPS profile, so the verdict above is
 unchanged. The next regression is still where `INVARIANTS.md` says it is.
 
+**Update, 2026-10-05.** The hold the journal module documentation named, an
+acknowledged final frame whose length field was changed being truncated on open,
+is closed by a refusal on the stored head
+([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262), §4.6).
+The verdict above is unchanged: #99, #107 and #108 remain unrun and no SLO has been
+measured on the named VPS profile.
+
 Everything below is the reasoning behind that sentence.
 
 ## 2. The claim under test
@@ -283,6 +290,30 @@ the register's observations against it:
 `Until that run exists` no longer describes these rows. It still describes
 #99, #107 T21/T22 and #108, and with rows of its own axis unobserved, this
 axis stays ⚠️ and the §1 verdict stands.
+
+**A length prefix that lies about an acknowledged frame is refused, not
+trimmed ([#262](https://github.com/srinji-kaggss/logicalworks-crates/issues/262)).**
+Until this change the one hold the module documentation itself named was real: an
+acknowledged final frame whose stored length was changed from `L` to `L + k`
+was truncated on open, because a complete prefix over a frame the file cannot
+hold looks like an append cut short, and the head-short shape (`k` in `1..=32`)
+was classified as torn without being asked at all. An open now decides on the
+bytes. Any payload length under the bytes present that reproduces the stored head,
+or a later whole frame that authenticates, was acknowledged, and the file is
+refused with `JournalError::Corrupt` and left byte-identical; only a tail that is a
+prefix of one cut-short append is trimmed. Observed by
+`journal::file::tests::a_lengthened_acknowledged_final_frame_is_refused_not_trimmed`
+(`k` in `1..=1024`, file hash compared),
+`an_inflated_non_final_length_is_refused_and_every_byte_survives`,
+`an_append_cut_at_every_byte_of_the_final_frame_is_repaired` (the control: no
+genuine cut is refused), and by `tests/sim_journal_tail.rs`, which sweeps seeded
+journals of one to a thousand frames through inflated, deflated, bit-flipped and
+cut prefixes, two tenants concurrently. **What it does not cover:** a final frame
+whose length and head are both damaged has nothing to authenticate it and is
+trimmed (`a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`),
+and a hand that truncates a file mid-frame is indistinguishable from a crash. The
+journal stays below the unattended-automation bar for the reasons in the ceiling
+paragraph below, not for this one.
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file

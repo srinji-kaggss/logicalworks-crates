@@ -252,6 +252,131 @@ where
     let head = head(record, previous, &payload);
     Ok((encode(payload_len, &payload, &head), head))
 }
+
+/// Whether the bytes behind a complete length prefix hold a frame this store
+/// acknowledged, so that the prefix lied and the bytes must not be trimmed.
+///
+/// A complete prefix whose frame the file cannot hold is byte-identical in two
+/// files: an append that was cut short, and an acknowledged frame whose length
+/// field was changed afterwards. The prefix cannot tell them apart and the head can,
+/// because a head is a hash of the previous head and the payload, so it is
+/// reproduced only by bytes a writer really framed. `suffix` is everything from the
+/// first byte after that prefix to the end of the file, and `previous` is the head
+/// the cut frame would have chained from. The answer is `true` when either
+///
+/// - some payload length under the bytes present reproduces the 32 bytes stored
+///   behind it, which is the cut frame itself under its true length (the final
+///   frame `L -> L + k` case, and an inflated length on a frame with frames behind
+///   it, since the true frame is still the first thing in `suffix`); or
+/// - a later complete frame authenticates, which is what still refuses when the
+///   cut frame itself is damaged as well and so cannot be matched, because failing
+///   to match one candidate does not prove that no acknowledged frame follows it.
+///   The frame behind a candidate chains from the head the candidate's payload
+///   implies (its own stored head may be the damaged part), and a frame anywhere
+///   later chains from the 32 bytes just before it (its payload may be the damaged
+///   part).
+///
+/// `head_of` is the store's own head function, over the previous head and the
+/// archived payload, and answers `None` for a payload it cannot make a head from.
+/// A genuine torn tail is a prefix of one frame, so it holds neither.
+///
+/// The work is bounded without a budget: a read that came up short was short of
+/// at most `max_frame_bytes` plus a head, so `suffix` is never longer than that,
+/// the first search is one pass of at most that many candidates, and the second
+/// examines each offset once. A hostile tail can make the second search hash a
+/// candidate per offset (quadratic in that bound, a fraction of a second at the
+/// journal's 64 KiB ceiling) and no more.
+pub(crate) fn holds_acknowledged_frame<H>(
+    suffix: &[u8],
+    previous: &Digest,
+    max_frame_bytes: usize,
+    head_of: H,
+) -> bool
+where
+    H: Fn(&Digest, &[u8]) -> Option<Digest>,
+{
+    let authenticates = |previous: &Digest, payload: &[u8], stored: &[u8]| {
+        head_of(previous, payload).is_some_and(|head| head.as_bytes().as_slice() == stored)
+    };
+    let room = suffix.len().saturating_sub(HEAD_BYTES);
+    for len in 1..=room.min(max_frame_bytes) {
+        let (Some(payload), Some(stored)) = (
+            suffix.get(..len),
+            suffix.get(len..len.saturating_add(HEAD_BYTES)),
+        ) else {
+            continue;
+        };
+        if authenticates(previous, payload, stored) {
+            return true;
+        }
+        // The payload may be whole behind a damaged stored head: the frame after it,
+        // if there is one, still chains from the head this payload implies.
+        if let Some(implied) = head_of(previous, payload)
+            && frame_chains_from(
+                suffix,
+                len.saturating_add(HEAD_BYTES),
+                &implied,
+                max_frame_bytes,
+                &authenticates,
+            )
+        {
+            return true;
+        }
+    }
+    // The earliest a later frame can begin: one payload byte and its head.
+    let mut at = HEAD_BYTES.saturating_add(1);
+    while at
+        .saturating_add(LENGTH_BYTES)
+        .saturating_add(1)
+        .saturating_add(HEAD_BYTES)
+        <= suffix.len()
+    {
+        if let Some(before) = suffix
+            .get(at.saturating_sub(HEAD_BYTES)..at)
+            .and_then(|bytes| <[u8; HEAD_BYTES]>::try_from(bytes).ok())
+            && frame_chains_from(
+                suffix,
+                at,
+                &Digest::from_bytes(before),
+                max_frame_bytes,
+                &authenticates,
+            )
+        {
+            return true;
+        }
+        at = at.saturating_add(1);
+    }
+    false
+}
+
+/// Whether a whole frame that begins at `at` in `suffix` chains from `previous`.
+fn frame_chains_from(
+    suffix: &[u8],
+    at: usize,
+    previous: &Digest,
+    max_frame_bytes: usize,
+    authenticates: &impl Fn(&Digest, &[u8], &[u8]) -> bool,
+) -> bool {
+    let payload_at = at.saturating_add(LENGTH_BYTES);
+    let Some(prefix) = suffix
+        .get(at..payload_at)
+        .and_then(|bytes| <[u8; LENGTH_BYTES]>::try_from(bytes).ok())
+    else {
+        return false;
+    };
+    let declared = declared_length(&prefix);
+    if !is_possible_length(declared, max_frame_bytes) {
+        return false;
+    }
+    let head_at = payload_at.saturating_add(declared);
+    let (Some(payload), Some(stored)) = (
+        suffix.get(payload_at..head_at),
+        suffix.get(head_at..head_at.saturating_add(HEAD_BYTES)),
+    ) else {
+        return false;
+    };
+    authenticates(previous, payload, stored)
+}
 /// The grammar's own tests: the round trip, the three prefix endings, the piece
 /// ending, and the two questions about a length.
 /// The bytes of one whole frame: the payload and the head that follows it.
@@ -432,5 +557,138 @@ mod tests {
                 "the stored head is the frame's last {HEAD_BYTES} bytes"
             );
         }
+    }
+
+    /// The head a store of plain chaining would store: a hash of the previous head
+    /// and the payload, over the bytes as written.
+    fn chained(previous: &Digest, payload: &[u8]) -> Option<Digest> {
+        let mut hasher = lgwks_std::hash::Hasher::new();
+        hasher.update(previous.as_bytes());
+        hasher.update(payload);
+        Some(hasher.finalize())
+    }
+
+    /// `count` chained frames laid out end to end, and the head each chained from.
+    fn chain_of(payloads: &[&[u8]]) -> (Vec<u8>, Vec<Digest>) {
+        let mut bytes = Vec::new();
+        let mut previous = Digest::from_bytes([0u8; HEAD_BYTES]);
+        let mut chained_from = Vec::new();
+        for payload in payloads {
+            let head = chained(&previous, payload).unwrap_or(previous);
+            let length = writable_length(payload.len(), usize::MAX).unwrap_or(0);
+            bytes.extend_from_slice(&encode(length, payload, &head));
+            chained_from.push(previous);
+            previous = head;
+        }
+        (bytes, chained_from)
+    }
+
+    const CEILING: usize = 64 * 1024;
+
+    /// The cut frame under its true length authenticates, so the prefix lied; every
+    /// shorter cut of the same bytes is a prefix of an append and holds nothing.
+    #[test]
+    fn the_cut_frame_authenticates_only_when_it_is_whole_behind_a_lying_prefix() {
+        let payload: Vec<u8> = (0u8..100).collect();
+        let (bytes, from) = chain_of(&[&payload]);
+        let previous = from[0];
+        let behind_prefix = &bytes[LENGTH_BYTES..];
+        assert!(super::holds_acknowledged_frame(
+            behind_prefix,
+            &previous,
+            CEILING,
+            chained
+        ));
+        for cut in 0..behind_prefix.len() {
+            assert!(
+                !super::holds_acknowledged_frame(
+                    &behind_prefix[..cut],
+                    &previous,
+                    CEILING,
+                    chained
+                ),
+                "a frame cut {cut} bytes in, short of its head, is an interrupted append"
+            );
+        }
+    }
+
+    /// A frame cut off from its head by one or more bytes, with its payload whole,
+    /// holds nothing: the head that would authenticate it is not there.
+    #[test]
+    fn a_whole_payload_with_a_short_head_authenticates_nothing() {
+        let payload = vec![9u8; 64];
+        let (bytes, from) = chain_of(&[&payload]);
+        let behind_prefix = &bytes[LENGTH_BYTES..];
+        for missing in 1..=HEAD_BYTES {
+            let cut = behind_prefix.len() - missing;
+            assert!(!super::holds_acknowledged_frame(
+                &behind_prefix[..cut],
+                &from[0],
+                CEILING,
+                chained
+            ));
+        }
+    }
+
+    /// With the cut frame itself damaged, a later whole frame still authenticates
+    /// against the head stored just before it.
+    #[test]
+    fn a_later_frame_authenticates_when_the_cut_frame_cannot() {
+        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50], &[3u8; 60]]);
+        let mut behind_prefix = bytes[LENGTH_BYTES..].to_vec();
+        behind_prefix[5] ^= 0x80;
+        assert!(super::holds_acknowledged_frame(
+            &behind_prefix,
+            &from[0],
+            CEILING,
+            chained
+        ));
+        // The same bytes with the later frames cut away leave nothing to find.
+        let first_only = &behind_prefix[..40 + HEAD_BYTES];
+        assert!(!super::holds_acknowledged_frame(
+            first_only, &from[0], CEILING, chained
+        ));
+    }
+
+    /// With the cut frame's own head damaged and exactly one frame behind it, that
+    /// frame still chains from the head the cut frame's payload implies.
+    #[test]
+    fn a_frame_behind_a_damaged_head_chains_from_the_head_its_payload_implies() {
+        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50]]);
+        let mut behind_prefix = bytes[LENGTH_BYTES..].to_vec();
+        behind_prefix[40 + 7] ^= 0x01;
+        assert!(super::holds_acknowledged_frame(
+            &behind_prefix,
+            &from[0],
+            CEILING,
+            chained
+        ));
+    }
+
+    /// Bytes that never framed anything hold nothing, at the ceiling and empty, and
+    /// the search answers in bounded time for the longest tail a short read can leave.
+    #[test]
+    fn noise_and_the_longest_possible_tail_hold_nothing() {
+        let previous = Digest::from_bytes([5u8; HEAD_BYTES]);
+        assert!(!super::holds_acknowledged_frame(
+            &[],
+            &previous,
+            CEILING,
+            chained
+        ));
+        let longest: Vec<u8> = (0..CEILING + HEAD_BYTES)
+            .map(|index| u8::try_from(index % 251).unwrap_or(0))
+            .collect();
+        assert!(!super::holds_acknowledged_frame(
+            &longest, &previous, CEILING, chained
+        ));
+        // A head function that refuses every payload can authenticate nothing.
+        let (bytes, from) = chain_of(&[&[7u8; 30]]);
+        assert!(!super::holds_acknowledged_frame(
+            &bytes[LENGTH_BYTES..],
+            &from[0],
+            CEILING,
+            |_previous, _payload| None
+        ));
     }
 }
