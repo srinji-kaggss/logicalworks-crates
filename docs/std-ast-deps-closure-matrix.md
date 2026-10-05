@@ -50,7 +50,7 @@ without a row is a coverage failure, and
 | 1 | `encoding` | `core` | exercised | `base64_matches_the_rfc_4648_vectors`, `base64_roundtrips_every_byte_value` (unit) | Source-vs-decoded offsets, per-escape allocation → [#161](https://github.com/srinji-kaggss/logicalworks-crates/issues/161) |
 | 2 | `fs` | `core` (`fs-raw` for the capacity query) | exercised | `sim_fs_walk.rs` (26 tests); `fs/mod.rs` 17 unit tests, `fs/capability.rs` 28 | Uniform path basis, strict diagnostics, consuming report API, separate budgets → [#166](https://github.com/srinji-kaggss/logicalworks-crates/issues/166) |
 | 3 | `glob` | `core` | exercised | `glob_public.rs` (4 tests) + 10 unit tests incl. `question_and_star_preserve_separator_boundaries` | Quadratic transitions, scalar-vs-byte wildcards, invalid-pattern vs invalid-dialect → [#154](https://github.com/srinji-kaggss/logicalworks-crates/issues/154) |
-| 4 | `hash` | `hash` | exercised + **assurance-gap** | `empty_input_matches_blake3_spec`, `deterministic_across_calls` (13 unit tests) | Constant-time equality is a hand-written XOR/OR loop → assurance gap X1, unresolved; **no timing attack was run and no generated code inspected**, so this is unproven, not a demonstrated vulnerability. Determinism is not semantic identity. |
+| 4 | `hash` | `hash` | exercised + **assurance-gap** | `empty_input_matches_blake3_spec`, `deterministic_across_calls` (13 unit tests) | X1 (#275): equality delegates to `blake3::Hash`'s `constant_time_eq`, and `examples/digest_timing.rs` is a dudect Welch's t test at 10⁶ samples per class, gated by the `digest-timing` lane. aarch64-apple-darwin, 2026-10-05: `digest_eq` t = 1.575 (30.4 ns per comparison); the early-exit control t = 10328.9, so the harness sees a leak when there is one; the pre-#275 XOR fold t = −0.098 (0.71 ns) on this target and compiler, which nothing guaranteed. x86_64-unknown-linux-gnu is measured by the CI job. **`Ord`/`PartialOrd` stay variable-time**, documented for collections only. Determinism is not semantic identity. |
 | 5 | `hex` | `core` | exercised | `encode_emits_two_lowercase_characters_per_byte`, `decode_accepts_uppercase_digits` | Shared decode-into primitive, destination modification semantics → [#161](https://github.com/srinji-kaggss/logicalworks-crates/issues/161) |
 | 6 | `http` | `http` | exercised | 43 unit tests incl. `gets_status_headers_and_body`, `default_option_wrappers_reach_the_same_path` | Stage-stable timeout class, byte-preserving headers, redirect provenance, budget accounting → [#163](https://github.com/srinji-kaggss/logicalworks-crates/issues/163) |
 | 7 | `id` | `random` | exercised | `generated_value_carries_version_four_and_the_rfc_variant`, `successive_identifiers_differ` | Fixed-size parse/format, error positions → [#161](https://github.com/srinji-kaggss/logicalworks-crates/issues/161). **A generated v4 is not proof of provenance**; arbitrary-value constructors certify neither. |
@@ -125,7 +125,7 @@ independently.
 [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168),
 [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169).
 
-**Assurance workstreams X1–X4** (constant-time hashing, fallible thread
+**Assurance workstreams X1–X4** (constant-time hashing — X1 measured by #275, fallible thread
 admission, entropy failure meaning, feature-isolated ergonomics) remain open
 against the four rows marked **assurance-gap** above and the `process`/`trace`
 rows.

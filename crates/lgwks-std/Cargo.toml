@@ -96,6 +96,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "pattern-workloads"
 required-features = ["pattern"]
 
+[[example]]
+name = "digest_timing"
+required-features = ["hash"]
+
 [[test]]
 name = "pattern_external"
 path = "tests/pattern_external.rs"

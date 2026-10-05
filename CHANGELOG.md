@@ -8,6 +8,23 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_std — Digest equality measured constant-time (#275)
+
+- `Digest`'s `==` now delegates to `blake3::Hash`'s equality, the
+  `constant_time_eq` routine behind an optimisation barrier, instead of a
+  hand-written XOR/OR fold that the compiler was free to turn into an
+  early exit. No new dependency: `constant_time_eq` was already in the graph
+  through `blake3`.
+- New `Digest::ct_eq`, the same comparison by name, for checks against a
+  secret-derived or adversary-written value. `lgwks_bot`'s `verify_chain`
+  compares recorded chain heads through it.
+- `Digest`'s `Ord`/`PartialOrd` are documented as variable-time, for
+  collections only. They are kept, because removing them would break 1.x.
+- `examples/digest_timing.rs` is a dudect-style Welch's t test over two
+  classes at 1,000,000 samples each, with an early-exit negative control it
+  must detect. The `digest-timing` gate lane runs it on the release build,
+  locally (aarch64-apple-darwin) and in CI (x86_64-unknown-linux-gnu).
+
 ### Property tests with shrinking (#273)
 
 - `proptest` 1.11 is admitted as a dev-only edge (`contract/APPROVED.toml`,

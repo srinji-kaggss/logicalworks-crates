@@ -258,6 +258,25 @@ jobs:
       - name: Async fairness gate and concurrency ladder
         run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
 
+  digest_timing:
+    # Its own job: a release build of lgwks_std alone, and a timing statistic is
+    # only meaningful on a runner not also compiling the rest of the workspace.
+    name: Digest timing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Digest constant-time equality (dudect)
+        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
+
   storefront_consumers:
     # Standalone consumer packages, one cargo build per storefront family.
     # Their own job so the Tests job is not held by nested builds that
