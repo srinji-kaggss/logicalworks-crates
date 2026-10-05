@@ -148,12 +148,18 @@ fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured 
     }
     let differ = Digest::from_bytes(differing_bytes);
 
+    // Each class's operand is copied into the one slot the comparison reads,
+    // as dudect does, so the two classes differ only in the bytes compared and
+    // never in the address they are read from: two separate operands put a
+    // cache-line or alignment difference between the classes that a timing
+    // test reports as a leak (x86_64 CI, t = -17.8 at equal means to 0.001 ns).
     let mut timed: Vec<(bool, u32)> = Vec::with_capacity(classes.len());
     for &is_differ in classes {
-        let right = if is_differ { &differ } else { &equal };
+        let mut right = if is_differ { differ } else { equal };
+        black_box(&mut right);
         let started = Instant::now();
         for _ in 0..BATCH {
-            black_box(compare(black_box(&base), black_box(right)));
+            black_box(compare(black_box(&base), black_box(&right)));
         }
         let nanos = u32::try_from(started.elapsed().as_nanos()).unwrap_or(u32::MAX);
         timed.push((is_differ, nanos));
