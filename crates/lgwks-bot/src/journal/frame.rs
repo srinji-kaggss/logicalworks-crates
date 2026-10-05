@@ -27,7 +27,7 @@
 //! acknowledged and are refused. The two are byte-identical to a reader that only
 //! looks at the prefix, which is why the prefix alone never decides anything.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 use lgwks_std::hash::Digest;
 
@@ -377,8 +377,59 @@ fn frame_chains_from(
     };
     authenticates(previous, payload, stored)
 }
-/// The grammar's own tests: the round trip, the three prefix endings, the piece
-/// ending, and the two questions about a length.
+
+/// Whether the file ended inside a frame it had acknowledged, read from the file.
+///
+/// The one door each store takes once a scan has read a complete, possible length
+/// prefix at `offset` and then hit the end of the file before the payload or the
+/// head was whole. It reads everything behind that prefix and asks
+/// [`holds_acknowledged_frame`]; `previous` is the head the cut frame would have
+/// chained from. A refused answer is the caller's to word, so the journal and the
+/// run stores each report it in their own vocabulary and neither can trim what the
+/// other would have refused.
+///
+/// A short read was short of at most one frame, so more behind the prefix than
+/// `max_frame_bytes` plus a head is not the tail the scan saw: someone wrote past
+/// the advisory lock while it ran. Nothing is decided on that, and it is reported
+/// through `storage` rather than guessed at.
+///
+/// # Errors
+///
+/// Whatever `storage` makes of the device's refusal, or of the file having grown
+/// past what a cut frame could leave.
+pub(crate) fn cut_holds_acknowledged<R, E, H>(
+    file: &mut R,
+    offset: u64,
+    previous: &Digest,
+    max_frame_bytes: usize,
+    storage: fn(std::io::Error) -> E,
+    head_of: H,
+) -> Result<bool, E>
+where
+    R: Read + Seek,
+    H: Fn(&Digest, &[u8]) -> Option<Digest>,
+{
+    let start = offset.saturating_add(u64::try_from(LENGTH_BYTES).unwrap_or(u64::MAX));
+    let len = file.seek(SeekFrom::End(0)).map_err(storage)?;
+    let behind = len.saturating_sub(start);
+    let ceiling = u64::try_from(max_frame_bytes.saturating_add(HEAD_BYTES)).unwrap_or(u64::MAX);
+    if behind > ceiling {
+        return Err(storage(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file grew while its tail was being resolved; reopen it",
+        )));
+    }
+    file.seek(SeekFrom::Start(start)).map_err(storage)?;
+    let mut suffix = vec![0u8; usize::try_from(behind).unwrap_or(usize::MAX)];
+    file.read_exact(&mut suffix).map_err(storage)?;
+    Ok(holds_acknowledged_frame(
+        &suffix,
+        previous,
+        max_frame_bytes,
+        head_of,
+    ))
+}
+
 /// The bytes of one whole frame: the payload and the head that follows it.
 #[cfg(feature = "script")]
 pub(crate) struct Raw {
@@ -388,21 +439,76 @@ pub(crate) struct Raw {
     pub(crate) head: [u8; HEAD_BYTES],
 }
 
+/// An aligned copy of `payload` when it does not already sit where an archive can be
+/// read from it, and `None` when it does.
+///
+/// A payload found by the tail search lies at whatever offset the bytes before it
+/// happened to leave, and an archive read from a misaligned slice is refused rather
+/// than decoded, which would make a frame the writer really framed look like noise.
+/// The copy is made only for a misaligned candidate, so the search's many
+/// candidates that start where the buffer does cost nothing extra.
+#[cfg(feature = "script")]
+pub(crate) fn misaligned_copy(payload: &[u8]) -> Option<lgwks_std::wire::AlignedVec> {
+    const ARCHIVE_ALIGN: usize = 16;
+    if payload.as_ptr().align_offset(ARCHIVE_ALIGN) == 0 {
+        return None;
+    }
+    let mut copy = lgwks_std::wire::AlignedVec::with_capacity(payload.len());
+    copy.extend_from_slice(payload);
+    Some(copy)
+}
+
+/// Which frame a reader is at: its ordinal, where its length prefix begins, and the
+/// head it chains from. The last two are what a reader needs to tell a cut append
+/// from a frame whose length lies.
+#[cfg(feature = "script")]
+pub(crate) struct Cursor<'chain> {
+    /// The frame's index, from zero.
+    pub(crate) at: u64,
+    /// The offset of the frame's length prefix.
+    pub(crate) offset: u64,
+    /// The head the frame chains from.
+    pub(crate) previous: &'chain Digest,
+}
+
+#[cfg(feature = "script")]
+impl<'chain> Cursor<'chain> {
+    /// The cursor for frame `at`, which begins at `offset` and chains from `previous`.
+    pub(crate) fn new(at: u64, offset: u64, previous: &'chain Digest) -> Self {
+        Self {
+            at,
+            offset,
+            previous,
+        }
+    }
+}
+
 /// Read the next whole frame, or `None` where the file stops holding one.
 ///
-/// A partial length prefix, or a payload or head cut short, is an append that
-/// never finished: it was never anyone's answer, so the scan stops and the
-/// caller trims. A complete prefix naming a length the writer never produces
-/// cannot be an interrupted append, and is `corrupt`.
+/// A partial length prefix is an append that never finished: it was never
+/// anyone's answer, so the scan stops and the caller trims. A complete prefix
+/// naming a length the writer never produces cannot be an interrupted append, and
+/// is `corrupt`. A payload or head cut short under a complete prefix is either an
+/// append that never finished or an acknowledged frame whose prefix was changed,
+/// and only the stored head tells them apart ([`cut_holds_acknowledged`]):
+/// the first is `None` and the second is `corrupt`, with the file untouched.
+/// `head_of` is the store's head over the previous head and an archived payload,
+/// `None` for a payload it cannot decode.
 #[cfg(feature = "script")]
-pub(crate) fn read_raw<E>(
-    reader: &mut impl Read,
+pub(crate) fn read_raw<R, E, H>(
+    file: &mut R,
+    at: &Cursor<'_>,
     max_frame_bytes: usize,
     storage: fn(std::io::Error) -> E,
     corrupt: impl FnOnce() -> E,
-) -> Result<Option<Raw>, E> {
+    head_of: H,
+) -> Result<Option<Raw>, E>
+where
+    R: Read + Seek,
+    H: Fn(&Digest, &[u8]) -> Option<Digest>,
+{
     let mut prefix = [0u8; LENGTH_BYTES];
-    let declared = match read_prefix(reader, &mut prefix).map_err(storage)? {
+    let declared = match read_prefix(file, &mut prefix).map_err(storage)? {
         Prefix::Eof | Prefix::Torn => return Ok(None),
         Prefix::Full => declared_length(&prefix),
     };
@@ -414,14 +520,98 @@ pub(crate) fn read_raw<E>(
         return Err(corrupt());
     }
     let mut payload = vec![0u8; declared];
-    if let Piece::Interrupted = read_piece(reader, &mut payload).map_err(storage)? {
-        return Ok(None);
-    }
     let mut head = [0u8; HEAD_BYTES];
-    if let Piece::Interrupted = read_piece(reader, &mut head).map_err(storage)? {
-        return Ok(None);
+    for piece in [&mut payload[..], &mut head[..]] {
+        if let Piece::Interrupted = read_piece(file, piece).map_err(storage)? {
+            let lies = cut_holds_acknowledged(
+                file,
+                at.offset,
+                at.previous,
+                max_frame_bytes,
+                storage,
+                head_of,
+            )?;
+            return if lies { Err(corrupt()) } else { Ok(None) };
+        }
     }
     Ok(Some(Raw { payload, head }))
+}
+
+/// Byte surgery on a framed file, which every store's tail tests share: where the
+/// frames begin, what a prefix declares, and a file with one prefix changed.
+#[cfg(test)]
+pub(crate) mod probe {
+    use super::{LENGTH_BYTES, framed_len};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Gives concurrent tests distinct scratch names.
+    static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A scratch file path unique to one test, removed when the test ends.
+    ///
+    /// Best effort on removal: a scratch file the system refuses to remove is
+    /// litter, not a failed observation, so the error does not mask the test's own
+    /// verdict.
+    pub(crate) struct Scratch(PathBuf);
+
+    impl Scratch {
+        /// A fresh path under the temp directory, named for `name`.
+        pub(crate) fn new(name: &str) -> Self {
+            let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default();
+            Self(std::env::temp_dir().join(format!("lgwks-frame-{name}-{nanos}-{unique}")))
+        }
+
+        /// Where the file is.
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_file(&self.0));
+        }
+    }
+
+    /// Where each frame of a valid file begins, walked from the prefixes after
+    /// `header` bytes of file header.
+    pub(crate) fn frame_starts(
+        bytes: &[u8],
+        header: usize,
+    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        let mut starts = Vec::new();
+        let mut at = header;
+        while at < bytes.len() {
+            starts.push(at);
+            at = at.saturating_add(usize::try_from(framed_len(usize::try_from(
+                declared_at(bytes, at),
+            )?))?);
+        }
+        Ok(starts)
+    }
+
+    /// `bytes` with the length prefix of the frame at `at` replaced.
+    pub(crate) fn with_prefix(bytes: &[u8], at: usize, declared: u32) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        for (slot, byte) in out.iter_mut().skip(at).zip(declared.to_be_bytes()) {
+            *slot = byte;
+        }
+        out
+    }
+
+    /// The declared payload length of the frame at `at`.
+    pub(crate) fn declared_at(bytes: &[u8], at: usize) -> u32 {
+        let mut prefix = [0u8; LENGTH_BYTES];
+        for (slot, byte) in prefix.iter_mut().zip(bytes.iter().skip(at)) {
+            *slot = *byte;
+        }
+        u32::from_be_bytes(prefix)
+    }
 }
 
 #[cfg(test)]

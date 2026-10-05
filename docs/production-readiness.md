@@ -313,7 +313,12 @@ whose length and head are both damaged has nothing to authenticate it and is
 trimmed (`a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit`),
 and a hand that truncates a file mid-frame is indistinguishable from a crash. The
 journal stays below the unattended-automation bar for the reasons in the ceiling
-paragraph below, not for this one.
+paragraph below, not for this one. The run store and the repair ledger shared the
+same defect through `frame::read_raw`, which treated every cut frame as a clean end;
+they now ask the same question of the same bytes, with each store's own head over
+its decoded record (`task::store::tests` and `task::ledger::tests`, including a
+ceiling-sized noise tail decided in bounded time). Their tests were not run against
+the unfixed code, so for those two stores the control is the cut-append test only.
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file

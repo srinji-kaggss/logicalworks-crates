@@ -273,32 +273,14 @@ fn resolve_ambiguous_tail(
     position: JournalPosition,
     index: u64,
 ) -> Result<u64, JournalError> {
-    use std::io::{Seek, SeekFrom};
-
-    let start = offset.saturating_add(u64::try_from(LENGTH_BYTES).unwrap_or(u64::MAX));
-    let file_len = file.metadata().map_err(JournalError::Storage)?.len();
-    let behind = file_len.saturating_sub(start);
-    let ceiling = u64::try_from(MAX_FRAME_BYTES.saturating_add(HEAD_BYTES)).unwrap_or(u64::MAX);
-    if behind > ceiling {
-        // A short read was short of at most one frame, so this is not the tail the
-        // scan saw: someone wrote past the advisory lock. Nothing is decided on it.
-        return Err(JournalError::Storage(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the journal file grew while its tail was being resolved; reopen it",
-        )));
-    }
-    file.seek(SeekFrom::Start(start))
-        .map_err(JournalError::Storage)?;
-    let mut suffix = vec![0u8; usize::try_from(behind).unwrap_or(usize::MAX)];
-    file.read_exact(&mut suffix)
-        .map_err(JournalError::Storage)?;
-
-    let acknowledged = super::frame::holds_acknowledged_frame(
-        &suffix,
+    let acknowledged = super::frame::cut_holds_acknowledged(
+        file,
+        offset,
         &position.head(),
         MAX_FRAME_BYTES,
+        JournalError::Storage,
         |previous, payload| Some(super::chain_over_bytes(previous, payload)),
-    );
+    )?;
     if acknowledged {
         let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
             index,
@@ -1479,6 +1461,7 @@ pub(super) mod tests {
     use crate::effect::{
         ActionDigest, ActionId, AttemptId, EnvironmentEpoch, EnvironmentId, FlowRevision, RunId,
     };
+    use crate::journal::frame::probe::{declared_at, frame_starts, with_prefix};
     use crate::journal::{AttemptStatus, EventKind};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2252,41 +2235,6 @@ pub(super) mod tests {
         Ok(())
     }
 
-    /// Where each frame of a valid journal begins, walked from the prefixes.
-    fn frame_starts(bytes: &[u8]) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
-        let mut starts = Vec::new();
-        let mut at = 0usize;
-        while at < bytes.len() {
-            starts.push(at);
-            let prefix = bytes
-                .get(at..at.saturating_add(LENGTH_BYTES))
-                .ok_or("a frame prefix runs past the end of a valid journal")?;
-            let declared = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
-            at = at.saturating_add(usize::try_from(crate::journal::frame::framed_len(
-                usize::try_from(declared)?,
-            ))?);
-        }
-        Ok(starts)
-    }
-
-    /// `bytes` with the length prefix of the frame at `at` replaced.
-    fn with_prefix(bytes: &[u8], at: usize, declared: u32) -> Vec<u8> {
-        let mut out = bytes.to_vec();
-        for (slot, byte) in out.iter_mut().skip(at).zip(declared.to_be_bytes()) {
-            *slot = byte;
-        }
-        out
-    }
-
-    /// The declared payload length of the frame at `at`.
-    fn declared_at(bytes: &[u8], at: usize) -> u32 {
-        let mut prefix = [0u8; LENGTH_BYTES];
-        for (slot, byte) in prefix.iter_mut().zip(bytes.iter().skip(at)) {
-            *slot = *byte;
-        }
-        u32::from_be_bytes(prefix)
-    }
-
     /// Open `path` and require a refusal as `Corrupt` at frame `at`, leaving the
     /// file byte-identical to `before`.
     fn require_refused_untouched(path: &Path, before: &[u8], at: u64, why: &str) -> TestResult {
@@ -2345,7 +2293,7 @@ pub(super) mod tests {
         let path = scratch("inflated-middle");
         let _guard = TempGuard(path.clone());
         let (bytes, _) = three_frame_file(&path)?;
-        let middle = frame_starts(&bytes)?[1];
+        let middle = frame_starts(&bytes, 0)?[1];
         let remaining = u32::try_from(bytes.len() - middle)?;
         for declared in [
             remaining,
@@ -2411,7 +2359,7 @@ pub(super) mod tests {
         let path = scratch("damaged-middle");
         let _guard = TempGuard(path.clone());
         let (bytes, _) = three_frame_file(&path)?;
-        let starts = frame_starts(&bytes)?;
+        let starts = frame_starts(&bytes, 0)?;
         let middle = starts[1];
         let remaining = u32::try_from(bytes.len() - middle)?;
         let mut lied = with_prefix(&bytes, middle, remaining + 7);
