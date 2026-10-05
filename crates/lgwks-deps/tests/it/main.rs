@@ -30,4 +30,5 @@ mod sim_license_policy;
 mod sim_metadata_dimensions;
 mod sim_origin;
 mod sim_policy_properties;
+mod sim_register_policy;
 mod workstream_c;
