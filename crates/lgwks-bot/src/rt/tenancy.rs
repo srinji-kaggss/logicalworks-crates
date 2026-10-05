@@ -647,16 +647,39 @@ impl<W> DeficitRoundRobin<W> {
     }
 
     /// Record that a waiter still in `tenant`'s queue has been abandoned by its
-    /// owner.
+    /// owner, and compact the queue when the abandoned outnumber the live.
     ///
-    /// The abandoned waiter is skipped by the next [`grant`](Self::grant) that
-    /// reaches it, and it stops counting against the queue bound immediately, so
-    /// a caller that gives up does not spend another tenant's queue room. Counted
-    /// separately from removal because a `VecDeque` cannot remove from the middle
-    /// in O(1), and the lazy skip is what keeps abandonment cheap.
-    pub fn note_abandoned(&mut self, tenant: &Tenant) {
-        if let Some(entry) = self.entries.get_mut(tenant) {
-            entry.abandoned = entry.abandoned.saturating_add(1).min(entry.queue.len());
+    /// `is_live` decides whether a waiter is still owned, exactly as it does for
+    /// [`grant`](Self::grant). Counting abandonment separately from removal is
+    /// what makes the common case free: a [`VecDeque`] cannot remove from the
+    /// middle in O(1), and a single abandoned waiter costs one counter.
+    ///
+    /// But a counter alone is not a bound. A tenant parked at its ceiling whose
+    /// callers keep walking away never passes a grant that could skip its
+    /// abandoned heads, so its deque grows by one entry per abandonment and
+    /// nothing ever shrinks it. The compaction is what makes the retention a
+    /// function of the policy rather than of how long the tenant has been
+    /// unlucky: once the abandoned outnumber the live, the queue is rebuilt from
+    /// the live waiters alone, which costs one pass over the queue and is paid
+    /// for by the abandonments that made it necessary — amortized O(1) per
+    /// abandonment, the same accounting the lazy skip already relies on.
+    pub fn note_abandoned<F>(&mut self, tenant: &Tenant, is_live: &mut F)
+    where
+        F: FnMut(&W) -> bool,
+    {
+        let Some(entry) = self.entries.get_mut(tenant) else {
+            return;
+        };
+        entry.abandoned = entry.abandoned.saturating_add(1).min(entry.queue.len());
+        // "Abandoned outnumber the live" rather than "any abandoned": rebuilding
+        // on every single abandonment would make the common case O(queue) and
+        // leave nothing for the skip in `grant` to do.
+        if entry.abandoned > entry.live() {
+            entry.queue.retain(|waiter| is_live(waiter));
+            // Everything retained answered live, so the count that survived them
+            // is zero. Setting it rather than recomputing keeps the two from
+            // disagreeing if a liveness predicate is stricter than the count.
+            entry.abandoned = 0;
         }
     }
 
@@ -1010,7 +1033,12 @@ mod tests {
             Arrival::Refused { limit: 1 },
             "the bound is reached while the waiter lives"
         );
-        core.note_abandoned(&t0);
+        // Waiter 8 is the one whose owner walked away, and the liveness predicate says
+        // so: the scheduler compacts on abandonment using the same knowledge the
+        // grant skip uses, and a predicate that denied nothing would keep an
+        // entry the count has already written off.
+        let mut gone = |waiter: &u32| *waiter != 8;
+        core.note_abandoned(&t0, &mut gone);
         assert_eq!(
             core.arrive(&t0, 10, || None),
             queued,

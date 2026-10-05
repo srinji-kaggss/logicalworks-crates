@@ -1053,7 +1053,13 @@ mod tenancy_support {
                 self.shell.release(&self.tenant, permit);
             }
             if abandoned {
-                self.shell.lock().note_abandoned(&self.tenant);
+                // The compaction inside `note_abandoned` needs to know which
+                // waiters are still owned, and the answer lives on each slot.
+                // The slot lock is released before this one is taken, so the two
+                // critical sections nest only in the order the shell uses.
+                let mut round = self.shell.lock();
+                let mut is_live = |slot: &Arc<WaitSlot>| slot.is_live();
+                round.note_abandoned(&self.tenant, &mut is_live);
             }
         }
     }

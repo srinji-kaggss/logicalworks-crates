@@ -152,6 +152,7 @@ mod sim_store_scale;
 mod sim_task;
 mod sim_task_axes;
 mod sim_task_resume;
+mod sim_tenancy;
 mod spec_materialize;
 mod store_read_failure;
 mod sys_process_binding;
