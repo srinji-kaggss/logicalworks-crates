@@ -32,10 +32,10 @@ statement = "The sys domain's verbs report a child's length-framed stdout readin
 scope = "lgwks_bot"
 owner = "lgwks_bot"
 enforcement = "static-check"
-enforced_by = "crates/lgwks-bot/tests/sys_process_binding.rs"
+enforced_by = "crates/lgwks-bot/tests/it/sys_process_binding.rs"
 approved_by = "maintainer"
 approved_on = "2026-10-03"
-review = "crates/lgwks-bot/tests/sys_process_binding.rs"
+review = "crates/lgwks-bot/tests/it/sys_process_binding.rs"
 
 [[invariant]]
 id = "INV-AST-ONE-PARSER"

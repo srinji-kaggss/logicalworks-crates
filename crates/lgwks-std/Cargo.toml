@@ -97,26 +97,7 @@ name = "pattern-workloads"
 required-features = ["pattern"]
 
 [[test]]
-name = "pattern_external"
-path = "tests/pattern_external.rs"
-required-features = ["pattern"]
-
-[[test]]
 name = "http_alloc"
 path = "tests/http_alloc.rs"
 required-features = ["http"]
 
-[[test]]
-name = "sim_http"
-path = "tests/sim_http.rs"
-required-features = ["http"]
-
-[[test]]
-name = "sim_fs_walk"
-path = "tests/sim_fs_walk.rs"
-required-features = ["trace"]
-
-[[test]]
-name = "sim_tenant_isolation"
-path = "tests/sim_tenant_isolation.rs"
-required-features = ["trace"]

@@ -727,7 +727,7 @@ assert_eq!(report.outcomes().len(), 2);
 # Ok::<(), std::io::Error>(())
 ```
 
-Invariants (enforced by `crates/lgwks-bot/tests/rt_async_tier.rs` and
+Invariants (enforced by `crates/lgwks-bot/tests/it/rt_async_tier.rs` and
 `rt::supervise`'s unit tests):
 
 - **INV-RT-SINGLE-ENTRY** — only `lgwks_deps` authors a `tokio` edge.

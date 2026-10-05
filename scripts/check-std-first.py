@@ -177,13 +177,7 @@ STD_FIRST = (
 # the next genuine occurrence added to the same file, and this list exists to be
 # the audit's record of what a reader looked at and decided — not a mute button.
 EXEMPT: dict[str, tuple[str, str]] = {
-    "crates/lgwks-bot/tests/rt_async_tier.rs:448": (
-        "let joined = std::thread::spawn(move || handle.block_on(async { 5u8 })).join();",
-        "the claim under test is that a `Handle` drives work from a thread the "
-        "runtime did not create; the thread is joined on the same line, so "
-        "nothing is leaked, and the file already carries an `#[expect]` saying so",
-    ),
-    "crates/lgwks-bot/tests/rt_process.rs:144": (
+    "crates/lgwks-bot/tests/it/rt_process.rs:157": (
         'let path = std::env::temp_dir().join(format!("lgwks-bot-{}-{name}", std::process::id()));',
         "a scratch directory name, not an identity: the per-test `name` argument "
         "is what keeps two tests apart, and the pid only namespaces the directory "

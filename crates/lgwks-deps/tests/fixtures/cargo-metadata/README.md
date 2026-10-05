@@ -25,7 +25,7 @@ cargo metadata --no-deps --format-version 1 --locked \
   | sed "s#$(pwd)#__FIXTURE_ROOT__#g" > baseline.json
 ```
 
-`tests/metadata_dimensions.rs` substitutes the real fixture directory for the
+`tests/it/metadata_dimensions.rs` substitutes the real fixture directory for the
 token when it loads the file, so the decode runs without invoking Cargo, and it
 additionally re-runs the command and compares the freshly decoded edges to the
 retained ones. The fixture is path-only, so the whole thing resolves, locks and

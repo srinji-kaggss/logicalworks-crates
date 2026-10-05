@@ -110,6 +110,6 @@ Because admission is all-or-nothing, a document with any unmet need is refused
 with one attributed `NeedSet`: an unknown source or action domain, a constructor
 that rejects its target, a missing capability, or an unknown condition. Nothing
 is polled and nothing is built. `experience/invariants/sdk.yaml` records the
-landed materializer. `crates/lgwks-bot/tests/registry.rs` and
-`crates/lgwks-bot/tests/spec_materialize.rs` enforce what the registry and the
+landed materializer. `crates/lgwks-bot/tests/it/registry.rs` and
+`crates/lgwks-bot/tests/it/spec_materialize.rs` enforce what the registry and the
 materializer claim.
