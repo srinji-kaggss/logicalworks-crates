@@ -357,19 +357,73 @@ id = "feat-std"
 group = "check"
 surfaces = "local ci"
 required = true
+# Every one of the twelve non-`full` features, each alone, plus the two
+# boundary sets. `core`, `trace`, `random`, `ron` and `process` were missing from
+# this list and so were never built by anything except the rustdoc lane: a
+# feature that silently needs another feature is exactly what an isolated build
+# refuses to hide. (#276)
 command = """\
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features\
 """
 ci_step = "Check lgwks-std feature matrix"
+
+# Every feature alone, *executed* rather than compiled. A `cargo check` says a
+# feature builds; only a run says its tests pass with nothing else switched on,
+# and a test that quietly needs a second feature passes in the full suite while
+# being unreachable for a consumer who selected one flag. The per-feature run is
+# one `nextest` invocation per feature, in the same feature sets the check lane
+# above uses. (#276)
+[[lane]]
+id = "tests-std-per-feature"
+group = "std-per-feature"
+surfaces = "local ci"
+required = true
+command = """\
+cargo nextest run --locked -p lgwks_std --no-default-features --features core && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features trace && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features random && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features hash && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features pattern && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features json && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features ron && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features wire && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features http && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features online && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features process\
+"""
+ci_step = "Run lgwks-std per-feature tests"
+needs = ["bin:cargo-nextest"]
+
+# The declared target matrix, executed. Before this lane the only non-native
+# build in the gate was the bot's WASI boundary, so `lgwks_std`, `lgwks_ast` and
+# `lgwks_deps` were never checked for a target the gate does not run on, and
+# `random` refused at compile time on every target but three. The script runs
+# `cargo check --target <t>` per target and per crate: the Rust-only surface is
+# required on every target, and a check that needs a C toolchain this runner
+# lacks is recorded with the exact error rather than dropped. (#276)
+[[lane]]
+id = "target-matrix"
+group = "targets"
+surfaces = "local ci"
+required = true
+command = "./scripts/check-target-matrix.sh"
+ci_step = "Check lgwks-std across the declared target matrix"
+needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
 
 [[lane]]
 id = "feat-deps-base"

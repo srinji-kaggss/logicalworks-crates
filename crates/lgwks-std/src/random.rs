@@ -24,6 +24,9 @@
 //!
 //! `id` reads [`bytes`] for UUID v4, so this set is also the set `lgwks_std`
 //! with `random` builds on.
+//!
+//! [`EntropyError`]: crate::random::EntropyError
+//! [`bytes`]: crate::random::bytes
 
 use std::error::Error;
 use std::fmt;
@@ -72,7 +75,7 @@ pub enum EntropyErrorKind {
     /// This target's backend has no entropy source, so the call failed at run
     /// time rather than falling back to a weaker source.
     UnsupportedTarget,
-    /// The backend failed without a code this crate can represent: a `errno`
+    /// The backend failed without a code this crate can represent: an `errno`
     /// that was zero or negative where a positive value was required, or a UEFI
     /// status above `i32::MAX`. There is nothing to match on, so a caller
     /// retries or fails.
@@ -128,9 +131,11 @@ impl EntropyError {
     /// The portable `std::io` classification of [`EntropyError::raw_os_error`],
     /// or `None` when there is no OS code to classify.
     ///
-    /// `EINTR` is [`io::ErrorKind::Interrupted`] and `ENODEV` is
-    /// [`io::ErrorKind::Uncategorized`], so a caller that retries on an
-    /// interruption reads the same answer from the kind or from the code.
+    /// The mapping is `std`'s, not this crate's, so it is whatever `std` says for
+    /// the code on the target in question. The one classification this crate
+    /// asserts is the one a retry depends on: `EINTR` is
+    /// [`io::ErrorKind::Interrupted`]. `ENODEV` is *not* that, so a caller that
+    /// retries on an interruption never loops on a host with no entropy device.
     #[must_use]
     pub fn io_error_kind(&self) -> Option<io::ErrorKind> {
         self.raw_os_error()
@@ -249,7 +254,7 @@ where
 mod tests {
     use super::*;
 
-    // `EINVALTR` is the one OS code whose portable classification this file
+    // `EINTR` is the one OS code whose portable classification this file
     // asserts, so a change to `std`'s mapping shows up here rather than in a
     // caller's retry loop.
     const EINTR: i32 = 4;
