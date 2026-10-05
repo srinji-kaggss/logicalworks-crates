@@ -1077,6 +1077,13 @@ mod tenancy_support {
             /// The bound the tenant's queue reached.
             limit: usize,
         },
+        /// Not admitted: the supervisor's own waiting bound is reached across
+        /// every tenant, so the tenant may still have room and is refused
+        /// anyway. The load is the supervisor's, not this tenant's.
+        SupervisorQueueFull {
+            /// The bound the supervisor's waiting total reached.
+            limit: usize,
+        },
     }
 
     impl TenancyShell {
@@ -1134,6 +1141,7 @@ mod tenancy_support {
                     ))
                 }
                 Arrival::Refused { limit } => Admission::Refused { limit },
+                Arrival::SupervisorFull { limit } => Admission::SupervisorQueueFull { limit },
             }
         }
 
@@ -2432,6 +2440,9 @@ impl Supervisor {
                 tenant: tenant.clone(),
                 limit,
             }),
+            tenancy_support::Admission::SupervisorQueueFull { limit } => {
+                Err(SpawnRefused::SupervisorQueueFull { limit })
+            }
             tenancy_support::Admission::Queued(waiter) => {
                 // Park on **this** waiter until it resolves or the token
                 // cancels. The waiter is pinned for the whole wait and never
@@ -2483,7 +2494,8 @@ impl Supervisor {
                     self.refused = self.refused.saturating_add(1);
                     None
                 }
-                tenancy_support::Admission::Refused { .. } => {
+                tenancy_support::Admission::Refused { .. }
+                | tenancy_support::Admission::SupervisorQueueFull { .. } => {
                     self.refused = self.refused.saturating_add(1);
                     None
                 }
@@ -5929,6 +5941,9 @@ mod tests {
             }
             super::tenancy_support::Admission::Refused { limit } => {
                 Err(format!("the queue bound of {limit} was already reached").into())
+            }
+            super::tenancy_support::Admission::SupervisorQueueFull { limit } => {
+                Err(format!("the supervisor's waiting bound of {limit} was already reached").into())
             }
         }
     }

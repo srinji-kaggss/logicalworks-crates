@@ -71,6 +71,16 @@ pub const MAX_QUEUE_PER_TENANT: usize = 65_536;
 /// tenant is allowed to be big".
 pub const MAX_TENANT_WEIGHT: u32 = 1_000;
 
+/// The most waiting admissions one supervisor may hold across every tenant.
+///
+/// A per-tenant queue bound is not a supervisor bound: tenants multiply, and any
+/// tenant name creates an entry, so a policy of per-tenant bounds admits
+/// `tenants x queue_per_tenant` waiting work for a caller willing to name that
+/// many tenants. This is the number that bounds the supervisor's own memory, and
+/// it is a policy field rather than a derived product because a real deployment
+/// knows its fleet size and its host and a test knows neither.
+pub const MAX_TOTAL_QUEUE: usize = 65_536;
+
 /// How many tenants one policy may name a weight for.
 ///
 /// The default weight is 1 and needs no entry, so this bounds only the explicit
@@ -161,6 +171,11 @@ pub struct TenancyPolicy {
     /// legal and refuses every contended arrival, which is a real policy — a
     /// tenant that must never queue — rather than a mistake to rewrite.
     queue_per_tenant: usize,
+    /// The most waiting admissions the supervisor holds across every tenant.
+    /// A bound of zero is legal and refuses every contended arrival, which is a
+    /// real policy -- a supervisor that must never queue -- rather than a
+    /// mistake to rewrite.
+    queue_total: usize,
     /// The DRR weight per tenant, defaulting to 1. A `BTreeMap` so the policy
     /// iterates in one order everywhere, which is what makes the seeded
     /// simulation of the scheduler reproducible.
@@ -184,8 +199,23 @@ impl TenancyPolicy {
         Self {
             per_tenant_limit: per_tenant_limit.max(1),
             queue_per_tenant: queue_per_tenant.min(MAX_QUEUE_PER_TENANT),
+            queue_total: MAX_TOTAL_QUEUE,
             weights: BTreeMap::new(),
         }
+    }
+
+    /// Hold `queue_total` waiting admissions across every tenant.
+    ///
+    /// Additive on `Self`, so a policy is built where it is declared rather than
+    /// mutated where it is used. A value of zero reads as the smallest queue a
+    /// supervisor can have, and one above [`MAX_TOTAL_QUEUE`] is clamped to it,
+    /// for the same reason [`TenancyPolicy::new`] clamps the per-tenant bound:
+    /// there is no argument that produces an unbounded supervisor, and the
+    /// accessors report what the supervisor actually holds.
+    #[must_use]
+    pub fn with_queue_total(mut self, queue_total: usize) -> Self {
+        self.queue_total = queue_total.min(MAX_TOTAL_QUEUE);
+        self
     }
 
     /// Carry `weight` for `tenant` in the round.
@@ -238,6 +268,12 @@ impl TenancyPolicy {
         self.queue_per_tenant
     }
 
+    /// The most waiting admissions one supervisor holds across every tenant.
+    #[must_use]
+    pub const fn queue_total(&self) -> usize {
+        self.queue_total
+    }
+
     /// The tenant's weight, 1 for a tenant the policy does not name.
     #[must_use]
     pub fn weight_of(&self, tenant: &Tenant) -> NonZeroU32 {
@@ -265,6 +301,14 @@ pub enum SpawnRefused {
         /// The bound the tenant's queue reached.
         limit: usize,
     },
+    /// The supervisor's own waiting bound is reached across every tenant. The
+    /// tenant named in the call may still have room, so this arm carries the
+    /// bound rather than the tenant: the load is the supervisor's and no single
+    /// tenant can be named as the loud one.
+    SupervisorQueueFull {
+        /// The supervisor's declared waiting bound.
+        limit: usize,
+    },
     /// The supervisor has been cancelled and admits no new work.
     Cancelled,
 }
@@ -275,6 +319,10 @@ impl fmt::Display for SpawnRefused {
             Self::TenantAtCapacity { ref tenant, limit } => write!(
                 formatter,
                 "tenant {tenant} already holds {limit} waiting admissions"
+            ),
+            Self::SupervisorQueueFull { limit } => write!(
+                formatter,
+                "the supervisor already holds {limit} waiting admissions across its tenants"
             ),
             Self::Cancelled => {
                 formatter.write_str("the supervisor is cancelled and admits no new work")
@@ -322,6 +370,17 @@ pub enum Arrival<P> {
     /// bound that was reached.
     Refused {
         /// The tenant's declared queue bound.
+        limit: usize,
+    },
+    /// The supervisor's own waiting bound is reached across every tenant, so
+    /// this tenant still has room and is refused anyway; nothing was retained.
+    /// `limit` is the supervisor's declared bound.
+    ///
+    /// A separate arm rather than another [`Self::Refused`] because the two name
+    /// different owners of the load: one says this tenant is loud, the other says
+    /// the supervisor is full and every tenant's share of the queue is spent.
+    SupervisorFull {
+        /// The supervisor's declared waiting bound.
         limit: usize,
     },
 }
@@ -467,6 +526,11 @@ pub struct DeficitRoundRobin<W> {
     entries: BTreeMap<Tenant, Entry<W>>,
     /// Tenants with waiting work under their ceiling, in turn order.
     ring: VecDeque<Tenant>,
+    /// Waiters retained across every tenant, abandoned ones included. The
+    /// supervisor's own memory, and therefore what the policy's total bound is
+    /// checked against. A count rather than a sum over the entries because a sum
+    /// is O(tenants) on every decision and this is read on every arrival.
+    retained: usize,
 }
 
 impl<W> DeficitRoundRobin<W> {
@@ -477,6 +541,7 @@ impl<W> DeficitRoundRobin<W> {
             policy,
             entries: BTreeMap::new(),
             ring: VecDeque::new(),
+            retained: 0,
         }
     }
 
@@ -523,6 +588,15 @@ impl<W> DeficitRoundRobin<W> {
         self.entries
             .get(tenant)
             .map_or(0, |entry| entry.queue.len())
+    }
+
+    /// How many waiters this scheduler retains across every tenant.
+    ///
+    /// The load the supervisor's own memory bound is checked against, and the
+    /// honest answer to "how full is this supervisor's queue".
+    #[must_use]
+    pub fn retained_total(&self) -> usize {
+        self.retained
     }
 
     /// How many tenants hold at least one waiter, abandoned or not.
@@ -572,7 +646,21 @@ impl<W> DeficitRoundRobin<W> {
             }
             return Arrival::Refused { limit: queue_limit };
         }
+        if self.retained >= self.policy.queue_total {
+            // The supervisor's own bound, checked after the tenant's so the
+            // refusal names the loudest owner of the pressure first: a caller who
+            // is told "this tenant is at its bound" can fix it, and a caller told
+            // "the supervisor is full" cannot. The entry is removed for the same
+            // reason as above.
+            if entry.is_idle() {
+                self.entries.remove(tenant);
+            }
+            return Arrival::SupervisorFull {
+                limit: self.policy.queue_total,
+            };
+        }
         entry.queue.push_back(waiter);
+        self.retained = self.retained.saturating_add(1);
         // A tenant at its ceiling parks off the ring; `note_release` re-arms it
         // the moment one of its admissions completes. The waiter is still
         // counted against the queue bound, which is the bound that protects the
@@ -675,7 +763,11 @@ impl<W> DeficitRoundRobin<W> {
         // on every single abandonment would make the common case O(queue) and
         // leave nothing for the skip in `grant` to do.
         if entry.abandoned > entry.live() {
+            let before = entry.queue.len();
             entry.queue.retain(|waiter| is_live(waiter));
+            self.retained = self
+                .retained
+                .saturating_sub(before.saturating_sub(entry.queue.len()));
             // Everything retained answered live, so the count that survived them
             // is zero. Setting it rather than recomputing keeps the two from
             // disagreeing if a liveness predicate is stricter than the count.
@@ -725,6 +817,7 @@ impl<W> DeficitRoundRobin<W> {
             while entry.queue.front().is_some_and(|waiter| !is_live(waiter)) {
                 entry.queue.pop_front();
                 entry.abandoned = entry.abandoned.saturating_sub(1);
+                self.retained = self.retained.saturating_sub(1);
             }
             if entry.queue.is_empty() {
                 // Nothing left to serve: retire the member and try the next.
@@ -748,6 +841,7 @@ impl<W> DeficitRoundRobin<W> {
             let Some(waiter) = entry.queue.pop_front() else {
                 continue;
             };
+            self.retained = self.retained.saturating_sub(1);
             entry.deficit = entry.deficit.saturating_sub(1);
             entry.in_flight = entry.in_flight.saturating_add(1);
             let drained = entry.queue.is_empty();
