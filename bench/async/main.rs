@@ -209,20 +209,14 @@ async fn facade_side_draining(total: usize, bound: usize, drain: Drain) -> (f64,
     // completion", the facade is drained with its token intact: reap until the
     // completion counter reaches the placed count. This is the drain a caller who
     // cares about completion rather than about shutdown performs.
-    let target = u64::try_from(total).unwrap_or(0);
+    let target = completed_target(total);
     if drain == Drain::GiveUp {
         // The defect, in one line: reap whatever is ready and stop. A real
         // harness that made this mistake would report success for work it never
         // waited for.
         supervisor.reap();
     } else {
-        while supervisor.stats().completed < target {
-            if supervisor.reap() == 0 {
-                // Nothing has ended yet; give the workers a real moment. A spin
-                // here would burn a core and change the timing being measured.
-                tokio::time::sleep(std::time::Duration::from_micros(50)).await;
-            }
-        }
+        drain_supervisor(&mut supervisor, target).await;
     }
     let stats = supervisor.stats();
     let elapsed = started.elapsed().as_secs_f64();
@@ -850,12 +844,7 @@ impl Receipt {
 /// timings the same process reports, and a row that measures while it waits is a
 /// row measuring its own harness.
 async fn drain_to(supervisor: &mut Supervisor, total: usize) -> lgwks_bot::rt::supervise::Stats {
-    let target = u64::try_from(total).unwrap_or(u64::MAX);
-    while supervisor.stats().completed < target {
-        if supervisor.reap() == 0 {
-            tokio::time::sleep(std::time::Duration::from_micros(50)).await;
-        }
-    }
+    drain_supervisor(supervisor, completed_target(total)).await;
     supervisor.stats()
 }
 
@@ -1150,12 +1139,8 @@ async fn row_two_tenants() -> Result<Receipt, String> {
             .spawn(move |_token| async move { body_unit(counter).await })
             .await;
     }
-    let target = u64::try_from(PER_TENANT).unwrap_or(u64::MAX);
-    while acme.stats().completed < target || globex.stats().completed < target {
-        acme.reap();
-        globex.reap();
-        tokio::time::sleep(std::time::Duration::from_micros(50)).await;
-    }
+    let target = completed_target(PER_TENANT);
+    drain_two_supervisors(&mut acme, &mut globex, target).await;
     let acme_stats = acme.stats();
     let globex_stats = globex.stats();
     let acme_work = acme_counter.load(Ordering::SeqCst);
@@ -1462,14 +1447,7 @@ fn workload_matrix(
         println!("wrote {path}");
     }
     if !failures.is_empty() {
-        let refusal = Err(format!(
-            "{} workload-matrix row(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        )
-        .into());
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "workload_matrix: returning an error to the caller");
-        return refusal;
+        return Err(refuse_failed("workload-matrix", "row(s) failed", &failures));
     }
     println!(
         "{} rows, every receipt above was produced by running the row",
@@ -1479,6 +1457,134 @@ fn workload_matrix(
 }
 
 // ── The open-loop driver ─────────────────────────────────────────────────────
+
+/// Refuse a mode that recorded failures, naming every one of them.
+///
+/// One refusal for every mode that accumulates a failure list rather than one per mode.
+/// The shape was identical three times over in the original — build the message, log the
+/// typed error, hand it back — and a third copy is where the next mode's version drifts
+/// from this one without anyone noticing, because a drift in a refusal path is invisible
+/// until the refusal is the thing a reader is relying on.
+fn refuse_failed(tool: &str, what: &str, failures: &[String]) -> Box<dyn std::error::Error> {
+    let refusal: Box<dyn std::error::Error> = format!(
+        "{tool}: {} {what}: {}",
+        failures.len(),
+        failures.join("; ")
+    )
+    .into();
+    // The message *is* the error and there is no cause beneath it, so the log carries the
+    // rendered form rather than a `.err()` on a `Box<dyn Error>` that is already the answer.
+    lgwks_std::trace::debug!(error = %refusal, "refuse_failed: refusing a mode that recorded failures");
+    refusal
+}
+
+/// How many completed tasks a supervisor must reach before a drain returns.
+fn completed_target(total: usize) -> u64 {
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
+/// How long a drain waits when a reap found nothing.
+///
+/// 50 us, and the choice is measured rather than assumed. This rig spent a day reading its
+/// own wait quantum as the facade's overhead: the estimate was that at bound 8 a 256-task
+/// wave runs 32 deep, so a 50 us timer per idle pass could be 1.6 ms of a measured 2.0 ms
+/// p50 — and a scheduler round-trip (`yield_now`) instead of the timer was the obvious
+/// repair. Built and run paired, three rounds each, the repair **lost**: on `quiet-async-bot`
+/// the timer drain measured 2.98x / 3.12x / 2.70x and the round-trip drain 3.49x / 5.09x /
+/// 3.50x, because a round-trip reschedules the draining task behind the workers it is
+/// waiting for and competes with them for a core, while the timer hands the core back. The
+/// timer stayed and the estimate was withdrawn.
+///
+/// Five call sites previously used two different waits — 50 us here, 200 us there — so
+/// `quiet-async-bot` and the open-loop drain were measured under different quanta. They now
+/// use one declared one, which is the part of that experiment worth keeping.
+const REAP_TIMER_INTERVAL: Duration = Duration::from_micros(50);
+
+/// Join every task until `target` of them have reached a terminal state.
+///
+/// One drain for every path that drives one supervisor, because three copies of a poll loop
+/// is three places for the wait quantum to drift and the quantum is a number the published
+/// table is sensitive to.
+///
+/// The facade's API has no blocking join — [`Supervisor::reap`] joins what has *already*
+/// finished and returns how many — so a drain through it must poll. The baseline reaches its
+/// drain through a blocking `join_next` and never polls at all. That asymmetry is documented
+/// here rather than removed: the facade offers no blocking join to compare against, and
+/// pretending otherwise would be the rig deciding the answer.
+async fn drain_supervisor(supervisor: &mut Supervisor, target: u64) {
+    while supervisor.stats().completed < target {
+        if supervisor.reap() == 0 {
+            tokio::time::sleep(REAP_TIMER_INTERVAL).await;
+        }
+    }
+}
+
+/// Join until both supervisors have reached `target`, polling whichever is behind.
+///
+/// Two supervisors at once, so this cannot be [`drain_supervisor`] twice: the point of the
+/// two-tenant row is that neither tenant waits on the other's drain, and a loop that drained
+/// one to completion before looking at the second would measure a serial run and call it two
+/// tenants.
+async fn drain_two_supervisors(first: &mut Supervisor, second: &mut Supervisor, target: u64) {
+    while first.stats().completed < target || second.stats().completed < target {
+        if first.reap() + second.reap() == 0 {
+            tokio::time::sleep(REAP_TIMER_INTERVAL).await;
+        }
+    }
+}
+
+/// This host's one-minute load average, and where it was read from.
+///
+/// Read once per run and recorded beside every figure, because a timing measured on a
+/// loaded host is a real measurement of the wrong thing. On the reference host a scenario
+/// table taken with three other builds running on it reported the **baseline** at 1.08 ms
+/// where it reported 0.35 ms on an idle one — a 3x shift in the control leg, which moves
+/// both sides of a paired ratio and is invisible without the load printed beside it.
+///
+/// A missing figure is absent, never zero: a host that cannot report its load reports
+/// nothing about it rather than reporting an idle one.
+fn host_load_average() -> (Option<String>, &'static str) {
+    #[cfg(target_os = "linux")]
+    {
+        let read = std::fs::read_to_string("/proc/loadavg").ok();
+        let average = read
+            .as_deref()
+            .and_then(|line| line.split_whitespace().next())
+            .map(str::to_string);
+        match average {
+            Some(average) => (Some(average), "/proc/loadavg"),
+            None => (None, "/proc/loadavg unreadable"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `sysctl` rather than a `getloadavg` FFI edge: the first is a system utility this
+        // instrument may run, the second is a C edge no crate here may author.
+        // `/usr/sbin`, not `/usr/bin`: on this host `sysctl` is in `/usr/sbin`, and a
+        // measurement instrument that reports "load average unavailable" because it looked
+        // in the wrong directory is worse than one that never claimed to read it.
+        //
+        // The braces are stripped rather than worked around by picking a field: macOS
+        // prints `{ 1.23 2.34 3.45 }`, so the first whitespace-separated token is `{` and
+        // reading it as a number would publish a brace. Linux's `/proc/loadavg` has no
+        // braces, which is why the two arms are separate rather than one parser with a
+        // flag.
+        let sample = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output();
+        let read = match sample {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .split(|character: char| character.is_whitespace() || character == '{')
+                .find(|token| token.parse::<f64>().is_ok())
+                .map(str::to_string),
+            _ => None,
+        };
+        match read {
+            Some(average) => (Some(average), "/usr/sbin/sysctl -n vm.loadavg"),
+            None => (None, "/usr/sbin/sysctl -n vm.loadavg unreadable"),
+        }
+    }
+}
 
 /// Which admission door an arrival is offered through.
 ///
@@ -1722,11 +1828,7 @@ impl Engine for FacadeEngine {
         // instead of re-deriving the spawn count on every pass.
         let target = self.supervisor.stats().spawned;
         async move {
-            while self.supervisor.stats().completed < target {
-                if self.supervisor.reap() == 0 {
-                    tokio::time::sleep(Duration::from_micros(200)).await;
-                }
-            }
+            drain_supervisor(&mut self.supervisor, target).await
         }
     }
 
@@ -3078,11 +3180,7 @@ async fn inflight_tier_facade(tier: usize) -> Result<TierRun, String> {
     }
     let (reached, rss_bytes, rss_source) = admit_tier(&gate, tier).await;
     let drain_started = Instant::now();
-    while supervisor.stats().completed < u64::try_from(tier).unwrap_or(u64::MAX) {
-        if supervisor.reap() == 0 {
-            tokio::time::sleep(Duration::from_micros(200)).await;
-        }
-    }
+    drain_supervisor(&mut supervisor, completed_target(tier)).await;
     let stats = supervisor.stats();
     Ok(TierRun {
         side: Side::Facade,
@@ -3757,12 +3855,24 @@ fn recovery_json(run: &RecoveryRun) -> String {
 
 // ── Allocation attribution ───────────────────────────────────────────────────
 
-/// One measured allocation window: what it exercised and what it cost.
+/// One measured allocation window: what it exercised, what it cost, and in what unit.
+///
+/// `units_per_iteration` is the field the previous report was missing. Three of these
+/// windows run a **wave** of 1,024 tasks per iteration and two run **one** operation per
+/// iteration, so dividing every window's total by its iteration count reported a wave of
+/// 1,024 tasks as "per call" beside a single `child_token` measured the same way — and
+/// the headline sentence below the table read the wave's whole cost as a per-task figure.
+/// Every row now states its unit, and the headline is derived per task.
 struct AllocWindow {
     /// The operation the window timed and counted.
     what: &'static str,
     /// How many times it ran inside the window.
     iterations: u64,
+    /// Tasks the operation inside one iteration creates, or one for a
+    /// single-operation window.
+    units_per_iteration: u64,
+    /// What one unit is, named so the table needs no arithmetic to be read.
+    unit: &'static str,
     allocs: u64,
     bytes: u64,
 }
@@ -3776,27 +3886,42 @@ impl AllocWindow {
         (self.allocs as f64) / (self.iterations as f64)
     }
 
+    /// Allocations per task, or per unit of whatever this window's unit is.
+    fn per_unit(&self) -> f64 {
+        let units = (self.iterations as f64) * (self.units_per_iteration.max(1) as f64);
+        if units <= 0.0 {
+            return 0.0;
+        }
+        (self.allocs as f64) / units
+    }
+
     /// One printed line.
     fn line(&self) -> String {
         format!(
-            "{:<46} {:>8} iterations {:>9} allocs {:>10.2} per call",
+            "{:<52} {:>7} x {:<6} {:>11} allocs  {:>8.2} per {}",
             self.what,
             self.iterations,
+            self.units_per_iteration,
             self.allocs,
-            self.per_iteration()
+            self.per_unit(),
+            self.unit
         )
     }
 
     /// One results-file row.
     fn json(&self) -> String {
         format!(
-            "{{\"operation\":\"{}\",\"iterations\":{},\"allocations\":{},\"bytes\":{},\
-              \"allocations_per_iteration\":{}}}",
+            "{{\"operation\":\"{}\",\"iterations\":{},\"units_per_iteration\":{},\
+              \"unit\":\"{}\",\"allocations\":{},\"bytes\":{},\
+              \"allocations_per_iteration\":{},\"allocations_per_unit\":{}}}",
             self.what,
             self.iterations,
+            self.units_per_iteration,
+            self.unit,
             self.allocs,
             self.bytes,
-            self.per_iteration()
+            self.per_iteration(),
+            self.per_unit()
         )
     }
 }
@@ -3808,7 +3933,13 @@ impl AllocWindow {
 /// allocation path, so counting during a timing run would attribute the counter's own
 /// cost to the code under test — which is how a measurement instrument ends up
 /// reporting its overhead as a result.
-async fn count_allocations<F, Fut>(iterations: u64, what: &'static str, body: F) -> AllocWindow
+async fn count_allocations<F, Fut>(
+    iterations: u64,
+    units_per_iteration: u64,
+    what: &'static str,
+    unit: &'static str,
+    body: F,
+) -> AllocWindow
 where
     F: Fn() -> Fut,
     Fut: Future<Output = ()>,
@@ -3823,6 +3954,8 @@ where
     AllocWindow {
         what,
         iterations,
+        units_per_iteration,
+        unit,
         allocs,
         bytes,
     }
@@ -3847,78 +3980,139 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
     const CONTENDED: usize = 8;
 
     println!("allocation attribution — every window counted separately from every timed round");
-    println!("{TASKS} tasks per wave unless stated otherwise\n");
+    println!("one wave is {TASKS} tasks, so a wave row is read per task and a single-operation");
+    println!("row is read per operation; the units are named on every row\n");
 
     let mut windows = Vec::new();
 
-    // The whole facade wave at a contended ceiling: the shipped figure.
+    // ── The two ends: the whole facade wave, and the raw wave it is compared against ──
     windows.push(
-        count_allocations(TASKS, "facade spawn wave, contended (bound 8)", || async {
+        count_allocations(TASKS, TASKS, "facade spawn wave, contended", "task", || async {
             let _wave = facade_side(TASKS as usize, CONTENDED).await;
         })
         .await,
     );
-    // The same wave at a ceiling the wave never reaches: the same work with no waiting.
+    windows.push(
+        count_allocations(TASKS, TASKS, "raw tokio wave, contended", "task", || async {
+            let _wave = baseline_side(TASKS as usize, CONTENDED).await;
+        })
+        .await,
+    );
+    // The same wave at a ceiling the wave never reaches: the same work with no waiting,
+    // so the difference between the two facade rows is the cost of the wait for a slot.
     windows.push(
         count_allocations(
             TASKS,
+            TASKS,
             "facade spawn wave, uncontended (bound 4096)",
+            "task",
             || async {
                 let _wave = facade_side(TASKS as usize, UNCONTENDED).await;
             },
         )
         .await,
     );
-    // The raw equivalent at the same contended ceiling: the baseline.
+
+    // ── The pieces, each counted on its own ──
+    //
+    // A wave is not a black box: it is a tokio spawn plus this module's own per-task
+    // work, and the only way to know which half the difference is is to price each half.
     windows.push(
-        count_allocations(TASKS, "raw tokio wave, contended (bound 8)", || async {
-            let _wave = baseline_side(TASKS as usize, CONTENDED).await;
+        count_allocations(TASKS, TASKS, "one raw tokio spawn (JoinSet::spawn, no body)", "task", || async {
+            let mut set: JoinSet<()> = JoinSet::new();
+            set.spawn(async {});
+            while set.join_next().await.is_some() {}
         })
         .await,
     );
-    // One child token, on its own: the per-task cancellation token the facade mints.
     windows.push(
-        count_allocations(
-            TASKS,
-            "one child token (CancellationToken::child_token)",
-            || async {
-                let root = lgwks_bot::rt::sync::CancellationToken::new();
-                let child = root.child_token();
-                let _kept = child;
-            },
-        )
+        count_allocations(TASKS, 1, "one Supervisor::new(4096)", "supervisor", || async {
+            let _supervisor = Supervisor::new(UNCONTENDED);
+        })
         .await,
     );
-    // One raced wait, on its own: the cancellation race the admission path performs
-    // per contended spawn.
     windows.push(
-        count_allocations(
-            TASKS,
-            "one cancellation race (run_until_cancelled)",
-            || async {
-                let root = lgwks_bot::rt::sync::CancellationToken::new();
-                let raced = root.run_until_cancelled(async {});
-                let _done = raced.await;
-            },
-        )
+        count_allocations(TASKS, 1, "one CancellationToken::new (a root token)", "token", || async {
+            let _token = lgwks_bot::rt::sync::CancellationToken::new();
+        })
+        .await,
+    );
+    // A child cannot exist without a parent, so this window *is* the spawn path's whole
+    // token cost and the child's own share of it is the difference from the root window
+    // above. Two windows for it would have measured the same operation twice.
+    windows.push(
+        count_allocations(TASKS, 1, "a root token plus one child (the spawn path)", "child token", || async {
+            let root = lgwks_bot::rt::sync::CancellationToken::new();
+            let _child = root.child_token();
+        })
+        .await,
+    );
+    windows.push(
+        count_allocations(TASKS, 1, "one CancellationToken clone", "clone", || async {
+            let root = lgwks_bot::rt::sync::CancellationToken::new();
+            let _kept = root.clone();
+        })
+        .await,
+    );
+    windows.push(
+        count_allocations(TASKS, 1, "one cancellation race (run_until_cancelled)", "race", || async {
+            let root = lgwks_bot::rt::sync::CancellationToken::new();
+            let raced = root.run_until_cancelled(async {});
+            let _done = raced.await;
+        })
         .await,
     );
 
     for window in &windows {
         println!("  {}", window.line());
     }
+
+    // Read by name rather than by index. An index is a second list to keep in step with
+    // the first, and it silently read the wrong window the moment a duplicate was removed
+    // from the middle — which is how `root_only` came to report 5 allocations for a token
+    // that costs 1, and the headline below it a *negative* child token.
+    let named = |needle: &str| {
+        windows
+            .iter()
+            .find(|window| window.what.contains(needle))
+            .map_or(0.0, AllocWindow::per_unit)
+    };
+    let facade_wave = named("facade spawn wave, contended");
+    let raw_wave = named("raw tokio wave");
+    let raw_spawn = named("one raw tokio spawn");
+    let root_plus_child = named("root token plus one child");
+    let root_only = named("(a root token)");
     println!(
-        "\nthe facade's excess over raw tokio is {} allocs per task at the contended \
-         ceiling, and {} of those are the wait for a slot rather than the spawn",
-        windows[0].per_iteration() - windows[2].per_iteration(),
-        windows[0].per_iteration() - windows[1].per_iteration()
+        "\ndecomposition, all per task, from the rows above rather than asserted:"
+    );
+    println!("  the facade's whole wave                    {facade_wave:>8.2} allocs per task");
+    println!("  the raw wave doing the same work            {raw_wave:>8.2} allocs per task");
+    println!("  the facade's excess over raw               {:>8.2} allocs per task", facade_wave - raw_wave);
+    println!("  a raw tokio spawn on its own                {raw_spawn:>8.2} allocs per task");
+    println!("  a root token plus one child token           {root_plus_child:>8.2} allocs per token");
+    println!("  a root token on its own                     {root_only:>8.2} allocs per token");
+    println!(
+        "  so the child token the spawn path mints     {:>8.2} allocs per task",
+        root_plus_child - root_only
+    );
+    println!(
+        "  and the facade's residual over a raw spawn  {:>8.2} allocs per task",
+        facade_wave - raw_spawn
     );
 
     if let Some(path) = json {
         let body = format!(
-            "{{\"tool\":\"lgwks-bench-async-alloc-attribution\",\"note\":\"each window is \
-              counted separately; the facade's excess is the difference between the whole \
-              wave and the raw wave at the same ceiling\",\"windows\":[\n{}\n]}}",
+            "{{\"tool\":\"lgwks-bench-async-alloc-attribution\",\"note\":\"every window is \
+              counted separately from every timed round; a wave row is a per-TASK figure and a \
+              single-operation row is per operation, and the unit is named on every row\",\
+              \"decomposition\":{{\"facade_wave\":{facade_wave},\"raw_wave\":{raw_wave},\
+              \"facade_excess_over_raw\":{},\"raw_spawn_alone\":{raw_spawn},\
+              \"root_plus_child_token\":{root_plus_child},\"root_token_alone\":{root_only},\
+              \"child_token_alone\":{},\"facade_residual_over_a_raw_spawn\":{}}},\
+              \"windows\":[\n{}\n]}}",
+            facade_wave - raw_wave,
+            root_plus_child - root_only,
+            facade_wave - raw_spawn,
             windows
                 .iter()
                 .map(AllocWindow::json)
@@ -4081,14 +4275,11 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     if !failures.is_empty() {
-        let refusal = Err(format!(
-            "{} seeded world(s) did not replay: {}",
-            failures.len(),
-            failures.join("; ")
-        )
-        .into());
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_simulation: refusing a simulation that did not replay");
-        return refusal;
+        return Err(refuse_failed(
+            "seeded open-loop model",
+            "seeded world(s) did not replay",
+            &failures,
+        ));
     }
     println!(
         "every seeded world replayed to the same trace hash; the p99-intended and \
@@ -4197,13 +4388,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pasted excerpt carries it. `available_parallelism` is what the runtime would
     // otherwise discover for itself, so the discovered case is printed as the same
     // number the scheduler would have used rather than as the word "default".
+    let (load, load_source) = host_load_average();
     println!(
-        "host: {} logical cores visible, runtime workers: {}",
+        "host: {} logical cores visible, runtime workers: {}, 1-minute load average: {} ({})",
         std::thread::available_parallelism().map_or(0, |cores| cores.get()),
         workers.map_or_else(
             || "discovered (available_parallelism)".to_string(),
             |count| count.to_string()
-        )
+        ),
+        load.as_deref().unwrap_or("unavailable"),
+        load_source
     );
 
     if simulation {

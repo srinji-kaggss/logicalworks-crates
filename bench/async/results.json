@@ -1,24 +1,11 @@
 {
- "tool":"lgwks-bench-async",
- "rounds":11,
- "fairness":"paired; aborted on any work-count mismatch",
- "floor_seconds":0.000009959,
- "ladder":{
-  "note":"both sides at every concurrency tier the contract names; bound 64 on every tier; 5 paired rounds; gated on identical work per round",
-  "peak_rss_bytes":3637248,
-  "peak_rss_source":"/usr/bin/time -l maximum resident set size, whole 4-tier process",
-  "wall_seconds":2.57,
-  "ceiling_reached":"100000 tasks, the top tier the contract names; the host reached it, so nothing is extrapolated",
-  "tiers":[
-   {"tier":100,"bound":64,"facade_p50":0.001796417,"facade_p95":0.001880566,"facade_p99":0.001893146,"baseline_p50":0.000122916,"baseline_p95":0.0003205746,"baseline_p99":0.00035564772,"facade_work_units":100,"baseline_work_units":100,"completed":100,"cancelled":0,"aborted":0},
-   {"tier":1000,"bound":64,"facade_p50":0.003482084,"facade_p95":0.003909783,"facade_p99":0.003942723,"baseline_p50":0.001222791,"baseline_p95":0.0013000918,"baseline_p99":0.00131135196,"facade_work_units":1000,"baseline_work_units":1000,"completed":1000,"cancelled":0,"aborted":0},
-   {"tier":10000,"bound":64,"facade_p50":0.023003834,"facade_p95":0.0281006336,"facade_p99":0.028219160320000002,"baseline_p50":0.013128417,"baseline_p95":0.016464092,"baseline_p99":0.016890252,"facade_work_units":10000,"baseline_work_units":10000,"completed":10000,"cancelled":0,"aborted":0},
-   {"tier":100000,"bound":64,"facade_p50":0.231890167,"facade_p95":0.2997341668,"facade_p99":0.30365943336,"baseline_p50":0.13418575,"baseline_p95":0.1580877754,"baseline_p99":0.16029282228,"facade_work_units":100000,"baseline_work_units":100000,"completed":100000,"cancelled":0,"aborted":0}
-  ]
- },
- "scenarios":[
-{"scenario":"quiet-async-bot","tasks":256,"bound":8,"facade_p50":0.002130042,"facade_p99":0.0027626702,"baseline_p50":0.000405541,"baseline_p99":0.0012536869000000003,"ratio":5.252346865051869,"ci_lo":3.325562861127715,"ci_hi":5.6159074071274135,"distinguishes":true,"completed":256,"cancelled":0,"aborted":0,"work_units":256},
-{"scenario":"high-fanout","tasks":2048,"bound":32,"facade_p50":0.005460625,"facade_p99":0.0075942161000000005,"baseline_p50":0.0024725,"baseline_p99":0.0034393173,"ratio":2.2085439838220426,"ci_lo":1.9812366219745403,"ci_hi":2.2591021882651003,"distinguishes":true,"completed":2048,"cancelled":0,"aborted":0,"work_units":2048},
-{"scenario":"at-capacity","tasks":512,"bound":4,"facade_p50":0.003224791,"facade_p99":0.0038243083,"baseline_p50":0.001304209,"baseline_p99":0.0029583708000000004,"ratio":2.4726029340389464,"ci_lo":1.965025310630465,"ci_hi":2.939425352838387,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512},
-{"scenario":"single-permit","tasks":512,"bound":1,"facade_p50":0.006516834,"facade_p99":0.010573904100000002,"baseline_p50":0.004743042,"baseline_p99":0.0070474289,"ratio":1.3739777130373292,"ci_lo":1.2801545706954776,"ci_hi":1.625758834522547,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512}]
+"tool":"lgwks-bench-async",
+"rounds":11,
+"fairness":"paired; aborted on any work-count mismatch",
+"floor_seconds":0.00000675,
+"scenarios":[
+{"scenario":"quiet-async-bot","tasks":256,"bound":8,"facade_p50":0.001958125,"facade_p99":0.0020001994,"baseline_p50":0.00035075,"baseline_p99":0.0003871378,"ratio":5.582679971489664,"ci_lo":5.240105540897098,"ci_hi":5.801492039423805,"distinguishes":true,"completed":256,"cancelled":0,"aborted":0,"work_units":256},
+{"scenario":"high-fanout","tasks":2048,"bound":32,"facade_p50":0.003998709,"facade_p99":0.0056199041,"baseline_p50":0.002019833,"baseline_p99":0.0021848167,"ratio":1.9797225810252628,"ci_lo":1.8226270430906388,"ci_hi":2.066877673385964,"distinguishes":true,"completed":2048,"cancelled":0,"aborted":0,"work_units":2048},
+{"scenario":"at-capacity","tasks":512,"bound":4,"facade_p50":0.002767291,"facade_p99":0.0029113214,"baseline_p50":0.001115708,"baseline_p99":0.0012642044999999998,"ratio":2.480300401180237,"ci_lo":2.4260641949507424,"ci_hi":2.568958903225575,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512},
+{"scenario":"single-permit","tasks":512,"bound":1,"facade_p50":0.005759292,"facade_p99":0.0060286792,"baseline_p50":0.003844125,"baseline_p99":0.004006454800000001,"ratio":1.4982062237830456,"ci_lo":1.4517915763145974,"ci_hi":1.5335641861125127,"distinguishes":true,"completed":512,"cancelled":0,"aborted":0,"work_units":512}]
 }
