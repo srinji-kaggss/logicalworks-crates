@@ -67,8 +67,8 @@ under it.
 ## Logging
 
 Library code in this workspace does not write to the terminal: `print_stdout` and
-`print_stderr` are `forbid` in `[workspace.lints.clippy]` (`Cargo.toml:124` and
-`Cargo.toml:125`), and `forbid` cannot be lowered from source by an `#[allow]`.
+`print_stderr` are `forbid` in `[workspace.lints.clippy]` (`Cargo.toml:130` and
+`Cargo.toml:131`), and `forbid` cannot be lowered from source by an `#[allow]`.
 No file under `crates/*/src` or `crates/*/examples` calls `println!` or
 `eprintln!`. `lgwks_std::trace` is the replacement, and `trace` is default-on
 precisely so it is reachable without selecting a feature first.
