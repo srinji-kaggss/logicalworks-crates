@@ -6,7 +6,9 @@
 //! regression replays identically.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "wire")]
 use crate::rng;
+#[cfg(feature = "wire")]
 use crate::wire_record;
 
 #[cfg(feature = "wire")]

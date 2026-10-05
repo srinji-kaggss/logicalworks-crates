@@ -8,6 +8,7 @@
 //! move the encoding is caught on every OS the suite runs on.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "wire")]
 use crate::wire_record;
 
 #[cfg(feature = "wire")]

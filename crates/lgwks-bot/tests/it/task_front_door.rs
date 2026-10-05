@@ -852,7 +852,9 @@ fn walk_pages(
             move |step, item| async move {
                 step.checkpoint()?;
                 if Some(item) == failing {
-                    return Err(FlowError::failed("page refused"));
+                    let refusal = Err(FlowError::failed("page refused"));
+                    lgwks_std::trace::debug!(page = item, "walk_pages: the scripted page refuses");
+                    return refusal;
                 }
                 Ok(item)
             },
