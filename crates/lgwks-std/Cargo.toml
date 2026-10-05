@@ -96,6 +96,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "pattern-workloads"
 required-features = ["pattern"]
 
+[[example]]
+name = "digest_timing"
+required-features = ["hash", "trace"]
+
 [[test]]
 name = "http_alloc"
 path = "tests/http_alloc.rs"
