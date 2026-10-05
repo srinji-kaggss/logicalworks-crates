@@ -462,14 +462,14 @@ row = "Untrusted PR, pagination, rename, unavailable diff and build-script execu
 state = "present"
 gap = "Untrusted PR, rename, unavailable diff, both diff ceilings and build-script execution are named; pagination of a list endpoint has no named test."
 tests = [
-  "it::sim_review_path::an_untrusted_build_script_is_never_executed",
+  "sim_review_path::an_untrusted_build_script_is_never_executed",
   "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed",
-  "it::sim_review_path::a_renamed_repository_is_refused_naming_both",
+  "sim_review_path::a_renamed_repository_is_refused_naming_both",
   "it::pr_review_journey::a_renamed_repository_is_refused_and_never_silently_re_pointed",
-  "it::sim_review_path::an_unavailable_diff_publishes_nothing",
+  "sim_review_path::an_unavailable_diff_publishes_nothing",
   "it::pr_review_journey::an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing",
-  "it::sim_review_path::the_two_diff_ceilings_are_refused_separately",
-  "it::sim_review_path::a_partial_submission_reports_both_counts",
+  "sim_review_path::the_two_diff_ceilings_are_refused_separately",
+  "sim_review_path::a_partial_submission_reports_both_counts",
   "it::gh_binding::an_unavailable_diff_is_a_typed_coverage_refusal",
   "it::gh_binding::a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal",
   "it::gh_binding::a_review_list_past_the_ceiling_is_refused_not_truncated",
@@ -483,8 +483,8 @@ state = "exercised"
 gap = ""
 tests = [
   "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing",
-  "it::sim_review_path::head_moved_between_snapshot_and_publish_r32",
-  "it::sim_review_path::a_publication_is_pinned_to_the_read_commit",
+  "sim_review_path::head_moved_between_snapshot_and_publish_r32",
+  "sim_review_path::a_publication_is_pinned_to_the_read_commit",
 ]
 
 [[row]]
@@ -499,8 +499,8 @@ tests = [
   "it::pr_review_journey::a_pending_draft_is_reconciled_as_a_draft_and_never_reposted",
   "it::pr_review_journey::a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost",
   "it::pr_review_journey::a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled",
-  "it::sim_review_path::duplicate_submission_r16",
-  "it::sim_review_path::verified_and_not_observed_r32",
+  "sim_review_path::duplicate_submission_r16",
+  "sim_review_path::verified_and_not_observed_r32",
 ]
 
 [[row]]
@@ -511,8 +511,8 @@ state = "exercised"
 gap = ""
 tests = [
   "it::pr_review_journey::a_lost_read_permission_reports_unverified_and_retains_the_review_id",
-  "it::sim_review_path::an_unverified_effect_retains_its_review_id",
-  "it::sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
+  "sim_review_path::an_unverified_effect_retains_its_review_id",
+  "sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
   "it::gh_binding::a_record_still_being_appended_is_not_read_back",
 ]
 
