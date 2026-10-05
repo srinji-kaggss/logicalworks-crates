@@ -160,4 +160,5 @@ mod t02_compile_surface;
 mod t22_process_surface;
 mod task_front_door;
 mod task_million;
+mod tenancy;
 mod wrong_identity_evidence;
