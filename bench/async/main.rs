@@ -1549,7 +1549,17 @@ struct OpenLoopSpec {
     /// Arrivals offered per second.
     offered_rate: u64,
     /// How long arrivals are offered for.
+    ///
+    /// A ceiling on the run, never the run's definition: the *arrival count* below is.
+    /// Offering "for one second" lets a faster side place more arrivals than a slower
+    /// one, and the difference would be a property of the clock rather than of the
+    /// engine — which is exactly what the fairness gate exists to refuse, and it did
+    /// refuse it, naming `placed`. So a run offers the arrivals the rate and the window
+    /// define and stops on the count, and the window only bounds how long a slow side may
+    /// take to offer them.
     window: Duration,
+    /// Arrivals to offer, or `None` to offer until the window closes.
+    arrivals: Option<u64>,
     /// The in-flight ceiling.
     bound: usize,
     /// Report every `drop_every`-th arrival as placed without placing it.
@@ -2043,7 +2053,15 @@ async fn open_loop_run<E: Engine>(
     let mut depth = DepthTrace::new();
     let mut max_lag = Duration::ZERO;
 
-    while t0.elapsed() < spec.window {
+    loop {
+        if let Some(limit) = spec.arrivals
+            && offered >= limit
+        {
+            break;
+        }
+        if spec.arrivals.is_none() && t0.elapsed() >= spec.window {
+            break;
+        }
         engine.reap();
         let intended = t0 + intended_arrival(offered, period, 0);
         wait_until(intended).await;
@@ -2288,10 +2306,26 @@ const KNEE_COLUMNS: [&str; 5] = [
     "refused at 64x",
 ];
 
-/// One measured point: a run at one offered rate, on one side.
-struct SweepPoint {
+/// Both sides' runs at one offered rate, gathered so the knee table can read either.
+///
+/// A `Vec` of two rather than a named pair, because the sweep walks both sides in the
+/// same loop and the only thing that differs is the engine — so the ladder is a list of
+/// points and each point holds the runs it measured.
+struct SweepPair {
     bound: usize,
-    run: SideRun,
+    offered_rate: u64,
+    facade: SideRun,
+    baseline: SideRun,
+}
+
+impl SweepPair {
+    /// This pair's run on `side`.
+    fn run(&self, side: Side) -> &SideRun {
+        match side {
+            Side::Facade => &self.facade,
+            Side::Baseline => &self.baseline,
+        }
+    }
 }
 
 /// Measure one side at one offered rate and gate it, for the table and the record.
@@ -2350,7 +2384,7 @@ async fn saturation_sweep(
     );
     println!("latency is measured from each arrival's INTENDED start\n");
 
-    let mut points: Vec<SweepPoint> = Vec::new();
+    let mut points: Vec<SweepPair> = Vec::new();
     let mut json_rows: Vec<String> = Vec::new();
 
     for bound in SWEEP_BOUNDS {
@@ -2360,6 +2394,7 @@ async fn saturation_sweep(
         let warm = OpenLoopSpec {
             offered_rate: sweep_rate(bound, 0),
             window: Duration::from_millis(300),
+            arrivals: None,
             bound,
             drop_every: 0,
         };
@@ -2370,9 +2405,14 @@ async fn saturation_sweep(
         println!("bound {bound}:");
         print_columns(&SWEEP_COLUMNS);
         for multiplier in SWEEP_MULTIPLIERS {
+            let rate = sweep_rate(bound, multiplier);
             let spec = OpenLoopSpec {
-                offered_rate: sweep_rate(bound, multiplier),
+                offered_rate: rate,
                 window,
+                // The count the rate and the window define: both sides are offered the
+                // same work, so a difference in what they placed is a difference in the
+                // engines rather than in how long each had.
+                arrivals: Some(rate.saturating_mul(window.as_secs())),
                 bound,
                 drop_every: 0,
             };
@@ -2397,9 +2437,11 @@ async fn saturation_sweep(
                     runs[0].refused, runs[1].refused
                 );
             }
-            points.push(SweepPoint {
+            points.push(SweepPair {
                 bound,
-                run: runs.swap_remove(0),
+                offered_rate: spec.offered_rate,
+                facade: runs.swap_remove(0),
+                baseline: runs.swap_remove(0),
             });
         }
         println!();
@@ -2416,7 +2458,7 @@ async fn saturation_sweep(
 /// budget. It is declared rather than eyeballed because a curve has no knee of its
 /// own: the same table read against a 10 ms SLO has a different one, and the SLO is
 /// named on the same line so the two cannot be separated.
-fn declare_knees(points: &[SweepPoint]) {
+fn declare_knees(points: &[SweepPair]) {
     println!(
         "knee — the highest offered rate with no refusal and p99 <= {} ms",
         SLO_P99_NANOS / 1_000_000
@@ -2427,16 +2469,15 @@ fn declare_knees(points: &[SweepPoint]) {
             let mut knee_rate = 0_u64;
             let mut knee_p99 = 0_u64;
             let mut refused_at_top = 0_u64;
-            for point in points
-                .iter()
-                .filter(|point| point.bound == bound && point.run.side == side)
-            {
-                if point.run.within_slo() {
-                    knee_rate = point.run.offered_rate;
-                    knee_p99 = point.run.histogram.quantile_nanos(0.99);
+            let top_rate = sweep_rate(bound, 64);
+            for point in points.iter().filter(|point| point.bound == bound) {
+                let run = point.run(side);
+                if run.within_slo() {
+                    knee_rate = point.offered_rate;
+                    knee_p99 = run.histogram.quantile_nanos(0.99);
                 }
-                if point.run.offered_rate == sweep_rate(bound, 64) {
-                    refused_at_top = point.run.refused;
+                if point.offered_rate == top_rate {
+                    refused_at_top = run.refused;
                 }
             }
             print_row(&[
