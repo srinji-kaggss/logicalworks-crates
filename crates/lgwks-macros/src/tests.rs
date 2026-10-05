@@ -22,7 +22,72 @@ fn expand(source: &str) -> Result<String, String> {
 
 /// Every refusal the language makes, each with the fragment of its message
 /// that names the replacement.
-const REFUSALS: [(&str, &str, &str); 20] = [
+const REFUSALS: [(&str, &str, &str); 33] = [
+    (
+        "unwrap by path",
+        "flow f(x: Option<u8>):\n    let n = Option::unwrap(x)\n",
+        "unwrap()` ends the program",
+    ),
+    (
+        "expect by turbofish path",
+        "flow f(r: Result<u8, String>):\n    let n = Result::<u8, String>::expect(r, \"n\")\n",
+        "expect()` ends the program",
+    ),
+    (
+        "unwrap_err",
+        "flow f(r: Result<u8, String>):\n    let e = r.unwrap_err()\n",
+        "unwrap_err()` ends the program",
+    ),
+    (
+        "expect_err",
+        "flow f(r: Result<u8, String>):\n    let e = r.expect_err(\"e\")\n",
+        "expect_err()` ends the program",
+    ),
+    (
+        "assert_eq",
+        "flow f(a: u8, b: u8):\n    assert_eq!(a, b)\n",
+        "`assert_eq!` ends the program",
+    ),
+    (
+        "debug_assert",
+        "flow f(a: bool):\n    debug_assert!(a)\n",
+        "`debug_assert!` ends the program",
+    ),
+    (
+        "process exit",
+        "flow f():\n    std::process::exit(1)\n",
+        "ending the process from a flow",
+    ),
+    (
+        "process abort",
+        "flow f():\n    std::process::abort()\n",
+        "ending the process from a flow",
+    ),
+    (
+        "mem forget",
+        "flow f(guard: String):\n    std::mem::forget(guard)\n",
+        "`mem::forget` leaks",
+    ),
+    (
+        "indexing",
+        "flow f(xs: Vec<u8>) -> u8:\n    xs[3]\n",
+        "indexing ends the program",
+    ),
+    (
+        "slicing a call's result",
+        "flow f(text: String) -> usize:\n    text.as_bytes()[1..].len()\n",
+        "indexing ends the program",
+    ),
+    (
+        "import that renames a refused call",
+        "flow f():\n    use std::thread::{sleep as pause};\n    pause(d)\n",
+        "`use` of `thread`",
+    ),
+    (
+        "machine path inside a format string",
+        "flow f(name: &str):\n    let p = format!(\"{}/home/me/{}\", root, name)\n",
+        "absolute path from one machine",
+    ),
     (
         "typed concurrency",
         "flow f(xs: Vec<u8>):\n    each x in xs, at most 16 at once:\n        x\n",
@@ -137,6 +202,54 @@ fn every_refusal_names_its_replacement() -> Result<(), String> {
             "{case}: expected {expected:?}, got {message:?}"
         );
     }
+    Ok(())
+}
+
+/// The near neighbours of every refusal, which must still expand: a refusal
+/// that also catches these would push authors back to writing the flow by
+/// hand, which is the opposite of what the language is for.
+#[test]
+fn the_near_misses_of_each_refusal_still_expand() -> Result<(), String> {
+    let source = "flow f(xs: Vec<u8>, pair: [u8; 2], r: Result<u8, String>) -> u8:\n\
+                  \x20   let [a, b] = pair\n\
+                  \x20   let table: [u8; 2] = [a, b]\n\
+                  \x20   let built = vec![1, 2]\n\
+                  \x20   let first = xs.get(3).copied().unwrap_or(0)\n\
+                  \x20   let fallback = r.unwrap_or_default()\n\
+                  \x20   let tail = xs.get(1..).map_or(0, <[u8]>::len)\n\
+                  \x20   let kept = std::mem::take(&mut vec![0u8])\n\
+                  \x20   for x in [1, 2]:\n\
+                  \x20       let seen = x\n\
+                  \x20   give back first + fallback + table.len() as u8 + built.len() as u8 + tail as u8 + kept.len() as u8\n";
+    let expanded = expand(source)?;
+    assert!(
+        expanded.contains("forbid"),
+        "every flow carries the forbidden lints: {expanded}"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_flow_forbids_the_lints_the_tokens_cannot_resolve() -> Result<(), String> {
+    let expanded = expand("pub flow f():\n    let x = 1\n")?;
+    for lint in [
+        "unsafe_code",
+        "clippy :: unwrap_used",
+        "clippy :: expect_used",
+        "clippy :: panic",
+        "clippy :: indexing_slicing",
+        "clippy :: exit",
+        "clippy :: mem_forget",
+        "clippy :: panic_in_result_fn",
+    ] {
+        assert!(expanded.contains(lint), "missing {lint:?} in {expanded}");
+    }
+    let at_forbid = expanded.find("forbid").ok_or("no forbid attribute")?;
+    let at_fn = expanded.find("async fn").ok_or("no flow")?;
+    assert!(
+        at_forbid < at_fn,
+        "the attribute sits on the flow, not after it"
+    );
     Ok(())
 }
 
