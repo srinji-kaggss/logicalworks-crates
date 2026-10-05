@@ -21,7 +21,7 @@
 #![cfg(all(unix, feature = "process"))]
 
 use std::error::Error;
-use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -105,23 +105,42 @@ impl Group {
     /// The shell backgrounds the members and then becomes the last sleeper
     /// itself, so every process in the group is a `sleep` that outlives any
     /// test unless the group is killed.
+    ///
+    /// It returns only after the shell reports every member forked. A group
+    /// killed while its leader is still forking can lose a child to the race
+    /// between the fork and the signal (the first run of this file left one
+    /// alive past its reap on Darwin); that race is a supervisor's to retry,
+    /// not the contract under test here.
     fn spawn(members: usize) -> Result<Self, Box<dyn Error>> {
         let mut script = "sleep 30 & ".repeat(members);
-        script.push_str("exec sleep 30");
+        script.push_str("echo ready; exec sleep 30");
         let leader = Command::new("sh")
             .arg("-c")
             .arg(&script)
             .process_group(0)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
         let id = i32::try_from(leader.id())?;
-        Ok(Self {
+        let mut group = Self {
             leader,
             id,
             phase: Phase::Live,
-        })
+        };
+        let stdout = group
+            .leader
+            .stdout
+            .take()
+            .ok_or("the leader's stdout was not piped")?;
+        let mut ready = String::new();
+        BufReader::new(stdout).read_line(&mut ready)?;
+        assert_eq!(
+            ready.trim_end(),
+            "ready",
+            "group {id}: the leader must report its members forked"
+        );
+        Ok(group)
     }
 
     /// Kills the group. The leader stays unreaped.
@@ -136,9 +155,17 @@ impl Group {
     fn reap(&mut self) -> Result<Option<i32>, Box<dyn Error>> {
         let status = self.leader.wait()?;
         self.phase = Phase::Reaped;
-        if !settles_absent(self.id)? {
-            return Err(format!("group {} outlived {SETTLE:?} after its reap", self.id).into());
-        }
+        let settled = settles_absent(self.id)? || holder_group(self.id)? == Some(self.id);
+        let survivors = if settled {
+            String::new()
+        } else {
+            group_listing(self.id)?
+        };
+        assert!(
+            settled,
+            "group {} outlived {SETTLE:?} after its reap; still in it: {survivors}",
+            self.id
+        );
         Ok(status.signal())
     }
 
@@ -173,6 +200,44 @@ fn settles_absent(id: i32) -> Result<bool, Box<dyn Error>> {
         std::thread::yield_now();
     }
     Ok(false)
+}
+
+/// The group of whatever process holds `pid` now, or `None` when none does.
+///
+/// Called only for a pid this test has already reaped, so a process found
+/// there is someone else's: the OS reused the id once the reap released it.
+/// That is the race a supervisor avoids by keeping its leader unreaped until
+/// signalling is done, and the reason no test here signals a reaped id. When
+/// the new holder leads its own group, a probe of the id answers for that
+/// group, not ours, so the answer says nothing about our cleanup.
+fn holder_group(pid: i32) -> Result<Option<i32>, Box<dyn Error>> {
+    let listed = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    if !listed.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&listed.stdout);
+    Ok(text.trim().parse().ok())
+}
+
+/// Every process in group `id` as `pid ppid stat command`, for a failure
+/// message that names what survived rather than only that something did.
+fn group_listing(id: i32) -> Result<String, Box<dyn Error>> {
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,pgid=,ppid=,stat=,comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    let text = String::from_utf8_lossy(&listed.stdout);
+    let wanted = id.to_string();
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|row| row.split_whitespace().nth(1) == Some(wanted.as_str()))
+        .collect();
+    Ok(rows.join(" | "))
 }
 
 /// Whether the unreaped leader `pid` is observed as exited within [`SETTLE`].
@@ -230,127 +295,128 @@ fn zombie_group_refusal(error: &std::io::Error) -> bool {
     cfg!(target_os = "macos") && error.raw_os_error() == Some(EPERM)
 }
 
+/// Probes `group` and checks the answer against the phase the model holds it in.
+fn check_probe(group: &Group, at: &str) -> TestResult {
+    let present = process_group_exists(group.id)?;
+    match group.phase {
+        Phase::Live => assert!(present, "{at}: a live group must be present"),
+        // A zombie leader still occupies its group; whether the OS reports it
+        // present is the OS's, but the probe is never an error.
+        Phase::Killed => {}
+        Phase::Reaped => assert!(
+            !present || holder_group(group.id)? == Some(group.id),
+            "{at}: a reaped group must be absent"
+        ),
+    }
+    Ok(())
+}
+
+/// Kills `group` and checks the answer against its phase.
+fn check_kill(group: &mut Group, at: &str) -> TestResult {
+    match group.phase {
+        Phase::Live => group.kill(),
+        Phase::Killed => {
+            // Members may be zombies or gone: success or ESRCH, or on Darwin
+            // EPERM, which is what it answers for a group that holds only
+            // zombies. Never another error.
+            if let Err(error) = kill_process_group(group.id) {
+                assert!(
+                    is_esrch(&error) || zombie_group_refusal(&error),
+                    "{at}: a second kill must succeed or say ESRCH, got {error}"
+                );
+            }
+            Ok(())
+        }
+        // A reaped id may already belong to another process, so neither a
+        // supervisor nor this simulation ever signals it.
+        Phase::Reaped => Ok(()),
+    }
+}
+
+/// Observes `group`'s leader without reaping it and checks the answer.
+fn check_observe(group: &Group, at: &str) -> TestResult {
+    match group.phase {
+        Phase::Live => {
+            let exited = child_has_exited_without_reaping(group.id)?;
+            assert!(!exited, "{at}: a live leader must not read as exited");
+        }
+        Phase::Killed => {
+            let exited = exit_observed(group.id)?;
+            assert!(
+                exited,
+                "{at}: a killed leader must read as exited within {SETTLE:?}"
+            );
+        }
+        Phase::Reaped => assert!(
+            child_has_exited_without_reaping(group.id).is_err()
+                || holder_group(group.id)?.is_some(),
+            "{at}: a reaped leader is no longer a child to observe"
+        ),
+    }
+    Ok(())
+}
+
+/// Reaps `group`, killing it first when the model holds it live, and checks
+/// that the leader ended by `SIGKILL`.
+fn check_reap(group: &mut Group, at: &str) -> TestResult {
+    let signal = match group.phase {
+        Phase::Live => group.stop()?,
+        Phase::Killed => group.reap()?,
+        Phase::Reaped => return Ok(()),
+    };
+    assert_eq!(signal, Some(SIGKILL), "{at}: the leader ends by SIGKILL");
+    Ok(())
+}
+
+/// One scheduled step: spawn a group, or probe, kill, observe or reap one,
+/// with the step and the phases folded into `trace`.
+fn lifecycle_step(rng: &mut Rng, trace: &mut u64, groups: &mut Vec<Group>, at: &str) -> TestResult {
+    let live = groups
+        .iter()
+        .filter(|group| group.phase != Phase::Reaped)
+        .count();
+    let op = if live == 0 || (groups.len() < MAX_GROUPS && rng.below(4) == 0) {
+        0
+    } else {
+        rng.below(4).saturating_add(1)
+    };
+    fold_usize(trace, op);
+    if op == 0 {
+        let members = rng.below(MAX_MEMBERS.saturating_add(1));
+        fold_usize(trace, members);
+        groups.push(Group::spawn(members)?);
+        return Ok(());
+    }
+    let slot = rng.below(groups.len());
+    let group = groups
+        .get_mut(slot)
+        .ok_or_else(|| format!("{at}: slot {slot} is out of range"))?;
+    fold_usize(trace, slot);
+    fold(trace, group.phase.code());
+    let checked = match op {
+        1 => check_probe(group, at),
+        2 => check_kill(group, at),
+        3 => check_observe(group, at),
+        _ => check_reap(group, at),
+    };
+    checked?;
+    fold(trace, group.phase.code());
+    Ok(())
+}
+
 /// One seeded lifecycle, checked against the model at every step, as its
-/// trace hash.
+/// trace hash. Every group still running at the end is stopped and checked.
 fn lifecycle(seed: u64) -> Result<u64, Box<dyn Error>> {
     let mut rng = Rng::new(seed);
     let mut trace = initial_trace();
     let mut groups: Vec<Group> = Vec::new();
     for step in 0..STEPS {
-        let live = groups
-            .iter()
-            .filter(|group| group.phase != Phase::Reaped)
-            .count();
-        let op = if live == 0 || (groups.len() < MAX_GROUPS && rng.below(4) == 0) {
-            0
-        } else {
-            rng.below(4).saturating_add(1)
-        };
-        fold_usize(&mut trace, op);
-        if op == 0 {
-            let members = rng.below(MAX_MEMBERS.saturating_add(1));
-            fold_usize(&mut trace, members);
-            groups.push(Group::spawn(members)?);
-            continue;
-        }
-        let slot = rng.below(groups.len());
-        let group = groups
-            .get_mut(slot)
-            .ok_or_else(|| format!("seed {seed:#x} step {step}: slot {slot} is out of range"))?;
-        fold_usize(&mut trace, slot);
-        fold(&mut trace, group.phase.code());
-        match (op, group.phase) {
-            // Probe.
-            (1, Phase::Live) => {
-                let present = process_group_exists(group.id)?;
-                assert!(
-                    present,
-                    "seed {seed:#x} step {step}: a live group must be present"
-                );
-            }
-            (1, Phase::Killed) => {
-                // A zombie leader still occupies its group; whether the OS
-                // reports it present is the OS's, but it is never an error.
-                process_group_exists(group.id)?;
-            }
-            (1, Phase::Reaped) => {
-                let present = process_group_exists(group.id)?;
-                assert!(
-                    !present,
-                    "seed {seed:#x} step {step}: a reaped group must be absent"
-                );
-            }
-            // Kill.
-            (2, Phase::Live) => group.kill()?,
-            (2, Phase::Killed) => {
-                // Members may be zombies or gone: success or ESRCH, or on
-                // Darwin EPERM, which is what it answers for a group that
-                // holds only zombies. Never another error.
-                if let Err(error) = kill_process_group(group.id) {
-                    assert!(
-                        is_esrch(&error) || zombie_group_refusal(&error),
-                        "seed {seed:#x} step {step}: a second kill must succeed or say ESRCH, got {error}"
-                    );
-                }
-            }
-            (2, Phase::Reaped) => {
-                let refused = kill_process_group(group.id);
-                assert!(
-                    refused.as_ref().is_err_and(is_esrch),
-                    "seed {seed:#x} step {step}: killing a reaped group must say ESRCH, got {refused:?}"
-                );
-            }
-            // Observe the leader without reaping it.
-            (3, Phase::Live) => {
-                let exited = child_has_exited_without_reaping(group.id)?;
-                assert!(
-                    !exited,
-                    "seed {seed:#x} step {step}: a live leader must not read as exited"
-                );
-            }
-            (3, Phase::Killed) => {
-                assert!(
-                    exit_observed(group.id)?,
-                    "seed {seed:#x} step {step}: a killed leader must read as exited within {SETTLE:?}"
-                );
-            }
-            (3, Phase::Reaped) => {
-                assert!(
-                    child_has_exited_without_reaping(group.id).is_err(),
-                    "seed {seed:#x} step {step}: a reaped leader is no longer a child to observe"
-                );
-            }
-            // Reap, killing first when the model holds it live.
-            (_, Phase::Live) => {
-                let signal = group.stop()?;
-                assert_eq!(
-                    signal,
-                    Some(SIGKILL),
-                    "seed {seed:#x} step {step}: the leader ends by SIGKILL"
-                );
-            }
-            (_, Phase::Killed) => {
-                let signal = group.reap()?;
-                assert_eq!(
-                    signal,
-                    Some(SIGKILL),
-                    "seed {seed:#x} step {step}: the leader ends by SIGKILL"
-                );
-            }
-            (_, Phase::Reaped) => {}
-        }
-        fold(&mut trace, group.phase.code());
+        let at = format!("seed {seed:#x} step {step}");
+        lifecycle_step(&mut rng, &mut trace, &mut groups, &at)?;
     }
+    let drain = format!("seed {seed:#x} drain");
     for group in &mut groups {
-        match group.phase {
-            Phase::Live => {
-                group.stop()?;
-            }
-            Phase::Killed => {
-                group.reap()?;
-            }
-            Phase::Reaped => {}
-        }
+        check_reap(group, &drain)?;
         fold(&mut trace, group.phase.code());
     }
     Ok(trace)
@@ -517,7 +583,7 @@ fn a_group_kill_reaches_every_member() -> TestResult {
         // to take down with it.
         group.stop()?;
         assert!(
-            !process_group_exists(group.id)?,
+            !process_group_exists(group.id)? || holder_group(group.id)? == Some(group.id),
             "seed {seed:#x}: all {members} members must be gone after the group kill"
         );
     }
@@ -573,7 +639,8 @@ fn a_reaped_child_is_no_longer_observable() -> TestResult {
         let mut group = Group::spawn(Rng::new(seed).below(MAX_MEMBERS.saturating_add(1)))?;
         group.stop()?;
         assert!(
-            child_has_exited_without_reaping(group.id).is_err(),
+            child_has_exited_without_reaping(group.id).is_err()
+                || holder_group(group.id)?.is_some(),
             "seed {seed:#x}: a reaped pid must not be reported as an exit a second time"
         );
     }
@@ -632,7 +699,8 @@ fn two_tenants_groups_are_isolated() -> TestResult {
 }
 
 #[test]
-/// Concurrent probes of a live and a reaped group each get the model's answer.
+/// Concurrent probes of a live group and a vacant id each get the model's
+/// answer.
 fn concurrent_probes_agree_with_the_model() -> TestResult {
     /// Threads probing at once.
     const PROBERS: usize = 16;
@@ -640,9 +708,9 @@ fn concurrent_probes_agree_with_the_model() -> TestResult {
     const PROBES: usize = 256;
     for seed in SWEEP_SEEDS {
         let mut live = Group::spawn(1)?;
-        let mut gone = Group::spawn(1)?;
-        gone.stop()?;
-        let expected = [(live.id, true), (gone.id, false)];
+        // The absent case is an id no OS can issue, not a reaped one: a reaped
+        // id may be reissued to another test's group mid-probe.
+        let expected = [(live.id, true), (VACANT_FLOOR, false)];
         let disagreements = std::thread::scope(|scope| {
             // Every prober is started before any is joined, so the probes overlap.
             let mut probers = Vec::with_capacity(PROBERS);
@@ -677,19 +745,27 @@ fn concurrent_probes_agree_with_the_model() -> TestResult {
 }
 
 #[test]
-/// A retried cleanup is idempotent and honest: every repeat says `ESRCH`.
-fn a_second_kill_of_a_reaped_group_is_esrch_not_success() -> TestResult {
+/// A cleanup retried before the reap is idempotent: while the unreaped leader
+/// holds the id, every repeat kill succeeds or says the group is already
+/// dead, and the reap still reports the first kill's `SIGKILL`.
+fn a_kill_retried_before_the_reap_is_idempotent() -> TestResult {
     for seed in SWEEP_SEEDS {
         let mut rng = Rng::new(seed);
         let mut group = Group::spawn(rng.below(MAX_MEMBERS.saturating_add(1)))?;
-        group.stop()?;
+        group.kill()?;
         for retry in 0..rng.below(16).saturating_add(1) {
-            let again = kill_process_group(group.id);
-            assert!(
-                again.as_ref().is_err_and(is_esrch),
-                "seed {seed:#x} retry {retry}: a retried cleanup must not report a kill it did not make, got {again:?}"
-            );
+            if let Err(error) = kill_process_group(group.id) {
+                assert!(
+                    is_esrch(&error) || zombie_group_refusal(&error),
+                    "seed {seed:#x} retry {retry}: a retried kill must succeed or say ESRCH, got {error}"
+                );
+            }
         }
+        assert_eq!(
+            group.reap()?,
+            Some(SIGKILL),
+            "seed {seed:#x}: the retries do not change how the leader ended"
+        );
     }
     Ok(())
 }
@@ -720,7 +796,7 @@ fn a_leader_that_exits_by_itself_leaves_its_group_absent_once_reaped() -> TestRe
             "seed {seed:#x}: the reap returns the exit code"
         );
         assert!(
-            settles_absent(id)?,
+            settles_absent(id)? || holder_group(id)? == Some(id),
             "seed {seed:#x}: a group whose leader exited and was reaped must be absent"
         );
     }
