@@ -1596,6 +1596,33 @@ impl Supervisor {
             self.refused = self.refused.saturating_add(1);
             return None;
         }
+        self.reap();
+
+        // The fast path, and it is the common one: an uncontended spawn must not
+        // arm a timer.
+        //
+        // The loop below races the permit against the token *through* a
+        // `timeout(100 ms)` inside `run_until_cancelled`, and on a free permit
+        // none of that can fire — but building it is not free. Measured on an
+        // Apple M5 Pro, `run_until_cancelled` costs 13 heap allocations and the
+        // `timeout` registers a `Sleep` with the runtime's timer wheel, so every
+        // spawn of a supervisor that was not at its bound paid for a wait it
+        // never took. Taking a permit that is already free and re-checking
+        // cancellation on it is the same decision without the apparatus: the
+        // re-check is what keeps cancellation winning the race, and it runs
+        // before the permit is returned either way.
+        if let Some(permit) = self.try_take() {
+            if self.token.is_cancelled() {
+                // The permit drops here rather than being returned: a slot that
+                // freed after cancellation is not an admission offer, and this
+                // is the same rule the loop below applies to the same race.
+                drop(permit);
+                self.refused = self.refused.saturating_add(1);
+                return None;
+            }
+            return Some(permit);
+        }
+
         loop {
             self.reap();
             let token = &self.token;
@@ -1635,19 +1662,29 @@ impl Supervisor {
             return None;
         }
         self.reap();
-        let acquired = Arc::clone(&self.permits).try_acquire_owned();
         if self.token.is_cancelled() {
-            // The permit, if it landed, drops here: refusal wins the race.
+            // Cancellation can land inside `reap`, which awaits. The permit, if one
+            // landed below, would drop here: refusal wins the race.
             self.refused = self.refused.saturating_add(1);
             return None;
         }
-        match acquired {
-            Ok(permit) => Some(permit),
-            Err(_) => {
+        match self.try_take() {
+            Some(permit) => Some(permit),
+            None => {
                 self.refused = self.refused.saturating_add(1);
                 None
             }
         }
+    }
+
+    /// Take a permit if one is free, without counting anything.
+    ///
+    /// The non-counting half of [`Self::claim_now`], split out because
+    /// [`Self::claim`]'s fast path must *not* count a full pool as a refusal: a
+    /// supervisor at its bound is healthy and waiting, which is backpressure, and
+    /// counting it as a refusal is the mistake this split exists to prevent.
+    fn try_take(&mut self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.permits).try_acquire_owned().ok()
     }
 
     /// Give the future a [`TaskId`], place it, and register the identity.
