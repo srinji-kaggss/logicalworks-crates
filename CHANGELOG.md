@@ -40,9 +40,11 @@ breaks are listed explicitly under the crate.
   `core`, `trace`, `random`, `ron` and `process` were built by nothing except
   the rustdoc lane, so a feature that quietly depended on a second feature was
   invisible to every build receipt.
-- New required lane `tests-std-per-feature`: one
+- New required lanes `tests-std-per-feature-a`, `-b` and `-c`: one
   `cargo nextest run --no-default-features --features <f>` per feature, because
-  a build receipt is not an execution receipt.
+  a build receipt is not an execution receipt. Three shards of four features,
+  each its own CI job: the twelve runs as one step took 228 s on GitHub and put
+  the run at 307 s, past the five-minute budget.
 - New required lane `target-matrix`, running the new
   `scripts/check-target-matrix.sh`. It installs each declared target with
   `rustup` and checks `lgwks_std`, `lgwks_ast` and `lgwks_deps` against it: the

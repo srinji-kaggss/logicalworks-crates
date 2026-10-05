@@ -502,26 +502,6 @@ jobs:
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-      - name: Run lgwks-std per-feature tests
-        # One nextest invocation per feature, each with nothing else on.
-        # The check above says every feature builds alone; only a run says
-        # its tests pass for a consumer who selected exactly one flag.
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features core
-          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
-          cargo nextest run --locked -p lgwks_std --no-default-features --features random
-          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
-          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
-          cargo nextest run --locked -p lgwks_std --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
-          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --no-default-features --features http
-          cargo nextest run --locked -p lgwks_std --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --no-default-features --features process
       - name: Check lgwks-deps
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
@@ -530,6 +510,87 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
+
+  # Every lgwks-std feature alone, executed: one nextest run per feature with
+  # nothing else on. Three shards in parallel, because the twelve runs as one
+  # step took 228 s and put the feature-matrix job at 303 s. (#276)
+  std-per-feature-a:
+    name: lgwks-std per-feature tests (a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features core
+          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
+          cargo nextest run --locked -p lgwks_std --no-default-features --features random
+          cargo nextest run --locked -p lgwks_std --no-default-features --features http
+
+  std-per-feature-b:
+    name: lgwks-std per-feature tests (b)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
+          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
+          cargo nextest run --locked -p lgwks_std --no-default-features --features json
+          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
+
+  std-per-feature-c:
+    name: lgwks-std per-feature tests (c)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Restore on every run, save only from `main`: a pull request reads the
+          # last merged build instead of writing a cache entry per branch.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
   # Its own job so the matrix runs beside the check jobs instead of after them:
   # twelve feature sets plus eight targets is several minutes of `cargo check`,
