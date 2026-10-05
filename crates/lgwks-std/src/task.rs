@@ -514,7 +514,7 @@ struct Pool {
     /// Starts one thread running [`Pool::run`]. The process pool starts an OS
     /// thread; a test pool can refuse, which is how a refusal is exercised
     /// without exhausting the machine's threads.
-    start: fn(&'static Pool) -> io::Result<()>,
+    start: fn(&'static Pool, Handoff) -> io::Result<()>,
 }
 
 /// What the pool's lock guards.
@@ -536,13 +536,15 @@ struct PoolState<W = Work> {
 }
 
 /// What admitting a job asks of the submitter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Admitted {
+#[derive(Debug, PartialEq, Eq)]
+enum Admitted<W> {
     /// An idle thread was claimed: notify the condvar.
     Woke,
-    /// No thread is idle and the pool is under its ceiling: start one, then
-    /// report [`PoolState::started`] or [`PoolState::start_failed`].
-    Start,
+    /// No thread is idle and the pool is under its ceiling: start one with
+    /// this job as its first, then report [`PoolState::started`] or
+    /// [`PoolState::start_failed`]. The job never passes through the queue,
+    /// so the new thread does not contend for the lock to reach it.
+    Start(W),
     /// Every thread is busy at the ceiling: the job waits its turn.
     Queued,
 }
@@ -575,9 +577,12 @@ impl<W> PoolState<W> {
         work: W,
         queue_limit: Option<usize>,
         ceiling: usize,
-    ) -> Result<Admitted, W> {
+    ) -> Result<Admitted<W>, W> {
         if queue_limit.is_some_and(|limit| self.queue.len() >= limit) {
             return Err(work);
+        }
+        if self.idle == 0 && self.live < ceiling {
+            return Ok(Admitted::Start(work));
         }
         self.queue.push_back(work);
         if self.idle > 0 {
@@ -585,10 +590,7 @@ impl<W> PoolState<W> {
             self.wakeups = self.wakeups.saturating_add(1);
             return Ok(Admitted::Woke);
         }
-        if self.live >= ceiling {
-            return Ok(Admitted::Queued);
-        }
-        Ok(Admitted::Start)
+        Ok(Admitted::Queued)
     }
 
     /// The thread [`Admitted::Start`] asked for is running.
@@ -596,14 +598,17 @@ impl<W> PoolState<W> {
         self.live = self.live.saturating_add(1);
     }
 
-    /// The thread [`Admitted::Start`] asked for could not start. With a live
-    /// thread the job stays queued for it (`None`); with none, nothing would
-    /// ever run it, so it is taken back out and returned.
-    fn start_failed(&mut self) -> Option<W> {
+    /// The thread [`Admitted::Start`] asked for could not start, and `work`
+    /// was its first job. With a live thread the job is queued for it
+    /// (`None`): no thread is idle, since admission chose to start one, and
+    /// the lock has been held since. With none, nothing would ever run it, so
+    /// it is handed back.
+    fn start_failed(&mut self, work: W) -> Option<W> {
         if self.live > 0 {
+            self.queue.push_back(work);
             return None;
         }
-        self.queue.pop_back()
+        Some(work)
     }
 
     /// The next job for a thread that is free.
@@ -640,16 +645,30 @@ fn pool() -> &'static Pool {
 
 /// Start one named OS thread serving `pool`. Detached: a pool thread is never
 /// joined, it exits after [`BLOCKING_KEEP_ALIVE`] without work.
-fn start_os_thread(pool: &'static Pool) -> io::Result<()> {
+///
+/// The thread runs the job in `first` before it ever takes the lock.
+fn start_os_thread(pool: &'static Pool, first: Handoff) -> io::Result<()> {
     thread::Builder::new()
         .name("lgwks-blocking".into())
-        .spawn(move || pool.run())
+        .spawn(move || {
+            let work = lock(&first).take();
+            drop(first);
+            if let Some(work) = work {
+                work();
+            }
+            pool.run();
+        })
         .map(drop)
 }
 
+/// A new thread's first job. Shared rather than moved into the thread's
+/// closure because a thread that fails to start drops its closure, and the
+/// job must come back to be queued or refused rather than vanish with it.
+type Handoff = Arc<Mutex<Option<Work>>>;
+
 impl Pool {
     /// An empty pool of at most `ceiling` threads, started by `start`.
-    const fn new(ceiling: usize, start: fn(&'static Self) -> io::Result<()>) -> Self {
+    const fn new(ceiling: usize, start: fn(&'static Self, Handoff) -> io::Result<()>) -> Self {
         Self {
             state: Mutex::new(PoolState::new()),
             work_ready: Condvar::new(),
@@ -683,22 +702,33 @@ impl Pool {
                 Ok(())
             }
             Admitted::Queued => Ok(()),
-            Admitted::Start => match (self.start)(self) {
-                Ok(()) => {
-                    state.started();
-                    Ok(())
-                }
-                Err(error) => match state.start_failed() {
-                    // A live thread will reach the job when it finishes its own.
-                    None => Ok(()),
-                    Some(_unrun) => {
-                        let refusal = Err(SpawnError::Os(error));
-                        #[cfg(feature = "trace")]
-                        crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: no blocking thread could be started");
-                        refusal
+            Admitted::Start(work) => {
+                let first = Arc::new(Mutex::new(Some(work)));
+                match (self.start)(self, Arc::clone(&first)) {
+                    Ok(()) => {
+                        state.started();
+                        Ok(())
                     }
-                },
-            },
+                    Err(error) => {
+                        // A starter reports failure only when its thread never
+                        // ran, so the job is still in the slot.
+                        let Some(work) = lock(&first).take() else {
+                            return Ok(());
+                        };
+                        match state.start_failed(work) {
+                            // A live thread will reach the job when it
+                            // finishes its own.
+                            None => Ok(()),
+                            Some(_unrun) => {
+                                let refusal = Err(SpawnError::Os(error));
+                                #[cfg(feature = "trace")]
+                                crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: no blocking thread could be started");
+                                refusal
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1172,7 +1202,7 @@ mod tests {
     }
 
     /// A starter that never starts a thread, as when the OS is out of them.
-    fn refuse_to_start(_pool: &'static Pool) -> io::Result<()> {
+    fn refuse_to_start(_pool: &'static Pool, _first: Handoff) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
             "injected: no thread",
@@ -1180,7 +1210,10 @@ mod tests {
     }
 
     /// A pool of its own, so a test's refusals never touch the process pool.
-    fn test_pool(ceiling: usize, start: fn(&'static Pool) -> io::Result<()>) -> &'static Pool {
+    fn test_pool(
+        ceiling: usize,
+        start: fn(&'static Pool, Handoff) -> io::Result<()>,
+    ) -> &'static Pool {
         Box::leak(Box::new(Pool::new(ceiling, start)))
     }
 
@@ -1224,12 +1257,12 @@ mod tests {
     #[test]
     fn a_failed_start_beside_a_live_thread_leaves_the_job_to_that_thread() {
         /// Starts the first thread, then refuses every later one.
-        fn first_only(pool: &'static Pool) -> io::Result<()> {
+        fn first_only(pool: &'static Pool, first: Handoff) -> io::Result<()> {
             static STARTS: AtomicUsize = AtomicUsize::new(0);
             if STARTS.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
-                start_os_thread(pool)
+                start_os_thread(pool, first)
             } else {
-                refuse_to_start(pool)
+                refuse_to_start(pool, first)
             }
         }
         let single = test_pool(4, first_only);

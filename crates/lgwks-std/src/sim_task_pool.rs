@@ -16,6 +16,9 @@
 //!   refused only at its bound.
 //! - **Accounting.** Parked threads always equal `idle + wakeups`, and the pool
 //!   ends with nothing queued, idle, claimed, or alive.
+//! - **Hand-off.** A job that starts a thread is that thread's first job,
+//!   never queued; a start that fails queues it beside a live thread or hands
+//!   it back.
 //! - **Progress.** A queued job always has a thread that will reach it: one
 //!   free or running, or a claimed wakeup on its way.
 //!
@@ -175,10 +178,15 @@ impl Sim {
                 fold_usize(&mut self.trace, 3);
             }
             Ok(Admitted::Queued) => fold_usize(&mut self.trace, 4),
-            Ok(Admitted::Start) => {
+            Ok(Admitted::Start(first)) => {
+                assert!(
+                    first == job,
+                    "admission started job {first}, not {job}: {}",
+                    self.at()
+                );
                 if self.rng.below(8) == 0 {
                     let live = self.state.live;
-                    match self.state.start_failed() {
+                    match self.state.start_failed(first) {
                         None => assert!(live > 0, "a job was left to no thread: {}", self.at()),
                         Some(back) => {
                             assert!(
@@ -193,8 +201,13 @@ impl Sim {
                     }
                     fold_usize(&mut self.trace, 5);
                 } else {
+                    // The new thread runs its first job before it ever
+                    // takes the lock.
                     self.state.started();
-                    self.threads.push(Thread::Free);
+                    if let Some(runs) = self.runs.get_mut(first) {
+                        *runs = runs.saturating_add(1);
+                    }
+                    self.threads.push(Thread::Running(first));
                     fold_usize(&mut self.trace, 6);
                 }
             }
