@@ -273,9 +273,34 @@ fn resolve_ambiguous_tail(
     position: JournalPosition,
     index: u64,
 ) -> Result<u64, JournalError> {
-    let acknowledged = super::frame::cut_holds_acknowledged(
-        file,
-        offset,
+    use std::io::{Seek, SeekFrom};
+
+    let start = offset.saturating_add(u64::try_from(LENGTH_BYTES).unwrap_or(u64::MAX));
+    let file_len = file.metadata().map_err(JournalError::Storage)?.len();
+    let behind = file_len.saturating_sub(start);
+    let ceiling = u64::try_from(MAX_FRAME_BYTES.saturating_add(HEAD_BYTES)).unwrap_or(u64::MAX);
+    if behind > ceiling {
+        // A short read was short of at most one frame, so this is not the tail the
+        // scan saw: someone wrote past the advisory lock. Nothing is decided on it.
+        let grew = Err(JournalError::Storage(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the journal file grew while its tail was being resolved; reopen it",
+        )));
+        lgwks_std::trace::debug!(
+            behind,
+            ceiling,
+            "resolve_ambiguous_tail: more behind the prefix than a cut frame leaves"
+        );
+        return grew;
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(JournalError::Storage)?;
+    let mut suffix = vec![0u8; usize::try_from(behind).unwrap_or(usize::MAX)];
+    file.read_exact(&mut suffix)
+        .map_err(JournalError::Storage)?;
+
+    let acknowledged = super::frame::holds_acknowledged_frame(
+        &suffix,
         &position.head(),
         MAX_FRAME_BYTES,
         JournalError::Storage,
