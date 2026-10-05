@@ -50,7 +50,7 @@ guard, recorded here as a minor bump rather than hidden in a patch.
 
 ### lgwks_bot — fan-out, journal status, process stdio (#257, #259, #260)
 
-- `FanOut` and `FanOutError`: a one-call fan-out over `script::each`, bounded
+- `script::FanOut` and `script::FanOutError`: a one-call fan-out over `script::each`, bounded
   by `at_most(limit)` and `within(deadline)`, whose error names the failing
   item or the timeout.
 - `journal::AttemptStatus::VerificationFailed`: a failed verification
