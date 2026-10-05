@@ -31,6 +31,7 @@
 #   AST_BUDGET_TIERS       "100 1000 10000 100000"
 #   AST_BUDGET_TIER_BYTES  65536     bytes per parse inside a tier
 #   AST_BUDGET_THREADS     8         workers a tier may admit
+#   AST_BUDGET_TIMEOUT     180       seconds one run may take before it is recorded as unfinished
 
 set -eu
 
@@ -56,6 +57,7 @@ rounds=${AST_BUDGET_ROUNDS:-3}
 tiers=${AST_BUDGET_TIERS:-"100 1000 10000 100000"}
 tier_bytes=${AST_BUDGET_TIER_BYTES:-65536}
 threads=${AST_BUDGET_THREADS:-8}
+timeout=${AST_BUDGET_TIMEOUT:-180}
 
 # `time -l` on macOS, `time -v` on GNU. Both print the peak; the label differs, so
 # both spellings are parsed when a table is built from these files.
@@ -67,13 +69,52 @@ fi
 
 # Run one measurement under the host timer, recording rather than propagating a
 # non-zero exit: a crashed process is a result this rig exists to report.
+#
+# The run is also bounded. A GLR parser given deeply nested delimiters at the
+# byte ceiling can take hours, and a sweep that stops at the first one reports
+# fewer grammars than it claims to rather than reporting the one that does not
+# finish -- which is itself the measurement (#277 item 1, a parse deadline, is
+# not available: ast-grep-core 0.45 builds its parser internally and does not
+# expose tree-sitter's progress callback). A run that reaches the bound is killed
+# and recorded as unfinished, with the elapsed time, so the table has a row for
+# it instead of a hole.
 timed() {
     name=$1
     shift
     set +e
-    /usr/bin/time "$time_flag" "$example" "$@" > "$out/$name.tsv" 2> "$out/$name.time"
+    # Job control puts the runner in its own process group, so the timeout can
+    # signal the *whole* group. Signalling only `/usr/bin/time` leaves the
+    # measurement itself running, and it then competes for the CPU with every
+    # later run and overwrites this row's tail -- a rig that measures the
+    # machine's load rather than its own subject.
+    set -m
+    /usr/bin/time "$time_flag" "$example" "$@" > "$out/$name.tsv" 2> "$out/$name.time" &
+    runner=$!
+    set +m
+    waited=0
+    unfinished=0
+    while kill -0 "$runner" 2>/dev/null; do
+        if [ "$waited" -ge "$timeout" ]; then
+            kill -TERM "-$runner" 2>/dev/null
+            sleep 1
+            kill -KILL "-$runner" 2>/dev/null
+            unfinished=1
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$runner" 2>/dev/null
     status=$?
     set -e
+    if [ "$unfinished" -eq 1 ]; then
+        printf 'unfinished\t%s\tafter\t%s\ts\tpartial_rows_kept\n' "$name" "$timeout" \
+            >> "$out/$name.tsv"
+        peak=$(sed -n -E 's/^[[:space:]]*([0-9]+)[[:space:]]*(maximum resident set size|Maximum resident set size \(kbytes\)).*/\1/p' "$out/$name.time" | tail -1)
+        printf '%-28s UNFINISHED after %ss (peak_rss_bytes=%s, partial row kept)\n' \
+            "$name" "$timeout" "${peak:-none}" >&2
+        return 0
+    fi
     peak=$(sed -n -E 's/^[[:space:]]*([0-9]+)[[:space:]]*(maximum resident set size|Maximum resident set size \(kbytes\)).*/\1/p' "$out/$name.time" | tail -1)
     if [ "$time_flag" = "-v" ] && [ -n "${peak:-}" ]; then
         # GNU reports kibibytes under a label that does not say so.
@@ -125,5 +166,5 @@ done
 
 printf '\n%s run(s) written under %s\n' "$(ls "$out" | grep -c '\.tsv$')" "$out"
 printf 'host: %s %s, %s cores\n' "$(uname -s)" "$(uname -r)" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')"
-printf 'bytes=%s shape_bytes=%s rounds=%s tiers=%s tier_bytes=%s threads=%s\n' \
-    "$bytes" "$shape_bytes" "$rounds" "$tiers" "$tier_bytes" "$threads"
+printf 'bytes=%s shape_bytes=%s rounds=%s tiers=%s tier_bytes=%s threads=%s timeout=%ss\n' \
+    "$bytes" "$shape_bytes" "$rounds" "$tiers" "$tier_bytes" "$threads" "$timeout"

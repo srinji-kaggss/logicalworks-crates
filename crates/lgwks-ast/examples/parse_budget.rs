@@ -262,6 +262,9 @@ fn outcome_of(answer: Result<lgwks_ast::Parsed, lgwks_ast::ParseError>) -> Strin
         Err(lgwks_ast::ParseError::InvalidSyntax { .. }) => "invalid-syntax".to_owned(),
         Err(lgwks_ast::ParseError::AstTooLarge { .. }) => "ast-too-large".to_owned(),
         Err(lgwks_ast::ParseError::AstTooDeep { .. }) => "ast-too-deep".to_owned(),
+        Err(lgwks_ast::ParseError::ContainerNestingTooDeep { .. }) => {
+            "container-nesting-too-deep".to_owned()
+        }
         Err(other) => format!("unclassified:{other}"),
     }
 }
@@ -351,13 +354,54 @@ fn measure(
     let mut parse_samples = Vec::with_capacity(rounds);
     let mut checked_samples = Vec::with_capacity(rounds);
 
+    // The checked parse first, because it is the crate's own boundary and it is
+    // the only one of the three that may refuse. The raw `AstGrep::try_new` probe
+    // below deliberately bypasses every bound -- that is what makes it a
+    // measurement of the parser rather than of the crate -- so it has to be the
+    // one that runs last, and only when the checked parse admitted the source.
+    // For markdown at a container depth past `MAX_MARKDOWN_CONTAINERS_PER_LINE`
+    // that ordering is the difference between a row and a dead process: the raw
+    // probe reaches a scanner whose serialization buffer overflows, and that is
+    // an `abort()`, not a parse that returns.
+    let mut outcome = None;
+    let mut refused_before_parser = false;
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let checked = try_parse(&source, language);
+        checked_samples.push(started.elapsed().as_nanos());
+        let arm = outcome_of(checked);
+        refused_before_parser = arm == "container-nesting-too-deep";
+        outcome.get_or_insert(arm);
+    }
+    let mut walk_samples = Vec::new();
+    if refused_before_parser {
+        // No raw probe and no walk: the crate refused the source before the
+        // grammar saw it, so there is no parser cost and no tree to walk. The
+        // row's `outcome` says so, and the zeros are the absence of a
+        // measurement rather than a measurement of zero.
+        return Ok(Measured {
+            grammar: language.name(),
+            kind: kind.to_owned(),
+            bytes: source.len(),
+            parse_p50: 0,
+            parse_p99: 0,
+            walk_p50: 0,
+            walk_p99: 0,
+            checked_p50: percentile(&checked_samples, 50),
+            checked_p99: percentile(&checked_samples, 99),
+            outcome: outcome.unwrap_or_else(|| "unmeasured".to_owned()),
+            nodes: 0,
+            depth: 0,
+        });
+    }
+
     // One tree, walked `rounds` times: the pre-issue walk is the public
     // `inspect_ast` under a node cap and no depth cap, which is exactly what
     // the crate ran before `MAX_AST_DEPTH` existed. Re-parsing per round would
     // charge the walk for the parser's variance.
     let tree = AstGrep::try_new(&source, language.support_lang())
         .map_err(|detail| format!("{} {kind}: {detail}", language.name()))?;
-    let mut walk_samples = Vec::with_capacity(rounds);
+    walk_samples.reserve(rounds);
     let mut observed = inspect_ast(&tree.root(), Some(MAX_AST_NODES));
     for _ in 0..rounds {
         let started = Instant::now();
@@ -365,17 +409,11 @@ fn measure(
         walk_samples.push(started.elapsed().as_nanos());
     }
 
-    let mut outcome = None;
     for _ in 0..rounds {
         let started = Instant::now();
         AstGrep::try_new(&source, language.support_lang())
             .map_err(|detail| format!("{} {kind}: {detail}", language.name()))?;
         parse_samples.push(started.elapsed().as_nanos());
-
-        let started = Instant::now();
-        let checked = try_parse(&source, language);
-        checked_samples.push(started.elapsed().as_nanos());
-        outcome.get_or_insert_with(|| outcome_of(checked));
     }
     drop(tree);
     parse_samples.sort_unstable();

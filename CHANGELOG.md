@@ -37,11 +37,26 @@ Two bounds the crate already claimed, and the numbers behind them.
   internally). Naming `tree-sitter` directly is the only route, and #277
   reserves that for the Director's word. Nothing here fakes it with a thread
   that cannot be stopped.
-- **Measured, per grammar, in `bench/README.md`**: throughput p50/p99 and peak
-  RSS at the 2 MiB ceiling on representative and adversarial input, the share of
-  a checked parse spent in the validation walk, and p99 plus peak RSS for a
-  bounded fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced
-  by `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`.
+- **Measured, per grammar, in `bench/README.md` and
+  `bench/ast-budget.tsv`** (224 rows): throughput p50/p99 and peak RSS at the
+  2 MiB ceiling on representative and adversarial input, the share of a checked
+  parse spent in the validation walk, and p99 plus peak RSS for a bounded
+  fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced by
+  `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`. Three
+  findings from it:
+  - **The documented memory ceiling is 723 MiB resident** for one parse of a
+    2 MiB file with the Ruby grammar, against a 2.1 MiB process floor; the
+    cheapest grammar at the same size is `solidity` at 100 MiB, so a caller
+    cannot size a parser from the input alone.
+  - **The parser, not the walk, is the unbounded work on hostile input.** The
+    validation walk is 10–15 ms on the three worst adversarial rows and the parse
+    is 25–97 seconds — 256 KiB of nested braces takes the Dart grammar
+    **97.5 seconds**, and at the 2 MiB ceiling it did not finish in 120 s. This
+    is precisely what the missing deadline would bound and cannot be bounded from
+    inside this crate.
+  - **Peak RSS is flat in the concurrency level** — 195 to 198 MiB for `rust`
+    across 100 to 100 000 concurrent 64 KiB parses — because the per-parse bound
+    is what makes a fleet of them bounded.
 - **The markdown grammar no longer aborts the process.** It did:
   `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
   containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
