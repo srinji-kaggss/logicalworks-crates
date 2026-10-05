@@ -726,10 +726,18 @@ jobs:
           # Restore on every run, save only from `main`: a pull request reads the
           # last merged build instead of writing a cache entry per branch.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # The fixture is its own workspace, so it built into its own target
+          # directory, which this cache never saved: every run compiled the
+          # whole GPUI stack again (3 min 03 s, 134 crates). It now builds into
+          # the cached `target`. The key is new so the first `main` run misses
+          # and saves those artifacts; an exact hit skips the save, and the old
+          # key would never have picked them up.
+          key: storefront-fixture-target
       - name: Check GPUI Windows renderer fixture
         run: >
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --target-dir target
           --no-default-features --features gpui --example gpui
 
   gpui-macos:
