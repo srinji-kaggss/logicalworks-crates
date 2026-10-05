@@ -11,7 +11,7 @@ a `Host` once with a tenant, stop token, admission ceiling, deadline and trail
 capacity, define a `Task` with `task(name, body)`, and `host.run(&task,
 input).await` returns a `Report` carrying the disposition, the typed output, the
 located error and a bounded step trail (INV-BOT-20, exercised by
-`tests/task_front_door.rs` and `tests/sim_task.rs`). **Bodies are polled on the
+`tests/it/task_front_door.rs` and `tests/it/sim_task.rs`). **Bodies are polled on the
 calling task, so they need not be `Send` and inputs may borrow** — which is the
 property this document argued for and which `async-parity.md` §5a now records as
 the only shipped route for a non-`Send` future.
@@ -27,7 +27,7 @@ still the design of record and the rest of #87 is still open, but:
   API.
 - `Bot::from_spec` also now materializes a validated `BotSpec` through the same
   registry and assembly path a native bot uses
-  (`tests/spec_materialize.rs`), so the "no second interpreter" clause below is
+  (`tests/it/spec_materialize.rs`), so the "no second interpreter" clause below is
   implemented rather than merely required.
 
 Everything after this paragraph is the design as written on 2026-09-21 and is

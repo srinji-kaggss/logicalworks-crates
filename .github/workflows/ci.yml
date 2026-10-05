@@ -236,7 +236,7 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot saturation tiers
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
+        run: cargo nextest run -p lgwks_bot --locked --features full --test it -E 'test(/^sim_review_path::/) & test(saturation_r32_tier)'
 
   bench_fairness:
     # Its own job: it builds a separate workspace root in release, and run after

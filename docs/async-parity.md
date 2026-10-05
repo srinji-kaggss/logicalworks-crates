@@ -87,7 +87,7 @@ be stored. The thesis — no verb here starts work and hands back a handle to it
 decides both.
 
 What serves the thesis is *driving* instead of spawning: await the future
-directly. `tests/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned`
+directly. `tests/it/rt_async_tier.rs::a_non_send_future_is_driven_rather_than_spawned`
 polls a genuinely `!Send` future (`Rc<Cell<u8>>`) to completion on the calling
 thread. Asserting the bound exists would not have proved anything; the test
 compiles only because the future is not `Send`.
@@ -173,7 +173,7 @@ program still on real time. This crate already has wall-clock budgets
 (`Supervisor`'s cooperative drain grace, a process deadline), so a "paused"
 runtime would still hang on any of them. A declared clock names which clock
 governs each deadline and keeps the watchdog separate — the property
-`INV-BOT-30` states and `tests/sim_clock.rs` proves.
+`INV-BOT-30` states and `tests/it/sim_clock.rs` proves.
 
 **What this does not claim.** A declared clock determinizes *which deadline is
 eligible*. It does not make poll order across workers deterministic, it does not

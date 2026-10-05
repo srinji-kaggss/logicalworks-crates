@@ -590,8 +590,8 @@ def builtin_invariants(root: Path, env: dict[str, str], out=None) -> tuple[int, 
                     )
                 continue
             # A test file, named relative to some crate's root rather than the
-            # repository's: `tests/rt_process.rs` lives at
-            # `crates/lgwks-bot/tests/rt_process.rs`, so the repository root is
+            # repository's: `tests/it/rt_process.rs` lives at
+            # `crates/lgwks-bot/tests/it/rt_process.rs`, so the repository root is
             # the wrong place to look and a prefix match is what is meant.
             test_path = re.fullmatch(r"((?:tests|src)/[A-Za-z0-9_./-]+\.rs)", reference)
             if test_path:
@@ -808,8 +808,14 @@ def builtin_simulation_evidence(root: Path, env: dict[str, str], out=None) -> tu
     sim_total = 0
     for suite_id, suite in payload.get("rust-suites", {}).items():
         binary_name = str(suite.get("binary-name", ""))
-        if binary_name.startswith("sim_") or "::sim_" in str(suite_id):
-            sim_total += len(suite.get("testcases", {}))
+        whole_binary = binary_name.startswith("sim_") or "::sim_" in str(suite_id)
+        for case in suite.get("testcases", {}):
+            # A consolidated binary (`tests/it/`, #272) keeps each former
+            # `sim_*` file as a module, so a case counts when any module on
+            # its path is a simulation; the test function's own name does not.
+            modules = str(case).split("::")[:-1]
+            if whole_binary or any(module.startswith("sim_") for module in modules):
+                sim_total += 1
     if total <= 0:
         return 1, "nextest listing reported no tests"
     if sim_total * 2 < total:

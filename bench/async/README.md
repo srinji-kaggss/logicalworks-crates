@@ -129,7 +129,7 @@ drove every tier to completion with `work_units` matching on both sides at every
 tier, so nothing here is extrapolated and no figure is carried over from another
 platform. This ladder's top tier is 100,000 because it is a gate lane run on
 every change. The issue's ">1M" is measured separately, without extrapolation,
-by `crates/lgwks-bot/tests/task_million.rs` (`LGWKS_MILLION=1`): 1,048,576
+by `crates/lgwks-bot/tests/it/task_million.rs` (`LGWKS_MILLION=1`): 1,048,576
 admitted `Host::run` executions across sixteen tenant hosts, all suspended in
 their bodies at once, peak RSS 6.45 GB — recorded in `CHANGELOG.md`.
 
