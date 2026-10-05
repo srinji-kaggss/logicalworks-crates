@@ -296,29 +296,47 @@ const CYCLES: usize = 6;
 /// work to finish, short enough that a cycle costs milliseconds.
 const CYCLE_KEEP_ALIVE: Duration = Duration::from_millis(1);
 
-/// Polls of a millisecond one idle period may take before the simulation calls
-/// it a thread that would not leave. Bounded, so a pool that never exits
-/// fails with a message instead of hanging the sweep.
-const IDLE_POLLS: usize = 500;
+/// How long one wait in this family may take before the simulation calls it a
+/// thread that would not leave. Bounded, so a pool that never exits fails with
+/// a message instead of hanging the sweep — and measured in elapsed time, not
+/// in a count of millisecond polls, because the waits are for real threads and
+/// a count of 500 was half a second of wall clock: on a host running the whole
+/// gate at once, a thread that *did* leave took longer than that, and the
+/// family reported a defect that was the host's load. The verdict must not
+/// depend on how busy the machine is; the bound only separates a hang from a
+/// slow scheduler, and the fast path still returns on the first poll that sees
+/// the condition.
+const HANG_BOUND: Duration = Duration::from_secs(30);
+
+/// Poll `done` every millisecond until it holds or [`HANG_BOUND`] has elapsed,
+/// answering whether it held.
+fn poll_until(mut done: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if started.elapsed() >= HANG_BOUND {
+            return done();
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Wait until every thread of `pool` has left, or fail naming the seed.
 ///
 /// The wait is a bounded poll rather than a sleep of a guessed length: what it
 /// proves is that a thread left, and how long that took is the host's business.
 fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
-    for _ in 0..IDLE_POLLS {
-        if lock(&pool.state).live == 0 {
-            return;
-        }
-        thread::sleep(Duration::from_millis(1));
+    if poll_until(|| lock(&pool.state).live == 0) {
+        return;
     }
     let state = lock(&pool.state);
     assert!(
         state.live == 0,
-        "seed {seed:#x}: {} threads were still alive after an idle period of {} polls at a \
+        "seed {seed:#x}: {} threads were still alive after {HANG_BOUND:?} at a \
          {CYCLE_KEEP_ALIVE:?} keep-alive",
         state.live,
-        IDLE_POLLS
     );
 }
 
@@ -468,18 +486,14 @@ static HELD_IN_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// the seed. The identity is checked against this count, so the check waits for
 /// the threads rather than racing them.
 fn wait_until_held(count: usize, seed: u64) {
-    for _ in 0..IDLE_POLLS {
-        if HELD_IN_WINDOW.load(Ordering::SeqCst) == count {
-            return;
-        }
-        thread::sleep(Duration::from_millis(1));
+    if poll_until(|| HELD_IN_WINDOW.load(Ordering::SeqCst) == count) {
+        return;
     }
     let held = HELD_IN_WINDOW.load(Ordering::SeqCst);
     assert!(
         held == count,
         "seed {seed:#x}: {held} threads were held in the mid-exit window, not {count}, after \
-         {} polls",
-        IDLE_POLLS
+         {HANG_BOUND:?}"
     );
 }
 
@@ -506,21 +520,19 @@ fn assert_handles_equal_live_plus_held(pool: &Arc<Pool>, where_: &str, seed: u64
 /// wait for the return itself. `is_finished` never blocks, and the poll is
 /// bounded so a thread that never returns fails with a message.
 fn wait_until_all_returned(pool: &Arc<Pool>, seed: u64) {
-    for _ in 0..IDLE_POLLS {
-        let returned = lock(&pool.state)
+    let returned = poll_until(|| {
+        lock(&pool.state)
             .handles
             .iter()
-            .all(super::ThreadHandle::is_finished);
-        if returned {
-            return;
-        }
-        thread::sleep(Duration::from_millis(1));
+            .all(super::ThreadHandle::is_finished)
+    });
+    if returned {
+        return;
     }
     let held = lock(&pool.state).handles.len();
     assert!(
         held == 0,
-        "seed {seed:#x}: {held} registered threads had not all returned after {} polls",
-        IDLE_POLLS
+        "seed {seed:#x}: {held} registered threads had not all returned after {HANG_BOUND:?}"
     );
 }
 

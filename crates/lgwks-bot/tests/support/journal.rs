@@ -34,8 +34,13 @@ pub const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8
 
 /// A counter that gives concurrent test runs distinct scratch names.
 ///
-/// Nanos plus a counter, not a process id: the OS reuses both pids and threads,
-/// and a reused id must never make two runs share a journal.
+/// The process id, the nanos and a counter, each covering what the others
+/// cannot. The counter is per process and the clock resolves to microseconds on
+/// macOS, so two test processes started together — the local gate runs the same
+/// test from two lanes at once — derived the same name and one opened the
+/// other's journal (`Locked`). A process id is unique among *live* processes,
+/// which are the ones that can collide; the nanos separate a pid the OS reuses
+/// later, and the counter separates calls within one process.
 static SCRATCH: AtomicU64 = AtomicU64::new(0);
 
 /// A scratch path unique to one test run.
@@ -45,7 +50,8 @@ pub fn scratch(name: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!("lgwks-journal-{name}-{nanos}-{unique}"))
+    let process = std::process::id();
+    std::env::temp_dir().join(format!("lgwks-journal-{name}-{process}-{nanos}-{unique}"))
 }
 
 /// A scratch *directory* unique to one test run, created before it is returned.

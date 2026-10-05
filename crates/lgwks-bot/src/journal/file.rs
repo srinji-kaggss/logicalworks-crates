@@ -1492,8 +1492,12 @@ pub(super) mod tests {
 
     /// A counter that gives concurrent test runs distinct scratch names.
     ///
-    /// Nanos plus a counter, not a process id: the OS reuses both pids and
-    /// threads, and a reused id must never make two runs share a journal.
+    /// The process id, the nanos and a counter, each covering what the others
+    /// cannot. The counter is per process and the clock resolves to
+    /// microseconds on macOS, so two test processes started together can derive
+    /// the same name. A process id is unique among *live* processes, which are
+    /// the ones that can collide; the nanos separate a pid the OS reuses later,
+    /// and the counter separates calls within one process.
     static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// A scratch path unique to one test run.
@@ -1506,7 +1510,10 @@ pub(super) mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_nanos())
             .unwrap_or_default();
-        std::env::temp_dir().join(format!("lgwks-journal-file-{name}-{nanos}-{unique}"))
+        let process = std::process::id();
+        std::env::temp_dir().join(format!(
+            "lgwks-journal-file-{name}-{process}-{nanos}-{unique}"
+        ))
     }
 
     fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
