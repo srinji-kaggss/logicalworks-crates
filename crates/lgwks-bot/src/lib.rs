@@ -386,6 +386,16 @@ pub use ecs::{
     DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, StalledSource, SupersededObservation,
     TickReport,
 };
+/// The per-stage tick profiler (feature `profile`): six named stages and the
+/// measured time each spent.
+///
+/// A measurement instrument rather than a capability, so it is default-off and
+/// re-exported on its own line rather than inside the four-verb list — the same
+/// reason [`RefreshReason`] is. `bench/` is the caller: the ratio it publishes
+/// against a hand-rolled loop is only readable once someone says which stage the
+/// ratio is made of.
+#[cfg(feature = "profile")]
+pub use ecs::{TickProfile, TickStage};
 pub use effect::{EventId, InputIdentity};
 pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;

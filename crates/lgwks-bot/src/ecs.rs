@@ -223,6 +223,16 @@ use super::verb::{Evaluate, Execute, Observe};
 // cancelled a poll traceable to a named authority.
 use crate::clock::Clock;
 
+/// The per-stage tick profiler. Compiled out entirely without the default-off
+/// `profile` feature: every charge site in this file sits behind the same
+/// `cfg`, so a build without it reads no clock and does no per-stage arithmetic.
+#[cfg(feature = "profile")]
+mod profile;
+#[cfg(feature = "profile")]
+use profile::Charge;
+#[cfg(feature = "profile")]
+pub use profile::{TickProfile, TickStage};
+
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
 
 /// The domain separator for an [`ActionId`] derived from a bot's structure.
@@ -1373,15 +1383,50 @@ struct TickError(Option<BotError>);
 #[derive(Resource, Debug, Default)]
 struct Order(Vec<Entity>);
 
-/// The chains whose source moved on this tick, one flag per chain.
+/// The decision phase's per-tick scratch: which chains moved, what the walk will
+/// do with each chain's live transition, and the admitted input each binding
+/// takes.
 ///
 /// A world resource rather than a local, because it is per-tick scratch and the
 /// point of scratch is that it is allocated once. Built as `vec![false; count]`
 /// inside the decision system, this was a fresh zeroed allocation every tick —
 /// one of a set of them, added together, that made the schedule's own bookkeeping
 /// the larger half of a tick's cost.
+///
+/// One resource for all three rather than three, because they are resized
+/// together: a plan that grows its chain count is a bot whose chain count grew,
+/// and three buffers resized independently could hold three different widths for
+/// one tick.
 #[derive(Default)]
-struct Moving(Vec<bool>);
+struct AdmitScratch {
+    /// Which chains the change filter reported as moved.
+    moving: Vec<bool>,
+    /// What the walk will do with each chain, in declaration order.
+    kinds: Vec<AdmitKind>,
+    /// The admitted-input identity each binding takes, `None` where it binds none.
+    inputs: Vec<Option<AdmittedInput>>,
+}
+
+/// The decision pass's scratch, taken out whole so the walk can read and write it
+/// while the world is borrowed for the query.
+///
+/// The one step rather than three because the borrow is the whole reason:
+/// `fire_plan` holds `&mut World`, and a mutable borrow of a single resource
+/// cannot survive the immutable borrow the change query needs. One `mem::take`
+/// moves all three buffers and keeps all three allocations.
+impl AdmitScratch {
+    /// Take the scratch out of the world, resized to `count` chains.
+    fn take(world: &mut World, count: usize) -> Self {
+        let mut scratch = std::mem::take(&mut *world.non_send_mut::<AdmitScratch>());
+        scratch.moving.clear();
+        scratch.moving.resize(count, false);
+        scratch.kinds.clear();
+        scratch.kinds.resize(count, AdmitKind::Idle);
+        scratch.inputs.clear();
+        scratch.inputs.resize(count, None);
+        scratch
+    }
+}
 
 /// The retry policy in force: one authority per world, like `Grants`.
 #[derive(Resource, Debug)]
@@ -4057,30 +4102,6 @@ fn revision_of(world: &World, chain: usize) -> u64 {
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
-/// The admitted-input identity of `value` for `chain`, or the fallback stamp.
-fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> AdmittedInput {
-    let identify = world
-        .non_send::<Chains>()
-        .0
-        .get(chain)
-        .map(|held| held.identify);
-    match (identify, value) {
-        (Some(identify), Some(value)) => identify(value.as_any()),
-        // A fallback stamp is content-free, so it can never name an event.
-        _ => AdmittedInput {
-            identity: world.non_send_mut::<Ledger>().mint_input(),
-            event: false,
-        },
-    }
-}
-
-/// Move the newest observation for `chain` out of its slot.
-///
-/// Moved, not copied. A source's `Output` carries no `Clone` bound and this is
-/// the reason it does not need one: the value is not wanted in two places at
-/// once. Once a transition is bound to it, the transition is what speaks for
-/// it, and the slot being empty is not a loss — it is the record that the value
-/// is out on loan, which [`observe_fold`] reads back through the binding.
 ///
 /// The take is also what admits the value: a generation is being opened over
 /// exactly this payload, so a later commit that overtakes it is superseding work
@@ -4130,12 +4151,139 @@ fn admits(world: &World, chain: usize, bound: Option<&Erased>) -> bool {
         .is_some_and(|chain| !(chain.same)(bound.as_any(), next.as_any()))
 }
 
+/// What the decision pass decided for one chain, before it walks any of them.
+///
+/// The value is computed in one batched pass over every chain — see
+/// [`plan_admissions`] — so the walk that follows reads a decision rather than
+/// making one. That is what lets the two halves of change detection be measured
+/// apart (which chains moved, and which admitted inputs are new) and it is also
+/// what keeps the admitted-input stamps in declaration order: the pass walks
+/// chains by index, exactly as the walk this replaces did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmitKind {
+    /// Keep the live transition exactly as it stands. No observation is taken
+    /// and no input is minted: the entries still running were acknowledged
+    /// against the payload the transition holds.
+    Keep,
+    /// Resume into a new revision over the newest observation, bound to
+    /// [`AdmittedInput`].
+    Resume,
+    /// Open a fresh transition over the newest observation, bound to
+    /// [`AdmittedInput`]. Only reachable for a chain that has no live
+    /// transition.
+    Open,
+    /// Nothing to walk: no transition is held and the source did not move.
+    Idle,
+}
+
+/// A chain's batched decision: its [`AdmitKind`] and the input it binds to.
+#[derive(Clone, Copy)]
+enum Admit {
+    /// Keep the live transition, or have nothing to walk.
+    Keep,
+    /// Resume or open, bound to this admitted input.
+    Bind(AdmittedInput),
+}
+
+impl Admit {
+    /// Compose a chain's decision from the two passes that produced it.
+    ///
+    /// A kind that needs an input the fingerprint pass did not derive reads as
+    /// [`Self::Keep`] rather than as a fabricated one: a transition bound to an
+    /// input nobody derived would mint dispatch identities that cannot be
+    /// recovered against, and keeping the previous transition is the safe answer
+    /// because the next tick re-plans from the same observations.
+    fn bind(kind: AdmitKind, input: Option<AdmittedInput>) -> Self {
+        match (kind, input) {
+            (AdmitKind::Resume | AdmitKind::Open, Some(input)) => Self::Bind(input),
+            _ => Self::Keep,
+        }
+    }
+}
+
+/// Decide every chain's [`AdmitKind`] in one pass, in declaration order.
+///
+/// Two questions per chain, and the answers are cached rather than recomputed
+/// inside the walk: whether the `Changed<Revision>` query reported the chain as
+/// moved, and whether the newest observation is admitted over the payload a
+/// retained transition holds. The second is the value comparison, and it is the
+/// expensive one — computing it here and reading it there is what keeps the walk
+/// from paying for it twice.
+///
+/// The `has_open` test is read here and again by the walk, and it is a scan of
+/// one transition's entry states rather than a comparison of values, so the
+/// repeat costs less than the caching saves.
+fn plan_admissions(world: &World, moving: &[bool], kinds: &mut [AdmitKind]) {
+    for (chain, kind) in kinds.iter_mut().enumerate() {
+        let ledger = world.non_send::<Ledger>();
+        let held = ledger.transitions.get(chain).and_then(Option::as_ref);
+        *kind = match held {
+            Some(transition) if transition.has_open() => AdmitKind::Keep,
+            Some(transition) => {
+                if admits(world, chain, transition.value.as_ref()) {
+                    AdmitKind::Resume
+                } else {
+                    AdmitKind::Keep
+                }
+            }
+            None if moving.get(chain).copied().unwrap_or(false) => AdmitKind::Open,
+            None => AdmitKind::Idle,
+        };
+    }
+}
+
+/// Derive the admitted-input identity for every chain whose kind binds one.
+///
+/// One batch, in two halves. The first half holds the world shared and reads the
+/// value each identity is derived from; the second holds it exclusively and mints
+/// the content-free fallback stamp for the chains whose binding cannot supply
+/// one. The split is why the stamps are still consumed in declaration order: the
+/// fallback is what a dispatch digest binds when nothing else can be, and two
+/// derivations of one identity are two identities the moment they disagree.
+fn plan_inputs(world: &mut World, kinds: &[AdmitKind], inputs: &mut [Option<AdmittedInput>]) {
+    let binds = |kind: &AdmitKind| matches!(kind, AdmitKind::Resume | AdmitKind::Open);
+    {
+        let chains = world.non_send::<Chains>();
+        let observed = world.non_send::<Observed>();
+        for (chain, kind) in kinds.iter().enumerate() {
+            if !binds(kind) {
+                continue;
+            }
+            let (Some(held), Some(value)) = (
+                chains.0.get(chain),
+                observed.0.get(chain).and_then(|slot| slot.as_ref()),
+            ) else {
+                continue;
+            };
+            if let Some(slot) = inputs.get_mut(chain) {
+                *slot = Some((held.identify)(value.as_any()));
+            }
+        }
+    }
+    let mut ledger = world.non_send_mut::<Ledger>();
+    for (chain, kind) in kinds.iter().enumerate() {
+        if !binds(kind) {
+            continue;
+        }
+        if inputs.get(chain).is_some_and(Option::is_none) {
+            // A fallback stamp is content-free, so it can never name an event.
+            let minted = AdmittedInput {
+                identity: ledger.mint_input(),
+                event: false,
+            };
+            if let Some(slot) = inputs.get_mut(chain) {
+                *slot = Some(minted);
+            }
+        }
+    }
+}
+
 /// The transition a chain should be walking this tick, if any.
 ///
-/// Three ways one exists: work is outstanding (walked whether or not the source
-/// moved — that is the whole point), the transition is kept only for an
-/// abandonment record and the newest observation is not admitted over it, or a
-/// transition is opened or resumed under an observation that is.
+/// The decision is [`Admit`]'s, computed for every chain in one batched pass
+/// rather than made here per chain: that is what makes the change detection and
+/// the identity derivation two separately measurable stages, and it keeps the
+/// admitted-input stamps in declaration order.
 ///
 /// Opening and resuming are where the payload is bound, and both *take* it out
 /// of the observation slot. That is the mechanism that keeps a transition on
@@ -4147,22 +4295,17 @@ fn admits(world: &World, chain: usize, bound: Option<&Erased>) -> bool {
 fn resume(
     world: &mut World,
     chain: usize,
-    moving: bool,
+    admit: Admit,
     held: Option<Transition>,
 ) -> Option<Transition> {
-    match held {
+    match (admit, held) {
         // Outstanding work keeps the payload it was opened under. A newer
         // observation is not admitted here, and deliberately: the entries
         // still running were acknowledged against this one.
-        Some(transition) if transition.has_open() => Some(transition),
-        // Nothing open: the transition is only a name for the work of a
-        // generation that has finished. It gives way to the newest observation
-        // when that observation has actually moved away from its binding, and
-        // is otherwise kept exactly as it stands — abandonment record and all.
-        Some(transition) if !admits(world, chain, transition.value.as_ref()) => Some(transition),
-        Some(transition) => {
+        (Admit::Keep, Some(transition)) => Some(transition),
+        (Admit::Keep, None) => None,
+        (Admit::Bind(input), Some(transition)) => {
             let value = take_observed(world, chain);
-            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::resumed(
                 input,
                 revision_of(world, chain),
@@ -4170,14 +4313,13 @@ fn resume(
                 value,
             ))
         }
-        None if moving => {
+        (Admit::Bind(input), None) => {
             let entries = world
                 .non_send::<Chains>()
                 .0
                 .get(chain)
                 .map_or(0, |chain| chain.entries.len());
             let value = take_observed(world, chain);
-            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::opened(
                 input,
                 revision_of(world, chain),
@@ -4185,7 +4327,6 @@ fn resume(
                 value,
             ))
         }
-        None => None,
     }
 }
 
@@ -4524,9 +4665,24 @@ fn fire_plan(world: &mut World) {
     // intermediate `Vec<usize>` of moved chains is gone with it: filling the
     // flags directly from the query is one pass instead of two and allocates
     // nothing.
-    let mut moving = std::mem::take(&mut world.non_send_mut::<Moving>().0);
-    moving.clear();
-    moving.resize(count, false);
+    //
+    // The admission plan rides in the same resource, because it is the same
+    // per-tick scratch for the same phase and a second resource for it would be
+    // a second place for the two halves of change detection to be resized
+    // independently.
+    let mut scratch = AdmitScratch::take(world, count);
+    let AdmitScratch {
+        ref mut moving,
+        ref mut kinds,
+        ref mut inputs,
+    } = scratch;
+
+    // Which chains moved, and whether each newest observation is admitted over
+    // the payload a retained transition holds. Both are change detection outside
+    // the poll, and both are answered here for every chain at once so the walk
+    // below reads a decision rather than making one.
+    #[cfg(feature = "profile")]
+    let compare_charge = Charge::new(TickStage::Compare);
     {
         let mut query = world.query_filtered::<&SourceId, Changed<Revision>>();
         for id in query.iter(world) {
@@ -4535,17 +4691,29 @@ fn fire_plan(world: &mut World) {
             }
         }
     }
+    plan_admissions(world, moving, kinds);
+    #[cfg(feature = "profile")]
+    drop(compare_charge);
+
+    // The admitted-input identity of every value a chain will bind, derived in
+    // one batch so the stamps stay in declaration order.
+    #[cfg(feature = "profile")]
+    let fingerprint_charge = Charge::new(TickStage::Fingerprint);
+    plan_inputs(world, kinds, inputs);
+    #[cfg(feature = "profile")]
+    drop(fingerprint_charge);
 
     failures.resize_with(count, || None);
 
+    #[cfg(feature = "profile")]
+    let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
         let held = world.non_send_mut::<Ledger>().take(index);
-        let Some(mut transition) = resume(
-            world,
-            index,
-            moving.get(index).copied().unwrap_or(false),
-            held,
-        ) else {
+        let admit = Admit::bind(
+            kinds.get(index).copied().unwrap_or(AdmitKind::Idle),
+            inputs.get(index).copied().flatten(),
+        );
+        let Some(mut transition) = resume(world, index, admit, held) else {
             continue;
         };
 
@@ -4617,7 +4785,9 @@ fn fire_plan(world: &mut World) {
         }
     }
 
-    world.non_send_mut::<Moving>().0 = moving;
+    #[cfg(feature = "profile")]
+    drop(decide_charge);
+    *world.non_send_mut::<AdmitScratch>() = scratch;
     put_plan_buffers(world, steps, failures);
 }
 
@@ -5147,7 +5317,11 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
+        #[cfg(feature = "profile")]
+        let poll_charge = Charge::new(TickStage::Poll);
         let (invalidations, stalled, watchdogs) = self.poll_sources(&mut polled).await;
+        #[cfg(feature = "profile")]
+        drop(poll_charge);
         self.world.non_send_mut::<Polled>().0 = polled;
 
         // Published before the schedule runs, so the report describes this tick's
@@ -5159,7 +5333,11 @@ impl EcsBot {
         self.publish_refreshes();
         self.publish_stalls(&stalled, watchdogs);
 
+        #[cfg(feature = "profile")]
+        let schedule_charge = Charge::new(TickStage::Schedule);
         self.schedule.run(&mut self.world);
+        #[cfg(feature = "profile")]
+        drop(schedule_charge);
 
         // Taken rather than borrowed: the effects are awaited below, and a
         // borrow of the plan would outlive the schedule that wrote it. An empty
@@ -5173,7 +5351,11 @@ impl EcsBot {
             mut failures,
         } = plan;
         let budget = self.world.resource::<Policy>().0.max_attempts();
+        #[cfg(feature = "profile")]
+        let act_charge = Charge::new(TickStage::Act);
         let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+        #[cfg(feature = "profile")]
+        drop(act_charge);
 
         // Handed back with their capacity, not dropped. The plan is taken out of
         // the world to run because the driver needs it mutably while it awaits,
@@ -5213,6 +5395,34 @@ impl EcsBot {
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
+    }
+
+    /// One tick, with each stage of it measured.
+    ///
+    /// The same [`tick_async`](Self::tick_async) on the same four phases, with the
+    /// per-stage instrument armed around it; the `Result` is the identical value
+    /// that call would have returned. Nothing here is a reimplementation of the
+    /// tick, so a profile is a decomposition of the real path rather than of a
+    /// model of it.
+    ///
+    /// # The instrument is not free, and this is how its cost is known
+    ///
+    /// Measuring six stages costs seven clock reads. A caller that wants both a
+    /// wall time and a profile therefore times the *same* workload through both
+    /// doors and takes the difference as the instrument's cost on that tick —
+    /// which is what `bench/` does, and the only way the two figures can be read
+    /// together. The **shares** the profile reports are the claim it supports;
+    /// the absolute per-stage times carry the instrument.
+    ///
+    /// Stages are a partition of the tick and nest in one direction: the
+    /// schedule step wraps the stages inside it, so [`TickStage::Schedule`] is
+    /// the *residual* — the dispatch of the two systems plus the commit
+    /// bookkeeping inside `observe_fold` that nothing else claims.
+    #[cfg(feature = "profile")]
+    pub async fn tick_profiled(&mut self) -> (Result<usize, BotError>, TickProfile) {
+        profile::begin();
+        let outcome = self.tick_async().await;
+        (outcome, profile::end())
     }
 
     /// Run one tick on this thread, without an async runtime.
@@ -6857,7 +7067,7 @@ impl EcsBot {
         // The change flags and the plan's buffers are per-tick scratch, inserted
         // here so the first tick allocates them once and every later tick reuses
         // the same allocations. Nothing else writes them.
-        world.insert_non_send(Moving::default());
+        world.insert_non_send(AdmitScratch::default());
         world.insert_non_send(Moved::default());
         world.insert_non_send(Plan::default());
         // One slot per chain, sized here so the observation phase never resizes

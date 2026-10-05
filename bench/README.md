@@ -46,93 +46,174 @@ CARGO_TARGET_DIR=/tmp/lgwks-bench-target \
 
 `--capcheck-only` skips the timing scenarios. The rig writes a JSON copy of its
 results and prints a human table; `results.json` in this directory is the
-committed record of the run described below.
+committed record of the run described below. Two more doors:
 
-### The journals, and why the timing run no longer finishes
+```sh
+# where a tick goes, stage by stage, measured on the tick path itself
+cargo run --release --manifest-path bench/Cargo.toml -- --profile
 
-Every bot this rig admits dispatches an external effect, and an external effect
-requires a journal whose `durability()` meets `ProcessCrash`
-(`crates/lgwks-bot/src/ecs.rs`). `MemoryJournal` reports `Ephemeral` and is
-refused at the first dispatch, so the rig journals to
-`$TMPDIR/lgwks-bench-journal-<pid>/bot-<n>.journal`, one file per bot, and
-leaves them there: a journal is the record of what left the process, and a
-measurement rig that deleted it would discard the evidence it exists to
-produce. Remove the directory yourself between runs.
+# heap allocations per steady-state tick, both engines, over the same window
+cargo run --release --manifest-path bench/Cargo.toml -- --alloc-report
+```
 
-The consequence is in the runtime, not in the arguments. One append on this
-machine's filesystem is a `write` plus an `fsync`, and `--alloc-report` costs
-what the run says:
+Both are separate from the timing run and neither number is taken from a
+counting or an instrumented window: the counters and the clock reads are real
+costs, and a ratio taken from a window that pays for them would be a ratio
+about the instrument.
 
-| scenario | effects the report fires | row cost, ms/tick |
-|---|---:|---:|
-| `poll-only-64x100` | 0 | 0.0 |
-| `steady-64x100` | 128 | 3.5 |
-| `churn-64x1` | 31 232 | 798.3 |
-| `fanout-1x64` | 31 744 | 501.9 |
-| `wide-256x10` | 32 256 | 160.4 |
+### The journals: what each bot dispatches through, and why
 
-That is about 8 minutes for the counting run, and the timing scenarios repeat
-that workload over 24 rounds plus warm-up, so they no longer complete at all.
-The cost is proportional to how many effects a tick fires, not to what the
-schedule decides, which is the cost of the configuration the crate now requires;
-see the section above on what the committed table does and does not cover.
+Every bot this rig admits dispatches an effect, and an effect goes through the
+ledger, the broker, and a journal. Two of those three are the guarantees the
+headline ratio is the price of; the third is a measurement choice, and it is
+stated here rather than left for a reader to infer.
+
+The rig's action is a counter increment in its own address space, so it declares
+`EffectLifetime::Local` and the crate admits an in-memory journal for it. An
+external handoff would instead need a journal whose durability meets
+`ProcessCrash`, and this machine's filesystem charges a `write` plus an `fsync`
+per append — about 3 ms — which would put a disk round-trip inside every timed
+window and make the table a measurement of `FileJournal` rather than of the
+schedule. That is a different claim, and it is stated when it is made (see the
+journal cost figures in `docs/production-readiness.md` §4.6), not folded in here.
+
+`MemoryJournal` retains at most `MAX_JOURNAL_EVENTS` (100 000) events and
+**refuses** the next append rather than dropping evidence, so a workload that
+fires millions of effects cannot be measured against one journal at all. Two
+consequences, both of them visible in the output:
+
+- **Each round builds its own bot** (and its own baseline) and warms both before
+  the timer starts. Admission is therefore outside the timed window on both
+  legs, and the retained journal is bounded by one round's workload instead of
+  by the whole run. `Scenario::ticks_per_round` is sized to stay inside that
+  ceiling; a round that overran it would be a rig that stopped measuring.
+- **Every row reports the events its busiest round retained and the ceiling it
+  had to stay under**, so no reader is told a number nobody ran.
 
 ## The headline, stated before the method
 
 **`lgwks_bot` is not state of the art on throughput, and this rig does not claim
-it is.** On this machine the bot is between **72x and 256x slower** than a
+it is.** On this machine the bot is between **320x and 3 633x slower** than a
 hand-rolled loop doing provably identical work. That is the honest result, and
 the rest of this document is about what that multiplier buys and where it goes.
 
 | scenario | bot ns/tick | baseline ns/tick | ratio (bot/baseline) | 95% CI |
 |---|---:|---:|---:|---|
-| `poll-only-64x100` | 2 540.0 | 30.9 | 82.57x | [81.22, 83.38] |
-| `steady-64x100` | 2 582.1 | 30.8 | 84.03x | [83.78, 84.42] |
-| `churn-64x1` | 10 931.6 | 42.6 | 256.42x | [254.26, 257.39] |
-| `fanout-1x64` | 2 329.5 | 32.2 | 72.38x | [71.99, 72.51] |
-| `wide-256x10` | 12 726.5 | 132.4 | 96.01x | [95.45, 96.33] |
+| `poll-only-64x100` | 14 365.1 | 44.7 | 319.56x | [312.50, 339.84] |
+| `steady-64x100` | 20 261.2 | 45.0 | 431.17x | [388.87, 464.24] |
+| `churn-64x1` | 223 385.7 | 93.2 | 2 483.09x | [2 336.41, 2 691.76] |
+| `fanout-1x64` | 183 596.5 | 50.2 | 3 632.88x | [3 420.35, 3 811.49] |
+| `wide-256x10` | 137 361.9 | 201.2 | 680.80x | [654.08, 720.08] |
 
-Every interval excludes parity, so each of these is a distinguishable
-difference rather than noise. The `churn-64x1` interval is the widest, which is
-what a scenario whose cost depends on how much work the scheduler actually
+Every interval excludes parity, so each of these is a distinguishable difference
+rather than noise. The `churn-64x1` and `fanout-1x64` intervals are the widest,
+which is what a scenario whose cost depends on how many effects the scheduler
 dispatches should look like.
 
 **Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.99.0,
 `opt-level = 3`, `lto = true`, `codegen-units = 1`. One machine, one run: these
 are absolute numbers for this host, not a cross-platform claim.
 
-### What these figures are and are not, as of the file-backed journal
+### These numbers are not the ones this file used to publish, and why
 
-**Every number in this document predates a change to the rig's own
-configuration, and that change is on the bot's side of the comparison.** An
-admitted bot is now refused at assembly unless it is given an effect scope, and
-the scope has to carry a journal whose durability promise meets what an external
-handoff requires. `MemoryJournal` reports `Ephemeral` and is refused, so the
-rig's measured bots dispatch through a `FileJournal` on this machine's disk, and
-the write and `fsync` an effect needs are now inside every timed window.
+The table above is **larger than the one this file carried before 2026-10-05**,
+which reported 72x to 256x. Two things changed, both on the bot's side of the
+comparison, and neither is a rig change that flattered either engine:
 
-That moves the bot leg by roughly three orders of magnitude on the scenarios
-that fire effects, and it moves `churn-64x1` and `wide-256x10` by more than
-the runtime of a full timing run on this filesystem. The figures below are
-therefore left exactly as measured rather than restated against a configuration
-they were not taken on, and read as what they are:
+1. **Every effect now writes a durable record.** An admitted bot is refused at
+   assembly unless it is given an effect scope, and the crate will not dispatch an
+   external effect through a journal that cannot outlive the process. A bot with
+   no effect scope at all — which is what the previous run's rig built, and what
+   the crate accepted then — fired effects with no ledger, no broker warrant and
+   no record. That configuration is not a bot the crate will build today, so its
+   ratios are not this crate's cost.
+2. **The source-level digest that let a chain skip its poll was removed.** The
+   `Observe::fingerprint` seam is deprecated and unused, and a source's value is
+   compared against the substrate's baseline *inside* the poll, after the value
+   has been produced. The previous run's rig source implemented `fingerprint`,
+   so on 99 of every 100 ticks it skipped the poll entirely.
 
-- They are the cost of **the schedule and the four verbs**, measured against an
-  in-memory journal — which the crate would now refuse to dispatch an external
-  effect through.
-- They are **not** the cost of `lgwks_bot` as it has to be configured today,
-  which includes a durable record per effect.
-- They are **not** the cost of durability either. Nothing here measures what
-  `journal::FileJournal` costs per append; the only figure this repository has
-  for that is the crate's own note that a four-rung attempt costs four flushes
-  at about 3.3 ms each (`crates/lgwks-bot/src/journal/file.rs`).
+Both changes make the bot slower, and both are stated here rather than left for a
+reader to reconcile. The decomposition below is what says which of them the
+current numbers are made of.
 
-Nothing in the measured table has been recomputed, because a full timing run
-against the file-backed journal does not complete in a usable time on this
-machine. Regenerating them is a deliberate future run, not something to
-estimate; the wall-clock figure the allocation report prints beside each row
-(`--alloc-report`, `row cost`, ms/tick) is the honest cost of a measured window
-as the rig stands, and it is not a substitute for a re-measured table.
+### Where a tick actually goes: the per-stage profile
+
+The claim "98% of a tick is poll and change detection" came from a two-scenario
+difference. It is now measured directly, on the tick path itself, by the crate's
+own `profile` feature (`Bot::tick_profiled` is `tick_async` with the per-stage
+instrument armed; nothing here is a reimplementation of the tick):
+
+```
+  scenario                     poll fingerprint   compare  schedule   decide      act      plain instrument
+  poll-only-64x100        7064.0     171.0    1238.0      43.0     548.0    1733.0    10741.7     +251.2
+  steady-64x100           7084.0     171.0    1270.0      44.0     589.0    3058.0    12111.3     +423.1
+  churn-64x1             10164.0   10401.0    5830.0      91.0    7130.0  164017.0   167184.6   +9852.4
+  fanout-1x64              856.0     204.0     967.0      55.0     690.0  145157.0   138333.9   +9450.6
+  wide-256x10           29532.0    3948.0    4392.0      68.0    5130.0   63324.0   107960.3    -691.5
+
+  shares of the measured tick
+  scenario                     poll fingerprint   compare  schedule   decide      act
+  poll-only-64x100         65.4%      1.6%     11.5%      0.4%      5.1%     16.0%
+  steady-64x100            58.0%      1.4%     10.4%      0.4%      4.8%     25.0%
+  churn-64x1                5.1%      5.3%      3.0%      0.0%      3.6%     83.0%
+  fanout-1x64               0.6%      0.1%      0.7%      0.0%      0.5%     98.1%
+  wide-256x10              27.8%      3.7%      4.1%      0.1%      4.8%     59.5%
+```
+
+**What each column is.** `poll` is the observation phase, and it carries each
+source's own comparison of the value it read against the value the substrate
+already holds, because that is where this substrate's per-source change detection
+happens. `fingerprint` is the admitted-input identity every value that moves
+binds. `compare` is change detection outside the poll: the `Changed<Revision>`
+query and the admission comparisons. `schedule` is the ECS step itself, and it is
+a **residual** — the stages nested inside it charge first, so what it reports is
+the dispatch of the two systems plus `observe_fold`'s commit bookkeeping.
+`decide` is the condition walk. `act` is the effects the tick selected, including
+the ledger write, the warrant, the durable record and the action.
+
+**The stage columns carry the instrument, and `plain` is what the same workload
+costs with it off.** A tick reads the clock once per charge plus once to open the
+window — seven reads — and one read costs **36 ns** on this host, so the
+instrument adds about 250 ns/tick on a short tick. On the two long scenarios the
+difference is larger than seven reads because the second window runs on a bot
+whose journal has already grown: that is the instrument's cost reported honestly
+rather than subtracted to taste, and it is why the **shares**, not the absolutes,
+are what this table supports.
+
+**What the profile says, which is not what the old file said.**
+
+| scenario | poll + change detection | decision and effects | the old claim |
+|---|---:|---:|---|
+| `poll-only-64x100` | 78.5% | 21.5% | 98% |
+| `steady-64x100` | 69.8% | 30.2% | 98% |
+| `churn-64x1` | 13.4% | 86.6% | 98% |
+| `fanout-1x64` | 1.4% | 98.6% | — |
+| `wide-256x10` | 35.6% | 64.4% | 98% |
+
+The old "98%" was true of a tree in which a source with a digest skipped its
+poll and an effect wrote no record. On this tree the two effects-heavy scenarios
+are dominated by `act` — the durable record each dispatched effect is written
+through — and only the three quiet scenarios are poll-dominated. Naming that is
+the point of measuring it rather than extrapolating from two scenarios.
+
+**Zero heap allocations is not yet true of this tick.** The counting allocator
+(`--alloc-report`, one shared instrument with `bench/async`) measures, on a
+warmed bot and outside every timed window:
+
+| scenario | allocs/tick | bytes/tick | mean bytes | baseline allocs/tick |
+|---|---:|---:|---:|---:|
+| `poll-only-64x100` | 317.6 | 42 389.0 | 133.5 | 0.0 |
+| `steady-64x100` | 321.1 | 43 845.5 | 136.5 | 0.0 |
+| `churn-64x1` | 797.0 | 205 792.1 | 258.2 | 0.0 |
+| `fanout-1x64` | 333.0 | 165 363.1 | 496.6 | 0.0 |
+| `wide-256x10` | 1 394.0 | 240 720.1 | 172.7 | 0.0 |
+
+The baseline's zero is the control: a hand-rolled loop over the same workload
+allocates nothing, so a non-zero count on that side would mean the counter was
+picking up something other than the bot. 317.6 allocations on a tick that fires
+nothing is 4.96 per source, and the per-tick trace says it is flat: the same
+317 on every quiet tick and 509 on the one tick in a hundred where a value moves.
 
 ## Method
 

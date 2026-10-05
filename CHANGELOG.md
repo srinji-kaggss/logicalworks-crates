@@ -9,6 +9,49 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a tick is measured stage by stage, and the rig that measures it runs again (#279)
+
+`bench/` publishes a ratio between this crate's tick and a hand-rolled loop
+doing provably identical work, and the ratio used to be read as "the schedule is
+slow" without anyone knowing which half of it. It is now measured directly, and
+the answer is not what the ratio used to imply.
+
+- **A new default-off `profile` feature, and `Bot::tick_profiled`.** The same
+  four phases as `tick_async` with a per-stage instrument armed: `poll`,
+  `fingerprint`, `compare`, `schedule`, `decide`, `act`. The stages are a
+  partition of the tick and nest in one direction — the schedule step wraps the
+  stages inside it, so `TickStage::Schedule` is the *residual* — and each charge
+  reads the clock once rather than twice. Nothing in the crate's execution path
+  reads the instrument, and every charge site is behind the feature, so a build
+  without `profile` contains no clock read at all. `bench/` is its only caller.
+- **The decision pass is now two batched passes instead of one interleaved
+  walk.** Which chains moved, and whether each newest observation is admitted
+  over the payload a retained transition holds, are answered for every chain
+  before the walk starts; the admitted-input identity of every value a chain
+  will bind is derived in one batch after that. The admission comparison is
+  cached rather than recomputed inside the walk, the admitted-input stamps are
+  still consumed in declaration order, and the decisions are the same ones —
+  which is what makes change detection and identity derivation two separately
+  measurable stages rather than one interleaved loop.
+- **`bench/` runs again.** Its rig built a bot with no effect scope, which the
+  crate now refuses at assembly, so it had not produced a timing in months. It
+  dispatches through an in-memory journal with an `EffectLifetime::Local`
+  action, each round builds and warms its own bot so the retained journal stays
+  inside `MAX_JOURNAL_EVENTS` and admission sits outside the timed window, and
+  every row reports the events its busiest round retained beside the ceiling.
+  Two new doors: `--profile` for the stage breakdown and `--alloc-report` for
+  the allocation model.
+- **The published ratios went up, and the reason is stated rather than
+  explained away.** The previous table (72x–256x) was taken on a tree that
+  dispatched effects with no ledger, no warrant and no record, and whose
+  source-level digest let a chain skip its poll entirely. Both of those are gone.
+  On this tree the two effect-heavy scenarios are dominated by `act` — the
+  durable record each dispatched effect is written through — and only the three
+  quiet scenarios are poll-dominated. `bench/README.md` and
+  `docs/production-readiness.md` §4.9 carry the new numbers and the
+  decomposition.
+
+
 ### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
 
 The two items #286 and #289 left open on the bounded blocking pool. Both are

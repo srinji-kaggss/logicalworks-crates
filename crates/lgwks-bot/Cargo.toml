@@ -86,6 +86,18 @@ inspect = ["dep:lgwks_ast"]
 # runs `cargo test -p lgwks_bot --features full`, so `tests/it/ephemeral.rs`
 # executes rather than only compiling.
 ephemeral = ["lgwks_std/random"]
+# `profile`: the per-stage tick profiler `bench/` publishes its decomposition
+# from. Default-off for the reason `signal` and `ephemeral` are: it is an
+# instrument, not a capability, and a build that pays for an instrument nobody
+# asked for is a build whose numbers are about the instrument. Nothing in the
+# crate's own execution path reads it, and every charge site in `ecs.rs` is
+# behind this feature, so a build without it contains no clock read at all.
+#
+# `full` turns it on so the runner step exercises the instrument rather than
+# letting it rot as an unbuilt candidate — the same treatment `inspect` gets, and
+# for the same reason: the profile is only trustworthy while something compiles
+# and tests it.
+profile = []
 full = [
     "rt",
     "time",
@@ -99,6 +111,7 @@ full = [
     "ephemeral",
     "script",
     "inspect",
+    "profile",
 ]
 
 [dependencies]
