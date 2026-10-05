@@ -1,3 +1,14 @@
+# Every test is bounded. nextest's default has no timeout, so a test that parks
+# forever holds the whole gate open, and "the suite hung" reads exactly like "the
+# suite is still running": on 2026-10-05 a tenancy test with every tokio worker
+# parked ran for 12.5 minutes at 0% CPU before anyone looked. A test that reports
+# no progress for five 60 s periods is killed and fails the run, naming itself.
+# 300 s is the whole budget for a gate, so no single test may take longer; the
+# per-module overrides below are tighter where their tests are known to be
+# shorter, and an override's own slow-timeout takes precedence over this one.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # journal_scale measures how many OS threads the process can create and then
 # holds that many tenant journals open. On Linux the thread limit is per user,
 # so a sibling test forked meanwhile can fail to spawn with EAGAIN (main CI run
