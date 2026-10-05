@@ -25,6 +25,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
+# The same value as `[profile.test] debug` in Cargo.toml, which cargo already
+# reads; it is repeated here for the cache. Swatinem/rust-cache keys on every
+# `CARGO*` variable but drops `[profile]` from the manifests it hashes, so a
+# profile change alone kept the old key: the restore was a full match, nothing
+# was saved, and every run would rebuild its dependencies with the new profile
+# from a cache built with the old one (#272). Change both together.
+env:
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   build:
     name: Build + gate
