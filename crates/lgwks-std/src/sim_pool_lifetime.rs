@@ -322,16 +322,22 @@ fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
     );
 }
 
-/// Two facts about the handle list that hold of any pool, at any step.
+/// The fact about the handle list that holds of any pool, at any step.
 ///
 /// `handles.len() == live + (threads that have left the accounting and not yet
 /// returned)` is an identity, and there is no constant on the second term: each
 /// departure frees a slot immediately while the thread keeps running its last
 /// instructions, so a scheduler that deschedules every departing thread in turn
-/// admits the next one. What is checkable is that every live thread is present
-/// and unreturned — a thread that has returned has already decremented `live` —
-/// and, at a reap point, that no returned thread is still held.
-fn assert_handles_accounted(pool: &Arc<Pool>, reap_point: bool, where_: &str, seed: u64) {
+/// admits the next one. What is checkable at any instant is that every live
+/// thread is present and unreturned — a thread that has returned has already
+/// decremented `live`.
+///
+/// Whether a *reap* took every returned thread is not checkable here: a kept
+/// thread may return between the reap and this read, so `is_finished` read
+/// afterwards describes a later instant than the reap did. [`cycles`] checks
+/// the reap instead from a state it fixed first — every older thread returned
+/// before the start that reaps — which is the only reading that cannot race.
+fn assert_handles_accounted(pool: &Arc<Pool>, where_: &str, seed: u64) {
     let state = lock(&pool.state);
     let live = state.live;
     let held = state.handles.len();
@@ -345,14 +351,6 @@ fn assert_handles_accounted(pool: &Arc<Pool>, reap_point: bool, where_: &str, se
         "seed {seed:#x} {where_}: {live} live threads but only {unreturned} unreturned handles \
          of {held}; a live thread cannot have returned, since it decrements `live` first"
     );
-    if reap_point {
-        let returned = held.saturating_sub(unreturned);
-        assert_eq!(
-            unreturned, held,
-            "seed {seed:#x} {where_}: {returned} returned threads were still held at a \
-             reap point; a start joins what has returned"
-        );
-    }
 }
 
 /// One seed's burst/idle cycles, as its trace hash.
@@ -380,7 +378,7 @@ fn cycles(seed: u64) -> u64 {
         let mut handles = Vec::with_capacity(burst);
         for index in 0..burst {
             handles.push(spawn_blocking_on(&pool, move || index));
-            assert_handles_accounted(&pool, true, &format!("cycle {cycle} submit {index}"), seed);
+            assert_handles_accounted(&pool, &format!("cycle {cycle} submit {index}"), seed);
         }
         for (index, value) in block_on(join_all(handles)).into_iter().enumerate() {
             assert_eq!(
@@ -389,7 +387,7 @@ fn cycles(seed: u64) -> u64 {
             );
             fold_usize(&mut trace, value);
         }
-        assert_handles_accounted(&pool, false, &format!("cycle {cycle} drained"), seed);
+        assert_handles_accounted(&pool, &format!("cycle {cycle} drained"), seed);
         wait_until_empty(&pool, seed);
         // With every thread gone and no start to reap them, what the list holds
         // is exactly the threads this cycle started — never more, however many
@@ -401,10 +399,15 @@ fn cycles(seed: u64) -> u64 {
              a thread that exits on its keep-alive must be reaped, not held"
         );
         fold(&mut trace, u64::from(held <= ceiling));
-        assert_handles_accounted(&pool, false, &format!("cycle {cycle} idle"), seed);
+        assert_handles_accounted(&pool, &format!("cycle {cycle} idle"), seed);
 
-        // The next cycle's first submit reaps what has finished, so the list is
-        // exactly its own handle at that point.
+        // The next cycle's first submit reaps what has returned. `live == 0`
+        // says every thread left the accounting, not that each has returned —
+        // one may still be in its last instructions, and the reap rightly keeps
+        // it — so the reap is checked only once every older thread has returned.
+        // Then the list after the start is exactly its own handle, whatever the
+        // new thread does afterwards: a handle leaves only at the next reap.
+        wait_until_all_returned(&pool, seed);
         let head = spawn_blocking_on(&pool, || 0u32);
         assert_eq!(block_on(head), 0);
         let after_reap = lock(&pool.state).handles.len();
@@ -414,7 +417,7 @@ fn cycles(seed: u64) -> u64 {
              the ones that had already left were not joined"
         );
         fold(&mut trace, u64::try_from(after_reap).unwrap_or(u64::MAX));
-        assert_handles_accounted(&pool, true, &format!("cycle {cycle} after the reap"), seed);
+        assert_handles_accounted(&pool, &format!("cycle {cycle} after the reap"), seed);
     }
     // The pool has nothing left to run: a shutdown still joins whatever the
     // last cycle's reap did not already take, and reports the threads it
@@ -516,8 +519,7 @@ fn wait_until_all_returned(pool: &Arc<Pool>, seed: u64) {
     let held = lock(&pool.state).handles.len();
     assert!(
         held == 0,
-        "seed {seed:#x}: {held} registered threads had not returned after {} polls of a \
-         released hold",
+        "seed {seed:#x}: {held} registered threads had not all returned after {} polls",
         IDLE_POLLS
     );
 }

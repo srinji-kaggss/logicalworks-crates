@@ -865,6 +865,12 @@ impl<W> PoolState<W> {
         ceiling: usize,
     ) -> Result<Admitted<W>, Refused<W>> {
         if self.draining {
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(
+                live = self.live,
+                queued = self.queue.len(),
+                "admit: the pool is shutting down and admits nothing"
+            );
             return Err(Refused::Draining(work));
         }
         if queue_limit.is_some_and(|limit| self.queue.len() >= limit) {
