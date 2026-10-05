@@ -41,3 +41,19 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = 'package(lgwks_std) & binary(it) & test(/^sim_random_error::/)'
 threads-required = 'num-test-threads'
+
+# The CI profile: the same runs, each writing a JUnit report of what it actually
+# ran, so the acceptance receipt can be built from the suite's own output instead
+# of running it a second time. `store-success-output = false` keeps a report to
+# what a reader needs -- per test, one status and one duration -- rather than the
+# captured stdout of every passing test, which for this crate is megabytes.
+#
+# `path` is a bare filename on purpose. nextest resolves it relative to the
+# runner's own report directory, so a path carrying directories in it is appended
+# to that directory and lands at `target/nextest/ci/target/nextest/ci/junit.xml`.
+# Wherever it lands it is under `target/`, which is already ignored, so a report
+# is a derived artifact and never reaches the repository.
+[profile.ci]
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false

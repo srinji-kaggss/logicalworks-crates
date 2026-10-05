@@ -62,53 +62,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 // ── Sources ────────────────────────────────────────────────────────────────
 
-/// A source whose value is the test's, and whose cache declaration and refusal
-/// are both the test's.
-///
-/// The declaration is read through the public [`Observe::cache_state`] on the
-/// tick after the poll that reached the failure, which is the ordering the trait
-/// documents: the reason is a statement about state the poll already touched.
-struct Declarable {
-    /// The value this poll reports.
-    value: Rc<Cell<u32>>,
-    /// What `cache_state` answers, read fresh on every call.
-    reason: Rc<Cell<Option<RefreshReason>>>,
-    /// Whether the next poll refuses rather than reading.
-    refusing: Rc<Cell<bool>>,
-    /// How many times the body ran.
-    polls: Rc<Cell<u32>>,
-    /// The domain identity a report names this source by.
-    domain: &'static str,
-}
-
-impl Observe for Declarable {
-    type Output = u32;
-
-    fn required_caps(&self) -> &[Cap] {
-        &[]
-    }
-
-    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-        admit_poll(&call.0, Observe::required_caps(self), &self.polls)?;
-        if self.refusing.get() {
-            Err(BotError::DomainError {
-                domain: self.domain.to_owned(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "the source refused to read".to_owned(),
-            })
-        } else {
-            Ok(self.value.get())
-        }
-    }
-
-    fn cache_state(&self) -> Option<RefreshReason> {
-        self.reason.get()
-    }
-
-    fn domain_id(&self) -> &str {
-        self.domain
-    }
-}
+use crate::declarable::Declarable;
 
 /// An event source: the next `EventId` the test queued, and the queue's
 /// remaining length.
@@ -1051,23 +1005,11 @@ struct DeclarableRig {
 }
 
 /// Build a one-chain bot over a declarable source.
-fn declarable_bot(
-    name: &'static str,
-    domain: &'static str,
-) -> Result<DeclarableRig, Box<dyn Error>> {
-    let value = Rc::new(Cell::new(1));
-    let reason = Rc::new(Cell::new(None));
-    let refusing = Rc::new(Cell::new(false));
-    let polls = Rc::new(Cell::new(0));
+fn declarable_bot(domain: &'static str) -> Result<DeclarableRig, Box<dyn Error>> {
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let source = Declarable {
-        value: Rc::clone(&value),
-        reason: Rc::clone(&reason),
-        refusing: Rc::clone(&refusing),
-        polls: Rc::clone(&polls),
-        domain,
-    };
-    let bot = Bot::builder(name)
+    let source = Declarable::new(1, domain);
+    let (value, reason, refusing, polls) = source.handles();
+    let bot = Bot::builder(domain)
         .observe(source)
         .on(
             |observed: &u32| *observed > 0,
@@ -1098,7 +1040,7 @@ fn declarable_bot(
 #[test]
 fn a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state() -> TestResult {
     for (cause, spelling) in CAUSES {
-        let mut rig = declarable_bot("t08", "test::t08_source")?;
+        let mut rig = declarable_bot("test::t08_source")?;
 
         // One clean tick: the source is read, the value commits, the entry runs,
         // and the chain settles. Nothing is armed, so nothing should be forced.
@@ -1175,7 +1117,7 @@ fn a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state() -> 
 /// commit the newer value.
 #[test]
 fn a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet() -> TestResult {
-    let mut rig = declarable_bot("t08-move", "test::t08_move")?;
+    let mut rig = declarable_bot("test::t08_move")?;
 
     tick(&mut rig.bot)?;
     assert_eq!(
@@ -1238,7 +1180,7 @@ fn a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet() -> TestR
 /// quiet before, and the report says nothing.
 #[test]
 fn a_failed_refresh_keeps_the_baseline_marked() -> TestResult {
-    let mut rig = declarable_bot("t08-fail", "test::t08_fail")?;
+    let mut rig = declarable_bot("test::t08_fail")?;
     tick(&mut rig.bot)?;
     let baseline = rig.polls.get();
 
@@ -1308,26 +1250,26 @@ fn two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain() -> 
     let broken_seen = Rc::new(RefCell::new(Vec::new()));
 
     let mut bot = Bot::builder("t08-tenants")
-        .observe(Declarable {
-            value: Rc::clone(&quiet_value),
-            reason: Rc::new(Cell::new(None)),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::clone(&quiet_polls),
-            domain: "test::tenant_quiet",
-        })
+        .observe(Declarable::over(
+            Rc::clone(&quiet_value),
+            Rc::new(Cell::new(None)),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&quiet_polls),
+            "test::tenant_quiet",
+        ))
         .on(
             |observed: &u32| *observed > 0,
             Lands {
                 seen: Rc::clone(&quiet_seen),
             },
         )
-        .observe(Declarable {
-            value: Rc::clone(&broken_value),
-            reason: Rc::clone(&broken_reason),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::clone(&broken_polls),
-            domain: "test::tenant_broken",
-        })
+        .observe(Declarable::over(
+            Rc::clone(&broken_value),
+            Rc::clone(&broken_reason),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&broken_polls),
+            "test::tenant_broken",
+        ))
         .on(
             |observed: &u32| *observed > 0,
             Lands {
@@ -1396,10 +1338,10 @@ struct EventRig {
 }
 
 /// Build a one-chain bot over an event feed.
-fn event_bot(name: &'static str, domain: &'static str) -> Result<EventRig, Box<dyn Error>> {
+fn event_bot(domain: &'static str) -> Result<EventRig, Box<dyn Error>> {
     let queue = Rc::new(RefCell::new(Vec::new()));
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let bot = Bot::builder(name)
+    let bot = Bot::builder(domain)
         .observe(EventFeed {
             queue: Rc::clone(&queue),
             polls: Rc::new(Cell::new(0)),
@@ -1428,7 +1370,7 @@ fn event_bot(name: &'static str, domain: &'static str) -> Result<EventRig, Box<d
 #[test]
 fn identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not() -> TestResult
 {
-    let mut rig = event_bot("t09-events", "test::t09_feed")?;
+    let mut rig = event_bot("test::t09_feed")?;
 
     // Event 1 over payload 7, then event 2 over the *same* payload.
     rig.queue.borrow_mut().push(EventId::new(1, 7));
@@ -1484,13 +1426,13 @@ fn an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired(
     let polls = Rc::new(Cell::new(0));
     let seen = Rc::new(RefCell::new(Vec::new()));
     let mut bot = Bot::builder("t09-latest")
-        .observe(Declarable {
-            value: Rc::clone(&value),
-            reason: Rc::clone(&reason),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::clone(&polls),
-            domain: "test::t09_latest",
-        })
+        .observe(Declarable::over(
+            Rc::clone(&value),
+            Rc::clone(&reason),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&polls),
+            "test::t09_latest",
+        ))
         .on(
             |observed: &u32| *observed > 0,
             NeverSettles {
@@ -1685,26 +1627,26 @@ fn saturated_pair(name: &'static str) -> Result<PairRig, Box<dyn Error>> {
     let ready_seen = Rc::new(RefCell::new(Vec::new()));
 
     let bot = Bot::builder(name)
-        .observe(Declarable {
-            value: Rc::clone(&saturated_value),
-            reason: Rc::new(Cell::new(None)),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::clone(&saturated_polls),
-            domain: "test::saturated",
-        })
+        .observe(Declarable::over(
+            Rc::clone(&saturated_value),
+            Rc::new(Cell::new(None)),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&saturated_polls),
+            "test::saturated",
+        ))
         .on(
             |observed: &u32| *observed > 0,
             NeverSettles {
                 seen: Rc::clone(&saturated_seen),
             },
         )
-        .observe(Declarable {
-            value: Rc::clone(&ready_value),
-            reason: Rc::new(Cell::new(None)),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::clone(&ready_polls),
-            domain: "test::independent",
-        })
+        .observe(Declarable::over(
+            Rc::clone(&ready_value),
+            Rc::new(Cell::new(None)),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&ready_polls),
+            "test::independent",
+        ))
         .on(
             |observed: &u32| *observed > 0,
             Lands {
@@ -1831,13 +1773,14 @@ fn a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier() -> Test
         // The independent chain is declared first, so it is chain 0 and its
         // effect is the first the walk reaches — the position a starved walk
         // would lose.
-        let mut builder = Bot::builder("t06-tiers").observe(Declarable {
-            value: Rc::new(Cell::new(1)),
-            reason: Rc::new(Cell::new(None)),
-            refusing: Rc::new(Cell::new(false)),
-            polls: Rc::new(Cell::new(0)),
-            domain: "test::independent",
-        });
+        let independent_polls = Rc::new(Cell::new(0));
+        let mut builder = Bot::builder("t06-tiers").observe(Declarable::over(
+            Rc::new(Cell::new(1)),
+            Rc::new(Cell::new(None)),
+            Rc::new(Cell::new(false)),
+            Rc::clone(&independent_polls),
+            "test::independent",
+        ));
         builder = builder.on(
             |observed: &u32| *observed > 0,
             Lands {
@@ -1848,13 +1791,13 @@ fn a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier() -> Test
         for _ in 0..requested {
             let seen = Rc::clone(&mass);
             builder = builder
-                .observe(Declarable {
-                    value: Rc::new(Cell::new(1)),
-                    reason: Rc::new(Cell::new(None)),
-                    refusing: Rc::new(Cell::new(false)),
-                    polls: Rc::new(Cell::new(0)),
-                    domain: "test::saturated",
-                })
+                .observe(Declarable::over(
+                    Rc::new(Cell::new(1)),
+                    Rc::new(Cell::new(None)),
+                    Rc::new(Cell::new(false)),
+                    Rc::new(Cell::new(0)),
+                    "test::saturated",
+                ))
                 .on(|observed: &u32| *observed > 0, NeverSettles { seen });
         }
 

@@ -9,6 +9,39 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### Acceptance evidence is now executable (#271)
+
+Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
+the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
+previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
+those tests through one anchored nextest filter and records each row's outcome
+in a SQLite database under the state directory, one row per revision, row, test,
+platform and feature set.
+
+The receipt can lower a row's claimed state and never raise one, so a green run
+cannot promote `present` to `exercised`, and it exits non-zero when a named test
+is absent, failing, or a row claims more than the run shows. The one promotion,
+`accepted`, requires the receipt's revision to be the head being rendered. The
+spec's per-row table is rendered from the database for one exact revision between
+`<!-- acceptance-table: start -->` markers, `--check` fails when the committed
+table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
+`--test` runs the generator's own fifteen regression cases. No new dependency:
+the database is Python's standard-library `sqlite3`.
+
+CI builds the receipt from what the suite already ran. The `ci` nextest profile
+writes a JUnit report per shard, and a job with no Rust toolchain merges the four
+with `--from-junit` in about 0.2 s, rather than executing the 215 named tests a
+second time.
+
+Every row now also answers to its own id in a test name: 15 new row-addressed
+tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
+`crates/lgwks-bot/tests/it/sim_t_rows.rs`, so
+`cargo nextest list --workspace -E 'test(/_t07$/)'` says which tests address a
+row without reading the map. Six of them are seeded sweeps replay-checked against
+their trace hash. They are new tests rather than renames precisely so that every
+existing citation of an existing test keeps resolving. No crate's public API
+changed.
+
 ### lgwks_ast — the parse had no time bound, and the walk was quadratic (#277)
 
 Two bounds the crate already claimed, and the numbers behind them.
