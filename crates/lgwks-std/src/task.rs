@@ -14,8 +14,9 @@
 //! - [`spawn_blocking`] runs one blocking closure on the bounded blocking pool
 //!   and returns a future for its result, so a blocking syscall (file read,
 //!   HTTP) does not stall the sibling futures driven by [`join_all`] or
-//!   [`block_on`]. [`try_spawn_blocking`] is the same with a bounded queue
-//!   and a typed [`SpawnError`] instead of an unbounded wait.
+//!   [`block_on`]. [`try_spawn_blocking`](crate::task::try_spawn_blocking) is
+//!   the same with a bounded queue and a typed
+//!   [`SpawnError`](crate::task::SpawnError) instead of an unbounded wait.
 //!
 //! Together these replace `tokio`, `futures`, `pollster`, and `async-trait`
 //! for applications that only need to await futures, await a bounded set of
