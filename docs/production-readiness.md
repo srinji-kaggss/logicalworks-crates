@@ -79,7 +79,10 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   which tests address a row without reading the map. The receipt can lower a
   row's claim and never raise one, and `scripts/acceptance-receipts.py --check`
   fails when the spec's generated table disagrees with the map and the receipt
-  for one exact revision. A row reads `accepted` only when that revision is the
+  for one exact revision. In CI that receipt is built from the JUnit reports the
+  four lgwks-bot shards already wrote, by a job that needs no Rust toolchain and
+  no build and takes about 0.2 s, so the named tests execute once per run rather
+  than twice. A row reads `accepted` only when that revision is the
   head being rendered. No row is `accepted`; the externally bounded subprocess
   and per-backend OS campaign has not run. `--check` reads the local database, so
   it is a local gate rather than a CI step: a CI checkout has no receipt for its
