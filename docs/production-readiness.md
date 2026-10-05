@@ -66,9 +66,15 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   be one commit in the history of `HEAD` and the enforcer must be unchanged since,
   or the entry is refused; where Git cannot answer, it is refused. Five scratch-repo
   tests in `lgwks_deps::invariants`.
-- **Acceptance rows T07, T10, T28 and T36** each gained the test the spec text asks
-  for. By the coverage map taken earlier in this work, that moves four rows from
-  partial to covered; eight stay partial.
+- **All 36 acceptance rows now name the tests that address them**, in
+  `docs/acceptance/t-rows.toml`, and `scripts/acceptance-receipts.py` ran exactly
+  those tests against the checked-out head, writing `evidence/<revision>.json`.
+  The run at `49bfcd6d` passed 195 of 195 named tests in 43.6s: 26 rows observed
+  `exercised`, and ten still `present` with the gap written down rather than
+  rounded up — T07, T10, T11, T14, T17, T21, T25, T28, T31 and T36. The receipt
+  can lower a row's claim and never raise one, so a stale or narrower claim
+  cannot hide behind a green run. No row is `accepted`; the externally bounded
+  subprocess and per-backend OS campaign has not run.
 - **The authoring contract (#87, §7 item 6) was measured four ways**, not argued:
   160 fixed-model trials across the old surface, the facade, the facade plus
   `FanOut`, and the `futures` crate. See `bench/ai-authoring/README.md`. The finding

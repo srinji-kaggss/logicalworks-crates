@@ -9,6 +9,21 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### Acceptance evidence is now executable (#271)
+
+Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
+the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
+previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
+those tests through one anchored nextest filter and writes
+`evidence/<revision>.json`, per row, with each test's observed outcome and the
+row's gap sentence.
+
+The receipt can lower a row's claimed state and never raise one, so a green run
+cannot promote `present` to `exercised`, and it exits non-zero when a named test
+is absent, failing, or a row claims more than the run shows. No crate's public
+API changed; this adds the map, the runner, the receipts and the spec's
+per-row table.
+
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 
 `lgwks_ast` stays at 1.0.0: its source is unchanged since that tag. Every

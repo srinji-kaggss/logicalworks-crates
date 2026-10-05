@@ -1,7 +1,12 @@
 # Acceptance: simple authoring, complete orchestration
 
-Status: **proposed tests and release criteria; the T01–T36 acceptance run is
-still UNRUN**. Tracker: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87),
+Status: **the acceptance run has executed; no row is accepted yet**. Every
+T01–T36 falsifier now names the tests that address it, and
+`scripts/acceptance-receipts.py` ran exactly those tests against this head. The
+per-row result is in [Per-row evidence at this revision](#per-row-evidence-at-this-revision)
+and the machine-readable record is in `evidence/`. What remains UNRUN is the
+externally bounded subprocess and per-backend OS campaign, which is why no row
+claims `accepted`. Tracker: [#87](https://github.com/srinji-kaggss/logicalworks-crates/issues/87),
 release gate [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109).
 A passing existing workflow does not execute tests that have not been added.
 
@@ -89,6 +94,51 @@ crash paths. A timeout on the executor that may be blocked is not an independent
 oracle. Run process containment checks on the actual supported OS backends;
 compiling a cfg branch is not runtime evidence for it.
 
+## Per-row evidence at this revision
+
+Generated from [`docs/acceptance/t-rows.toml`](acceptance/t-rows.toml) and the run recorded in [`evidence/2f2bb0ee42bcf7fd4e12372212558e792957464c.json`](../evidence/2f2bb0ee42bcf7fd4e12372212558e792957464c.json): every test the map names, run once through `scripts/acceptance-receipts.py` at this exact head. A row is `exercised` only when a named test drives its falsifier; `present` means named tests cover part of the text and the gap column says what is not asserted. No row is `accepted`, and nothing here claims the externally bounded subprocess and per-backend campaign has run.
+
+| ID | State | Tests | Gap |
+|---|---|---|---|
+| T01 | exercised | 3/3 | — |
+| T02 | exercised | 4/4 | — |
+| T03 | exercised | 3/3 | — |
+| T04 | exercised | 5/5 | — |
+| T05 | exercised | 5/5 | — |
+| T06 | exercised | 6/6 | — |
+| T07 | present | 4/4 | No named test drives A's new fingerprint and B's refused atomic observation group in one tick and then reads B's recovery with A's uncommitted update executed exactly once; the named tests cover per-chain baseline marks and cross-chain attribution separately. |
+| T08 | exercised | 8/8 | — |
+| T09 | exercised | 6/6 | — |
+| T10 | present | 5/5 | The Unknown half is named; no single test drives all four predecessor states (Failed, Abandoned, Skipped, Unknown) for one dependent and asserts the dependent never runs for any of them. |
+| T11 | present | 10/10 | No named test delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown; the named tests settle A Unknown and prove isolation and duplicate idempotence separately. |
+| T12 | exercised | 7/7 | — |
+| T13 | exercised | 6/6 | — |
+| T14 | present | 7/7 | Four of the five named boundaries are covered; the crash before intent ack (nothing committed) has no named test of its own. |
+| T15 | exercised | 6/6 | — |
+| T16 | exercised | 6/6 | — |
+| T17 | present | 5/5 | Dropping the client and holding the uncertain attempt are named; no named test asserts that uncertainty and cleanup are reported as two independent facts from the same drained host. |
+| T18 | exercised | 8/8 | — |
+| T19 | exercised | 4/4 | — |
+| T20 | exercised | 3/3 | — |
+| T21 | present | 3/3 | Signalling only into the supervised group and a session escape are named; no named test exercises PID or process-group reuse, and the row is not executed per backend. |
+| T22 | exercised | 8/8 | — |
+| T23 | exercised | 7/7 | — |
+| T24 | exercised | 5/5 | — |
+| T25 | present | 5/5 | The shared trace for native and generated forms is named; no named test drives an unknown operation name and asserts refusal before any effect. |
+| T26 | exercised | 7/7 | — |
+| T27 | exercised | 2/2 | — |
+| T28 | present | 5/5 | Conflicting writes and concurrent readers are named; no named test asserts that a worker in one tenant cannot read another tenant's artifact when both bytes are identical. |
+| T29 | exercised | 4/4 | — |
+| T30 | exercised | 6/6 | — |
+| T31 | present | 11/11 | Untrusted PR, rename, unavailable diff, both diff ceilings and build-script execution are named; pagination of a list endpoint has no named test. |
+| T32 | exercised | 3/3 | — |
+| T33 | exercised | 7/7 | — |
+| T34 | exercised | 4/4 | — |
+| T35 | exercised | 4/4 | — |
+| T36 | present | 3/3 | Overflow counting and terminal retrieval are named; no named test drives a client that reads no progress at all and asserts no task-owned reporting loop runs. |
+
+At `2f2bb0ee`: 36 rows, 195/195 named tests passing, 26 rows exercised, 10 still partial, 43.578s wall. The ten partial rows are the work this run says is missing.
+
 ## Developer-experience acceptance
 
 Measure the complete task, not a screenshot of its shortest call site. Commit
@@ -139,7 +189,13 @@ HOL4 model theorems remain model evidence, not refinement proof of this Rust.
 ## Release handoff
 
 Every acceptance row needs a test path and exact-head receipt before it becomes
-accepted. The implementation PR must include compiled public examples and
-feature-matrix checks under `AGENTS.md`, dependency-policy checks, docs version
-boundaries, and a migration record. This specification change adds no tests,
-changes no production code and does not claim these gates have run.
+accepted. Both now exist for all 36 rows: `docs/acceptance/t-rows.toml` is the
+path, and `scripts/acceptance-receipts.py` writes the receipt for whichever
+revision is checked out, so a stale receipt is visible rather than assumed. The
+receipt can only lower a row's claim; promoting a row is a review decision, not
+something a green run does.
+
+The implementation PR must include compiled public examples and feature-matrix
+checks under `AGENTS.md`, dependency-policy checks, docs version boundaries, and
+a migration record. This specification change adds no production code and does
+not claim the release gates have run.
