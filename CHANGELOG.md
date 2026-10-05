@@ -8,6 +8,19 @@ explicitly under that crate.
 
 ## [Unreleased]
 
+### lgwks_macros — refusals by path, and lints the consumer enforces (#265)
+
+- `script!` now refuses `unwrap`/`expect`/`unwrap_err`/`expect_err` called by
+  path (`Option::unwrap(x)`) as well as by method; every `assert*!` and
+  `debug_assert*!`; `process::exit`, `process::abort` and `mem::forget`;
+  indexing and slicing; a `use` inside a flow that renames any refused call;
+  and a machine path anywhere in a string literal. Each refusal names its
+  replacement. A script that relied on any of these no longer compiles.
+- Every generated flow carries `#[forbid(..)]` on `unsafe_code` and on the
+  clippy lints for the same defects, after the author's own attributes, so a
+  name imported outside the script is refused by the consumer's `cargo clippy`
+  and an `#[allow]` above a flow cannot lower it.
+
 ### 1.0.0 — lgwks_std, lgwks_bot, lgwks_ast, lgwks_deps, lgwks_macros
 
 First stable cut: from here the public API follows semantic versioning (a
