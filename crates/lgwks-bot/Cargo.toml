@@ -124,6 +124,9 @@ lgwks_macros = { workspace = true, optional = true }
 # Python), so the edge needs no feature override.
 lgwks_ast = { workspace = true, optional = true }
 
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true
 

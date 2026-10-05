@@ -527,3 +527,23 @@ reason = "Structured events alone do not give a developer a working debugger: a 
 approved_by = "maintainer"
 approved_on = "2026-09-28"
 review = "crates/lgwks-std/src/trace.rs"
+
+[[approved]]
+crate = "proptest"
+tier = "boundary"
+version = "^1.11"
+license = "MIT OR Apache-2.0"
+owner = "lgwks_deps"
+capability = "test.property-shrinking"
+source = "registry"
+# Test-only: no shipped artifact links it. Default features are off, so the
+# fork/timeout process machinery (rusty-fork, wait-timeout, tempfile) stays
+# out; `std` is what failure persistence and seeded runs need.
+uses_default_features = "false"
+features = "std"
+allowed_consumers = "lgwks_std,lgwks_bot,lgwks_deps,lgwks_macros"
+allowed_kinds = "dev"
+reason = "Property tests that shrink a failing input to its minimal form and persist the failing seed have no standard-library or workspace equivalent; seeded sweeps find failures but cannot reduce them."
+approved_by = "srinji"
+approved_on = "2026-10-04"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/273"
