@@ -32,6 +32,25 @@ use crate::openloop::{
     slot_range, slot_value,
 };
 
+/// The body costs the live sweep's ladder is checked at, in microseconds.
+///
+/// Three, because one is a point rather than a family: the sweep's own declared default,
+/// a body ten times cheaper (a ceiling whose declared capacity is already generator-capped
+/// even at the narrowest bound), and a body ten times dearer (a ceiling so wide that every
+/// rung but the first is clamped). A ladder checked at one body cost would only prove the
+/// ladder is right where it was looked at.
+const BODY_COSTS: [u64; 3] = [500, 5_000, 50_000];
+
+/// The bounds the live sweep declares, at which the ladder arithmetic is checked.
+///
+/// Every declared bound, not a convenient subset: the ladder is exactly the arithmetic
+/// whose wide-bound behaviour is the thing a reader has to be told about, so checking it
+/// at 64 alone would prove it where it is least interesting.
+const SWEEP_BOUNDS: [usize; 6] = [64, 1_024, 10_000, 16_384, 100_000, 131_072];
+
+/// The bounds the model can sweep exhaustively, because its admission is a linear scan.
+const MODEL_BOUNDS: [usize; 3] = [1, 4, 64];
+
 /// The seeds this family sweeps.
 const SEEDS: [u64; 4] = [
     0x0000_0000_0000_0001,
@@ -131,6 +150,343 @@ fn sweep(spec: fn(usize, u64) -> SimSpec) -> Vec<(u64, usize, crate::openloop::S
         }
     }
     runs
+}
+
+/// One world whose bodies all cost exactly `body_micros`, jitter-free.
+///
+/// The live rig's declared capacity is `bound * 1e6 / body_micros`, so a model of the same
+/// ceiling has to charge each body exactly that and nothing else — a jittered body would
+/// put the model's own mean capacity somewhere the ladder had no rung for, and the
+/// comparison between the ladder and the model it is read against would be a comparison of
+/// two different workloads.
+fn constant_service(
+    bound: usize,
+    body_micros: u64,
+    offered_rate: u64,
+    bodies_per_bound: u64,
+    seed: u64,
+) -> SimSpec {
+    let service_nanos = body_micros.saturating_mul(1_000);
+    SimSpec {
+        offered_rate,
+        arrivals: u64::try_from(bound)
+            .unwrap_or(1)
+            .saturating_mul(bodies_per_bound),
+        bound,
+        service_min_nanos: service_nanos,
+        service_max_nanos: service_nanos,
+        jitter: false,
+        refuse_at_bound: false,
+        seed,
+    }
+}
+
+#[test]
+fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() {
+    // The knee table is read as "the highest rung that refused nothing and stayed inside
+    // the budget", which is only a knee if the ladder actually reaches one. Two ways it
+    // can fail, and both are defects rather than findings: a ladder whose rungs all clamp
+    // to the generator's own ceiling prints one rate many times and reads as a curve, and
+    // a ladder whose top rung sits below the declared capacity never offered past the knee
+    // at all, so the "knee" it declares is the top of the ladder rather than a property of
+    // the engine.
+    for bound in SWEEP_BOUNDS {
+        for body_micros in BODY_COSTS {
+            let ladder = crate::sweep_ladder(bound, body_micros);
+            assert!(
+                ladder.len() <= crate::SWEEP_MULTIPLIERS.len(),
+                "bound {bound} at {body_micros}us produced {} rungs for {} multipliers: the \
+                 ladder was never deduplicated, so one rate is printed several times",
+                ladder.len(),
+                crate::SWEEP_MULTIPLIERS.len()
+            );
+            assert!(
+                ladder.windows(2).all(|pair| pair[0] < pair[1]),
+                "bound {bound} at {body_micros}us produced a non-increasing ladder {ladder:?}: \
+                 two adjacent rungs resolved to the same rate, so the deduplication did not run"
+            );
+            assert!(
+                ladder
+                    .iter()
+                    .all(|rate| *rate >= 1 && *rate <= crate::MAX_OFFERED_RATE),
+                "bound {bound} at {body_micros}us produced {ladder:?}: a rate outside \
+                 [1, MAX_OFFERED_RATE] is one the generator cannot express"
+            );
+
+            let capacity = crate::capacity_per_second(bound, body_micros);
+            let top = ladder.last().copied().unwrap_or(0);
+            if crate::ladder_clamped(bound, body_micros) {
+                assert_eq!(
+                    top, crate::MAX_OFFERED_RATE,
+                    "bound {bound} at {body_micros}us declares itself clamped and yet its top \
+                     rung is {top}, not the generator's own ceiling"
+                );
+            } else {
+                assert!(
+                    top >= capacity,
+                    "bound {bound} at {body_micros}us declares a capacity of {capacity} \
+                     arrivals/s and its top rung is {top}: the ladder never offered past the \
+                     knee, so the knee it declares is the end of the ladder"
+                );
+                assert!(
+                    ladder.first().copied().unwrap_or(0) < capacity,
+                    "bound {bound} at {body_micros}us starts its ladder at {:?}, at or above its \
+                     own declared capacity of {capacity}: there is no rung below the knee to \
+                     read it from",
+                    ladder.first()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_both_sides_are_offered_the_same_arrivals() {
+    // The fairness gate refused a window-bounded run naming `placed`, because a faster side
+    // places more arrivals inside the same second and the offered work stops being equal.
+    // The count both sides are given is therefore derived from the rate and the window, and
+    // this pins the three properties that makes it: it is the same number whoever asks for
+    // it, it is the rate times the window, and a zero-second window cannot silently offer
+    // nothing.
+    let mut drawn: Vec<u64> = Vec::new();
+    for seed in SEEDS {
+        let rate = crate::async_stats::Rng::new(seed).next_u64() % crate::MAX_OFFERED_RATE + 1;
+        drawn.push(rate);
+        assert_eq!(
+            crate::async_stats::Rng::new(seed).next_u64() % crate::MAX_OFFERED_RATE + 1,
+            rate,
+            "seed {seed}: the offered rate this world drew did not replay, so the count under \
+             test is not a function of the seed alone"
+        );
+        for window in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3),
+        ] {
+            let offered = crate::sweep_arrivals(rate, window);
+            assert_eq!(
+                offered,
+                crate::sweep_arrivals(rate, window),
+                "seed {seed}: {rate}/s for {window:?} produced two different arrival counts — \
+                 the count is a function of the rate and the window and of nothing else"
+            );
+            assert_eq!(
+                offered,
+                rate.saturating_mul(window.as_secs().max(1)),
+                "seed {seed}: {rate}/s for {window:?} offered {offered} arrivals, which is not \
+                 the rate times the window floored at one second"
+            );
+            assert!(
+                offered > 0,
+                "seed {seed}: {rate}/s for {window:?} offered nothing at all: a zero-arrival \
+                 point is a measurement of nothing rather than a short one"
+            );
+        }
+    }
+    let unique = drawn.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        drawn.len(),
+        "two seeds drew the same offered rate, so the seeds are not driving this family"
+    );
+}
+
+#[test]
+fn sim_the_live_ladder_reads_the_knee_the_model_measures() {
+    // The same ladder the live sweep walks, run through the model at the bounds the model
+    // can sweep exhaustively: the bottom rung admits and completes every arrival, and the
+    // top rung — four times the ceiling's declared capacity once it is past it — queues
+    // behind the ceiling rather than passing through it. A ladder whose rungs do not land
+    // in those two regimes would declare a knee against worlds where the knee is not there.
+    for bound in MODEL_BOUNDS {
+        for body_micros in BODY_COSTS {
+            let ladder = crate::sweep_ladder(bound, body_micros);
+            let bottom = ladder.first().copied().unwrap_or(0);
+            let top = ladder.last().copied().unwrap_or(0);
+            assert!(
+                ladder.len() >= 2,
+                "bound {bound} at {body_micros}us produced a {}-rung ladder {ladder:?}: the knee \
+                 table reads the top rung, and a ladder of one rung has no top to read",
+                ladder.len()
+            );
+            for seed in SEEDS {
+                let quiet = simulate(&constant_service(bound, body_micros, bottom, 8, seed));
+                assert_eq!(
+                    quiet.refused, 0,
+                    "seed {seed} at bound {bound} and {body_micros}us: the ladder's bottom rung \
+                     {bottom}/s is a quarter of the declared capacity and the model refused \
+                     {} arrivals on it",
+                    quiet.refused
+                );
+                assert_eq!(
+                    quiet.completed, quiet.offered,
+                    "seed {seed} at bound {bound} and {body_micros}us: the ladder's bottom rung \
+                     completed {} of {} arrivals",
+                    quiet.completed,
+                    quiet.offered
+                );
+
+                if top <= crate::capacity_per_second(bound, body_micros) {
+                    continue;
+                }
+                let deep = simulate(&constant_service(bound, body_micros, top, 8, seed));
+                assert!(
+                    deep.peak_queue > bound,
+                    "seed {seed} at bound {bound} and {body_micros}us: the ladder's top rung \
+                     {top}/s is past the declared capacity and the model still queued no \
+                     deeper than its ceiling (peak queue {})",
+                    deep.peak_queue
+                );
+                assert!(
+                    deep.p99_intended_nanos > deep.p99_actual_nanos,
+                    "seed {seed} at bound {bound} and {body_micros}us: past the knee the \
+                     intended-start p99 {}ns did not exceed the actual-start p99 {}ns, so the \
+                     queue the saturation built is invisible to the measurement",
+                    deep.p99_intended_nanos,
+                    deep.p99_actual_nanos
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() {
+    // The scaling the whole sweep rests on: the body cost is derived per bound so every
+    // ceiling's declared capacity lands on the same target, because a constant body cost
+    // puts a wide ceiling's capacity above what an in-process generator can offer and every
+    // rung above the first then measures the generator instead of the ceiling. Three
+    // properties, and the middle one is the one that makes the other two true: the rounding
+    // is upwards, so the derived capacity is at or just below the target and never above it.
+    for bound in SWEEP_BOUNDS {
+        for target in [1_000_u64, 20_000, 250_000] {
+            let body = crate::body_for_bound(bound, target, 0);
+            let capacity = crate::capacity_per_second(bound, body);
+            assert!(
+                capacity <= target,
+                "bound {bound} derived a {body}us body at a target of {target}/s and declares \
+                 {capacity}/s: the rounding went the wrong way, so the ceiling is under more \
+                 load than the ladder's middle rung expects"
+            );
+            assert!(
+                capacity * 100 >= target * 90,
+                "bound {bound} derived a {body}us body at a target of {target}/s and declares \
+                 only {capacity}/s: a tenth of the load is missing, so the ladder's knee rung \
+                 is below the ceiling's own knee"
+            );
+            let ladder = crate::sweep_ladder(bound, body);
+            assert!(
+                ladder.windows(2).all(|pair| pair[0] < pair[1]),
+                "bound {bound} at a {target}/s target produced a non-increasing ladder \
+                 {ladder:?} from a derived {body}us body"
+            );
+            // Four times the capacity is the rung that has to exist for the knee to be
+            // inside the ladder rather than at its end. A target above 125,000/s clamps
+            // that rung at the generator's own ceiling and still leaves eight times the
+            // capacity, which is why the assertion is four and not sixteen.
+            assert!(
+                ladder.last().copied().unwrap_or(0) >= capacity.saturating_mul(4),
+                "bound {bound} at a {target}/s target produced {ladder:?} against a declared \
+                 capacity of {capacity}/s: the ladder does not reach four times the capacity, \
+                 so the knee it declares is the end of the ladder"
+            );
+        // Every ceiling the family derives has to sit below what this generator can
+            // actually offer, or the sweep's knee is the generator's. The measured floor on
+            // the reference host over four sweep points was 449,482 arrivals a second for
+            // the facade; the constant is a round number under it, and the run prints its own
+            // `achieved/s` beside every row so a reader sees the margin rather than trusting
+            // this line. The second target in this list is the rig's own
+            // `DEFAULT_CAPACITY_TARGET`, so the default sweep is inside the assertion.
+            assert!(
+                capacity <= crate::GENERATOR_PLACEMENT_CEILING,
+                "bound {bound} at a {target}/s target declares {capacity}/s, above the measured \
+                 generator placement ceiling {}: this sweep's knee would be the generator's",
+                crate::GENERATOR_PLACEMENT_CEILING
+            );
+        }
+    }
+}
+
+#[test]
+fn sim_the_knee_budget_scales_with_the_body_and_still_bites() {
+    // The sweep derives a different body cost per bound, so a budget in milliseconds alone
+    // cannot mean the same thing at every ceiling: at a bound of 131,072 the body is 6.55 s
+    // and a 50 ms floor is smaller than one service time, which would declare "no knee" at
+    // every rung and say something about the budget rather than about the engine. The rule
+    // under test is `max(floor, one more service time)`, and both halves matter: the floor
+    // has to hold where the body is cheap, and the body has to hold where it is dear.
+    for bound in MODEL_BOUNDS {
+        for body_micros in BODY_COSTS {
+            let body_nanos = body_micros.saturating_mul(1_000);
+            let budget = crate::SLO_P99_NANOS.max(body_nanos.saturating_mul(2));
+            assert!(
+                budget >= crate::SLO_P99_NANOS,
+                "bound {bound} at {body_micros}us: the budget {budget}ns is below the declared \\
+                 {}-ns floor, so a cheap body could not be held to the estate's budget",
+                crate::SLO_P99_NANOS
+            );
+            assert!(
+                budget >= body_nanos,
+                "bound {bound} at {body_micros}us: the budget {budget}ns is below one service \
+                 time ({body_nanos}ns), so every arrival would read as out of budget however \
+                 little queueing there was"
+            );
+            let capacity = crate::capacity_per_second(bound, body_micros);
+            for seed in SEEDS {
+                // Enough bodies that a world driven sixteen times past its capacity builds a
+                // backlog deeper than the budget rather than a shallow one: at a 500 us body
+                // and eight arrivals per permit the deepest wait is seven service times,
+                // which is *inside* a 50 ms floor, and the test would then be asserting that
+                // a saturated world reads as healthy.
+                let below = simulate(&constant_service(bound, body_micros, capacity, 256, seed));
+                assert!(
+                    below.p99_intended_nanos <= budget,
+                    "seed {seed} at bound {bound} and {body_micros}us: a world offered at its \\
+                     own declared capacity reported p99 {}ns against a budget of {budget}ns",
+                    below.p99_intended_nanos
+                );
+                let past = simulate(&constant_service(
+                    bound,
+                    body_micros,
+                    capacity.saturating_mul(16),
+                    256,
+                    seed,
+                ));
+                assert!(
+                    past.p99_intended_nanos > budget,
+                    "seed {seed} at bound {bound} and {body_micros}us: a world offered at sixteen \\
+                     times its declared capacity reported p99 {}ns against a budget of \\
+                     {budget}ns, so the budget cannot tell the two regimes apart",
+                    past.p99_intended_nanos
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sim_an_explicit_body_cost_overrides_the_derived_one() {
+    // `--body-micros` pins the cost at every bound, which is the other question a reader
+    // may ask ("at a fixed service time, where does each ceiling's knee sit"). The override
+    // has to win outright, and the run that uses it has to say on its face that the capacity
+    // target does not apply — a silently ignored override would publish a scaled curve under
+    // the name of a fixed one.
+    for bound in SWEEP_BOUNDS {
+        for pinned in [1_u64, 500, 5_000, 50_000] {
+            assert_eq!(
+                crate::body_for_bound(bound, 20_000, pinned),
+                pinned,
+                "bound {bound} with an explicit {pinned}us body: the override was not applied, \\
+                 so the run measured a derived service time under the name of a pinned one"
+            );
+        }
+        assert_eq!(
+            crate::body_for_bound(bound, 20_000, 0),
+            crate::body_for_bound(bound, 20_000, 0),
+            "bound {bound}: the derived body cost did not replay, so the ladder it produces is \
+             not a function of the bound and the target alone"
+        );
+    }
 }
 
 #[test]
