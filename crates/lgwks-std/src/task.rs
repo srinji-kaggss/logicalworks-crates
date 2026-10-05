@@ -579,6 +579,8 @@ impl<W> PoolState<W> {
         ceiling: usize,
     ) -> Result<Admitted<W>, W> {
         if queue_limit.is_some_and(|limit| self.queue.len() >= limit) {
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(queued = self.queue.len(), limit = ?queue_limit, "admit: the wait queue is at its bound");
             return Err(work);
         }
         if self.idle == 0 && self.live < ceiling {
