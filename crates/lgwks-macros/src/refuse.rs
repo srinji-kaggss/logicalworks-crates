@@ -5,14 +5,81 @@
 //! names the replacement. The check runs over every token a script passes
 //! through to Rust, including inside brackets, so it cannot be stepped around
 //! by nesting.
+//!
+//! Tokens are all a macro sees: it cannot resolve a name. Calling a refused
+//! method by path (`Option::unwrap(x)`) or renaming it with a `use` inside a
+//! flow is therefore refused by spelling, and a name imported *outside* the
+//! script under another spelling is out of reach here. That half is closed by
+//! the lint attributes [`lint_forbids`] puts on every generated flow, which the
+//! consumer's own compiler and clippy enforce by resolved path.
 
-use lgwks_deps::proc_macro2::{TokenStream, TokenTree};
+use lgwks_deps::proc_macro2::{Delimiter, TokenStream, TokenTree};
+use lgwks_deps::quote::quote;
 use lgwks_deps::syn::{Error, Result};
 
 use crate::lines::{is_ident, is_punct};
 
 /// Macro names that end a program instead of returning an error.
-const PANICKING_MACROS: [&str; 5] = ["panic", "todo", "unimplemented", "unreachable", "assert"];
+const PANICKING_MACROS: [&str; 10] = [
+    "panic",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+];
+
+/// Methods that end the program when their value is the wrong variant,
+/// refused whether called as `.name()` or by path as `Type::name(value)`.
+const PANICKING_METHODS: [&str; 4] = ["unwrap", "expect", "unwrap_err", "expect_err"];
+
+/// Names a `use` inside a flow may not bring in: each would let a refused call
+/// be written under a spelling the refusals do not see.
+const REFUSED_IMPORTS: [&str; 11] = [
+    "thread",
+    "sleep",
+    "process",
+    "exit",
+    "abort",
+    "forget",
+    "spawn",
+    "block_on",
+    "unwrap",
+    "expect",
+    "unbounded_channel",
+];
+
+/// Rust keywords that may stand directly before a `[`, where the bracket opens
+/// an array, slice pattern or type rather than indexing a value.
+const KEYWORDS_BEFORE_BRACKET: [&str; 12] = [
+    "let", "for", "in", "return", "break", "else", "match", "if", "as", "move", "mut", "ref",
+];
+
+/// The lints every generated flow carries at `forbid`, so the consumer's
+/// compiler (`unsafe_code`) and clippy (the rest) refuse by resolved path what
+/// the token check can only refuse by spelling. `forbid` rather than `deny`
+/// because an `#[allow]` inside the flow cannot lower it.
+pub(crate) fn lint_forbids() -> TokenStream {
+    quote! {
+        #[forbid(
+            unsafe_code,
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::todo,
+            clippy::unimplemented,
+            clippy::unreachable,
+            clippy::indexing_slicing,
+            clippy::exit,
+            clippy::mem_forget,
+            clippy::panic_in_result_fn
+        )]
+    }
+}
 
 /// Absolute path prefixes that only exist on the machine that wrote them.
 const MACHINE_PATHS: [&str; 9] = [
@@ -34,6 +101,17 @@ const MACHINE_PATHS: [&str; 9] = [
 /// The first banned construct, spanned at the offending token, with the
 /// replacement in the message.
 pub(crate) fn check(tokens: &[TokenTree]) -> Result<()> {
+    if let Some(import) = refused_import(tokens) {
+        let refusal = Err(Error::new(
+            import.span(),
+            format!(
+                "`use` of `{import}` inside a flow renames a call the script refuses; call what the \
+             flow needs by its full path, or put it behind a function outside the script"
+            ),
+        ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
+        return refusal;
+    }
     for (index, token) in tokens.iter().enumerate() {
         let back = |distance: usize| index.checked_sub(distance).and_then(|at| tokens.get(at));
         let next = index.checked_add(1).and_then(|at| tokens.get(at));
@@ -75,7 +153,7 @@ fn refusal(
     match *token {
         TokenTree::Ident(ref ident) => {
             let word = ident.to_string();
-            if after_dot && (word == "unwrap" || word == "expect") {
+            if (after_dot || after_path) && PANICKING_METHODS.contains(&word.as_str()) {
                 return Some(format!(
                     "`.{word}()` ends the program on failure; a flow returns its failure instead: \
                      use `?`, `.or_fail()?` (permanent) or `.or_retry()?` (worth repeating)"
@@ -93,17 +171,61 @@ fn refusal(
             let text = literal.to_string();
             let body = text.trim_start_matches('r').trim_start_matches('#');
             let body = body.strip_prefix('"').unwrap_or(body);
+            // Anywhere in the literal, not only at its start: a format string
+            // such as `"{}/home/me"` carries a machine path just as surely.
             MACHINE_PATHS
                 .iter()
-                .any(|prefix| body.starts_with(prefix))
+                .any(|prefix| body.contains(prefix))
                 .then(|| {
                     "an absolute path from one machine does not exist on the next; \
                      take the path as a flow parameter or resolve it from configuration"
                         .to_owned()
                 })
         }
+        TokenTree::Group(ref group) if group.delimiter() == Delimiter::Bracket => indexes(previous)
+            .then(|| {
+                "indexing ends the program when the position is out of range; use \
+                 `.get(i).or_fail()?` (or `.get(a..b)`) so a missing item is a flow failure"
+                    .to_owned()
+            }),
         TokenTree::Group(_) | TokenTree::Punct(_) => None,
     }
+}
+
+/// Whether a `[` group after `previous` indexes a value: it follows a name, a
+/// call's `)` or another index's `]`, and not a keyword that opens an array or
+/// slice pattern. `vec![..]`, `#[..]`, `: [u8; 4]` and `&[..]` follow a
+/// punctuation mark and so are never read as indexing.
+fn indexes(previous: Option<&TokenTree>) -> bool {
+    let Some(token) = previous else {
+        return false;
+    };
+    match *token {
+        TokenTree::Ident(ref name) => !KEYWORDS_BEFORE_BRACKET.contains(&name.to_string().as_str()),
+        TokenTree::Group(ref group) => matches!(
+            group.delimiter(),
+            Delimiter::Parenthesis | Delimiter::Bracket
+        ),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    }
+}
+
+/// The first refused name a `use` line brings in, if `tokens` is one.
+fn refused_import(tokens: &[TokenTree]) -> Option<TokenTree> {
+    /// Search `tokens` and every group inside them.
+    fn find(tokens: impl IntoIterator<Item = TokenTree>) -> Option<TokenTree> {
+        tokens.into_iter().find_map(|token| match token {
+            TokenTree::Ident(ref name) if REFUSED_IMPORTS.contains(&name.to_string().as_str()) => {
+                Some(TokenTree::Ident(name.clone()))
+            }
+            TokenTree::Group(ref group) => find(group.stream()),
+            TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => None,
+        })
+    }
+    if !tokens.first().is_some_and(|first| is_ident(first, "use")) {
+        return None;
+    }
+    find(tokens.iter().skip(1).cloned())
 }
 
 /// Refusals decided by the identifier alone, or by the path it ends.
@@ -128,6 +250,16 @@ fn refusal_for_word(word: &str, after_path: bool, path_head: Option<&TokenTree>)
         "sleep" if after_path && path_head.is_some_and(|path| is_ident(path, "thread")) => {
             "`thread::sleep` stalls every sibling on this thread; use `within D:` for a \
              deadline or `retry .., waiting D:` for a pause between attempts"
+        }
+        "exit" | "abort"
+            if after_path && path_head.is_some_and(|path| is_ident(path, "process")) =>
+        {
+            "ending the process from a flow skips every caller's cleanup and leaves no \
+             record of why; `fail with \"reason\"` and let the caller decide"
+        }
+        "forget" if after_path && path_head.is_some_and(|path| is_ident(path, "mem")) => {
+            "`mem::forget` leaks what the value owns (a permit, a process group, a lock); \
+             let it drop, or hand it to the owner that must outlive the flow"
         }
         _ => return None,
     };
