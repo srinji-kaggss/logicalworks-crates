@@ -65,9 +65,10 @@
 )]
 mod async_stats;
 
+use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use lgwks_bot::rt::runtime::Runtime;
 use lgwks_bot::rt::supervise::Supervisor;
@@ -85,6 +86,21 @@ use tokio::task::JoinSet;
 // module docs for why that separation is the whole point.
 #[path = "../src/alloc_count.rs"]
 mod alloc_count;
+
+// ── The open-loop half ───────────────────────────────────────────────────────
+
+// The open-loop generator, the log-bucketed recorder and the seeded model they
+// are both checked against. One module, because the measurement and the model of
+// the measurement share the schedule arithmetic (`intended_arrival`) and a second
+// copy of that function is a second definition of what "the intended start" is.
+mod openloop;
+
+#[cfg(test)]
+mod sim_openloop;
+
+use openloop::{
+    Histogram, Recorder, RecorderSet, SimSpec, intended_arrival, period_nanos, simulate,
+};
 
 // ── The two sides ───────────────────────────────────────────────────────────
 
@@ -1462,6 +1478,2214 @@ fn workload_matrix(
     Ok(())
 }
 
+// ── The open-loop driver ─────────────────────────────────────────────────────
+
+/// Which admission door an arrival is offered through.
+///
+/// The two doors are the facade's own, and they fail differently, which is why a
+/// saturation curve needs both: `spawn` awaits a slot, so past the knee the
+/// caller's own loop becomes the queue and the backlog shows up as latency measured
+/// from the intended start; `try_spawn` refuses at the bound, so past the knee the
+/// arrival is dropped and counted and memory does not grow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Admission {
+    /// Await a free slot: the caller's own loop is the queue.
+    Backpressure,
+    /// Refuse at the bound and count the refusal.
+    Refuse,
+}
+
+impl Admission {
+    /// The name the results file carries.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Backpressure => "backpressure",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
+/// Which side of the comparison an open-loop run drove.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    /// `lgwks_bot::rt::supervise::Supervisor`.
+    Facade,
+    /// Pinned raw Tokio: `JoinSet` + `Semaphore` + a `watch`-based token.
+    Baseline,
+}
+
+impl Side {
+    /// The name the results file carries.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Facade => "facade",
+            Self::Baseline => "baseline",
+        }
+    }
+
+    /// Every side, in the order a paired run drives them.
+    const ALL: [Side; 2] = [Side::Facade, Side::Baseline];
+}
+
+/// The declared p99 budget a knee is declared against.
+///
+/// A declared number rather than a discovered one, because "the knee" is only
+/// meaningful against a service level: the same curve read against a 10 ms SLO and
+/// a 1 s SLO has two different knees. 50 ms is the estate's standing budget for a
+/// request-shaped interaction, and it is named on every table that uses it, so a
+/// reader can re-declare the knee against another budget from the same rows.
+const SLO_P99_NANOS: u64 = 50_000_000;
+
+/// Queue-depth samples kept per open-loop run.
+///
+/// Bounded, because a run is a measurement and a measurement's own storage is a cost
+/// it must not impose on what it measures. 65,536 samples covers a 65-second run at
+/// one sample per millisecond; samples past the cap are counted, not kept.
+const DEPTH_SAMPLE_CAP: usize = 65_536;
+
+/// One open-loop run: an offered rate, a window, and a ceiling.
+#[derive(Clone, Copy, Debug)]
+struct OpenLoopSpec {
+    /// Arrivals offered per second.
+    offered_rate: u64,
+    /// How long arrivals are offered for.
+    window: Duration,
+    /// The in-flight ceiling.
+    bound: usize,
+    /// Report every `drop_every`-th arrival as placed without placing it.
+    ///
+    /// Zero on every honest run. This is the negative control the conservation gate
+    /// has to catch: a driver that counts an admission it never made reports a
+    /// latency for work that never ran, the same class of defect `--mutant-check`
+    /// guards for the closed-loop rig.
+    drop_every: u64,
+}
+
+/// A bounded queue-depth trace, plus the two facts a reader needs from it.
+#[derive(Debug, Default)]
+struct DepthTrace {
+    samples: Vec<u32>,
+    dropped: u64,
+    peak: usize,
+}
+
+impl DepthTrace {
+    /// A trace with room for a first window's worth of samples.
+    fn new() -> Self {
+        Self {
+            samples: Vec::with_capacity(4_096),
+            dropped: 0,
+            peak: 0,
+        }
+    }
+
+    /// Record one queue depth, in arrivals.
+    fn push(&mut self, depth: usize) {
+        self.peak = self.peak.max(depth);
+        let depth = u32::try_from(depth).unwrap_or(u32::MAX);
+        if self.samples.len() < DEPTH_SAMPLE_CAP {
+            self.samples.push(depth);
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// Mean depth over the samples kept.
+    fn mean(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let total: u64 = self.samples.iter().map(|depth| u64::from(*depth)).sum();
+        (total as f64) / (self.samples.len() as f64)
+    }
+}
+
+/// The four operations an open-loop run needs from an engine.
+///
+/// This is why the generator exists once rather than twice. A comparison between a
+/// facade and the engine it wraps is only a comparison if everything except the
+/// engine surface is *the same code*: two driver loops, however carefully matched,
+/// are two programs, and a difference between them is indistinguishable from a
+/// difference between the engines. So the generator, the latency accounting, the
+/// queue sampling and the conservation gate are one piece of code parameterised by
+/// these calls, and an engine contributes only what is genuinely its own.
+trait Engine {
+    /// Offer one arrival at the ceiling, reporting whether it was admitted.
+    ///
+    /// Blocks on the backpressure door and refuses on the other, which is the whole
+    /// difference between the two overload behaviours.
+    fn admit(
+        &mut self,
+        counter: Arc<AtomicU64>,
+        shard: Arc<Recorder>,
+        intended: Instant,
+    ) -> impl Future<Output = bool>;
+
+    /// Join whatever has finished, without waiting.
+    fn reap(&mut self);
+
+    /// Tasks in flight at this instant.
+    fn in_flight(&self) -> u64;
+
+    /// Join everything, blocking until nothing is left.
+    fn drain(&mut self) -> impl Future<Output = ()>;
+
+    /// Terminal counters after the drain: completed, cancelled, aborted.
+    ///
+    /// The engine's own counters, never a second tally this rig maintains beside
+    /// them: a comparison that reads its numbers from a different place than the
+    /// engine writes them is the second-ledger defect INV-BOT-31 exists to refuse.
+    fn terminals(&self) -> (u64, u64, u64);
+}
+
+/// The facade, as an [`Engine`].
+///
+/// Every call is the facade's own door: `spawn` awaits a permit, `try_spawn` refuses
+/// at the bound and counts the refusal, `reap` joins what finished, and the terminal
+/// counters are `Supervisor::stats`. Nothing here re-implements any of it.
+struct FacadeEngine {
+    supervisor: Supervisor,
+    admission: Admission,
+}
+
+impl FacadeEngine {
+    /// A facade engine with a ceiling of `bound` at the given door.
+    fn new(bound: usize, admission: Admission) -> Self {
+        Self {
+            supervisor: Supervisor::new(bound),
+            admission,
+        }
+    }
+}
+
+impl Engine for FacadeEngine {
+    fn admit(
+        &mut self,
+        counter: Arc<AtomicU64>,
+        shard: Arc<Recorder>,
+        intended: Instant,
+    ) -> impl Future<Output = bool> {
+        let admission = self.admission;
+        let supervisor = &mut self.supervisor;
+        async move {
+            match admission {
+                Admission::Backpressure => {
+                    supervisor
+                        .spawn(move |_token| async move {
+                            recorded_body_unit(counter, shard, intended).await;
+                        })
+                        .await;
+                    true
+                }
+                Admission::Refuse => {
+                    let attempt = supervisor.try_spawn(move |_token| async move {
+                        recorded_body_unit(counter, shard, intended).await;
+                    });
+                    if attempt.is_err() {
+                        lgwks_std::trace::debug!(error = ?attempt.as_ref().err(), "FacadeEngine: the ceiling refused an arrival");
+                    }
+                    attempt.is_ok()
+                }
+            }
+        }
+    }
+
+    fn reap(&mut self) {
+        // Reaping is what keeps the retained set at the live bound rather than the
+        // lifetime total, and `Supervisor` performs it on its own call.
+        while self.supervisor.reap() > 0 {}
+    }
+
+    fn in_flight(&self) -> u64 {
+        self.supervisor.stats().in_flight()
+    }
+
+    fn drain(&mut self) -> impl Future<Output = ()> {
+        // Naming the target before the block is what lets the loop read a plain local
+        // instead of re-deriving the spawn count on every pass.
+        let target = self.supervisor.stats().spawned;
+        async move {
+            while self.supervisor.stats().completed < target {
+                if self.supervisor.reap() == 0 {
+                    tokio::time::sleep(Duration::from_micros(200)).await;
+                }
+            }
+        }
+    }
+
+    fn terminals(&self) -> (u64, u64, u64) {
+        let stats = self.supervisor.stats();
+        (stats.succeeded, stats.cancelled, stats.aborted)
+    }
+}
+
+/// Pinned raw Tokio, as an [`Engine`].
+///
+/// `JoinSet` for task-set lifetime, `Semaphore` for the ceiling the facade enforces,
+/// and an explicit `try_acquire` before each spawn so a refusal at the bound is
+/// counted rather than silently queued — the same refusal semantics the facade has.
+/// Every `JoinError` is read, not discarded, so the abort/panic split survives
+/// exactly as the facade preserves it.
+struct BaselineEngine {
+    set: JoinSet<()>,
+    permits: Arc<Semaphore>,
+    token: tokio_util_cancel::Token,
+    admission: Admission,
+    completed: u64,
+    aborted: u64,
+}
+
+impl BaselineEngine {
+    /// A baseline engine with a ceiling of `bound` at the given door.
+    fn new(bound: usize, admission: Admission) -> Self {
+        Self {
+            set: JoinSet::new(),
+            permits: Arc::new(Semaphore::new(bound)),
+            token: tokio_util_cancel::token(),
+            admission,
+            completed: 0,
+            aborted: 0,
+        }
+    }
+
+    /// Spawn one admitted body, holding its permit for the body's whole life.
+    fn spawn_body(
+        &mut self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        counter: Arc<AtomicU64>,
+        shard: Arc<Recorder>,
+        intended: Instant,
+    ) {
+        let child = self.token.child();
+        self.set.spawn(async move {
+            let _held = permit;
+            recorded_body_unit(counter, shard, intended).await;
+            let _ = child;
+        });
+    }
+
+    /// Count one join result.
+    ///
+    /// `JoinError` is read rather than discarded: an aborted task and a panicked one
+    /// are different facts, and the facade keeps them apart, so a baseline that
+    /// collapsed them would be doing less work for a better number.
+    fn count(&mut self, joined: Result<(), tokio::task::JoinError>) {
+        match joined {
+            Ok(()) => self.completed = self.completed.saturating_add(1),
+            Err(_) => self.aborted = self.aborted.saturating_add(1),
+        }
+    }
+}
+
+impl Engine for BaselineEngine {
+    fn admit(
+        &mut self,
+        counter: Arc<AtomicU64>,
+        shard: Arc<Recorder>,
+        intended: Instant,
+    ) -> impl Future<Output = bool> {
+        let admission = self.admission;
+        let permits = Arc::clone(&self.permits);
+        async move {
+            let permit = match admission {
+                Admission::Backpressure => permits.acquire_owned().await.ok(),
+                Admission::Refuse => permits.try_acquire_owned().ok(),
+            };
+            let Some(permit) = permit else {
+                return false;
+            };
+            self.spawn_body(permit, counter, shard, intended);
+            true
+        }
+    }
+
+    fn reap(&mut self) {
+        while let Some(joined) = self.set.try_join_next() {
+            self.count(joined);
+        }
+    }
+
+    fn in_flight(&self) -> u64 {
+        // `JoinSet::len` is the set's own count, which is the same fact as "tasks
+        // placed and not yet joined" — read from the engine rather than from a
+        // second counter this rig would then have to keep in step with it.
+        u64::try_from(self.set.len()).unwrap_or(u64::MAX)
+    }
+
+    /// An explicit block rather than an `async fn`: the trait declares
+    /// `-> impl Future`, the only shape that keeps the `&mut self` borrow across the
+    /// await without boxing the future.
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the trait's RPITIT signature keeps the `&mut self` borrow, which an                   `async fn` in the impl would have to box to match"
+    )]
+    fn drain(&mut self) -> impl Future<Output = ()> {
+        async move {
+            while let Some(joined) = self.set.join_next().await {
+                self.count(joined);
+            }
+        }
+    }
+
+    fn terminals(&self) -> (u64, u64, u64) {
+        // Nothing cancels a baseline run, so `cancelled` is structurally zero. It is
+        // returned rather than omitted so both sides' reports carry the same fields
+        // and a reader does not have to remember which is which.
+        (self.completed, 0, self.aborted)
+    }
+}
+
+/// Wait until `intended`, unless it has already passed.
+///
+/// A generator that sleeps unconditionally pays a timer round-trip per arrival, and
+/// at a million arrivals per second that timer *is* the offered rate. Past saturation
+/// the generator is supposed to fall behind, and falling behind means offering as fast
+/// as it can — so the wait is skipped exactly when it is already late, and the lag is
+/// charged to the latency instead.
+async fn wait_until(intended: Instant) {
+    let now = Instant::now();
+    if now < intended {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(intended)).await;
+    }
+}
+
+/// Sample the queue after one arrival and return the generator's lag.
+///
+/// The queue depth is "bodies running now, plus arrivals that are due but not yet
+/// running". The second term is the generator's own lag divided by the arrival period,
+/// so it reads as an arrival count rather than as a duration, and it is what a
+/// backpressure door accumulates when it falls behind: the caller's own loop *is* the
+/// queue, and this is its depth.
+fn sample_queue(
+    now: Instant,
+    next_intended: Instant,
+    period: u64,
+    in_flight: u64,
+    depth: &mut DepthTrace,
+) -> Duration {
+    let lag = now.saturating_duration_since(next_intended);
+    let waiting = u64::try_from(lag.as_nanos() / u128::from(period.max(1))).unwrap_or(0);
+    depth.push(usize::try_from(waiting.saturating_add(in_flight)).unwrap_or(usize::MAX));
+    lag
+}
+
+/// Record one arrival's admission outcome.
+fn count_arrival(placed: bool, admitted: &mut u64, refused: &mut u64) {
+    if placed {
+        *admitted = admitted.saturating_add(1);
+    } else {
+        *refused = refused.saturating_add(1);
+    }
+}
+
+/// Nanoseconds from `intended` to now.
+///
+/// A `u128` from `elapsed()` into a `u64` cannot overflow in practice — a stalled run
+/// of 584 years would — and the recorder clamps past its own ceiling, so the
+/// conversion is stated rather than assumed.
+fn latency_nanos(intended: Instant) -> u64 {
+    u64::try_from(intended.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// One task's two recording handles: the counter its body bumps, and the recorder
+/// shard its latency lands in.
+///
+/// Taken once per task and moved into the body, so the shard a body's single sample
+/// lands in cannot differ between two samples of the same body — which is what makes
+/// a merge across shards an addition rather than a puzzle.
+fn task_handles(work: &Arc<AtomicU64>, recorders: &RecorderSet) -> (Arc<AtomicU64>, Arc<Recorder>) {
+    (Arc::clone(work), recorders.take())
+}
+
+/// The body an open-loop arrival runs: the same work unit every side runs, then its
+/// latency from the **intended** start.
+///
+/// Measuring from the intended instant rather than from the body's own first poll is
+/// the whole coordinated-omission correction: a generator that fell behind reports the
+/// queue it created rather than the service it managed to reach.
+async fn recorded_body_unit(counter: Arc<AtomicU64>, shard: Arc<Recorder>, intended: Instant) {
+    body_unit(counter).await;
+    shard.record(latency_nanos(intended));
+}
+
+/// What one side did under one offered rate.
+#[derive(Debug)]
+struct SideRun {
+    side: Side,
+    bound: usize,
+    offered_rate: u64,
+    admission: Admission,
+    /// Arrivals the generator offered.
+    offered: u64,
+    /// Arrivals admitted to a slot.
+    admitted: u64,
+    /// Arrivals the ceiling refused.
+    refused: u64,
+    /// Arrivals whose body ran to completion.
+    completed: u64,
+    /// Arrivals that ended by observing cancellation.
+    cancelled: u64,
+    /// Arrivals the runtime dropped.
+    aborted: u64,
+    /// Work units the bodies recorded.
+    work_units: u64,
+    /// Tasks still in flight after the drain.
+    in_flight_at_end: u64,
+    /// The queue-depth trace; its peak is the peak queue.
+    depth: DepthTrace,
+    /// The generator's worst lag behind its own schedule.
+    max_lag: Duration,
+    /// Latencies from the intended start.
+    histogram: Histogram,
+    /// Wall time over which arrivals were offered.
+    wall: Duration,
+    /// Time spent draining after the window closed.
+    drain: Duration,
+    /// Resident set size sampled at the run's peak.
+    rss_bytes: Option<u64>,
+    /// How the RSS figure was read.
+    rss_source: &'static str,
+}
+
+impl SideRun {
+    /// Fraction of offered arrivals the ceiling refused.
+    fn refusal_rate(&self) -> f64 {
+        if self.offered == 0 {
+            return 0.0;
+        }
+        (self.refused as f64) / (self.offered as f64)
+    }
+
+    /// Completions per second over the window and the drain together.
+    fn throughput_per_second(&self) -> f64 {
+        let seconds = self.wall.as_secs_f64() + self.drain.as_secs_f64();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        (self.completed as f64) / seconds
+    }
+
+    /// Whether this run refused nothing and stayed inside the declared p99 budget.
+    fn within_slo(&self) -> bool {
+        self.refused == 0 && self.histogram.quantile_nanos(0.99) <= SLO_P99_NANOS
+    }
+}
+
+/// The resident set size of this process, and how it was read.
+///
+/// Linux reads its own `/proc/self/status`, which is a file the process already has
+/// and a high-water mark rather than a sample. macOS has no in-process equivalent
+/// without a `getrusage` edge, so the reading is a `ps` sample of the process's
+/// **current** RSS, taken at the moment the run is at its peak. The two are different
+/// measurements and each is labelled: a peak figure reported under the name of the
+/// other is a false claim, and an unavailable one reported as a small one is worse
+/// than an absent one.
+fn resident_bytes() -> (Option<u64>, &'static str) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(value) = line.strip_prefix("VmHWM:")
+                    && let Some(kib) = value.split_whitespace().next()
+                    && let Ok(kib) = kib.parse::<u64>()
+                {
+                    return (
+                        Some(kib.saturating_mul(1024)),
+                        "/proc/self/status VmHWM (peak)",
+                    );
+                }
+            }
+        }
+        (None, "/proc/self/status VmHWM unreadable")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `ps` rather than `getrusage`: the first is a system utility this instrument
+        // may run, the second is a C edge no crate here may author.
+        let sample = std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p"])
+            .arg(std::process::id().to_string())
+            .output();
+        let read = match sample {
+            Ok(output) => String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .and_then(|kib| kib.parse::<u64>().ok())
+                .map(|kib| kib.saturating_mul(1024)),
+            Err(_) => None,
+        };
+        match read {
+            Some(bytes) => (Some(bytes), "/bin/ps -o rss= (current, at peak)"),
+            None => (None, "/bin/ps -o rss= unreadable"),
+        }
+    }
+}
+
+/// Offer `spec.offered_rate` for `spec.window` to one engine, and report what it did.
+///
+/// The generator is one loop: join what has finished, sleep to the arrival's intended
+/// instant, offer it through the engine's door, then sample the queue depth. The
+/// latency is measured inside the body from the **intended** instant, which is what
+/// makes the p99 comparable across offered rates and across engines.
+async fn open_loop_run<E: Engine>(
+    engine: &mut E,
+    side: Side,
+    admission: Admission,
+    spec: &OpenLoopSpec,
+) -> Result<SideRun, String> {
+    let work = Arc::new(AtomicU64::new(0));
+    let recorders = RecorderSet::new();
+    let period = period_nanos(spec.offered_rate);
+    let t0 = Instant::now();
+    let mut offered = 0_u64;
+    let mut admitted = 0_u64;
+    let mut refused = 0_u64;
+    let mut depth = DepthTrace::new();
+    let mut max_lag = Duration::ZERO;
+
+    while t0.elapsed() < spec.window {
+        engine.reap();
+        let intended = t0 + intended_arrival(offered, period, 0);
+        wait_until(intended).await;
+        offered = offered.saturating_add(1);
+        // The negative control's decision, made once per arrival so an honest run
+        // pays one predictable branch.
+        let place = spec.drop_every == 0 || !offered.is_multiple_of(spec.drop_every);
+        let placed = if place {
+            let (counter, shard) = task_handles(&work, &recorders);
+            engine.admit(counter, shard, intended).await
+        } else {
+            // The control's defect in one line: the arrival is counted as offered and
+            // reported as admitted, and nothing runs.
+            true
+        };
+        count_arrival(placed, &mut admitted, &mut refused);
+        let next_intended = t0 + intended_arrival(offered, period, 0);
+        max_lag = max_lag.max(sample_queue(
+            Instant::now(),
+            next_intended,
+            period,
+            engine.in_flight(),
+            &mut depth,
+        ));
+    }
+
+    let offered_at_end = Instant::now();
+    let (rss_bytes, rss_source) = resident_bytes();
+    let drain_started = Instant::now();
+    engine.drain().await;
+    let drain = drain_started.elapsed();
+    let (completed, cancelled, aborted) = engine.terminals();
+    Ok(SideRun {
+        side,
+        bound: spec.bound,
+        offered_rate: spec.offered_rate,
+        admission,
+        offered,
+        admitted,
+        refused,
+        completed,
+        cancelled,
+        aborted,
+        work_units: work.load(Ordering::SeqCst),
+        in_flight_at_end: engine.in_flight(),
+        depth,
+        max_lag,
+        histogram: Recorder::merged(recorders.shards()),
+        wall: offered_at_end.duration_since(t0),
+        drain,
+        rss_bytes,
+        rss_source,
+    })
+}
+
+/// Build the engine for one side at one door and run the generator against it.
+async fn open_loop_side(
+    side: Side,
+    admission: Admission,
+    spec: &OpenLoopSpec,
+) -> Result<SideRun, String> {
+    match side {
+        Side::Facade => {
+            let mut engine = FacadeEngine::new(spec.bound, admission);
+            open_loop_run(&mut engine, side, admission, spec).await
+        }
+        Side::Baseline => {
+            let mut engine = BaselineEngine::new(spec.bound, admission);
+            open_loop_run(&mut engine, side, admission, spec).await
+        }
+    }
+}
+
+/// The one accounting check both open-loop gates share: every completed body recorded
+/// exactly its own work unit.
+///
+/// The same rule at both levels — an open-loop run and an in-flight tier — because it
+/// is the same rule. Two copies of it is one place where the two gates can disagree
+/// about what "the bodies and the accounting agree" means, and a gate that disagrees
+/// with itself is a gate whose verdict depends on which level asked.
+fn work_units_match(
+    label: &str,
+    completed: u64,
+    work_units: u64,
+    noun: &str,
+) -> Result<(), String> {
+    if work_units == completed {
+        return Ok(());
+    }
+    Err(format!(
+        "{label}: {work_units} work units for {completed} completed {noun} — the bodies and \
+         the accounting disagree about how much ran"
+    ))
+}
+
+/// The conservation gate: what every open-loop run must satisfy, whatever it measured.
+///
+/// This is the fairness gate's job in a regime where the two sides are *expected* to
+/// diverge: past the knee one side admits what the other refuses, and that difference
+/// is the result. What may never differ is whether a side did the work it reported —
+/// every arrival offered was admitted or refused, every admitted body completed, every
+/// completed body recorded its work, and nothing was left in flight. A percentile
+/// computed on a run that violates one of these is a number about a different program,
+/// so the run aborts and names the field.
+fn open_loop_conserved(label: &str, run: &SideRun) -> Result<(), String> {
+    let accounted = run.admitted.saturating_add(run.refused);
+    if accounted != run.offered {
+        return Err(format!(
+            "{label}: offered {}, admitted {} plus refused {} is {accounted} — an arrival was \
+             lost or counted twice",
+            run.offered, run.admitted, run.refused
+        ));
+    }
+    if run.completed != run.admitted {
+        return Err(format!(
+            "{label}: {} of {} admitted bodies completed — work was lost or duplicated",
+            run.completed, run.admitted
+        ));
+    }
+    let terminal = run
+        .completed
+        .saturating_add(run.cancelled)
+        .saturating_add(run.aborted);
+    if terminal != run.admitted {
+        return Err(format!(
+            "{label}: {terminal} of {} admitted arrivals reached a terminal state",
+            run.admitted
+        ));
+    }
+    work_units_match(label, run.completed, run.work_units, "bodies")?;
+    if run.in_flight_at_end != 0 {
+        return Err(format!(
+            "{label}: {} tasks still in flight after the drain",
+            run.in_flight_at_end
+        ));
+    }
+    Ok(())
+}
+
+/// The cross-side gate for a pair that admitted everything it was offered.
+///
+/// Below both knees the two sides did the same work, so the closed-loop gate applies in
+/// full. Past a knee the sides legitimately differ — one refused what the other
+/// admitted — and refusing the run for that would refuse the measurement, so the pair
+/// is reported as a saturation point, with each side's own conservation gate already
+/// enforced.
+///
+/// Returns whether the pair was gated as equal work, so a reader can tell a gated pair
+/// from a saturation point without re-deriving it.
+fn open_loop_pair_fair(label: &str, facade: &SideRun, baseline: &SideRun) -> Result<bool, String> {
+    if facade.refused != 0 || baseline.refused != 0 {
+        return Ok(false);
+    }
+    let tally = |run: &SideRun| Tally {
+        placed: run.admitted,
+        completed: run.completed,
+        cancelled: run.cancelled,
+        aborted: run.aborted,
+        refused: run.refused,
+        retained: 0,
+        dropped_detail: 0,
+        work_units: run.work_units,
+    };
+    fair(&tally(facade), &tally(baseline)).map_err(|reason| format!("{label}: {reason}"))?;
+    Ok(true)
+}
+
+/// Print one row of a table.
+///
+/// One printer for every table in this file: a column width chosen once, so the tables
+/// cannot drift apart, and a cell's padding decided in one place rather than by each
+/// table's own format string.
+fn print_row(cells: &[String]) {
+    println!("  {}", cells.join("  "));
+}
+
+/// Print a table's column names.
+fn print_columns(columns: &[&str]) {
+    print_row(
+        &columns
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// A latency in nanoseconds, rendered in microseconds to one decimal.
+///
+/// One renderer for every latency this file prints, so no table reports the same
+/// measurement in two scales and lets a reader compare them by eye.
+fn micros(nanos: u64) -> String {
+    format!("{:.1}", nanos as f64 / 1_000.0)
+}
+
+// ── The saturation sweep ─────────────────────────────────────────────────────
+
+/// The in-flight bounds the saturation sweep runs at.
+///
+/// Six, because the issue's sweep list (`64`, `1,024`, `16,384`, `131,072`) and the
+/// delivery brief's list (`64`, `1,024`, `10,000`, `100,000`) name different decades
+/// and neither is a subset of the other. Both are here rather than one chosen for the
+/// reader's convenience, because a sweep that quietly drops a tier reads as coverage
+/// of the tiers it kept.
+const SWEEP_BOUNDS: [usize; 6] = [64, 1_024, 10_000, 16_384, 100_000, 131_072];
+
+/// Offered rates, as multiples of the bound. Zero means a quarter of the bound.
+///
+/// Past the knee an offered rate the generator cannot express is not a measurement, so
+/// the ladder is expressed as a multiple of the ceiling: a bound of 1,024 is swept at
+/// 256, 1,024, 4,096, 16,384 and 65,536 arrivals per second, which spans from
+/// comfortably inside the knee to far past it.
+const SWEEP_MULTIPLIERS: [u64; 5] = [0, 1, 4, 16, 64];
+
+/// The offered rate for `multiplier` × `bound`.
+fn sweep_rate(bound: usize, multiplier: u64) -> u64 {
+    let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+    if multiplier == 0 {
+        return bound.saturating_div(4).max(1);
+    }
+    bound.saturating_mul(multiplier).min(20_000_000)
+}
+
+/// The columns of the saturation table.
+const SWEEP_COLUMNS: [&str; 9] = [
+    "offered/s",
+    "side",
+    "admitted",
+    "refused",
+    "p50 us",
+    "p95 us",
+    "p99 us",
+    "peak queue",
+    "max lag ms",
+];
+
+/// The columns of the knee table.
+const KNEE_COLUMNS: [&str; 5] = [
+    "bound",
+    "side",
+    "knee offered/s",
+    "p99 at knee",
+    "refused at 64x",
+];
+
+/// One measured point: a run at one offered rate, on one side.
+struct SweepPoint {
+    bound: usize,
+    run: SideRun,
+}
+
+/// Measure one side at one offered rate and gate it, for the table and the record.
+async fn measure_point(
+    side: Side,
+    admission: Admission,
+    spec: &OpenLoopSpec,
+) -> Result<SideRun, Box<dyn std::error::Error>> {
+    let run = open_loop_side(side, admission, spec)
+        .await
+        .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
+    let label = format!(
+        "bound {} at {}/s on the {}",
+        spec.bound,
+        spec.offered_rate,
+        side.as_str()
+    );
+    open_loop_conserved(&label, &run)
+        .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
+    Ok(run)
+}
+
+/// Print one sweep row.
+fn print_sweep_row(run: &SideRun) {
+    let (p50, p95, p99) = run.histogram.percentiles_nanos();
+    print_row(&[
+        run.offered_rate.to_string(),
+        run.side.as_str().to_string(),
+        run.admitted.to_string(),
+        run.refused.to_string(),
+        micros(p50),
+        micros(p95),
+        micros(p99),
+        run.depth.peak.to_string(),
+        run.max_lag.as_millis().to_string(),
+    ]);
+}
+
+/// Sweep offered rate past the knee at every bound, on one admission door.
+///
+/// For each bound the ladder is walked on both sides, paired within the point, and
+/// gated. The knee for a row is the highest ladder rate that refused nothing and
+/// stayed inside [`SLO_P99_NANOS`]: a rate past it either refused arrivals or blew the
+/// budget, and either is a refusal rather than a served request.
+async fn saturation_sweep(
+    admission: Admission,
+    window: Duration,
+    json: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("saturation sweep — offered rate against p50/p95/p99 and the ceiling");
+    println!(
+        "door: {}   window: {} s per point   SLO: p99 <= {} ms",
+        admission.as_str(),
+        window.as_secs(),
+        SLO_P99_NANOS / 1_000_000
+    );
+    println!("latency is measured from each arrival's INTENDED start\n");
+
+    let mut points: Vec<SweepPoint> = Vec::new();
+    let mut json_rows: Vec<String> = Vec::new();
+
+    for bound in SWEEP_BOUNDS {
+        // One warm-up per side per bound, discarded: the first-touch page faults and
+        // the runtime's worker start are one-time costs a measured point would
+        // otherwise charge to the code under test.
+        let warm = OpenLoopSpec {
+            offered_rate: sweep_rate(bound, 0),
+            window: Duration::from_millis(300),
+            bound,
+            drop_every: 0,
+        };
+        for side in Side::ALL {
+            open_loop_side(side, admission, &warm).await?;
+        }
+
+        println!("bound {bound}:");
+        print_columns(&SWEEP_COLUMNS);
+        for multiplier in SWEEP_MULTIPLIERS {
+            let spec = OpenLoopSpec {
+                offered_rate: sweep_rate(bound, multiplier),
+                window,
+                bound,
+                drop_every: 0,
+            };
+            let mut runs = Vec::new();
+            for side in Side::ALL {
+                let run = measure_point(side, admission, &spec).await?;
+                print_sweep_row(&run);
+                if let Some(rss) = run.rss_bytes {
+                    println!(
+                        "           peak RSS {rss} bytes at the run's peak ({})",
+                        run.rss_source
+                    );
+                }
+                json_rows.push(sweep_json(&run));
+                runs.push(run);
+            }
+            let label = format!("bound {bound} at {}/s", spec.offered_rate);
+            if !open_loop_pair_fair(&label, &runs[0], &runs[1])? {
+                println!(
+                    "           a saturation point: facade refused {}, baseline refused {} — \
+                     each side's own conservation gate is what gates it",
+                    runs[0].refused, runs[1].refused
+                );
+            }
+            points.push(SweepPoint {
+                bound,
+                run: runs.swap_remove(0),
+            });
+        }
+        println!();
+    }
+
+    declare_knees(&points);
+    write_sweep_json(json, admission, window, &json_rows);
+    Ok(())
+}
+
+/// The knee per bound and per side, declared against [`SLO_P99_NANOS`].
+///
+/// The knee is the highest ladder rate that refused nothing and stayed inside the
+/// budget. It is declared rather than eyeballed because a curve has no knee of its
+/// own: the same table read against a 10 ms SLO has a different one, and the SLO is
+/// named on the same line so the two cannot be separated.
+fn declare_knees(points: &[SweepPoint]) {
+    println!(
+        "knee — the highest offered rate with no refusal and p99 <= {} ms",
+        SLO_P99_NANOS / 1_000_000
+    );
+    print_columns(&KNEE_COLUMNS);
+    for bound in SWEEP_BOUNDS {
+        for side in Side::ALL {
+            let mut knee_rate = 0_u64;
+            let mut knee_p99 = 0_u64;
+            let mut refused_at_top = 0_u64;
+            for point in points
+                .iter()
+                .filter(|point| point.bound == bound && point.run.side == side)
+            {
+                if point.run.within_slo() {
+                    knee_rate = point.run.offered_rate;
+                    knee_p99 = point.run.histogram.quantile_nanos(0.99);
+                }
+                if point.run.offered_rate == sweep_rate(bound, 64) {
+                    refused_at_top = point.run.refused;
+                }
+            }
+            print_row(&[
+                bound.to_string(),
+                side.as_str().to_string(),
+                knee_rate.to_string(),
+                format!("{:.1} ms", knee_p99 as f64 / 1_000_000.0),
+                refused_at_top.to_string(),
+            ]);
+        }
+    }
+    println!();
+}
+
+/// Write the sweep's results rows, if a path was given.
+///
+/// A write failure is reported rather than propagated: the measurement has already
+/// been made and printed, and refusing the whole run because the record could not be
+/// filed would throw away the numbers in order to complain about the filing.
+fn write_sweep_json(json: Option<&str>, admission: Admission, window: Duration, rows: &[String]) {
+    let Some(path) = json else {
+        return;
+    };
+    let body = format!(
+        "{{\"tool\":\"lgwks-bench-async-saturation\",\"door\":\"{}\",\
+          \"window_seconds\":{},\"slo_p99_nanos\":{SLO_P99_NANOS},\"points\":[\n{}\n]}}",
+        admission.as_str(),
+        window.as_secs(),
+        rows.join(",\n")
+    );
+    match std::fs::write(path, body) {
+        Ok(()) => println!("wrote {path}"),
+        Err(error) => println!("could not write {path}: {error}"),
+    }
+}
+
+/// One sweep point as a results-file row.
+fn sweep_json(run: &SideRun) -> String {
+    let (p50, p95, p99) = run.histogram.percentiles_nanos();
+    let rss = run
+        .rss_bytes
+        .map_or_else(|| "null".to_string(), |bytes| bytes.to_string());
+    format!(
+        "{{\"bound\":{},\"side\":\"{}\",\"door\":\"{}\",\"offered_rate\":{},\"offered\":{},\
+          \"admitted\":{},\"refused\":{},\"completed\":{},\"cancelled\":{},\"aborted\":{},\
+          \"work_units\":{},\"refusal_rate\":{},\"p50_nanos\":{p50},\"p95_nanos\":{p95},\
+          \"p99_nanos\":{p99},\"max_nanos\":{},\"mean_nanos\":{},\"peak_queue\":{},\
+          \"mean_queue\":{},\"max_lag_millis\":{},\"drain_millis\":{},\
+          \"throughput_per_second\":{},\"within_slo\":{},\"min_nanos\":{},\
+          \"clamped_samples\":{},\"rss_bytes\":{rss},\"rss_source\":\"{}\"}}",
+        run.bound,
+        run.side.as_str(),
+        run.admission.as_str(),
+        run.offered_rate,
+        run.offered,
+        run.admitted,
+        run.refused,
+        run.completed,
+        run.cancelled,
+        run.aborted,
+        run.work_units,
+        run.refusal_rate(),
+        run.histogram.max_nanos(),
+        run.histogram.mean_nanos(),
+        run.depth.peak,
+        run.depth.mean(),
+        run.max_lag.as_millis(),
+        run.drain.as_millis(),
+        run.throughput_per_second(),
+        run.within_slo(),
+        run.histogram.min_nanos(),
+        run.histogram.clamped(),
+        run.rss_source
+    )
+}
+
+// ── In-flight tiers ──────────────────────────────────────────────────────────
+
+/// How long one tier may take to admit everything it asked for before the tier is
+/// reported as not reached.
+const TIER_ADMIT_LIMIT: Duration = Duration::from_secs(180);
+
+/// A gate every admitted body waits on, so a tier's in-flight count is *proved* by the
+/// bodies themselves rather than asserted from a counter.
+#[derive(Debug)]
+struct Gate {
+    entered: AtomicU64,
+    open: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Gate {
+    /// A closed gate.
+    fn new() -> Self {
+        Self {
+            entered: AtomicU64::new(0),
+            open: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Record one arrival at the gate and wait for it to open.
+    async fn enter(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        loop {
+            // The future is created before the flag is read, so an open landing
+            // between the two cannot be missed — the lost-wakeup window a
+            // check-then-wait ordering has.
+            let notified = self.notify.notified();
+            if self.open.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait until `tier` bodies are parked here, and report how many got in.
+    ///
+    /// Bounded by [`TIER_ADMIT_LIMIT`]: a tier that cannot be admitted in that time
+    /// did not saturate, it hung, and the caller reports the level reached rather than
+    /// waiting for ever (INV-BOT-16's rule — requested, reached and ceiling together,
+    /// so no reader is told a concurrency number nobody ran).
+    async fn await_tier(&self, tier: u64) -> u64 {
+        let started = Instant::now();
+        while self.entered() < tier {
+            if started.elapsed() > TIER_ADMIT_LIMIT {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        self.entered()
+    }
+
+    /// How many arrivals are parked at the gate.
+    fn entered(&self) -> u64 {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    /// Open the gate and release every waiter.
+    fn release(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
+/// One tier body's three handles and the instant it was offered.
+///
+/// The facade's and the baseline's tiers differ in where the body is placed, not in what
+/// it captures, so the captures are built here once: a body that was offered at a
+/// different instant on one side than the other would make the tier's latency figures a
+/// comparison of two harnesses.
+struct TierBody {
+    counter: Arc<AtomicU64>,
+    shard: Arc<Recorder>,
+    gate: Arc<Gate>,
+    offered_at: Instant,
+}
+
+impl TierBody {
+    /// Mint the handles for one body against a gate.
+    fn new(work: &Arc<AtomicU64>, recorders: &RecorderSet, gate: &Arc<Gate>) -> Self {
+        let (counter, shard) = task_handles(work, recorders);
+        Self {
+            counter,
+            shard,
+            gate: Arc::clone(gate),
+            offered_at: Instant::now(),
+        }
+    }
+
+    /// Destructure into what `gated_body_unit` takes.
+    fn into_parts(self) -> (Arc<AtomicU64>, Arc<Recorder>, Arc<Gate>, Instant) {
+        (self.counter, self.shard, self.gate, self.offered_at)
+    }
+}
+
+/// Wait for the whole tier to be admitted, read the resident set at that peak, release
+/// it, and report what was reached.
+///
+/// One function for both sides, because the order matters and the order *is* the claim:
+/// the resident set is read **between** the admission and the release, which is the only
+/// moment at which the tier's worth of tasks are simultaneously alive. Read before the
+/// admission it would report a smaller process; read after the release it would report a
+/// draining one, and the per-task figure the issue asks for would be measured at the wrong
+/// moment on both sides.
+///
+/// Returns the level reached beside the reading because both are facts about the same
+/// instant, and a caller that reported them from two places could pair a peak from one with
+/// an admission count from another.
+async fn admit_tier(gate: &Arc<Gate>, tier: usize) -> (u64, Option<u64>, &'static str) {
+    let reached = gate
+        .await_tier(u64::try_from(tier).unwrap_or(u64::MAX))
+        .await;
+    let (rss_bytes, rss_source) = resident_bytes();
+    gate.release();
+    (reached, rss_bytes, rss_source)
+}
+
+/// The body an in-flight tier runs: park at the gate, then the same recorded work unit
+/// every open-loop arrival runs.
+///
+/// The park is what makes the tier a concurrency measurement: without it a body would
+/// finish before its neighbour was admitted and the peak in-flight count would be an
+/// artefact of scheduling rather than of the ceiling.
+async fn gated_body_unit(
+    counter: Arc<AtomicU64>,
+    shard: Arc<Recorder>,
+    gate: Arc<Gate>,
+    offered_at: Instant,
+) {
+    gate.enter().await;
+    recorded_body_unit(counter, shard, offered_at).await;
+}
+
+/// One in-flight tier's measurement.
+struct TierRun {
+    side: Side,
+    /// The tier the caller asked for.
+    requested: usize,
+    /// How many were concurrently admitted, as the bodies themselves observed.
+    reached: u64,
+    /// The engine's own maximum permit count.
+    ceiling: usize,
+    placed: u64,
+    completed: u64,
+    aborted: u64,
+    work_units: u64,
+    in_flight_at_end: u64,
+    histogram: Histogram,
+    rss_bytes: Option<u64>,
+    rss_source: &'static str,
+    wall: Duration,
+}
+
+impl TierRun {
+    /// p50, p95 and p99, in nanoseconds.
+    fn percentiles(&self) -> (u64, u64, u64) {
+        self.histogram.percentiles_nanos()
+    }
+
+    /// Resident bytes per concurrently admitted task, or `None` where the host cannot
+    /// report RSS at all.
+    fn rss_per_task(&self) -> Option<f64> {
+        self.rss_bytes
+            .map(|bytes| bytes as f64 / self.reached.max(1) as f64)
+    }
+
+    /// The RSS cell for a table: bytes, or an explicit `null`.
+    fn rss_cell(&self) -> String {
+        self.rss_bytes
+            .map_or_else(|| "null".to_string(), |bytes| format!("{bytes} B"))
+    }
+
+    /// The RSS-per-task cell for a table: bytes per task, or an explicit `null`.
+    fn rss_per_task_cell(&self) -> String {
+        self.rss_per_task()
+            .map_or_else(|| "null".to_string(), |bytes| format!("{bytes:.0} B"))
+    }
+}
+
+/// Admit `tier` tasks at once through the facade, then drain them.
+async fn inflight_tier_facade(tier: usize) -> Result<TierRun, String> {
+    let work = Arc::new(AtomicU64::new(0));
+    let recorders = RecorderSet::new();
+    let gate = Arc::new(Gate::new());
+    let mut supervisor = Supervisor::new(tier);
+    let t0 = Instant::now();
+    for _ in 0..tier {
+        let (counter, shard, body_gate, offered_at) =
+            TierBody::new(&work, &recorders, &gate).into_parts();
+        supervisor
+            .spawn(move |_token| async move {
+                gated_body_unit(counter, shard, body_gate, offered_at).await;
+            })
+            .await;
+    }
+    let (reached, rss_bytes, rss_source) = admit_tier(&gate, tier).await;
+    let drain_started = Instant::now();
+    while supervisor.stats().completed < u64::try_from(tier).unwrap_or(u64::MAX) {
+        if supervisor.reap() == 0 {
+            tokio::time::sleep(Duration::from_micros(200)).await;
+        }
+    }
+    let stats = supervisor.stats();
+    Ok(TierRun {
+        side: Side::Facade,
+        requested: tier,
+        reached,
+        ceiling: Semaphore::MAX_PERMITS,
+        placed: u64::try_from(tier).unwrap_or(u64::MAX),
+        completed: stats.succeeded,
+        aborted: stats.aborted,
+        work_units: work.load(Ordering::SeqCst),
+        in_flight_at_end: stats.in_flight(),
+        histogram: Recorder::merged(recorders.shards()),
+        rss_bytes,
+        rss_source,
+        wall: t0.elapsed() + drain_started.elapsed(),
+    })
+}
+
+/// Admit `tier` tasks at once through the raw baseline, then drain them.
+///
+/// The same gate, the same recorder and the same drain as the facade tier; the engine
+/// surface is the only difference.
+async fn inflight_tier_baseline(tier: usize) -> Result<TierRun, String> {
+    let work = Arc::new(AtomicU64::new(0));
+    let recorders = RecorderSet::new();
+    let permits = Arc::new(Semaphore::new(tier));
+    let gate = Arc::new(Gate::new());
+    let mut set: JoinSet<()> = JoinSet::new();
+    let t0 = Instant::now();
+    for _ in 0..tier {
+        let Some(permit) = Arc::clone(&permits).try_acquire_owned().ok() else {
+            break;
+        };
+        let (counter, shard, body_gate, offered_at) =
+            TierBody::new(&work, &recorders, &gate).into_parts();
+        set.spawn(async move {
+            let _held = permit;
+            gated_body_unit(counter, shard, body_gate, offered_at).await;
+        });
+    }
+    let (reached, rss_bytes, rss_source) = admit_tier(&gate, tier).await;
+    let drain_started = Instant::now();
+    let mut completed = 0_u64;
+    let mut aborted = 0_u64;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(()) => completed = completed.saturating_add(1),
+            Err(_) => aborted = aborted.saturating_add(1),
+        }
+    }
+    Ok(TierRun {
+        side: Side::Baseline,
+        requested: tier,
+        reached,
+        ceiling: Semaphore::MAX_PERMITS,
+        placed: completed.saturating_add(aborted),
+        completed,
+        aborted,
+        work_units: work.load(Ordering::SeqCst),
+        in_flight_at_end: 0,
+        histogram: Recorder::merged(recorders.shards()),
+        rss_bytes,
+        rss_source,
+        wall: t0.elapsed() + drain_started.elapsed(),
+    })
+}
+
+/// The in-flight tiers, each the ceiling it admits at.
+///
+/// The distinction from the concurrency ladder is the point of this row: the ladder runs
+/// *many tasks through* a fixed bound of 64, so its peak in-flight count is 64 however
+/// large the task count grows. A tier here runs *that many tasks concurrently
+/// admitted*, so the bound is the tier and the peak is the tier.
+const INFLIGHT_TIERS: [usize; 5] = [100, 1_000, 10_000, 100_000, 1_048_576];
+
+/// The columns of the in-flight tier table.
+const TIER_COLUMNS: [&str; 9] = [
+    "tier",
+    "side",
+    "reached",
+    "placed",
+    "completed",
+    "p50 us",
+    "p99 us",
+    "peak RSS",
+    "RSS/task",
+];
+
+/// Drive one in-flight tier on one side and gate it.
+///
+/// Every gate here is about the *claim* rather than about execution: a tier is only
+/// evidence about concurrency if the tier's worth of tasks really were alive at once,
+/// and if every one of them finished.
+async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std::error::Error>> {
+    let run = match side {
+        Side::Facade => inflight_tier_facade(tier).await,
+        Side::Baseline => inflight_tier_baseline(tier).await,
+    }
+    .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
+    let label = format!("in-flight tier {tier} on the {}", side.as_str());
+    let requested = u64::try_from(tier).unwrap_or(u64::MAX);
+    if run.reached != requested {
+        return Err(format!(
+            "{label}: only {} of {tier} tasks were concurrently admitted within {} s — \
+             requested {tier}, reached {}, engine ceiling {}",
+            run.reached,
+            TIER_ADMIT_LIMIT.as_secs(),
+            run.reached,
+            run.ceiling
+        )
+        .into());
+    }
+    if run.completed.saturating_add(run.aborted) != run.placed {
+        return Err(format!(
+            "{label}: {} of {} admitted tasks reached a terminal state",
+            run.completed.saturating_add(run.aborted),
+            run.placed
+        )
+        .into());
+    }
+    work_units_match(&label, run.completed, run.work_units, "tasks")
+        .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
+    if run.in_flight_at_end != 0 {
+        return Err(format!(
+            "{label}: {} tasks still in flight after the drain",
+            run.in_flight_at_end
+        )
+        .into());
+    }
+    Ok(run)
+}
+
+/// One tier's row in the results file.
+fn tier_json(run: &TierRun) -> String {
+    let (p50, _, p99) = run.percentiles();
+    let per_task = run
+        .rss_per_task()
+        .map_or_else(|| "null".to_string(), |bytes| bytes.to_string());
+    format!(
+        "{{\"tier\":{},\"side\":\"{}\",\"reached\":{},\"ceiling\":{},\"placed\":{},\
+          \"completed\":{},\"aborted\":{},\"work_units\":{},\"p50_nanos\":{p50},\
+          \"p99_nanos\":{p99},\"peak_rss_bytes\":{},\"rss_bytes_per_in_flight_task\":{per_task},\
+          \"rss_source\":\"{}\",\"wall_millis\":{}}}",
+        run.requested,
+        run.side.as_str(),
+        run.reached,
+        run.ceiling,
+        run.placed,
+        run.completed,
+        run.aborted,
+        run.work_units,
+        run.rss_cell(),
+        run.rss_source,
+        run.wall.as_millis()
+    )
+}
+
+/// Drive every in-flight tier on both sides and report the memory each cost.
+async fn in_flight_tiers(
+    only: Option<usize>,
+    json: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("in-flight tiers — that many tasks CONCURRENTLY ADMITTED, each tier its own ceiling");
+    println!("every body parks on a gate until the whole tier is admitted, so the peak");
+    println!("in-flight count is what the bodies saw and not a counter's opinion\n");
+    print_columns(&TIER_COLUMNS);
+
+    let mut json_rows: Vec<String> = Vec::new();
+    for tier in INFLIGHT_TIERS {
+        if only.is_some_and(|wanted| wanted != tier) {
+            continue;
+        }
+        for side in Side::ALL {
+            let run = in_flight_tier(tier, side).await?;
+            let (p50, _, p99) = run.percentiles();
+            print_row(&[
+                tier.to_string(),
+                side.as_str().to_string(),
+                run.reached.to_string(),
+                run.placed.to_string(),
+                run.completed.to_string(),
+                micros(p50),
+                micros(p99),
+                run.rss_cell(),
+                run.rss_per_task_cell(),
+            ]);
+            json_rows.push(tier_json(&run));
+        }
+        println!();
+    }
+
+    if let Some(path) = json {
+        let body = format!(
+            "{{\"tool\":\"lgwks-bench-async-inflight\",\"note\":\"each tier's ceiling is the \
+              tier; every body parks on a gate until the whole tier is admitted, so the peak \
+              in-flight count is observed rather than inferred\",\"tiers\":[\n{}\n]}}",
+            json_rows.join(",\n")
+        );
+        std::fs::write(path, body)?;
+        println!("wrote {path}");
+    }
+    Ok(())
+}
+
+// ── Overload and recovery ────────────────────────────────────────────────────
+
+/// Which phase of the overload run is offering load.
+///
+/// An enum rather than a name compared at each use: a phase whose identity is a
+/// string is a phase whose identity a typo can change, and the recovery reading
+/// depends on telling the recovery phase from the other two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PhaseLabel {
+    /// Steady load below the knee: the p99 the run must come back to.
+    Baseline,
+    /// Twice the knee: the load that builds the queue.
+    Overload,
+    /// Back down below the knee: the drain and the return are measured here.
+    Recovery,
+}
+
+impl PhaseLabel {
+    /// The name the record carries.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Overload => "overload",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
+/// One phase of the overload run: an offered rate and how long it holds.
+#[derive(Clone, Copy)]
+struct Phase {
+    /// What this phase is.
+    label: PhaseLabel,
+    offered_rate: u64,
+    window: Duration,
+}
+
+/// What one overload run measured.
+#[derive(Debug)]
+struct RecoveryRun {
+    side: Side,
+    bound: usize,
+    /// The p99 the side served at 0.5× the knee, before any overload.
+    baseline_p99_nanos: u64,
+    /// The offered rate the overload ran at.
+    overload_rate: u64,
+    /// Deepest queue the overload reached, in arrivals.
+    overload_peak_queue: usize,
+    /// Wall time from the overload's last arrival until nothing was in flight.
+    drain: Duration,
+    /// Wall time from the overload's last arrival until a whole window's p99 was back
+    /// inside the baseline's.
+    recovered: Duration,
+    /// The p99 of the first window that was back inside the baseline.
+    recovered_p99_nanos: u64,
+    /// The conservation counters of the whole run.
+    offered: u64,
+    admitted: u64,
+    refused: u64,
+    completed: u64,
+    work_units: u64,
+}
+
+/// How long one recovery window offers load before its p99 is read.
+///
+/// A window has to be long enough to hold enough samples for a p99 to mean anything
+/// and short enough that "back to baseline" is a time a reader can act on. 500 ms at
+/// the recovery rate is several thousand samples on this host and is bounded above by
+/// the run itself rather than by a timer.
+const RECOVERY_WINDOW: Duration = Duration::from_millis(500);
+
+/// The fewest samples a recovery window must hold before its p99 is read.
+///
+/// Below this a window's p99 is the maximum of a handful of samples, and a run that
+/// reported it as a recovery would be reporting noise as a measurement.
+const RECOVERY_MIN_SAMPLES: u64 = 64;
+
+/// How long the recovery phase may run before the run reports it did not recover.
+///
+/// The overload left a queue behind; draining it is bounded work, and an unbounded
+/// wait for a p99 that never returns would turn a slow host into a hung rig.
+const RECOVERY_LIMIT: Duration = Duration::from_secs(120);
+
+/// Drive one side through a baseline phase, an overload phase and a recovery phase,
+/// and report what it took to come back.
+///
+/// The phases are the issue's: a steady baseline at 0.5× the knee, then 2× the knee
+/// long enough to build a queue, then back down to 0.5×. Two readings come out: how
+/// long the drain took, and how long until a whole window's p99 was back inside the
+/// baseline's. The conservation counters come from the same gate as every other run,
+/// so "nothing was lost or duplicated while it recovered" is checked rather than
+/// assumed.
+async fn overload_run(
+    side: Side,
+    bound: usize,
+    knee_rate: u64,
+    baseline_window: Duration,
+    overload_window: Duration,
+) -> Result<RecoveryRun, Box<dyn std::error::Error>> {
+    let half = (knee_rate / 2).max(1);
+    let twice = knee_rate.saturating_mul(2);
+    let recovery_window = baseline_window;
+    let phases = [
+        Phase {
+            label: PhaseLabel::Baseline,
+            offered_rate: half,
+            window: baseline_window,
+        },
+        Phase {
+            label: PhaseLabel::Overload,
+            offered_rate: twice,
+            window: overload_window,
+        },
+        Phase {
+            label: PhaseLabel::Recovery,
+            offered_rate: half,
+            window: recovery_window,
+        },
+    ];
+
+    println!(
+        "\n{} at bound {bound}: baseline {} s at {half}/s, overload {} s at {twice}/s, \
+         recovery {} s at {half}/s",
+        side.as_str(),
+        baseline_window.as_secs(),
+        overload_window.as_secs(),
+        recovery_window.as_secs()
+    );
+
+    let mut engine = match side {
+        Side::Facade => EngineBox::Facade(FacadeEngine::new(bound, Admission::Backpressure)),
+        Side::Baseline => EngineBox::Baseline(BaselineEngine::new(bound, Admission::Backpressure)),
+    };
+    let work = Arc::new(AtomicU64::new(0));
+    let recorders = RecorderSet::new();
+    let mut depth = DepthTrace::new();
+    let mut offered = 0_u64;
+    let mut admitted = 0_u64;
+    let mut refused = 0_u64;
+    let mut baseline_p99 = 0_u64;
+    // The instant the overload stopped offering: every recovery reading is measured
+    // from here, so "back to baseline" includes the drain rather than starting after
+    // it.
+    let mut overload_stopped = Instant::now();
+    let mut overload_peak_queue = 0_usize;
+    let mut drain = Duration::ZERO;
+    let mut recovered = Duration::ZERO;
+    let mut recovered_p99 = 0_u64;
+
+    for phase in phases {
+        let period = period_nanos(phase.offered_rate);
+        let t0 = Instant::now();
+        while t0.elapsed() < phase.window {
+            engine.reap();
+            let intended = t0 + intended_arrival(offered, period, 0);
+            wait_until(intended).await;
+            offered = offered.saturating_add(1);
+            let (counter, shard) = task_handles(&work, &recorders);
+            let placed = engine.admit(counter, shard, intended).await;
+            count_arrival(placed, &mut admitted, &mut refused);
+            let next_intended = t0 + intended_arrival(offered, period, 0);
+            sample_queue(
+                Instant::now(),
+                next_intended,
+                period,
+                engine.in_flight(),
+                &mut depth,
+            );
+            let queue = depth.peak;
+            match phase.label {
+                PhaseLabel::Overload => {
+                    overload_peak_queue = overload_peak_queue.max(queue);
+                }
+                // The baseline phase has nothing to watch for: it is the reading the
+                // other two are compared against.
+                PhaseLabel::Baseline => {}
+                // The recovery phase watches for the two facts it is measuring: the
+                // queue is empty, and a whole window has served a p99 inside the
+                // baseline's. The window is bounded by `RECOVERY_LIMIT` so a host
+                // that never recovers reports that rather than hanging.
+                PhaseLabel::Recovery => {
+                    if recovered_p99 == 0
+                        && engine.in_flight() == 0
+                        && t0.elapsed() >= RECOVERY_WINDOW
+                    {
+                        let window = Recorder::merged(recorders.shards());
+                        // A window below `RECOVERY_MIN_SAMPLES` has a p99 that is the
+                        // maximum of a handful of samples; reading it as "recovered"
+                        // would report noise as a measurement, so the window is
+                        // discarded and the next one is read instead.
+                        let window_p99 = if window.count() >= RECOVERY_MIN_SAMPLES {
+                            window.quantile_nanos(0.99)
+                        } else {
+                            0
+                        };
+                        if window_p99 != 0 && window_p99 <= baseline_p99 {
+                            recovered_p99 = window_p99;
+                            recovered = Instant::now().saturating_duration_since(overload_stopped);
+                        }
+                        recorders.reset();
+                    }
+                }
+            }
+        }
+
+        let histogram = Recorder::merged(recorders.shards());
+        let p99 = histogram.quantile_nanos(0.99);
+        match phase.label {
+            PhaseLabel::Baseline => {
+                baseline_p99 = p99;
+                println!(
+                    "  baseline  {} offered  {} admitted  p99 {:.3} ms",
+                    offered,
+                    admitted,
+                    p99 as f64 / 1_000_000.0
+                );
+            }
+            PhaseLabel::Overload => {
+                println!(
+                    "  overload  {} offered  {} admitted  {} refused  p99 {:.3} ms  peak \
+                     queue {overload_peak_queue}",
+                    offered,
+                    admitted,
+                    refused,
+                    p99 as f64 / 1_000_000.0
+                );
+                // Drain from here, timed: the overload's queue is what has to go.
+                overload_stopped = Instant::now();
+                let drain_started = overload_stopped;
+                engine.drain().await;
+                drain = drain_started.elapsed();
+            }
+            PhaseLabel::Recovery => {
+                if recovered_p99 == 0 {
+                    println!(
+                        "  recovery  drained in {:.3} ms  p99 did NOT return to the baseline \
+                         {} ms within the {} s phase — reported as not recovered rather \
+                         than as a number",
+                        drain.as_secs_f64() * 1_000.0,
+                        RECOVERY_LIMIT.as_secs(),
+                        phase.window.as_secs()
+                    );
+                } else {
+                    println!(
+                        "  recovery  drained in {:.3} ms  p99 back to baseline after {:.3} ms \
+                         ({} ms inside)",
+                        drain.as_secs_f64() * 1_000.0,
+                        recovered.as_secs_f64() * 1_000.0,
+                        recovered_p99 as f64 / 1_000_000.0
+                    );
+                }
+            }
+        }
+        if phase.label != PhaseLabel::Recovery {
+            recorders.reset();
+        }
+    }
+
+    engine.drain().await;
+    let (completed, cancelled, aborted) = engine.terminals();
+    if cancelled != 0 || aborted != 0 {
+        return Err(format!(
+            "{} overload run ended with {cancelled} cancelled and {aborted} aborted tasks: a \
+             recovery that drops work is not a recovery",
+            side.as_str()
+        )
+        .into());
+    }
+    let work_units = work.load(Ordering::SeqCst);
+    let run = RecoveryRun {
+        side,
+        bound,
+        baseline_p99_nanos: baseline_p99,
+        overload_rate: twice,
+        overload_peak_queue,
+        drain,
+        recovered,
+        recovered_p99_nanos: recovered_p99,
+        offered,
+        admitted,
+        refused,
+        completed,
+        work_units,
+    };
+    // The same conservation gate as every other run, on the same counters.
+    let conserved = RecoveryRun::conserved(&run);
+    conserved.map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
+    Ok(run)
+}
+
+impl RecoveryRun {
+    /// Every arrival was admitted or refused, every admitted body completed, and the
+    /// bodies' own work counter agrees — the property "nothing was lost or duplicated
+    /// while it recovered" is a check on, not a claim about, the run.
+    fn conserved(run: &RecoveryRun) -> Result<(), String> {
+        let accounted = run.admitted.saturating_add(run.refused);
+        if accounted != run.offered {
+            return Err(format!(
+                "{}: offered {}, admitted {} plus refused {} is {accounted} — an arrival was \
+                 lost or counted twice",
+                run.side.as_str(),
+                run.offered,
+                run.admitted,
+                run.refused
+            ));
+        }
+        if run.completed != run.admitted {
+            return Err(format!(
+                "{}: {} of {} admitted bodies completed — work was lost or duplicated",
+                run.side.as_str(),
+                run.completed,
+                run.admitted
+            ));
+        }
+        work_units_match(
+            "overload and recovery",
+            run.completed,
+            run.work_units,
+            "bodies",
+        )
+    }
+}
+
+/// Either engine, as one value, so a multi-phase run is written once.
+///
+/// The phases of an overload run are the same three on either side, and an `enum`
+/// with the two `Engine` implementations under it is what lets the phase loop call
+/// `reap`/`admit`/`drain` without knowing which engine it is driving. Two phase loops
+/// would be two programs again — the same objection the `Engine` trait exists to
+/// answer.
+enum EngineBox {
+    Facade(FacadeEngine),
+    Baseline(BaselineEngine),
+}
+
+impl EngineBox {
+    /// Join whatever has finished, without waiting.
+    fn reap(&mut self) {
+        match self {
+            Self::Facade(engine) => engine.reap(),
+            Self::Baseline(engine) => engine.reap(),
+        }
+    }
+
+    /// Offer one arrival at the ceiling, reporting whether it was admitted.
+    async fn admit(
+        &mut self,
+        counter: Arc<AtomicU64>,
+        shard: Arc<Recorder>,
+        intended: Instant,
+    ) -> bool {
+        match self {
+            Self::Facade(engine) => engine.admit(counter, shard, intended).await,
+            Self::Baseline(engine) => engine.admit(counter, shard, intended).await,
+        }
+    }
+
+    /// Tasks in flight at this instant.
+    fn in_flight(&self) -> u64 {
+        match self {
+            Self::Facade(engine) => engine.in_flight(),
+            Self::Baseline(engine) => engine.in_flight(),
+        }
+    }
+
+    /// Join everything, blocking until nothing is left.
+    async fn drain(&mut self) {
+        match self {
+            Self::Facade(engine) => engine.drain().await,
+            Self::Baseline(engine) => engine.drain().await,
+        }
+    }
+
+    /// Terminal counters after the drain: completed, cancelled, aborted.
+    fn terminals(&self) -> (u64, u64, u64) {
+        match self {
+            Self::Facade(engine) => engine.terminals(),
+            Self::Baseline(engine) => engine.terminals(),
+        }
+    }
+}
+
+/// Drive the overload-and-recovery run on both sides at one bound.
+///
+/// The bound is a parameter rather than a constant because the recovery time is a
+/// property of the ceiling a reader chose, not of the runtime: the same recovery at
+/// bound 64 and at bound 1,024 are different claims.
+async fn overload_and_recovery(
+    bound: usize,
+    knee_rate: u64,
+    baseline_window: Duration,
+    overload_window: Duration,
+    json: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "overload and recovery — {baseline_window:?} baseline, {overload_window:?} at 2x the knee, then back down"
+    );
+    println!("drain time and time-to-baseline-p99 are both measured, and the conservation gate");
+    println!("checks that nothing was lost or duplicated on either side of the transition\n");
+
+    let mut rows = Vec::new();
+    for side in Side::ALL {
+        let run = overload_run(side, bound, knee_rate, baseline_window, overload_window).await?;
+        print_row(&[
+            side.as_str().to_string(),
+            bound.to_string(),
+            format!("{:.3} ms", run.baseline_p99_nanos as f64 / 1_000_000.0),
+            run.overload_rate.to_string(),
+            run.overload_peak_queue.to_string(),
+            format!("{:.1} ms", run.drain.as_secs_f64() * 1_000.0),
+            format!("{:.1} ms", run.recovered.as_secs_f64() * 1_000.0),
+            run.offered.to_string(),
+            run.admitted.to_string(),
+            run.completed.to_string(),
+        ]);
+        rows.push(run);
+    }
+
+    if let Some(path) = json {
+        let body = format!(
+            "{{\"tool\":\"lgwks-bench-async-overload\",\"bound\":{bound},\
+              \"knee_offered_rate\":{knee_rate},\"baseline_window_ms\":{},\
+              \"overload_window_ms\":{},\"runs\":[\n{}\n]}}",
+            baseline_window.as_millis(),
+            overload_window.as_millis(),
+            rows.iter()
+                .map(recovery_json)
+                .collect::<Vec<_>>()
+                .join(",\n")
+        );
+        std::fs::write(path, body)?;
+        println!("wrote {path}");
+    }
+    Ok(())
+}
+
+/// One overload run as a results-file row.
+fn recovery_json(run: &RecoveryRun) -> String {
+    format!(
+        "{{\"side\":\"{}\",\"bound\":{},\"baseline_p99_nanos\":{},\"overload_offered_rate\":{},\
+          \"overload_peak_queue\":{},\"drain_millis\":{},\"recovered_millis\":{},\"phase\":\"{}\",\
+          \"recovered_p99_nanos\":{},\"offered\":{},\"admitted\":{},\"refused\":{},\
+          \"completed\":{},\"work_units\":{}}}",
+        run.side.as_str(),
+        run.bound,
+        run.baseline_p99_nanos,
+        run.overload_rate,
+        run.overload_peak_queue,
+        run.drain.as_millis(),
+        run.recovered.as_millis(),
+        PhaseLabel::Recovery.as_str(),
+        run.recovered_p99_nanos,
+        run.offered,
+        run.admitted,
+        run.refused,
+        run.completed,
+        run.work_units
+    )
+}
+
+// ── Allocation attribution ───────────────────────────────────────────────────
+
+/// One measured allocation window: what it exercised and what it cost.
+struct AllocWindow {
+    /// The operation the window timed and counted.
+    what: &'static str,
+    /// How many times it ran inside the window.
+    iterations: u64,
+    allocs: u64,
+    bytes: u64,
+}
+
+impl AllocWindow {
+    /// Allocations per iteration.
+    fn per_iteration(&self) -> f64 {
+        if self.iterations == 0 {
+            return 0.0;
+        }
+        (self.allocs as f64) / (self.iterations as f64)
+    }
+
+    /// One printed line.
+    fn line(&self) -> String {
+        format!(
+            "{:<46} {:>8} iterations {:>9} allocs {:>10.2} per call",
+            self.what,
+            self.iterations,
+            self.allocs,
+            self.per_iteration()
+        )
+    }
+
+    /// One results-file row.
+    fn json(&self) -> String {
+        format!(
+            "{{\"operation\":\"{}\",\"iterations\":{},\"allocations\":{},\"bytes\":{},\
+              \"allocations_per_iteration\":{}}}",
+            self.what,
+            self.iterations,
+            self.allocs,
+            self.bytes,
+            self.per_iteration()
+        )
+    }
+}
+
+/// Count the allocations one window costs.
+///
+/// Counting runs in its own process-wide window, strictly around the operation and
+/// never mixed with a timed round: the counter is a relaxed atomic add on the
+/// allocation path, so counting during a timing run would attribute the counter's own
+/// cost to the code under test — which is how a measurement instrument ends up
+/// reporting its overhead as a result.
+async fn count_allocations<F, Fut>(iterations: u64, what: &'static str, body: F) -> AllocWindow
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    alloc_count::reset();
+    alloc_count::start();
+    for _ in 0..iterations {
+        body().await;
+    }
+    alloc_count::stop();
+    let (allocs, bytes) = alloc_count::snapshot();
+    AllocWindow {
+        what,
+        iterations,
+        allocs,
+        bytes,
+    }
+}
+
+/// Attribute the facade's per-task allocations to the operations that make them up.
+///
+/// The issue asks for each allocation with its source line, and a source line is a
+/// claim a reader can check by reading. This measures the same thing without trusting
+/// the reading: each window counts one operation in isolation, so the difference
+/// between the whole facade and the baseline is decomposed into the parts that were
+/// measured individually rather than asserted.
+///
+/// The windows are chosen to be *subtractive*: the facade's spawn wave at an
+/// uncontended ceiling and the same wave at a contended one, against a raw-Tokio wave
+/// of the same shape, so the difference between them is the facade's admission cost
+/// and the difference between contended and uncontended is the cost of waiting for a
+/// slot.
+async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    const TASKS: u64 = 1_024;
+    const UNCONTENDED: usize = 4_096;
+    const CONTENDED: usize = 8;
+
+    println!("allocation attribution — every window counted separately from every timed round");
+    println!("{TASKS} tasks per wave unless stated otherwise\n");
+
+    let mut windows = Vec::new();
+
+    // The whole facade wave at a contended ceiling: the shipped figure.
+    windows.push(
+        count_allocations(TASKS, "facade spawn wave, contended (bound 8)", || async {
+            let _wave = facade_side(TASKS as usize, CONTENDED).await;
+        })
+        .await,
+    );
+    // The same wave at a ceiling the wave never reaches: the same work with no waiting.
+    windows.push(
+        count_allocations(
+            TASKS,
+            "facade spawn wave, uncontended (bound 4096)",
+            || async {
+                let _wave = facade_side(TASKS as usize, UNCONTENDED).await;
+            },
+        )
+        .await,
+    );
+    // The raw equivalent at the same contended ceiling: the baseline.
+    windows.push(
+        count_allocations(TASKS, "raw tokio wave, contended (bound 8)", || async {
+            let _wave = baseline_side(TASKS as usize, CONTENDED).await;
+        })
+        .await,
+    );
+    // One child token, on its own: the per-task cancellation token the facade mints.
+    windows.push(
+        count_allocations(
+            TASKS,
+            "one child token (CancellationToken::child_token)",
+            || async {
+                let root = lgwks_bot::rt::sync::CancellationToken::new();
+                let child = root.child_token();
+                let _kept = child;
+            },
+        )
+        .await,
+    );
+    // One raced wait, on its own: the cancellation race the admission path performs
+    // per contended spawn.
+    windows.push(
+        count_allocations(
+            TASKS,
+            "one cancellation race (run_until_cancelled)",
+            || async {
+                let root = lgwks_bot::rt::sync::CancellationToken::new();
+                let raced = root.run_until_cancelled(async {});
+                let _done = raced.await;
+            },
+        )
+        .await,
+    );
+
+    for window in &windows {
+        println!("  {}", window.line());
+    }
+    println!(
+        "\nthe facade's excess over raw tokio is {} allocs per task at the contended \
+         ceiling, and {} of those are the wait for a slot rather than the spawn",
+        windows[0].per_iteration() - windows[2].per_iteration(),
+        windows[0].per_iteration() - windows[1].per_iteration()
+    );
+
+    if let Some(path) = json {
+        let body = format!(
+            "{{\"tool\":\"lgwks-bench-async-alloc-attribution\",\"note\":\"each window is \
+              counted separately; the facade's excess is the difference between the whole \
+              wave and the raw wave at the same ceiling\",\"windows\":[\n{}\n]}}",
+            windows
+                .iter()
+                .map(AllocWindow::json)
+                .collect::<Vec<_>>()
+                .join(",\n")
+        );
+        std::fs::write(path, body)?;
+        println!("wrote {path}");
+    }
+    Ok(())
+}
+
+/// Run one open-loop mode on a runtime of its own.
+///
+/// The open-loop modes drive a generator across every worker thread and are written
+/// as one async body each, so each gets its own `block_on` here rather than being
+/// nested inside a runtime the caller already owns: calling `block_on` from inside a
+/// runtime is the documented way to deadlock a multi-threaded scheduler, and a
+/// measurement rig that hangs is worse than one that refuses.
+fn block_on_mode<F, Fut>(body: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
+{
+    Runtime::new()?.block_on(body())
+}
+
+/// The seeded open-loop model, run over the same bounds the sweep uses at every bound
+/// small enough to sweep exhaustively.
+///
+/// Every world is simulated twice from its own seed, and the run exits non-zero unless
+/// the two agree on the trace hash *and* on every reported figure. That is the same
+/// property `tests/it/sim_*` families assert in-process, checked here on the path a
+/// reader runs: a generator whose numbers cannot be reproduced from a seed are numbers
+/// with no provenance.
+fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
+    println!("seeded open-loop simulation — the model the live driver is checked against");
+    println!("one seed drives arrival jitter and body length; every world is replayed\n");
+    print_columns(&[
+        "seed",
+        "bound",
+        "world",
+        "offered/s",
+        "admitted",
+        "refused",
+        "p50 intended us",
+        "p99 intended us",
+        "p99 actual us",
+        "trace hash",
+    ]);
+
+    // A permit of a 5 µs body sustains about 200,000 arrivals a second, so each
+    // bound's ladder is derived from its own ceiling: a tenth of capacity (quiet), five
+    // times capacity (past the knee), and the same five times on the refusal door. The
+    // rates are derived rather than typed so a bound is never swept at a rate that does
+    // not reach its knee — which would print a saturation arm that saturated nothing.
+    const PERMITS_PER_SECOND: u64 = 200_000;
+    let mut failures = Vec::new();
+    for seed in [
+        0x0000_0000_0000_0001_u64,
+        0x5EED_0000_0000_0001,
+        0xDEAD_BEEF_0000_0001,
+    ] {
+        for bound in [1_usize, 4, 64] {
+            let permits = u64::try_from(bound).unwrap_or(1);
+            let ladder = [
+                (
+                    "quiet",
+                    permits.saturating_mul(PERMITS_PER_SECOND / 10).max(1),
+                    false,
+                ),
+                (
+                    "past the knee",
+                    permits.saturating_mul(PERMITS_PER_SECOND * 5),
+                    false,
+                ),
+                (
+                    "refusal door",
+                    permits.saturating_mul(PERMITS_PER_SECOND * 5),
+                    true,
+                ),
+            ];
+            for (what, offered_rate, refuse) in ladder {
+                let spec = SimSpec {
+                    offered_rate,
+                    arrivals: permits.saturating_mul(8),
+                    bound,
+                    service_min_nanos: 2_000,
+                    service_max_nanos: 8_000,
+                    jitter: true,
+                    refuse_at_bound: refuse,
+                    seed,
+                };
+                let first = simulate(&spec);
+                let second = simulate(&spec);
+                let replayed = first.trace_hash == second.trace_hash && first == second;
+                if !replayed {
+                    failures.push(format!(
+                        "seed {seed} at bound {bound} at {offered_rate}/s did not replay: \
+                         hash {} then {}",
+                        first.trace_hash, second.trace_hash
+                    ));
+                }
+                print_row(&[
+                    format!("{seed:#x}"),
+                    bound.to_string(),
+                    what.to_string(),
+                    offered_rate.to_string(),
+                    first.admitted.to_string(),
+                    first.refused.to_string(),
+                    micros(first.p50_intended_nanos),
+                    micros(first.p99_intended_nanos),
+                    micros(first.p99_actual_nanos),
+                    format!("{:#018x}", first.trace_hash),
+                ]);
+            }
+        }
+    }
+    println!();
+
+    if !failures.is_empty() {
+        let refusal = Err(format!(
+            "{} seeded world(s) did not replay: {}",
+            failures.len(),
+            failures.join("; ")
+        )
+        .into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_simulation: refusing a simulation that did not replay");
+        return refusal;
+    }
+    println!(
+        "every seeded world replayed to the same trace hash; the p99-intended and \
+         p99-actual columns are the coordinated-omission gap, measured on one world read \
+         two ways"
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rounds: usize = 15;
     let mut json: Option<String> = None;
@@ -1469,6 +3693,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mutant = false;
     let mut tiers = false;
     let mut matrix = false;
+    let mut saturation = false;
+    let mut refusal = false;
+    let mut inflight = false;
+    let mut overload = false;
+    let mut attribution = false;
+    let mut simulation = false;
+    let mut window_seconds: u64 = 2;
+    let mut tier: Option<usize> = None;
+    let mut knee: u64 = 32_768;
+    let mut baseline_seconds: u64 = 4;
+    let mut overload_seconds: u64 = 30;
+    let mut bound: Option<usize> = None;
     for arg in std::env::args().skip(1) {
         if let Some(value) = arg.strip_prefix("--rounds=") {
             rounds = value
@@ -1476,15 +3712,105 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| format!("rounds must be a number: {error}"))?;
         } else if let Some(value) = arg.strip_prefix("--json=") {
             json = Some(value.to_string());
-        } else if arg == "--alloc-report" {
-            alloc_report = true;
-        } else if arg == "--mutant-check" {
-            mutant = true;
-        } else if arg == "--tiers" {
-            tiers = true;
-        } else if arg == "--matrix" {
-            matrix = true;
+        } else if let Some(value) = arg.strip_prefix("--window=") {
+            window_seconds = value
+                .parse()
+                .map_err(|error| format!("window must be a number of seconds: {error}"))?;
+        } else if let Some(value) = arg.strip_prefix("--tier=") {
+            tier = Some(
+                value
+                    .parse()
+                    .map_err(|error| format!("tier must be a number: {error}"))?,
+            );
+        } else if let Some(value) = arg.strip_prefix("--knee=") {
+            knee = value
+                .parse()
+                .map_err(|error| format!("knee must be an offered rate: {error}"))?;
+        } else if let Some(value) = arg.strip_prefix("--baseline-seconds=") {
+            baseline_seconds = value
+                .parse()
+                .map_err(|error| format!("baseline-seconds must be a number: {error}"))?;
+        } else if let Some(value) = arg.strip_prefix("--overload-seconds=") {
+            overload_seconds = value
+                .parse()
+                .map_err(|error| format!("overload-seconds must be a number: {error}"))?;
+        } else if let Some(value) = arg.strip_prefix("--bound=") {
+            bound = Some(
+                value
+                    .parse()
+                    .map_err(|error| format!("bound must be a number: {error}"))?,
+            );
+        } else if let Some(arg) = arg.strip_prefix("--") {
+            match arg {
+                "alloc-report" => alloc_report = true,
+                "mutant-check" => mutant = true,
+                "tiers" => tiers = true,
+                "matrix" => matrix = true,
+                "saturation" => saturation = true,
+                "refusal" => refusal = true,
+                "inflight" => inflight = true,
+                "overload" => overload = true,
+                "alloc-attribution" => attribution = true,
+                "sim-open-loop" => simulation = true,
+                // An unknown flag is refused rather than ignored: a mistyped
+                // `--saturaton` that silently ran the default suite would report a
+                // number for a run nobody asked for.
+                other => {
+                    let refusal = Err(format!("unknown flag --{other}").into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: refusing an unknown flag");
+                    return refusal;
+                }
+            }
         }
+    }
+
+    if simulation {
+        // The seeded model runs alone and exits non-zero when a replay diverges: a
+        // simulation whose traces do not reproduce is a simulation whose numbers
+        // cannot be attributed to a seed, and the gate on it has to be as loud as
+        // the fairness gate's.
+        return open_loop_simulation();
+    }
+
+    if saturation {
+        return block_on_mode(|| {
+            saturation_sweep(
+                Admission::Backpressure,
+                Duration::from_secs(window_seconds),
+                json.as_deref(),
+            )
+        });
+    }
+
+    if refusal {
+        return block_on_mode(|| {
+            saturation_sweep(
+                Admission::Refuse,
+                Duration::from_secs(window_seconds),
+                json.as_deref(),
+            )
+        });
+    }
+
+    if inflight {
+        return block_on_mode(|| in_flight_tiers(tier, json.as_deref()));
+    }
+
+    if overload {
+        let at_bound = bound.unwrap_or(1_024);
+        return block_on_mode(|| {
+            overload_and_recovery(
+                at_bound,
+                knee,
+                Duration::from_secs(baseline_seconds),
+                Duration::from_secs(overload_seconds),
+                json.as_deref(),
+            )
+        });
+    }
+
+    if attribution {
+        return block_on_mode(|| allocation_attribution(json.as_deref()));
     }
 
     if matrix {
