@@ -592,13 +592,18 @@ fn mid_exit(seed: u64) -> u64 {
             "seed {seed:#x}: a start after the threads returned reaps every departed handle"
         );
     }
-    wait_until_held(0, seed);
+    // The third thread was started by the lingering starter too, so a
+    // keep-alive after its job it leaves the accounting and is held until the
+    // next release: "held 0" is a state that lasts one keep-alive and then
+    // becomes "held 1" for good. Asserting the transient state passed only when
+    // this line ran within that millisecond; the settled one is deterministic.
+    wait_until_empty(&pool, seed);
+    wait_until_held(1, seed);
     assert_handles_equal_live_plus_held(&pool, "after the reap", seed);
     fold(&mut trace, 62);
 
     // The last thread lingers too: release it, and the shutdown joins it rather
     // than reporting it, which is the whole of what a handle is for.
-    wait_until_empty(&pool, seed);
     hold.release();
     wait_until_all_returned(&pool, seed);
     let report = pool.shutdown(GENEROUS);

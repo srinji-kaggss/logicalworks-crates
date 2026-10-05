@@ -428,6 +428,13 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
     let p50 = percentile(&samples, 50);
     let p95 = percentile(&samples, 95);
     let p99 = percentile(&samples, 99);
+    // The peak is the concurrent phase's claim, and it is over: every tenant has
+    // joined. The sampler is stopped before the reopen below because on macOS it
+    // spawns `ps` through a shell, and a spawned child holds a copy of every
+    // descriptor the process has open until its exec closes them — including a
+    // journal's locked one. A reopen landing in that window was refused
+    // `Locked` by a lock no writer held, and a loaded host widens the window.
+    let peak_rss_kb = peak.stop();
 
     for (tenant, path) in paths.iter().enumerate() {
         let journal = FileJournal::open(path)?;
@@ -447,7 +454,7 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
         p50,
         p95,
         p99,
-        peak_rss_kb: peak.stop(),
+        peak_rss_kb,
     })
 }
 
