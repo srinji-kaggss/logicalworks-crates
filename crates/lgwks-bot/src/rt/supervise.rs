@@ -852,16 +852,6 @@ fn implicit_tenant() -> Tenant {
     Tenant::assumed(IMPLICIT_TENANT)
 }
 
-/// How long a waiting admission sleeps before re-reading cancellation.
-///
-/// A permit frees through the completion hook, which hands it to the waiter and
-/// wakes it directly, so this poll is not how a grant arrives — it is how a
-/// *cancellation* is noticed by a waiter whose pool will never hand out another
-/// permit. It bounds how late that is, never whether it is, and it is the same
-/// interval [`Supervisor::claim`] uses for the untenanted pool.
-#[cfg(feature = "script")]
-const TENANT_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 /// The async half of per-tenant admission: one lock over the pure round
 /// scheduler, plus the parked waiters it hands permits to.
 ///
@@ -994,9 +984,9 @@ mod tenancy_support {
     ///
     /// The only way a queued waiter learns of its grant is being woken by
     /// [`WaitSlot::deliver`], which runs on whichever task released the permit —
-    /// so a grant is delivered by the completion hook rather than polled for, and
-    /// the interval in [`TENANT_CLAIM_POLL_INTERVAL`](super::TENANT_CLAIM_POLL_INTERVAL)
-    /// exists for the stop, not for the permit.
+    /// so a grant is delivered by the completion hook rather than polled for.
+    /// The caller races this against its own cancellation token, which wakes on
+    /// the token in turn; neither direction needs an interval.
     pub(super) struct WaitPermit {
         /// Where the grant is delivered.
         slot: Arc<WaitSlot>,
@@ -1224,6 +1214,18 @@ mod tenancy_support {
         pub(super) fn counts_of(&self, tenant: &Tenant) -> (usize, usize) {
             let round = self.lock();
             (round.in_flight_of(tenant), round.queued_of(tenant))
+        }
+
+        /// How many of `tenant`'s waiting admissions this shell still holds, live or
+        /// abandoned. Read from the round's own deque, so a test can see the
+        /// retention rather than infer it from the live count.
+        ///
+        /// A test seam rather than production API: the report a caller needs is
+        /// [`counts_of`](Self::counts_of), and the retained-but-abandoned count
+        /// is a fact about callers that walked away rather than about capacity.
+        #[cfg(test)]
+        pub(super) fn retained_waiters(&self, tenant: &Tenant) -> usize {
+            self.lock().retained_of(tenant)
         }
 
         /// How many tenants hold at least one waiter.
@@ -1735,24 +1737,10 @@ impl Supervisor {
         // The fence lives in `claim`, which is why the constructor below is
         // safe to call: a cancelled supervisor never returns a permit, so the
         // body handed to it is never built. The refusal is counted there.
-        let Some(permit) = self.claim().await else {
+        let Some(lease) = self.claim().await else {
             return;
         };
-        let token = self.child_token();
-        let future = body(token.clone());
-        self.place(permit, async move {
-            future.await;
-            // The reading is taken at the instant the body returned, so it is
-            // a fact about the supervisor's own state rather than a guess at
-            // the body's intent: a body that returned while cancellation was
-            // in force is reported cancelled, and one that returned with no
-            // cancellation in force is reported completed.
-            if token.is_cancelled() {
-                TaskEnd::Cancelled
-            } else {
-                TaskEnd::Completed
-            }
-        });
+        self.place_body(lease, body);
     }
     /// Place `body` on this supervisor, refusing if the bound is reached or
     /// the supervisor is cancelled.
@@ -1773,7 +1761,7 @@ impl Supervisor {
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let Some(permit) = self.claim_now() else {
+        let Some(lease) = self.claim_now() else {
             // `claim_now` counted the refusal; which world refused is the one
             // fact the counter cannot carry, so it is read here for the type.
             if self.token.is_cancelled() {
@@ -1785,16 +1773,7 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "try_spawn: returning an error to the caller");
             return refusal;
         };
-        let token = self.child_token();
-        let future = body(token.clone());
-        self.place(permit, async move {
-            future.await;
-            if token.is_cancelled() {
-                TaskEnd::Cancelled
-            } else {
-                TaskEnd::Completed
-            }
-        });
+        self.place_body(lease, body);
         Ok(())
     }
 
@@ -1842,16 +1821,7 @@ impl Supervisor {
                 return refused;
             }
         };
-        let token = self.child_token();
-        let future = body(token.clone());
-        self.place(lease, async move {
-            future.await;
-            if token.is_cancelled() {
-                TaskEnd::Cancelled
-            } else {
-                TaskEnd::Completed
-            }
-        });
+        self.place_body(lease, body);
         Ok(())
     }
 
@@ -2426,74 +2396,60 @@ impl Supervisor {
     ///
     /// A cancelled supervisor refuses before the wait, during the wait, and at
     /// the moment a permit lands, exactly as the untenanted path does: the token
-    /// is read before every wait and again on the permit.
+    /// is read before the wait and again on the permit. There is **no** loop
+    /// here, and that is the contract rather than an omission: one arrival
+    /// produces exactly one waiter, and the round's queue is FIFO, so a second
+    /// attempt would not make progress faster — it would forfeit the place the
+    /// first attempt earned.
     #[cfg(feature = "script")]
     async fn claim_tenanted(
         &mut self,
         shell: &Arc<tenancy_support::TenancyShell>,
         tenant: &Tenant,
     ) -> Result<Lease, SpawnRefused> {
-        loop {
-            if self.token.is_cancelled() {
-                return Err(SpawnRefused::Cancelled);
+        if self.token.is_cancelled() {
+            return Err(SpawnRefused::Cancelled);
+        }
+        self.reap();
+        match shell.admit(tenant) {
+            tenancy_support::Admission::Admitted(lease) => {
+                // Cancellation wins the race for a permit that landed in the
+                // same instant, and the lease's drop returns the capacity to the
+                // round either way.
+                if self.token.is_cancelled() {
+                    Err(SpawnRefused::Cancelled)
+                } else {
+                    Ok(lease)
+                }
             }
-            self.reap();
-            match shell.admit(tenant) {
-                tenancy_support::Admission::Admitted(lease) => {
-                    return if self.token.is_cancelled() {
-                        // Cancellation wins the race for a permit that landed in
-                        // the same instant, and the lease's drop returns the
-                        // capacity to the round either way.
+            tenancy_support::Admission::Refused { limit } => Err(SpawnRefused::TenantAtCapacity {
+                tenant: tenant.clone(),
+                limit,
+            }),
+            tenancy_support::Admission::Queued(waiter) => {
+                // Park on **this** waiter until it resolves or the token
+                // cancels. The waiter is pinned for the whole wait and never
+                // re-created, because the round's queue is FIFO: dropping it to
+                // re-ask forfeits the place this caller earned and leaves an
+                // abandoned entry behind for every interval it waited. A grant
+                // does not need a poll interval to arrive — the completion hook
+                // hands the permit to this waiter and wakes it directly — and
+                // `run_until_cancelled` wakes on the token too, so neither
+                // direction needs a timer.
+                let mut waiter = std::pin::pin!(waiter);
+                let token = self.token.clone();
+                match token.run_until_cancelled(waiter.as_mut()).await {
+                    None => Err(SpawnRefused::Cancelled),
+                    Some(permit) if !self.token.is_cancelled() => {
+                        Ok(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()))
+                    }
+                    Some(permit) => {
+                        // Cancellation won the race against a grant that had
+                        // already been charged to this tenant. The permit is
+                        // handed back through the round, so the tenant is not
+                        // left holding an admission nobody owns.
+                        drop(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
                         Err(SpawnRefused::Cancelled)
-                    } else {
-                        Ok(lease)
-                    };
-                }
-                tenancy_support::Admission::Refused { limit } => {
-                    return Err(SpawnRefused::TenantAtCapacity {
-                        tenant: tenant.clone(),
-                        limit,
-                    });
-                }
-                tenancy_support::Admission::Queued(waiter) => {
-                    // Park. The permit arrives through the completion hook, which
-                    // wakes this waiter directly; the interval is here so a stop
-                    // is noticed even when no further permit will ever be
-                    // granted, and its loop re-reads cancellation every turn.
-                    // The waiter is scoped to this arm so its `Drop` — which
-                    // records the abandonment — runs on every exit from here,
-                    // rather than living past the match.
-                    let settled = {
-                        let mut waiter = std::pin::pin!(waiter);
-                        let token = self.token.clone();
-                        token
-                            .run_until_cancelled(crate::rt::time::timeout(
-                                TENANT_CLAIM_POLL_INTERVAL,
-                                waiter.as_mut(),
-                            ))
-                            .await
-                    };
-                    match settled {
-                        None => return Err(SpawnRefused::Cancelled),
-                        Some(Ok(permit)) if !self.token.is_cancelled() => {
-                            return Ok(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
-                        }
-                        // A permit that landed is already charged to this
-                        // tenant by the round, so it is handed back *through*
-                        // the round: a bare permit would return to the pool and
-                        // leave the tenant holding an in-flight admission that
-                        // nobody has, which is capacity the tenant can never
-                        // spend again. The lease's drop is the release hook the
-                        // completed-task path uses, so the accounting is one
-                        // path rather than two.
-                        Some(Ok(permit)) => {
-                            drop(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
-                        }
-                        // The interval elapsed with no permit. The waiter drops
-                        // here and records its abandonment, so the round stops
-                        // holding it; the next turn re-reads the token and asks
-                        // again.
-                        Some(Err(_)) => {}
                     }
                 }
             }
@@ -2547,6 +2503,34 @@ impl Supervisor {
                 None
             }
         }
+    }
+
+    /// Place a caller's body under `lease`, reporting the two ways a body that
+    /// returned can end.
+    ///
+    /// One wrapper for the untenanted, the refusing and the tenant-scoped spawn
+    /// doors, because a third copy of the reading below is how one of them ends
+    /// up reporting a cancelled body as a completed one.
+    fn place_body<F, Fut>(&mut self, lease: Lease, body: F) -> TaskId
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let token = self.child_token();
+        let future = body(token.clone());
+        self.place(lease, async move {
+            future.await;
+            // The reading is taken at the instant the body returned, so it is a
+            // fact about the supervisor's own state rather than a guess at the
+            // body's intent: a body that returned while cancellation was in
+            // force is reported cancelled, and one that returned with no
+            // cancellation in force is reported completed.
+            if token.is_cancelled() {
+                TaskEnd::Cancelled
+            } else {
+                TaskEnd::Completed
+            }
+        })
     }
 
     /// Give the future a [`TaskId`], place it, and register the identity.
@@ -5648,6 +5632,194 @@ mod tests {
             );
             Ok::<(), Box<dyn std::error::Error>>(())
         })
+    }
+
+    /// A parked admission keeps its place in its tenant's FIFO queue, and leaves
+    /// nothing abandoned behind it, however long it waits.
+    ///
+    /// Three waiters on one tenant, because FIFO order is only observable with
+    /// company: a queue of one is in order under every implementation. The
+    /// claim below is driven by the real `claim_tenanted` and is parked with the
+    /// poll interval the old loop used, so a waiter that was dropped and re-asked
+    /// would rotate to the back of these three on every interval — which is the
+    /// defect this pins.
+    #[cfg(feature = "script")]
+    #[test]
+    fn a_parked_tenant_admission_keeps_its_place_in_the_queue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rt::tenancy::TenancyPolicy;
+        use crate::script::Tenant;
+        use lgwks_deps::tokio::sync::OwnedSemaphorePermit;
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        /// Slices of 50 ms. Twenty-four of them is 1.2 s, an order of magnitude
+        /// past the 100 ms interval the old loop wrapped each wait in, so a
+        /// waiter that was dropped and re-asked would rotate several times.
+        const SLICES: u32 = 24;
+        /// How long one slice of the park lasts.
+        const SLICE: Duration = Duration::from_millis(50);
+
+        block_on(async {
+            // One permit, a ceiling of three and a queue of eight: the permit is
+            // held back by the test, so every arrival parks rather than being
+            // admitted, and the three waiters share one tenant's queue.
+            let mut supervisor = Supervisor::with_tenancy(1, TenancyPolicy::new(3, 8));
+            let shell = Arc::clone(
+                supervisor
+                    .tenancy
+                    .as_ref()
+                    .ok_or("a policy must install a tenancy shell")?,
+            );
+            let pool = Arc::clone(&supervisor.permits);
+            let tenant = Tenant::new("queued")?;
+            // The pool's one permit is held back by the test before the first
+            // arrival, so every arrival below parks rather than being admitted.
+            let mut held = Some(match Arc::clone(&pool).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => return Err("the pool did not start with its one permit".into()),
+            });
+
+            // The claim under test registers first, so FIFO serves it first. It
+            // borrows the supervisor for as long as it is parked, which is why
+            // the pool is cloned out before the pin and the two company waiters
+            // are registered through the shell rather than through the
+            // supervisor.
+            let mut claim = std::pin::pin!(supervisor.claim_tenanted(&shell, &tenant));
+            let mut probe = Context::from_waker(Waker::noop());
+            assert!(
+                claim.as_mut().poll(&mut probe).is_pending(),
+                "the claim must park on a spent pool rather than be admitted"
+            );
+            let mut second = queued_waiter(&shell, &tenant)?;
+            let mut third = queued_waiter(&shell, &tenant)?;
+
+            let mut slices = 0_u32;
+            while slices < SLICES {
+                assert!(
+                    crate::rt::time::timeout(SLICE, claim.as_mut())
+                        .await
+                        .is_err(),
+                    "the claim cannot resolve while the pool is spent"
+                );
+                assert_eq!(
+                    shell.counts_of(&tenant).1,
+                    3,
+                    "all three waiters stay live while they are parked"
+                );
+                assert_eq!(
+                    shell.retained_waiters(&tenant),
+                    3,
+                    "a waiter that keeps its place leaves no abandoned entry behind; \
+                     the deque grew to {} entries over {slices} polls",
+                    shell.retained_waiters(&tenant)
+                );
+                slices = slices.saturating_add(1);
+            }
+
+            // Serve them in turn. One permit is handed to the round, the waiter
+            // the round names resolves, and the permit it was holding is handed
+            // straight on to the next — so the order the three resolve in is the
+            // queue's own order and nothing else.
+            let mut order: Vec<u8> = Vec::new();
+            // Hoisted out of the loop: a future that has returned must never be
+            // polled again, and the claim is the one that resolves first.
+            let mut claim_out: Option<Result<Lease, SpawnRefused>> = None;
+            let mut claim_done = false;
+            for _ in 0..3 {
+                if let Some(permit) = held.take() {
+                    shell.release(&tenant, permit);
+                }
+                let mut second_out: Option<OwnedSemaphorePermit> = None;
+                let mut third_out: Option<OwnedSemaphorePermit> = None;
+                crate::rt::time::timeout(
+                    Duration::from_secs(5),
+                    std::future::poll_fn(|context| {
+                        if !claim_done
+                            && claim_out.is_none()
+                            && let Poll::Ready(value) = claim.as_mut().poll(context)
+                        {
+                            claim_done = true;
+                            claim_out = Some(value);
+                        }
+                        if second_out.is_none()
+                            && let Poll::Ready(permit) = second.as_mut().poll(context)
+                        {
+                            second_out = Some(permit);
+                        }
+                        if third_out.is_none()
+                            && let Poll::Ready(permit) = third.as_mut().poll(context)
+                        {
+                            third_out = Some(permit);
+                        }
+                        if claim_done || second_out.is_some() || third_out.is_some() {
+                            return Poll::Ready(());
+                        }
+                        Poll::Pending
+                    }),
+                )
+                .await
+                .map_err(|_| "no waiter resolved after a permit was released into the round")?;
+                let index = if claim_out.is_some() {
+                    match claim_out.take() {
+                        Some(Ok(lease)) => {
+                            // The granted lease hands its permit to the next
+                            // waiter as it drops, which is the hand-off the next
+                            // round needs.
+                            drop(lease);
+                            0
+                        }
+                        Some(Err(refusal)) => {
+                            return Err(format!("the parked claim was refused: {refusal}").into());
+                        }
+                        None => return Err("the claim reported no outcome at all".into()),
+                    }
+                } else if let Some(permit) = second_out {
+                    held = Some(permit);
+                    1
+                } else if let Some(permit) = third_out {
+                    held = Some(permit);
+                    2
+                } else {
+                    return Err("a resolution was reported with no waiter behind it".into());
+                };
+                order.push(index);
+            }
+            assert_eq!(
+                order,
+                vec![0, 1, 2],
+                "one tenant's three waiters are served in arrival order: the claim \
+                 that parked first, then the two behind it"
+            );
+            assert_eq!(
+                shell.retained_waiters(&tenant),
+                0,
+                "every waiter left the queue once it was served"
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+    }
+
+    /// Park one extra waiter on `tenant`, or report which arm answered instead.
+    ///
+    /// A helper rather than three inline matches: the second and third waiter
+    /// are identical constructions, and a copy per waiter is how two of them end
+    /// up arming a different arm than the first.
+    #[cfg(feature = "script")]
+    fn queued_waiter(
+        shell: &Arc<super::tenancy_support::TenancyShell>,
+        tenant: &crate::script::Tenant,
+    ) -> Result<std::pin::Pin<Box<super::tenancy_support::WaitPermit>>, Box<dyn std::error::Error>>
+    {
+        match shell.admit(tenant) {
+            super::tenancy_support::Admission::Queued(waiter) => Ok(Box::pin(waiter)),
+            super::tenancy_support::Admission::Admitted(_) => {
+                Err("the pool was spent, so this arrival must have parked".into())
+            }
+            super::tenancy_support::Admission::Refused { limit } => {
+                Err(format!("the queue bound of {limit} was already reached").into())
+            }
+        }
     }
 }
 

@@ -510,6 +510,21 @@ impl<W> DeficitRoundRobin<W> {
         self.entries.get(tenant).map_or(0, Entry::live)
     }
 
+    /// How many waiters `tenant` still holds, abandoned ones included.
+    ///
+    /// Not the same number as [`queued_of`](Self::queued_of): an abandoned
+    /// waiter stops counting against the queue bound immediately, but it stays
+    /// in the deque until a grant skips it, so this is the memory the scheduler
+    /// is actually retaining. Reported so a test can assert that the retention
+    /// stays bounded by the policy rather than growing with the number of
+    /// callers that walked away.
+    #[must_use]
+    pub fn retained_of(&self, tenant: &Tenant) -> usize {
+        self.entries
+            .get(tenant)
+            .map_or(0, |entry| entry.queue.len())
+    }
+
     /// How many tenants hold at least one waiter, abandoned or not.
     ///
     /// The honest load number for a report: it counts the queues the scheduler
