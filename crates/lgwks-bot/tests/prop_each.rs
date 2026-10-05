@@ -82,6 +82,7 @@ async fn run_body(probe: &Probe, index: usize, body: Body) -> Result<usize, Flow
     .await;
     probe.end(index, body.fails);
     if body.fails {
+        lgwks_std::trace::debug!(index, "run_body: the item fails, as generated");
         return Err(FlowError::failed(format!("item {index} failed")));
     }
     Ok(index.saturating_mul(2))

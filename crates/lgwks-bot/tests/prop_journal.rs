@@ -139,12 +139,14 @@ fn oracle(landed: &[EffectEvent]) -> Result<Vec<(EffectKey, AttemptStatus)>, Tes
                 VerificationResult::Satisfied => AttemptStatus::Verified,
                 VerificationResult::NotSatisfied => AttemptStatus::VerificationFailed,
                 _ => {
+                    lgwks_std::trace::debug!(%landed_event, "oracle: an unknown verification result");
                     return Err(TestCaseError::fail(format!(
                         "the oracle does not know the verification in {landed_event}"
                     )));
                 }
             },
             _ => {
+                lgwks_std::trace::debug!(%landed_event, "oracle: an unknown event");
                 return Err(TestCaseError::fail(format!(
                     "the oracle does not know the event {landed_event}"
                 )));

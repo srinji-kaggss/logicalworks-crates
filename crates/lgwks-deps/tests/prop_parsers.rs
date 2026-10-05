@@ -318,6 +318,10 @@ fn lock_duplicate_property(
     let inserted = format!("{key} = \"second\"\n");
     let rendered = render_lock(packages);
     let Some((at, _)) = rendered.match_indices("\n[[package]]\n").nth(index) else {
+        lgwks_std::trace::debug!(
+            index,
+            "lock_duplicate_property: the rendered lock has too few blocks"
+        );
         return Err(TestCaseError::fail(format!(
             "the rendered lock has no block {index}:\n{rendered}"
         )));

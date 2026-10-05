@@ -63,12 +63,10 @@ where
         ..Config::default()
     });
     match mutant_runner.run(strategy, property) {
-        Err(TestError::Fail(reason, minimal)) => {
-            if reason.message().starts_with(SETUP_FAILED) {
-                return Err(format!("the mutant was never reached: {reason}").into());
-            }
-            Ok(minimal)
+        Err(TestError::Fail(reason, _)) if reason.message().starts_with(SETUP_FAILED) => {
+            Err(format!("the mutant was never reached: {reason}").into())
         }
+        Err(TestError::Fail(_, minimal)) => Ok(minimal),
         Err(TestError::Abort(reason)) => Err(format!("the mutant run aborted: {reason}").into()),
         Ok(()) => Err("the property did not catch its mutant".into()),
     }

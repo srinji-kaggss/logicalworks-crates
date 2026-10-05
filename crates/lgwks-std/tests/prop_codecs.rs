@@ -64,28 +64,30 @@ fn hex_decode(input: &[u8]) -> Result<Vec<u8>, hex::DecodeError> {
 /// What a strict hex decoder must answer, computed independently: an odd
 /// length is refused as a whole, otherwise the first non-digit is named.
 fn hex_oracle(input: &[u8]) -> Result<Vec<u8>, hex::DecodeError> {
-    if !input.len().is_multiple_of(2) {
-        return Err(hex::DecodeError::OddLength {
-            len: input.len(),
-            at: input.len(),
-        });
-    }
-    if let Some((at, &byte)) = input
+    let first_alien = input
         .iter()
         .enumerate()
-        .find(|&(_, byte)| !byte.is_ascii_hexdigit())
-    {
-        return Err(hex::DecodeError::NotHexDigit { at, byte });
+        .find(|&(_, byte)| !byte.is_ascii_hexdigit());
+    match (input.len().is_multiple_of(2), first_alien) {
+        (false, _) => Err(hex::DecodeError::OddLength {
+            len: input.len(),
+            at: input.len(),
+        }),
+        (true, Some((at, &byte))) => Err(hex::DecodeError::NotHexDigit { at, byte }),
+        (true, None) => {
+            let digits: Vec<u32> = input
+                .iter()
+                .filter_map(|&byte| char::from(byte).to_digit(16))
+                .collect();
+            let (pairs, _) = digits.as_chunks::<2>();
+            Ok(pairs
+                .iter()
+                .filter_map(|&[high, low]| {
+                    u8::try_from(high.saturating_mul(16).saturating_add(low)).ok()
+                })
+                .collect())
+        }
     }
-    let digits: Vec<u32> = input
-        .iter()
-        .filter_map(|&byte| char::from(byte).to_digit(16))
-        .collect();
-    let (pairs, _) = digits.as_chunks::<2>();
-    Ok(pairs
-        .iter()
-        .filter_map(|&[high, low]| u8::try_from(high.saturating_mul(16).saturating_add(low)).ok())
-        .collect())
 }
 
 /// Agrees with [`hex_oracle`] on every input, refusals included, and an
@@ -242,20 +244,35 @@ fn percent_oracle(input: &str) -> Result<String, percent::DecodeError> {
             out.push(byte);
             continue;
         }
-        let (Some((high_at, high)), Some((low_at, low))) = (bytes.next(), bytes.next()) else {
-            return Err(percent::DecodeError::TruncatedEscape { at });
-        };
-        let Some(high) = char::from(high).to_digit(16) else {
-            return Err(percent::DecodeError::NotHexDigit { at: high_at });
-        };
-        let Some(low) = char::from(low).to_digit(16) else {
-            return Err(percent::DecodeError::NotHexDigit { at: low_at });
-        };
-        out.extend(u8::try_from(high.saturating_mul(16).saturating_add(low)).ok());
+        let high = bytes.next();
+        let low = bytes.next();
+        out.push(percent_escape(at, high, low)?);
     }
     String::from_utf8(out).map_err(|error| percent::DecodeError::NotUtf8 {
         decoded_at: error.utf8_error().valid_up_to(),
     })
+}
+
+/// The byte one `%XY` escape at `at` stands for, from the two (offset, byte)
+/// pairs after the `%`, either of which may be missing.
+fn percent_escape(
+    at: usize,
+    high: Option<(usize, u8)>,
+    low: Option<(usize, u8)>,
+) -> Result<u8, percent::DecodeError> {
+    match (high, low) {
+        (Some((high_at, high)), Some((low_at, low))) => {
+            let high = char::from(high)
+                .to_digit(16)
+                .ok_or(percent::DecodeError::NotHexDigit { at: high_at })?;
+            let low = char::from(low)
+                .to_digit(16)
+                .ok_or(percent::DecodeError::NotHexDigit { at: low_at })?;
+            // Two hex digits are at most 0xff, so the conversion cannot fail.
+            Ok(u8::try_from(high.saturating_mul(16).saturating_add(low)).unwrap_or(u8::MAX))
+        }
+        _ => Err(percent::DecodeError::TruncatedEscape { at }),
+    }
 }
 
 /// Agrees with [`percent_oracle`] on every input, refusals included.
