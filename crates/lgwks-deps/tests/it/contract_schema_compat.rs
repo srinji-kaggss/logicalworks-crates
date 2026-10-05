@@ -75,3 +75,47 @@ fn the_committed_register_is_schema_two() -> TestResult {
     );
     Ok(())
 }
+
+/// Each repository-policy list is refused whole on a member it cannot read.
+#[test]
+fn a_policy_list_is_refused_whole_on_a_bad_member() {
+    for (key, value) in [
+        ("accepted_licenses", "MIT, , Apache-2.0"),
+        ("accepted_licenses", "MIT, MIT"),
+        ("accepted_licenses", "MIT OR Apache-2.0"),
+        ("surfaces", "lgwks_std, lgwks std"),
+        ("frozen_tier", "eliminate"),
+    ] {
+        let text =
+            format!("[policy]\nenforce = true\nfrozen_surfaces = \"x\"\n{key} = \"{value}\"\n");
+        let text = if key == "frozen_tier" {
+            text
+        } else {
+            text.replace("frozen_surfaces = \"x\"\n", "")
+        };
+        assert!(
+            Contract::parse(&text).is_err(),
+            "{key} = {value:?} must be refused"
+        );
+    }
+}
+
+/// `frozen_surfaces` and `frozen_tier` are one rule, written together, and a
+/// frozen surface must be one the register's own surface set names.
+#[test]
+fn a_half_written_freeze_is_refused() {
+    for text in [
+        "[policy]\nfrozen_surfaces = \"lgwks_ast\"\n",
+        "[policy]\nfrozen_tier = \"boundary\"\n",
+        "[policy]\nsurfaces = \"lgwks_std\"\nfrozen_surfaces = \"lgwks_ast\"\nfrozen_tier = \"boundary\"\n",
+    ] {
+        assert!(Contract::parse(text).is_err(), "{text:?} must be refused");
+    }
+    assert!(
+        Contract::parse(
+            "[policy]\nsurfaces = \"lgwks_std, lgwks_ast\"\nfrozen_surfaces = \"lgwks_ast\"\nfrozen_tier = \"boundary\"\naccepted_licenses = \"MIT, Apache-2.0 WITH LLVM-exception\"\n"
+        )
+        .is_ok(),
+        "a complete policy block parses"
+    );
+}

@@ -1068,6 +1068,16 @@ impl Register {
     pub fn parse(text: &str) -> Result<Self, ErrorKind> {
         let raw = contract::parse_register(text, "[[invariant]]", &ENTRY_FIELDS)
             .map_err(map_contract_error)?;
+        // The repository-policy keys are the dependency register's; the shared
+        // line reader collects them, and this register has no meaning for them.
+        if let Some(field) = raw.policy_fields.first() {
+            let refusal = Err(ErrorKind::UnknownKey {
+                line: field.line,
+                key: field.key.to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse: returning an error to the caller");
+            return refusal;
+        }
         let mut entries = Vec::with_capacity(raw.entries.len());
         for raw_entry in &raw.entries {
             entries.push(build(raw_entry)?);
@@ -1324,6 +1334,12 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
         error @ (contract::ContractError::UnsupportedSchema { line, .. }
         | contract::ContractError::AliasCollision { line, .. }) => ErrorKind::Malformed {
             line,
+            text: error.to_string(),
+        },
+        // Only `Contract::parse` decodes the repository-policy keys, and this
+        // register refuses them before that point; mapped for the same reason.
+        error @ contract::ContractError::IncompletePolicy { .. } => ErrorKind::Malformed {
+            line: 0,
             text: error.to_string(),
         },
     }

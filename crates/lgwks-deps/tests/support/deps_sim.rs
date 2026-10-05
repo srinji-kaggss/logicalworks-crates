@@ -63,7 +63,7 @@ pub fn edge(
 pub fn register(package: &str, source: &str, extra: &str) -> Result<Contract, Box<dyn Error>> {
     let text = format!(
         concat!(
-            "[policy]\nschema = 2\nenforce = true\n\n",
+            "[policy]\nschema = 2\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n",
             "[[approved]]\n",
             "crate = \"{package}\"\ntier = \"boundary\"\nversion = \"1.0\"\nowner = \"app\"\n",
             "capability = \"engine.core\"\nlicense = \"MIT OR Apache-2.0\"\nsource = \"{source}\"\n{extra}",

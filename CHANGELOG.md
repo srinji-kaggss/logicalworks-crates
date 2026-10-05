@@ -9,6 +9,36 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_deps — the gate compiles in no repository's policy (breaking; 2.0.0)
+
+`lgwks_deps` is published and audits other repositories, but it compiled in
+this repository's licence set (`ACCEPTED_LICENSES`), its five surface names and
+URL (`SURFACES`, `SURFACE_REPOSITORY`), its frozen surface and tier
+(`FROZEN_SURFACES`, `FROZEN_TIER`), and a maintainer's e-mail address in the
+crates.io `User-Agent`. No consumer could change any of them, so the estate's
+own MPL-2.0 `lgwks_bot` was refused in every repository that ran the gate.
+All of it now comes from the register's `[policy]` (INV-DEP-16).
+
+- **Removed** `lgwks_deps::accepted_licenses()`: the accepted set is a register
+  decision, read back with `Contract::accepted_licenses()`.
+- **Added** `[policy]` keys `accepted_licenses`, `surfaces`, `frozen_surfaces`
+  and `frozen_tier`, each a comma-separated string refused whole on an empty,
+  repeated or malformed member; `Refusal::LicensePolicyUndeclared`;
+  `ContractError::IncompletePolicy` (a freeze written without its tier, or the
+  reverse); the `check --json` receipt's `contract.accepted_licenses`.
+- **Changed**: a register that approves an observed edge and declares no
+  `accepted_licenses` is refused once, naming the line to add, rather than
+  judged by a set compiled into the gate. A register that declares no
+  `surfaces` or freeze binds none, which is what every repository other than
+  this one already got.
+- **Fixed**: the `freshness` crates.io lookup's `User-Agent` is the tool's name,
+  its real version and its repository, read from the manifest (it said `0.1`
+  and carried a personal address).
+- **Migration**: add one line to `[policy]`, e.g.
+  `accepted_licenses = "MIT, Apache-2.0, MPL-2.0"`. This repository's register
+  declares exactly the set the gate used to compile in, plus its surfaces and
+  `lgwks_ast`'s freeze, so its own verdict is unchanged.
+
 ### Acceptance evidence is now executable (#271)
 
 Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
