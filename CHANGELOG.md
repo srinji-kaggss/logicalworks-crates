@@ -25,8 +25,13 @@ is absent, failing, or a row claims more than the run shows. The one promotion,
 spec's per-row table is rendered from the database for one exact revision between
 `<!-- acceptance-table: start -->` markers, `--check` fails when the committed
 table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
-`--test` runs the generator's own seven regression cases. No new dependency: the
-database is Python's standard-library `sqlite3`.
+`--test` runs the generator's own fifteen regression cases. No new dependency:
+the database is Python's standard-library `sqlite3`.
+
+CI builds the receipt from what the suite already ran. The `ci` nextest profile
+writes a JUnit report per shard, and a job with no Rust toolchain merges the four
+with `--from-junit` in about 0.2 s, rather than executing the 215 named tests a
+second time.
 
 Every row now also answers to its own id in a test name: 15 new row-addressed
 tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
