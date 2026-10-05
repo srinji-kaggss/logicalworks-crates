@@ -360,6 +360,20 @@ pub mod session;
 /// `Auth::check` where it was, and reaches `syn` only on the host through the
 /// `lgwks_deps` storefront.
 pub mod spec;
+/// The stable-read protocol: what an `Observe` adapter must establish before a
+/// reading is allowed to count as a change.
+///
+/// A subject being written while it is read is not a different subject, and the
+/// value a reader gets out of that is one nobody on the system ever held. This
+/// module is the discipline commercial automation applies to it with: two
+/// independent reads must agree, and a reading that cannot be confirmed is
+/// reported as [`BotError::UnstableObservation`](error::BotError::UnstableObservation)
+/// — pending, never a change.
+///
+/// Wired rather than offered: [`domain::data::JsonStore`] reads through
+/// [`stability::read_stable_file`], so every poll of a JSON-backed store is
+/// confirmed before it is reported.
+pub mod stability;
 /// The task front door: a [`Host`](task::Host) runs a
 /// [`Task`](task::Task) and returns a [`Report`](task::Report) (feature
 /// `script`).

@@ -9,6 +9,48 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — row 1 of #278: a torn read is pending, never a change
+
+The first of the seven runtime-level mess rows in `docs/production-readiness.md`
+§4.4. Additive: no signature changed and no existing behaviour did.
+
+- `stability` (new module) owns the stable-read protocol an `Observe` adapter
+  needs. `read_stable` requires two *independent* readings of a subject to
+  agree on its reported length, its modification time and the BLAKE3 digest of
+  its bytes before either is handed back; the bound is
+  `stability::MAX_STABILITY_READS` (8) reads, and a subject that never settles
+  is `ReadFailure::Unstable` naming the axis that kept moving and both digests
+  it saw. `read_stable_file` is the same protocol over a real file, on the
+  blocking pool so a parked filesystem cannot stall a tick.
+- `stability::Drift` has four named axes rather than one boolean: `Length`,
+  `Modified`, `Contents` (an in-place rewrite of the same length within one
+  filesystem timestamp granularity — the case a size-and-mtime check admits),
+  and `Truncated` (a read cut short by the writer, which is a property of one
+  reading and is checked before any comparison).
+- `BotError::UnstableObservation { domain, unstable }` is the typed outcome.
+  It is `NotDelivered`, so `dispatch_certainty` and `retry_class` read it as a
+  plain retry: nothing was read, nothing was committed, and the chain keeps the
+  value it already holds. It is not a `DomainError` because nothing is wrong
+  with the domain — a source that keeps reporting it is telling you about a
+  writer that never settles.
+- Wired on the shipped path: `domain::data::JsonStore` reads through
+  `stability::read_stable_file` on every `Observe` and `Query`, so a bot
+  polling a JSON-backed store no longer commits a half-written document. **Not
+  claimed:** that a settled reading is valid JSON, or that a writer which
+  rewrites in place and pauses is caught — the stronger guarantee belongs to
+  the writer's `rename`-into-place discipline, and the module says so.
+- Evidence: `tests/it/stability.rs` drives a real file against a real
+  child-process writer (a tight append loop and a rename-into-place writer),
+  asserts that a moving store is never reported unreadable, that the refusal
+  names its reads and its axis, that an absent store is unreadable rather than
+  unsettled, and that the store recovers once the writer is gone.
+  `tests/it/sim_stability.rs` sweeps 1,024 seeds over a modelled writer: no
+  torn reading is ever admitted, a writer that never pauses is refused at the
+  declared bound for every seed, a renamed subject settles whole every seed,
+  and the same seed replays to the same trace hash with adjacent seeds
+  diverging. `docs/production-readiness.md` §4.4 moves the
+  "a file was half-written when read" row on those tests.
+
 ### lgwks_std tests — `fs::capability` is swept with hostile seeds
 
 `fs::capability` had 28 unit tests and no seeded sweep. It is the sandbox

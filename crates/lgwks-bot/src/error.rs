@@ -218,6 +218,32 @@ pub enum BotError {
         /// The budget the poll was given, as the bot declared it.
         deadline: Duration,
     },
+    /// A source's subject was still moving when it was read, so no reading of
+    /// it could be confirmed.
+    ///
+    /// The torn read, as a typed outcome rather than as a value. A source that
+    /// read a document while another writer was half-way through it has seen
+    /// bytes no one ever held as a whole; reporting that as the current state
+    /// makes the substrate commit a value and fire a chain against a document
+    /// that does not exist. So the reading is refused and the observation is
+    /// **pending**: the chain keeps the value it already holds and reads again
+    /// on the next tick, which is the same discipline a failed poll follows and
+    /// for the same reason — the value that was to be replaced is still there.
+    ///
+    /// Its own variant rather than a [`DomainError`](Self::DomainError) because
+    /// the repair differs: nothing is wrong with the domain and no amount of
+    /// retrying *this* call helps beyond the bound the read protocol already
+    /// applied. A caller triaging a source that keeps reporting this is looking
+    /// at a writer that never settles, which is a fact about the other side.
+    ///
+    /// `NotDelivered`, so a consumer's retry classifier reads it as safe: no
+    /// effect was attempted and nothing was committed.
+    UnstableObservation {
+        /// The source that could not confirm a reading.
+        domain: String,
+        /// How many reads were taken, and which axis kept moving.
+        unstable: crate::stability::Unstable,
+    },
     /// The declared per-poll deadline was refused, because it would bound
     /// nothing.
     ///
@@ -874,6 +900,10 @@ impl BotError {
             // into the `Refused` arm above would make a caller classify a source
             // that recovers on the next tick as one whose wiring will never work.
             Self::PollStalled { .. } => DispatchCertainty::NotDelivered,
+            // An unsettled reading is the same fact as a cancelled poll: the
+            // value that was to be replaced is still the one the substrate
+            // holds, so nothing was committed and a later tick is a plain retry.
+            Self::UnstableObservation { .. } => DispatchCertainty::NotDelivered,
             _ => DispatchCertainty::Refused,
         }
     }
@@ -1364,6 +1394,16 @@ impl fmt::Display for BotError {
                 "source poll for chain {chain} was cancelled at its declared {deadline:?} \
                  per-poll deadline: nothing was read, nothing committed, and the other chains \
                  of this tick were not stopped"
+            ),
+            Self::UnstableObservation {
+                ref domain,
+                unstable,
+            } => write!(
+                f,
+                "source {} read a subject that did not settle ({}); no reading was committed and \
+                 the observation is pending the next tick",
+                Escaped(domain),
+                unstable
             ),
             Self::PollDeadlineUnbounded { deadline } => write!(
                 f,

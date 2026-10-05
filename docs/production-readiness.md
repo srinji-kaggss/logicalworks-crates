@@ -397,7 +397,7 @@ The state of that, honestly:
 | A contradictory outcome overwriting a settled one | ✅ tested | `durable_dispatch`, refused |
 | **The element is gone, not moved** | ⚠️ studied, not coded | [`frontier.md`](frontier.md): false-heal 40.5–57.1% on removed elements; decoy and drift score ranges **overlap**, so no threshold separates them |
 | An OS dialog stole focus mid-flow | ❌ | no coverage |
-| A file was half-written when read | ❌ | no coverage |
+| A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
 | Clock skew between two hosts | ❌ | no coverage |
 | A credential expired mid-run | ❌ | no coverage |
 | The locale changed a date or number format | ❌ | no coverage |
