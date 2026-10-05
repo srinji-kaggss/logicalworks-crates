@@ -240,21 +240,29 @@ The retained `JoinSet` never exceeds `limit` entries. Only the output vector
 grows with input length, so fanning out over thousands of inputs needs no manual
 chunking.
 
-## `spawn_blocking`: one thread per call
+## `spawn_blocking`: a bounded pool
 
-`lgwks_std::task::spawn_blocking` runs a closure on a dedicated OS thread and
-returns a future for its result. Its documented bound
-(`crates/lgwks-std/src/task.rs:265`) is one OS thread per call while the closure
-runs, with no pooled thread between calls. The doc says the quiet part out loud:
-"callers that need a ceiling on simultaneous threads (for example
-`lgwks_bot::Bot::tick`) bound their own fan-out."
+`lgwks_std::task::spawn_blocking` runs a closure on a process-wide blocking
+pool and returns a future for its result
+(`crates/lgwks-std/src/task.rs:354`). At most 512 pool threads run at once;
+a job submitted while all of them are busy waits its turn, and a thread with
+no work for ten seconds exits, so an idle process holds none. Jobs that wait
+on each other must number fewer than the ceiling, or the waiters hold every
+thread the awaited job needs.
 
-The tick does exactly that, on both adapters, because the wave loop lives in the
-`observe_fold` system rather than in either entry point. `MAX_IN_FLIGHT_POLLS`
-is 32 (`crates/lgwks-bot/src/ecs.rs:1805`), and `observe_fold` polls sources in
-waves of that size, because a source poll may occupy one `spawn_blocking` thread.
-Chains beyond 32 are polled in additional waves, so the cap holds regardless of
-how many chains a spec declares.
+`spawn_blocking` keeps its 1.0 contract: its wait queue is not bounded and it
+never refuses. `try_spawn_blocking` is the bounded form. When 16,384 jobs are
+already waiting it refuses with `SpawnError::AtCapacity`, and when no thread
+can be started it refuses with `SpawnError::Os`; either way the job never ran.
+`lgwks_bot`'s `net::Endpoint` poll uses the bounded form and reports a refusal
+as a `Refused` domain error, because nothing was sent.
+
+The tick still bounds its own fan-out on both adapters, because the wave loop
+lives in the `observe_fold` system rather than in either entry point.
+`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1805`), and
+`observe_fold` polls sources in waves of that size. Chains beyond 32 are polled
+in additional waves, so the cap holds regardless of how many chains a spec
+declares.
 
 ## The limits
 
@@ -272,9 +280,9 @@ implementation races each iteration with `token.run_until_cancelled(body(...))`
 (`crates/lgwks-bot/src/rt/supervise.rs:2859`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
-spawns an OS thread and offers no abort, and its documented bound is a thread per
-call, not a deadline. If your body blocks a thread, treat the supervisor's cancel
-as a request, not as an interruption.
+hands the closure to a pool thread and offers no abort, and its bound is a
+thread ceiling, not a deadline. If your body blocks a thread, treat the
+supervisor's cancel as a request, not as an interruption.
 
 **`spawn` can deadlock with itself.** The module documents this one
 (`crates/lgwks-bot/src/rt/supervise.rs:92`): `spawn` awaits a permit, so a caller

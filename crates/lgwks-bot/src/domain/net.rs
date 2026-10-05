@@ -114,8 +114,19 @@ impl verb::Observe for Endpoint {
             .deadline(Duration::from_secs(POLL_TIMEOUT_SECS))
             .max_body_bytes(BODY_PREVIEW_BYTES)
             .body_policy(BodyPolicy::Preview);
-        let exchange =
-            lgwks_std::task::spawn_blocking(move || http::get_with(&url, &options)).await;
+        // The bounded form: a burst of concurrent polls waits for, or is
+        // refused by, the shared blocking pool rather than starting one OS
+        // thread per poll. A refusal sent nothing, so it is `Refused`.
+        let request = lgwks_std::task::try_spawn_blocking(move || http::get_with(&url, &options))
+            .map_err(|error| {
+            lgwks_std::trace::debug!(%error, "poll: the blocking pool refused the request");
+            BotError::DomainError {
+                domain: self.domain_id().into(),
+                certainty: DispatchCertainty::Refused,
+                cause: format!("no thread was available for the request: {error}"),
+            }
+        })?;
+        let exchange = request.await;
         match exchange {
             Ok(response) => Ok(NetState {
                 status_code: response.status,
