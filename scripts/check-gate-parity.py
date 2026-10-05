@@ -318,17 +318,17 @@ def check_parity(manifest_text: str, workflow_text: str) -> list[str]:
 
     expected_rust = str(table.get("toolchain", {}).get("rust", ""))
     if expected_rust:
-        for job in jobs:
-            if f"toolchain: \"{expected_rust}\"" in workflow_text or f"toolchain: '{expected_rust}'" in workflow_text:
-                break
-        else:
-            pins = re.findall(r"toolchain:\s*[\"']([^\"']+)[\"']", workflow_text)
-            if not pins:
-                problems.append("ci.yml installs no pinned toolchain")
-            elif any(pin != expected_rust for pin in pins):
-                problems.append(
-                    f"toolchain.rust is {expected_rust!r} but ci.yml pins {sorted(set(pins))}"
-                )
+        # Every pin, not any pin: one job left on an older toolchain builds a
+        # different compiler's output while the manifest names another, and
+        # that job's green says nothing about the declared build.
+        pins = re.findall(r"toolchain:\s*[\"']([^\"']+)[\"']", workflow_text)
+        if not pins:
+            problems.append("ci.yml installs no pinned toolchain")
+        drifted = sorted({pin for pin in pins if pin != expected_rust})
+        if drifted:
+            problems.append(
+                f"toolchain.rust is {expected_rust!r} but ci.yml also pins {drifted}"
+            )
     return problems
 
 
@@ -416,6 +416,17 @@ class ParityRegression(unittest.TestCase):
         problems = check_parity(mutated, self.workflow)
         self.assertTrue(problems, "a toolchain drift must break parity")
         self.assertTrue(any("toolchain" in p for p in problems), problems)
+
+    def test_one_drifted_job_pin_fails(self):
+        """One job on another toolchain is drift even when the rest agree."""
+        pinned = re.search(r'rust = "([^"]+)"', self.manifest).group(1)
+        mutated = self.workflow.replace(
+            f'toolchain: "{pinned}"', 'toolchain: "0.0.0-drifted"', 1
+        )
+        self.assertNotEqual(mutated, self.workflow, "the mutation must change the workflow")
+        self.assertIn(f'toolchain: "{pinned}"', mutated, "the other jobs still agree")
+        problems = check_parity(self.manifest, mutated)
+        self.assertTrue(any("0.0.0-drifted" in p for p in problems), problems)
 
     def test_unclaimed_gate_step_fails(self):
         mutated = self.workflow.replace(
