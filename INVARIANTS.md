@@ -1176,7 +1176,14 @@ Each of these was a shipped defect. Treat the list as the spec.
 - **INV-AST-1** Checked AST inspection charges nodes before descending and
   retains pending traversal state proportional to active depth, not sibling
   fan-out; the byte and node ceilings remain separate from parser allocation.
-  · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
+  A checked parse also bounds *depth* (`MAX_AST_DEPTH`), because a source of
+  `(((…` is a few bytes per level and produces one node per level, which the
+  byte and node ceilings admit in the hundreds of thousands of levels.
+  · why: #143 R17, #277 · enforced by:
+  `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
+  `lgwks_ast::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
+  `lgwks_ast::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
+  `lgwks_ast::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
 - **INV-AST-2** Content detection parses each distinct compiled candidate once;
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
@@ -1197,6 +1204,77 @@ Each of these was a shipped defect. Treat the list as the spec.
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
   `a_syntax_refusal_points_at_the_earliest_recovery_node`)
+- **INV-AST-3** The tree walk is linear in tree size, and it gets there by not
+  addressing a node's children by index. `inspect_ast` and
+  `diagnostic::diagnostics` drive a tree-sitter cursor; the only state either
+  retains is the cursor's own ancestor stack, so time is `O(nodes)` and resident
+  state is `O(depth)`. A walk that reached child *i* through
+  `ast_grep_core::Node::child(i)` is `O(i)` on a node whose visible children are
+  not its structural children, which is what a recovery-heavy parse produces,
+  and it was measured at 85 microseconds per node — 1.39 s of walk for a 16 KiB
+  source against 1.06 ms of parse, quadrupling on every doubling of the width,
+  inside `try_parse`. The cursor walk spends 40 ns per node on the same source at
+  every width from 2 KiB to 2 MiB. The cursor is reached through the node the
+  walk was handed, so no `tree-sitter` edge is authored and no `tree-sitter`
+  type is named. Two properties move with it and are stated rather than left
+  implicit: nodes arrive in **source order**, not reverse-sibling order, so the
+  `limit + 1` witness is the earliest node rather than the last; and a
+  depth-capped walk holds the ceiling **plus** the one witness it must visit to
+  be able to say the tree is too deep. Every published guarantee survives both:
+  `AstMetrics` folds order-independently, the retained diagnostics are the
+  earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before they are
+  returned, and `diagnostics` sorts its own output. · why: #277 · enforced by:
+  `lgwks_ast::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
+  (the replaced walk is kept as a test-only model and the replacement must visit
+  the same nodes at the same depths with the same recovery state on five tree
+  shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
+  `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
+  `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
+- **INV-AST-4** Hostile input earns a typed refusal, and the input that could
+  not is refused *before* the grammar sees it. Four generators per compiled
+  grammar — a full-ceiling tiling of the grammar's own source, one line of
+  megabytes, a nesting run past the depth ceiling with and without its closers —
+  answer with a tree inside the crate's bounds or with a `ParseError` that names
+  itself. The **markdown** grammar needed one more, because
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`: `"- "` repeated 255 times — 510
+  bytes — ended the process with `SIGABRT` rather than returning anything a
+  caller could handle. The crate cannot patch the scanner (the grammar arrives
+  compiled through `ast-grep-language`; forking it is forbidden by #277 and a
+  `tree-sitter` edge needs the Director's word), so it refuses the source first:
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and
+  `ParseError::ContainerNestingTooDeep`, applied by `markdown_containers` in one
+  `O(bytes)` pass with `O(1)` state on the markdown path only. **What the bound
+  is measured against:** seventeen container shapes bisected from a child
+  process — unordered and ordered list markers, blockquotes of one, two and
+  three `>`, tabs, list-in-quote, quote-in-list, list-in-quote-in-list, fenced
+  and indented code inside containers, and containers nested by indentation —
+  and *every* shape that aborts does so at **255 open containers**, whether it
+  spells them one per repetition (255 of `- `), two (128 of `> - `) or three
+  (85 of `>>> `). Three shapes never abort, because markdown does not nest a
+  blockquote, an ordered list or a tab run by indentation. The count is an
+  over-estimate wherever indentation and markers both carry depth, so a count of
+  64 cannot be 255 open containers: the margin is about 4x and it is on the safe
+  side. Known limit, stated rather than hidden: the guard runs on the **checked**
+  parse only. `parse` and `parse_with` return a `Parsed` rather than a
+  `Result`, so a refusal has nowhere to go in them, and their documentation says
+  so. · why: #277 · enforced by:
+  `tests/it/hostile.rs` (`markdown_never_reaches_the_scanner_past_its_bound`
+  proves from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes of
+  container prefixes, 1 065 children and zero aborts — plus
+  `every_adversarial_shape_answers_typed`,
+  `the_byte_ceiling_is_refused_before_any_tree_exists`,
+  `every_refusal_renders_as_a_located_diagnostic`,
+  `the_unchecked_parse_of_the_same_shapes_still_answers`,
+  `multibyte_and_truncated_sources_are_answered`) and
+  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `the_container_count_does_not_charge_prose_or_a_thematic_break`,
+  `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
+  `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
+  nextest `slow-timeout` with `terminate-after`, so a walk that stops making
+  progress fails the run instead of holding it open
 
 ## Docs
 
