@@ -9,6 +9,54 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
+
+The two items #286 and #289 left open on the bounded blocking pool. Both are
+additive: no signature changed and no existing behaviour did.
+
+- `task::configure_blocking_pool(threads)` fixes the pool's thread ceiling
+  once, before the pool first runs a job. The pool's own creation is the
+  arbitration — a configure and a first use race to build it, so neither can
+  miss the other's write — and a ceiling is therefore never silently ignored.
+  A later attempt is refused with the new `PoolConfigError`: `InUse` once the
+  pool has run work, `AlreadyConfigured` naming the ceiling in force,
+  `InvalidCeiling` for a ceiling below one. Asking again for the ceiling
+  already in force succeeds: the pool is at it.
+- `task::shutdown_blocking_pool(within)` closes admission, lets the queued
+  and running jobs finish, and joins every pool thread inside the deadline.
+  A thread with no job leaves instead of parking, and a parked thread is woken
+  to take a waiting job or leave, so the pool empties by finishing its work
+  rather than by cancelling it. The new `PoolShutdown` reports what the wait
+  found: `Drained { threads }` means every thread was joined and none outlives
+  the call; `DeadlineExceeded { joined, running, queued }` names the threads
+  still executing and the jobs still waiting, and their handles stay
+  registered so a later shutdown joins them.
+- `task::SpawnError::Shutdown` is the refusal both entry points give after a
+  shutdown. `try_spawn_blocking` returns it; `spawn_blocking`, whose 1.0
+  contract is that it never refuses, fails its awaiter with it as the
+  payload, as it already did for an `Os` refusal. The closure never runs.
+- A thread is no longer detached. Each start registers its handle under the
+  same lock that counted the thread, so a shutdown can never observe a thread
+  it cannot join.
+- **A start now joins the threads that have already returned**, so a process
+  whose load is bursty — a burst, an idle period, a burst — no longer keeps
+  one handle per exited thread for ever. What the handle list holds is exactly
+  `live + (threads that have left the accounting and not yet returned)`: every
+  entry beyond `live` is a real thread still executing its last instructions,
+  and that second group has no constant bound, because a departure frees its
+  slot immediately. What is bounded is the accumulation: every thread that
+  *has* returned is joined at the next start or at a shutdown.
+- The pool is an `Arc`, so a thread owns its own reference and a caller can own
+  and drop a pool; the tests' last `Box::leak` is gone.
+- Two seeded simulation families cover the new paths: `sim_pool` drives the
+  accounting through configure attempts that move nothing and a shutdown
+  closing admission mid-schedule (2,000 seeds × 2,000 steps), and
+  `sim_pool_lifetime` drives real OS threads through burst drains, an expired
+  deadline, a parked thread, a refused ceiling, and burst/idle cycles that
+  would grow the handle list if nothing reaped it. A process-owning test
+  binary exercises the two public functions against the real process-wide
+  pool, because a shutdown closes admission for the life of its process.
+
 ### lgwks_std — `random` reaches every target its backend does, and says why it failed (#276)
 
 - `random` no longer refuses to compile on every target but Linux, macOS and

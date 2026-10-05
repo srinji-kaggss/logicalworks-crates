@@ -1126,6 +1126,51 @@ Each of these was a shipped defect. Treat the list as the spec.
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
 
+- **INV-TASK-POOL-1** The blocking pool's ceiling is decided once and its
+  threads all have an owner. `configure_blocking_pool` fixes the ceiling
+  before the pool first runs, arbitrated by the pool's own creation, so a
+  configure and a first use race to build it and neither can miss the other's
+  write; every later attempt is refused typed (`InUse`, `AlreadyConfigured`,
+  `InvalidCeiling`) rather than silently ignored, and asking again for the
+  ceiling in force succeeds because the pool is at it. `shutdown_blocking_pool`
+  closes admission first, so a submit racing it is either admitted before the
+  flag or refused as `SpawnError::Shutdown` and there is no third outcome;
+  queued and running jobs are never cancelled — a thread with no job leaves
+  instead of parking, and a parked thread is woken to take a waiting job or
+  leave — and every thread's join handle is registered under the same lock that
+  counted the thread, so `PoolShutdown::Drained` means no thread outlives the
+  call and `DeadlineExceeded` reports, by count, the threads still executing
+  and the jobs still waiting, with those handles left for a later shutdown to
+  join. The handle list holds exactly `live + (threads that have left the
+  accounting and not yet returned)`; the second group has **no constant
+  bound**, because a departure frees its slot while the thread keeps running
+  its last instructions, and what bounds accumulation is that every thread
+  that has returned is joined at the next start or at a shutdown — without
+  that reap a bursty process keeps one handle per exited thread for ever.
+  A dropped `JoinHandle` still does not stop its thread, and cooperative
+  polling is not preemption: a closure that never returns is only detectable
+  from outside the process. · why: #264 (assurance gap X2, and the ceiling
+  and ownership items #286 and #289 left open) · enforced by:
+  `tests/sim_task_pool_public.rs`
+  (`the_public_pool_journey_configures_drains_joins_and_then_refuses`),
+  `task::tests` (`a_configure_after_the_pool_has_run_is_refused_with_the_running_ceiling`,
+  `a_second_configure_is_refused_named_or_is_the_ceiling_already_in_force`,
+  `a_ceiling_below_one_is_refused_before_the_pool_is_touched`,
+  `after_a_shutdown_admission_is_refused_and_the_job_never_runs`,
+  `a_thread_that_cannot_start_refuses_the_job_and_it_never_runs`,
+  `spawn_blocking_reports_a_refusal_to_its_awaiter_as_the_job_failing`,
+  `a_failed_start_beside_a_live_thread_leaves_the_job_to_that_thread`,
+  `no_more_than_the_ceiling_run_at_once_and_every_job_completes`,
+  `past_the_queue_bound_a_job_is_refused_with_a_typed_reason`,
+  `a_panicking_job_does_not_cost_the_pool_its_thread`), `sim_task_pool.rs`
+  (`sim_every_admitted_job_runs_once_under_every_interleaving`,
+  `sim_a_seed_replays_its_trace_and_distinct_seeds_diverge`), and
+  `sim_pool_lifetime.rs` (`sim_every_scenario_drains_joins_and_never_loses_a_job`,
+  `sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_takes_one`,
+  `sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles`,
+  `sim_a_seed_replays_its_pool_lifetime_trace`,
+  `sim_distinct_seeds_diverge_in_their_pool_lifetime_trace`).
+
 ## lgwks_ast
 
 - **INV-AST-1** Checked AST inspection charges nodes before descending and
