@@ -2478,11 +2478,22 @@ impl Supervisor {
                         Some(Ok(permit)) if !self.token.is_cancelled() => {
                             return Ok(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
                         }
-                        // Timed out without a permit, or the supervisor was
-                        // cancelled with one in hand. The waiter drops here and
-                        // records its abandonment, so the round stops holding it;
-                        // the next turn re-reads the token and asks again.
-                        Some(_) => {}
+                        // A permit that landed is already charged to this
+                        // tenant by the round, so it is handed back *through*
+                        // the round: a bare permit would return to the pool and
+                        // leave the tenant holding an in-flight admission that
+                        // nobody has, which is capacity the tenant can never
+                        // spend again. The lease's drop is the release hook the
+                        // completed-task path uses, so the accounting is one
+                        // path rather than two.
+                        Some(Ok(permit)) => {
+                            drop(Lease::tenanted(permit, Arc::clone(shell), tenant.clone()));
+                        }
+                        // The interval elapsed with no permit. The waiter drops
+                        // here and records its abandonment, so the round stops
+                        // holding it; the next turn re-reads the token and asks
+                        // again.
+                        Some(Err(_)) => {}
                     }
                 }
             }
@@ -3971,6 +3982,8 @@ mod tests {
     use super::CleanupOwners;
     #[cfg(all(not(unix), feature = "process"))]
     use super::ProcessSpec;
+    #[cfg(feature = "script")]
+    use super::SpawnRefused;
     #[cfg(all(unix, feature = "process"))]
     use super::SupervisorCancelled;
     use super::{
@@ -5537,6 +5550,104 @@ mod tests {
             "short",
             "a message within the cap is carried unchanged"
         );
+    }
+
+    /// A grant that lands in the same instant as a cancellation is handed back
+    /// through the round, so the tenant it was charged to is not left holding an
+    /// admission it does not have.
+    ///
+    /// The ordering this test creates is the whole point and it is created, not
+    /// raced. On a current-thread runtime the task that ends is queued by
+    /// `notify_waiters` **before** the parked admission is queued by `cancel`,
+    /// because the helper body performs both in one poll with no await between
+    /// them. The permit therefore reaches the parked waiter's slot *after* the
+    /// token is cancelled, and the wait is woken with a permit in hand: the one
+    /// state in which a bare permit would leak the tenant's in-flight charge.
+    #[cfg(feature = "script")]
+    #[test]
+    fn a_cancelled_admission_hands_its_granted_permit_back_to_the_round()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rt::sync::Notify;
+        use crate::rt::tenancy::TenancyPolicy;
+        use crate::script::Tenant;
+
+        block_on(async {
+            // Two permits and a ceiling of one per tenant: the occupier holds
+            // one, the helper takes the other, and the pool still has to be able
+            // to hand the occupier's permit to the waiter below.
+            let mut supervisor = Supervisor::with_tenancy(2, TenancyPolicy::new(1, 8));
+            let shell = Arc::clone(
+                supervisor
+                    .tenancy
+                    .as_ref()
+                    .ok_or("a policy must install a tenancy shell")?,
+            );
+            let tenant = Tenant::new("held")?;
+            let helper = Tenant::new("helper")?;
+            let gate = Arc::new(Notify::new());
+            let parked = Arc::new(AtomicUsize::new(0));
+            let root = supervisor.token.clone();
+
+            // The occupier: `tenant` takes its one admission and parks.
+            supervisor
+                .spawn_for(&tenant, {
+                    let gate = Arc::clone(&gate);
+                    let parked = Arc::clone(&parked);
+                    move |_token| async move {
+                        parked.fetch_add(1, Ordering::SeqCst);
+                        gate.notified().await;
+                    }
+                })
+                .await
+                .map_err(|refusal| format!("the occupier was refused: {refusal}"))?;
+            assert!(
+                yield_until(|| parked.load(Ordering::SeqCst) >= 1, 1_000).await,
+                "the occupier never parked, so the premise of this test did not hold"
+            );
+
+            // The helper: waits until the claim below has actually parked in the
+            // round, then ends the occupier and cancels, with no await between
+            // the two so the ordering above is the one the executor follows.
+            let helper_gate = Arc::clone(&gate);
+            let helper_shell = Arc::clone(&shell);
+            let helper_tenant = tenant.clone();
+            let helper_root = root.clone();
+            supervisor
+                .spawn_for(&helper, move |_token| async move {
+                    while helper_shell.counts_of(&helper_tenant).1 == 0 {
+                        yield_now().await;
+                    }
+                    helper_gate.notify_waiters();
+                    helper_root.cancel();
+                })
+                .await
+                .map_err(|refusal| format!("the helper was refused: {refusal}"))?;
+
+            let outcome = supervisor.claim_tenanted(&shell, &tenant).await;
+            assert_eq!(
+                outcome.err(),
+                Some(SpawnRefused::Cancelled),
+                "a supervisor cancelled while a grant was in flight refuses the admission"
+            );
+            assert!(
+                settle(&mut supervisor).await,
+                "the occupier and the helper must both finish"
+            );
+            let (in_flight, queued) = shell.counts_of(&tenant);
+            assert_eq!(
+                (in_flight, queued),
+                (0, 0),
+                "the permit the round had already charged to {tenant} must come back \
+                 through the round; a bare permit returns to the pool and leaves the \
+                 tenant charged for an admission it does not hold ({in_flight} in flight)"
+            );
+            assert_eq!(
+                supervisor.permits.available_permits(),
+                2,
+                "both permits are back in the pool, so nothing leaked"
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
     }
 }
 
