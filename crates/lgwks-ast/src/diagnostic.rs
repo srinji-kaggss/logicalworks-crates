@@ -709,9 +709,9 @@ mod tests {
 
     #[test]
     fn the_walk_retains_depth_and_not_the_sibling_frontier() {
-        // The same resource invariant INV-AST-1 states for `inspect_ast`, held
-        // by this walk: a wide tree must not accumulate one pending frame per
-        // sibling, or a file with N top-level items costs O(N) resident memory.
+        // The resource half of INV-AST-3, held by this walk: a wide tree must
+        // not accumulate one retained entry per sibling, or a file with N
+        // top-level items costs O(N) resident memory.
         let source = wide_source(4_096);
         let tree = parse(&source, Language::Rust);
         assert_eq!(
@@ -722,12 +722,12 @@ mod tests {
         let peak = peak_retained_frames(&tree.root());
         assert!(
             peak < 64,
-            "retained {peak} frames for 4,096 wide siblings; that is fan-out, not depth"
+            "descended {peak} levels for 4,096 wide siblings; that is fan-out, not depth"
         );
     }
 
     #[test]
-    fn a_deep_narrow_tree_still_retains_one_frame_per_ancestor() {
+    fn a_deep_narrow_tree_still_descends_one_level_per_ancestor() {
         // The other half of the same invariant: a deep tree does cost depth,
         // and the cost is the active depth rather than the total node count.
         let depth = 200;
@@ -740,12 +740,13 @@ mod tests {
         let peak = peak_retained_frames(&tree.root());
         assert!(
             peak > 1,
-            "a {depth}-deep tree retained {peak} frames; the walk is not descending"
+            "a {depth}-deep tree descended only {peak} levels; the walk is not descending"
         );
         let nodes = crate::inspect_ast(&tree.root(), None).nodes;
         assert!(
             peak < nodes,
-            "retained {peak} frames for a tree of {nodes} nodes; that is not depth-proportional"
+            "descended {peak} levels for a tree of {nodes} nodes; that is not \
+             depth-proportional"
         );
     }
 }
