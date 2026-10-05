@@ -110,8 +110,8 @@ tests = [
 id = "T07"
 requires = "LC-04"
 row = "A succeeds with a new fingerprint, B fails the atomic observation group, then B recovers; A's uncommitted update still executes exactly once. Test initial and subsequent changes."
-state = "present"
-gap = "No named test drives A's new fingerprint and B's refused atomic observation group in one tick and then reads B's recovery with A's uncommitted update executed exactly once; the named tests cover per-chain baseline marks and cross-chain attribution separately."
+state = "exercised"
+gap = ""
 tests = [
   "it::sim_t_rows::a_failed_group_leaves_its_own_chain_forced_t07",
   "it::observe_refresh::a_failed_refresh_keeps_the_baseline_marked",
@@ -158,7 +158,7 @@ id = "T10"
 requires = "DX-06/LC-01"
 row = "A required predecessor fails, is abandoned, is skipped or becomes Unknown; dependent writes never run merely because it is no longer active."
 state = "present"
-gap = "The Unknown half is named; no single test drives all four predecessor states (Failed, Abandoned, Skipped, Unknown) for one dependent and asserts the dependent never runs for any of them."
+gap = "The Unknown half is now swept over a seeded number of recovery cycles, with the dependent proved not to run and the predecessor's body proved to be entered exactly once; the other three predecessor states (Failed, Abandoned, Skipped) are named only through the ecs_tick and durable_dispatch journeys, not swept for one dependent."
 tests = [
   "it::sim_t_rows::a_required_predecessor_holds_its_dependent_t10",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
@@ -173,7 +173,7 @@ id = "T11"
 requires = "LC-05/06"
 row = "A Unknown -> NotApplied -> B Unknown; delayed A NotApplied and A Applied cannot alter B. Duplicate A evidence stays attributable to A."
 state = "present"
-gap = "No named test delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown; the named tests settle A Unknown and prove isolation and duplicate idempotence separately."
+gap = "Holding an indeterminate predecessor across a seeded number of restarts, under one attributable key, with the body never re-entered, is now swept; no named test still delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown."
 tests = [
   "it::sim_t_rows::an_indeterminate_predecessor_is_never_resent_t11",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
@@ -551,8 +551,8 @@ tests = [
 id = "T36"
 requires = "DX-11"
 row = "Progress buffer overflow loses only declared detail and increments counters; authoritative terminal/Unknown state is still retrievable. A quiet client never requires a task-owned reporting loop."
-state = "present"
-gap = "Overflow counting and terminal retrieval are named; no named test drives a client that reads no progress at all and asserts no task-owned reporting loop runs."
+state = "exercised"
+gap = ""
 tests = [
   "it::t_rows::an_overflowing_progress_buffer_keeps_the_terminal_state_t36",
   "it::t_rows::a_failed_overflowing_run_still_reports_its_terminal_failure_t36",
