@@ -417,6 +417,13 @@ pub enum IncompleteReason {
         /// The applied bound.
         limit: usize,
     },
+    /// The parser was still working when its deadline passed and was stopped,
+    /// so there is no tree to inspect. A statement about the subject's cost
+    /// for this grammar, not about its syntax.
+    ParseDeadlineExceeded {
+        /// The deadline the parser ran under, in milliseconds.
+        deadline_ms: u64,
+    },
 }
 
 /// One rule's coverage in one inspection.
@@ -961,6 +968,42 @@ fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> 
                 empty,
             );
         }
+        // The parser's own depth refusals — the tree it built, or the markdown
+        // containers it was never handed — are a depth budget reached, so they
+        // are incomplete rather than an infrastructure fault: a deeply nested
+        // file is a fact about the subject.
+        Err(ParseError::AstTooDeep {
+            observed, limit, ..
+        })
+        | Err(ParseError::ContainerNestingTooDeep {
+            observed, limit, ..
+        }) => {
+            return base(
+                Verdict::Incomplete {
+                    reason: IncompleteReason::DepthBudgetExceeded {
+                        reached: observed,
+                        limit,
+                    },
+                },
+                Some(language_name),
+                coverage,
+                Vec::new(),
+                empty,
+            );
+        }
+        Err(ParseError::TimedOut { after, .. }) => {
+            return base(
+                Verdict::Incomplete {
+                    reason: IncompleteReason::ParseDeadlineExceeded {
+                        deadline_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
+                    },
+                },
+                Some(language_name),
+                coverage,
+                Vec::new(),
+                empty,
+            );
+        }
         Err(ParseError::ParserUnavailable { language, detail }) => {
             return base(
                 Verdict::InfrastructureFailure {
@@ -1240,6 +1283,36 @@ mod tests {
         assert!(
             !matches!(report.verdict(), Verdict::Clean { .. }),
             "an infrastructure failure must never read as clean"
+        );
+        Ok(())
+    }
+
+    /// A parse stopped at its deadline is an incomplete inspection that names
+    /// the deadline, never an infrastructure failure and never clean.
+    ///
+    /// The seam here is the real `lgwks_ast` deadline path with a deadline of
+    /// zero, not a fabricated refusal: the subject is large enough that the
+    /// parser reaches its first progress check, so `try_parse_within` really
+    /// stops it, and what this asserts is how the operation reports that.
+    #[test]
+    fn a_parse_stopped_at_its_deadline_is_incomplete_not_an_infrastructure_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subject = "fn f() {".repeat(4_000);
+        let request = InspectRequest::new("src/lib.rs", &subject);
+        let stopped: ParseFn =
+            |code, language| lgwks_ast::try_parse_within(code, language, std::time::Duration::ZERO);
+        let report = inspect_with(&request, stopped);
+        match report.verdict().clone() {
+            Verdict::Incomplete {
+                reason: IncompleteReason::ParseDeadlineExceeded { deadline_ms },
+            } => assert_eq!(deadline_ms, 0, "the report names the deadline applied"),
+            other => {
+                return Err(format!("expected a deadline refusal, got {other:?}").into());
+            }
+        }
+        assert!(
+            report.findings().is_empty(),
+            "a parse with no tree retains no finding"
         );
         Ok(())
     }

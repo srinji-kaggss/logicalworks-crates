@@ -336,7 +336,7 @@ fn the_byte_ceiling_is_refused_before_any_tree_exists() -> TestResult {
 
 #[test]
 /// Every refusal renders as a located diagnostic rather than as text, including
-/// the two the byte and depth bounds produce.
+/// the ones the byte, depth and deadline bounds produce.
 fn every_refusal_renders_as_a_located_diagnostic() -> TestResult {
     let source = "fn main() {}\n";
     let refusals = [
@@ -357,6 +357,10 @@ fn every_refusal_renders_as_a_located_diagnostic() -> TestResult {
             language: "rust",
             observed: MAX_AST_DEPTH.saturating_add(1),
             limit: MAX_AST_DEPTH,
+        },
+        ParseError::TimedOut {
+            language: "rust",
+            after: lgwks_ast::DEFAULT_PARSE_DEADLINE,
         },
     ];
     for refusal in refusals {

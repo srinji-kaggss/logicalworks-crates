@@ -4184,6 +4184,7 @@ dependencies = [
  "ast-grep-language",
  "thiserror 2.0.20",
  "tracing",
+ "tree-sitter",
 ]
 
 [[package]]

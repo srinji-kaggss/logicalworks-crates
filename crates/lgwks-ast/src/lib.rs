@@ -63,9 +63,17 @@
 //! A recoverable tree-sitter tree is not proof of valid syntax: recovery emits
 //! `ERROR` and `MISSING` nodes. [`try_parse`] therefore refuses before any
 //! detector sees the tree: oversized bytes, a parser that cannot produce a
-//! tree, a tree past [`MAX_AST_NODES`], or one carrying recovery nodes. The
-//! unchecked [`parse`] exists for diagnostics and tests that inspect
-//! malformed trees on purpose.
+//! tree, a parse still running at its deadline, a tree past [`MAX_AST_NODES`],
+//! or one carrying recovery nodes. The unchecked [`parse`] exists for
+//! diagnostics and tests that inspect malformed trees on purpose.
+//!
+//! The byte ceiling bounds what the parser is handed, not how long it works:
+//! tree-sitter's GLR parser is super-linear in nesting on some grammars, and a
+//! quarter of the byte ceiling of nested braces held the Dart parser for 97.5 s.
+//! The checked parse therefore runs under [`DEFAULT_PARSE_DEADLINE`] (or the
+//! caller's own, through [`try_parse_within`]): the parser asks at every
+//! hundredth operation whether to continue, stops when the deadline has passed,
+//! frees its thread, and the call answers [`ParseError::TimedOut`].
 //!
 //! The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
 //! bytes handed to the parser and is what keeps parse work linear in input;
@@ -111,6 +119,12 @@ pub mod diagnostic;
 /// the version-suffixed private module.
 #[doc(hidden)]
 pub use thiserror::*;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
 use ast_grep_core::Language as CoreLanguage;
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
@@ -159,6 +173,42 @@ pub const MAX_AST_NODES: usize = 2_000_000;
 /// only producer is the checked parse, which reports it as
 /// [`ParseError::AstTooDeep`].
 pub const MAX_AST_DEPTH: usize = 512;
+
+/// How long a checked parse may hold its thread when the caller names no
+/// deadline (10 s).
+///
+/// The byte ceiling bounds what the parser is handed, not how long it works on
+/// it: tree-sitter's GLR parser is super-linear in nesting on some grammars, and
+/// the parse-budget rig measured 97.5 s for 256 KiB of nested braces under the
+/// Dart grammar and 29.8 s for a 512 KiB single line of Scala, with the 2 MiB
+/// forms of both unfinished at 120 s (`bench/README.md`). This is the bound on
+/// that: the parser is asked every hundred operations whether to continue, and
+/// past the deadline it stops, releases its thread and the call answers
+/// [`ParseError::TimedOut`].
+///
+/// Ten seconds is chosen from the same measurement. The slowest grammar on its
+/// own valid source at the full byte ceiling is `javascript` at 1 MB/s p99,
+/// about two seconds for 2 MiB, and the slowest *legitimate* shape measured —
+/// one megabyte-and-a-half line of Ruby — is 5.6 s; ten seconds admits both on
+/// the measuring host and stops every adversarial row the rig recorded. A
+/// caller with a tighter budget, or a slower host, names its own through
+/// [`try_parse_within`].
+pub const DEFAULT_PARSE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Grammars one thread keeps a ready parser for before it starts over.
+///
+/// A parser is per thread and per grammar, so the cache is never shared and
+/// never locked; the ceiling exists because a caller-registered grammar is a
+/// key this crate does not choose, and an unbounded map keyed by it would grow
+/// with whatever a long-lived thread was handed. Every compiled grammar fits
+/// with room to spare, so the built-in set never evicts.
+const MAX_CACHED_PARSERS: usize = 64;
+
+thread_local! {
+    /// This thread's parser per grammar, reset before every parse.
+    static PARSERS: RefCell<HashMap<TSLanguage, tree_sitter::Parser>> =
+        RefCell::new(HashMap::new());
+}
 
 /// Largest number of block containers one line of markdown may declare (64).
 ///
@@ -710,6 +760,20 @@ pub enum ParseError {
         /// The applied bound.
         limit: usize,
     },
+    /// The parser was still working when its deadline passed, and was stopped.
+    ///
+    /// A refusal of the whole file, like the size and shape refusals, and not a
+    /// statement about its syntax: the source may be perfectly valid and merely
+    /// expensive for this grammar. The thread that ran the parse is free again
+    /// when this is returned, and its parser is reset, so the next parse on the
+    /// same thread starts clean rather than resuming this one.
+    #[error("{language} parse stopped at its deadline of {after:?}")]
+    TimedOut {
+        /// The language name.
+        language: &'static str,
+        /// The deadline that was applied.
+        after: Duration,
+    },
 }
 
 /// Every recovery node in `tree`, as a located diagnostic.
@@ -1015,21 +1079,55 @@ fn keep_first_incomplete(
     }
 }
 
-/// Production boundary: refuse oversized bytes, then reject recovery nodes and
-/// over-budget trees in one traversal.
+/// Production boundary: refuse oversized bytes, stop a parse past
+/// [`DEFAULT_PARSE_DEADLINE`], then reject recovery nodes and over-budget trees
+/// in one traversal.
 pub fn try_parse(code: &str, language: Language) -> Result<Parsed, ParseError> {
+    try_parse_within(code, language, DEFAULT_PARSE_DEADLINE)
+}
+
+/// [`try_parse`] under a deadline the caller names.
+///
+/// The deadline bounds the parser, which is the work that is super-linear on
+/// hostile input; the byte check before it and the validation walk after it are
+/// linear and bounded by [`MAX_SOURCE_BYTES`] and [`MAX_AST_NODES`]. A parse
+/// still running when `deadline` passes is stopped at the parser's next progress
+/// check — every hundred parser operations — and answers
+/// [`ParseError::TimedOut`]; one that finishes first answers exactly as
+/// [`try_parse`] does. A source small enough to parse before the first check
+/// therefore completes even under `Duration::ZERO`, because a parse that
+/// finished has spent nothing the deadline could have saved.
+///
+/// ```
+/// use std::time::Duration;
+/// use lgwks_ast::{Language, ParseError};
+///
+/// let nested = "fn f() {".repeat(4_000);
+/// let refusal = lgwks_ast::try_parse_within(&nested, Language::Rust, Duration::ZERO);
+/// assert!(matches!(refusal, Err(ParseError::TimedOut { .. })));
+/// // The thread is free, and its parser starts clean.
+/// assert!(lgwks_ast::try_parse_within("fn f() {}", Language::Rust, Duration::from_secs(1)).is_ok());
+/// ```
+pub fn try_parse_within(
+    code: &str,
+    language: Language,
+    deadline: Duration,
+) -> Result<Parsed, ParseError> {
     parse_bounded(
         code,
         &language.support_lang(),
         language.name(),
-        MAX_SOURCE_BYTES,
-        MAX_AST_NODES,
-        MAX_AST_DEPTH,
+        Bounds {
+            source_bytes: MAX_SOURCE_BYTES,
+            ast_nodes: MAX_AST_NODES,
+            ast_depth: MAX_AST_DEPTH,
+            deadline,
+        },
     )
 }
 
 /// Checked parse of a caller-registered grammar, held to the same byte bound,
-/// node bound, depth bound, and recovery refusal as [`try_parse`].
+/// deadline, node bound, depth bound, and recovery refusal as [`try_parse`].
 pub fn try_parse_with<L: LanguageExt>(
     code: &str,
     language: &L,
@@ -1039,14 +1137,31 @@ pub fn try_parse_with<L: LanguageExt>(
         code,
         language,
         name,
-        MAX_SOURCE_BYTES,
-        MAX_AST_NODES,
-        MAX_AST_DEPTH,
+        Bounds {
+            source_bytes: MAX_SOURCE_BYTES,
+            ast_nodes: MAX_AST_NODES,
+            ast_depth: MAX_AST_DEPTH,
+            deadline: DEFAULT_PARSE_DEADLINE,
+        },
     )
 }
 
+/// The policy one checked parse applies, named at the call site.
+#[derive(Clone, Copy)]
+struct Bounds {
+    /// Largest source handed to the parser.
+    source_bytes: usize,
+    /// Largest tree the walk admits.
+    ast_nodes: usize,
+    /// Deepest branch the walk admits.
+    ast_depth: usize,
+    /// How long the parser may run.
+    deadline: Duration,
+}
+
 /// The one body behind [`try_parse`] and [`try_parse_with`]: byte bound, then
-/// tree, then node bound, then depth bound, then recovery refusal.
+/// the tree under its deadline, then node bound, then depth bound, then
+/// recovery refusal.
 ///
 /// The bounds are parameters rather than constants read in place so both entry
 /// points state the policy they apply at the call site, and so a later caller
@@ -1069,10 +1184,14 @@ fn parse_bounded<L: LanguageExt>(
     code: &str,
     language: &L,
     name: &'static str,
-    max_source_bytes: usize,
-    max_ast_nodes: usize,
-    max_ast_depth: usize,
+    bounds: Bounds,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
+    let Bounds {
+        source_bytes: max_source_bytes,
+        ast_nodes: max_ast_nodes,
+        ast_depth: max_ast_depth,
+        deadline,
+    } = bounds;
     validate_source_size(code, max_source_bytes)?;
     // Before the parser, and only for the markdown grammar: its external scanner
     // serializes open block containers into a fixed buffer and asserts when they
@@ -1081,12 +1200,12 @@ fn parse_bounded<L: LanguageExt>(
     if name == MARKDOWN {
         validate_markdown_containers(code, name, MAX_MARKDOWN_CONTAINERS_PER_LINE)?;
     }
-    let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
-        ParseError::ParserUnavailable {
-            language: name,
-            detail,
-        }
-    })?;
+    let tree = parse_tree(code, &language.get_ts_language(), name, deadline);
+    let parsed = AstGrep::doc(StrDoc {
+        src: code.to_owned(),
+        lang: language.clone(),
+        tree: tree?,
+    });
     let (metrics, _, diagnostics, diagnostics_truncated) =
         inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes), Some(max_ast_depth));
     if metrics.stop_reason == Some(InspectionStopReason::DepthLimitExceeded) {
@@ -1117,6 +1236,118 @@ fn parse_bounded<L: LanguageExt>(
         return refusal;
     }
     Ok(parsed)
+}
+
+/// Build `code`'s tree with this thread's parser for `grammar`, stopping it at
+/// `deadline`.
+///
+/// This is the one place the crate names `tree-sitter` directly, and it does so
+/// for the one thing `ast-grep-core` does not expose: its `parse_lang` builds the
+/// parser privately and calls `Parser::parse` with no progress callback, so a
+/// tree built through it cannot be stopped. The tree built here is the same
+/// `tree_sitter::Tree` ast-grep would have built — same grammar, same source,
+/// same parser defaults — and is handed to it through `StrDoc`'s public fields,
+/// so a caller receives the identical [`Parsed`].
+///
+/// The parser is cached per thread and per grammar, as ast-grep's is. If the
+/// cache is already borrowed on this thread, which nothing in this crate does,
+/// the parse runs on a fresh parser rather than failing.
+fn parse_tree(
+    code: &str,
+    grammar: &TSLanguage,
+    name: &'static str,
+    deadline: Duration,
+) -> Result<tree_sitter::Tree, ParseError> {
+    PARSERS.with(|cache| match cache.try_borrow_mut() {
+        Ok(mut parsers) => {
+            if parsers.len() >= MAX_CACHED_PARSERS && !parsers.contains_key(grammar) {
+                parsers.clear();
+            }
+            let parser = match parsers.entry(grammar.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let fresh = new_parser(grammar, name);
+                    entry.insert(fresh?)
+                }
+            };
+            run_parser(parser, code, name, deadline)
+        }
+        Err(busy) => {
+            tracing::debug!(
+                ?busy,
+                "parse_tree: the parser cache is in use; parsing on a fresh parser"
+            );
+            let fresh = new_parser(grammar, name);
+            run_parser(&mut fresh?, code, name, deadline)
+        }
+    })
+}
+
+/// A parser for `grammar`, or the grammar's own refusal of it.
+fn new_parser(grammar: &TSLanguage, name: &'static str) -> Result<tree_sitter::Parser, ParseError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(grammar)
+        .map(|()| parser)
+        .map_err(|error| {
+            let refusal = ParseError::ParserUnavailable {
+                language: name,
+                detail: error.to_string(),
+            };
+            tracing::debug!(error = ?refusal, "new_parser: returning an error to the caller");
+            refusal
+        })
+}
+
+/// Run one parse of `code` on `parser`, asking at every progress check whether
+/// `deadline` has passed.
+///
+/// The parser is reset before and after. Before, because a parser from the
+/// cache may hold state from whatever ran on it last; after, because a stopped
+/// parse keeps its partial state *for resuming*, and a cached parser that kept
+/// it would hand the next caller on this thread a continuation of somebody
+/// else's source.
+fn run_parser(
+    parser: &mut tree_sitter::Parser,
+    code: &str,
+    name: &'static str,
+    deadline: Duration,
+) -> Result<tree_sitter::Tree, ParseError> {
+    parser.reset();
+    // `None` is a deadline past what the clock can represent, which never
+    // arrives: the parse runs to completion, as it would with no bound at all.
+    let stop_at = Instant::now().checked_add(deadline);
+    let mut expired = false;
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if stop_at.is_some_and(|at| Instant::now() >= at) {
+            expired = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let bytes = code.as_bytes();
+    let tree = parser.parse_with_options(
+        &mut |offset, _| bytes.get(offset..).unwrap_or_default(),
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+    );
+    parser.reset();
+    tree.ok_or_else(|| {
+        let refusal = if expired {
+            ParseError::TimedOut {
+                language: name,
+                after: deadline,
+            }
+        } else {
+            ParseError::ParserUnavailable {
+                language: name,
+                detail: "the parser returned no tree".to_owned(),
+            }
+        };
+        tracing::debug!(error = ?refusal, "run_parser: returning an error to the caller");
+        refusal
+    })
 }
 
 /// Unchecked parse for diagnostics and tests that intentionally inspect
@@ -1361,9 +1592,10 @@ pub fn inspect_ast<'t, L: LanguageExt>(
 /// quadrupled the walk. The cursor walk spends 40 ns per node on that same
 /// source, at every width from 2 KiB to 2 MiB.
 ///
-/// The cursor is reached through the node the walk was handed, so no
-/// `tree-sitter` type is named and no `tree-sitter` edge is authored: every call
-/// below is an inherent method on a type this crate already holds.
+/// The cursor is reached through the node the walk was handed, so the walk
+/// names no `tree-sitter` type: every call below is an inherent method on a type
+/// this crate already holds. (The crate's one direct `tree-sitter` use is the
+/// parse deadline in `parse_tree`, which `ast-grep-core` has no door for.)
 ///
 /// Two properties move with the traversal and are worth stating rather than
 /// leaving to be discovered:
@@ -2462,9 +2694,12 @@ mod tests {
             "fn f() { let x = 1; }",
             &SupportLang::Rust,
             "rust",
-            MAX_SOURCE_BYTES,
-            2,
-            MAX_AST_DEPTH,
+            Bounds {
+                source_bytes: MAX_SOURCE_BYTES,
+                ast_nodes: 2,
+                ast_depth: MAX_AST_DEPTH,
+                deadline: DEFAULT_PARSE_DEADLINE,
+            },
         );
         // The gate is this assertion, which reports whatever came back
         // instead. The `if let` below only reads the numbers, and the pattern
@@ -2498,9 +2733,12 @@ mod tests {
             &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
             &SupportLang::Rust,
             "rust",
-            MAX_SOURCE_BYTES,
-            MAX_AST_NODES,
-            8,
+            Bounds {
+                source_bytes: MAX_SOURCE_BYTES,
+                ast_nodes: MAX_AST_NODES,
+                ast_depth: 8,
+                deadline: DEFAULT_PARSE_DEADLINE,
+            },
         );
         assert!(
             matches!(refusal, Err(ParseError::AstTooDeep { .. })),

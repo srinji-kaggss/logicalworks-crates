@@ -9,8 +9,10 @@
 
 mod content_detection;
 mod hostile;
+mod parse_deadline;
 mod sim_diagnostics;
 mod sim_parse_bounds;
+mod sim_parse_deadline;
 
 /// The seed substrate every `sim_*` module in this binary drives.
 ///
