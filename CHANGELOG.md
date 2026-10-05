@@ -20,9 +20,19 @@ row's gap sentence.
 
 The receipt can lower a row's claimed state and never raise one, so a green run
 cannot promote `present` to `exercised`, and it exits non-zero when a named test
-is absent, failing, or a row claims more than the run shows. No crate's public
-API changed; this adds the map, the runner, the receipts and the spec's
-per-row table.
+is absent, failing, or a row claims more than the run shows. `evidence/` is
+committed, the spec's per-row table is generated from it between
+`<!-- acceptance-table: start -->` markers, and `--check` fails when the
+committed table disagrees with the map and the receipt in the tree.
+
+Every row now also answers to its own id in a test name: 15 new row-addressed
+tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
+`crates/lgwks-bot/tests/it/sim_t_rows.rs`, so
+`cargo nextest list --workspace -E 'test(/_t07$/)'` says which tests address a
+row without reading the map. Six of them are seeded sweeps replay-checked against
+their trace hash. They are new tests rather than renames precisely so that every
+existing citation of an existing test keeps resolving. No crate's public API
+changed.
 
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 

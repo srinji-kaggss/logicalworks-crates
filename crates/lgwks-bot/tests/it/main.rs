@@ -27,6 +27,9 @@ mod band_family;
 #[path = "../support/compile.rs"]
 mod compile;
 
+#[path = "../support/declarable.rs"]
+mod declarable;
+
 #[path = "../support/effects.rs"]
 mod effects;
 
@@ -155,7 +158,9 @@ mod spec_materialize;
 mod store_read_failure;
 mod sys_process_binding;
 mod sys_process_portable;
+mod sim_t_rows;
 mod t02_compile_surface;
+mod t_rows;
 mod t22_process_surface;
 mod task_front_door;
 mod task_million;

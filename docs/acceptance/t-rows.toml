@@ -29,6 +29,7 @@ row = "A one-shot task returns a typed value with one task declaration and call;
 state = "exercised"
 gap = ""
 tests = [
+  "it::t_rows::a_one_declaration_one_call_returns_a_typed_value_t01",
   "it::task_front_door::one_declaration_one_call_returns_a_typed_value",
   "it::task_front_door::a_task_body_runs_under_its_own_named_step",
   "it::task_front_door::a_report_claims_no_external_effect",
@@ -54,6 +55,7 @@ row = "Drop local composition while suspended; no borrowed child escapes. An ind
 state = "exercised"
 gap = ""
 tests = [
+  "it::t_rows::a_dropped_suspended_run_releases_its_permit_t03",
   "it::task_front_door::dropping_a_suspended_run_releases_its_permit",
   "t03_non_yielding::a_non_yielding_callback_is_detected_from_outside_and_not_preempted",
   "t03_non_yielding::the_same_front_door_admits_a_callback_that_does_yield",
@@ -66,6 +68,7 @@ row = "Nested `all`/`map` at concurrency one finishes; parents waiting for child
 state = "exercised"
 gap = ""
 tests = [
+  "it::t_rows::nested_runs_finish_at_a_ceiling_of_one_t04",
   "it::task_front_door::nested_runs_complete_at_a_ceiling_of_one",
   "it::sim_task::ceiling_binds_the_peak_band_00",
   "it::sim_task::ceiling_binds_the_peak_band_01",
@@ -94,6 +97,7 @@ row = "Saturated task A cannot starve independent B; one slow source does not bl
 state = "exercised"
 gap = ""
 tests = [
+  "it::sim_t_rows::a_held_mass_never_starves_an_independent_chain_t06",
   "it::observe_refresh::a_chain_held_at_capacity_does_not_starve_an_independent_chain",
   "it::observe_refresh::a_slow_source_does_not_block_an_independent_chain",
   "it::observe_refresh::a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier",
@@ -109,6 +113,7 @@ row = "A succeeds with a new fingerprint, B fails the atomic observation group, 
 state = "present"
 gap = "No named test drives A's new fingerprint and B's refused atomic observation group in one tick and then reads B's recovery with A's uncommitted update executed exactly once; the named tests cover per-chain baseline marks and cross-chain attribution separately."
 tests = [
+  "it::sim_t_rows::a_failed_group_leaves_its_own_chain_forced_t07",
   "it::observe_refresh::a_failed_refresh_keeps_the_baseline_marked",
   "it::sim_observe_refresh::a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it",
   "it::observe_refresh::two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain",
@@ -122,6 +127,7 @@ row = "Disconnect, watch overflow, stale remote key and invalidation failure for
 state = "exercised"
 gap = ""
 tests = [
+  "it::sim_t_rows::every_declared_reason_forces_a_refresh_t08",
   "it::observe_refresh::a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state",
   "it::observe_refresh::a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet",
   "it::observe_refresh::a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each",
@@ -154,6 +160,7 @@ row = "A required predecessor fails, is abandoned, is skipped or becomes Unknown
 state = "present"
 gap = "The Unknown half is named; no single test drives all four predecessor states (Failed, Abandoned, Skipped, Unknown) for one dependent and asserts the dependent never runs for any of them."
 tests = [
+  "it::sim_t_rows::a_required_predecessor_holds_its_dependent_t10",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_false_condition_and_its_successor",
   "ecs_tick::an_abandoned_entry_blocks_its_successors",
@@ -168,6 +175,7 @@ row = "A Unknown -> NotApplied -> B Unknown; delayed A NotApplied and A Applied 
 state = "present"
 gap = "No named test delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown; the named tests settle A Unknown and prove isolation and duplicate idempotence separately."
 tests = [
+  "it::sim_t_rows::an_indeterminate_predecessor_is_never_resent_t11",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_false_condition_and_its_successor",
   "it::durable_dispatch::a_poll_failure_does_not_erase_a_recovered_unknown",
@@ -187,6 +195,7 @@ row = "Wrong tenant/run/action/payload/revision/environment/epoch evidence is re
 state = "exercised"
 gap = ""
 tests = [
+  "it::sim_t_rows::identical_digests_never_cross_tenants_t12",
   "it::wrong_identity_evidence::every_wrong_identity_field_is_refused_and_the_correct_one_is_not",
   "it::wrong_identity_evidence::a_settlement_carrying_another_runs_identity_is_refused",
   "it::wrong_identity_evidence::a_refused_settlement_leaves_a_real_file_journal_byte_identical",
@@ -376,14 +385,15 @@ tests = [
 id = "T25"
 requires = "DX-09"
 row = "Native task and supported wire form produce the same normalized operation trace for the same inputs. Unknown operations fail before execution."
-state = "present"
-gap = "The shared trace for native and generated forms is named; no named test drives an unknown operation name and asserts refusal before any effect."
+state = "exercised"
+gap = ""
 tests = [
   "it::spec_materialize::one_chain_traces_match",
   "it::spec_materialize::two_entries_in_one_chain_trace_in_declaration_order",
   "it::sim_spec_materialize::spec_replay_0000",
   "it::sim_spec_materialize::spec_replay_0001",
   "it::ephemeral::a_minted_id_round_trips_through_its_wire_form",
+  "it::proposal::an_unknown_operation_is_refused_whatever_asked_for_it",
 ]
 
 [[row]]
@@ -393,6 +403,8 @@ row = "Malformed model output and tool-output instruction injection cannot chang
 state = "exercised"
 gap = ""
 tests = [
+  "it::t_rows::an_unknown_operation_is_refused_by_name_t26",
+  "it::t_rows::a_credential_read_is_refused_and_changes_nothing_t26",
   "it::proposal::a_malformed_payload_never_becomes_work",
   "it::proposal::an_injected_instruction_is_refused_by_name",
   "it::proposal::an_injected_instruction_is_refused_at_its_step_on_a_real_run",
@@ -417,10 +429,15 @@ tests = [
 id = "T28"
 requires = "AI-04/05"
 row = "Parallel workers cannot read another tenant's same-digest artifact; conflicting writes are serialized while independent reads progress."
-state = "present"
-gap = "Conflicting writes and concurrent readers are named; no named test asserts that a worker in one tenant cannot read another tenant's artifact when both bytes are identical."
+state = "exercised"
+gap = ""
 tests = [
+  "it::t_rows::a_same_digest_artifact_stays_inside_its_tenant_t28",
+  "it::proposal::two_tenants_on_one_digest_stay_isolated",
   "it::proposal::conflicting_writes_to_one_key_are_serialized_and_idempotent",
+  "it::proposal::concurrent_writers_of_one_key_commit_exactly_once_per_tenant",
+  "it::sim_proposal::two_tenants_on_one_digest_stay_isolated_band_08",
+  "it::sim_proposal::two_tenants_on_one_digest_stay_isolated_band_09",
   "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_12",
   "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_13",
   "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_14",
@@ -447,6 +464,7 @@ row = "Same request key plus different payload is Conflict; a duplicate identica
 state = "exercised"
 gap = ""
 tests = [
+  "it::t_rows::one_request_key_serves_one_payload_t30",
   "it::request_key::same_key_with_a_different_payload_is_a_typed_conflict",
   "it::request_key::a_duplicate_identical_request_reattaches_without_rerunning",
   "it::request_key::distinct_request_keys_are_distinct_runs",
@@ -536,6 +554,8 @@ row = "Progress buffer overflow loses only declared detail and increments counte
 state = "present"
 gap = "Overflow counting and terminal retrieval are named; no named test drives a client that reads no progress at all and asserts no task-owned reporting loop runs."
 tests = [
+  "it::t_rows::an_overflowing_progress_buffer_keeps_the_terminal_state_t36",
+  "it::t_rows::a_failed_overflowing_run_still_reports_its_terminal_failure_t36",
   "it::task_front_door::an_overflowing_trail_counts_what_it_dropped",
   "it::task_front_door::an_overflowing_trail_still_reports_the_terminal_failure",
   "it::proposal::reads_progress_while_a_write_is_in_flight",
