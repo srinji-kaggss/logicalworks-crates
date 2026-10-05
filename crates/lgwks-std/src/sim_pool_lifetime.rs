@@ -35,19 +35,24 @@
 //! fast a thread happened to run.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 // The seeded generator and replay harness are declared once, by the parent
 // module: a file loaded as a module twice is two copies of every type in it,
-// which clippy refuses. Both simulation families use them.
+// which clippy refuses. Both simulation families use them. The gate is the
+// other family's fixture too, so it is loaded from the one shared copy.
+#[path = "../tests/support/gate.rs"]
+mod gate;
+
 use super::{
     BLOCKING_KEEP_ALIVE, Pool, PoolConfigError, PoolShutdown, SpawnError, block_on,
     configure_decision, join_all, lock, prepare, rng, seeded_sweep, spawn_blocking_on,
     start_os_thread,
 };
+use gate::Gate;
 use rng::Rng;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
@@ -114,40 +119,6 @@ const ARM_WOKEN: u64 = 52;
 const ARM_IN_USE: u64 = 53;
 /// A drained pool refused a job, typed, and the job never ran.
 const ARM_CLOSED: u64 = 54;
-
-/// A gate every job waits on, so no thread can finish a job and take the next
-/// while the burst is being measured.
-struct Gate {
-    open: Mutex<bool>,
-    opened: Condvar,
-}
-
-impl Gate {
-    /// A gate nobody has opened.
-    const fn new() -> Self {
-        Self {
-            open: Mutex::new(false),
-            opened: Condvar::new(),
-        }
-    }
-
-    /// Wait until the gate opens.
-    fn pass(&self) {
-        let mut open = lock(&self.open);
-        while !*open {
-            open = self
-                .opened
-                .wait(open)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-
-    /// Open the gate, releasing every waiter.
-    fn release(&self) {
-        *lock(&self.open) = true;
-        self.opened.notify_all();
-    }
-}
 
 /// One seed's whole journey, as its trace hash.
 fn journey(seed: u64) -> u64 {
@@ -308,14 +279,122 @@ fn journey(seed: u64) -> u64 {
     trace
 }
 
+/// Cycles per seed: every cycle leaves the pool and comes back, which is what
+/// a bursty process does for as long as it runs.
+const CYCLES: usize = 6;
+
+/// The keep-alive the burst/idle cycles run under: long enough for a burst's
+/// work to finish, short enough that a cycle costs milliseconds.
+const CYCLE_KEEP_ALIVE: Duration = Duration::from_millis(1);
+
+/// Polls of a millisecond one idle period may take before the simulation calls
+/// it a thread that would not leave. Bounded, so a pool that never exits
+/// fails with a message instead of hanging the sweep.
+const IDLE_POLLS: usize = 500;
+
+/// Wait until every thread of `pool` has left, or fail naming the seed.
+///
+/// The wait is a bounded poll rather than a sleep of a guessed length: what it
+/// proves is that a thread left, and how long that took is the host's business.
+fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
+    for _ in 0..IDLE_POLLS {
+        if lock(&pool.state).live == 0 {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let state = lock(&pool.state);
+    assert!(
+        state.live == 0,
+        "seed {seed:#x}: {} threads were still alive after an idle period of {} polls at a \
+         {CYCLE_KEEP_ALIVE:?} keep-alive",
+        state.live,
+        IDLE_POLLS
+    );
+}
+
+/// One seed's burst/idle cycles, as its trace hash.
+///
+/// Every cycle submits a burst, lets the threads finish, waits out the
+/// keep-alive, and checks the pool holds no more join handles than its ceiling
+/// — the bound a thread that exits on its own would break, one handle per
+/// cycle, if nothing reaped it. The next cycle's first submit then has to find
+/// exactly its own handle: the exited threads were joined on the way, so a
+/// handle per cycle cannot accumulate.
+fn cycles(seed: u64) -> u64 {
+    let mut rng = Rng::new(seed);
+    let ceiling = rng.below(4).saturating_add(1);
+    let cycles = rng.below(CYCLES).saturating_add(2);
+    let mut trace = initial_trace();
+    fold(&mut trace, seed);
+    fold_usize(&mut trace, ceiling);
+    fold_usize(&mut trace, cycles);
+
+    let pool = Arc::new(Pool::tuned(ceiling, start_os_thread, CYCLE_KEEP_ALIVE));
+    for cycle in 0..cycles {
+        // A burst: every thread the ceiling allows, each returning its own
+        // index, so a thread that never ran its job is a failure, not a
+        // detail.
+        let burst = ceiling.saturating_add(1);
+        let mut handles = Vec::with_capacity(burst);
+        for index in 0..burst {
+            handles.push(spawn_blocking_on(&pool, move || index));
+        }
+        for (index, value) in block_on(join_all(handles)).into_iter().enumerate() {
+            assert_eq!(
+                value, index,
+                "seed {seed:#x}: cycle {cycle} job {index} ran elsewhere"
+            );
+            fold_usize(&mut trace, value);
+        }
+        wait_until_empty(&pool, seed);
+        let held = lock(&pool.state).handles.len();
+        assert!(
+            held <= ceiling,
+            "seed {seed:#x}: cycle {cycle} left {held} join handles for a ceiling of {ceiling}; \
+             a thread that exits on its keep-alive must be reaped, not held"
+        );
+        fold(&mut trace, u64::from(held <= ceiling));
+
+        // The next cycle's first submit reaps what has finished, so the list is
+        // exactly its own handle at that point.
+        let head = spawn_blocking_on(&pool, || 0u32);
+        assert_eq!(block_on(head), 0);
+        let after_reap = lock(&pool.state).handles.len();
+        assert_eq!(
+            after_reap, 1,
+            "seed {seed:#x}: cycle {cycle} started a thread holding {after_reap} handles; \
+             the ones that had already left were not joined"
+        );
+        fold(&mut trace, u64::try_from(after_reap).unwrap_or(u64::MAX));
+    }
+    // The pool has nothing left to run: a shutdown still joins whatever the
+    // last cycle's reap did not already take, and reports the threads it
+    // joined, so the cycles end with no thread and no handle left behind.
+    let report = pool.shutdown(GENEROUS);
+    let state = lock(&pool.state);
+    assert!(
+        matches!(report, PoolShutdown::Drained { .. }) && state.handles.is_empty(),
+        "seed {seed:#x}: the cycles ended holding handles the pool never joined: {report:?}"
+    );
+    trace
+}
+
 #[test]
-fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
+fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
     let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
     for _ in 0..SEEDS {
-        journey(next_seed(&mut state));
+        cycles(next_seed(&mut state));
     }
 }
 
+#[test]
+fn sim_a_seed_replays_its_pool_lifetime_trace() {
+    for seed in SWEEP_SEEDS {
+        assert_same_seed_replays(journey, seed);
+        assert_same_seed_replays(cycles, seed);
+    }
+}
 #[test]
 fn sim_the_same_seed_replays_the_same_pool_lifetime_trace() {
     for seed in SWEEP_SEEDS {
@@ -327,4 +406,5 @@ fn sim_the_same_seed_replays_the_same_pool_lifetime_trace() {
 fn sim_distinct_seeds_diverge_in_their_pool_lifetime_trace() {
     let [first, second, ..] = SWEEP_SEEDS;
     assert_distinct_seeds_diverge(journey, first, second);
+    assert_distinct_seeds_diverge(cycles, first, second);
 }

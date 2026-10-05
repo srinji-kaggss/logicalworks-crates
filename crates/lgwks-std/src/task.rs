@@ -753,6 +753,11 @@ struct Pool {
     /// `Some(threads)` when [`configure_blocking_pool`] built this pool at
     /// that ceiling; `None` when first use built it at the default.
     configured: Option<usize>,
+    /// How long a thread with no work waits before it leaves. The process pool
+    /// always uses [`BLOCKING_KEEP_ALIVE`]; the seeded lifetime family builds
+    /// pools with a short one, so many burst/idle cycles cost milliseconds
+    /// rather than the ten seconds each would really take.
+    keep_alive: Duration,
     /// Starts one thread running [`Pool::run`]. The process pool starts an OS
     /// thread and hands back its join handle; a test pool can refuse, which is
     /// how a refusal is exercised without exhausting the machine's threads.
@@ -779,8 +784,16 @@ struct PoolState<W = Work> {
     /// job leaves instead of parking.
     draining: bool,
     /// The join handle of every thread this pool started and has not joined.
+    ///
     /// Registered under the same lock that counted the start, so a shutdown
-    /// can never observe a thread it cannot join.
+    /// can never observe a thread it cannot join. **At most `ceiling` entries
+    /// at any moment:** a start joins the handles that have already finished
+    /// before it counts its own, and admission only reaches this arm while
+    /// `live < ceiling`, so the list can never hold more than the pool could
+    /// have running. The bound needs the reap: a thread that exits on its
+    /// keep-alive is still held by its handle until something joins it, so a
+    /// pool left to itself across burst/idle cycles would hold one per cycle
+    /// — one per exited thread, growing without bound.
     handles: Vec<ThreadHandle>,
 }
 
@@ -928,6 +941,38 @@ impl<W> PoolState<W> {
     const fn begin_drain(&mut self) {
         self.draining = true;
     }
+
+    /// Join every thread that has already left.
+    ///
+    /// A thread that exits on its keep-alive is still held by its handle: the
+    /// resources std reclaims on join stay held until then, and the handle
+    /// itself is one more entry. `is_finished` never blocks and a finished
+    /// thread's `join` returns at once, so this is a reap rather than a wait,
+    /// and calling it where a thread is about to be started is what keeps the
+    /// list within the pool's ceiling.
+    fn reap_finished_threads(&mut self) {
+        let mut kept = Vec::with_capacity(self.handles.len());
+        let mut reaped = 0usize;
+        for handle in std::mem::take(&mut self.handles) {
+            if handle.is_finished() {
+                join_pool_thread(handle);
+                reaped = reaped.saturating_add(1);
+            } else {
+                kept.push(handle);
+            }
+        }
+        self.handles = kept;
+        #[cfg(feature = "trace")]
+        if reaped > 0 {
+            crate::trace::debug!(
+                reaped,
+                live = self.live,
+                "submit: joined the pool threads that had already left"
+            );
+        }
+        #[cfg(not(feature = "trace"))]
+        let _ = reaped;
+    }
 }
 
 /// The process-wide pool. [`configure_blocking_pool`] and first use race to
@@ -983,16 +1028,30 @@ fn join_pool_thread(handle: ThreadHandle) {
 
 impl Pool {
     /// An empty pool of at most `ceiling` threads, started by `start`, built
-    /// by first use rather than by [`configure_blocking_pool`].
+    /// by first use rather than by [`configure_blocking_pool`]. Its threads
+    /// leave after [`BLOCKING_KEEP_ALIVE`].
     const fn new(
         ceiling: usize,
         start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
+    ) -> Self {
+        Self::tuned(ceiling, start, BLOCKING_KEEP_ALIVE)
+    }
+
+    /// [`Pool::new`] with the keep-alive the caller asks for. Private because
+    /// the production pool's keep-alive is [`BLOCKING_KEEP_ALIVE`] and a
+    /// ceiling is the only thing a caller may choose; the seeded lifetime
+    /// family uses this to reach the idle-exit path in milliseconds.
+    const fn tuned(
+        ceiling: usize,
+        start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
+        keep_alive: Duration,
     ) -> Self {
         Self {
             state: Mutex::new(PoolState::new()),
             work_ready: Condvar::new(),
             ceiling,
             configured: None,
+            keep_alive,
             start,
         }
     }
@@ -1002,13 +1061,9 @@ impl Pool {
         ceiling: usize,
         start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
     ) -> Self {
-        Self {
-            configured: Some(ceiling),
-            state: Mutex::new(PoolState::new()),
-            work_ready: Condvar::new(),
-            ceiling,
-            start,
-        }
+        let mut pool = Self::tuned(ceiling, start, BLOCKING_KEEP_ALIVE);
+        pool.configured = Some(ceiling);
+        pool
     }
 
     /// Queue `work` and make sure a thread will run it.
@@ -1046,6 +1101,11 @@ impl Pool {
                 let first = Arc::new(Mutex::new(Some(work)));
                 match (self.start)(Arc::clone(self), Arc::clone(&first)) {
                     Ok(handle) => {
+                        // The reap comes before the count, not after it: the
+                        // exited threads of earlier bursts are released here,
+                        // while the new one is still unheld, which is what
+                        // keeps the list within the ceiling.
+                        state.reap_finished_threads();
                         state.started();
                         state.handles.push(handle);
                         Ok(())
@@ -1095,7 +1155,7 @@ impl Pool {
             loop {
                 let (guard, waited) = self
                     .work_ready
-                    .wait_timeout(state, BLOCKING_KEEP_ALIVE)
+                    .wait_timeout(state, self.keep_alive)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state = guard;
                 match state.woken(waited.timed_out()) {
@@ -1175,7 +1235,7 @@ impl Pool {
             let wait = match deadline {
                 // No finite deadline: wait in keep-alive chunks, woken by
                 // each thread that leaves.
-                None => BLOCKING_KEEP_ALIVE,
+                None => self.keep_alive,
                 Some(until) => until.saturating_duration_since(now),
             };
             let (guard, _) = self
