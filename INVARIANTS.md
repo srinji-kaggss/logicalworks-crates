@@ -1661,7 +1661,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `two_identities_on_one_repository_stay_isolated`) and
   `tests/it/sim_review_pr.rs` (`subject_r64`, `publication_r64`, `identity_r64`,
   `same_seed_same_trace_hash`, `every_outcome_is_reachable_in_the_family`),
-  `tests/it/sim_review_path.rs` (`verified_and_not_observed_r32`,
+  `tests/sim_review_path.rs` (`verified_and_not_observed_r32`,
   `gh_exit_failures_r32`, `deadline_stop_r32`,
   `head_moved_between_snapshot_and_publish_r32`,
   `malformed_and_oversized_answers_r32`,
@@ -1852,7 +1852,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal`,
   `an_unavailable_diff_is_a_typed_coverage_refusal`,
   `a_changed_file_inventory_is_read_as_data`),
-  `tests/it/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
+  `tests/sim_review_path.rs` (`subject_coverage_and_partial_faults` bands 00
   through 07 (64 seeds), `same_seed_same_trace_hash_subject` bands 08 through
   11 (32 seeds), `two_identities_subject` bands 12 through 13 (16 seeds)), and
   `tests/it/sim_review_pr.rs` (`review_comments_are_carried_and_omitted_r16`)
@@ -1887,7 +1887,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   permissions. A publication is pinned to the commit that was read, so a run that
   re-pointed the subject after a rename would fail rather than publish at code it
   never read. · why: #231 review (the arm families were untested under fault
-  density) · enforced by: `tests/it/sim_review_path.rs`
+  density) · enforced by: `tests/sim_review_path.rs`
   (`an_unavailable_diff_publishes_nothing`,
   `a_diff_past_the_file_ceiling_publishes_nothing`,
   `a_diff_past_the_byte_ceiling_publishes_nothing`,
@@ -1923,8 +1923,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   share is cancelled out by a healthy one in the totals, is a measurement that
   proved nothing; the per-receiver assertions exist to make that visible
   instead of arithmetic. · why: #151 review finding on
-  `tests/it/sim_review_path.rs`'s saturation tiers (a >300 s family that also timed
-  a degenerate world) · enforced by: `tests/it/sim_review_path.rs`
+  `tests/sim_review_path.rs`'s saturation tiers (a >300 s family that also timed
+  a degenerate world) · enforced by: `tests/sim_review_path.rs`
   (`saturation_r32_tier_100`, `saturation_r32_tier_1000`,
   `saturation_r32_tier_10000`, which assert per receiver and in total, and
   `same_seed_same_trace_hash_r32` for the replay the tier still owes)

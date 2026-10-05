@@ -140,7 +140,6 @@ mod sim_ready;
 mod sim_repair;
 mod sim_replay_drift;
 mod sim_request_key;
-mod sim_review_path;
 mod sim_review_pr;
 mod sim_run_boundaries;
 mod sim_scale;

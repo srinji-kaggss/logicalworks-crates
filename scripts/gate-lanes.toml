@@ -178,7 +178,7 @@ required = true
 # The saturation family on its own: it is CPU-bound for about two minutes, so it
 # gets its own runner instead of one shard's tail. Builds only the one test
 # binary it runs.
-command = "cargo nextest run -p lgwks_bot --locked --features full --test it -E 'test(/^sim_review_path::/) & test(saturation_r32_tier)'"
+command = "cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'"
 ci_step = "Run lgwks-bot saturation tiers"
 
 [[lane]]

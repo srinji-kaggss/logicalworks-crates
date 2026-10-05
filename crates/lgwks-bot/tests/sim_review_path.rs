@@ -1,6 +1,6 @@
 //! Deterministic simulation of the **real** review path, across many seeds.
 //!
-//! [`sim_review_pr`](./sim_review_pr.rs) simulates the decision the
+//! [`sim_review_pr`](./it/sim_review_pr.rs) simulates the decision the
 //! reconciliation makes, with no process anywhere in the picture. This file
 //! simulates the same decisions *through the path a caller runs*: every family
 //! here drives [`lgwks_bot::review::review_pr`] on a [`Host`], with the adapter
@@ -63,12 +63,17 @@ use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
 use lgwks_bot::script::Scope;
 use lgwks_bot::task::{Host, Report, Task, task};
 
-use crate::fake_gh;
+// Its own binary rather than a module of `it` (#272): the saturation CI job
+// runs only this file's tiers, and building the whole `it` binary for them put
+// 80 s of compile on the gate's critical path.
+#[path = "support/fake_gh.rs"]
+mod fake_gh;
 
-use crate::sim;
+mod sim;
 
 // The band-declaration macro, defined once for the whole layer.
-use crate::band_family;
+#[path = "sim/bands.rs"]
+mod band_family;
 
 use fake_gh::{FakeGh, Scenario};
 
