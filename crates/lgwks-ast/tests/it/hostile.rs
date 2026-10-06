@@ -55,9 +55,6 @@ use lgwks_ast::{
 /// What every family returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// What a case builder returns: the cases, or the refusal that stopped it.
-type Built<T> = Result<T, Box<dyn Error>>;
-
 /// One shape of hostile input, and what it is supposed to earn.
 struct Adversarial {
     /// What the generator is called in an assertion message.
@@ -444,6 +441,9 @@ mod markdown {
     use super::*;
 
     use lgwks_ast::MAX_MARKDOWN_CONTAINERS_PER_LINE;
+
+    /// What a case builder returns: the cases, or the refusal that stopped it.
+    type Built<T> = Result<T, Box<dyn Error>>;
 
     // ── The markdown guard ──────────────────────────────────────────────────────
     //
