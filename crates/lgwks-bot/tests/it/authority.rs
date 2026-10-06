@@ -106,11 +106,13 @@ impl Observe for Script {
         // refuses, because answering a value the test never scripted would let a
         // chain fire on movement nobody wrote.
         let Some(value) = self.values.get(index) else {
-            return Err(BotError::DomainError {
+            let refusal = Err(BotError::DomainError {
                 domain: "test::script".to_owned(),
                 certainty: DispatchCertainty::NotDelivered,
                 cause: format!("the script ran out at poll {index}"),
             });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
+            return refusal;
         };
         Ok(*value)
     }

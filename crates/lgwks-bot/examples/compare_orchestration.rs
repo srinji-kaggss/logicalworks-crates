@@ -182,15 +182,10 @@ impl Ctx {
         let pause = match self.spec.scenario {
             Scenario::Throughput | Scenario::Storm => 1,
             Scenario::FailFast => {
-                // A deterministic pause of 1-20 ms. The scale is non-zero, so
-                // the remainder exists; the arm is here because a zero scale
-                // would otherwise read as a pause of zero milliseconds.
-                let Some(scale) = u64::from(item).wrapping_mul(7_919).checked_rem(20) else {
-                    let refusal = Err(FlowError::failed("the pause scale must be non-zero"));
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
-                    return refusal;
-                };
-                scale.saturating_add(1)
+                // A deterministic pause of 1-20 ms, spread over the items by a
+                // prime stride. The divisor is a non-zero literal, so the
+                // remainder always exists and needs no refusal path.
+                (u64::from(item).wrapping_mul(7_919) % 20).saturating_add(1)
             }
             Scenario::Cancel => 50,
             Scenario::Deadline => 2_000,
@@ -516,8 +511,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // task rather than spawned. The cancellation race is driven by `join!`,
         // so one tenant's cancel reaches the others through the shared stop.
         if &*way == "host" {
-            let tenants = usize::try_from(ctx.spec.tenants)
-                .map_err(|_| FlowError::failed("a tenant count this host cannot address"))?;
+            let tenants = usize::try_from(ctx.spec.tenants).map_err(|error| {
+                FlowError::failed(format!("a tenant count this host cannot address: {error}"))
+            })?;
             let names: Vec<Arc<str>> = ["acme", "globex"]
                 .iter()
                 .take(tenants)
@@ -542,8 +538,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(total);
         }
         let mut tenants = JoinSet::new();
-        let tenant_count = usize::try_from(ctx.spec.tenants)
-            .map_err(|_| FlowError::failed("a tenant count this host cannot address"))?;
+        let tenant_count = usize::try_from(ctx.spec.tenants).map_err(|error| {
+            FlowError::failed(format!("a tenant count this host cannot address: {error}"))
+        })?;
         for tenant in ["acme", "globex"].iter().take(tenant_count) {
             tenants.spawn(tenant_run(
                 Arc::clone(&way),

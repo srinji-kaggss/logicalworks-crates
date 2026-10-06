@@ -141,6 +141,13 @@ impl Plan {
     fn tenant(&self, index: usize) -> Option<TenantPlan> {
         self.tenant.get(index).copied()
     }
+
+    /// The schedule for tenant `index`, or a refusal: a plan draws one schedule
+    /// per tenant it declares, so an index past them is a plan defect.
+    fn schedule(&self, index: usize) -> Result<TenantPlan, Box<dyn Error>> {
+        self.tenant(index)
+            .ok_or_else(|| format!("a schedule that declares no tenant at index {index}").into())
+    }
 }
 
 impl TenantPlan {
@@ -595,6 +602,14 @@ where
         .build(&GrantSet::empty())?)
 }
 
+/// Tenant `index` of `plan`, built from its own schedule, with the id it runs as.
+fn tenant_of(plan: &Plan, index: usize) -> Result<(u32, Tenant), Box<dyn Error>> {
+    let id = u32::try_from(index)?;
+    let schedule = plan.schedule(index)?;
+    let subject = tenant(id, &schedule)?;
+    Ok((id, subject))
+}
+
 /// Build one tenant's bot over exactly [`MAX_CHAINS`] chains.
 ///
 /// Written out rather than looped, because `Bot::observe` returns a builder of a
@@ -694,23 +709,18 @@ impl ChainHandles {
 fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
-        let mut tenants = Vec::new();
-        for index in 0..usize::try_from(plan.tenants)? {
-            tenants.push(tenant(
-                u32::try_from(index)?,
-                &plan
-                    .tenant(index)
-                    .ok_or("a schedule that declares no tenant at this index")?,
-            )?);
+        let count = usize::try_from(plan.tenants)?;
+        let mut tenants = Vec::with_capacity(count);
+        for index in 0..count {
+            let (_, subject) = tenant_of(&plan, index)?;
+            tenants.push(subject);
         }
 
         // Everything the run saw, as report rows.
         let mut rows: Vec<ReportRow> = Vec::new();
         for tick in 1..=plan.ticks {
             for (index, subject) in tenants.iter_mut().enumerate() {
-                let schedule = plan
-                    .tenant(index)
-                    .ok_or("a schedule that declares no tenant at this index")?;
+                let schedule = plan.schedule(index)?;
                 subject.arm(tick, &schedule);
                 subject.advance(tick);
                 subject.observe(&mut rows);
@@ -885,9 +895,7 @@ fn tenants_never_cross(band: Band) -> TestResult {
         let mut rows: Vec<ReportRow> = Vec::new();
         for tick in 1..=plan.ticks {
             for (subject, index) in [(&mut left, 0_usize), (&mut right, 1_usize)] {
-                let schedule = plan
-                    .tenant(index)
-                    .ok_or("a schedule that declares no tenant at this index")?;
+                let schedule = plan.schedule(index)?;
                 subject.arm(tick, &schedule);
                 subject.advance(tick);
                 subject.observe(&mut rows);
@@ -1071,22 +1079,13 @@ fn event_identities_are_per_event(band: Band) -> TestResult {
 fn the_same_seed_replays(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
-        for index in 0..usize::try_from(plan.tenants)? {
-            let tenant_id = u32::try_from(index)?;
-            let mut subject = tenant(
-                tenant_id,
-                &plan
-                    .tenant(index)
-                    .ok_or("a schedule that declares no tenant at this index")?,
-            )?;
+        let count = usize::try_from(plan.tenants)?;
+        for index in 0..count {
+            let (tenant_id, mut subject) = tenant_of(&plan, index)?;
+            let schedule = plan.schedule(index)?;
             let mut rows: Vec<ReportRow> = Vec::new();
             for tick in 1..=plan.ticks {
-                subject.arm(
-                    tick,
-                    &plan
-                        .tenant(index)
-                        .ok_or("a schedule that declares no tenant at this index")?,
-                );
+                subject.arm(tick, &schedule);
                 subject.advance(tick);
                 subject.observe(&mut rows);
             }
@@ -1107,14 +1106,8 @@ fn the_same_seed_replays(band: Band) -> TestResult {
         // "decided", and it is where a cross-tenant mistake would show up: a
         // settlement for another tenant's key is a typed refusal, not a quiet
         // success.
-        for index in 0..usize::try_from(plan.tenants)? {
-            let tenant_id = u32::try_from(index)?;
-            let mut subject = tenant(
-                tenant_id,
-                &plan
-                    .tenant(index)
-                    .ok_or("a schedule that declares no tenant at this index")?,
-            )?;
+        for index in 0..count {
+            let (tenant_id, mut subject) = tenant_of(&plan, index)?;
             subject.advance(0);
             let _outcome = subject.bot.tick();
             for work in subject.bot.pending() {

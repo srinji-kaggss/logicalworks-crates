@@ -184,8 +184,9 @@ fn measure(
     // Ten thousandths of a watchdog per tick. A zero tick count has no per-tick
     // rate at all, and a rate that does not fit a `u32` is a refusal rather than
     // a rounded number: both are reported as the absence they are.
-    let window = u32::try_from(ticks)
-        .map_err(|_| "a tick count that does not fit this host's address space")?;
+    let window = u32::try_from(ticks).map_err(|error| {
+        format!("a tick count that does not fit this host's address space: {error}")
+    })?;
     let per_tick = watchdogs
         .saturating_mul(10_000)
         .checked_div(window)

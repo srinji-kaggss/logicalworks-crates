@@ -152,11 +152,13 @@ fn report_concurrent(
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let started = Instant::now();
-    let lane_count = usize::try_from(concurrency)
-        .map_err(|_| "a lane count that does not fit this host's address space")?;
+    let lane_count = usize::try_from(concurrency).map_err(|error| {
+        format!("a lane count that does not fit this host's address space: {error}")
+    })?;
     let mut lanes = Vec::with_capacity(lane_count);
-    let per_lane = usize::try_from(LANE_APPENDS)
-        .map_err(|_| "a per-lane append count that does not fit this host's address space")?;
+    let per_lane = usize::try_from(LANE_APPENDS).map_err(|error| {
+        format!("a per-lane append count that does not fit this host's address space: {error}")
+    })?;
     for lane in 0..concurrency {
         let host = host.clone();
         let samples = std::sync::Arc::clone(&samples);
