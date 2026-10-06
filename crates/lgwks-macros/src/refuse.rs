@@ -169,13 +169,15 @@ fn refusal(
         }
         TokenTree::Literal(ref literal) => {
             let text = literal.to_string();
-            let body = text.trim_start_matches('r').trim_start_matches('#');
-            let body = body.strip_prefix('"').unwrap_or(body);
             // Anywhere in the literal, not only at its start: a format string
-            // such as `"{}/home/me"` carries a machine path just as surely.
+            // such as `"{}/home/me"` carries a machine path just as surely. The
+            // literal is searched whole, delimiters and all: every prefix below
+            // opens with `/`, `~` or `C`, none of which is a delimiter of any
+            // literal spelling, so no amount of stripping quotes, `r` markers or
+            // `#` hashes could stand between a prefix and the path it starts.
             MACHINE_PATHS
                 .iter()
-                .any(|prefix| body.contains(prefix))
+                .any(|prefix| text.contains(prefix))
                 .then(|| {
                     "an absolute path from one machine does not exist on the next; \
                      take the path as a flow parameter or resolve it from configuration"

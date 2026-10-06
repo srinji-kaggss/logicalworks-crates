@@ -29,8 +29,15 @@ pub(crate) struct Line {
 
 impl Line {
     /// The identifier the line starts with, if it starts with one.
-    pub(crate) fn keyword(&self) -> Option<String> {
-        self.tokens.first().and_then(ident).map(ToString::to_string)
+    pub(crate) fn keyword(&self) -> Option<&Ident> {
+        self.tokens.first().and_then(ident)
+    }
+
+    /// Whether the line starts with the identifier `word`.
+    pub(crate) fn starts_with(&self, word: &str) -> bool {
+        self.tokens
+            .first()
+            .is_some_and(|token| is_ident(token, word))
     }
 }
 
@@ -42,6 +49,26 @@ pub(crate) struct Node {
     pub(crate) children: Vec<Node>,
 }
 
+/// The tokens after the first `count` of `tokens`.
+///
+/// Every caller passes the tokens of a line whose leading words it has already
+/// read — a keyword, an `in`, the `=`, the `, at most` of a bound — so `count` is
+/// a number of tokens this slice has. Asking past the end is asking about a form
+/// that has nothing after what it consumed, and each such caller already refuses
+/// it in its own words (`if` needs a condition, `each` reads
+/// `each <name> in <items>:`); reading "nothing after it" once here keeps the
+/// fourteen callers from each deciding what an absent remainder means.
+pub(crate) fn after(tokens: &[TokenTree], count: usize) -> &[TokenTree] {
+    let mut rest = tokens;
+    for _ in 0..count {
+        let Some((_read, tail)) = rest.split_first() else {
+            return rest;
+        };
+        rest = tail;
+    }
+    rest
+}
+
 /// Split a stream into logical lines.
 pub(crate) fn split(stream: TokenStream) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
@@ -49,33 +76,42 @@ pub(crate) fn split(stream: TokenStream) -> Vec<Line> {
     let mut last_end: usize = 0;
     for token in stream {
         let start = token.span().start();
-        if !current.is_empty() && start.line > last_end {
-            lines.push(finish(std::mem::take(&mut current)));
+        if !current.is_empty()
+            && start.line > last_end
+            && let Some(line) = finish(std::mem::take(&mut current))
+        {
+            lines.push(line);
         }
         last_end = token.span().end().line;
         current.push(token);
     }
-    if !current.is_empty() {
-        lines.push(finish(current));
+    if let Some(line) = finish(current) {
+        lines.push(line);
     }
     lines
 }
 
 /// Close a line: record its position and strip a block-opening `:`.
-fn finish(mut tokens: Vec<TokenTree>) -> Line {
-    let span = tokens.first().map_or_else(Span::call_site, TokenTree::span);
+///
+/// `None` for a line with no tokens at all, which is not a line of the script:
+/// its position, its line number and its span would all be invented, and a
+/// [`Line`] whose span is invented reports an error against a place in the
+/// source the author never wrote. [`split`] closes a line only around tokens it
+/// has read, so it never asks for one of these.
+fn finish(mut tokens: Vec<TokenTree>) -> Option<Line> {
+    let span = tokens.first()?.span();
     let start = span.start();
     let opens_block = ends_in_block_colon(&tokens);
     if opens_block {
         tokens.pop();
     }
-    Line {
+    Some(Line {
         tokens,
         column: start.column,
         number: start.line,
         opens_block,
         span,
-    }
+    })
 }
 
 /// Whether the last token is a lone `:` rather than the second half of `::`.
@@ -211,7 +247,14 @@ pub(crate) fn text(tokens: &[TokenTree]) -> String {
         if gap && !rendered.is_empty() {
             rendered.push(' ');
         }
-        rendered.push_str(&span.source_text().unwrap_or_else(|| token.to_string()));
+        // Two different spellings, not one spelling with a stand-in: a token the
+        // person wrote has the source text its span names, and a token another
+        // macro produced has none, so the compiler's own rendering of it is the
+        // closest text available.
+        match span.source_text() {
+            Some(source) => rendered.push_str(&source),
+            None => rendered.push_str(&token.to_string()),
+        }
         previous_end = Some(span.end());
     }
     rendered

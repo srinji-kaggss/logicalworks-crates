@@ -4,7 +4,7 @@ use lgwks_deps::proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTre
 use lgwks_deps::quote::{ToTokens, quote};
 use lgwks_deps::syn::{Error, Result};
 
-use crate::lines::{Line, group, ident, is_ident, is_parens, is_punct, text};
+use crate::lines::{Line, after, group, ident, is_ident, is_parens, is_punct, text};
 
 use super::{Labels, Shapes, runtime};
 
@@ -16,18 +16,16 @@ pub(super) fn rewrite(
     line: &Line,
 ) -> Result<TokenStream> {
     let mut output = TokenStream::new();
-    let mut index: usize = 0;
-    while let Some(token) = tokens.get(index) {
+    // The walk carries the tail rather than an index into it, so "the tokens
+    // after `run`" is the slice itself and a call that consumed several tokens
+    // hands back where it stopped, instead of the caller re-deriving both.
+    let mut rest = tokens;
+    while let Some((token, tail)) = rest.split_first() {
         if is_ident(token, "run")
-            && let Some((consumed, call)) = run_call(
-                tokens.get(index.saturating_add(1)..).unwrap_or_default(),
-                labels,
-                shapes,
-                line,
-            )?
+            && let Some((remaining, call)) = run_call(tail, labels, shapes, line)?
         {
             output.extend(quote!((#call?)));
-            index = index.saturating_add(consumed).saturating_add(1);
+            rest = remaining;
             continue;
         }
         if let TokenTree::Group(ref group) = *token {
@@ -38,41 +36,54 @@ pub(super) fn rewrite(
         } else {
             output.extend([token.clone()]);
         }
-        index = index.saturating_add(1);
+        rest = tail;
     }
     Ok(output)
 }
 
-/// `path(args)` after a `run`: the call, awaited and propagated, and how many
-/// tokens it used. `None` when what follows `run` is not a call.
-pub(super) fn run_call(
-    tokens: &[TokenTree],
+/// `path(args)` after a `run`: the call, awaited and propagated, and the tokens
+/// left after it. `None` when what follows `run` is not a call, in which case
+/// nothing was consumed and the caller continues from the first token.
+pub(super) fn run_call<'line>(
+    tokens: &'line [TokenTree],
     labels: &mut Labels,
     shapes: &mut Shapes,
     line: &Line,
-) -> Result<Option<(usize, TokenStream)>> {
-    let mut path_end: usize = 0;
+) -> Result<Option<(&'line [TokenTree], TokenStream)>> {
+    let mut path: Vec<TokenTree> = Vec::new();
+    let mut rest = tokens;
     let mut callee: Option<&Ident> = None;
-    while let Some(segment) = tokens.get(path_end).and_then(ident) {
-        callee = Some(segment);
-        path_end = path_end.saturating_add(1);
-        let colons = (tokens.get(path_end), tokens.get(path_end.saturating_add(1)));
-        if let (Some(first), Some(second)) = colons
+    while let Some((segment, tail)) = rest.split_first() {
+        let Some(name) = ident(segment) else {
+            break;
+        };
+        callee = Some(name);
+        path.push(segment.clone());
+        // A `::` continues the path, so the segment after it is the callee; a
+        // parenthesis ends it, and that group is the call's arguments.
+        if let Some((first, after_first)) = tail.split_first()
+            && let Some((second, after_second)) = after_first.split_first()
             && is_punct(first, ':')
             && is_punct(second, ':')
         {
-            path_end = path_end.saturating_add(2);
-            continue;
+            path.push(first.clone());
+            path.push(second.clone());
+            rest = after_second;
+        } else {
+            rest = tail;
+            break;
         }
-        break;
     }
-    let (Some(callee), Some(args)) = (callee, tokens.get(path_end)) else {
+    let (Some(callee), Some(args)) = (callee, rest.first()) else {
         return Ok(None);
     };
     let Some(args_group) = group(args).filter(|_| is_parens(args)) else {
         return Ok(None);
     };
-    let path: TokenStream = tokens.iter().take(path_end).cloned().collect();
+    // The callee path is every token read above, and the call consumed the
+    // argument group as well, so what is left is what follows it.
+    let path_tokens: TokenStream = path.iter().cloned().collect();
+    let after_args = after(rest, path.len());
     let arguments: Vec<TokenTree> = args_group.stream().into_iter().collect();
     let arguments = rewrite(&arguments, labels, shapes, line)?;
     let callee_name = callee.to_string();
@@ -83,33 +94,43 @@ pub(super) fn run_call(
         quote!(&scope.enter(#label)?)
     };
     let call = if arguments.is_empty() {
-        quote!(#path(#scope_argument).await)
+        quote!(#path_tokens(#scope_argument).await)
     } else {
-        quote!(#path(#scope_argument, #arguments).await)
+        quote!(#path_tokens(#scope_argument, #arguments).await)
     };
     shapes.push(shape_tokens(
         "Run",
         &callee_name,
-        &format!("run {}", text(tokens.get(..path_end).unwrap_or_default())),
+        &format!("run {}", text(&path)),
         line,
         &[],
     ));
-    Ok(Some((path_end.saturating_add(1), call)))
+    Ok(Some((after_args, call)))
 }
 
 /// Words a line must start with, and the tokens after them.
+///
+/// Each word is read off the front of the remaining tokens rather than compared
+/// by index, so a line shorter than the form is refused by the same refusal a
+/// line that starts with something else is, rather than answering with an empty
+/// remainder that reads as "there is nothing after `give back`".
 pub(super) fn expect_words<'line>(
     line: &'line Line,
     words: &[&str],
     form: &str,
 ) -> Result<&'line [TokenTree]> {
-    let matches = words.iter().enumerate().all(|(index, word)| {
-        line.tokens
-            .get(index)
-            .is_some_and(|token| is_ident(token, word))
-    });
-    let rest = line.tokens.get(words.len()..).unwrap_or_default();
-    if !matches || rest.is_empty() {
+    let mut rest: &[TokenTree] = &line.tokens;
+    for word in words {
+        match rest.split_first() {
+            Some((token, tail)) if is_ident(token, word) => rest = tail,
+            _ => {
+                let refusal = Err(Error::new(line.span, format!("this line reads {form}")));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "expect_words: returning an error to the caller");
+                return refusal;
+            }
+        }
+    }
+    if rest.is_empty() {
         let refusal = Err(Error::new(line.span, format!("this line reads {form}")));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "expect_words: returning an error to the caller");
         return refusal;
@@ -211,9 +232,15 @@ pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream>
     match *tokens {
         [TokenTree::Literal(ref literal)] => {
             let written = literal.to_string().replace('_', "");
-            let split =
-                written.find(|character: char| !(character.is_ascii_digit() || character == '.'));
-            let (number, unit) = written.split_at(split.unwrap_or(written.len()));
+            // Two readings, and the second is not a fallback: a literal whose
+            // every character is numeric or a point names no unit at all, which
+            // is the refusal below rather than a unit of nothing.
+            let (number, unit) = match written
+                .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+            {
+                Some(at) => written.split_at(at),
+                None => (written.as_str(), ""),
+            };
             let Some(&(_, scale)) = UNITS.iter().find(|&&(name, _)| name == unit) else {
                 let refusal = Err(Error::new(
                     literal.span(),
@@ -247,7 +274,22 @@ pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream>
             let literal = Literal::u64_unsuffixed(nanos);
             Ok(quote!(::core::time::Duration::from_nanos(#literal)))
         }
-        [ref only] if is_parens(only) => Ok(group(only).map(Group::stream).unwrap_or_default()),
+        [ref only] if is_parens(only) => {
+            // The guard above already decided this token is a parenthesised
+            // group, so the group is there to read; the arm states that rather
+            // than answering with an empty stream for a group it just matched.
+            match group(only) {
+                Some(inner) => Ok(inner.stream()),
+                None => {
+                    let refusal = Err(Error::new(
+                        line.span,
+                        "a duration is `250ms`, `2s`, `1.5s`, `5m`, `1h`, or `(expr)`",
+                    ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "duration: returning an error to the caller");
+                    refusal
+                }
+            }
+        }
         _ => Err(Error::new(
             line.span,
             "a duration is `250ms`, `2s`, `1.5s`, `5m`, `1h`, or `(expr)`",
@@ -257,7 +299,13 @@ pub(super) fn duration(tokens: &[TokenTree], line: &Line) -> Result<TokenStream>
 
 /// `number` (digits with at most one `.`) times `scale`, exactly.
 pub(super) fn scaled(number: &str, scale: u128) -> Option<u128> {
-    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    // A number with no point is a whole number: its fraction is empty, and an
+    // empty fraction is what a whole number multiplies by, not a default for a
+    // missing one.
+    let (whole, fraction) = match number.split_once('.') {
+        Some(split) => split,
+        None => (number, ""),
+    };
     if whole.is_empty() && fraction.is_empty() {
         return None;
     }
@@ -313,9 +361,17 @@ pub(super) fn shape_tokens(
     }
 }
 
-/// The line number as a `u32` literal.
+/// The line number as a `u32` literal, saturating at `u32::MAX`.
+///
+/// The arithmetic saturates rather than substituting a value: a source with more
+/// lines than `u32::MAX` cannot be read by any host, and a saturated line number
+/// keeps the emitted literal the last line there is rather than wrapping onto
+/// some other line of the file.
 pub(super) fn line_literal(line: &Line) -> Literal {
-    Literal::u32_unsuffixed(u32::try_from(line.number).unwrap_or(u32::MAX))
+    match u32::try_from(line.number) {
+        Ok(number) => Literal::u32_unsuffixed(number),
+        Err(_more_lines_than_a_u32_holds) => Literal::u32_unsuffixed(u32::MAX),
+    }
 }
 
 /// Tokens as a person would write them.
@@ -349,8 +405,10 @@ pub(super) fn run_only(
     }
     let lookahead_labels = labels.seen.clone();
     let lookahead_shapes = shapes.len();
+    // The call must consume the whole line to be the line's value; anything left
+    // after it is another statement, so the lookahead is rolled back.
     match run_call(rest, labels, shapes, line)? {
-        Some((consumed, call)) if consumed == rest.len() => Ok(Some(call)),
+        Some((&[], call)) => Ok(Some(call)),
         _ => {
             labels.seen = lookahead_labels;
             shapes.truncate(lookahead_shapes);
