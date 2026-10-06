@@ -9,6 +9,23 @@
 
 use std::path::Path;
 
+#[path = "../../../lgwks-deps/tests/support/target_dir.rs"]
+mod target_dir;
+
+/// Where a probe's build goes: the caller's `CARGO_TARGET_DIR`, otherwise the
+/// workspace's `target/`, by the one rule every crate's consumer probes share.
+///
+/// A path under the crate's own manifest directory is not that: on a gate whose
+/// target directory lives outside the checkout, it is a directory the checkout
+/// step deletes, so every probe compiled its dependencies cold on every run and
+/// `serde_facade_consumers` ran past its 300 s bound on the local runner.
+///
+/// # Errors
+/// Returns the refusal when the workspace root cannot be located.
+pub fn target_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    target_dir::workspace_target_dir()
+}
+
 /// Write `main_rs` into a fresh crate whose manifest is `manifest`, resolve its
 /// lockfile offline, run it, and return its stdout.
 ///
@@ -22,15 +39,13 @@ pub fn build_and_run(manifest: &str, main_rs: &str) -> Result<String, Box<dyn st
     std::fs::write(&manifest_path, manifest)?;
     std::fs::write(directory.path().join("src/main.rs"), main_rs)?;
 
+    let target = target_dir()?;
     let cargo = |args: &[&str]| {
         std::process::Command::new(env!("CARGO"))
             .args(args)
             .arg("--manifest-path")
             .arg(&manifest_path)
-            .env(
-                "CARGO_TARGET_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-            )
+            .env("CARGO_TARGET_DIR", &target)
             .output()
     };
     let lock = cargo(&["generate-lockfile", "--offline"])?;
