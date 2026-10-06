@@ -52,7 +52,7 @@ use lgwks_std::task::{
 
 use crate::gate::Gate;
 use crate::rng::Rng;
-use crate::seeded_sweep::{SWEEP_SEEDS, fold, initial_trace};
+use crate::seeded_sweep::{SWEEP_SEEDS, fold_usize, initial_trace, next_index};
 
 /// The smallest ceiling a seed may draw: above one, so a burst of the drawn
 /// size can be both under and over the ceiling.
@@ -80,9 +80,13 @@ const TOO_SHORT: Duration = Duration::from_millis(50);
 /// The value job `index` of a burst seeded by `seed` must return: computed
 /// from the seed and position alone, so a result that crossed to another job
 /// or another burst cannot match.
-fn expected(seed: u64, index: usize) -> u64 {
-    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(u64::try_from(index).unwrap_or(u64::MAX))
+fn expected(seed: u64, index: usize) -> usize {
+    // The value is an index-width number end to end: the seed becomes the base
+    // through the shared word fold and the position is added to it, so two
+    // positions of one burst can never share a value and no conversion between
+    // the 64-bit seed and the index width can truncate one.
+    let mut stream = seed;
+    next_index(&mut stream).wrapping_add(index)
 }
 
 /// The burst a seed draws: how many jobs, and how many yields each spends.
@@ -132,7 +136,7 @@ fn burst_trace(seed: u64, jobs: usize, ceiling: usize) -> u64 {
             expected(seed, index),
             "seed {seed:#x}: job {index} returned another job's value"
         );
-        fold(&mut trace, value);
+        fold_usize(&mut trace, value);
     }
     let seen = peak.load(Ordering::SeqCst);
     assert!(
