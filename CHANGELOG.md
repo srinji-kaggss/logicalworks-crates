@@ -9,6 +9,36 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std tests — `fs::capability` is swept with hostile seeds
+
+`fs::capability` had 28 unit tests and no seeded sweep. It is the sandbox
+boundary that `Dir` promises, so `tests/it/sim_fs_capability.rs` now draws
+adversarial inputs per seed and watches a parent directory the handle was
+never given, which makes an escape observable rather than assumed absent:
+
+- names spelled from `..`, `.`, `/`, NUL, newline and multi-byte text are
+  refused with `InvalidInput` by all eight entry points, exactly when they are
+  not one component, and valid names land inside and nowhere else;
+- symlinks aimed up, absolute, and through `sub/../..` are reported as
+  symlinks with their targets verbatim, and are never opened, truncated or
+  descended under the default policy;
+- every created file and directory carries no group, world or special bits;
+- a held handle keeps writing into the directory it opened after that
+  directory's name is moved onto one to four successive replacements;
+- 2–16 tenants writing the same names concurrently each read back only their
+  own bytes;
+- a `try_clone` handle keeps resolving and creating after the original and
+  the other clones are dropped in a seeded order.
+
+The `lgwks-deps` sim substrate doc no longer claims `lgwks_std` shares
+`seed.rs`: the crate sits below `lgwks_bot` and keeps its own generator.
+
+```
+$ cargo nextest run -p lgwks_std --locked --features full
+691 tests run: 691 passed, 0 skipped        (36 in sim_fs_capability)
+```
+
+
 ### tests — the simulation substrate's own contracts are swept, not assumed
 
 Every `sim_*` family rests on the seed substrate, the sweep and the scratch
