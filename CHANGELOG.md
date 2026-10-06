@@ -81,6 +81,43 @@ Behaviour is unchanged. All 10 `lgwks_macros` tests pass, including the property
 suite that renders trees, reads them back and asserts a line moved off its column
 is refused at that line, and `lgwks_bot`'s 192 `script!` tests pass against the
 rewritten emitter.
+### lgwks_bot — the measurement examples: no sentinel stands in for a reading
+
+Every `unwrap_or` family call across the ten example harnesses was a fabricated
+number, a fabricated identity, or a fabricated error, and each is now either the
+reading the operation produced or a typed refusal. The published numbers change
+in three places, all of them cases where the old output claimed a measurement
+nobody made.
+
+- **No example substitutes a default for a missing value.** A percentile over an
+  empty sample is `null` (INV-BOT-142's spelling of *not measured*) rather than
+  `0`, a run whose elapsed window is below the clock's own resolution reports no
+  rate rather than a fabricated maximum, `fsyncs/records` is `none` when nothing
+  was staged, and `peak_rss_kib` is `null` off Linux instead of `0` — a printed
+  zero beside a memory field reads as a process that used none.
+- **One percentile definition.** `inspect_scale` and `measure_overhead` carried
+  private percentile functions beside the shared instrument at
+  `examples/support/measure.rs` that the other three harnesses use; both now
+  report through it, so every harness's p50/p95/p99 means the same thing.
+  `measure_overhead`'s two JSON lines become that instrument's line format, and
+  `inspect_scale`'s tier line carries the same `n=`/`max=` fields the others do.
+- **One scratch directory.** `examples/support/scratch.rs` owns the random-named
+  temp root four harnesses built by hand and removed only on the success path;
+  a refusal half way through a sweep now leaves nothing behind for the next run
+  to inherit (INV-BOT-116). One recovery from a poisoned `Mutex` lives at
+  `tests/support/lock.rs` and is included by path from the tests and the
+  examples, so no harness carries a second opinion about what a panic leaves.
+- **An unknown mode is a refusal.** `inspect_scale` folded any unrecognised
+  argument into the tier sweep, so a mistyped mode measured the wrong thing
+  silently; it now names the two modes and refuses the rest. `review_pr_bench`
+  refuses a tier of zero, whose percentiles would have been readings of an
+  empty sample, and its usage and diagnostic lines go through locked handles
+  whose write errors are handled.
+- `script_tenants` and `compare_orchestration` spell their retry ceiling inside
+  the loop instead of carrying an `Option` whose `None` arm stood in for a
+  refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
+  the two `unwrap()`s it used to carry so the audit record demonstrates one
+  claim rather than two.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 

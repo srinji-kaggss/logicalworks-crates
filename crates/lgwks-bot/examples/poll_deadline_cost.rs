@@ -28,9 +28,13 @@ use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, Execute, GrantSet, Obs
 
 #[path = "support/measure.rs"]
 mod measure;
+#[path = "support/scratch.rs"]
+mod scratch;
 
 #[path = "../tests/support/effects.rs"]
 mod effects;
+
+use scratch::Scratch;
 
 /// How many ticks each configuration is timed over.
 ///
@@ -177,13 +181,18 @@ fn measure(
     // caller can see is the number this table claims.
     let mut out = std::io::stdout().lock();
     let _written = writeln!(out, "{}", summary.line(label));
+    // Ten thousandths of a watchdog per tick. A zero tick count has no per-tick
+    // rate at all, and a rate that does not fit a `u32` is a refusal rather than
+    // a rounded number: both are reported as the absence they are.
+    let window = u32::try_from(ticks)
+        .map_err(|_| "a tick count that does not fit this host's address space")?;
+    let per_tick = watchdogs
+        .saturating_mul(10_000)
+        .checked_div(window)
+        .ok_or("a run of zero ticks has no per-tick rate")?;
     let _written = writeln!(
         out,
-        "  watchdogs: {watchdogs} over {ticks} ticks, ten thousandths per tick: {}",
-        watchdogs
-            .saturating_mul(10_000)
-            .checked_div(u32::try_from(ticks).unwrap_or(1))
-            .unwrap_or(0)
+        "  watchdogs: {watchdogs} over {ticks} ticks, ten thousandths per tick: {per_tick}"
     );
     Ok(summary)
 }
@@ -264,12 +273,9 @@ fn wedged_table(scratch: &std::path::Path) -> Result<(), Box<dyn std::error::Err
 /// Measure the ordinary tick at every tier, then the saturated one.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A per-run directory under the system temp dir, named by random bytes so
-    // two runs on one machine never share one and no run overwrites another's
-    // output.
-    let unique = lgwks_std::random::bytes::<8>()?;
-    let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
-    let scratch = std::env::temp_dir().join(format!("lgwks-poll-cost-{hex}"));
-    std::fs::create_dir_all(&scratch)?;
+    // two runs on one machine never share one, and owned by a guard so a
+    // refusal half way through leaves nothing for the next run to inherit.
+    let scratch = Scratch::new("poll-cost")?;
 
     let mut out = std::io::stdout().lock();
     let _written = writeln!(
@@ -280,8 +286,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let _written = writeln!(out, "{}", "-".repeat(72));
 
-    ready_table(&scratch)?;
+    ready_table(scratch.path())?;
     let _written = writeln!(out, "{}", "-".repeat(72));
-    wedged_table(&scratch)?;
+    wedged_table(scratch.path())?;
     Ok(())
 }

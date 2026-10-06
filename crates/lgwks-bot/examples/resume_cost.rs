@@ -35,10 +35,16 @@ use lgwks_bot::task::{Host, task};
 
 #[path = "support/effect_key.rs"]
 mod effect_key;
+#[path = "../tests/support/lock.rs"]
+mod lock;
 #[path = "support/measure.rs"]
 mod measure;
+#[path = "support/scratch.rs"]
+mod scratch;
 
 use effect_key::key;
+use lock::take_unpoisoned;
+use scratch::Scratch;
 
 /// How many steps each measurement performs.
 const STEPS: usize = 2_000;
@@ -102,18 +108,21 @@ const LANE_APPENDS: u32 = 16;
 /// Integer arithmetic only, so the number a report carries is exactly the number a
 /// reader can compare against another run's rather than one that lost a digit to
 /// floating point on the way out.
-fn per_record(flushes: u64, records: u64) -> String {
-    if records == 0 {
-        return String::from("none-staged");
+fn per_record(flushes: u64, records: u64) -> Option<String> {
+    let hundredths = flushes.checked_mul(100)?.checked_div(records)?;
+    Some(format!("{hundredths}/100"))
+}
+
+/// The `fsyncs_per_record` clause every tier line and the stored summary carry.
+///
+/// One definition, because the ratio is what says whether a mechanism batches,
+/// and two spellings of it would be free to drift. An absent ratio is printed as
+/// `none` with the two counts beside it, never as a zero.
+fn flush_clause(flushes: u64, records: u64) -> String {
+    match per_record(flushes, records) {
+        Some(ratio) => format!("fsyncs_per_record={ratio}"),
+        None => format!("fsyncs_per_record=none (flushes={flushes} records={records})"),
     }
-    let hundredths = u128::from(flushes)
-        .saturating_mul(100)
-        .checked_div(u128::from(records))
-        .unwrap_or(u128::MAX);
-    u64::try_from(hundredths).map_or_else(
-        |_| String::from("over-100/100"),
-        |whole| format!("{whole}/100"),
-    )
 }
 
 /// Report one tier's cost at `concurrency` lanes of [`LANE_APPENDS`] appends.
@@ -143,7 +152,11 @@ fn report_concurrent(
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let started = Instant::now();
-    let mut lanes = Vec::with_capacity(usize::try_from(concurrency).unwrap_or(0));
+    let lane_count = usize::try_from(concurrency)
+        .map_err(|_| "a lane count that does not fit this host's address space")?;
+    let mut lanes = Vec::with_capacity(lane_count);
+    let per_lane = usize::try_from(LANE_APPENDS)
+        .map_err(|_| "a per-lane append count that does not fit this host's address space")?;
     for lane in 0..concurrency {
         let host = host.clone();
         let samples = std::sync::Arc::clone(&samples);
@@ -151,7 +164,7 @@ fn report_concurrent(
             std::thread::Builder::new()
                 .name(format!("cost-{lane}"))
                 .spawn(move || -> Result<(), String> {
-                    let mut local = Vec::with_capacity(usize::try_from(LANE_APPENDS).unwrap_or(0));
+                    let mut local = Vec::with_capacity(per_lane);
                     let work = one_step_task().map_err(|cause| cause.to_string())?;
                     for index in 0..LANE_APPENDS {
                         let at = Instant::now();
@@ -165,10 +178,7 @@ fn report_concurrent(
                             )); lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "report_concurrent: returning an error to the caller"); return refusal; };
                         }
                     }
-                    samples
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .extend(local);
+                    take_unpoisoned(&samples).extend(local);
                     Ok(())
                 })?,
         );
@@ -180,18 +190,14 @@ fn report_concurrent(
     let elapsed = started.elapsed();
     let acknowledged = LANE_APPENDS.saturating_mul(concurrency);
     let (flushes, staged) = store.flush_counts();
-    let mut sorted = samples
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
+    let mut sorted = take_unpoisoned(&samples).clone();
     let summary = measure::Summary::of(&mut sorted);
     report(&format!("tier c={concurrency} n={acknowledged}"), &summary);
     let mut out = std::io::stdout().lock();
     let _written = writeln!(
         out,
-        "tier c={concurrency}: elapsed={elapsed:?} fsyncs={flushes} records={staged} \
-         fsyncs_per_record={}",
-        per_record(flushes, staged)
+        "tier c={concurrency}: elapsed={elapsed:?} fsyncs={flushes} records={staged} {}",
+        flush_clause(flushes, staged)
     );
     drop(host);
     drop(std::fs::remove_dir_all(&tier_dir));
@@ -200,12 +206,15 @@ fn report_concurrent(
 
 /// Report the per-step cost of each mechanism over the same payload size.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Random bytes rather than a process id: the OS reuses ids, so two harness
-    // runs on one machine would share a directory and read each other's records.
-    let unique = lgwks_std::random::bytes::<8>()?;
-    let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
-    let scratch = std::env::temp_dir().join(format!("lgwks-resume-bench-{hex}"));
-    std::fs::create_dir_all(&scratch)?;
+    // The scratch root is owned by a guard: a refusal half way through the sweep
+    // leaves no directory behind for the next run to inherit.
+    let scratch = Scratch::new("resume-bench")?;
+
+    // Every mechanism keys its record by a `u32` ordinal, so the sample count is
+    // drawn in that width once here instead of being narrowed per step: a count
+    // this host cannot address is a refusal, not a wrapped index.
+    let steps = u32::try_from(STEPS)?;
+    let step_slots = usize::try_from(steps)?;
 
     let mut out = std::io::stdout().lock();
     let _written = writeln!(
@@ -217,11 +226,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Measurement 1: no store. A hand-built scope, so the "no store" run is the
     // same body rather than a different one that happens to be cheaper.
     let scope = Scope::root(Tenant::new("bench")?);
-    let mut plain = Vec::with_capacity(STEPS);
-    for index in 0..STEPS {
+    let mut plain = Vec::with_capacity(step_slots);
+    for index in 0..steps {
         let started = Instant::now();
         let outcome = lgwks_bot::block_on(remember(&scope, "plain", || async move {
-            Ok::<_, FlowError>(u32::try_from(index).unwrap_or_default())
+            Ok::<_, FlowError>(index)
         }));
         plain.push(started.elapsed().as_micros());
         if outcome.is_err() {
@@ -234,15 +243,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Measurement 2: the same count through a real file-backed store, each step
     // under its own run so no step replays another step's record.
-    let store_dir: PathBuf = scratch.join("store");
+    let store_dir: PathBuf = scratch.path().join("store");
     let host = Host::builder("bench")?.run_store(&store_dir)?.build()?;
-    let mut stored = Vec::with_capacity(STEPS);
-    for index in 0..STEPS {
+    let mut stored = Vec::with_capacity(step_slots);
+    for index in 0..steps {
         let started = Instant::now();
-        let report = lgwks_bot::block_on(host.run(
-            &one_step_task()?,
-            (0, u32::try_from(index).unwrap_or_default()),
-        ));
+        let report = lgwks_bot::block_on(host.run(&one_step_task()?, (0, index)));
         stored.push(started.elapsed().as_micros());
         if !report.disposition().is_success() {
             {
@@ -264,9 +270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flush_counts();
     let _written = writeln!(
         out,
-        "stored (remember): fsyncs={flushes} records={staged} \
-         fsyncs_per_record={}",
-        per_record(flushes, staged)
+        "stored (remember): fsyncs={flushes} records={staged} {}",
+        flush_clause(flushes, staged)
     );
 
     // Measurement 2b: the same body at concurrency, which is where a batch forms.
@@ -274,19 +279,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // batch with. The sweep below is what says whether the flush rate is the
     // mechanism's ceiling or the device's.
     for tier in TIERS {
-        report_concurrent(&scratch, tier)?;
+        report_concurrent(scratch.path(), tier)?;
     }
 
     // Measurement 3: the estate's existing durable append, at the same payload
     // size. This is the frontier comparison: if `remember` cost more than a
     // journal append for the same bytes, it would be paying for the same mechanism
     // twice.
-    let mut journal = FileJournal::open(scratch.join("journal.bin"))?;
-    let mut journalled = Vec::with_capacity(STEPS);
-    for index in 0..STEPS {
-        let event = EffectEvent::IntentAdmitted {
-            key: key(u32::try_from(index).unwrap_or_default())?,
-        };
+    let mut journal = FileJournal::open(scratch.path().join("journal.bin"))?;
+    let mut journalled = Vec::with_capacity(step_slots);
+    for index in 0..steps {
+        let event = EffectEvent::IntentAdmitted { key: key(index)? };
         let started = Instant::now();
         let appended = journal.compare_and_append(tail_of(&journal), &event);
         journalled.push(started.elapsed().as_micros());
@@ -310,6 +313,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          journal::owner, so the difference above is what a step record costs over \
          an effect record, not two implementations of the same thing"
     );
-    drop(std::fs::remove_dir_all(&scratch));
     Ok(())
 }

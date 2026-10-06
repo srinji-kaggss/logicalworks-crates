@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::rt::sync::{CancellationToken, Semaphore};
@@ -41,6 +41,11 @@ use lgwks_bot::rt::task::{JoinSet, join_all_bounded};
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::script::{FlowError, Scope, Tenant, within};
 use lgwks_bot::task::{Host, task};
+
+#[path = "../tests/support/lock.rs"]
+mod lock;
+
+use lock::take_unpoisoned;
 
 /// Which workload runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,8 +128,8 @@ struct Probe {
     attempts: AtomicU64,
     /// Keys the site served twice.
     duplicates: AtomicU64,
-    /// Per-body wall time, microseconds.
-    latencies: Mutex<Vec<u64>>,
+    /// Per-body wall time, microseconds, in the width `as_micros` reports.
+    latencies: Mutex<Vec<u128>>,
     /// Keys served, and items whose first attempt failed.
     served: Mutex<(HashSet<String>, HashSet<String>)>,
 }
@@ -151,12 +156,8 @@ impl Live {
     /// The body reached its end.
     fn finish(self) {
         self.probe.finished.fetch_add(1, Ordering::Relaxed);
-        let micros = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.probe
-            .latencies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(micros);
+        let micros = self.started.elapsed().as_micros();
+        take_unpoisoned(&self.probe.latencies).push(micros);
     }
 }
 
@@ -180,20 +181,22 @@ impl Ctx {
         self.probe.attempts.fetch_add(1, Ordering::Relaxed);
         let pause = match self.spec.scenario {
             Scenario::Throughput | Scenario::Storm => 1,
-            Scenario::FailFast => u64::from(item)
-                .wrapping_mul(7_919)
-                .checked_rem(20)
-                .unwrap_or(0)
-                .saturating_add(1),
+            Scenario::FailFast => {
+                // A deterministic pause of 1-20 ms. The scale is non-zero, so
+                // the remainder exists; the arm is here because a zero scale
+                // would otherwise read as a pause of zero milliseconds.
+                let Some(scale) = u64::from(item).wrapping_mul(7_919).checked_rem(20) else {
+                    let refusal = Err(FlowError::failed("the pause scale must be non-zero"));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "attempt: returning an error to the caller");
+                    return refusal;
+                };
+                scale.saturating_add(1)
+            }
             Scenario::Cancel => 50,
             Scenario::Deadline => 2_000,
         };
         sleep(Duration::from_millis(pause)).await;
-        let mut served = self
-            .probe
-            .served
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut served = take_unpoisoned(&self.probe.served);
         match self.spec.scenario {
             Scenario::Storm => {
                 let refusal = Err(FlowError::transient("the upstream is down"));
@@ -399,9 +402,17 @@ async fn tenant_run_host(
     stop: CancellationToken,
 ) -> Result<u64, FlowError> {
     let items: Vec<u32> = (0..ctx.spec.items).collect();
-    stop.run_until_cancelled(by_host(Arc::clone(&ctx), Arc::clone(&tenant), items))
+    match stop
+        .run_until_cancelled(by_host(Arc::clone(&ctx), Arc::clone(&tenant), items))
         .await
-        .unwrap_or_else(|| Err(FlowError::failed("cancelled")))
+    {
+        Some(answered) => answered,
+        None => {
+            let refusal = Err(FlowError::failed("cancelled"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_run_host: returning an error to the caller");
+            refusal
+        }
+    }
 }
 // END host
 
@@ -426,25 +437,55 @@ async fn tenant_run(
             _ => by_joinset(Arc::clone(&ctx), Arc::clone(&tenant), items).await,
         }
     };
-    stop.run_until_cancelled(run)
-        .await
-        .unwrap_or_else(|| Err(FlowError::failed("cancelled")))
+    match stop.run_until_cancelled(run).await {
+        Some(answered) => answered,
+        None => {
+            let refusal = Err(FlowError::failed("cancelled"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tenant_run: returning an error to the caller");
+            refusal
+        }
+    }
 }
 
-/// The value at `permille` of sorted `values`, as `milliseconds.micros`.
-fn quantile(values: &[u64], permille: usize) -> String {
-    let rank = values
+/// The `permille`-th value of sorted `values`, in microseconds.
+///
+/// `None` when the sample is empty or the rank does not divide: an empty sample
+/// has no quantile, and the publisher below reports the absence rather than a
+/// number nobody observed.
+fn quantile(sorted: &[u128], permille: usize) -> Option<u128> {
+    let rank = sorted
         .len()
-        .saturating_sub(1)
+        .checked_sub(1)?
         .saturating_mul(permille)
+        .checked_div(1_000)?;
+    sorted.get(rank).copied()
+}
+
+/// A latency as JSON milliseconds at microsecond resolution, or `null`.
+///
+/// `null` is the estate's spelling of *not measured* (INV-BOT-142), and the
+/// orchestration runner skips a `null` median rather than reading it as a
+/// number. A published zero would be indistinguishable from a run that finished
+/// inside a microsecond.
+fn millis_field(micros: Option<u128>) -> Result<String, Box<dyn std::error::Error>> {
+    let Some(micros) = micros else {
+        return Ok(String::from("null"));
+    };
+    let whole = micros
         .checked_div(1_000)
-        .unwrap_or(0);
-    let micros = values.get(rank).copied().unwrap_or(0);
-    format!(
-        "{}.{:03}",
-        micros.checked_div(1_000).unwrap_or(0),
-        micros.checked_rem(1_000).unwrap_or(0)
-    )
+        .ok_or("a millisecond is a thousand microseconds")?;
+    let fraction = micros
+        .checked_rem(1_000)
+        .ok_or("a millisecond is a thousand microseconds")?;
+    Ok(format!("{whole}.{fraction:03}"))
+}
+
+/// A counted number as a JSON number, or `null` for a count that is not one.
+fn count_field(value: Option<u128>) -> String {
+    match value {
+        Some(number) => number.to_string(),
+        None => String::from("null"),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -475,10 +516,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // task rather than spawned. The cancellation race is driven by `join!`,
         // so one tenant's cancel reaches the others through the shared stop.
         if &*way == "host" {
+            let tenants = usize::try_from(ctx.spec.tenants)
+                .map_err(|_| FlowError::failed("a tenant count this host cannot address"))?;
             let names: Vec<Arc<str>> = ["acme", "globex"]
                 .iter()
-                .take(usize::try_from(ctx.spec.tenants).unwrap_or(1))
-                .map(|name| Arc::from(*name))
+                .take(tenants)
+                .map(|n| Arc::from(*n))
                 .collect();
             let runs = lgwks_std::task::join_all(
                 names
@@ -499,10 +542,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(total);
         }
         let mut tenants = JoinSet::new();
-        for tenant in ["acme", "globex"]
-            .iter()
-            .take(usize::try_from(ctx.spec.tenants).unwrap_or(1))
-        {
+        let tenant_count = usize::try_from(ctx.spec.tenants)
+            .map_err(|_| FlowError::failed("a tenant count this host cannot address"))?;
+        for tenant in ["acme", "globex"].iter().take(tenant_count) {
             tenants.spawn(tenant_run(
                 Arc::clone(&way),
                 Arc::clone(&ctx),
@@ -532,28 +574,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finished
         .load(Ordering::Relaxed)
         .saturating_sub(finished_at_return);
-    let mut latencies = probe
-        .latencies
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let mut latencies = take_unpoisoned(&probe.latencies).clone();
     latencies.sort_unstable();
     let attempts = probe.attempts.load(Ordering::Relaxed);
     let (error, total) = match outcome {
         Ok(total) => (String::new(), total),
         Err(error) => (error.to_string(), 0),
     };
-    let items = u64::from(ctx.spec.items).saturating_mul(u64::from(ctx.spec.tenants));
-    let elapsed_micros = u64::try_from(elapsed.as_micros())
-        .unwrap_or(u64::MAX)
-        .max(1);
+    let items = u128::from(ctx.spec.items).saturating_mul(u128::from(ctx.spec.tenants));
+    let elapsed_micros = elapsed.as_micros();
     let per_s = if error.is_empty() {
-        items
-            .saturating_mul(1_000_000)
-            .checked_div(elapsed_micros)
-            .unwrap_or(0)
+        // A run that finished inside the clock's own resolution has no rate to
+        // report, and `null` says so where a fabricated maximum would read as
+        // the fastest run in the table.
+        count_field(items.saturating_mul(1_000_000).checked_div(elapsed_micros))
     } else {
-        0
+        String::from("0")
     };
     writeln!(
         std::io::stdout().lock(),
@@ -564,10 +600,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          \"finished_after_return\":{finished_after_return},\"error\":{:?}}}",
         args.get(2).map_or("throughput", String::as_str),
         error.is_empty(),
-        quantile(&[elapsed_micros], 0),
-        quantile(&latencies, 500),
-        quantile(&latencies, 950),
-        quantile(&latencies, 990),
+        millis_field(quantile(&[elapsed_micros], 0))?,
+        millis_field(quantile(&latencies, 500))?,
+        millis_field(quantile(&latencies, 950))?,
+        millis_field(quantile(&latencies, 990))?,
         ctx.spec.bound,
         probe.peak.load(Ordering::Relaxed),
         probe.duplicates.load(Ordering::Relaxed),

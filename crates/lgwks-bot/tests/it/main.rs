@@ -55,6 +55,9 @@ mod journal_fixtures;
 #[path = "../support/load.rs"]
 mod load;
 
+#[path = "../support/lock.rs"]
+mod lock;
+
 #[path = "../support/poll.rs"]
 mod poll;
 
