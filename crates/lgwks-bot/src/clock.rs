@@ -170,7 +170,17 @@ impl Inner {
     /// watchdog asked of it starts now — the moment it was asked for — which is
     /// the only real origin a virtual clock can honestly offer.
     fn origin(&self) -> Instant {
-        self.placed.unwrap_or_else(Instant::now)
+        match self.placed {
+            // A wall clock carries the instant it was placed at, so every
+            // reading of that clock counts from one stable origin.
+            Some(placed) => placed,
+            // A virtual clock has no placement, and `Instant::now()` is not a
+            // stand-in for one: it is the only real origin a clock that was
+            // never placed has, which is why the watchdog it hands out starts
+            // when it is asked for. The two arms are different facts about the
+            // clock, not one value covering for another.
+            None => Instant::now(),
+        }
     }
 }
 
@@ -520,8 +530,18 @@ impl WallClock {
 /// `u64::MAX` nanoseconds is about 584 years, so the ceiling is never reached by
 /// a real budget; it exists so that a caller who somehow asks for more gets the
 /// documented ceiling rather than a wrapped instant.
+///
+/// Split rather than widen-then-narrow: `Duration` reports seconds and
+/// sub-second nanoseconds through two infallible projections, so the only
+/// arithmetic left is the scaling, and `saturating_mul`/`saturating_add` put
+/// the ceiling in that arithmetic instead of in a conversion that could fail
+/// and leave a caller holding a default.
 fn duration_to_nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    const NANOS_PER_SEC: u64 = 1_000_000_000;
+    duration
+        .as_secs()
+        .saturating_mul(NANOS_PER_SEC)
+        .saturating_add(u64::from(duration.subsec_nanos()))
 }
 
 /// `nanos` nanoseconds as a [`Duration`].
