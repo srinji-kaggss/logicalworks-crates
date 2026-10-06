@@ -132,11 +132,14 @@ impl Plan {
     /// this family exists to prove, and a third tenant would add no evidence to
     /// it: the property is that two tenants do not cross, and a schedule that
     /// can hold three would prove the same thing about a different pair.
-    fn tenant(&self, index: usize) -> TenantPlan {
-        self.tenant
-            .get(index)
-            .copied()
-            .unwrap_or_else(TenantPlan::healthy)
+    /// The plan for the tenant at `index`, or `None` when the schedule declares
+    /// no such tenant.
+    ///
+    /// `None` rather than a healthy plan: a row that names a tenant this schedule
+    /// does not declare has no plan at all, and standing in a healthy one would
+    /// measure a tenant nobody armed.
+    fn tenant(&self, index: usize) -> Option<TenantPlan> {
+        self.tenant.get(index).copied()
     }
 }
 
@@ -181,10 +184,17 @@ fn plan(rng: &mut Rng) -> Plan {
             // "nothing else is forced" half of the claim checkable.
             let armed = rng.chance(500);
             *window = FaultWindow {
-                cause: armed.then(|| {
-                    let draw = rng.below(4);
-                    CAUSES[usize::try_from(draw).unwrap_or(0)]
-                }),
+                cause: match armed {
+                    // The table is fixed at four, so the draw is in range by the
+                    // generator's own bound; a host whose address space is
+                    // narrower than the draw has no cause to arm, and arming the
+                    // first one would test the wrong fault.
+                    true => match usize::try_from(rng.below(4)) {
+                        Ok(draw) => CAUSES.get(draw).copied(),
+                        Err(_too_wide) => None,
+                    },
+                    false => None,
+                },
                 from: rng.between(1, ticks.max(2)),
                 ticks: rng.between(1, 3),
             };
@@ -391,7 +401,7 @@ impl Observe for Armed {
         // Stable per run and distinct per chain, which is what makes a report's
         // `domain()` readable: a caller triaging two forced refreshes has to be
         // able to tell which source each came from.
-        DOMAINS[usize::try_from(self.tenant).unwrap_or(0)][self.chain % 8]
+        domain_of(self.tenant, self.chain)
     }
 }
 
@@ -399,7 +409,37 @@ impl Observe for Armed {
 ///
 /// A fixed table rather than a formatted string so the identity is `'static` and
 /// the report carries the same pointer a reader can compare across two runs.
-const DOMAINS: [[&str; 8]; 2] = [
+/// How many bits of a chain index name a domain: one row of [`DOMAINS`] is this
+/// many entries wide, so the wrap is a mask rather than a remainder and the width
+/// the mask names is the width the table declares.
+const DOMAIN_ROW_BITS: u32 = 3;
+
+/// The mask that wraps a chain index into one row of [`DOMAINS`].
+const DOMAIN_ROW_MASK: usize = (1 << DOMAIN_ROW_BITS) - 1;
+
+/// The domain a tenant/chain pair outside [`DOMAINS`] reports under.
+///
+/// Named rather than indexed past the table: a `domain()` is what a caller
+/// triages by, and one that pointed into another tenant's row would blame the
+/// wrong source — the one thing this family exists to rule out.
+const UNMAPPED_DOMAIN: &str = "test::unmapped";
+
+/// The domain a tenant/chain pair reports under.
+fn domain_of(tenant: u32, chain: usize) -> &'static str {
+    let row = match usize::try_from(tenant) {
+        Ok(row) => row,
+        Err(_too_wide) => return UNMAPPED_DOMAIN,
+    };
+    match DOMAINS
+        .get(row)
+        .and_then(|names| names.get(chain & DOMAIN_ROW_MASK))
+    {
+        Some(name) => name,
+        None => UNMAPPED_DOMAIN,
+    }
+}
+
+const DOMAINS: [[&str; 1 << DOMAIN_ROW_BITS]; 2] = [
     [
         "sim::t0c0",
         "sim::t0c1",
@@ -655,10 +695,12 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
         let mut tenants = Vec::new();
-        for index in 0..usize::try_from(plan.tenants).unwrap_or(0) {
+        for index in 0..usize::try_from(plan.tenants)? {
             tenants.push(tenant(
-                u32::try_from(index).unwrap_or_default(),
-                &plan.tenant(index),
+                u32::try_from(index)?,
+                &plan
+                    .tenant(index)
+                    .ok_or("a schedule that declares no tenant at this index")?,
             )?);
         }
 
@@ -666,7 +708,9 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
         let mut rows: Vec<ReportRow> = Vec::new();
         for tick in 1..=plan.ticks {
             for (index, subject) in tenants.iter_mut().enumerate() {
-                let schedule = plan.tenant(index);
+                let schedule = plan
+                    .tenant(index)
+                    .ok_or("a schedule that declares no tenant at this index")?;
                 subject.arm(tick, &schedule);
                 subject.advance(tick);
                 subject.observe(&mut rows);
@@ -690,7 +734,9 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
             if row.kind != "forced" {
                 continue;
             }
-            let schedule = plan.tenant(usize::try_from(row.tenant).unwrap_or(0));
+            let schedule = plan
+                .tenant(usize::try_from(row.tenant)?)
+                .ok_or("a report from a tenant the schedule does not declare")?;
             let window = schedule.faults.get(row.chain).copied().ok_or_else(|| {
                 format!(
                     "tenant {} reported chain {} but declared {MAX_CHAINS} chains",
@@ -707,18 +753,25 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
                 window.cause.map(RefreshReason::as_str)
             );
         }
-        let armed_chains = (0..usize::try_from(plan.tenants).unwrap_or(0))
-            .flat_map(|index| {
-                let schedule = plan.tenant(index);
-                (0..MAX_CHAINS).filter_map(move |chain| {
-                    schedule
-                        .faults
-                        .get(chain)?
-                        .cause
-                        .map(|cause| (index, chain, cause.as_str()))
-                })
+        let armed_chains: usize = (0..usize::try_from(plan.tenants)?)
+            .filter_map(|index| {
+                // A tenant the schedule does not declare contributes no armed
+                // chain, and the assertion above has already required every armed
+                // chain to come from one it does declare.
+                let schedule = plan.tenant(index)?;
+                Some(
+                    (0..MAX_CHAINS)
+                        .filter_map(move |chain| {
+                            schedule
+                                .faults
+                                .get(chain)?
+                                .cause
+                                .map(|cause| (index, chain, cause.as_str()))
+                        })
+                        .count(),
+                )
             })
-            .count();
+            .sum();
         let reported_chains = reported.len();
         assert_eq!(
             reported_chains, armed_chains,
@@ -816,13 +869,25 @@ fn a_refresh_that_never_lands_stays_marked(band: Band) -> TestResult {
 fn tenants_never_cross(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
-        let mut left = tenant(0, &plan.tenant(0))?;
-        let mut right = tenant(1, &plan.tenant(1))?;
+        let mut left = tenant(
+            0,
+            &plan
+                .tenant(0)
+                .ok_or("a two-tenant schedule with no left tenant")?,
+        )?;
+        let mut right = tenant(
+            1,
+            &plan
+                .tenant(1)
+                .ok_or("a two-tenant schedule with no right tenant")?,
+        )?;
 
         let mut rows: Vec<ReportRow> = Vec::new();
         for tick in 1..=plan.ticks {
             for (subject, index) in [(&mut left, 0_usize), (&mut right, 1_usize)] {
-                let schedule = plan.tenant(index);
+                let schedule = plan
+                    .tenant(index)
+                    .ok_or("a schedule that declares no tenant at this index")?;
                 subject.arm(tick, &schedule);
                 subject.advance(tick);
                 subject.observe(&mut rows);
@@ -901,7 +966,7 @@ fn event_identities_are_per_event(band: Band) -> TestResult {
         for _ in 0..delivered {
             let reuse = !stream.is_empty() && sim.rng().chance(450);
             let id = if reuse {
-                stream[usize::try_from(sim.rng().below(distinct)).unwrap_or(0)]
+                stream[usize::try_from(sim.rng().below(distinct))?]
             } else {
                 distinct = distinct.saturating_add(1);
                 distinct
@@ -966,7 +1031,7 @@ fn event_identities_are_per_event(band: Band) -> TestResult {
         );
         assert_eq!(
             wanted.len(),
-            usize::try_from(distinct).unwrap_or(0),
+            usize::try_from(distinct)?,
             "the drawn stream and the drawn distinct count agree, so the schedule \
              and the expectation are one fact rather than two"
         );
@@ -1006,12 +1071,22 @@ fn event_identities_are_per_event(band: Band) -> TestResult {
 fn the_same_seed_replays(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let plan = plan(sim.rng());
-        for index in 0..usize::try_from(plan.tenants).unwrap_or(0) {
-            let tenant_id = u32::try_from(index).unwrap_or_default();
-            let mut subject = tenant(tenant_id, &plan.tenant(index))?;
+        for index in 0..usize::try_from(plan.tenants)? {
+            let tenant_id = u32::try_from(index)?;
+            let mut subject = tenant(
+                tenant_id,
+                &plan
+                    .tenant(index)
+                    .ok_or("a schedule that declares no tenant at this index")?,
+            )?;
             let mut rows: Vec<ReportRow> = Vec::new();
             for tick in 1..=plan.ticks {
-                subject.arm(tick, &plan.tenant(index));
+                subject.arm(
+                    tick,
+                    &plan
+                        .tenant(index)
+                        .ok_or("a schedule that declares no tenant at this index")?,
+                );
                 subject.advance(tick);
                 subject.observe(&mut rows);
             }
@@ -1032,9 +1107,14 @@ fn the_same_seed_replays(band: Band) -> TestResult {
         // "decided", and it is where a cross-tenant mistake would show up: a
         // settlement for another tenant's key is a typed refusal, not a quiet
         // success.
-        for index in 0..usize::try_from(plan.tenants).unwrap_or(0) {
-            let tenant_id = u32::try_from(index).unwrap_or_default();
-            let mut subject = tenant(tenant_id, &plan.tenant(index))?;
+        for index in 0..usize::try_from(plan.tenants)? {
+            let tenant_id = u32::try_from(index)?;
+            let mut subject = tenant(
+                tenant_id,
+                &plan
+                    .tenant(index)
+                    .ok_or("a schedule that declares no tenant at this index")?,
+            )?;
             subject.advance(0);
             let _outcome = subject.bot.tick();
             for work in subject.bot.pending() {
@@ -1095,16 +1175,16 @@ impl PacePlan {
     /// silently arm every chain *fast* on the tick after its last — and the run
     /// would still pass every report assertion, because the arming and the
     /// expectation would have shifted together.
-    fn at(&self, chain: usize, tick: u32) -> PaceWindow {
+    /// The window this schedule declares for `chain` at `tick`, or `None` when
+    /// the schedule declares no such cell.
+    ///
+    /// `None` rather than a fast window carrying the value `1`: a cell the
+    /// schedule does not declare has no pace and no value, and a stand-in would
+    /// put one into the trace as though the schedule had drawn it.
+    fn at(&self, chain: usize, tick: u32) -> Option<PaceWindow> {
         let row = tick.saturating_sub(1);
-        self.windows
-            .get(usize::try_from(row).unwrap_or(0))
-            .and_then(|row| row.get(chain))
-            .copied()
-            .unwrap_or(PaceWindow {
-                pace: Pace::Fast,
-                value: 1,
-            })
+        let row = self.windows.get(usize::try_from(row).ok()?)?;
+        row.get(chain).copied()
     }
 
     /// Whether `chain` answers on every tick of the run.
@@ -1115,7 +1195,12 @@ impl PacePlan {
     /// that way. Deciding it here rather than at the call site is what keeps the
     /// filter and the comparison describing the same set.
     fn never_stalled(&self, chain: usize) -> bool {
-        (1..=self.ticks).all(|tick| self.at(chain, tick).pace == Pace::Fast)
+        // A chain the schedule leaves undeclared at a tick has no pace, and a
+        // chain that was never wedged is exactly that: absence is the answer.
+        (1..=self.ticks).all(|tick| {
+            self.at(chain, tick)
+                .is_none_or(|window| window.pace == Pace::Fast)
+        })
     }
 
     /// A plan whose *last* tick is `tick`, with `per_chain` naming each chain's
@@ -1125,12 +1210,12 @@ impl PacePlan {
     /// uses it arms one tick at a time: the question is how one *wave* spends its
     /// watchdogs, and a plan that decided a run's pacings up front would answer
     /// it only on whichever tick the draw happened to land on.
-    fn one_tick(per_chain: &[u32], tick: u32) -> PacePlan {
+    fn one_tick(per_chain: &[u32], tick: u32) -> Result<PacePlan, Box<dyn std::error::Error>> {
         let mut windows = [[PaceWindow {
             pace: Pace::Fast,
             value: 1,
         }; MAX_CHAINS]; MAX_TICKS];
-        let row = usize::try_from(tick.saturating_sub(1)).unwrap_or(0);
+        let row = usize::try_from(tick.saturating_sub(1))?;
         for (index, window) in windows.iter_mut().enumerate() {
             for (chain, cell) in window.iter_mut().enumerate() {
                 *cell = PaceWindow {
@@ -1141,16 +1226,15 @@ impl PacePlan {
                     },
                     // A distinct value per cell, so a commit of one chain's
                     // value can never be mistaken for another's.
-                    value: u32::try_from(index.saturating_mul(MAX_CHAINS).saturating_add(chain))
-                        .unwrap_or(0)
+                    value: u32::try_from(index.saturating_mul(MAX_CHAINS).saturating_add(chain))?
                         .saturating_add(1),
                 };
             }
         }
-        PacePlan {
+        Ok(PacePlan {
             windows,
-            ticks: u32::try_from(row.saturating_add(1)).unwrap_or(1),
-        }
+            ticks: u32::try_from(row.saturating_add(1))?,
+        })
     }
 }
 
@@ -1167,20 +1251,20 @@ const MAX_TICKS: usize = 6;
 /// tick* rather than per chain, because the property that matters is a source
 /// that recovers — a chain wedged for the whole run would satisfy "every
 /// cancellation is reported" without ever exercising "the next tick re-polls it".
-fn pace_plan(rng: &mut Rng, ticks: u32) -> PacePlan {
-    let drawn = usize::try_from(ticks).unwrap_or(0).min(MAX_TICKS);
+fn pace_plan(rng: &mut Rng, ticks: u32) -> Result<PacePlan, Box<dyn std::error::Error>> {
+    let drawn = usize::try_from(ticks)?.min(MAX_TICKS);
     let mut windows = [[PaceWindow {
         pace: Pace::Fast,
         value: 1,
     }; MAX_CHAINS]; MAX_TICKS];
-    let span = u32::try_from(MAX_CHAINS).unwrap_or(1);
+    let span = u32::try_from(MAX_CHAINS)?;
     for (tick, row) in windows.iter_mut().enumerate().take(drawn) {
         // One-based, because the families drive ticks from 1. A zero-based table
         // read at tick 1 would describe the tick *before* the first one, so every
         // arming decision in the run would be off by one — and an off-by-one here
         // surfaces only as "the report does not match the schedule", which is the
         // one failure mode a simulation family cannot debug from its trace.
-        let tick_index = u32::try_from(tick).unwrap_or(1).saturating_add(1);
+        let tick_index = u32::try_from(tick)?.saturating_add(1);
         for (chain, window) in row.iter_mut().enumerate() {
             // Distinct per chain and tick, so a commit that did not happen is
             // distinguishable from a commit of somebody else's value.
@@ -1192,12 +1276,12 @@ fn pace_plan(rng: &mut Rng, ticks: u32) -> PacePlan {
                 },
                 value: tick_index
                     .saturating_mul(span)
-                    .saturating_add(u32::try_from(chain).unwrap_or(0))
+                    .saturating_add(u32::try_from(chain)?)
                     .saturating_add(1),
             };
         }
     }
-    PacePlan { windows, ticks }
+    Ok(PacePlan { windows, ticks })
 }
 
 /// A tenant whose sources' paces are the plan's, under a short poll deadline.
@@ -1286,7 +1370,7 @@ impl Observe for Paced {
     }
 
     fn domain_id(&self) -> &str {
-        DOMAINS[usize::try_from(self.tenant).unwrap_or(0)][self.chain % 8]
+        domain_of(self.tenant, self.chain)
     }
 }
 
@@ -1305,7 +1389,9 @@ fn paced_tick(
     tick: u32,
 ) -> Result<Vec<ReportRow>, Box<dyn Error>> {
     for (index, held) in subject.handles.iter().enumerate() {
-        let window = plan.at(index, tick);
+        let window = plan
+            .at(index, tick)
+            .ok_or("the schedule declares no window for this chain at this tick")?;
         held.pace.set(if window.pace == Pace::Wedged {
             WEDGED_PACE
         } else {
@@ -1333,7 +1419,11 @@ fn unpace_tick(
 ) -> Result<Vec<ReportRow>, Box<dyn Error>> {
     for (index, held) in subject.handles.iter().enumerate() {
         held.pace.set(0);
-        held.value.set(plan.at(index, tick).value);
+        held.value.set(
+            plan.at(index, tick)
+                .ok_or("the schedule declares no window for this chain at this tick")?
+                .value,
+        );
         held.declared.set(None);
     }
     let mut rows = Vec::new();
@@ -1378,8 +1468,8 @@ fn a_wedged_source_is_reported_and_costs_its_neighbours_nothing(band: Band) -> T
     sim::assert_replays(band, |sim| {
         // Both tenants draw from the same stream, so one seed fixes both schedules
         // and both runs.
-        let left = pace_plan(sim.rng(), 4);
-        let right = pace_plan(sim.rng(), 4);
+        let left = pace_plan(sim.rng(), 4)?;
+        let right = pace_plan(sim.rng(), 4)?;
         let schedules = [left, right];
 
         let mut wedged = [
@@ -1393,7 +1483,9 @@ fn a_wedged_source_is_reported_and_costs_its_neighbours_nothing(band: Band) -> T
 
         for tick in 1..=left.ticks {
             for index in 0..wedged.len() {
-                let plan = schedules.get(index).copied().unwrap_or(left);
+                let plan = *schedules
+                    .get(index)
+                    .ok_or("a subject this run armed has no schedule")?;
 
                 // The wedged run, as the schedule decided it.
                 let rows = paced_tick(&mut wedged[index], &plan, tick)?;
@@ -1412,7 +1504,10 @@ fn a_wedged_source_is_reported_and_costs_its_neighbours_nothing(band: Band) -> T
                     .map(|row| (row.chain(), row.domain().to_owned()))
                     .collect();
                 let wanted: Vec<(usize, String)> = (0..MAX_CHAINS)
-                    .filter(|chain| plan.at(*chain, tick).pace == Pace::Wedged)
+                    .filter(|chain| {
+                        plan.at(*chain, tick)
+                            .is_some_and(|window| window.pace == Pace::Wedged)
+                    })
                     .map(|chain| (chain, DOMAINS[index][chain % 8].to_owned()))
                     .collect();
                 assert_eq!(
@@ -1500,7 +1595,7 @@ fn a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit(
         // family that stopped varying anything would still replay — and a
         // schedule this asymmetric is the one that can actually distinguish "the
         // cancellation is bounded" from "the whole tick is cancelled".
-        let ceiling = u32::try_from(MAX_TICKS).unwrap_or(6);
+        let ceiling = u32::try_from(MAX_TICKS)?;
         let ticks = sim.rng().between(2, ceiling);
         let mut all_wedged = PacePlan {
             windows: [[PaceWindow {
@@ -1524,7 +1619,7 @@ fn a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit(
                 };
                 all_fast.windows[tick][chain] = PaceWindow {
                     pace: Pace::Fast,
-                    value: u32::try_from(tick.saturating_add(1)).unwrap_or(1),
+                    value: u32::try_from(tick.saturating_add(1))?,
                 };
             }
         }
@@ -1553,7 +1648,7 @@ fn a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit(
                 ready_report.stalled()
             );
             assert!(
-                ready.ran.borrow().len() >= usize::try_from(tick).unwrap_or(0),
+                ready.ran.borrow().len() >= usize::try_from(tick)?,
                 "and it still committed and acted while the other tenant's whole \
                  wave was cancelled"
             );
@@ -1570,14 +1665,13 @@ fn a_saturated_wave_stalls_every_chain_and_still_lets_the_next_tenant_commit(
 
 /// How many chains the saturated wave covers, as the tier it actually reached.
 fn subject_count(plan: &PacePlan) -> usize {
-    plan.windows
-        .first()
-        .map(|row| {
-            row.iter()
-                .filter(|window| window.pace == Pace::Wedged)
-                .count()
-        })
-        .unwrap_or(0)
+    // A plan with no rows has no wedged subject in it: zero is that count, not a
+    // stand-in for a count nobody took.
+    plan.windows.first().map_or(0, |row| {
+        row.iter()
+            .filter(|window| window.pace == Pace::Wedged)
+            .count()
+    })
 }
 
 /// A seeded scope spends one watchdog on a wave that has a poll left pending,
@@ -1622,7 +1716,7 @@ fn a_wave_spends_one_watchdog_and_a_fast_wave_spends_none(band: Band) -> TestRes
         // Cut before anything is built: the tick count is a draw like any other,
         // and a run that drew six ticks of wedged sources would spend six real
         // deadlines waiting for the wall clock rather than exercising the claim.
-        let ceiling = u32::try_from(MAX_TICKS).unwrap_or(6);
+        let ceiling = u32::try_from(MAX_TICKS)?;
         let ticks = sim.rng().between(2, ceiling);
 
         // Which chains wedge is re-drawn per tick from the same stream, so a run
@@ -1646,7 +1740,7 @@ fn a_wave_spends_one_watchdog_and_a_fast_wave_spends_none(band: Band) -> TestRes
                         0
                     };
                 }
-                let plan = PacePlan::one_tick(drawn, tick);
+                let plan = PacePlan::one_tick(drawn, tick)?;
                 let _rows = paced_tick(subject, &plan, tick)?;
 
                 let report = subject.bot.tick_report();
@@ -1691,8 +1785,8 @@ fn a_wave_spends_one_watchdog_and_a_fast_wave_spends_none(band: Band) -> TestRes
 /// rather than one scenario's shape.
 fn the_same_seed_replays_a_stalled_wave(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let left = pace_plan(sim.rng(), 4);
-        let right = pace_plan(sim.rng(), 4);
+        let left = pace_plan(sim.rng(), 4)?;
+        let right = pace_plan(sim.rng(), 4)?;
         let schedules = [left, right];
         let mut subjects = [
             paced_tenant(0, SIM_DEADLINE)?,
@@ -1701,7 +1795,9 @@ fn the_same_seed_replays_a_stalled_wave(band: Band) -> TestResult {
 
         for tick in 1..=left.ticks {
             for (index, subject) in subjects.iter_mut().enumerate() {
-                let plan = schedules.get(index).copied().unwrap_or(left);
+                let plan = *schedules
+                    .get(index)
+                    .ok_or("a subject this run armed has no schedule")?;
                 let _rows = paced_tick(subject, &plan, tick)?;
                 let report = subject.bot.tick_report();
                 // The watchdog count beside the stall list: a run that replayed
@@ -1866,7 +1962,7 @@ impl Observe for Scripted {
     }
 
     fn domain_id(&self) -> &str {
-        DOMAINS[usize::try_from(self.tenant).unwrap_or(0)][self.chain % 8]
+        domain_of(self.tenant, self.chain)
     }
 }
 
@@ -1967,7 +2063,7 @@ fn baseline_bot(
 ) -> Result<Tenant, Box<dyn Error>> {
     let mut subject = scripted_bot(name, 0, width, deadline, holds)?;
     for (index, held) in subject.handles.iter().enumerate() {
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        let value = u32::try_from(index)?.saturating_add(1);
         arm_chain(held, value, 0, None, 0);
     }
     let _baseline = subject.bot.tick();
@@ -1984,13 +2080,13 @@ fn baseline_bot(
 fn a_fast_wave_spends_no_watchdog_across_seeded_widths() -> TestResult {
     const SEED: u64 = 0x1240_0001;
     let mut rng = Rng::new(SEED);
-    let ceiling = u32::try_from(WAVE_WIDTH).unwrap_or(32);
+    let ceiling = u32::try_from(WAVE_WIDTH)?;
     for _ in 0..6_u32 {
-        let width = usize::try_from(rng.between(1, ceiling)).unwrap_or(1);
+        let width = usize::try_from(rng.between(1, ceiling))?;
         let holds = Rc::new(Cell::new(false));
         let mut subject = scripted_bot("sim-observe-fast-wave", 0, width, SIM_DEADLINE, holds)?;
         for (index, held) in subject.handles.iter().enumerate() {
-            let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+            let value = u32::try_from(index)?.saturating_add(1);
             arm_chain(held, value, 0, None, 0);
         }
         let _outcome = subject.bot.tick();
@@ -2023,15 +2119,14 @@ fn a_fast_wave_spends_no_watchdog_across_seeded_widths() -> TestResult {
 fn a_pending_source_spends_one_watchdog_for_its_wave() -> TestResult {
     const SEED: u64 = 0x1240_0002;
     let mut rng = Rng::new(SEED);
-    let wave = u32::try_from(WAVE_WIDTH).unwrap_or(32);
-    let width =
-        usize::try_from(rng.between(wave.saturating_add(1), wave.saturating_mul(2))).unwrap_or(33);
-    let yields = usize::try_from(rng.below(u32::try_from(width).unwrap_or(33))).unwrap_or(0);
+    let wave = u32::try_from(WAVE_WIDTH)?;
+    let width = usize::try_from(rng.between(wave.saturating_add(1), wave.saturating_mul(2)))?;
+    let yields = usize::try_from(rng.below(u32::try_from(width)?))?;
     let holds = Rc::new(Cell::new(false));
     let mut subject = scripted_bot("sim-observe-pending", 0, width, SIM_DEADLINE, holds)?;
     for (index, held) in subject.handles.iter().enumerate() {
         let pending = u32::from(index == yields);
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        let value = u32::try_from(index)?.saturating_add(1);
         arm_chain(held, value, 0, None, pending);
     }
     let _outcome = subject.bot.tick();
@@ -2078,7 +2173,7 @@ fn a_seeded_run_spends_one_watchdog_per_pending_tick() -> TestResult {
             let pace = if wedged { WEDGED_PACE } else { 0 };
             let value = tick
                 .saturating_mul(10)
-                .saturating_add(u32::try_from(index).unwrap_or(0));
+                .saturating_add(u32::try_from(index)?);
             arm_chain(held, value, pace, None, 0);
         }
         let _outcome = subject.bot.tick();
@@ -2116,7 +2211,7 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
     let holds = Rc::new(Cell::new(false));
     let mut subject = baseline_bot("sim-observe-cancelled-tick", 3, SIM_DEADLINE, holds)?;
 
-    let wedged = usize::try_from(rng.below(3)).unwrap_or(0);
+    let wedged = usize::try_from(rng.below(3))?;
     for (index, held) in subject.handles.iter().enumerate() {
         let pace = if index == wedged { WEDGED_PACE } else { 0 };
         arm_chain(held, 7, pace, None, 0);
@@ -2137,7 +2232,7 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
     }
 
     for (index, held) in subject.handles.iter().enumerate() {
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(20);
+        let value = u32::try_from(index)?.saturating_add(20);
         arm_chain(held, value, 0, None, 0);
     }
     let _recovered = subject.bot.tick();
@@ -2174,7 +2269,7 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
 fn a_stalled_chain_keeps_its_mark_and_is_re_polled_next_tick() -> TestResult {
     const SEED: u64 = 0x1230_0005;
     let mut rng = Rng::new(SEED);
-    let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+    let cause = CAUSES[usize::try_from(rng.below(4))?];
     let holds = Rc::new(Cell::new(false));
     let mut subject = baseline_bot("sim-observe-stall-mark", 3, SIM_DEADLINE, holds)?;
 
@@ -2315,14 +2410,14 @@ fn a_poll_deadline_around_both_edges_is_accepted_or_refused_at_build() -> TestRe
 fn only_the_seeded_wedged_chain_is_reported_stalled() -> TestResult {
     const SEED: u64 = 0x1230_0007;
     let mut rng = Rng::new(SEED);
-    let ceiling = u32::try_from(WAVE_WIDTH).unwrap_or(32);
-    let width = usize::try_from(rng.between(2, ceiling)).unwrap_or(2);
-    let wedged = usize::try_from(rng.below(u32::try_from(width).unwrap_or(2))).unwrap_or(0);
+    let ceiling = u32::try_from(WAVE_WIDTH)?;
+    let width = usize::try_from(rng.between(2, ceiling))?;
+    let wedged = usize::try_from(rng.below(u32::try_from(width)?))?;
     let holds = Rc::new(Cell::new(false));
     let mut subject = scripted_bot("sim-observe-one-stalled", 0, width, SIM_DEADLINE, holds)?;
     for (index, held) in subject.handles.iter().enumerate() {
         let pace = if index == wedged { WEDGED_PACE } else { 0 };
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        let value = u32::try_from(index)?.saturating_add(1);
         arm_chain(held, value, pace, None, 0);
     }
     let _outcome = subject.bot.tick();
@@ -2368,13 +2463,13 @@ fn only_the_seeded_wedged_chain_is_reported_stalled() -> TestResult {
 fn siblings_of_a_wedged_source_act_in_the_same_tick() -> TestResult {
     const SEED: u64 = 0x1230_0008;
     let mut rng = Rng::new(SEED);
-    let width = usize::try_from(rng.between(3, 12)).unwrap_or(3);
-    let wedged = usize::try_from(rng.below(u32::try_from(width).unwrap_or(3))).unwrap_or(0);
+    let width = usize::try_from(rng.between(3, 12))?;
+    let wedged = usize::try_from(rng.below(u32::try_from(width)?))?;
     let mover = wedged.saturating_add(1) % width;
     let holds = Rc::new(Cell::new(false));
     let mut subject = scripted_bot("sim-observe-siblings", 0, width, SIM_DEADLINE, holds)?;
     for (index, held) in subject.handles.iter().enumerate() {
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        let value = u32::try_from(index)?.saturating_add(1);
         arm_chain(held, value, 0, None, 0);
     }
     let _baseline = subject.bot.tick();
@@ -2385,7 +2480,7 @@ fn siblings_of_a_wedged_source_act_in_the_same_tick() -> TestResult {
         let value = if index == mover {
             999
         } else {
-            u32::try_from(index).unwrap_or(0).saturating_add(1)
+            u32::try_from(index)?.saturating_add(1)
         };
         arm_chain(held, value, pace, None, 0);
     }
@@ -2424,13 +2519,13 @@ fn a_seeded_reason_per_chain_is_reported_against_its_own_chain() -> TestResult {
     let mut expected: Vec<(usize, RefreshReason)> = Vec::new();
     for (index, held) in subject.handles.iter().enumerate() {
         let cause = if rng.chance(700) {
-            let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+            let cause = CAUSES[usize::try_from(rng.below(4))?];
             expected.push((index, cause));
             Some(cause)
         } else {
             None
         };
-        let value = u32::try_from(index).unwrap_or(0).saturating_add(1);
+        let value = u32::try_from(index)?.saturating_add(1);
         arm_chain(held, value, 0, cause, 0);
     }
     let _outcome = subject.bot.tick();
@@ -2469,7 +2564,7 @@ fn a_seeded_reason_per_chain_is_reported_against_its_own_chain() -> TestResult {
 fn a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it() -> TestResult {
     const SEED: u64 = 0x1200_0010;
     let mut rng = Rng::new(SEED);
-    let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+    let cause = CAUSES[usize::try_from(rng.below(4))?];
     let failures = rng.between(2, 4);
     let holds = Rc::new(Cell::new(false));
     let mut subject = scripted_bot("sim-observe-failed-mark", 0, 2, SIM_DEADLINE, holds)?;
@@ -2690,13 +2785,13 @@ fn two_tenants_interleaved_ticks_never_cross_attribution() -> TestResult {
 
     for tick in 1..=ticks {
         for subject in [&mut left, &mut right] {
-            let cause = CAUSES[usize::try_from(rng.below(4)).unwrap_or(0)];
+            let cause = CAUSES[usize::try_from(rng.below(4))?];
             for (index, held) in subject.handles.iter().enumerate() {
                 let pace = if index == 1 { WEDGED_PACE } else { 0 };
                 let declared = if index == 0 { Some(cause) } else { None };
                 let value = tick
                     .saturating_mul(10)
-                    .saturating_add(u32::try_from(index).unwrap_or(0));
+                    .saturating_add(u32::try_from(index)?);
                 arm_chain(held, value, pace, declared, 0);
             }
             let _outcome = subject.bot.tick();
@@ -2778,7 +2873,7 @@ fn the_same_seed_replays_a_deadline_wave() -> TestResult {
                 let pace = if wedged { WEDGED_PACE } else { 0 };
                 let value = tick
                     .saturating_mul(10)
-                    .saturating_add(u32::try_from(index).unwrap_or(0));
+                    .saturating_add(u32::try_from(index)?);
                 arm_chain(held, value, pace, None, yields);
             }
             let _outcome = subject.bot.tick();

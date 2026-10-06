@@ -81,6 +81,28 @@ Behaviour is unchanged. All 10 `lgwks_macros` tests pass, including the property
 suite that renders trees, reads them back and asserts a line moved off its column
 is refused at that line, and `lgwks_bot`'s 192 `script!` tests pass against the
 rewritten emitter.
+### lgwks_bot — `sim_observe_refresh`: a schedule cell the run did not draw is `None`
+
+The observe/refresh simulation had 60 places where a failed width conversion was
+folded onto a number, and four where a *missing* schedule cell became a real one.
+The largest of the four was a tenant or pace window the schedule does not
+declare: it arrived as a healthy plan, a fast window carrying the value `1`, a
+healthy fallback tenant, or a domain id borrowed from another tenant's row — and
+a `domain()` is precisely what a caller triaging two forced refreshes reads, so
+that last one would have blamed the wrong source.
+
+- **`TenantSchedule::tenant` and `PacePlan::at` return `Option`.** Every caller
+  propagates, and the assertions that already compared a report against the
+  schedule now fail on a cell that does not exist rather than passing against a
+  stand-in.
+- **`domain_of` names the unmapped pair.** The wrap into a row is a mask over a
+  width the table declares (`1 << DOMAIN_ROW_BITS`), so the mask and the row
+  cannot drift apart, and a pair outside the table is `test::unmapped`.
+- The remaining conversions are each loop or draw drawn in the width its consumer
+  already uses, so there is no conversion left to stand in for.
+
+(9-axis sweep)
+
 ### lgwks_bot — the journal and inspection test fixtures are read, not re-spelled
 
 Four test files each carried their own copy of an identity the shared fixture
