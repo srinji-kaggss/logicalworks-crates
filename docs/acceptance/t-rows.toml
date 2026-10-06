@@ -227,12 +227,12 @@ row = "Crash before intent ack, after ack before dispatch, after dispatch before
 state = "present"
 gap = "Four of the five named boundaries are covered; the crash before intent ack (nothing committed) has no named test of its own."
 tests = [
-  "durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared",
-  "durable_crash_observation::a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
-  "durable_crash_observation::a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome",
-  "durable_crash_observation::a_kill_during_recovery_leaves_the_journal_exactly_as_it_was",
-  "durable_crash_observation::a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
-  "durable_crash_observation::a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
+  "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared",
+  "it::durable_crash_observation::a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
+  "it::durable_crash_observation::a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome",
+  "it::durable_crash_observation::a_kill_during_recovery_leaves_the_journal_exactly_as_it_was",
+  "it::durable_crash_observation::a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
+  "it::durable_crash_observation::a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
   "it::effect_journal::e11_a_blind_resend_is_not_representable",
 ]
 
@@ -258,10 +258,10 @@ row = "Old worker returns after owner-epoch takeover; its receipt cannot authori
 state = "exercised"
 gap = ""
 tests = [
-  "owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize",
-  "owner_epoch_takeover::a_warrant_from_the_previous_generation_is_superseded",
-  "owner_epoch_takeover::the_current_generation_may_still_settle_its_own_attempt",
-  "owner_epoch_takeover::a_generation_and_a_tail_are_two_fences_and_both_answer",
+  "it::owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize",
+  "it::owner_epoch_takeover::a_warrant_from_the_previous_generation_is_superseded",
+  "it::owner_epoch_takeover::the_current_generation_may_still_settle_its_own_attempt",
+  "it::owner_epoch_takeover::a_generation_and_a_tail_are_two_fences_and_both_answer",
   "lgwks_bot::broker::tests::a_warrant_minted_before_a_replacement_is_refused_at_the_boundary",
   "lgwks_bot::broker::tests::a_stale_controller_cannot_append_after_recovery",
 ]
@@ -329,8 +329,8 @@ row = "Signalling failure, PID/group reuse and child escape attempts cannot kill
 state = "present"
 gap = "Signalling only into the supervised group and a session escape are named; no named test exercises PID or process-group reuse, and the row is not executed per backend."
 tests = [
-  "process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group",
-  "process_escape::a_session_escape_is_not_reported_as_complete_tree_cleanup",
+  "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group",
+  "it::process_escape::a_session_escape_is_not_reported_as_complete_tree_cleanup",
   "it::gh_binding::a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code",
 ]
 

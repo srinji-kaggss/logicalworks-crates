@@ -268,8 +268,8 @@ fn lying_lengths(band: Band) -> TestResult {
         }
 
         sim.record("lying-lengths-refused-untouched");
-        sim.trace.record_count("lying-frames", frames);
-        sim.trace.record_u64("lying-cases", cases);
+        sim.trace.record_number("lying-frames", frames);
+        sim.trace.record_number("lying-cases", cases);
         Ok(())
     })
 }
@@ -330,9 +330,9 @@ fn cut_appends(band: Band) -> TestResult {
             repaired = repaired.saturating_add(u64::from(*cut != boundary));
         }
         sim.record("cut-appends-keep-the-whole-frames");
-        sim.trace.record_count("cut-frames", frames);
-        sim.trace.record_count("cut-cases", cuts.len());
-        sim.trace.record_u64("cut-repaired", repaired);
+        sim.trace.record_number("cut-frames", frames);
+        sim.trace.record_number("cut-cases", cuts.len());
+        sim.trace.record_number("cut-repaired", repaired);
         Ok(())
     })
 }
@@ -390,8 +390,8 @@ fn damaged_cut_frames(band: Band) -> TestResult {
             cases = cases.saturating_add(u64::from(damage_one(sim, &path, &written)?));
         }
         sim.record("damaged-cut-frames-refused");
-        sim.trace.record_count("damaged-frames", frames);
-        sim.trace.record_u64("damaged-cases", cases);
+        sim.trace.record_number("damaged-frames", frames);
+        sim.trace.record_number("damaged-cases", cases);
         Ok(())
     })
 }
@@ -479,7 +479,7 @@ fn tenants_beside_a_refusal(band: Band) -> TestResult {
             }
         }
         sim.record("a-refusal-stayed-with-its-tenant");
-        sim.trace.record_count("tenants", count);
+        sim.trace.record_number("tenants", count);
         Ok(())
     })
 }

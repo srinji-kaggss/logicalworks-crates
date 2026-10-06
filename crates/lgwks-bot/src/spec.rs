@@ -1158,10 +1158,7 @@ impl std::fmt::Display for Need {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::Broker;
-    use crate::effect::{EnvironmentId, FlowRevision, RunId};
     use crate::error::DispatchCertainty;
-    use crate::journal::MemoryJournal;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1173,7 +1170,8 @@ mod tests {
     /// the failure with `?` rather than flattening it into a variant it is not.
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-    /// The effect scope a test's bot runs under.
+    /// The effect scope a test's bot runs under: the bot's own, so the spec
+    /// tests and the ECS tests build one scope rather than two that could drift.
     ///
     /// A bot has no dispatch path without one, so every builder in this module
     /// hands over a scope; the ones whose subject is spec validation still do,
@@ -1181,21 +1179,7 @@ mod tests {
     /// wrong thing and the assertion around it would read as the validation it
     /// claims to test.
     fn test_effects() -> TestResult<EffectScope> {
-        let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-        let mut broker = Broker::new();
-        broker.register(environment)?;
-        Ok(EffectScope::new(
-            EffectIdentity::new(
-                RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-                environment,
-                FlowRevision::from_tagged(
-                    "blake3_256",
-                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-                )?,
-            ),
-            broker,
-            Box::new(MemoryJournal::new()),
-        ))
+        crate::ecs::tests::test_effects()
     }
 
     /// The failure a test reports when its precondition did not hold. Tests

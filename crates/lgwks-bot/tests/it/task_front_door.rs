@@ -394,7 +394,11 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
             async move {
                 log.set(log.get().saturating_add(1));
                 let report = host.run(&leaf, vec![value]).await;
-                Ok(report.into_output().unwrap_or_default().iter().sum::<u32>())
+                Ok(report
+                    .into_output()
+                    .ok_or_else(|| FlowError::failed("the nested run produced no output"))?
+                    .iter()
+                    .sum::<u32>())
             }
         })?
     });
@@ -408,11 +412,10 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
             let log = Rc::clone(&log);
             async move {
                 log.set(log.get().saturating_add(1));
-                Ok(host
-                    .run(&inner, value)
+                host.run(&inner, value)
                     .await
                     .into_output()
-                    .unwrap_or_default())
+                    .ok_or_else(|| FlowError::failed("the nested run produced no output"))
             }
         })?
     });
@@ -426,11 +429,10 @@ fn nested_runs_complete_at_a_ceiling_of_one() -> TestResult {
             let log = Rc::clone(&log);
             async move {
                 log.set(log.get().saturating_add(1));
-                Ok(host
-                    .run(&middle, value)
+                host.run(&middle, value)
                     .await
                     .into_output()
-                    .unwrap_or_default())
+                    .ok_or_else(|| FlowError::failed("the nested run produced no output"))
             }
         })?
     });
@@ -531,7 +533,9 @@ fn a_deadline_is_reported_with_its_step_path() -> TestResult {
         matches!(error, FlowError::TimedOut { .. }),
         "the failure is the timeout itself: {error}"
     );
-    let path = report.ended_at().unwrap_or("no path");
+    let path = report
+        .ended_at()
+        .ok_or("the report names the step it ended at")?;
     assert!(
         path.starts_with("overrun"),
         "the timeout is located under the task's own step: {path}"
@@ -566,7 +570,9 @@ fn a_stop_is_reported_as_cancelled_with_its_step_path() -> TestResult {
         report.error().is_some_and(FlowError::is_cancelled),
         "the report's error is the cancellation itself"
     );
-    let path = report.ended_at().unwrap_or("no path");
+    let path = report
+        .ended_at()
+        .ok_or("the report names the step it ended at")?;
     assert!(
         path.starts_with("stop-self"),
         "the stop is located under the task's own step: {path}"

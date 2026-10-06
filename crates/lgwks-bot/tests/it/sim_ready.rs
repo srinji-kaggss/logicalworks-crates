@@ -169,9 +169,9 @@ struct Observed {
 impl Observed {
     /// Fold this observation into a trace, in a fixed field order.
     fn record(&self, trace: &mut sim::Trace) {
-        trace.record_count("released", self.released.len());
+        trace.record_number("released", self.released.len());
         for generation in &self.released {
-            trace.record_u64("released-generation", *generation);
+            trace.record_number("released-generation", *generation);
         }
         for refusal in &self.refusals {
             trace.record(refusal);
@@ -179,11 +179,11 @@ impl Observed {
         for outcome in &self.outcomes {
             trace.record(outcome);
         }
-        trace.record_count("served", self.served.len());
+        trace.record_number("served", self.served.len());
         for value in &self.served {
             trace.record(value);
         }
-        trace.record_u64("admitted", self.admitted);
+        trace.record_number("admitted", self.admitted);
     }
 }
 
@@ -400,7 +400,7 @@ fn an_interleaving_never_releases_a_stale_generation(band: Band) -> TestResult {
         // accepted any label at all would pass if a stale signal had been
         // silently accepted, so the vocabulary is closed here.
         for label in &observed.refusals {
-            let arm = label.split(' ').next().unwrap_or("");
+            let arm = label.split_once(' ').map_or(label.as_str(), |(arm, _)| arm);
             assert!(
                 matches!(
                     arm,
@@ -698,7 +698,7 @@ fn saturation_admits_up_to_the_declared_cap() -> TestResult {
         );
         assert_eq!(
             readiness.admitted(),
-            u64::try_from(tier).unwrap_or(0),
+            u64::try_from(tier)?,
             "and charge every admission once"
         );
 
@@ -712,7 +712,7 @@ fn saturation_admits_up_to_the_declared_cap() -> TestResult {
         refused.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             readiness.admitted(),
-            u64::try_from(tier).unwrap_or(0),
+            u64::try_from(tier)?,
             "a refused admission at a tier of {tier} charged no slot"
         );
 

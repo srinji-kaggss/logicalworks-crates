@@ -408,7 +408,7 @@ pub enum TaskOutcome {
 /// It does **not** claim that no process this supervisor started is still
 /// running. That is the honest limit of a process group, and a caller that needs
 /// it needs a kernel job object or a cgroup, neither of which this module has.
-/// `tests/process_escape.rs` exercises a real `setsid` escape and states this
+/// `tests/it/process_escape.rs` exercises a real `setsid` escape and states this
 /// boundary against a live process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2215,21 +2215,8 @@ static ORPHANS: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::n
 /// Reap every parked orphan that has exited, keeping the rest parked.
 #[cfg(all(unix, feature = "process"))]
 fn reap_orphans() {
-    lock_unpoisoned(&ORPHANS).retain_mut(|orphan| matches!(orphan.try_wait(), Ok(None)));
-}
-
-/// Take `mutex`'s guard, recovering it from a poisoned lock.
-///
-/// Every mutex in this module guards a list whose every intermediate state is
-/// valid — an owner or an orphan is pushed whole or not at all — so a panic
-/// on another thread while it held the lock cannot have left a half-written
-/// entry, and refusing the lock forever would leak every obligation it holds.
-#[cfg(all(unix, feature = "process"))]
-fn lock_unpoisoned<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    crate::journal::owner::lock(&ORPHANS)
+        .retain_mut(|orphan| matches!(orphan.try_wait(), Ok(None)));
 }
 
 /// A started child this module owns: the std handle, its two captured pipes as
@@ -2322,7 +2309,7 @@ impl Drop for OwnedChild {
             lgwks_std::trace::debug!(%error, pid = self.pid, "owned child: direct kill on drop refused");
         }
         if !matches!(inner.try_wait(), Ok(Some(_))) {
-            lock_unpoisoned(&ORPHANS).push(inner);
+            crate::journal::owner::lock(&ORPHANS).push(inner);
         }
         reap_orphans();
     }
@@ -2407,7 +2394,7 @@ struct CleanupOwners {
 impl CleanupOwners {
     /// Transfer a live task's lease and cleanup obligation to this registry.
     fn register(&self, task: TaskId, group: i32, permit: OwnedSemaphorePermit) {
-        lock_unpoisoned(&self.pending).push(PendingCleanup {
+        crate::journal::owner::lock(&self.pending).push(PendingCleanup {
             task,
             group,
             _permit: permit,
@@ -2418,7 +2405,7 @@ impl CleanupOwners {
 
     /// Count currently retained obligations.
     fn pending_count(&self) -> usize {
-        lock_unpoisoned(&self.pending).len()
+        crate::journal::owner::lock(&self.pending).len()
     }
 
     /// Probe each owner once; present or unobservable groups keep their lease.
@@ -2427,7 +2414,7 @@ impl CleanupOwners {
         observer: &dyn GroupObserver,
         task_is_live: impl Fn(TaskId) -> bool,
     ) -> Vec<TaskId> {
-        let mut pending = lock_unpoisoned(&self.pending);
+        let mut pending = crate::journal::owner::lock(&self.pending);
         let mut retained = Vec::with_capacity(pending.len());
         let mut settled = Vec::new();
         for mut owner in pending.drain(..) {

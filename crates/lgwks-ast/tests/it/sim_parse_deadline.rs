@@ -148,7 +148,7 @@ fn scenario(seed: u64) -> Scenario<Trace> {
     let (source, shape) = write_source(&mut rng)?;
     let mut trace = Trace::new();
     trace.record(shape);
-    trace.record_count("bytes", source.len());
+    trace.record_number("bytes", source.len());
 
     let stopped = try_parse_within(&source, Language::Rust, Duration::ZERO);
     trace.record(&answer_of(&stopped));

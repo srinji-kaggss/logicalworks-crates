@@ -510,6 +510,9 @@ fn retry_budget_holds(band: Band) -> TestResult {
         let retries = attempts.saturating_sub(first);
         if list.is_empty() {
             assert!(outcome.is_ok(), "no items, no failure");
+            sim.record(&format!(
+                "n=0 limit={limit} budget={budget} attempts={attempts} end=ok"
+            ));
             return Ok(());
         }
         let error = failure_of(outcome, "an upstream that always fails must fail the flow")?;
@@ -520,8 +523,11 @@ fn retry_budget_holds(band: Band) -> TestResult {
             ),
             "a spent retry ends as Throttled or Exhausted: {error}"
         );
+        let allowance = first
+            .checked_div(5)
+            .ok_or("the budget grows by one per five first attempts")?;
         assert!(
-            retries <= 10_u64.saturating_add(first.checked_div(5).unwrap_or(0)),
+            retries <= 10_u64.saturating_add(allowance),
             "retries {retries} exceeded the budget for {first} first attempts"
         );
         assert!(!error.is_retryable(), "a spent budget is not retried again");

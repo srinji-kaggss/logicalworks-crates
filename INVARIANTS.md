@@ -567,7 +567,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   of which this crate has, and the bound is stated on the receipt itself rather
   than left to be inferred from a green test. · why: #87 acceptance row T21
   (LC-10), observed against a real `setsid` escape · enforced by:
-  `tests/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
+  `tests/it/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
   `cleanup_never_signals_a_process_outside_the_supervisors_group`)
 - **INV-BOT-113** A callback that never reaches an await point is observable only
   from outside the process that runs it, and the observation is **detection, not
@@ -625,7 +625,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `same_seed_same_trace_hash_band_14..15`), `tests/it/store_read_failure.rs`
   (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
-  `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
+  `a_compatible_resume_still_replays_after_no_fault`), and `tests/it/task_resume.rs`
   (`a_pre_version_store_is_refused_naming_both_versions`,
   `a_foreign_file_is_still_refused_as_not_a_store`), and
   `tests/it/sim_store_faults.rs`
@@ -668,7 +668,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   second claimer, and a process can hold a live descriptor on a journal it no
   longer owns, because nothing revokes an open descriptor. · why: T16 ·
   enforced by:
-  `tests/owner_epoch_takeover.rs`
+  `tests/it/owner_epoch_takeover.rs`
   (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize`,
   `a_warrant_from_the_previous_generation_is_superseded`,
   `a_generation_the_broker_never_issued_is_not_a_supersession`,
@@ -703,7 +703,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_repaired_run_survives_a_reopened_host`,
   `a_host_spent_on_one_run_still_repairs_the_next`,
   `a_bounded_sweep_repairs_every_ticket_once`) and
-  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
+  `tests/it/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
 
 - **INV-BOT-57** Each boundary of the durable ladder recovers its own answer, and
   recovery is itself a window the crashing process can do damage in. A kill
@@ -718,7 +718,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   an interrupted append — which was never anyone's answer — into a committed one.
   The ladder makes the duplicate settlement unrepresentable rather than merely
   discouraged. · why: T14 · enforced by:
-  `tests/durable_crash_observation.rs`
+  `tests/it/durable_crash_observation.rs`
   (`a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared`,
   `a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome`,
   `a_kill_during_recovery_leaves_the_journal_exactly_as_it_was`,
@@ -1547,7 +1547,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   Under contention the ordered step stays ordered: many appends through one owner
   thread lose nothing, a repeated submission commits one frame, and a replayed
   step is never re-recorded. · why: #87 step 5 (hyperscale) · enforced by:
-  `tests/task_resume.rs::concurrent_runs_across_tiers` and
+  `tests/it/task_resume.rs::concurrent_runs_across_tiers` and
   `tests/it/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
   `an_interrupted_step_records_exactly_once`,
   `tenants_interleaved_stay_isolated`, `same_seed_replays`)
@@ -1566,7 +1566,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   guarantee is exactly-once for a *recorded* step and at-least-once for an
   unrecorded one; an external effect a step performs still needs the effect
   journal, not this. · why: #87 step 5 (host-held continuation) · enforced by:
-  `tests/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
+  `tests/it/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
   `a_run_without_a_store_claims_no_durability`,
   `two_tenants_resuming_one_run_id_stay_isolated`,
   `a_torn_final_record_is_dropped_and_earlier_ones_survive`,
@@ -1638,7 +1638,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `saturation_reaches_every_tier_and_records_the_ceiling`,
   `the_batch_bounds_are_declared_and_never_silent`, `same_seed_replays`),
   `tests/it/resume_liveness.rs::a_grouped_batch_still_lets_the_runtime_turn`,
-  `tests/durable_crash_group_commit.rs`
+  `tests/it/durable_crash_group_commit.rs`
   (`a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`,
   `a_killed_run_with_no_acknowledgment_leaves_no_record`), and
   `crates/lgwks-bot/examples/resume_cost.rs`
@@ -1660,7 +1660,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`
   (the failed batch's durable reality is read from a reopen of the file, not the
   handle that refused it), and
-  `tests/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
+  `tests/it/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
 - **INV-BOT-132** One storage owner serves every durable store with one ordered
   step whose answer has three shapes: `Settled` (nothing was written, the answer is
   ready), `Unsynced` (bytes are on the file and the answer and fold are owed the
@@ -1814,7 +1814,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   committed event and no torn tail, and the retry lands exactly once. The kill
   is a real `SIGKILL` of a child that handed the storage owner the append and
   then parked. · why: #122 item 2 / #156 · enforced by:
-  `tests/durable_crash_observation.rs`
+  `tests/it/durable_crash_observation.rs`
   (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
 - **INV-BOT-45** Concurrent tenant appends over separate files stay isolated,
   lose nothing and duplicate nothing, and one acknowledged append's latency
@@ -2345,14 +2345,14 @@ Each of these was a shipped defect. Treat the list as the spec.
 - Partial answer, 2026-09-23: INV-BOT-2, INV-BOT-3, INV-BOT-4 and the
   journal-before-acknowledge half of INV-BOT-1 are exercised under a real
   process kill against a real file store by
-  `tests/durable_crash_observation.rs` (rows #100, #101, #102, #104, #106 of
+  `tests/it/durable_crash_observation.rs` (rows #100, #101, #102, #104, #106 of
   the #109 register). The still-unnamed remainder — INV-BOT-5's poll path
   under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
   INV-BOT-10's real frame (#108) — is where the next regression will come
   from.
 - 2026-10-05 (#280): #109 closed on 2026-09-23 with those three rows repaired
   and covered by in-process regression tests, not by an external observation.
-  INV-BOT-9's T21 is now observed by `tests/process_escape.rs`, which shows a
+  INV-BOT-9's T21 is now observed by `tests/it/process_escape.rs`, which shows a
   `setsid` descendant escaping the group and the receipt not claiming it
   (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
   path and INV-BOT-10's real frame still have no named external test.

@@ -96,6 +96,8 @@ use lgwks_std::hash::{Digest, Hasher};
 use crate::cap::{Cap, Deficit, Demand, Shortage, uncovered};
 use crate::effect::{InputIdentity, RunId};
 use crate::gate::GrantSet;
+use crate::journal::frame::SaturatingFrom;
+use crate::journal::owner::lock;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
@@ -928,28 +930,13 @@ struct Installation {
     repair_attempts: u64,
     /// The most root spend one run may be charged before it is refused.
     repair_spend: u64,
-    /// The runtime [`Host::block_on`] drives on, built once on first use.
-    reactor: Mutex<Option<Reactor>>,
-}
-
-/// The owned runtime a synchronous entry drives on.
-///
-/// Field order is the ownership: the handle is dropped before the runtime it
-/// points at, so a handle can never outlive the reactor that drives it. The
-/// runtime is held and never read, and that is the point — a runtime whose last
-/// reference is dropped shuts down and drops every task still running on it, so
-/// keeping it alive for the host's lifetime is what lets a second
-/// [`Host::block_on`] drive work on the same reactor.
-struct Reactor {
-    /// Drives work on [`Reactor::runtime`].
-    handle: Handle,
-    /// The owned engine runtime. Unread by design; see the type's own docs.
-    #[expect(
-        dead_code,
-        reason = "the runtime is owned to keep the reactor alive; it is never read, and \
-                  dropping it would shut the reactor down between synchronous runs"
-    )]
-    runtime: Runtime,
+    /// The runtime [`Host::block_on`] drives on, built once on first use and
+    /// owned for the host's lifetime: a runtime whose last owner drops it shuts
+    /// down and drops every task still running on it, so holding it here is what
+    /// lets a second [`Host::block_on`] drive work on the same reactor. Each call
+    /// takes a fresh handle from it rather than a stored copy, so no handle can
+    /// outlive the runtime it points at.
+    reactor: Mutex<Option<Runtime>>,
 }
 
 /// What one call to [`Host::execute`] is asking for.
@@ -1006,7 +993,6 @@ impl Plan {
 mod tests {
     use super::Plan;
     use crate::effect::RunId;
-    use crate::script::Tenant;
     use crate::task::{Host, name::TaskName};
 
     /// What this module's tests report.
@@ -1104,16 +1090,6 @@ mod tests {
             .build()
             .map_err(|error| error.to_string())
     }
-
-    /// The tenant name this module's tests build, named so the fixture above is
-    /// the only place it is spelled.
-    #[expect(
-        dead_code,
-        reason = "the tenant is named by the host fixture; kept for the type"
-    )]
-    fn tenant() -> Result<Tenant, String> {
-        Tenant::new("acme").map_err(|error| error.to_string())
-    }
 }
 
 impl Host {
@@ -1199,11 +1175,15 @@ impl Host {
     /// under another. `None` means nothing is recorded yet, which is the first
     /// attempt's situation and not a compatibility.
     fn identity_for(&self, run: RunId, declared: &DefinitionIdentity) -> DefinitionIdentity {
-        self.inner
+        match self
+            .inner
             .store
             .as_ref()
             .and_then(|store| store.definition_of(run))
-            .unwrap_or_else(|| declared.clone())
+        {
+            Some(recorded) => recorded,
+            None => declared.clone(),
+        }
     }
 
     /// The identity a run adopts when its caller declared none.
@@ -1265,12 +1245,17 @@ impl Host {
         input_digest: Option<Digest>,
         steps: usize,
     ) -> DefinitionIdentity {
-        let input = input_digest.unwrap_or_else(|| {
-            let mut hasher = Hasher::new();
-            hasher.write_framed(b"lgwks.bot.input.undeclared");
-            hasher.write_framed(self.inner.codec.as_bytes());
-            hasher.finalize()
-        });
+        // An undeclared input is named by the codec it would be encoded with,
+        // so two hosts that encode differently never share an identity.
+        let input = match input_digest {
+            Some(declared) => declared,
+            None => {
+                let mut hasher = Hasher::new();
+                hasher.write_framed(b"lgwks.bot.input.undeclared");
+                hasher.write_framed(self.inner.codec.as_bytes());
+                hasher.finalize()
+            }
+        };
         DefinitionIdentity::new(task_name, definition_revision, input, steps)
             .with_codec(&self.inner.codec)
     }
@@ -2277,15 +2262,16 @@ impl Host {
         // reading: this run holds nothing it inherited, so it is charged for
         // everything it does itself. `Vec::new()` rather than a discard of the
         // not-entered error, which carries no permit information at all.
-        let held = HELD_PERMITS
-            .try_with(Clone::clone)
-            .unwrap_or_else(|not_entered| {
+        let held = match HELD_PERMITS.try_with(Clone::clone) {
+            Ok(held) => held,
+            Err(not_entered) => {
                 lgwks_std::trace::debug!(
                     ?not_entered,
                     "submit: no enclosing scope holds a permit set"
                 );
                 Vec::new()
-            });
+            }
+        };
         let charged = if held.contains(&self.inner.identity) {
             held
         } else {
@@ -2563,15 +2549,12 @@ impl Host {
     /// This host's reactor, built on first use and kept for every later call.
     fn reactor(&self) -> Result<Handle, HostError> {
         let mut slot = self.reactor_slot();
-        if let Some(owner) = slot.as_ref() {
-            return Ok(owner.handle.clone());
+        if let Some(runtime) = slot.as_ref() {
+            return Ok(runtime.handle());
         }
         let runtime = Runtime::new().map_err(|cause| HostError::Runtime { cause })?;
         let handle = runtime.handle();
-        *slot = Some(Reactor {
-            handle: handle.clone(),
-            runtime,
-        });
+        *slot = Some(runtime);
         Ok(handle)
     }
 
@@ -2580,11 +2563,8 @@ impl Host {
     /// Poisoning recovers rather than propagating: the slot holds a
     /// [`Runtime`], whose `Drop` is infallible, so no panic path can leave a
     /// half-installed reactor behind.
-    fn reactor_slot(&self) -> MutexGuard<'_, Option<Reactor>> {
-        self.inner
-            .reactor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn reactor_slot(&self) -> MutexGuard<'_, Option<Runtime>> {
+        lock(&self.inner.reactor)
     }
 
     /// Wait for one of this host's permits, bounded by the run's deadline and
@@ -2602,9 +2582,11 @@ impl Host {
         // admitted and then stopped, which is a different thing to tell a
         // reader — and the reason this returns a [`Permit`] or a *timeout* is
         // that only a run which entered its body can be cancelled inside it.
-        let nested = HELD_PERMITS
-            .try_with(|held| held.contains(&self.inner.identity))
-            .unwrap_or(false);
+        // Outside every scope a run holds nothing, so it is not nested.
+        let nested = matches!(
+            HELD_PERMITS.try_with(|held| held.contains(&self.inner.identity)),
+            Ok(true)
+        );
         if nested {
             return Ok(Permit::Charged);
         }
@@ -3238,8 +3220,8 @@ impl HostBuilder {
     /// [`HostError::Bound`] for a ceiling outside the declared bound, including a
     /// zero deadline, which would expire every run before its body starts.
     pub fn build(self) -> Result<Host, HostError> {
-        let tasks = u64::try_from(self.max_concurrent.get()).unwrap_or(u64::MAX);
-        let tasks_ceiling = u64::try_from(MAX_ADMITTED_TASKS).unwrap_or(u64::MAX);
+        let tasks = u64::saturating_from(self.max_concurrent.get());
+        let tasks_ceiling = u64::saturating_from(MAX_ADMITTED_TASKS);
         if tasks > tasks_ceiling {
             let refusal = Err(HostError::Bound {
                 what: "the admission ceiling",
@@ -3267,8 +3249,8 @@ impl HostBuilder {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
             return refusal;
         }
-        let steps = u64::try_from(self.progress).unwrap_or(u64::MAX);
-        let steps_ceiling = u64::try_from(MAX_PROGRESS_STEPS).unwrap_or(u64::MAX);
+        let steps = u64::saturating_from(self.progress);
+        let steps_ceiling = u64::saturating_from(MAX_PROGRESS_STEPS);
         if steps > steps_ceiling {
             let refusal = Err(HostError::Bound {
                 what: "the progress capacity",
@@ -3309,10 +3291,20 @@ impl HostBuilder {
 /// The admission ceiling a host uses when the builder says nothing.
 fn default_max_concurrent() -> NonZeroUsize {
     /// The bodies one core may have waiting at once.
-    const PER_CORE: usize = 64;
-    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    NonZeroUsize::new(cores.saturating_mul(PER_CORE).min(MAX_ADMITTED_TASKS))
-        .unwrap_or(NonZeroUsize::MIN)
+    const PER_CORE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(63);
+    /// [`MAX_ADMITTED_TASKS`] in the non-zero type the default is clamped in.
+    const CEILING: NonZeroUsize =
+        NonZeroUsize::MIN.saturating_add(MAX_ADMITTED_TASKS.saturating_sub(1));
+    // A host that cannot count its cores is sized as one core: the smallest
+    // machine the default has to fit, rather than a guess at a bigger one.
+    let cores = match std::thread::available_parallelism() {
+        Ok(cores) => cores,
+        Err(uncounted) => {
+            lgwks_std::trace::debug!(?uncounted, "default_max_concurrent: sizing for one core");
+            NonZeroUsize::MIN
+        }
+    };
+    cores.saturating_mul(PER_CORE).min(CEILING)
 }
 
 /// The deadline a host applies when the builder says nothing.

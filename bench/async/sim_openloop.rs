@@ -91,8 +91,7 @@ fn quiet(bound: usize, seed: u64) -> SimSpec {
 /// about the others, which is exactly how a reader would take it.
 fn saturated(bound: usize, seed: u64) -> SimSpec {
     SimSpec {
-        offered_rate: crate::widen(bound)
-            .saturating_mul(PERMITS_PER_SECOND * 5),
+        offered_rate: crate::widen(bound).saturating_mul(PERMITS_PER_SECOND * 5),
         arrivals: crate::widen(bound).saturating_mul(4),
         bound,
         service_min_nanos: 2_000,
@@ -167,8 +166,7 @@ fn constant_service(
     let service_nanos = body_micros.saturating_mul(1_000);
     SimSpec {
         offered_rate,
-        arrivals: crate::widen(bound)
-            .saturating_mul(bodies_per_bound),
+        arrivals: crate::widen(bound).saturating_mul(bodies_per_bound),
         bound,
         service_min_nanos: service_nanos,
         service_max_nanos: service_nanos,
@@ -211,7 +209,10 @@ fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() -> Result<(
             );
 
             let capacity = crate::capacity_per_second(bound, body_micros);
-            let top = ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
+            let top = ladder
+                .last()
+                .copied()
+                .ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
             if crate::ladder_clamped(bound, body_micros) {
                 assert_eq!(
                     top,
@@ -227,7 +228,11 @@ fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() -> Result<(
                      knee, so the knee it declares is the end of the ladder"
                 );
                 assert!(
-                    ladder.first().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))? < capacity,
+                    ladder
+                        .first()
+                        .copied()
+                        .ok_or_else(|| format!("bound {bound} produced an empty ladder"))?
+                        < capacity,
                     "bound {bound} at {body_micros}us starts its ladder at {:?}, at or above its \
                      own declared capacity of {capacity}: there is no rung below the knee to \
                      read it from",
@@ -300,8 +305,14 @@ fn sim_the_live_ladder_reads_the_knee_the_model_measures() -> Result<(), String>
     for bound in MODEL_BOUNDS {
         for body_micros in BODY_COSTS {
             let ladder = crate::sweep_ladder(bound, body_micros);
-            let bottom = ladder.first().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
-            let top = ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
+            let bottom = ladder
+                .first()
+                .copied()
+                .ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
+            let top = ladder
+                .last()
+                .copied()
+                .ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
             assert!(
                 ladder.len() >= 2,
                 "bound {bound} at {body_micros}us produced a {}-rung ladder {ladder:?}: the knee \
@@ -384,7 +395,11 @@ fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() -> Result<()
             // that rung at the generator's own ceiling and still leaves eight times the
             // capacity, which is why the assertion is four and not sixteen.
             assert!(
-                ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))? >= capacity.saturating_mul(4),
+                ladder
+                    .last()
+                    .copied()
+                    .ok_or_else(|| format!("bound {bound} produced an empty ladder"))?
+                    >= capacity.saturating_mul(4),
                 "bound {bound} at a {target}/s target produced {ladder:?} against a declared \
                  capacity of {capacity}/s: the ladder does not reach four times the capacity, \
                  so the knee it declares is the end of the ladder"

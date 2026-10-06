@@ -206,12 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              {duplicates} duplicates, total {total} (expected {expected})"
         )?;
         if total != expected || fetched != u64::from(PAGES) {
-            {
-                let refusal =
-                    Err(format!("{name}: the crawl did not fetch every page exactly once").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("{name}: the crawl did not fetch every page exactly once").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     let shared = acme_site.keys().intersection(&globex_site.keys()).count();

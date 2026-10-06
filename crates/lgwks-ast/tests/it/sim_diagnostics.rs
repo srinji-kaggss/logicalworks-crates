@@ -686,7 +686,7 @@ fn scenario(seed: u64) -> Scenario<Trace> {
     let mut rng = Rng::new(seed);
     let source = mixed_rust(&mut rng)?;
     let mut trace = Trace::new();
-    trace.record_count("bytes", source.len());
+    trace.record_number("bytes", source.len());
     for found in findings(&source) {
         trace.record(&found.render());
     }

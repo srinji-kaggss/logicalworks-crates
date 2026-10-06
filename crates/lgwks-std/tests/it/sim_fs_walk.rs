@@ -21,6 +21,8 @@
 
 #[path = "../../../lgwks-bot/tests/sim/seed.rs"]
 mod seed;
+#[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
+mod seed_helpers;
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -1073,15 +1075,15 @@ fn scenario(seed: u64) -> Result<Trace, Box<dyn Error>> {
     let mut rng = Rng::new(seed);
     let tree = SimTree::grow(&mut rng)?;
     let mut trace = Trace::new();
-    trace.record_count("nodes", tree.nodes.len());
+    trace.record_number("nodes", tree.nodes.len());
     let walk = options(draw(&mut rng, 0, 4), false, true);
     for path in tree.relative(&walk_dir(&tree.root, &walk)?) {
         trace.record(&path);
     }
     let limits = limits_near(&mut rng, &tree);
     let report: WalkReport = walk_dir_tolerant_bounded(&tree.root, &unbounded(), &limits)?;
-    trace.record_u64("complete", u64::from(report.is_complete()));
-    trace.record_count("prefix", report.entries().len());
+    trace.record_number("complete", u64::from(report.is_complete()));
+    trace.record_number("prefix", report.entries().len());
     Ok(trace)
 }
 

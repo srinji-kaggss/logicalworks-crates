@@ -81,10 +81,10 @@ fn run(spec: &ProcessSpec) -> Result<lgwks_bot::rt::process::ProcessRun, Box<dyn
 fn record_capture(sim: &mut sim::Sim, label: &str, run: &lgwks_bot::rt::process::ProcessRun) {
     sim.record(label);
     sim.trace
-        .record_count("retained", run.stdout().bytes().len());
-    sim.trace.record_u64("total", run.stdout().total_bytes());
+        .record_number("retained", run.stdout().bytes().len());
+    sim.trace.record_number("total", run.stdout().total_bytes());
     sim.trace
-        .record_u64("truncated", u64::from(run.stdout().truncated()));
+        .record_number("truncated", u64::from(run.stdout().truncated()));
 }
 
 /// A seeded output size stays at the ceiling, and the exact total is reported.
@@ -105,8 +105,7 @@ fn sizes_stay_at_the_ceiling(band: Band) -> TestResult {
         let outcome = run(&captured(&script, ceiling)?)?;
 
         for (name, stream) in [("stdout", outcome.stdout()), ("stderr", outcome.stderr())] {
-            let expected =
-                usize::try_from(size.min(u32::try_from(ceiling).unwrap_or(u32::MAX)))?.min(ceiling);
+            let expected = usize::try_from(size.min(u32::try_from(ceiling)?))?.min(ceiling);
             assert_eq!(
                 stream.bytes().len(),
                 expected,
@@ -123,7 +122,7 @@ fn sizes_stay_at_the_ceiling(band: Band) -> TestResult {
             );
             assert_eq!(
                 stream.truncated(),
-                u64::from(size) > u64::try_from(ceiling).unwrap_or(u64::MAX),
+                u64::from(size) > u64::try_from(ceiling)?,
                 "{name} truncation is exactly size > ceiling"
             );
             assert!(
@@ -133,8 +132,8 @@ fn sizes_stay_at_the_ceiling(band: Band) -> TestResult {
             );
         }
         record_capture(sim, "size", &outcome);
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_u64("size", u64::from(size));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("size", u64::from(size));
         Ok(())
     })
 }
@@ -157,9 +156,9 @@ fn cuts_are_refused_never_decoded(band: Band) -> TestResult {
         // The cut is in the bytes the child actually writes, so the reader really
         // does see a short payload rather than being asked to imagine one.
         let mut stream_bytes: Vec<u8> = Vec::new();
-        stream_bytes.extend(u32::try_from(WHOLE.len()).unwrap_or(0).to_be_bytes());
+        stream_bytes.extend(u32::try_from(WHOLE.len())?.to_be_bytes());
         stream_bytes.extend_from_slice(WHOLE);
-        stream_bytes.extend(u32::try_from(DECLARED).unwrap_or(0).to_be_bytes());
+        stream_bytes.extend(u32::try_from(DECLARED)?.to_be_bytes());
         stream_bytes.extend_from_slice(&PARTIAL[..cut]);
         let stream_literal = stream_bytes
             .iter()
@@ -224,9 +223,9 @@ fn cuts_are_refused_never_decoded(band: Band) -> TestResult {
             );
         }
         sim.record("cut");
-        sim.trace.record_count("cut", cut);
+        sim.trace.record_number("cut", cut);
         sim.trace
-            .record_u64("declared", u64::try_from(DECLARED).unwrap_or(u64::MAX));
+            .record_number("declared", u64::try_from(DECLARED)?);
         Ok(())
     })
 }
@@ -242,7 +241,7 @@ fn two_tenants_never_cross(band: Band) -> TestResult {
         let ceiling = usize::try_from(sim.rng().between(64, 8192))?;
         let size = sim.rng().between(1, 20_000);
         let tenant: u32 = sim.rng().below(4);
-        let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
+        let byte = u8::try_from(tenant)?.wrapping_add(b'a');
 
         let mut observations: Vec<(Vec<u8>, u64)> = Vec::new();
         for _ in 0..2 {
@@ -257,8 +256,14 @@ fn two_tenants_never_cross(band: Band) -> TestResult {
             ));
         }
 
-        let (first, first_total) = observations.first().cloned().unwrap_or_default();
-        let (second, second_total) = observations.get(1).cloned().unwrap_or_default();
+        let (first, first_total) = observations
+            .first()
+            .cloned()
+            .ok_or("the first tenant was observed")?;
+        let (second, second_total) = observations
+            .get(1)
+            .cloned()
+            .ok_or("the second tenant was observed")?;
         assert_eq!(
             first_total,
             u64::from(size),
@@ -278,10 +283,10 @@ fn two_tenants_never_cross(band: Band) -> TestResult {
             "the second tenant's retained bytes must all be its own byte {byte:?}"
         );
         sim.record("tenants");
-        sim.trace.record_u64("tenant", u64::from(tenant));
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_u64("size", u64::from(size));
-        sim.trace.record_count("retained", first.len());
+        sim.trace.record_number("tenant", u64::from(tenant));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("size", u64::from(size));
+        sim.trace.record_number("retained", first.len());
         Ok(())
     })
 }
@@ -301,15 +306,15 @@ fn the_same_seed_replays(band: Band) -> TestResult {
         // The framing half of the receipt too, so a change in how a cut frame is
         // classified shows up here and not only in the family that cuts.
         let frames = outcome.stdout().frames(ceiling);
-        sim.trace.record_count("frames", frames.records().len());
+        sim.trace.record_number("frames", frames.records().len());
         // The ending's *class*, not a rendering of it: a text comparison would
         // pass while the classification changed.
         sim.trace
             .record(&format!("ended-{}", ending_class(&frames)));
         sim.trace
-            .record_u64("capture-truncated", u64::from(outcome.stdout().truncated()));
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_u64("size", u64::from(size));
+            .record_number("capture-truncated", u64::from(outcome.stdout().truncated()));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("size", u64::from(size));
         Ok(())
     })
 }
@@ -376,8 +381,8 @@ fn a_seeded_flood_stays_bounded_on_one_worker(band: Band) -> TestResult {
             "the retained buffer must not grow past the ceiling"
         );
         record_capture(sim, "flood", &outcome);
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_u64("size", u64::from(size));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("size", u64::from(size));
         Ok(())
     })
 }
@@ -406,7 +411,7 @@ fn capture_cuts_end_at_the_capture_ceiling(band: Band) -> TestResult {
         // bytes, and one this family is not about.
         let ceiling = usize::try_from(sim.rng().between(20, 60))?;
         let tenant: u32 = sim.rng().below(2);
-        let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
+        let byte = u8::try_from(tenant)?.wrapping_add(b'a');
 
         let outcome = run(&framed_capture(byte, PAYLOAD, 6, ceiling)?)?;
         assert!(
@@ -466,10 +471,10 @@ fn capture_cuts_end_at_the_capture_ceiling(band: Band) -> TestResult {
             );
         }
         sim.record("capture-cut");
-        sim.trace.record_u64("tenant", u64::from(tenant));
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_count("retained", retained);
-        sim.trace.record_count("frames", frames.records().len());
+        sim.trace.record_number("tenant", u64::from(tenant));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("retained", retained);
+        sim.trace.record_number("frames", frames.records().len());
         sim.record(ending_class(&frames));
         Ok(())
     })
@@ -505,19 +510,18 @@ fn room_without_a_record_is_the_ceiling(band: Band) -> TestResult {
         // `head`, because two 40 KiB records spelled as octal escapes would be a
         // half-megabyte single argument, past what an `execve` accepts, and the
         // child would fail to start rather than exercise the reader.
-        let prefix_of = |length: usize| -> String {
-            u32::try_from(length)
-                .unwrap_or(0)
+        let prefix_of = |length: usize| -> Result<String, std::num::TryFromIntError> {
+            Ok(u32::try_from(length)?
                 .to_be_bytes()
                 .iter()
                 .map(|value| format!("\\{value:03o}"))
-                .collect()
+                .collect())
         };
         let script = format!(
             "printf '{first_prefix}'; head -c {first} /dev/zero | tr '\\0' '9'; \
              printf '{second_prefix}'; head -c {second} /dev/zero | tr '\\0' '9'",
-            first_prefix = prefix_of(first),
-            second_prefix = prefix_of(second),
+            first_prefix = prefix_of(first)?,
+            second_prefix = prefix_of(second)?,
         );
         let outcome = run(&captured(&script, CAPTURE)?)?;
         assert!(
@@ -530,7 +534,7 @@ fn room_without_a_record_is_the_ceiling(band: Band) -> TestResult {
         // and be reported as one, so the count is pinned before the framing is.
         assert_eq!(
             outcome.stdout().total_bytes(),
-            u64::try_from(first.saturating_add(second).saturating_add(8)).unwrap_or(u64::MAX),
+            u64::try_from(first.saturating_add(second).saturating_add(8))?,
             "first={first} second={second}: the child wrote exactly two length-prefixed records"
         );
 
@@ -570,7 +574,7 @@ fn room_without_a_record_is_the_ceiling(band: Band) -> TestResult {
         // zero, and one past the ceiling. A reader that folded either into the
         // ceiling would accept a record the frame grammar refuses.
         for declared in [0_usize, CEILING + 1] {
-            let mut rot: &[u8] = &u32::try_from(declared).unwrap_or(0).to_be_bytes();
+            let mut rot: &[u8] = &u32::try_from(declared)?.to_be_bytes();
             let refused = lgwks_bot::rt::process::read_frames(&mut rot, CEILING)?;
             assert_eq!(
                 refused.ended(),
@@ -587,9 +591,9 @@ fn room_without_a_record_is_the_ceiling(band: Band) -> TestResult {
             );
         }
         sim.record("room");
-        sim.trace.record_count("first", first);
-        sim.trace.record_count("second", second);
-        sim.trace.record_count("room", room);
+        sim.trace.record_number("first", first);
+        sim.trace.record_number("second", second);
+        sim.trace.record_number("room", room);
         sim.record(ending_class(&frames));
         Ok(())
     })
@@ -718,7 +722,7 @@ fn capture_cuts_saturate_at_the_declared_tiers() -> TestResult {
     for requested in [100_usize, 1_000, 10_000] {
         let level = requested.min(CAPTURE_CEILING);
         let specs: Vec<ProcessSpec> = (0..level)
-            .map(|index| framed_capture(tenant_byte(index), PAYLOAD, RECORDS, CEILING))
+            .map(|index| framed_capture(tenant_byte(index)?, PAYLOAD, RECORDS, CEILING))
             .collect::<Result<Vec<_>, _>>()?;
         let runtime = lgwks_bot::Runtime::new()?;
         // Each child gets its own `Supervisor::new(1)` *inside its own async
@@ -760,7 +764,7 @@ fn capture_cuts_saturate_at_the_declared_tiers() -> TestResult {
                 "requested={requested} child {index}: only the {expected_frames} whole frames \
                  inside a {CEILING}-byte capture are records"
             );
-            let byte = tenant_byte(index);
+            let byte = tenant_byte(index)?;
             for (record, payload) in read
                 .records()
                 .iter()
@@ -808,7 +812,7 @@ fn rot_before_the_capture_cut_is_the_ending(band: Band) -> TestResult {
         const FRAME: usize = 4 + PAYLOAD;
         let pad = usize::try_from(sim.rng().below(3))?;
         let tenant: u32 = sim.rng().below(2);
-        let byte = u8::try_from(tenant).unwrap_or(0).wrapping_add(b'a');
+        let byte = u8::try_from(tenant)?.wrapping_add(b'a');
         // Drawn *after* `pad` so that drawing it does not renumber the seeds, and
         // above both the rot's position and one whole record — so whether the rot
         // was retained whole is a real draw across the sweep rather than an
@@ -825,16 +829,18 @@ fn rot_before_the_capture_cut_is_the_ending(band: Band) -> TestResult {
         };
 
         let mut writer: Vec<u8> = Vec::new();
-        let push_record = |writer: &mut Vec<u8>, declared: usize| {
-            writer.extend_from_slice(&u32::try_from(declared).unwrap_or(0).to_be_bytes());
-            writer.extend(std::iter::repeat_n(byte, declared));
-        };
+        let push_record =
+            |writer: &mut Vec<u8>, declared: usize| -> Result<(), std::num::TryFromIntError> {
+                writer.extend_from_slice(&u32::try_from(declared)?.to_be_bytes());
+                writer.extend(std::iter::repeat_n(byte, declared));
+                Ok(())
+            };
         for _ in 0..pad {
-            push_record(&mut writer, PAYLOAD);
+            push_record(&mut writer, PAYLOAD)?;
         }
-        push_record(&mut writer, declared);
+        push_record(&mut writer, declared)?;
         for _ in 0..tail {
-            push_record(&mut writer, PAYLOAD);
+            push_record(&mut writer, PAYLOAD)?;
         }
         let literal = writer
             .iter()
@@ -889,14 +895,15 @@ fn rot_before_the_capture_cut_is_the_ending(band: Band) -> TestResult {
             "an ending the pass stopped on carries no payload"
         );
         sim.record("rot");
-        sim.trace.record_u64("tenant", u64::from(tenant));
-        sim.trace.record_count("ceiling", ceiling);
-        sim.trace.record_count("retained", retained);
-        sim.trace.record_count("pad", pad);
-        sim.trace.record_count("tail", tail);
-        sim.trace.record_count("rot-at", rot_at);
-        sim.trace.record_count("declared", declared);
-        sim.trace.record_u64("capture-cut", u64::from(capture_cut));
+        sim.trace.record_number("tenant", u64::from(tenant));
+        sim.trace.record_number("ceiling", ceiling);
+        sim.trace.record_number("retained", retained);
+        sim.trace.record_number("pad", pad);
+        sim.trace.record_number("tail", tail);
+        sim.trace.record_number("rot-at", rot_at);
+        sim.trace.record_number("declared", declared);
+        sim.trace
+            .record_number("capture-cut", u64::from(capture_cut));
         sim.record(ending_class(&frames));
         Ok(())
     })
@@ -908,8 +915,13 @@ fn rot_before_the_capture_cut_is_the_ending(band: Band) -> TestResult {
 /// payload bytes between runs: the assertion is about *which* capture a record
 /// came from, not about every child having a distinct byte, and a crossed pipe
 /// would still show as a byte this child never wrote.
-fn tenant_byte(index: usize) -> u8 {
-    u8::try_from(index % 26).unwrap_or(0).wrapping_add(b'a')
+fn tenant_byte(index: usize) -> Result<u8, Box<dyn Error>> {
+    const LETTERS: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
+    index
+        .checked_rem(LETTERS.len())
+        .and_then(|at| LETTERS.get(at))
+        .copied()
+        .ok_or_else(|| format!("tenant {index} has no letter").into())
 }
 
 /// How many whole `frame`-byte frames fit in `retained` bytes.
@@ -941,7 +953,7 @@ fn framed_capture(
     let body: Vec<u8> = std::iter::repeat_n(byte, payload).collect();
     let mut writer: Vec<u8> = Vec::new();
     for _ in 0..records {
-        writer.extend_from_slice(&u32::try_from(payload).unwrap_or(0).to_be_bytes());
+        writer.extend_from_slice(&u32::try_from(payload)?.to_be_bytes());
         writer.extend_from_slice(&body);
     }
     let literal = writer
@@ -985,9 +997,7 @@ fn verb_framed_reads_agree_with_the_model(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let payload = usize::try_from(sim.rng().between(1, 32))?;
         let records = usize::try_from(sim.rng().between(1, 8))?;
-        let byte = u8::try_from(sim.rng().below(26))
-            .unwrap_or(0)
-            .wrapping_add(b'a');
+        let byte = u8::try_from(sim.rng().below(26))?.wrapping_add(b'a');
         // A capture ceiling generous enough that the child's whole output is
         // retained, so the framed ending is the child's own and not the
         // capture's cut.
@@ -1021,9 +1031,9 @@ fn verb_framed_reads_agree_with_the_model(band: Band) -> TestResult {
         );
         assert!(frames.is_complete(), "every record was decoded whole");
         sim.record("verb-framed");
-        sim.trace.record_count("payload", payload);
-        sim.trace.record_count("records", records);
-        sim.trace.record_count("frames", frames.records().len());
+        sim.trace.record_number("payload", payload);
+        sim.trace.record_number("records", records);
+        sim.trace.record_number("frames", frames.records().len());
         Ok(())
     })
 }
@@ -1079,12 +1089,12 @@ fn verb_two_tenants_never_cross(band: Band) -> TestResult {
             "both tenants wrote the same shape, so isolation is about content not count"
         );
         sim.record("verb-tenants");
-        sim.trace.record_count("payload", payload);
-        sim.trace.record_count("records", records);
+        sim.trace.record_number("payload", payload);
+        sim.trace.record_number("records", records);
         sim.trace
-            .record_u64("first-total", first_state.stdout_total_bytes);
+            .record_number("first-total", first_state.stdout_total_bytes);
         sim.trace
-            .record_u64("second-total", second_state.stdout_total_bytes);
+            .record_number("second-total", second_state.stdout_total_bytes);
         Ok(())
     })
 }
@@ -1136,7 +1146,7 @@ fn verb_framed_reads_saturate_at_the_declared_tiers() -> TestResult {
         let auth = sys_auth()?;
         let processes: Vec<Process> = (0..level)
             .map(|index| -> Result<Process, Box<dyn Error>> {
-                process_with_frames(framed_capture(tenant_byte(index), PAYLOAD, RECORDS, 4096)?)
+                process_with_frames(framed_capture(tenant_byte(index)?, PAYLOAD, RECORDS, 4096)?)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let observations = runtime.block_on(async {
@@ -1163,7 +1173,7 @@ fn verb_framed_reads_saturate_at_the_declared_tiers() -> TestResult {
                 RECORDS,
                 "requested={requested} child {index}: each call keeps its own {RECORDS} records"
             );
-            let expected: Vec<u8> = std::iter::repeat_n(tenant_byte(index), PAYLOAD).collect();
+            let expected: Vec<u8> = std::iter::repeat_n(tenant_byte(index)?, PAYLOAD).collect();
             for record in frames.records() {
                 assert_eq!(
                     record.payload(),

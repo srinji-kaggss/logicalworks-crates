@@ -147,11 +147,11 @@ fn torn_tail(band: Band) -> TestResult {
             path.metadata()?.len()
         );
         sim.record("torn-tail-refused-or-repaired");
-        sim.trace.record_u64("torn-mode", u64::from(mode));
+        sim.trace.record_number("torn-mode", u64::from(mode));
         sim.trace
-            .record_u64("torn-bytes", torn.saturating_sub(intact));
-        sim.trace.record_count("torn-committed", after);
-        sim.trace.record_count("torn-uncertain", uncertain);
+            .record_number("torn-bytes", torn.saturating_sub(intact));
+        sim.trace.record_number("torn-committed", after);
+        sim.trace.record_number("torn-uncertain", uncertain);
         Ok(())
     })
 }
@@ -182,8 +182,8 @@ fn tail_fence(band: Band) -> TestResult {
             assert!(after != before, "an accepted append did not move the tail");
         }
         sim.trace
-            .record_u64("fence-accepted", u64::from(outcome.is_ok()));
-        sim.trace.record_count("fence-committed", committed);
+            .record_number("fence-accepted", u64::from(outcome.is_ok()));
+        sim.trace.record_number("fence-committed", committed);
         Ok(())
     })
 }
@@ -206,7 +206,7 @@ fn replay_bytes(band: Band) -> TestResult {
              a function of the inputs"
         );
         sim.record("byte-replay-identical");
-        sim.trace.record_count("replay-bytes", first.len());
+        sim.trace.record_number("replay-bytes", first.len());
         Ok(())
     })
 }
@@ -257,9 +257,10 @@ fn recover_uncertain(band: Band) -> TestResult {
             );
         }
         sim.record("recover-classified");
-        sim.trace.record_count("recover-events", written);
-        sim.trace.record_count("recover-uncertain", uncertain.len());
-        sim.trace.record_count("recover-settled", settle_to);
+        sim.trace.record_number("recover-events", written);
+        sim.trace
+            .record_number("recover-uncertain", uncertain.len());
+        sim.trace.record_number("recover-settled", settle_to);
         Ok(())
     })
 }
@@ -293,8 +294,8 @@ fn chain_verifies(band: Band) -> TestResult {
         assert_eq!(entries.len(), expected, "the chain lost an entry");
         drop(final_handle);
         sim.record("chain-verified");
-        sim.trace.record_count("chain-entries", entries.len());
-        sim.trace.record_count("chain-cycles", cycles);
+        sim.trace.record_number("chain-entries", entries.len());
+        sim.trace.record_number("chain-cycles", cycles);
         Ok(())
     })
 }
@@ -359,7 +360,7 @@ fn tenant_isolation(band: Band) -> TestResult {
         }
         sim.record("tenants-isolated");
         sim.trace
-            .record_u64("isolation-tenants", u64::from(tenants));
+            .record_number("isolation-tenants", u64::from(tenants));
         Ok(())
     })
 }
@@ -400,7 +401,7 @@ fn idempotent_restore(band: Band) -> TestResult {
             "an already-climbed rung was appended twice"
         );
         sim.record("restore-refused-at-stale-tail");
-        sim.trace.record_count("idem-events", complete);
+        sim.trace.record_number("idem-events", complete);
         Ok(())
     })
 }
@@ -469,8 +470,8 @@ fn stored_lags_history_but_still_fences_a_replay(band: Band) -> TestResult {
             "the lag fence did not survive reopen"
         );
         sim.record("lagging-fact-still-fences");
-        sim.trace.record_u64("lag-depth", depth);
-        sim.trace.record_count("lag-events-behind", lagged);
+        sim.trace.record_number("lag-depth", depth);
+        sim.trace.record_number("lag-events-behind", lagged);
         Ok(())
     })
 }
@@ -513,7 +514,8 @@ fn middle_corruption(band: Band) -> TestResult {
             drop(reopened);
         }
         sim.record("interior-corruption-refused-or-bounded");
-        sim.trace.record_u64("middle-bytes", path.metadata()?.len());
+        sim.trace
+            .record_number("middle-bytes", path.metadata()?.len());
         Ok(())
     })
 }
@@ -542,7 +544,7 @@ fn reopen_portability(band: Band) -> TestResult {
         drop(reader);
 
         sim.record("reopen-is-byte-stable");
-        sim.trace.record_count("portable-events", written);
+        sim.trace.record_number("portable-events", written);
         Ok(())
     })
 }
@@ -574,7 +576,7 @@ fn bound_refusal(band: Band) -> TestResult {
         } else {
             sim.record("over-limit-refused");
         }
-        sim.trace.record_u64("bound-size", size);
+        sim.trace.record_number("bound-size", size);
         Ok(())
     })
 }
@@ -603,8 +605,8 @@ fn event_cap(band: Band) -> TestResult {
             journal.events().count(),
             "the journal reports a different count than it accepted"
         );
-        sim.trace.record_count("cap-accepted", accepted);
-        sim.trace.record_u64("cap-refused-at", refused_at);
+        sim.trace.record_number("cap-accepted", accepted);
+        sim.trace.record_number("cap-refused-at", refused_at);
         sim.record("cap-refuses-rather-than-deletes");
         Ok(())
     })
@@ -669,9 +671,9 @@ fn exploit_shapes(band: Band) -> TestResult {
             "opening a malformed journal grew it from {size} to {} bytes",
             path.metadata()?.len()
         );
-        sim.trace.record_u64("exploit-shape", u64::from(shape));
+        sim.trace.record_number("exploit-shape", u64::from(shape));
         sim.trace
-            .record_u64("exploit-tolerated", u64::from(tolerated));
+            .record_number("exploit-tolerated", u64::from(tolerated));
         sim.record("malformed-refused-or-bounded");
         Ok(())
     })

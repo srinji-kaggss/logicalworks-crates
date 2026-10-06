@@ -47,6 +47,7 @@ use lgwks_std::hash::{Digest, Hasher, blake3};
 use lgwks_std::wire::{AlignedVec, WireError};
 
 use crate::effect::{EffectKey, Id128};
+use frame::SaturatingFrom;
 
 /// The evidence vocabulary is `crate::ecs`'s, re-exported here rather than
 /// restated.
@@ -1620,20 +1621,19 @@ impl EffectJournal for MemoryJournal {
         let actual = self.tail();
         let key = event.key();
         check_append_order(expected_tail, actual, event, self.ladder.get(&key).copied())?;
-        let requested_events = u64::try_from(self.committed.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        if requested_events > u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX) {
+        let requested_events = u64::saturating_from(self.committed.len()).saturating_add(1);
+        let event_limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
+        if requested_events > event_limit {
             let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
-                limit: u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX),
+                limit: event_limit,
                 requested: requested_events,
             });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
             return refusal;
         }
-        let payload_len = u64::try_from(event.to_bytes().map_err(JournalError::Encoding)?.len())
-            .unwrap_or(u64::MAX);
+        let payload_len =
+            u64::saturating_from(event.to_bytes().map_err(JournalError::Encoding)?.len());
         let requested_bytes = self
             .committed_bytes
             .saturating_add(payload_len)
@@ -1709,15 +1709,14 @@ mod tests {
         let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
         let key_environment = EnvironmentId::from_hex(ENV)?;
         let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
-        Ok(EffectKey::new(
-            key_run,
-            key_action,
-            key_attempt,
-            key_flow_revision,
-            key_digest,
-            key_environment,
-            key_epoch,
-        ))
+        Ok(
+            crate::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+                key_action,
+                key_attempt,
+                key_digest,
+                key_epoch,
+            ),
+        )
     }
 
     /// A verification record naming a real predicate and a real observation
@@ -1781,6 +1780,21 @@ mod tests {
         append(journal, EffectEvent::IntentAdmitted { key })?;
         append(journal, EffectEvent::DispatchPrepared { key })?;
         Ok(())
+    }
+
+    /// A journal holding one attempt walked past the boundary to an applied
+    /// outcome: the state every verification test starts from.
+    fn applied_journal(key: EffectKey) -> Result<MemoryJournal, Box<dyn std::error::Error>> {
+        let mut journal = MemoryJournal::new();
+        admit_and_prepare(&mut journal, key)?;
+        append(
+            &mut journal,
+            EffectEvent::OutcomeObserved {
+                key,
+                evidence: EffectEvidence::Applied,
+            },
+        )?;
+        Ok(journal)
     }
 
     #[test]
@@ -1941,15 +1955,7 @@ mod tests {
     #[test]
     fn a_verified_attempt_refuses_everything_but_a_later_verification() -> TestResult {
         let key = key("1", "1")?;
-        let mut journal = MemoryJournal::new();
-        admit_and_prepare(&mut journal, key)?;
-        append(
-            &mut journal,
-            EffectEvent::OutcomeObserved {
-                key,
-                evidence: EffectEvidence::Applied,
-            },
-        )?;
+        let mut journal = applied_journal(key)?;
         append(
             &mut journal,
             EffectEvent::Verified {
@@ -2053,15 +2059,7 @@ mod tests {
     #[test]
     fn a_satisfied_predicate_is_the_only_verified_state() -> TestResult {
         let key = key("1", "1")?;
-        let mut journal = MemoryJournal::new();
-        admit_and_prepare(&mut journal, key)?;
-        append(
-            &mut journal,
-            EffectEvent::OutcomeObserved {
-                key,
-                evidence: EffectEvidence::Applied,
-            },
-        )?;
+        let mut journal = applied_journal(key)?;
         append(
             &mut journal,
             EffectEvent::Verified {
@@ -2076,15 +2074,7 @@ mod tests {
     #[test]
     fn a_predicate_that_did_not_hold_is_not_a_verification() -> TestResult {
         let key = key("1", "1")?;
-        let mut journal = MemoryJournal::new();
-        admit_and_prepare(&mut journal, key)?;
-        append(
-            &mut journal,
-            EffectEvent::OutcomeObserved {
-                key,
-                evidence: EffectEvidence::Applied,
-            },
-        )?;
+        let mut journal = applied_journal(key)?;
         append(
             &mut journal,
             EffectEvent::Verified {
@@ -2128,15 +2118,7 @@ mod tests {
     #[test]
     fn a_verification_can_be_revised_in_both_directions() -> TestResult {
         let key = key("1", "1")?;
-        let mut journal = MemoryJournal::new();
-        admit_and_prepare(&mut journal, key)?;
-        append(
-            &mut journal,
-            EffectEvent::OutcomeObserved {
-                key,
-                evidence: EffectEvidence::Applied,
-            },
-        )?;
+        let mut journal = applied_journal(key)?;
         for (version, result) in [
             (1, VerificationResult::Satisfied),
             (2, VerificationResult::NotSatisfied),

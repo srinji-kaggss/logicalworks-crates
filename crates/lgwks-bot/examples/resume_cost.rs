@@ -39,7 +39,7 @@ mod effect_key;
 mod lock;
 #[path = "support/measure.rs"]
 mod measure;
-#[path = "support/scratch.rs"]
+#[path = "../tests/support/scratch.rs"]
 mod scratch;
 
 use effect_key::key;
@@ -253,12 +253,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let report = lgwks_bot::block_on(host.run(&one_step_task()?, (0, index)));
         stored.push(started.elapsed().as_micros());
         if !report.disposition().is_success() {
-            {
-                let refusal =
-                    Err(format!("the stored measurement step failed: {:?}", report.error()).into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the stored measurement step failed: {:?}", report.error()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     report("stored (remember)", &measure::Summary::of(&mut stored));
@@ -296,12 +294,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let appended = journal.compare_and_append(tail_of(&journal), &event);
         journalled.push(started.elapsed().as_micros());
         if appended.is_err() {
-            {
-                let refusal =
-                    Err(format!("journal append {index} failed: {:?}", appended.err()).into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("journal append {index} failed: {:?}", appended.err()).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     report(

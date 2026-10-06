@@ -34,7 +34,7 @@ use lgwks_bot::journal::{DurabilityPromise, EffectEvent, EffectJournal, FileJour
 
 use crate::journal_fixtures as shared;
 
-use shared::{TempGuard, key, record_measurement, scratch};
+use shared::{TempGuard, key, percentile, record_measurement, scratch};
 
 /// How many acknowledged appends the latency family times.
 const SAMPLES: usize = 1_024;
@@ -81,21 +81,6 @@ const FALLBACK_TENANTS: usize = 100;
 const RSS_SAMPLE_MS: u64 = 10;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// The nearest-rank percentile of an already-sorted slice, in microseconds.
-///
-/// `None` for an empty sample: an empty sample has no percentile, and the
-/// measurement line prints the absence rather than a zero nobody measured.
-fn percentile(sorted: &[u128], percent: usize) -> Option<u128> {
-    let rank = sorted
-        .len()
-        .checked_sub(1)?
-        .saturating_mul(percent)
-        .saturating_add(99)
-        .checked_div(100)?
-        .saturating_sub(1);
-    sorted.get(rank).copied()
-}
 
 /// The attempt number tenant `tenant` writes for `step`.
 fn attempt_of(tenant: usize, step: usize) -> Result<u64, std::num::TryFromIntError> {
@@ -453,9 +438,9 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
         .map_err(|error| std::io::Error::other(format!("the latency sink was poisoned: {error}")))?
         .clone();
     samples.sort_unstable();
-    let p50 = percentile(&samples, 50);
-    let p95 = percentile(&samples, 95);
-    let p99 = percentile(&samples, 99);
+    let p50 = percentile(&samples, 500);
+    let p95 = percentile(&samples, 950);
+    let p99 = percentile(&samples, 990);
     // The peak is the concurrent phase's claim, and it is over: every tenant has
     // joined. The sampler is stopped before the reopen below because on macOS it
     // spawns `ps` through a shell, and a spawned child holds a copy of every
@@ -514,9 +499,9 @@ fn append_latency_tails_are_bounded() -> TestResult {
         );
     }
     samples.sort_unstable();
-    let p50 = percentile(&samples, 50).ok_or("the latency sweep sampled nothing at all")?;
-    let p95 = percentile(&samples, 95).ok_or("the latency sweep sampled nothing at all")?;
-    let p99 = percentile(&samples, 99).ok_or("the latency sweep sampled nothing at all")?;
+    let p50 = percentile(&samples, 500).ok_or("the latency sweep sampled nothing at all")?;
+    let p95 = percentile(&samples, 950).ok_or("the latency sweep sampled nothing at all")?;
+    let p99 = percentile(&samples, 990).ok_or("the latency sweep sampled nothing at all")?;
     let max = match samples.last() {
         Some(worst) => worst.to_string(),
         // An empty sample has no slowest value, and the percentile fields beside

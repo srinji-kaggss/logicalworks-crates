@@ -27,14 +27,14 @@ numbers.
 eight invariants. Every repair landed by 2026-09-22 (#99 as #110, #107 as #117,
 #108 as #116, and the five ladder rows), and #109 was closed on 2026-09-23 by
 commit `7d9ad29f` (#142). That commit ran **five of the eight external
-observations** in `tests/durable_crash_observation.rs`: the journal-ladder rows
+observations** in `tests/it/durable_crash_observation.rs`: the journal-ladder rows
 (#100, #101, #102, #104, #106) were driven against a real file-backed journal,
 killed mid-ladder with a real `SIGKILL`, restarted, and the recovered answer
 asserted against the one the design names. The other three closed on their
 repair and its in-process regression tests, not on an external observation:
 #99 (the ECS poll path) has no real-store run and #108 (`locator_eligibility`)
 has no real frame. Of #107's rows, T21 is now observed by
-`tests/process_escape.rs`, which drives a real descendant that calls `setsid`
+`tests/it/process_escape.rs`, which drives a real descendant that calls `setsid`
 out of the group and asserts the receipt does not claim the tree was cleaned
 (INV-BOT-112) — an honest report of a containment gap, open as
 [#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) — and
@@ -462,7 +462,7 @@ Now five of them have been proved on one that does not. `FileJournal`
 written and `sync_all`-ed before the acknowledgment is minted, whose stored
 chain heads make a tampered frame a refusal rather than a trim, and whose torn
 tail — an append a killed writer never finished — is truncated on open
-because it was never acknowledged. `tests/durable_crash_observation.rs` runs
+because it was never acknowledged. `tests/it/durable_crash_observation.rs` runs
 the register's observations against it:
 
 - **#106**: a child process walked a key to `OutcomeObserved(Applied)`, was
@@ -772,7 +772,7 @@ world mess is one of the seven covered rows in §4.4.
 To change the verdict, in the order that matters:
 
 1. **Finish #109's eight external observations.** Five are run
-   (`tests/durable_crash_observation.rs`): the journal-ladder rows have a real
+   (`tests/it/durable_crash_observation.rs`): the journal-ladder rows have a real
    store, a real kill, a restart and the designed answer. #109 closed with the
    other three repaired but not externally observed: #99 needs the poll path
    under a real store, #108 a real frame, and #107's T21 a descendant the

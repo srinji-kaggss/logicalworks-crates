@@ -290,10 +290,11 @@ fn a_non_yielding_callback_is_detected_from_outside_and_not_preempted() -> TestR
 /// that a child had started when none had.
 fn child_scratch(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
+    let nanos = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_nanos(),
+        // A clock set before the epoch still names an instant: how far before it.
+        Err(before) => before.duration().as_nanos(),
+    };
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("lgwks-bot-{name}-{nanos}-{seq}"));
     std::fs::create_dir_all(&path)?;
@@ -302,14 +303,12 @@ fn child_scratch(name: &str) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Wait until `path` exists and is non-empty, up to `budget`.
 fn wait_for(path: &std::path::Path, budget: Duration) -> bool {
-    let deadline = std::time::Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(std::time::Instant::now);
+    let started = std::time::Instant::now();
     loop {
         if path.metadata().is_ok_and(|meta| meta.len() > 0) {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if started.elapsed() >= budget {
             return path.metadata().is_ok_and(|meta| meta.len() > 0);
         }
         std::thread::park_timeout(POLL);

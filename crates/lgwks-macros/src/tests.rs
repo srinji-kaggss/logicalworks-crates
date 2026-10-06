@@ -12,7 +12,10 @@ use lgwks_deps::proc_macro2::TokenStream;
 use crate::{emit, lines};
 
 /// Expand `source` as the macro would, as text or as the refusal message.
-fn expand(source: &str) -> Result<String, String> {
+///
+/// The crate's one expansion fixture: every test module that asserts on an
+/// expansion reads it through here.
+pub(crate) fn expand(source: &str) -> Result<String, String> {
     let stream = TokenStream::from_str(source).map_err(|error| error.to_string())?;
     lines::tree(lines::split(stream))
         .and_then(emit::script)

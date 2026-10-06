@@ -64,10 +64,9 @@ fn band(index: usize) -> Band {
 }
 
 /// A shell spec running `script` with both streams captured to `limit`.
-fn captured(script: &str, limit: u32) -> ProcessSpec {
+fn captured(script: &str, limit: NonZeroUsize) -> ProcessSpec {
     let mut spec = ProcessSpec::new("sh");
     spec.arg("-c").arg(script);
-    let limit = NonZeroUsize::new(usize::try_from(limit).unwrap_or(1)).unwrap_or(NonZeroUsize::MIN);
     spec.capture_stdout(limit);
     spec.capture_stderr(limit);
     spec
@@ -78,11 +77,6 @@ fn plain(script: &str) -> ProcessSpec {
     let mut spec = ProcessSpec::new("sh");
     spec.arg("-c").arg(script);
     spec
-}
-
-/// An exit code as a trace number, with `None` mapped to a distinct sentinel.
-fn code_to_u64(code: Option<i32>) -> u64 {
-    code.map_or(u64::MAX, |value| u64::try_from(value).unwrap_or(u64::MAX))
 }
 
 /// Run `spec` to completion on a fresh single-slot supervisor.
@@ -98,11 +92,12 @@ fn run(
 
 /// A child writes `total` zero bytes; the retained head is `min(total, limit)`.
 fn output_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
-    let limit = sim.rng().between(1, 2048);
+    let drawn = sim.rng().between(1, 2048);
     let total = sim.rng().between(1, 20000);
+    let limit = NonZeroUsize::new(usize::try_from(drawn)?).ok_or("a limit is drawn from one up")?;
     let script = format!("head -c {total} /dev/zero");
     let run = run(runtime, &captured(&script, limit))?;
-    let expected = usize::try_from(total.min(limit)).unwrap_or(0);
+    let expected = usize::try_from(total.min(drawn))?;
     assert_eq!(
         run.stdout().bytes().len(),
         expected,
@@ -119,16 +114,16 @@ fn output_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     );
     assert_eq!(
         run.stdout().truncated(),
-        total > limit,
+        total > drawn,
         "truncation is exactly total > limit"
     );
     sim.record("output");
-    sim.trace.record_u64("limit", u64::from(limit));
-    sim.trace.record_u64("total", u64::from(total));
+    sim.trace.record_number("limit", u64::from(drawn));
+    sim.trace.record_number("total", u64::from(total));
     sim.trace
-        .record_count("retained", run.stdout().bytes().len());
+        .record_number("retained", run.stdout().bytes().len());
     sim.trace
-        .record_u64("truncated", u64::from(run.stdout().truncated()));
+        .record_number("truncated", u64::from(run.stdout().truncated()));
     Ok(())
 }
 
@@ -139,14 +134,14 @@ fn exit_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     let run = run(runtime, &plain(&script))?;
     assert_eq!(
         run.exit_code(),
-        Some(i32::try_from(code).unwrap_or(-1)),
+        Some(i32::try_from(code)?),
         "the drawn exit code must survive"
     );
     assert!(!run.deadline_fired(), "no deadline was set");
     sim.record("exit");
-    sim.trace.record_u64("code", u64::from(code));
-    sim.trace
-        .record_u64("exit-code", code_to_u64(run.exit_code()));
+    sim.trace.record_number("code", u64::from(code));
+    let exited = run.exit_code().ok_or("an exited child reports its code")?;
+    sim.trace.record_number("exit-code", u64::try_from(exited)?);
     Ok(())
 }
 
@@ -156,10 +151,8 @@ fn signal_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     assert_eq!(run.exit_code(), None, "a signal death has no exit code");
     assert_eq!(run.signal(), Some(15), "the terminating signal is reported");
     sim.record("signal");
-    sim.trace.record_u64(
-        "signal",
-        u64::try_from(run.signal().unwrap_or(0)).unwrap_or(0),
-    );
+    let signal = run.signal().ok_or("a signalled child reports its signal")?;
+    sim.trace.record_number("signal", u64::try_from(signal)?);
     Ok(())
 }
 
@@ -180,9 +173,9 @@ fn deadline_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
         "the group kill must have been delivered"
     );
     sim.record("deadline");
-    sim.trace.record_u64("millis", u64::from(millis));
+    sim.trace.record_number("millis", u64::from(millis));
     sim.trace
-        .record_u64("deadline-fired", u64::from(run.deadline_fired()));
+        .record_number("deadline-fired", u64::from(run.deadline_fired()));
     Ok(())
 }
 

@@ -321,24 +321,21 @@ fn input_digest_value(input: u32) -> lgwks_std::hash::Digest {
     hasher.finalize()
 }
 
-/// second reach the control and then assert it was refused.
-fn drawn_drift(sim: &mut sim::Sim) -> DriftKind {
-    let drawn = usize::try_from(sim.rng().below(4)).unwrap_or_default();
-    DriftKind::DRIFTED[drawn]
+/// The drift kind this seed chose, drawn from `table` by `sim`.
+///
+/// One draw for every family that draws one, because two draws spelled out are
+/// two places the draw order could move — and a draw order that moves silently
+/// renumbers every other family's trace without failing anything. A draw past
+/// the table is refused with its seed rather than read as some other arm.
+fn drawn(sim: &mut sim::Sim, table: &[DriftKind]) -> Result<DriftKind, Box<dyn Error>> {
+    let drawn = usize::try_from(sim.rng().below(u32::try_from(table.len())?))?;
+    table
+        .get(drawn)
+        .copied()
+        .ok_or_else(|| format!("seed {} drew arm {drawn} of {}", sim.seed, table.len()).into())
 }
 
 /// A stable number per axis, so a trace compares runs rather than rendered text.
-/// The drift kind this seed chose, drawn from `sim` and recorded there.
-///
-/// One constructor for the two families that draw one, because two draws spelled
-/// out are two places the draw order could move — and a draw order that moves
-/// silently renumbers every other family's trace without failing anything.
-fn drawn_kind(sim: &mut sim::Sim, arms: usize) -> DriftKind {
-    let drawn =
-        usize::try_from(sim.rng().below(u32::try_from(arms).unwrap_or(1))).unwrap_or_default();
-    DriftKind::ALL[drawn]
-}
-
 fn axis_id(axis: &str) -> u64 {
     match axis {
         "definition" => 1,
@@ -380,7 +377,7 @@ fn attempt(
     }
     assert_eq!(
         constructions().saturating_sub(before),
-        u64::try_from(STEPS).unwrap_or(u64::MAX),
+        u64::try_from(STEPS)?,
         "the first attempt constructs every durable step exactly once"
     );
     let run = initial
@@ -498,12 +495,12 @@ fn assert_exact_drift(
 fn drift_kinds_are_refused_typed(band: sim::Band) -> TestResult {
     let body = |sim: &mut sim::Sim| -> TestResult {
         for tenant in TENANTS {
-            let kind = drawn_drift(sim);
+            let kind = drawn(sim, &DriftKind::DRIFTED)?;
             let dir = Scratch(sim.scratch("drift")?);
             let observed = attempt(&dir.0, tenant, FIRST_INPUT, FIRST_CODEC, kind)?;
 
             sim.record(&format!("{tenant}:{}", kind.tag()));
-            sim.trace.record_u64(
+            sim.trace.record_number(
                 "disposition",
                 shared::disposition_code(observed.disposition),
             );
@@ -609,8 +606,8 @@ fn compatible_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     );
 
     sim.record(tenant);
-    sim.trace.record_u64("input", u64::from(input));
-    sim.trace.record_u64("output", u64::from(expected));
+    sim.trace.record_number("input", u64::from(input));
+    sim.trace.record_number("output", u64::from(expected));
     Ok(())
 }
 
@@ -646,7 +643,7 @@ fn tenants_drift_independently(band: sim::Band) -> TestResult {
                 let observed = attempt(&shared.0, tenant, FIRST_INPUT, FIRST_CODEC, kind)?;
                 sim.record(&format!("{tenant}:{}", kind.tag()));
                 sim.trace
-                    .record_u64("drift", observed.drift.map_or(255, axis_id));
+                    .record_number("drift", observed.drift.map_or(255, axis_id));
 
                 assert_eq!(
                     observed.disposition,
@@ -698,8 +695,7 @@ fn every_axis_is_distinguishable(band: sim::Band) -> TestResult {
                 );
                 seen.push(axis);
             }
-            sim.trace
-                .record_u64("axes", u64::try_from(seen.len()).unwrap_or(u64::MAX));
+            sim.trace.record_number("axes", u64::try_from(seen.len())?);
         }
         assert_eq!(
             seen.len(),
@@ -749,7 +745,7 @@ fn exact_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
             .into()
         })?;
         sim.record(&format!("{tenant}:{}", kind.tag()));
-        sim.trace.record_u64("axis", axis_id(drift.kind()));
+        sim.trace.record_number("axis", axis_id(drift.kind()));
         assert_exact_drift(tenant, kind, drift, recorded_input)?;
     }
     Ok(())
@@ -781,7 +777,7 @@ fn every_axis_is_refused_with_its_exact_drift(band: sim::Band) -> TestResult {
 
 /// One tenant of the drifted-resume sweep.
 fn drifted_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
-    let kind = drawn_drift(sim);
+    let kind = drawn(sim, &DriftKind::DRIFTED)?;
     let dir = Scratch(sim.scratch("bytes")?);
     let path = store_path(&dir.0, tenant);
 
@@ -824,10 +820,8 @@ fn drifted_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     );
 
     sim.record(&format!("{tenant}:{}", kind.tag()));
-    sim.trace.record_u64(
-        "store-bytes",
-        u64::try_from(before.len()).unwrap_or(u64::MAX),
-    );
+    sim.trace
+        .record_number("store-bytes", u64::try_from(before.len())?);
     Ok(())
 }
 
@@ -921,12 +915,11 @@ fn refused_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     );
 
     sim.record(tenant);
-    sim.trace.record_u64("found", u64::from(PRE_VERSION));
-    sim.trace.record_u64("expected", u64::from(CURRENT_FORMAT));
-    sim.trace.record_u64(
-        "store-bytes",
-        u64::try_from(before.len()).unwrap_or(u64::MAX),
-    );
+    sim.trace.record_number("found", u64::from(PRE_VERSION));
+    sim.trace
+        .record_number("expected", u64::from(CURRENT_FORMAT));
+    sim.trace
+        .record_number("store-bytes", u64::try_from(before.len())?);
     Ok(())
 }
 
@@ -1031,8 +1024,8 @@ fn replay_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     }
 
     sim.record(tenant);
-    sim.trace.record_u64("armed", u64::from(armed));
-    sim.trace.record_u64(
+    sim.trace.record_number("armed", u64::from(armed));
+    sim.trace.record_number(
         "disposition",
         shared::disposition_code(refused.disposition()),
     );
@@ -1077,18 +1070,17 @@ fn same_seed_same_trace_hash(band: sim::Band) -> TestResult {
     // distinct-seed check ends up comparing two runs that never differed.
     let one_run = |sim: &mut sim::Sim| -> Result<(), Box<dyn Error>> {
         for tenant in TENANTS {
-            let kind = drawn_kind(sim, 5);
+            let kind = drawn(sim, &DriftKind::ALL)?;
             let dir = Scratch(sim.scratch("replay")?);
             let observed = attempt(&dir.0, tenant, FIRST_INPUT, FIRST_CODEC, kind)?;
             sim.record(&format!("{tenant}:{}", kind.tag()));
-            sim.trace.record_u64(
-                "records",
-                u64::try_from(observed.records).unwrap_or(u64::MAX),
-            );
+            sim.trace.record_number("records", observed.records);
             sim.trace
-                .record_u64("constructions", observed.constructions);
-            sim.trace.record_u64("alpha", u64::from(observed.markers.0));
-            sim.trace.record_u64("beta", u64::from(observed.markers.1));
+                .record_number("constructions", observed.constructions);
+            sim.trace
+                .record_number("alpha", u64::from(observed.markers.0));
+            sim.trace
+                .record_number("beta", u64::from(observed.markers.1));
         }
         Ok(())
     };

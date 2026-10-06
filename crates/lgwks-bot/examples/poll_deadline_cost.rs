@@ -28,7 +28,7 @@ use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, Execute, GrantSet, Obs
 
 #[path = "support/measure.rs"]
 mod measure;
-#[path = "support/scratch.rs"]
+#[path = "../tests/support/scratch.rs"]
 mod scratch;
 
 #[path = "../tests/support/effects.rs"]

@@ -1328,13 +1328,10 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
             Some(at) => match at.checked_duration_since(std::time::Instant::now()) {
                 Some(left) if !left.is_zero() => Some(left),
                 _ => {
-                    {
-                        let refusal =
-                            Err(failure(FailureStage::Deadline, FailureKind::Timeout, None));
-                        #[cfg(feature = "trace")]
-                        crate::trace::debug!(error = ?refusal.as_ref().err(), "exchange: returning an error to the caller");
-                        return refusal;
-                    };
+                    let refusal = Err(failure(FailureStage::Deadline, FailureKind::Timeout, None));
+                    #[cfg(feature = "trace")]
+                    crate::trace::debug!(error = ?refusal.as_ref().err(), "exchange: returning an error to the caller");
+                    return refusal;
                 }
             },
             None => None,

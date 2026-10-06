@@ -176,14 +176,7 @@ STD_FIRST = (
 # The list is deliberately exact-line rather than per-file. A glob would cover
 # the next genuine occurrence added to the same file, and this list exists to be
 # the audit's record of what a reader looked at and decided — not a mute button.
-EXEMPT: dict[str, tuple[str, str]] = {
-    "crates/lgwks-bot/tests/it/rt_process.rs:157": (
-        'let path = std::env::temp_dir().join(format!("lgwks-bot-{}-{name}", std::process::id()));',
-        "a scratch directory name, not an identity: the per-test `name` argument "
-        "is what keeps two tests apart, and the pid only namespaces the directory "
-        "under the temp root (re-anchored after PidDir extraction moved the line)",
-    ),
-}
+EXEMPT: dict[str, tuple[str, str]] = {}
 
 
 def code_only(text: str) -> str:

@@ -27,6 +27,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 use crate::band_family;
@@ -44,7 +46,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use measure::record_measurement;
-use shared::{Scratch, one_step_task};
+use shared::{one_step_task, store_file};
 
 use sim::Band;
 use sim::Rng;
@@ -86,10 +88,10 @@ impl Round {
     /// Fold into the trace, so a family running a different scenario stays
     /// comparable with one running this.
     fn record(&self, trace: &mut sim::Trace) {
-        trace.record_u64("acknowledged", u64::from(self.acknowledged));
-        trace.record_u64("refused", u64::from(self.refused));
-        trace.record_u64("flushes", self.flushes);
-        trace.record_u64("staged", self.staged);
+        trace.record_number("acknowledged", u64::from(self.acknowledged));
+        trace.record_number("refused", u64::from(self.refused));
+        trace.record_number("flushes", self.flushes);
+        trace.record_number("staged", self.staged);
         for _run in &self.runs {
             trace.record("run");
         }
@@ -183,7 +185,7 @@ impl Seeded {
     /// Whatever the entropy source or the filesystem reports.
     fn open(name: &'static str) -> Result<Self, Box<dyn Error>> {
         let scratch = Scratch::new(name)?;
-        let store = RunStore::open(scratch.store())?;
+        let store = RunStore::open(store_file(scratch.path()))?;
         Ok(Self { scratch, store })
     }
 
@@ -234,7 +236,7 @@ impl Seeded {
 
     /// The path this seed's store lives at.
     fn scratch_path(&self) -> std::path::PathBuf {
-        self.scratch.store()
+        store_file(self.scratch.path())
     }
 
     /// Let the store's file go, so a reopen in this seed does not race a live handle,
@@ -245,7 +247,7 @@ impl Seeded {
     /// So the store handle is dropped and the fixture is returned, and the caller
     /// keeps it for the reopen.
     fn release(self) -> (Self, PathBuf) {
-        let path = self.scratch.store();
+        let path = store_file(self.scratch.path());
         (self, path)
     }
 }
@@ -698,7 +700,7 @@ fn same_seed_replays(band: Band) -> TestResult {
         // to a replay comparison.
         sim_run
             .trace
-            .record_u64("committed", reopened.committed_bytes());
+            .record_number("committed", reopened.committed_bytes());
         Ok(())
     };
     sim::assert_replays(band, body)?;

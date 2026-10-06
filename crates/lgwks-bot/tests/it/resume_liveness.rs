@@ -33,7 +33,11 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::journal_fixtures as measure;
+
+use crate::liveness_fixtures as liveness;
 
 use crate::resume_fixtures as shared;
 
@@ -47,7 +51,8 @@ use lgwks_bot::effect::RunId;
 use lgwks_bot::rt::runtime;
 use lgwks_bot::task::{Disposition, Host, RunStore};
 
-use shared::{PROGRESS_TURNS, Parked, Scratch, heartbeat, one_step_task};
+use liveness::{PROGRESS_TURNS, Parked, heartbeat};
+use shared::{one_step_task, store_file};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -62,8 +67,8 @@ type TestResult = Result<(), Box<dyn Error>>;
 #[test]
 fn a_parked_record_device_lets_the_runtime_turn() -> TestResult {
     let scratch = Scratch::new("liveness-progress")?;
-    let store = RunStore::open_with_stalled_device(scratch.store())?;
-    let parked = Parked::new(store.storage_gate())?;
+    let store = RunStore::open_with_stalled_device(store_file(scratch.path()))?;
+    let parked = Parked::at(None, store.storage_gate())?;
     let work = one_step_task()?;
     let host = Host::builder("acme")?.store(store).build()?;
 
@@ -103,7 +108,7 @@ fn a_parked_record_device_lets_the_runtime_turn() -> TestResult {
     drop(report);
     drop(host);
     let reopened = Host::builder("acme")?
-        .store(RunStore::open(scratch.store())?)
+        .store(RunStore::open(store_file(scratch.path()))?)
         .build()?;
     let replayed = runtime::block_on(reopened.resume(landed, &work, 7u32));
     assert_eq!(
@@ -128,9 +133,9 @@ fn a_parked_record_device_lets_the_runtime_turn() -> TestResult {
 #[test]
 fn an_abandoned_record_leaves_the_store_consistent() -> TestResult {
     let scratch = Scratch::new("liveness-cancel")?;
-    let path = scratch.store();
+    let path = store_file(scratch.path());
     let store = RunStore::open_with_stalled_device(&path)?;
-    let parked = Parked::new(store.storage_gate())?;
+    let parked = Parked::at(None, store.storage_gate())?;
     let run = RunId::mint()?;
     let work = one_step_task()?;
     let host = Host::builder("acme")?.store(store).build()?;
@@ -210,7 +215,7 @@ fn an_abandoned_record_leaves_the_store_consistent() -> TestResult {
 #[test]
 fn a_parked_store_still_serves_its_own_records_only() -> TestResult {
     let scratch = Scratch::new("liveness-tenant")?;
-    let path = scratch.store();
+    let path = store_file(scratch.path());
     let work = one_step_task()?;
     let first = runtime::block_on(
         Host::builder("acme")?
@@ -280,8 +285,8 @@ fn the_parked_device_probe_measures_turns() -> TestResult {
 #[test]
 fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
     let scratch = Scratch::new("liveness-group")?;
-    let store = RunStore::open_with_stalled_device(scratch.store())?;
-    let parked = Parked::new(store.storage_gate())?;
+    let store = RunStore::open_with_stalled_device(store_file(scratch.path()))?;
+    let parked = Parked::at(None, store.storage_gate())?;
     let work = one_step_task()?;
     let host = Host::builder("acme")?.store(store).build()?;
     // The batch is one number in two widths: the task's input is a `u32` and a
@@ -348,7 +353,7 @@ fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
     // a batch that acknowledged only some of its members would look identical from
     // the driver's side.
     drop(beat);
-    let store = RunStore::open(scratch.store())?;
+    let store = RunStore::open(store_file(scratch.path()))?;
     let on_disk = landed
         .iter()
         .filter(|run| store.record_count(**run) == 1)

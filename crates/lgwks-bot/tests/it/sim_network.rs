@@ -151,10 +151,10 @@ fn at_least_once(band: Band) -> TestResult {
             "{delivered} delivered and {dropped} dropped is not the {sent} that were sent"
         );
         sim.record("nothing-vanished");
-        sim.trace.record_count("aloast-returned", returned.len());
-        sim.trace.record_u64("aloast-sent", sent);
+        sim.trace.record_number("aloast-returned", returned.len());
+        sim.trace.record_number("aloast-sent", sent);
         sim.trace
-            .record_u64("aloast-delivered", u64::from(delivered));
+            .record_number("aloast-delivered", u64::from(delivered));
         Ok(())
     })
 }
@@ -188,8 +188,8 @@ fn dup_suppressed(band: Band) -> TestResult {
             );
             assert!(applied >= distinct.len(), "the journal lost accepted facts");
             sim.record("duplicates-suppressed");
-            sim.trace.record_count("dup-applied", applied);
-            sim.trace.record_count("dup-keys", keys.len());
+            sim.trace.record_number("dup-applied", applied);
+            sim.trace.record_number("dup-keys", keys.len());
             Ok(())
         })
     })
@@ -208,7 +208,7 @@ fn reorder_tolerated(band: Band) -> TestResult {
                 "a chain that survived reordering must still end at this handle's own tail"
             );
             sim.record("reorder-verifies");
-            sim.trace.record_count("reorder-entries", entries.len());
+            sim.trace.record_number("reorder-entries", entries.len());
             Ok(())
         })
     })
@@ -250,11 +250,12 @@ fn partition_recovers(band: Band) -> TestResult {
             sim.faults.partition_until
         );
         sim.record("partition-recovers");
-        sim.trace.record_u64("partition-during", u64::from(during));
         sim.trace
-            .record_u64("partition-dropped", u64::from(dropped));
-        sim.trace.record_u64("partition-probe", u64::from(probe));
-        sim.trace.record_count("partition-resumed", resumed.len());
+            .record_number("partition-during", u64::from(during));
+        sim.trace
+            .record_number("partition-dropped", u64::from(dropped));
+        sim.trace.record_number("partition-probe", u64::from(probe));
+        sim.trace.record_number("partition-resumed", resumed.len());
         Ok(())
     })
 }
@@ -273,10 +274,11 @@ fn at_least_once_claimed(band: Band) -> TestResult {
         // Whatever the seed decided, the receipt has to carry the fact: a
         // consumer that cannot see duplication will claim exactly-once.
         sim.trace
-            .record_u64("alonce-duplicates", u64::from(duplicated));
-        sim.trace.record_u64("alonce-dropped", u64::from(dropped));
+            .record_number("alonce-duplicates", u64::from(duplicated));
         sim.trace
-            .record_u64("alonce-repeat-seen", u64::from(repeat));
+            .record_number("alonce-dropped", u64::from(dropped));
+        sim.trace
+            .record_number("alonce-repeat-seen", u64::from(repeat));
         sim.record("at-least-once-is-claimed");
         Ok(())
     })
@@ -296,8 +298,8 @@ fn accounting(band: Band) -> TestResult {
             "the network accounted for fewer envelopes than it returned"
         );
         sim.record("accounting-balances");
-        sim.trace.record_u64("acct-sent", sent);
-        sim.trace.record_count("acct-in-flight", held);
+        sim.trace.record_number("acct-sent", sent);
+        sim.trace.record_number("acct-in-flight", held);
         Ok(())
     })
 }
@@ -327,7 +329,7 @@ fn routes(band: Band) -> TestResult {
             );
         }
         sim.record("routes-to-addressee");
-        sim.trace.record_count("routed", deliveries.len());
+        sim.trace.record_number("routed", deliveries.len());
         Ok(())
     })
 }
@@ -355,8 +357,8 @@ fn retry_same(band: Band) -> TestResult {
             );
         }
         sim.record("retry-carries-same-bytes");
-        sim.trace.record_count("retry-first", first.len());
-        sim.trace.record_count("retry-second", second.len());
+        sim.trace.record_number("retry-first", first.len());
+        sim.trace.record_number("retry-second", second.len());
         Ok(())
     })
 }
@@ -373,7 +375,7 @@ fn idle_net(band: Band) -> TestResult {
         );
         assert_eq!(sim.net.in_flight(), 0, "an idle network held traffic");
         sim.record("idle-net-quiet");
-        sim.trace.record_count("idle-deliveries", deliveries.len());
+        sim.trace.record_number("idle-deliveries", deliveries.len());
         Ok(())
     })
 }
@@ -393,8 +395,8 @@ fn burst(band: Band) -> TestResult {
             "the scheduler's return disagrees with its own accounting"
         );
         sim.record("burst-accounted");
-        sim.trace.record_u64("burst-size", u64::from(burst));
-        sim.trace.record_count("burst-delivered", deliveries.len());
+        sim.trace.record_number("burst-size", u64::from(burst));
+        sim.trace.record_number("burst-delivered", deliveries.len());
         Ok(())
     })
 }
@@ -414,7 +416,7 @@ fn drop_redo(band: Band) -> TestResult {
             "re-sending the same fact grew the journal, so a re-send became a second event"
         );
         sim.record("re-send-is-one-fact");
-        sim.trace.record_count("redo-events", second);
+        sim.trace.record_number("redo-events", second);
         Ok(())
     })
 }
@@ -447,7 +449,7 @@ fn late_verify(band: Band) -> TestResult {
         );
         assert!(total >= early_bodies.len(), "the late wave lost history");
         sim.record("late-delivery-verifies");
-        sim.trace.record_count("late-events", total);
+        sim.trace.record_number("late-events", total);
         Ok(())
     })
 }
@@ -472,7 +474,7 @@ fn dup_visible(band: Band) -> TestResult {
             .filter(|envelope| envelope.attempts() > 1)
             .count();
         sim.record("duplicates-are-visible");
-        sim.trace.record_count("dup-repeats", repeats);
+        sim.trace.record_number("dup-repeats", repeats);
         Ok(())
     })
 }
@@ -498,7 +500,7 @@ fn partition_journal(band: Band) -> TestResult {
             "a network partition changed the journal's bytes"
         );
         sim.record("partition-leaves-journal");
-        sim.trace.record_u64("partition-sent", u64::from(sent));
+        sim.trace.record_number("partition-sent", u64::from(sent));
         Ok(())
     })
 }
@@ -525,7 +527,7 @@ fn flood(band: Band) -> TestResult {
             "a tick released traffic that was not due"
         );
         sim.record("flood-bounded");
-        sim.trace.record_u64("flood-size", flood);
+        sim.trace.record_number("flood-size", flood);
         Ok(())
     })
 }
@@ -548,7 +550,7 @@ fn deterministic(band: Band) -> TestResult {
                 order.push(format!("{tenant}:{attempt}"));
             }
         }
-        sim.trace.record_count("order-length", order.len());
+        sim.trace.record_number("order-length", order.len());
         for entry in &order {
             sim.trace.record(entry);
         }

@@ -177,7 +177,7 @@ fn scenario(seed: u64) -> Scenario<Trace> {
     let (source, shape) = write_source(&mut rng)?;
     let mut trace = Trace::new();
     trace.record(shape.name());
-    trace.record_count("bytes", source.len());
+    trace.record_number("bytes", source.len());
     // No timing goes into the trace: a hash over a clock reading is a hash over
     // the machine, and a replay receipt that diverges on a loaded host has
     // stopped being a receipt. The durations live in the measurement rig, which
@@ -192,8 +192,8 @@ fn scenario(seed: u64) -> Scenario<Trace> {
         Err(ref error) => trace.record(&error.to_diagnostic("sim.rs", &source).render()),
         Ok(ref tree) => {
             let metrics = inspect_ast(&tree.root(), None);
-            trace.record_count("nodes", metrics.nodes);
-            trace.record_count("depth", metrics.max_depth);
+            trace.record_number("nodes", metrics.nodes);
+            trace.record_number("depth", metrics.max_depth);
         }
     }
     Ok(trace)

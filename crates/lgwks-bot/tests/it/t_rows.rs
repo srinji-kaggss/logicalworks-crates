@@ -186,7 +186,11 @@ fn nested_runs_finish_at_a_ceiling_of_one_t04() -> TestResult {
             async move {
                 entered.set(entered.get().saturating_add(1));
                 let report = host.run(&leaf, vec![value, value]).await;
-                Ok(report.into_output().unwrap_or_default().iter().sum::<u32>())
+                Ok(report
+                    .into_output()
+                    .ok_or_else(|| FlowError::failed("the nested run produced no output"))?
+                    .iter()
+                    .sum::<u32>())
             }
         })?
     });
@@ -203,7 +207,10 @@ fn nested_runs_finish_at_a_ceiling_of_one_t04() -> TestResult {
                 for value in values {
                     entered.set(entered.get().saturating_add(1));
                     let report = host.run(&inner, value).await;
-                    total = total.saturating_add(report.into_output().unwrap_or_default());
+                    total =
+                        total.saturating_add(report.into_output().ok_or_else(|| {
+                            FlowError::failed("the nested run produced no output")
+                        })?);
                 }
                 Ok(total)
             }
@@ -342,7 +349,7 @@ fn a_same_digest_artifact_stays_inside_its_tenant_t28() -> TestResult {
 #[test]
 fn one_request_key_serves_one_payload_t30() -> TestResult {
     use crate::request_fixtures as request;
-    use crate::resume_fixtures::Scratch;
+    use crate::scratch::Scratch;
     use lgwks_bot::task::{RequestError, RequestKey};
 
     let scratch = Scratch::new("t30-request-key")?;

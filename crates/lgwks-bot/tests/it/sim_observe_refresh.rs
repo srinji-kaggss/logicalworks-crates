@@ -788,8 +788,14 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
             "every armed chain reached the report exactly once, and no unarmed one \
              did: the row is a bijection, not a count"
         );
+        // The schedule's shape first, so a seed that armed nothing still replays
+        // to a receipt of what it decided rather than to the empty trace.
+        sim.record(&format!(
+            "tenants={} ticks={} armed={armed_chains}",
+            plan.tenants, plan.ticks
+        ));
         for row in &rows {
-            sim.record(&format!("{} {} {}", row.kind, row.tenant, row.spell()));
+            sim.record(&row.spell());
         }
         Ok(())
     })
@@ -803,7 +809,7 @@ fn forced_refresh_matches_the_schedule(band: Band) -> TestResult {
 /// comparing against a value it has said it cannot trust — the quiet state T08
 /// exists to rule out.
 fn a_refresh_that_never_lands_stays_marked(band: Band) -> TestResult {
-    sim::assert_replays(band, |_sim| {
+    sim::assert_replays(band, |sim| {
         // A schedule that refuses everything: no draw decides it, because the
         // property needs the refusal to be certain rather than likely. Chain 0
         // is armed from tick 2 onward; chains 1 and 2 are healthy throughout,
@@ -862,6 +868,14 @@ fn a_refresh_that_never_lands_stays_marked(band: Band) -> TestResult {
                  fault — {:?}",
                 report.forced()
             );
+            sim.record(&format!(
+                "tick {tick} forced chain {} {}",
+                forced.chain(),
+                forced.reason().as_str()
+            ));
+        }
+        for row in &rows {
+            sim.record(&row.spell());
         }
         Ok(())
     })
@@ -902,7 +916,7 @@ fn tenants_never_cross(band: Band) -> TestResult {
             }
         }
         for row in &rows {
-            sim.record(&format!("{} {}", row.kind, row.spell()));
+            sim.record(&row.spell());
         }
 
         // Each tenant's report names only its own chains, and only within the
@@ -1090,7 +1104,7 @@ fn the_same_seed_replays(band: Band) -> TestResult {
                 subject.observe(&mut rows);
             }
             for row in &rows {
-                sim.record(&format!("{} {}", row.kind, row.spell()));
+                sim.record(&row.spell());
             }
             // The action log goes into the trace in order, never a timing.
             for &(chain, value) in subject.ran.borrow().iter() {
@@ -1551,7 +1565,7 @@ fn a_wedged_source_is_reported_and_costs_its_neighbours_nothing(band: Band) -> T
                 );
 
                 for row in &rows {
-                    sim.record(&format!("{} {}", row.kind, row.spell()));
+                    sim.record(&row.spell());
                 }
                 let logged: Vec<(usize, u32)> = subject.ran.borrow().iter().copied().collect();
                 for (chain, value) in logged {
