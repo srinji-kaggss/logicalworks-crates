@@ -9,8 +9,8 @@
 Cargo.toml:131	print_stderr = "forbid"
 Cargo.toml:132	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
-crates/lgwks-ast/src/lib.rs:3444	assert_eq!(
-crates/lgwks-ast/src/lib.rs:3447	"the fixture table must cover every grammar the manifest declares"
+crates/lgwks-ast/src/lib.rs:3405	assert_eq!(
+crates/lgwks-ast/src/lib.rs:3408	"the fixture table must cover every grammar the manifest declares"
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
@@ -68,8 +68,8 @@ crates/lgwks-bot/src/rt/supervise.rs:870	/// long enough on one worker and far t
 crates/lgwks-bot/src/rt/supervise.rs:934	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise.rs:1312	/// # Why the description is borrowed
 crates/lgwks-bot/src/rt/supervise.rs:1478	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
-crates/lgwks-bot/src/rt/supervise.rs:3258	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:3367	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:3262	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:3371	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

@@ -442,6 +442,9 @@ mod markdown {
 
     use lgwks_ast::MAX_MARKDOWN_CONTAINERS_PER_LINE;
 
+    /// What a case builder returns: the cases, or the refusal that stopped it.
+    type Built<T> = Result<T, Box<dyn Error>>;
+
     // ── The markdown guard ──────────────────────────────────────────────────────
     //
     // # What was measured
@@ -489,7 +492,10 @@ mod markdown {
         "hostile::markdown::markdown_never_reaches_the_scanner_past_its_bound";
 
     /// Seeds in the mixed-prefix family.
-    const SEEDED_CASES: u64 = 1_000;
+    ///
+    /// A count rather than a seed count: the loop draws each seed from its
+    /// index, and a case total is compared against this on both sides.
+    const SEEDED_CASES: usize = 1_000;
 
     /// The base the seeded family's seeds are derived from.
     const SEED_BASE: u64 = 0x0d0c_0000_0000_0277;
@@ -558,21 +564,35 @@ mod markdown {
 
     /// A seeded mix of container prefixes: per line, an indent and a fragment, so a
     /// case can be shallow but dense, deep but sparse, or both at once.
-    fn seeded_source(seed: u64) -> String {
+    ///
+    /// Every draw is bounded by a count a sixteen-bit `usize` holds, and each is
+    /// converted rather than assumed: a host that cannot hold one is reported,
+    /// because a mix written from a substituted indent or fragment is still a
+    /// case and would still be run against the guard.
+    fn seeded_source(seed: u64) -> Built<String> {
         let mut rng = Rng::new(seed ^ SEED_BASE);
         let lines = rng.between(1, 24);
         let mut source = String::new();
         for _ in 0..lines {
-            source.push_str(&"  ".repeat(usize::try_from(rng.between(0, 24)).unwrap_or(0)));
-            let count = u32::try_from(FRAGMENTS.len()).unwrap_or(1);
-            let fragment = FRAGMENTS
-                .get(usize::try_from(rng.below(count)).unwrap_or(0))
-                .copied()
-                .unwrap_or("");
-            source.push_str(&fragment.repeat(usize::try_from(rng.between(1, 40)).unwrap_or(1)));
-            source.push_str("x\n");
+            seeded_line(&mut rng, &mut source)?;
         }
-        source
+        Ok(source)
+    }
+
+    /// One seeded line of a mix: an indent, then a fragment repeated, then `x`.
+    fn seeded_line(rng: &mut Rng, source: &mut String) -> Built<()> {
+        let indent = usize::try_from(rng.between(0, 24))?;
+        source.push_str(&"  ".repeat(indent));
+        let count = u32::try_from(FRAGMENTS.len())?;
+        let at = usize::try_from(rng.below(count))?;
+        let fragment = FRAGMENTS
+            .get(at)
+            .copied()
+            .ok_or("a draw from the fragment table names none of it")?;
+        let count = usize::try_from(rng.between(1, 40))?;
+        source.push_str(&fragment.repeat(count));
+        source.push_str("x\n");
+        Ok(())
     }
 
     /// One markdown source the guard is proved against.
@@ -587,7 +607,7 @@ mod markdown {
 
     /// Every case: the shapes at the bound and around it, the shapes at their own
     /// measured abort depth, and [`SEEDED_CASES`] seeded mixes.
-    fn markdown_cases() -> Vec<Case> {
+    fn markdown_cases() -> Built<Vec<Case>> {
         let bound = MAX_MARKDOWN_CONTAINERS_PER_LINE;
         let mut cases = Vec::new();
         for entry in &SHAPES {
@@ -606,13 +626,13 @@ mod markdown {
             }
         }
         for index in 0..SEEDED_CASES {
-            let seed = index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let seed = u64::try_from(index)?.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             cases.push(case(
-                seeded_source(seed),
+                seeded_source(seed)?,
                 format!("seeded mix {index} (seed {seed:#x})"),
             ));
         }
-        cases
+        Ok(cases)
     }
 
     /// One case from a source, recording whether the guard is what refuses it.
@@ -630,15 +650,46 @@ mod markdown {
     ///
     /// The child's exit status is the whole observation, so nothing is written to a
     /// file: a code means the child answered, and no code means it did not, which is
-    /// the fact this module exists to record.
-    fn markdown_child(index: usize) -> Result<std::process::ExitStatus, Box<dyn Error>> {
+    /// the fact this module exists to record. A child that will not answer is
+    /// killed at [`CHILD_BUDGET`] rather than waited on, because the parse is
+    /// single-digit milliseconds and a hang is the defect this module records.
+    fn markdown_child(index: usize) -> Built<std::process::ExitStatus> {
         let mut child = std::process::Command::new(std::env::current_exe()?)
             .args([GUARD_TEST_NAME, "--exact", "--nocapture"])
             .env(CHILD_ENV, "1")
             .env(CASE_ENV, index.to_string())
             .spawn()?;
-        Ok(child.wait()?)
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            // The budget is measured from this instant rather than added to one,
+            // so the deadline cannot be built by arithmetic that overflows or is
+            // mistaken for a duration the clock holds.
+            let elapsed = started.elapsed();
+            if elapsed >= CHILD_BUDGET {
+                // The child owns nothing of this process and holds the only
+                // handle to itself, so a kill followed by a wait is what
+                // releases it rather than leaving a process behind the run.
+                let _killed = child.kill();
+                let _reaped = child.wait();
+                let refusal =
+                    Err(format!("case {index} did not answer within {CHILD_BUDGET:?}").into());
+                tracing::debug!(error = ?refusal.as_ref().err(), "hostile case: returning an error to the caller");
+                return refusal;
+            }
+            // A park, not a spin: the budget is seconds and the poll interval is
+            // milliseconds, so the cost of noticing an answer is bounded and a
+            // parent waiting on a child burns nothing.
+            let remaining = CHILD_BUDGET.saturating_sub(elapsed);
+            std::thread::park_timeout(remaining.min(CHILD_POLL));
+        }
     }
+
+    /// How often the parent looks for a child's answer, between [`CHILD_BUDGET`]
+    /// and the instant the budget runs out.
+    const CHILD_POLL: Duration = Duration::from_millis(5);
 
     /// Re-run this binary as the child that parses one case.
     fn run_markdown_child() -> TestResult {
@@ -648,28 +699,26 @@ mod markdown {
             })?
             .parse::<usize>()
             .map_err(|error| format!("CASE_ENV is not an index: {error}"))?;
-        let cases = markdown_cases();
+        let cases = markdown_cases()?;
         let case = cases
             .get(index)
             .ok_or("CASE_ENV names a case this build does not have")?;
-        // The arm is printed, not returned: a child that reaches here answered, and
-        // its exit status is the observation the parent reads. The text is here so a
-        // failing case names the arm in the child's own output.
-        // The arm is recorded rather than returned: a child that reaches here
-        // answered, and its exit status is the observation the parent reads. The
-        // text goes to stdout through `Write` because `clippy::print_stdout` is
-        // forbidden workspace-wide, and the file the child is in is not exempt.
-        let arm = arm_of(case).unwrap_or_else(|| "accepted".to_owned());
+        // The arm is printed, not returned: a child that reaches here answered,
+        // and its exit status is the observation the parent reads. The text goes
+        // to stdout through `Write` because `clippy::print_stdout` is forbidden
+        // workspace-wide, and this file is not an exempt surface.
+        let arm = arm_of(case);
         let mut stdout = std::io::stdout();
         drop(writeln!(stdout, "{} -> {arm}", case.label));
         Ok(())
     }
 
-    /// The arm a case answered with, `None` when it parsed.
-    fn arm_of(case: &Case) -> Option<String> {
+    /// The arm a case answered with: a refusal's own text, or `accepted` for a
+    /// source that parsed.
+    fn arm_of(case: &Case) -> String {
         match try_parse(&case.source, Language::Markdown) {
-            Ok(_) => None,
-            Err(refusal) => Some(refusal_name(&refusal)),
+            Ok(_) => String::from("accepted"),
+            Err(refusal) => refusal_name(&refusal),
         }
     }
 
@@ -679,9 +728,9 @@ mod markdown {
             return run_markdown_child();
         }
 
-        let cases = markdown_cases();
+        let cases = markdown_cases()?;
         assert!(
-            cases.len() >= 50 + usize::try_from(SEEDED_CASES).unwrap_or(0),
+            cases.len() >= 50 + SEEDED_CASES,
             "only {} cases; the shapes alone contribute more than 50",
             cases.len()
         );
@@ -698,12 +747,12 @@ mod markdown {
             );
             if case.guarded {
                 guarded = guarded.saturating_add(1);
-                let arm = arm_of(case).ok_or_else(|| {
-                    format!(
-                        "{}: the guard is expected to refuse this source",
-                        case.label
-                    )
-                })?;
+                let arm = arm_of(case);
+                assert_ne!(
+                    arm, "accepted",
+                    "{}: the guard is expected to refuse this source, and it parsed",
+                    case.label
+                );
                 assert!(
                     arm.contains("block containers"),
                     "{}: refused as `{arm}` rather than by the container bound, so this is not the \\

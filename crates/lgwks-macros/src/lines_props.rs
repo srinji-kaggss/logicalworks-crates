@@ -191,15 +191,31 @@ fn misalignment_property(
     else {
         return Ok(());
     };
-    let source: Vec<String> = rendered
-        .iter()
-        .enumerate()
-        .map(|(index, line)| match (index == moved, deeper) {
+    let mut source: Vec<String> = Vec::with_capacity(rendered.len());
+    for (index, line) in rendered.iter().enumerate() {
+        let written = match (index == moved, deeper) {
             (true, true) => format!("  {}", line.text),
-            (true, false) => line.text.get(2..).unwrap_or_default().to_owned(),
+            // Moving a line shallower means dropping two columns of its indent,
+            // which is the two leading spaces the renderer put there. A line
+            // without them is a generator defect rather than a shape, and the
+            // refusal says so instead of shortening the line to whatever prefix
+            // it happens to carry.
+            (true, false) => match line.text.strip_prefix("  ") {
+                Some(shifted) => shifted.to_owned(),
+                None => {
+                    let refusal = Err(TestCaseError::fail(format!(
+                        "line {} is `{}`, which carries no two-column indent to move it by",
+                        moved.saturating_add(1),
+                        line.text
+                    )));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "moving a line: returning an error to the caller");
+                    return refusal;
+                }
+            },
             (false, _) => line.text.clone(),
-        })
-        .collect();
+        };
+        source.push(written);
+    }
     let text = source.join("\n");
     let stream = setup(TokenStream::from_str(&text))?;
     match build(lines::split(stream)) {
@@ -238,7 +254,21 @@ fn the_property_catches_a_builder_that_snaps_lines_to_the_grid() -> Outcome {
     /// a misaligned line is silently re-homed instead of refused.
     fn snapping(mut split: Vec<Line>) -> lgwks_deps::syn::Result<Vec<Node>> {
         for line in &mut split {
-            let over = line.column.checked_rem(INDENT).unwrap_or(0);
+            // Rounding a column down to a multiple of the indent is arithmetic
+            // on the column, and a divisor of zero is not a rounding at all, so
+            // a zero `INDENT` is refused where it is read rather than answered
+            // with a column of zero.
+            let over = match line.column.checked_rem(INDENT) {
+                Some(over) => over,
+                None => {
+                    let refusal = Err(lgwks_deps::syn::Error::new(
+                        line.span,
+                        format!("the indentation unit is {INDENT}, and zero is not an indent"),
+                    ));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "snapping: returning an error to the caller");
+                    return refusal;
+                }
+            };
             line.column = line.column.saturating_sub(over);
         }
         lines::tree(split)
