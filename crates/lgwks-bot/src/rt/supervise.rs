@@ -1829,6 +1829,19 @@ const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 /// cheaper than a misreported outcome.
 const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
+/// How many finished tasks one tenanted admission joins before it is placed.
+///
+/// Two, because every admission adds one task: joining up to two per call
+/// drains a backlog rather than growing it, so the finished-but-unjoined set
+/// stays proportional to the in-flight ceiling — only a task that was in flight
+/// between two calls can finish between them. An unbounded reap made a call's
+/// bookkeeping every task *any* tenant finished since the last call, so a tenant
+/// whose bodies end at once charged its own joins to whichever neighbour
+/// admitted next (#268's adversarial row). [`Supervisor::reap`],
+/// [`Supervisor::wait_idle`] and shutdown still join everything.
+#[cfg(feature = "script")]
+const REAP_PER_ADMISSION: usize = 2;
+
 /// How much longer [`Supervisor::shutdown`] waits, past
 /// [`COOPERATIVE_DRAIN_GRACE`], while a supervised process task is still live.
 ///
@@ -2226,8 +2239,21 @@ impl Supervisor {
     /// Every joined task produces exactly one [`TaskOutcome`], readable through
     /// [`Supervisor::next_report`].
     pub fn reap(&mut self) -> usize {
+        self.reap_at_most(usize::MAX)
+    }
+
+    /// Join at most `limit` already-finished tasks, returning how many were
+    /// joined.
+    ///
+    /// The bounded form a tenanted admission takes (`REAP_PER_ADMISSION`), so
+    /// one call's bookkeeping is a constant rather than every task any tenant
+    /// finished since the last call.
+    fn reap_at_most(&mut self, limit: usize) -> usize {
         let mut reaped: usize = 0;
-        while let Some(joined) = self.set.try_join_next_with_id() {
+        while reaped < limit {
+            let Some(joined) = self.set.try_join_next_with_id() else {
+                break;
+            };
             self.absorb(joined, Retention::Capped);
             reaped = reaped.saturating_add(1);
         }
@@ -2356,7 +2382,6 @@ impl Supervisor {
             self.spawn(body).await;
             return Ok(());
         };
-        self.reap();
         let lease = match self.claim_tenanted(&shell, tenant).await {
             Ok(lease) => lease,
             Err(refusal) => {
@@ -2971,6 +2996,17 @@ impl Supervisor {
     /// produces exactly one waiter, and the round's queue is FIFO, so a second
     /// attempt would not make progress faster — it would forfeit the place the
     /// first attempt earned.
+    ///
+    /// Reaping is bookkeeping, not admission — a lease is released inside its
+    /// task the moment the body ends, never at the reap — so it happens once per
+    /// call, *after* the round has decided, and joins at most
+    /// `REAP_PER_ADMISSION` tasks. A queued caller reaps while its grant is on
+    /// the way, so the joins cost it nothing it was not already waiting
+    /// through. Reaping everything first put every task any tenant had finished
+    /// on the critical path of whichever tenant called next, which is how a
+    /// tenant whose bodies end at once charged its own bookkeeping to its
+    /// neighbour (#268's adversarial row). A grant delivered during the reap
+    /// waits in the waiter's slot, which the first poll takes.
     #[cfg(feature = "script")]
     async fn claim_tenanted(
         &mut self,
@@ -2982,9 +3018,9 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "claim_tenanted: returning an error to the caller");
             return refusal;
         }
-        self.reap();
         match shell.admit(tenant) {
             tenancy_support::Admission::Admitted(lease) => {
+                self.reap_at_most(REAP_PER_ADMISSION);
                 // Cancellation wins the race for a permit that landed in the
                 // same instant, and the lease's drop returns the capacity to the
                 // round either way.
@@ -3012,6 +3048,7 @@ impl Supervisor {
                 // `run_until_cancelled` wakes on the token too, so neither
                 // direction needs a timer.
                 let mut waiter = std::pin::pin!(waiter);
+                self.reap_at_most(REAP_PER_ADMISSION);
                 let token = self.token.clone();
                 match token.run_until_cancelled(waiter.as_mut()).await {
                     None => Err(SpawnRefused::Cancelled),
