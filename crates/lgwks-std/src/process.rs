@@ -9,7 +9,9 @@
 //! are the `process` feature's primitives. Unix-only; other targets report
 //! [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io;
 
 /// Send SIGKILL to every process in group `pgid`.
@@ -195,6 +197,7 @@ pub const MAX_CAPTURED_DESCENDANTS: usize = 4096;
 ///
 /// A descendant tree deeper than this is a program that forks without bound,
 /// which the capture reports as truncated rather than following for ever.
+#[cfg(unix)]
 const MAX_CAPTURED_DEPTH: usize = 64;
 
 /// How many thread directories of one process the Linux walk reads.
