@@ -1464,7 +1464,7 @@ impl fmt::Display for BotError {
                 ref needs,
             } => write!(
                 f,
-                "{} was refused by its upstream with status {status}: {needs}",
+                "{} was refused by its upstream with HTTP {status}: {needs}",
                 Escaped(domain)
             ),
             Self::UnstableObservation {
