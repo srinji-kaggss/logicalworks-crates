@@ -266,14 +266,7 @@ fn lock_property(read: ReadLock, packages: &[Package]) -> Result<(), TestCaseErr
     let resolved = read(&text).map_err(|error| TestCaseError::fail(format!("{error}\n{text}")))?;
     let read_back: Vec<Row<'_>> = resolved
         .iter()
-        .map(|row| {
-            (
-                row.name.as_str(),
-                row.version.as_str(),
-                row.local,
-                row.checksum.as_deref(),
-            )
-        })
+        .map(|row| (row.name(), row.version(), row.is_local(), row.checksum()))
         .collect();
     let written: Vec<Row<'_>> = packages
         .iter()

@@ -27,9 +27,23 @@ use crate::lock;
 #[non_exhaustive]
 pub struct Missing {
     /// Package name exactly as `Cargo.lock` spells it.
-    pub name: String,
+    name: String,
     /// Resolved version.
-    pub version: String,
+    version: String,
+}
+
+impl Missing {
+    /// Package name exactly as `Cargo.lock` spells it.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The version Cargo resolved, and the version the tree does not carry.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
 }
 
 /// The coverage verdict for one repository.
@@ -41,11 +55,43 @@ pub struct Missing {
 #[non_exhaustive]
 pub struct Report {
     /// Lock registry packages matched by hash (or by manifest for sourceless hashes).
-    pub covered: usize,
+    covered: usize,
     /// Local packages skipped: workspace members and path dependencies.
-    pub skipped_local: usize,
+    skipped_local: usize,
     /// Lock packages with no matching bytes in the tree.
-    pub missing: Vec<Missing>,
+    missing: Vec<Missing>,
+}
+
+impl Report {
+    /// Lock registry packages the tree carries with the exact bytes the lock
+    /// pins, matched by hash or — for a sourceless git package — by manifest
+    /// identity.
+    #[must_use]
+    pub const fn covered(&self) -> usize {
+        self.covered
+    }
+
+    /// Local packages the check is out of scope for: workspace members and path
+    /// dependencies, which carry no `source` and no vendored bytes.
+    #[must_use]
+    pub const fn skipped_local(&self) -> usize {
+        self.skipped_local
+    }
+
+    /// The lock packages with no matching bytes in the tree, sorted.
+    ///
+    /// A slice, so a caller can read the verdict without being able to edit it
+    /// into a pass: a report is only a pass when this is empty.
+    #[must_use]
+    pub fn missing(&self) -> &[Missing] {
+        &self.missing
+    }
+
+    /// Whether every non-local package the lock resolves is present in the tree.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -348,25 +394,25 @@ pub fn check_coverage(lock_text: &str, tree: &Path) -> Result<Report, VendorErro
         missing: Vec::new(),
     };
     for package in &resolved {
-        if package.local {
+        if package.is_local() {
             // Both counters are bounded by `resolved.len()`, and a `Vec` cannot
             // exceed `isize::MAX` bytes, so neither can reach `usize::MAX` and
             // this cannot saturate.
             report.skipped_local = report.skipped_local.saturating_add(1);
             continue;
         }
-        let covered = match package.checksum.as_deref() {
+        let covered = match package.checksum() {
             Some(hash) => index.by_hash.contains_key(hash),
             None => index
                 .by_name_version
-                .contains_key(&(package.name.clone(), package.version.clone())),
+                .contains_key(&(package.name().to_owned(), package.version().to_owned())),
         };
         if covered {
             report.covered = report.covered.saturating_add(1);
         } else {
             report.missing.push(Missing {
-                name: package.name.clone(),
-                version: package.version.clone(),
+                name: package.name().to_owned(),
+                version: package.version().to_owned(),
             });
         }
     }
@@ -374,7 +420,7 @@ pub fn check_coverage(lock_text: &str, tree: &Path) -> Result<Report, VendorErro
     // and across platforms, whatever order the lockfile listed packages in.
     report
         .missing
-        .sort_by(|left, right| (&left.name, &left.version).cmp(&(&right.name, &right.version)));
+        .sort_by(|left, right| (left.name(), left.version()).cmp(&(right.name(), right.version())));
     Ok(report)
 }
 
@@ -437,13 +483,20 @@ source = "git+https://example.com/org/git-crate#abc123"
         /// sufficient; it is not.
         fn create() -> Result<Fixture, Box<dyn std::error::Error>> {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            // The clock separates this run's roots from a *previous* run's under
+            // a recycled pid, so a clock that reads before the Unix epoch has no
+            // subsecond value to offer and is refused: a root named for 1970 is
+            // a name this process cannot tell from any other process reading the
+            // same broken clock.
+            let clock = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|before_epoch| {
+                    format!("the wall clock reads before the Unix epoch: {before_epoch}")
+                })?
+                .subsec_nanos();
             let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-vendor-test-{}-{}-{}",
+                "lgwks-deps-vendor-test-{}-{clock}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|elapsed| elapsed.subsec_nanos())
-                    .unwrap_or(0),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("tree/covered-crate"))?;
@@ -483,15 +536,15 @@ source = "git+https://example.com/org/git-crate#abc123"
     fn hash_matched_packages_are_covered_and_locals_skipped() -> TestResult {
         let fixture = Fixture::create()?;
         let report = check_coverage(LOCK, &fixture.tree())?;
-        assert_eq!(report.covered, 2);
-        assert_eq!(report.skipped_local, 1);
-        assert_eq!(
-            report.missing,
-            vec![Missing {
-                name: "missing-crate".to_owned(),
-                version: "4.5.6".to_owned(),
-            }]
-        );
+        assert_eq!(report.covered(), 2);
+        assert_eq!(report.skipped_local(), 1);
+        let missing: Vec<(&str, &str)> = report
+            .missing()
+            .iter()
+            .map(|entry| (entry.name(), entry.version()))
+            .collect();
+        assert_eq!(missing, vec![("missing-crate", "4.5.6")]);
+        assert!(!report.is_complete(), "a report with a gap is not complete");
         Ok(())
     }
 

@@ -426,6 +426,45 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the resolved graph, the vendor report and the CLI's target resolution
+
+The readers that build the gate's inputs each answered a value it did not have,
+and the CLI each resolved "no path given" on its own.
+
+- **A `[[package]]` block with no `version` is refused**
+  (`LockError::VersionlessPackage`) instead of being read with an empty version.
+  A resolved package is an identity of name *and* version, and an empty version
+  is a value no line declared — `freshness` compared it with the registry's
+  latest and the audit compared it with the approval's pin, so both decided on
+  it. This is the same refusal `NamelessPackage` already was, for the other half
+  of the identity. Cargo writes `version` for every locked package, so only a
+  hand-edited or truncated lockfile reaches it.
+- **`lock::Resolved`, `vendor::Missing` and `vendor::Report` are read through
+  accessors.** `#[non_exhaustive]` blocks construction outside the crate, not
+  mutation of a value a caller holds; these three are the readers' own output.
+  `Report::missing()` returns a slice and `Report::is_complete()` is the verdict,
+  so a caller can no longer empty the list that decides the exit code.
+- **One `subject_path` resolves every command's target.** Six call sites each
+  substituted `.` for an absent path; a command given no path audits the
+  repository the operator is standing in, and that is now one named fact.
+- **A verdict that arrives without a repository is refused.** `check` printed its
+  receipt against `.` when the collection reached a verdict without a root,
+  which is the exact defect `check_cli` pins — a receipt for a repository nobody
+  asked about.
+- **No command and an unknown command are distinct refusals**, each with its own
+  message and the usage block, instead of an empty command name.
+- **The debugger surface reads the `lgwks_std` manifest's own vocabulary**: an
+  absent `default`/`trace` assignment is `None` and answers "does this list
+  include that entry" for itself, rather than being read as an empty list.
+- **A registry that publishes no version is `None`**, not an empty string, so
+  `stale` is decided only between two versions crates.io and the lock both named.
+- **`serde_json_number` keeps counts; `schema_number` renders the register's
+  `u32` version.** The version went through a widening conversion whose failure
+  was reported as `usize::MAX` — a register version this binary could not name.
+- **`scan`'s excluded-directory test reads the directory's own name.** A name
+  that is not UTF-8 was read as empty, and an empty name matches no excluded
+  directory only by inventing a name the filesystem does not carry.
+
 ### lgwks_deps — the seeded generators draw through one total generator
 
 The simulation suites substituted a value for every draw they could not make: a

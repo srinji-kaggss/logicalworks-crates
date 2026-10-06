@@ -416,30 +416,36 @@ fn report_invariant_audit(
 /// Exits 2: an unknown command is a failure of the invocation, not a refused
 /// audit, but both are "this did not do what you asked" and share the code the
 /// usage block documents.
-fn handle_unknown(other: &str, err: &mut impl io::Write) -> io::Result<ExitCode> {
-    writeln!(err, "lgwks-deps: unknown command {other:?}\n")?;
+///
+/// The two refusals are distinct messages because they are distinct operator
+/// mistakes: naming a command this binary does not run, and naming none at all.
+fn handle_unknown(other: Option<&str>, err: &mut impl io::Write) -> io::Result<ExitCode> {
+    match other {
+        Some(name) => writeln!(err, "lgwks-deps: unknown command {name:?}\n")?,
+        None => writeln!(err, "lgwks-deps: no command given\n")?,
+    }
     write!(err, "{USAGE}")?;
     Ok(ExitCode::from(2))
 }
 
 /// Routes the first argument to its command, with the remaining arguments.
 fn dispatch(
-    command: &str,
+    command: Option<&str>,
     args: &[String],
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
     match command {
-        "check" => handle_check(&args[1..], out, err),
-        "invariants" => handle_invariants(&args[1..], out, err),
-        "request" => run_request(args.get(1), args.get(2), out, err),
-        "init" => run_init(args.get(1).map(PathBuf::from), out, err),
-        "tiers" => handle_tiers(out),
-        "freshness" => handle_freshness(&args[1..], out, err),
-        "vendor" => handle_vendor(&args[1..], out, err),
-        "scan" => handle_scan(&args[1..], out, err),
-        "debug" => handle_debug(&args[1..], out, err),
-        "-h" | "--help" | "help" => handle_help(out),
+        Some("check") => handle_check(&args[1..], out, err),
+        Some("invariants") => handle_invariants(&args[1..], out, err),
+        Some("request") => run_request(args.get(1), args.get(2), out, err),
+        Some("init") => run_init(args.get(1).map(PathBuf::from), out, err),
+        Some("tiers") => handle_tiers(out),
+        Some("freshness") => handle_freshness(&args[1..], out, err),
+        Some("vendor") => handle_vendor(&args[1..], out, err),
+        Some("scan") => handle_scan(&args[1..], out, err),
+        Some("debug") => handle_debug(&args[1..], out, err),
+        Some("-h" | "--help" | "help") => handle_help(out),
         other => handle_unknown(other, err),
     }
 }
@@ -452,7 +458,10 @@ fn dispatch(
 /// into the exit code.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = args.first().map(String::as_str).unwrap_or("");
+    // An absent command reaches the same refusal as an unrecognised one, with
+    // its own message: the operator asked for nothing this binary can run, and
+    // the usage block is what tells them what it can.
+    let command = args.first().map(String::as_str);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let stderr = io::stderr();
@@ -575,7 +584,7 @@ fn run_check(
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let start = path.unwrap_or_else(|| PathBuf::from("."));
+    let start = subject_path(path.as_deref());
     let mode = PolicyMode::of(&contract_override);
     let root = match repository_root(&start) {
         Ok(root) => root,
@@ -850,16 +859,16 @@ fn write_invariant_register_error(
     root: &Path,
     verdict: &Verdict,
     invariant_error: &str,
-    stderr: &mut impl io::Write,
+    writer: &mut impl io::Write,
 ) -> io::Result<()> {
     writeln!(
-        stderr,
+        writer,
         "REFUSED  {} — {} dependency-edge violations, invariant register error\n",
         root.display(),
         verdict.refusals().len()
     )?;
-    write_dependency_refusals(verdict.refusals(), stderr)?;
-    write_register_detail(stderr, "invariant", invariant_error)
+    write_dependency_refusals(verdict.refusals(), writer)?;
+    write_register_detail(writer, "invariant", invariant_error)
 }
 
 /// Writes the human refusal for a tree on which neither register could be
@@ -868,15 +877,15 @@ fn write_both_registers_unaudited(
     root: &Path,
     dependency_error: &str,
     invariant_error: &str,
-    stderr: &mut impl io::Write,
+    writer: &mut impl io::Write,
 ) -> io::Result<()> {
     writeln!(
-        stderr,
+        writer,
         "REFUSED  {} — both registers could not be audited",
         root.display()
     )?;
-    write_register_detail(stderr, "dependency", dependency_error)?;
-    write_register_detail(stderr, "invariant", invariant_error)
+    write_register_detail(writer, "dependency", dependency_error)?;
+    write_register_detail(writer, "invariant", invariant_error)
 }
 
 /// Writes the receipt that binds the verdict to what it was reached against.
@@ -980,7 +989,17 @@ fn report_check(
         Ok(verdict) => verdict,
         Err(message) => return refuse(message, err),
     };
-    let named = outcome.root.unwrap_or(Path::new("."));
+    // The audited subject is the root the collection resolved. A collection
+    // that reached a verdict without one is not a collection this module can
+    // have produced, and naming the operator's own directory would print a
+    // receipt for a repository nobody asked about — the defect `check_cli`
+    // pins. It is therefore reported as an unreadable outcome rather than
+    // rendered against an invented subject.
+    let Some(named) = outcome.root else {
+        let message = "the audit reached a verdict without naming a repository";
+        lgwks_std::trace::debug!(error = ?message, "report: the audit reached a verdict without a root");
+        return refuse(message, err);
+    };
     if verdict.refusals().is_empty() {
         report_ok(named, verdict.register().entry_count(), out)?;
         finish_verdict(outcome, out, ExitCode::SUCCESS)
@@ -1061,9 +1080,7 @@ fn print_check_json(
     contract.insert(
         "schema".to_owned(),
         match register {
-            Some(register) => Value::Number(serde_json_number(
-                usize::try_from(register.schema()).unwrap_or(usize::MAX),
-            )),
+            Some(register) => Value::Number(schema_number(register.schema())),
             None => Value::Null,
         },
     );
@@ -1234,8 +1251,21 @@ fn print_check_json(
 fn serde_json_number(count: usize) -> lgwks_std::json::Number {
     match i64::try_from(count) {
         Ok(exact) => lgwks_std::json::Number::from(exact),
+        // A count past `i64::MAX` is reported as the largest number JSON can
+        // hold, so a receipt says the count is not exactly countable rather than
+        // reporting a smaller count as if it were the whole.
         Err(_) => lgwks_std::json::Number::from(i64::MAX),
     }
+}
+
+/// A JSON number for the register's declared schema version.
+///
+/// A `u32` is at most `u32::MAX`, which `i64` holds exactly, so the version is
+/// rendered from the value itself. This is not the count path: a schema version
+/// is never large enough to need a clamp, and clamping one would report a
+/// register with a version this binary cannot name as the version it declared.
+fn schema_number(version: u32) -> lgwks_std::json::Number {
+    lgwks_std::json::Number::from(i64::from(version))
 }
 
 /// Prints a one-line refusal on stderr and returns the refusal exit code.
@@ -1260,6 +1290,20 @@ macro_rules! unwrap_or_refuse {
 /// Resolves a repository root into the command's string-refusal vocabulary.
 fn resolve_repository_root(start: &Path) -> Result<PathBuf, String> {
     repository_root(start).map_err(|error| error.to_string())
+}
+
+/// The subject a command audits: the path it named, or the directory the
+/// operator is standing in.
+///
+/// A command given no path is not auditing nothing: it audits the repository
+/// the process was started in, which is the one subject that is always a
+/// repository. Every command resolves its target here so that rule is one fact
+/// about the CLI rather than a substitution repeated at each call site.
+fn subject_path(named: Option<&Path>) -> PathBuf {
+    match named {
+        Some(path) => path.to_path_buf(),
+        None => PathBuf::from("."),
+    }
 }
 
 /// Reads the lockfile text for commands that audit the resolved dependency set.
@@ -1350,7 +1394,7 @@ fn parse_debug_args(args: &[String]) -> Result<DebugArgs, String> {
 /// Runs the debugger doctor and returns the report to render.
 fn run_debug(args: &[String]) -> Result<DebugReport, String> {
     let request = parse_debug_args(args)?;
-    let start = request.target.unwrap_or_else(|| PathBuf::from("."));
+    let start = subject_path(request.target.as_deref());
     let root = repository_root(&start).map_err(|error| error.to_string())?;
     let mut config = lgwks_std::trace::DebugConfig::from_env("lgwks-deps")
         .map_err(|error| format!("cannot configure debugger: {error}"))?;
@@ -1387,12 +1431,19 @@ fn inspect_debug_surface(root: &Path) -> Result<DebugSurface, String> {
     let manifest_path = root.join("crates/lgwks-std/Cargo.toml");
     let manifest = std::fs::read_to_string(&manifest_path)
         .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
-    let default_value = assignment_value(&manifest, "default").unwrap_or_default();
-    let trace_value = assignment_value(&manifest, "trace").unwrap_or_default();
+    // A manifest that assigns no `default` or no `trace` list declares no
+    // features there, so the question the surface answers is "does that list
+    // include this entry" and an absent list answers it for itself.
+    let default_value = assignment_value(&manifest, "default");
+    let trace_value = assignment_value(&manifest, "trace");
     Ok(DebugSurface {
-        default_includes_trace: default_value.contains("\"trace\""),
-        trace_includes_tracing: trace_value.contains("\"dep:tracing\""),
-        trace_includes_subscriber: trace_value.contains("\"dep:tracing-subscriber\""),
+        default_includes_trace: default_value.is_some_and(|list| list.contains("\"trace\"")),
+        trace_includes_tracing: trace_value
+            .as_ref()
+            .is_some_and(|list| list.contains("\"dep:tracing\"")),
+        trace_includes_subscriber: trace_value
+            .as_ref()
+            .is_some_and(|list| list.contains("\"dep:tracing-subscriber\"")),
         tracing_declared: dependency_declared(&manifest, "tracing"),
         subscriber_declared: dependency_declared(&manifest, "tracing-subscriber"),
     })
@@ -1646,7 +1697,7 @@ fn run_init(
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let start = path.unwrap_or_else(|| PathBuf::from("."));
+    let start = subject_path(path.as_deref());
     let root = unwrap_or_refuse!(resolve_repository_root(&start), err);
     let target = root.join(CONTRACT_PATH);
     if let Err(msg) = prepare_init_file(&target) {
@@ -1671,10 +1722,11 @@ fn handle_freshness(
 ) -> io::Result<ExitCode> {
     let json_output = args.iter().any(|arg| arg == "--json");
     let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    let start = positional
-        .first()
-        .map(|candidate| PathBuf::from(candidate.as_str()))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let start = subject_path(
+        positional
+            .first()
+            .map(|candidate| Path::new(candidate.as_str())),
+    );
 
     let root = unwrap_or_refuse!(resolve_repository_root(&start), err);
     let lock_text = unwrap_or_refuse!(read_lock_text(&root), err);
@@ -1684,8 +1736,10 @@ fn handle_freshness(
         Err(error) => return refuse(&format!("Cargo.lock: {error}"), err),
     };
 
-    let registry: Vec<&lgwks_deps::lock::Resolved> =
-        resolved.iter().filter(|package| !package.local).collect();
+    let registry: Vec<&lgwks_deps::lock::Resolved> = resolved
+        .iter()
+        .filter(|package| !package.is_local())
+        .collect();
 
     if registry.is_empty() {
         writeln!(out, "no registry dependencies in Cargo.lock")?;
@@ -1718,10 +1772,12 @@ struct FreshnessResult {
     name: String,
     /// Version the lock file resolved.
     resolved: String,
-    /// Latest version crates.io reports, or empty when unknown.
-    latest: String,
-    /// Upstream repository URL reported by crates.io, or empty.
-    repository: String,
+    /// Latest version crates.io reports, or `None` when it published none.
+    latest: Option<String>,
+    /// Upstream repository URL crates.io reports, or `None` when it published
+    /// none. A published version carries no repository, and an unpublished one
+    /// carries neither; neither is an empty string crates.io sent.
+    repository: Option<String>,
     /// Whether `latest` is a real version newer than `resolved`.
     stale: bool,
     /// Why the lookup failed, when it did.
@@ -1730,11 +1786,21 @@ struct FreshnessResult {
 
 impl FreshnessResult {
     /// Successful registry lookup.
-    fn found(package: &lgwks_deps::lock::Resolved, latest: String, repository: String) -> Self {
-        let stale = !latest.is_empty() && latest != package.version;
+    fn found(
+        package: &lgwks_deps::lock::Resolved,
+        latest: Option<String>,
+        repository: Option<String>,
+    ) -> Self {
+        // A registry that publishes no version for a crate cannot be compared,
+        // so nothing is claimed: `stale` is only ever decided between two
+        // versions the registry and the lock both named.
+        let stale = match latest.as_deref() {
+            Some(latest) => latest != package.version(),
+            None => false,
+        };
         Self {
-            name: package.name.clone(),
-            resolved: package.version.clone(),
+            name: package.name().to_owned(),
+            resolved: package.version().to_owned(),
             latest,
             repository,
             stale,
@@ -1745,10 +1811,10 @@ impl FreshnessResult {
     /// Failed registry lookup, which is reported but not treated as stale.
     fn lookup_failed(package: &lgwks_deps::lock::Resolved, error: String) -> Self {
         Self {
-            name: package.name.clone(),
-            resolved: package.version.clone(),
-            latest: String::new(),
-            repository: String::new(),
+            name: package.name().to_owned(),
+            resolved: package.version().to_owned(),
+            latest: None,
+            repository: None,
             stale: false,
             error: Some(error),
         }
@@ -1779,7 +1845,7 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
     let mut results = Vec::new();
 
     for package in packages {
-        if !seen.insert(&package.name) {
+        if !seen.insert(package.name()) {
             continue;
         }
 
@@ -1790,7 +1856,7 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
                 "10",
                 "-H",
                 USER_AGENT,
-                &format!("https://crates.io/api/v1/crates/{}", package.name),
+                &format!("https://crates.io/api/v1/crates/{}", package.name()),
             ])
             .output();
 
@@ -1815,7 +1881,7 @@ fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessRes
 }
 
 /// INV-GATE-ZERO-DEPS: no JSON parser; extract fields by line scan.
-fn parse_crate_response(body: &str) -> (String, String) {
+fn parse_crate_response(body: &str) -> (Option<String>, Option<String>) {
     let newest = extract_json_string(body, "newest_version");
     let repo = extract_json_string(body, "repository");
     (newest, repo)
@@ -1825,11 +1891,13 @@ fn parse_crate_response(body: &str) -> (String, String) {
 /// form.
 ///
 /// Both `"key":"value"` and `"key": "value"` spacing are accepted, and a key
-/// that is absent yields an empty string rather than an error: freshness is a
-/// best-effort advisory, and a missing field must not turn a successful HTTP
-/// lookup into a failure. This is deliberately not a JSON parser; see the
-/// zero-deps invariant above.
-fn extract_json_string(body: &str, key: &str) -> String {
+/// that is absent yields `None` rather than an empty string: freshness is a
+/// best-effort advisory, so a missing field is not a failure, and an empty
+/// string is a value crates.io never sent. `None` is what the caller reports as
+/// "not published", and an unterminated value is refused the same way, because
+/// a half-read value is not a shorter one. This is deliberately not a JSON
+/// parser; see the zero-deps invariant above.
+fn extract_json_string(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{}\":\"", key);
     let alt_needle = format!("\"{}\": \"", key);
     // Each `index` is a byte offset at which `body` matched `needle`, so the
@@ -1842,21 +1910,33 @@ fn extract_json_string(body: &str, key: &str) -> String {
             body.find(&alt_needle)
                 .map(|index| index.saturating_add(alt_needle.len()))
         });
-    match start {
-        Some(value_start) => body[value_start..]
-            .find('"')
-            // `end_offset` indexes the closing quote inside the slice that
-            // begins at `value_start`, so the sum stays within `body`.
-            .map(|end_offset| body[value_start..value_start.saturating_add(end_offset)].to_string())
-            .unwrap_or_default(),
-        None => String::new(),
-    }
+    // Three refusals, one answer: the key is absent, the value is unterminated,
+    // and the key is absent under the spaced spelling. None of them is a value
+    // crates.io sent.
+    let value_start = start?;
+    // `end_offset` indexes the closing quote inside the slice that begins at
+    // `value_start`, so the sum stays within `body`.
+    let end_offset = body[value_start..].find('"')?;
+    Some(body[value_start..value_start.saturating_add(end_offset)].to_string())
 }
 
 // Each label is a column value; the format string owns the alignment. The final
 // column is spelled inside the format string rather than passed as an argument:
 // a trailing string literal in a `{}` slot is what `clippy::write_literal`
 // flags, and the rendered line is byte-identical either way.
+/// The table cell for a field crates.io may not have published.
+///
+/// `?` is the marker a failed lookup already prints, and a version the registry
+/// never published is the same fact to a reader: the value is not known. Naming
+/// the mapping keeps one cell spelling for "not known" instead of an empty column
+/// that reads as a value crates.io sent.
+fn or_unpublished(value: Option<&str>) -> &str {
+    match value {
+        Some(value) => value,
+        None => "?",
+    }
+}
+
 /// Prints the human-readable freshness table.
 ///
 /// A failed lookup is shown as `?` / `err` rather than as a version, so an
@@ -1880,7 +1960,11 @@ fn print_freshness_table(results: &[FreshnessResult], out: &mut impl io::Write) 
             writeln!(
                 out,
                 "{:<30} {:<12} {:<12} {:<5} {}",
-                result.name, result.resolved, result.latest, stale_mark, result.repository
+                result.name,
+                result.resolved,
+                or_unpublished(result.latest.as_deref()),
+                stale_mark,
+                or_unpublished(result.repository.as_deref())
             )?;
         }
     }
@@ -1922,11 +2006,22 @@ fn print_freshness_json(results: &[FreshnessResult], out: &mut impl io::Write) -
             "resolved".to_owned(),
             Value::String(result.resolved.clone()),
         );
-        row.insert("latest".to_owned(), Value::String(result.latest.clone()));
+        // `null` for a field crates.io did not publish, so a consumer reads
+        // "not published" rather than a version nobody published.
+        row.insert(
+            "latest".to_owned(),
+            match result.latest.as_ref() {
+                Some(latest) => Value::String(latest.clone()),
+                None => Value::Null,
+            },
+        );
         row.insert("stale".to_owned(), Value::Bool(result.stale));
         row.insert(
             "repository".to_owned(),
-            Value::String(result.repository.clone()),
+            match result.repository.as_ref() {
+                Some(repository) => Value::String(repository.clone()),
+                None => Value::Null,
+            },
         );
         // Always present, `null` when the lookup succeeded: a consumer reads a
         // fixed set of keys rather than testing for the existence of each.
@@ -1961,10 +2056,11 @@ fn handle_vendor(
         .iter()
         .filter(|arg| !arg.starts_with("--"))
         .collect();
-    let start = positional
-        .first()
-        .map(|candidate| PathBuf::from(candidate.as_str()))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let start = subject_path(
+        positional
+            .first()
+            .map(|candidate| Path::new(candidate.as_str())),
+    );
     run_vendor_check(&start, out, err)
 }
 
@@ -1980,14 +2076,14 @@ fn write_missing_packages(
         err,
         "REFUSED  {} — {} of {} locked packages missing from {}\n",
         root.display(),
-        report.missing.len(),
+        report.missing().len(),
         // Both operands are counts of entries in one lock file, so the
         // sum is bounded by its package count and cannot overflow.
-        report.covered.saturating_add(report.missing.len()),
+        report.covered().saturating_add(report.missing().len()),
         tree.display()
     )?;
-    for missing in &report.missing {
-        writeln!(err, "  {} {}", missing.name, missing.version)?;
+    for missing in report.missing() {
+        writeln!(err, "  {} {}", missing.name(), missing.version())?;
     }
     writeln!(
         err,
@@ -2012,14 +2108,14 @@ fn run_vendor_check(
     };
     let lock_text = unwrap_or_refuse!(read_lock_text(&root), err);
     match lgwks_deps::vendor::check_coverage(&lock_text, &tree) {
-        Ok(report) if report.missing.is_empty() => {
+        Ok(report) if report.is_complete() => {
             writeln!(
                 out,
                 "OK  {} — {} locked packages covered by {}, {} local skipped",
                 root.display(),
-                report.covered,
+                report.covered(),
                 tree.display(),
-                report.skipped_local
+                report.skipped_local()
             )?;
             Ok(ExitCode::SUCCESS)
         }
@@ -2055,14 +2151,20 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
     dirs.sort();
     files.sort();
     for dir in dirs {
-        let name = dir
+        // A directory name that is not UTF-8 is not one of the excluded names:
+        // it compares equal to none of them, so it is walked. Reading it as an
+        // empty name would compare equal to none of them too, but would do so
+        // by inventing a name the filesystem does not carry.
+        let excluded = dir
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if matches!(
-            name,
-            "target" | "vendor" | "node_modules" | "third_party" | ".venv" | ".git" | ".jj"
-        ) {
+            .is_some_and(|name| {
+                matches!(
+                    name,
+                    "target" | "vendor" | "node_modules" | "third_party" | ".venv" | ".git" | ".jj"
+                )
+            });
+        if excluded {
             continue;
         }
         collect_rs_files(&dir, out);
