@@ -180,6 +180,24 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-06 — Release cut: lgwks_std 2.0.0, lgwks_ast 1.1.0, lgwks_deps 3.0.0, lgwks_bot 2.0.0, lgwks_macros 1.1.1
+
+- **Director-ordered** ("U WILL ENSURE LOGICALWORKS-CRATES is GOOGLE AND APPLE
+  LEVEL COMPLETE AND RELEASED ONTO CARGO", 2026-10-06). The cut is `origin/main`
+  at 44c94326 (PR #339 merged, all 32 CI checks green, run 37475980214, 4 m 42 s
+  wall) plus this commit.
+- Versions follow `docs/releasing.md` §3: `lgwks_std`, `lgwks_deps` and
+  `lgwks_bot` each remove or retype a public item and take the major position;
+  `lgwks_ast` adds public items only and takes a minor; `lgwks_macros` changes
+  no public item and takes a patch. CHANGELOG.md's release section opens with
+  an upgrade list naming each break and its replacement.
+- The `[Unreleased]` block had collected five headings and a 369-line verbatim
+  duplicate of ten sections (#264, #269, #271, #272, #276, #277); the release
+  section keeps one copy of each.
+
+**Does not claim:** that anything is uploaded when this entry lands. The upload,
+tags and GitHub releases follow the merge, in `docs/releasing.md` §1 and §4 order.
+
 ### 2026-09-23 — Requirements spine, bot durability fixes, readiness
 
 - **Requirements spine.** `REQUIREMENTS.md` (R1–R13, immutable, superseded
