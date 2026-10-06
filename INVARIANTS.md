@@ -569,7 +569,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   and stopped by pid. `CleanupReceipt::CleanupConfirmed` claims the group was
   observed gone **and** every captured descendant stopped running; a captured
   pid still running is named in `CleanupSurvivors` and never absorbed into a
-  pending group or promoted by a later observation. Every process outcome carries
+  pending group or promoted by a later observation. After the leader is reaped the
+  cleanup observes the pids it captured, by pid, and never walks the tree from the
+  reaped leader again: the OS may have reissued that id, and a walk from it names
+  whoever holds it now. Every process outcome carries
   a `Containment` report naming the mechanism, how many pids it captured and
   signalled, and its residual risk (`TableUnreadable`, `CaptureTruncated`), so
   "nothing survived" and "nothing was looked at" never read alike. **Not
@@ -1438,10 +1441,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   `SupervisorQueueFull` the supervisor). A tenant's live count is exactly the
   owners still waiting, including when an owner leaves between the round's choice
   and the delivery: the shell withdraws that waiter and the owner's report counts
-  nothing. **Not claimed:** throughput isolation from a tenant whose bodies burn
-  the runtime's CPU; the round decides admission, not scheduling of admitted
-  work. · why: #268 · enforced by: `rt::tenancy::tests`,
+  nothing. A tenanted admission joins at most `REAP_PER_ADMISSION` (two) finished
+  tasks, after the round has decided, so a tenant whose bodies end at once cannot
+  put the joins of its whole flood on a neighbour's admission, and the retained
+  set still never exceeds the in-flight ceiling. **Not claimed:** throughput
+  isolation from a tenant whose bodies burn the runtime's CPU; the round decides
+  admission, not scheduling of admitted work. · why: #268 · enforced by:
+  `rt::tenancy::tests`,
   `rt::supervise::tenancy_support::tests::a_late_abandonment_leaves_the_live_count_exact`,
+  `rt::supervise::tests::a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling`,
   `tests/it/tenancy.rs` (`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
   `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
   `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and

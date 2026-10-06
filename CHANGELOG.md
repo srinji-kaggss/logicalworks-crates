@@ -9,7 +9,32 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a tenanted admission joins a bounded backlog (#268)
+
+`spawn_for` and `run_process_for` on a tenanted supervisor joined every finished
+task before admitting, twice. A tenant whose bodies end at once therefore put the
+joins of its whole flood on the critical path of whichever neighbour admitted
+next: on a GitHub x86 runner the neighbour's admissions ran 14.7% slower beside a
+fail-fast flood (draft PR #340, CI run 37470645014), past #268's 10% row. An
+admission now joins at most `REAP_PER_ADMISSION = 2` finished tasks, once, after
+the round has decided, so a queued caller reaps while its grant is on the way.
+The same probe then measured 0.25% (draft PR #341, CI run 37470654341). Two per
+call is still a drain: every admission places one task and joins two, so the
+retained set stays at the in-flight ceiling. `Supervisor::reap`,
+`Supervisor::wait_idle` and shutdown still join everything. Pinned by
+`rt::supervise::tests::a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling`
+(10,000 admissions; an unbounded reap fails it with 32 joins in one call).
+
 ### lgwks_bot — the supervised tree is captured, signalled by pid, and reported (#263)
+
+**After the reap the cleanup observes, it does not capture.** The post-reap pass
+used to walk the tree from the reaped leader once more. The leader's id is free
+by then, so the walk could name another process's children, and on Linux a
+reaped root has no `/proc/<pid>/task`, so every supervised process paid a
+whole-table `ps` spawn: `sim_review_path`'s 10,000-run tier went from 62 s on
+main to 181 s on CI (run 37468321247), and to 269 s locally. The pass now asks
+only about the pids the pinned phase proved running, and reads no table when
+there are none (local tier: 146 s).
 
 A group kill reaches the members that exist when it is sent. A descendant that
 called `setsid` has left the group by construction, so this cleanup now names

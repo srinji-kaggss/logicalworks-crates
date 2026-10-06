@@ -113,8 +113,8 @@ use std::time::Duration;
 use std::io;
 
 #[cfg(all(unix, feature = "process"))]
-use lgwks_deps::tokio::sync::Notify;
-use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use crate::rt::sync::Notify;
+use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
 #[cfg(all(unix, feature = "process"))]
@@ -1113,7 +1113,7 @@ mod tenancy_support {
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
-    use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
+    use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 
     use super::Lease;
     use crate::rt::tenancy::{Arrival, DeficitRoundRobin, Grant, GrantOutcome, TryArrival};
@@ -1550,7 +1550,7 @@ mod tenancy_support {
         use std::error::Error;
         use std::sync::Arc;
 
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         use super::{Departure, TenancyShell, WaitSlot};
         use crate::rt::tenancy::{Arrival, GrantOutcome, TenancyPolicy};
@@ -1828,6 +1828,19 @@ const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 /// it spends it on the shutdown path — the terminal one, where a delay is
 /// cheaper than a misreported outcome.
 const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+
+/// How many finished tasks one tenanted admission joins before it is placed.
+///
+/// Two, because every admission adds one task: joining up to two per call
+/// drains a backlog rather than growing it, so the finished-but-unjoined set
+/// stays proportional to the in-flight ceiling — only a task that was in flight
+/// between two calls can finish between them. An unbounded reap made a call's
+/// bookkeeping every task *any* tenant finished since the last call, so a tenant
+/// whose bodies end at once charged its own joins to whichever neighbour
+/// admitted next (#268's adversarial row). [`Supervisor::reap`],
+/// [`Supervisor::wait_idle`] and shutdown still join everything.
+#[cfg(feature = "script")]
+const REAP_PER_ADMISSION: usize = 2;
 
 /// How much longer [`Supervisor::shutdown`] waits, past
 /// [`COOPERATIVE_DRAIN_GRACE`], while a supervised process task is still live.
@@ -2217,17 +2230,31 @@ impl Supervisor {
     /// Join every task that has already finished, returning how many were
     /// joined.
     ///
-    /// Each entry point calls this before spawning, which is what keeps the
+    /// Each entry point reaps before placing its task, which is what keeps the
     /// retained set proportional to the live bound rather than to the total
-    /// number of spawns. It is public because a caller who has stopped spawning
+    /// number of spawns; the tenanted entry joins a bounded number per call
+    /// (`REAP_PER_ADMISSION`), which keeps the same bound. It is public because a caller who has stopped spawning
     /// and wants the counters to settle should not have to spawn a task to make
     /// that happen.
     ///
     /// Every joined task produces exactly one [`TaskOutcome`], readable through
     /// [`Supervisor::next_report`].
     pub fn reap(&mut self) -> usize {
+        self.reap_at_most(usize::MAX)
+    }
+
+    /// Join at most `limit` already-finished tasks, returning how many were
+    /// joined.
+    ///
+    /// The bounded form a tenanted admission takes (`REAP_PER_ADMISSION`), so
+    /// one call's bookkeeping is a constant rather than every task any tenant
+    /// finished since the last call.
+    fn reap_at_most(&mut self, limit: usize) -> usize {
         let mut reaped: usize = 0;
-        while let Some(joined) = self.set.try_join_next_with_id() {
+        while reaped < limit {
+            let Some(joined) = self.set.try_join_next_with_id() else {
+                break;
+            };
             self.absorb(joined, Retention::Capped);
             reaped = reaped.saturating_add(1);
         }
@@ -2356,7 +2383,6 @@ impl Supervisor {
             self.spawn(body).await;
             return Ok(());
         };
-        self.reap();
         let lease = match self.claim_tenanted(&shell, tenant).await {
             Ok(lease) => lease,
             Err(refusal) => {
@@ -2971,6 +2997,17 @@ impl Supervisor {
     /// produces exactly one waiter, and the round's queue is FIFO, so a second
     /// attempt would not make progress faster — it would forfeit the place the
     /// first attempt earned.
+    ///
+    /// Reaping is bookkeeping, not admission — a lease is released inside its
+    /// task the moment the body ends, never at the reap — so it happens once per
+    /// call, *after* the round has decided, and joins at most
+    /// `REAP_PER_ADMISSION` tasks. A queued caller reaps while its grant is on
+    /// the way, so the joins cost it nothing it was not already waiting
+    /// through. Reaping everything first put every task any tenant had finished
+    /// on the critical path of whichever tenant called next, which is how a
+    /// tenant whose bodies end at once charged its own bookkeeping to its
+    /// neighbour (#268's adversarial row). A grant delivered during the reap
+    /// waits in the waiter's slot, which the first poll takes.
     #[cfg(feature = "script")]
     async fn claim_tenanted(
         &mut self,
@@ -2982,9 +3019,9 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "claim_tenanted: returning an error to the caller");
             return refusal;
         }
-        self.reap();
         match shell.admit(tenant) {
             tenancy_support::Admission::Admitted(lease) => {
+                self.reap_at_most(REAP_PER_ADMISSION);
                 // Cancellation wins the race for a permit that landed in the
                 // same instant, and the lease's drop returns the capacity to the
                 // round either way.
@@ -3012,6 +3049,7 @@ impl Supervisor {
                 // `run_until_cancelled` wakes on the token too, so neither
                 // direction needs a timer.
                 let mut waiter = std::pin::pin!(waiter);
+                self.reap_at_most(REAP_PER_ADMISSION);
                 let token = self.token.clone();
                 match token.run_until_cancelled(waiter.as_mut()).await {
                     None => Err(SpawnRefused::Cancelled),
@@ -4690,9 +4728,19 @@ impl<'ops> ProcessGroup<'ops> {
             self.containment.record_survivors(&[]);
             return;
         }
-        match self.capture.running(&captured.pids) {
+        self.observe_running(&captured.pids);
+    }
+
+    /// Replace the survivor list with which of `pids` are still running.
+    ///
+    /// The one observation both phases make: [`Self::observe_captured`] asks it
+    /// of a fresh capture, [`Self::confirm_absence`] of the pids an earlier
+    /// observation proved running. An unreadable table records every pid asked
+    /// about as running, the answer that understates the cleanup.
+    fn observe_running(&mut self, pids: &[i32]) {
+        match self.capture.running(pids) {
             Ok(running) => self.containment.record_survivors(&running),
-            Err(_) => self.containment.record_survivors(&captured.pids),
+            Err(_) => self.containment.record_survivors(pids),
         }
     }
 
@@ -4730,6 +4778,16 @@ impl<'ops> ProcessGroup<'ops> {
     /// because nothing more can be done about it here: the leader is reaped, so
     /// signalling any captured pid now could reach a reissued id.
     ///
+    /// It observes the survivors the pinned phase captured and **does not capture
+    /// again**. The leader's id is released by the reap, so a walk from it names
+    /// whoever holds that number now — another process's children, attributed to
+    /// this task — and the descendants it did have were re-parented away when it
+    /// exited, so the walk could not find them either. It was also the dear half:
+    /// a reaped root has no `/proc/<pid>/task`, so the Linux reading fell back to
+    /// a whole-table `ps` spawn on every process a supervisor ran, which tripled
+    /// `sim_review_path`'s 10,000-run tier on CI (62 s on main, 181 s with the
+    /// re-capture). With no survivor the observation reads no table at all.
+    ///
     /// The reap is what makes this pass able to succeed at all — an unreaped
     /// zombie leader keeps its group present, which is why the pinned phase could
     /// only ever report `Pending`.
@@ -4741,8 +4799,9 @@ impl<'ops> ProcessGroup<'ops> {
             if matches!(self.observer.exists(self.group), Ok(false)) {
                 self.group_absent = true;
             }
-            if let Some(ref captured) = self.read_tree() {
-                self.observe_captured(captured);
+            if !self.no_survivors() {
+                let survivors = self.containment.survivors.clone();
+                self.observe_running(&survivors);
             }
             if self.group_absent && self.no_survivors() {
                 return self.receipt();
@@ -5524,7 +5583,7 @@ mod tests {
 
     #[cfg(all(unix, feature = "process"))]
     fn test_lease() -> Option<Lease> {
-        let permit = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
+        let permit = Arc::new(crate::rt::sync::Semaphore::new(1))
             .try_acquire_owned()
             .ok()?;
         Some(Lease::plain(permit))
@@ -5637,7 +5696,10 @@ mod tests {
             "a named survivor is by definition an incomplete containment"
         );
         // Nothing more can be done about it after the reap, so the pass observes
-        // rather than signals and keeps the receipt it earned.
+        // rather than signals and keeps the receipt it earned. It observes the
+        // survivor by pid and never walks the tree again: a walk from a reaped
+        // leader names whoever holds its id now.
+        let pinned_reads = capture.reads();
         group.mark_reaped();
         assert_eq!(
             block_on(group.confirm_absence()),
@@ -5645,6 +5707,11 @@ mod tests {
                 survivors: vec![71],
             },
             "a survivor is never promoted to a clean cleanup by a later observation"
+        );
+        assert_eq!(
+            capture.reads(),
+            pinned_reads,
+            "the post-reap pass observes the captured survivor and reads no tree"
         );
         assert_eq!(
             capture.signals(),
@@ -5677,11 +5744,18 @@ mod tests {
             CleanupReceipt::CleanupPending,
             "the group is still pinned by its unreaped leader, so the pinned phase is pending"
         );
+        let pinned_reads = capture.reads();
         group.mark_reaped();
         assert_eq!(
             block_on(group.confirm_absence()),
             CleanupReceipt::CleanupConfirmed,
             "an absent group and no running descendant is a complete cleanup"
+        );
+        assert_eq!(
+            capture.reads(),
+            pinned_reads,
+            "a clean post-reap pass reads no tree: on Linux a walk from a reaped leader \
+             was a whole-table `ps` spawn per process"
         );
         assert!(
             group.containment().is_complete(),
@@ -5826,7 +5900,7 @@ mod tests {
     fn pending_cleanup_owner_keeps_its_permit_until_later_absence_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::CleanupOwners;
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -5909,7 +5983,7 @@ mod tests {
     fn cleanup_failed_transfers_its_lease_until_absence_is_observed()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::CleanupOwners;
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -5950,7 +6024,7 @@ mod tests {
     #[test]
     fn shutdown_report_keeps_pending_cleanup_and_emits_later_terminal_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -7559,6 +7633,98 @@ mod tests {
         })
     }
 
+    /// A tenanted admission joins at most `REAP_PER_ADMISSION` finished
+    /// tasks, so a tenant whose bodies end at once cannot charge its joins to
+    /// the neighbour that admits next (#268's adversarial row), and the bounded
+    /// reap still keeps the retained set at the in-flight ceiling.
+    ///
+    /// The flood is created, not raced: every attacker body has finished before
+    /// the neighbour's admission, so an unbounded reap would join all of them
+    /// inside that one call. The second half drives 10,000 admissions of bodies
+    /// that end at once, alternating tenants, and reads the retained set after
+    /// each: it never exceeds the ceiling, because every call that finds two or
+    /// more finished tasks joins two and places one.
+    #[cfg(feature = "script")]
+    #[test]
+    fn a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::REAP_PER_ADMISSION;
+        use crate::rt::tenancy::TenancyPolicy;
+        use crate::script::Tenant;
+
+        const LIMIT: usize = 64;
+        const FLOOD: usize = 32;
+        const ADMISSIONS: usize = 10_000;
+        // The bound is only a bound if it is smaller than the flood: an
+        // unbounded reap joins all `FLOOD` below, so a constant at or past it
+        // fails this test at compile time rather than passing vacuously.
+        const _: () = assert!(
+            REAP_PER_ADMISSION < FLOOD,
+            "a per-admission reap must be smaller than the flood it bounds"
+        );
+
+        block_on(async {
+            let mut supervisor = Supervisor::with_tenancy(LIMIT, TenancyPolicy::new(FLOOD, LIMIT));
+            let attacker = Tenant::new("attacker")?;
+            let neighbour = Tenant::new("neighbour")?;
+            let ended = Arc::new(AtomicUsize::new(0));
+            for _ in 0..FLOOD {
+                let ended = Arc::clone(&ended);
+                supervisor
+                    .spawn_for(&attacker, move |_token| async move {
+                        ended.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .await
+                    .map_err(|refusal| format!("a flood body was refused: {refusal}"))?;
+            }
+            assert!(
+                yield_until(|| ended.load(Ordering::SeqCst) >= FLOOD, 10_000).await,
+                "the flood bodies never ended, so the premise of this test did not hold"
+            );
+            // Let every ended body's task complete in the set, not just run.
+            for _ in 0..FLOOD {
+                yield_now().await;
+            }
+            let before = supervisor.stats().succeeded;
+            supervisor
+                .spawn_for(&neighbour, |_token| async {})
+                .await
+                .map_err(|refusal| format!("the neighbour was refused: {refusal}"))?;
+            let joined = supervisor.stats().succeeded.saturating_sub(before);
+            assert!(
+                joined <= u64::try_from(REAP_PER_ADMISSION)?,
+                "the neighbour's admission joined {joined} of the flood's finished tasks; \
+                 at most {REAP_PER_ADMISSION} may land on its critical path"
+            );
+
+            let mut largest = 0_usize;
+            for admission in 0..ADMISSIONS {
+                let tenant = if admission % 2 == 0 {
+                    &attacker
+                } else {
+                    &neighbour
+                };
+                supervisor
+                    .spawn_for(tenant, |_token| async {})
+                    .await
+                    .map_err(|refusal| format!("admission {admission} was refused: {refusal}"))?;
+                largest = largest.max(supervisor.set.len());
+                yield_now().await;
+            }
+            assert!(
+                largest <= LIMIT,
+                "the retained set reached {largest} tasks against an in-flight ceiling of {LIMIT}"
+            );
+            let report = supervisor.shutdown().await;
+            assert_eq!(
+                report.stats.succeeded,
+                u64::try_from(FLOOD + 1 + ADMISSIONS)?,
+                "every body is joined and counted by shutdown"
+            );
+            Ok(())
+        })
+    }
+
     /// A parked admission keeps its place in its tenant's FIFO queue, and leaves
     /// nothing abandoned behind it, however long it waits.
     ///
@@ -7572,9 +7738,9 @@ mod tests {
     #[test]
     fn a_parked_tenant_admission_keeps_its_place_in_the_queue()
     -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rt::sync::OwnedSemaphorePermit;
         use crate::rt::tenancy::TenancyPolicy;
         use crate::script::Tenant;
-        use lgwks_deps::tokio::sync::OwnedSemaphorePermit;
         use std::future::Future;
         use std::task::{Context, Poll, Waker};
 
@@ -7752,7 +7918,7 @@ mod tests {
         const LIMIT: Duration = Duration::from_secs(2);
 
         block_on(async {
-            let pool = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1));
+            let pool = Arc::new(crate::rt::sync::Semaphore::new(1));
             let mut first = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
             let mut second = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
             let mut held = match Arc::clone(&pool).try_acquire_owned() {
