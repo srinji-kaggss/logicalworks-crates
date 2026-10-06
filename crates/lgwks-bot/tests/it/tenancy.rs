@@ -371,9 +371,16 @@ fn a_tenant_past_its_queue_bound_is_refused_by_name() -> TestResult {
 /// callers.
 ///
 /// Both arms run [`ROUNDS`] times, interleaved, on identically shaped
-/// supervisors, and each arm's cost is its fastest round, because load on a
-/// shared host only ever adds wall time. Neither arm sleeps or waits before its
-/// timed window, so neither starts with parked workers the other did not have.
+/// supervisors, so the load the rest of a shared host adds falls on both arms
+/// alike, and each arm's cost is its median round. The fastest round was used
+/// before and it measured the host: on a GitHub runner the baseline's own nine
+/// rounds spread from 3.2 ms to 6.4 ms, its best was 16% under its second best,
+/// and the comparison failed on that one lucky window while the attacked arm's
+/// median sat 8% *under* the baseline's. A minimum is an extreme value, and its
+/// spread over a few-millisecond window is wider than the 10% being tested; the
+/// median of interleaved rounds is the estimate whose spread is not. Neither arm
+/// sleeps or waits before its timed window, so neither starts with parked
+/// workers the other did not have.
 #[test]
 fn an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput() -> TestResult {
     let attacker = Tenant::new("attacker")?;
@@ -413,31 +420,30 @@ fn an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput() -> TestR
         baseline_walls.push(baseline_wall);
         attacked_walls.push(attacked_wall);
     }
-    let baseline_best = baseline_walls
-        .iter()
-        .min()
-        .copied()
-        .ok_or("a baseline round ran")?;
-    let attacked_best = attacked_walls
-        .iter()
-        .min()
-        .copied()
-        .ok_or("an attacked round ran")?;
+    let baseline_median = median(&mut baseline_walls).ok_or("a baseline round ran")?;
+    let attacked_median = median(&mut attacked_walls).ok_or("an attacked round ran")?;
 
     // The spec's bound: the neighbour's throughput under the flood is within 10%
     // of its throughput alone.
-    let budget = baseline_best
+    let budget = baseline_median
         .checked_div(10)
         .ok_or("a tenth of the baseline wall time")?;
-    let ceiling = baseline_best.saturating_add(budget);
+    let ceiling = baseline_median.saturating_add(budget);
     assert!(
-        attacked_best <= ceiling,
-        "the neighbour's admission time under a fail-at-once flood was {attacked_best:?} \
-         at best over {ROUNDS} rounds, more than 10% over its {baseline_best:?} best \
-         alone (ceiling {ceiling:?}; baseline rounds {baseline_walls:?}, attacked \
+        attacked_median <= ceiling,
+        "the neighbour's admission time under a fail-at-once flood was {attacked_median:?} \
+         at the median of {ROUNDS} rounds, more than 10% over its {baseline_median:?} \
+         median alone (ceiling {ceiling:?}; baseline rounds {baseline_walls:?}, attacked \
          rounds {attacked_walls:?})"
     );
     Ok(())
+}
+
+/// The middle of `walls` once sorted, or `None` for no rounds. [`ROUNDS`] is odd,
+/// so the middle is one measured round rather than an average of two.
+fn median(walls: &mut [Duration]) -> Option<Duration> {
+    walls.sort_unstable();
+    walls.get(walls.len() >> 1).copied()
 }
 
 /// One arm of [`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`]:
@@ -505,9 +511,9 @@ const NEIGHBOUR_TASKS: usize = 2_000;
 /// How many interleaved rounds each arm of the throughput comparison runs.
 ///
 /// One round per arm is a single few-millisecond sample, and a sample that size
-/// on a host running the rest of the suite measures the host. Nine rounds per
-/// arm cost well under a second together.
-const ROUNDS: usize = 9;
+/// on a host running the rest of the suite measures the host. Odd, so the median
+/// is a round that ran; forty-one per arm cost under a second together.
+const ROUNDS: usize = 41;
 
 /// How many fail-at-once attacker submissions land before each neighbour
 /// submission in the adversarial arm: a flood four times the neighbour's own
