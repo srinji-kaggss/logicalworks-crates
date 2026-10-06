@@ -38,12 +38,18 @@ mod sim {
     use lgwks_std::random::{self, EntropyError};
 
     use crate::seeded_sweep::{
-        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-        initial_trace,
+        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize,
+        initial_trace, next_index,
     };
 
     /// The concurrency tiers the drawers drive.
     const TIERS: [usize; 4] = [100, 1_000, 10_000, 100_000];
+
+    /// How many drawn bytes one sentinel byte is expected to survive in.
+    const SENTINELS_PER_BYTE: usize = 256;
+
+    /// The slack the sentinel budget allows on top of twice its expectation.
+    const SENTINEL_BUDGET_SLACK: usize = 8;
 
     /// The tier this host is required to reach in full.
     ///
@@ -86,6 +92,15 @@ mod sim {
     /// assertions below are reported as a budget rather than as a proof.
     const DISTINGUISHABLE_AT: usize = 4_096;
 
+    /// The shortest draw whose coming back entirely unwritten means something.
+    ///
+    /// A whole draw of `n` bytes equals the sentinel everywhere with probability
+    /// `256^-n`: one draw in 256 at one byte, which is a test that fails on a
+    /// working source, and `2^-64` at eight. Shorter draws are not classified
+    /// as untouched at all, rather than classified with a known false-positive
+    /// rate.
+    const UNTOUCHED_DISTINGUISHABLE_AT: usize = 8;
+
     /// The most sentinel bytes a whole draw of `length` bytes may leave behind.
     ///
     /// The sentinel is a byte value like any other, so a draw of `n` bytes
@@ -96,8 +111,14 @@ mod sim {
     /// is a floor and the assertion is a smoke check, which is why the
     /// completeness claims are made on the two long draws.
     fn sentinel_budget(length: usize) -> usize {
-        let expected = length.checked_div(256).unwrap_or(0);
-        expected.saturating_mul(2).saturating_add(8)
+        // Twice the expected whole number of sentinel bytes, plus a constant. The
+        // expectation is one byte in 256, and a length below 256 has no whole
+        // one: its quotient is zero there, so the constant alone is the floor a
+        // short draw is held to, which is what the note above says the budget is.
+        length
+            .div_euclid(SENTINELS_PER_BYTE)
+            .saturating_mul(2)
+            .saturating_add(SENTINEL_BUDGET_SLACK)
     }
 
     /// The traceable shape of one sweep.
@@ -132,16 +153,18 @@ mod sim {
             .map_or_else(String::new, ToString::to_string)
     }
 
-    /// Records one draw's outcomes and folds them into the running trace.
+    /// Records one draw's outcomes and folds its length into the running trace.
     ///
-    /// The buffer is never hashed. What is folded is the length, whether the
-    /// draw came back untouched, and whether the source refused: three facts a
+    /// Nothing derived from the buffer is folded, not even whether it came
+    /// back untouched: a one-byte draw from a working source equals the
+    /// sentinel one time in 256, so a trace that folded that classification
+    /// diverged between two runs of the same seed. The length is the fact a
     /// second run under the same seed reproduces exactly, whatever bytes the
-    /// first run happened to draw.
+    /// first run happened to draw; the refusal is folded by the caller.
     fn observe(trace: &mut SweepTrace, length: usize, buf: &[u8]) {
         let survivors = buf.iter().filter(|byte| **byte == SENTINEL).count();
         let distinct: BTreeSet<u8> = buf.iter().copied().collect();
-        let untouched = !buf.is_empty() && survivors == buf.len();
+        let untouched = length >= UNTOUCHED_DISTINGUISHABLE_AT && survivors == buf.len();
         trace.draws = trace.draws.saturating_add(1);
         trace.sentinel_survivors = trace.sentinel_survivors.saturating_add(survivors);
         let worst = trace.worst_sentinels.entry(length).or_insert(0);
@@ -153,8 +176,7 @@ mod sim {
             // a draw of two or more can answer the question.
             .saturating_add(usize::from(length > 1 && distinct.len() == 1));
         trace.trace = trace.trace.wrapping_mul(FNV_PRIME);
-        fold(&mut trace.trace, u64::try_from(length).unwrap_or(u64::MAX));
-        fold_usize(&mut trace.trace, usize::from(untouched));
+        fold_usize(&mut trace.trace, length);
     }
 
     /// Draws one buffer of `length` bytes and records what came back.
@@ -182,22 +204,18 @@ mod sim {
             ..SweepTrace::default()
         };
         let mut order = LENGTHS;
-        let mut state = seed | 1;
+        // The shuffle draws through the crate's one seeded stream, in the index
+        // width it indexes in, so a pick is one of the positions this loop is
+        // permuting rather than a narrowed copy of one.
+        let mut state = seed;
         for index in (1..order.len()).rev() {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            let span = u64::try_from(index.saturating_add(1)).unwrap_or(1);
-            let pick = state.checked_rem(span).unwrap_or(0);
-            order.swap(index, usize::try_from(pick).unwrap_or(0));
+            let pick = next_index(&mut state).rem_euclid(index.saturating_add(1));
+            order.swap(index, pick);
         }
         for length in order {
             let outcome = draw(&mut trace, length);
-            fold(
-                &mut trace.trace,
-                u64::try_from(refusal_text(&outcome).len()).unwrap_or(u64::MAX),
-            );
-            fold(&mut trace.trace, u64::try_from(length).unwrap_or(u64::MAX));
+            fold_usize(&mut trace.trace, refusal_text(&outcome).len());
+            fold_usize(&mut trace.trace, length);
         }
         trace
     }
@@ -241,7 +259,13 @@ mod sim {
                 });
             match started {
                 Ok(joined) => {
-                    let (filled, buf) = joined.join().unwrap_or((false, [0u8; DRAW_BYTES]));
+                    // A worker that panicked reports a draw that wrote nothing,
+                    // which is the arm this family measures: the sentinel count
+                    // for a draw that never filled its buffer is every byte.
+                    let (filled, buf) = match joined.join() {
+                        Ok(drawn) => drawn,
+                        Err(_) => (false, [SENTINEL; DRAW_BYTES]),
+                    };
                     if filled {
                         survivors = survivors.saturating_add(usize::from(buf.contains(&SENTINEL)));
                     } else {
@@ -295,7 +319,7 @@ mod sim {
                 trace.untouched_draws, trace.draws
             );
             for length in LENGTHS {
-                let worst = trace.worst_sentinels.get(&length).copied().unwrap_or(0);
+                let worst = trace.worst_sentinels[&length];
                 assert!(
                     worst <= sentinel_budget(length),
                     "seed {seed:#018x}: a {length}-byte draw left {worst} sentinel bytes, \
@@ -351,7 +375,7 @@ mod sim {
                 "a {length}-byte draw must hand back {length} bytes; refusal: {}",
                 refusal_text(&outcome)
             );
-            let worst = trace.worst_sentinels.get(&length).copied().unwrap_or(0);
+            let worst = trace.worst_sentinels[&length];
             assert!(
                 worst <= sentinel_budget(length),
                 "a {length}-byte draw left {worst} sentinel bytes, above the {} a whole draw \
@@ -494,29 +518,63 @@ mod sim {
     }
 
     #[test]
-    fn no_seeded_generator_predicts_a_draw() {
+    fn no_seeded_generator_predicts_a_draw() -> Result<(), EntropyError> {
         // INV-RANDOM-ONE-SOURCE, observed from outside: a build whose entropy
         // had been replaced by a seeded userspace generator would let the
-        // test's own generator predict it. Two whole bytes per draw, so the
-        // chance of a hit across 100 draws is about 1.5e-4 and one hit names a
-        // substituted source immediately.
+        // test's own generator predict it, so the generator fills each
+        // sixteen-byte draw from two whole words, the way such a substitute
+        // would. A true source matches one draw by chance with probability
+        // 2^-128, so across 100 draws a hit is never noise and always names a
+        // substituted source. (Two-byte draws matched by chance once in about
+        // 650 runs, which a gate that runs every PR on several lanes reaches.)
+        // A refused draw fails the test rather than shrinking it.
         let mut generator = crate::rng::Rng::new(SWEEP_SEEDS[0]);
         let mut predicted = 0usize;
-        let mut drawn = 0usize;
         for _ in 0..100 {
-            let Ok(pair) = random::bytes::<2>() else {
-                continue;
-            };
-            drawn = drawn.saturating_add(1);
-            let first = u8::try_from(generator.next().checked_rem(256).unwrap_or(0)).unwrap_or(0);
-            let second = u8::try_from(generator.next().checked_rem(256).unwrap_or(0)).unwrap_or(0);
-            predicted = predicted.saturating_add(usize::from(pair == [first, second]));
+            let block = random::bytes::<16>()?;
+            let mut guess = [0u8; 16];
+            let (low, high) = guess.split_at_mut(8);
+            low.copy_from_slice(&generator.next().to_le_bytes());
+            high.copy_from_slice(&generator.next().to_le_bytes());
+            predicted = predicted.saturating_add(usize::from(block == guess));
         }
         assert_eq!(
             predicted, 0,
-            "a seeded generator predicted {predicted} of {drawn} two-byte draws; the entropy \
+            "a seeded generator predicted {predicted} of 100 sixteen-byte draws; the entropy \
              source is not the OS CSPRNG it claims to be"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_trace_folds_no_drawn_byte() {
+        // The replay defect, pinned without entropy: at every declared length,
+        // a buffer that came back all sentinel and one that came back with no
+        // sentinel at all leave the same trace, and a one-byte draw that
+        // happened to equal the sentinel is not reported as unwritten.
+        for length in LENGTHS {
+            let mut all_sentinel = SweepTrace {
+                trace: initial_trace(),
+                ..SweepTrace::default()
+            };
+            let mut no_sentinel = SweepTrace {
+                trace: initial_trace(),
+                ..SweepTrace::default()
+            };
+            observe(&mut all_sentinel, length, &vec![SENTINEL; length]);
+            observe(&mut no_sentinel, length, &vec![!SENTINEL; length]);
+            assert_eq!(
+                all_sentinel.trace, no_sentinel.trace,
+                "a {length}-byte draw folded its bytes into the trace, so the same seed \
+                 cannot replay"
+            );
+            assert_eq!(
+                all_sentinel.untouched_draws,
+                usize::from(length >= UNTOUCHED_DISTINGUISHABLE_AT),
+                "a {length}-byte all-sentinel draw is untouched only where chance cannot \
+                 produce it"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,8 @@
 
 #[path = "../../../lgwks-bot/tests/sim/seed.rs"]
 mod seed;
+#[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
+mod seed_helpers;
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -79,11 +81,26 @@ fn seed_for(family: u64, index: u64) -> u64 {
         ^ index.wrapping_mul(0x2545_f491_4f6c_dd1d)
 }
 
+/// A count this sweep draws, as the `u32` the generator's draws are made in.
+///
+/// Every width, depth and table length here is counted in a few thousand at
+/// most, so a count's low four bytes are the count; reading them is total where
+/// a checked conversion would carry a refusal arm for a bound the sweep's own
+/// constants state.
+fn draw_bound(count: usize) -> u32 {
+    let bytes = count.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// A generated draw as the `usize` count the tree and its model are counted in.
+fn drawn_count(draw: u32) -> usize {
+    let bytes = draw.to_le_bytes();
+    usize::from(bytes[0]) | (usize::from(bytes[1]) << 8)
+}
+
 /// A `usize` draw in `low..=high`.
 fn draw(rng: &mut Rng, low: usize, high: usize) -> usize {
-    let low32 = u32::try_from(low).unwrap_or(u32::MAX);
-    let high32 = u32::try_from(high).unwrap_or(u32::MAX);
-    usize::try_from(rng.between(low32, high32)).unwrap_or(low)
+    drawn_count(rng.between(draw_bound(low), draw_bound(high)))
 }
 
 /// One grown entry, relative to the tree's root.
@@ -143,11 +160,7 @@ impl SimTree {
         let min_width = u32::from(level == 1);
         let width = rng.between(min_width, MAX_WIDTH);
         for index in 0..width {
-            let stem_count = u32::try_from(STEMS.len()).unwrap_or(1);
-            let stem = STEMS
-                .get(usize::try_from(rng.below(stem_count)).unwrap_or(0))
-                .copied()
-                .unwrap_or("a");
+            let stem = STEMS[drawn_count(rng.below(draw_bound(STEMS.len())))];
             let rel = rel_dir.join(format!("{stem}{index}"));
             if level < max_level && rng.chance(400) {
                 fs::create_dir(self.root.join(&rel))?;
@@ -214,14 +227,15 @@ impl SimTree {
 
     /// The widest directory a walk at `max_depth` reads.
     fn widest(&self, max_depth: usize) -> usize {
-        let mut widths = vec![self.children(Path::new("")).len()];
-        widths.extend(
-            self.nodes
-                .iter()
-                .filter(|node| node.dir && node.level() <= max_depth)
-                .map(|node| self.children(&node.rel).len()),
-        );
-        widths.into_iter().max().unwrap_or(0)
+        // The floor is zero, which is the width of a level with no entries, so a
+        // tree with no children reports its width rather than nothing at all.
+        let mut widest = self.children(Path::new("")).len();
+        for node in &self.nodes {
+            if node.dir && node.level() <= max_depth {
+                widest = widest.max(self.children(&node.rel).len());
+            }
+        }
+        widest
     }
 
     /// Path bytes a walk at `max_depth` charges: one charge per listed entry.
@@ -1061,15 +1075,15 @@ fn scenario(seed: u64) -> Result<Trace, Box<dyn Error>> {
     let mut rng = Rng::new(seed);
     let tree = SimTree::grow(&mut rng)?;
     let mut trace = Trace::new();
-    trace.record_count("nodes", tree.nodes.len());
+    trace.record_number("nodes", tree.nodes.len());
     let walk = options(draw(&mut rng, 0, 4), false, true);
     for path in tree.relative(&walk_dir(&tree.root, &walk)?) {
         trace.record(&path);
     }
     let limits = limits_near(&mut rng, &tree);
     let report: WalkReport = walk_dir_tolerant_bounded(&tree.root, &unbounded(), &limits)?;
-    trace.record_u64("complete", u64::from(report.is_complete()));
-    trace.record_count("prefix", report.entries().len());
+    trace.record_number("complete", u64::from(report.is_complete()));
+    trace.record_number("prefix", report.entries().len());
     Ok(trace)
 }
 
@@ -1098,13 +1112,18 @@ fn the_same_seed_replays_to_the_same_trace() -> TestResult {
 /// forty-eight times.
 fn different_seeds_explore_different_trees() -> TestResult {
     let mut hashes = BTreeSet::new();
+    // The seeds drawn are counted here rather than read back from the constant:
+    // the count is then a count on both sides of the comparison, with nothing
+    // narrowed between the sweep and the number it reports.
+    let mut seeds = 0_usize;
     for index in 0..SEEDS {
         hashes.insert(scenario(seed_for(26, index))?.hash());
+        seeds = seeds.saturating_add(1);
     }
-    let distinct = u64::try_from(hashes.len()).unwrap_or(0);
+    let distinct = hashes.len();
     assert!(
-        distinct.saturating_mul(4) >= SEEDS.saturating_mul(3),
-        "only {distinct} distinct traces from {SEEDS} seeds"
+        distinct.saturating_mul(4) >= seeds.saturating_mul(3),
+        "only {distinct} distinct traces from {seeds} seeds"
     );
     Ok(())
 }

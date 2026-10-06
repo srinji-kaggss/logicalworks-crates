@@ -11,20 +11,11 @@
 //! Included by path so both targets share it:
 //! `#[path = "support/proposal.rs"] mod support;` from a target at `tests/`.
 
-// Each including test target uses a different subset of this harness, so a name
-// unused in one is not dead. The lint is real per target and the allowance is
-// inherent to sharing one harness across two of them.
-#![allow(
-    dead_code,
-    reason = "each including test target uses a different subset of the shared harness"
-)]
-
 use std::error::Error;
 
 use lgwks_bot::cap::Cap;
 use lgwks_bot::proposal::{
     ArtifactStore, Decoder, LedgerLimits, PlanBudget, PlanLimits, Provenance, Source, Surface,
-    WriteOutcome,
 };
 use lgwks_bot::script::{Gate, Scope};
 
@@ -177,20 +168,6 @@ pub fn two_tenant_store() -> (ArtifactStore, Vec<u8>) {
     (store, shared)
 }
 
-/// Write `bytes` as `tenant`'s artifact and report whether it was newly stored.
-///
-/// # Errors
-///
-/// Whatever the store reports, so a caller can assert on a refusal rather than
-/// unwrapping one.
-pub fn store(
-    artifacts: &ArtifactStore,
-    tenant: &str,
-    bytes: &[u8],
-) -> Result<WriteOutcome, Box<dyn Error>> {
-    Ok(artifacts.write(tenant, bytes)?)
-}
-
 // ── The wired path: a task body admitting untrusted output ───────────────────
 
 /// The admission ceiling every gate here is opened with.
@@ -236,32 +213,6 @@ pub fn poor_gate(tenant: &str) -> Result<Gate, Box<dyn Error>> {
         PlanBudget::new(ADMISSIONS),
         LedgerLimits::new(REPEAT, 8),
     ))
-}
-
-/// A fresh scratch directory for a run store, named by random bytes.
-///
-/// Random bytes and never the process id: the OS reuses a pid, so two runs in two
-/// processes would share a scratch directory and one would delete the other's
-/// store mid-run. `lgwks_std::random` is the estate's one distinguishable source.
-/// The randomness names the *directory* and never enters an assertion, so the
-/// tests' observations are unchanged by it.
-///
-/// # Errors
-///
-/// [`lgwks_std::random`]'s error when the entropy source is unavailable, or an
-/// I/O error creating the directory.
-pub fn scratch(tag: &str) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    let unique = lgwks_std::random::bytes::<8>()?;
-    let suffix = unique
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let path = std::env::temp_dir().join(format!("lgwks-proposal-{tag}-{suffix}"));
-    if path.exists() {
-        std::fs::remove_dir_all(&path)?;
-    }
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
 }
 
 /// Drive one future to completion on the crate's own runtime.

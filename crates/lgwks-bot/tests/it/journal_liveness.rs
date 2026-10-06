@@ -26,10 +26,10 @@ use lgwks_bot::journal::{DurabilityPromise, EffectEvent, EffectJournal, FileJour
 
 use crate::journal_fixtures as fixtures;
 
-use crate::resume_fixtures as shared;
+use crate::liveness_fixtures as liveness;
 
 use fixtures::{TempGuard, key, scratch};
-use shared::{PROGRESS_TURNS, Parked, heartbeat};
+use liveness::{PROGRESS_TURNS, Parked, heartbeat};
 
 type TestResult = Result<(), Box<dyn Error>>;
 

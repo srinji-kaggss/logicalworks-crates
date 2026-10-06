@@ -86,8 +86,8 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use lgwks_deps::tokio::sync::watch;
@@ -103,7 +103,18 @@ struct Inner {
     /// Carries the same `bool` as a *value* rather than an event, which is what
     /// makes a late subscriber correct rather than merely lucky. Sending never
     /// fails, even with no receiver alive.
-    signal: watch::Sender<bool>,
+    ///
+    /// **Built on the first subscriber rather than in the constructor.** The
+    /// flag above is the authority and a `watch` channel exists only to *wake*
+    /// waiters, so a node nobody ever waits on needs no channel. This is the whole
+    /// per-task cost of `child_token`: measured on an Apple M5 Pro, building the
+    /// channel cost 10 allocations against the 1 the node's own `Arc` costs, so
+    /// `Supervisor::spawn` was paying eleven heap allocations per task for a
+    /// channel with no reader. Building it lazily takes a child token from
+    /// 11 allocations to 1 without changing what any of the three paths above
+    /// observes — the subscriber re-reads the flag after installing the channel,
+    /// which is what closes the window a lazy channel opens.
+    signal: OnceLock<watch::Sender<bool>>,
     /// The token this one follows, if any. Strong, so the chain a token needs in
     /// order to be cancellable is kept alive by the token itself, and
     /// one-directional, so it cannot form a cycle. See the module docs.
@@ -113,25 +124,49 @@ struct Inner {
 impl Inner {
     /// The root of a fresh, uncancelled tree.
     fn root() -> Arc<Self> {
-        // The receiver is dropped immediately: `send_replace` does not error
-        // when no receiver exists, and `subscribe` mints one on demand, so
-        // holding it would keep a channel alive for nothing.
-        let (signal, _receiver) = watch::channel(false);
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
-            signal,
+            signal: OnceLock::new(),
             parent: None,
         })
     }
 
     /// A node following `parent`.
     fn child_of(parent: &Arc<Self>) -> Arc<Self> {
-        let (signal, _receiver) = watch::channel(false);
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
-            signal,
+            signal: OnceLock::new(),
             parent: Some(Arc::clone(parent)),
         })
+    }
+
+    /// This node's signal channel, built on first use, with the node's current
+    /// cancellation state already published on it.
+    ///
+    /// The flag is re-read **after** the channel is installed rather than before,
+    /// and that ordering is what makes a lazy channel correct. The three orders:
+    ///
+    /// - **Cancelled before the channel existed.** The store in `cancel` has
+    ///   already happened, so this load reads `true` and publishes it here; the
+    ///   cancel that set it found no channel to send on and did nothing else.
+    /// - **Cancelled while the channel is being installed.** Either this load
+    ///   reads `true` and publishes it, or `cancel`'s lookup finds the channel
+    ///   this call just installed and sends on it.
+    /// - **Cancelled after this call returns.** `cancel` finds the installed
+    ///   channel and sends, and the receiver below is subscribed *before* it reads
+    ///   the value, so the send either is the value it reads or wakes its
+    ///   `changed` wait.
+    ///
+    /// A build that read the flag first would have a window in which a cancel
+    /// between the read and the install published to nothing.
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        let signal = self.signal.get_or_init(|| watch::channel(false).0);
+        if self.cancelled.load(Ordering::SeqCst) {
+            // Idempotent: `send_replace` on an already-`true` channel is a write
+            // of the same value, and it is infallible with no receiver alive.
+            signal.send_replace(true);
+        }
+        signal.subscribe()
     }
 
     /// Whether this node or any ancestor has been cancelled.
@@ -169,7 +204,7 @@ impl Inner {
         let mut waiters: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = Vec::new();
         let mut node = Some(self);
         while let Some(current) = node {
-            let mut receiver = current.signal.subscribe();
+            let mut receiver = current.subscribe();
             // `borrow_and_update` rather than `borrow`: it marks the current
             // value as seen, so a following `changed` waits for the *next*
             // write instead of returning at once on the value just read.
@@ -212,11 +247,16 @@ impl Inner {
     /// signal. Cancelling is therefore local, and `Arc<Inner>` never has to
     /// reach sideways.
     fn cancel(&self) {
-        // The store is the once-only gate for this node. `send_replace` is
-        // infallible, there is no error to discard and no `let _ =`, and it
-        // writes the value even when every receiver has already dropped.
+        // The store is the once-only gate for this node, and it comes **first**:
+        // a node with no channel yet has nobody to wake, and the flag is what a
+        // later subscriber reads (see `Inner::subscribe`), so publishing to an
+        // absent channel loses nothing. `send_replace` is infallible, there is no
+        // error to discard and no `let _ =`, and it writes the value even when
+        // every receiver has already dropped.
         self.cancelled.store(true, Ordering::SeqCst);
-        self.signal.send_replace(true);
+        if let Some(signal) = self.signal.get() {
+            signal.send_replace(true);
+        }
     }
 }
 
@@ -504,7 +544,13 @@ mod tests {
     /// and if it were ever hit the `reached_middle` assertion in each caller fails
     /// rather than passing silently.
     fn middle_link(depth: usize) -> usize {
-        depth.checked_div(2).unwrap_or(0)
+        // The whole chain less its ceiling half, which is floor division without
+        // the `/` this crate forbids and without a `checked_div` whose `None` arm
+        // would have to invent an answer: a division by a constant cannot fail,
+        // so there is no failure to handle. The fixture only ever builds chains of
+        // two or more, and a caller that asked for one is told by the
+        // `reached_middle` assertion in each test rather than by a panic here.
+        depth.saturating_sub(depth.div_ceil(2))
     }
 
     /// Poll `future` exactly once and report whether it completed.
@@ -548,24 +594,16 @@ mod tests {
         /// only if a previous holder panicked while holding it, which this never
         /// does, and a panic in a destructor during an unwind aborts the process.
         fn ring(&self) {
-            let mut rung = self
-                .rung
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let mut rung = crate::journal::owner::lock(&self.rung);
             *rung = true;
             self.bell.notify_all();
         }
 
         /// Wait at most `timeout` for the ring, returning whether it rang.
         fn wait(&self, timeout: Duration) -> bool {
-            let rung = self
-                .rung
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let (rung, _timeout) = self
-                .bell
-                .wait_timeout_while(rung, timeout, |rung| !*rung)
-                .unwrap_or_else(|poison| poison.into_inner());
+            let rung = crate::journal::owner::lock(&self.rung);
+            let (rung, _timeout) =
+                crate::journal::owner::wait_timeout_while(&self.bell, rung, timeout, |rung| !*rung);
             *rung
         }
     }
@@ -1059,6 +1097,63 @@ mod tests {
             });
             assert_eq!(outcome, StackFailure::Finished, "depth {depth}");
         }
+    }
+
+    #[test]
+    fn a_cancel_that_finds_no_subscriber_is_observed_by_the_next_one() {
+        // The window a lazily-built signal channel opens, and the arm nothing else
+        // reaches. Every other test here either waits *before* the cancel or cancels
+        // after a wait has already installed a channel; this one cancels a node
+        // nobody has ever waited on, so `Inner::cancel` finds no channel to send on,
+        // and then waits. The `AtomicBool` is what carries the cancel across, and the
+        // subscriber's post-install re-read of it is what publishes the value onto the
+        // channel it has just built.
+        //
+        // Asserted under a deadline because the failure mode is a wait that never
+        // resolves: a missed cancel is not a wrong value, it is a hang, so the
+        // timeout has to be the assertion.
+        for depth in DEPTHS {
+            let (root, leaf) = chain_of(depth);
+            // No wait anywhere in this scope before the cancel: the whole point is
+            // that `cancel` publishes to a channel that does not exist yet.
+            let intermediate = leaf.child_token();
+            root.cancel();
+            assert!(
+                intermediate.is_cancelled(),
+                "depth {depth}: a child of an already-cancelled node must observe the cancel \
+                 without any channel having been built for either"
+            );
+            let resolved = block_on(crate::rt::time::timeout(JOURNEY_LIMIT, leaf.cancelled()));
+            assert!(
+                resolved.is_ok(),
+                "depth {depth}: a cancel published to no channel must still wake the next \
+                 waiter; it did not resolve within the journey limit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_cancelled_before_its_own_channel_exists_still_wakes_its_own_waiter() {
+        // The per-node half of the same property, on the node whose flag the
+        // subscriber re-reads directly rather than through an ancestor. A child
+        // cancelled on its own account is the case where nothing upstream ever sends
+        // on the child's channel, so only the flag can carry it.
+        let root = CancellationToken::new();
+        let child = root.child_token();
+        child.cancel();
+        assert!(
+            child.is_cancelled(),
+            "a child cancelled on its own account must observe its own cancel"
+        );
+        assert!(
+            !root.is_cancelled(),
+            "cancelling a child must still leave its parent running"
+        );
+        let resolved = block_on(crate::rt::time::timeout(JOURNEY_LIMIT, child.cancelled()));
+        assert!(
+            resolved.is_ok(),
+            "a child cancelled before any waiter existed must still resolve the next waiter"
+        );
     }
 
     #[test]

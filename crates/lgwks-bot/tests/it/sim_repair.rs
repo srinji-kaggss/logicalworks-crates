@@ -49,6 +49,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 // The band-declaration macro, defined once for the whole layer.
@@ -206,27 +208,26 @@ impl Clone for Plan {
 /// decision is chosen cannot renumber how many capabilities a run reached for in
 /// another family: a regression in the denial rules would otherwise be
 /// unbisectable against a regression in the need width.
-fn plan(rng: &mut Rng) -> Plan {
+fn plan(rng: &mut Rng) -> Result<Plan, Box<dyn Error>> {
     // `1..=3`, not `1..=4`: the seeded families include an over-wide case, and
     // a ticket naming all four shipped capabilities leaves no shipped name outside
     // it to reach for, so the case would have nothing to assert.
-    let reach = usize::try_from(rng.between(1, 3)).unwrap_or(1);
+    let reach = usize::try_from(rng.between(1, 3))?;
     let count = rng.between(2, 5);
-    let mut actions = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
-    for _ in 0..count {
-        actions.push(match rng.below(5) {
+    let actions = (0..count)
+        .map(|_| match rng.below(5) {
             0 => Action::Repair,
             1 => Action::Duplicate,
             2 => Action::Deny,
             3 => Action::OverWide,
             _ => Action::Inspect,
-        });
-    }
-    Plan {
+        })
+        .collect();
+    Ok(Plan {
         ordinal: rng.between(1, 1_000),
         reach,
         actions,
-    }
+    })
 }
 
 /// A host for `tenant` over `dir`, granting nothing, with both stores installed.
@@ -270,10 +271,10 @@ fn wide_grant(reach: usize) -> GrantSet {
     // `1..=3` for exactly this reason: a ticket naming all four leaves nothing
     // among the shipped names to reach for, and an over-wide grant the check
     // cannot see is not a case this file can assert.
-    let beyond = candidate_needs()
-        .get(reach)
-        .cloned()
-        .unwrap_or_else(|| Cap::new("test.beyond"));
+    let beyond = match candidate_needs().get(reach) {
+        Some(shipped) => shipped.clone(),
+        None => Cap::new("test.beyond"),
+    };
     exact_grant(reach).grant(beyond)
 }
 
@@ -625,7 +626,7 @@ fn decision_in_order(
 /// it was delivered.
 fn seeded_orders_reach_the_same_state(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let plan = plan(sim.rng());
+        let plan = plan(sim.rng())?;
         let dir = sim.scratch("repair-order")?;
         let case = block(TENANTS[0], &dir, plan.reach)?;
         let Case {
@@ -655,7 +656,7 @@ fn seeded_orders_reach_the_same_state(band: Band) -> TestResult {
         );
         assert_eq!(
             end.epoch(),
-            u64::try_from(end.applied()).unwrap_or(u64::MAX),
+            u64::try_from(end.applied())?,
             "the epoch and the applied-ticket count are one fact: a run that had a \
              ticket applied is at epoch one, and one that did not is at zero"
         );
@@ -693,7 +694,7 @@ fn seeded_orders_reach_the_same_state(band: Band) -> TestResult {
 /// keys hash the tenant, and the repair ledger is a file per tenant.
 fn tenants_keep_their_own_tickets_and_budgets(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let plan = plan(sim.rng());
+        let plan = plan(sim.rng())?;
         let dir = sim.scratch("repair-tenants")?;
 
         let mut runs = Vec::with_capacity(TENANTS.len());
@@ -828,8 +829,7 @@ fn saturation_applies_each_ticket_once(band: Band) -> TestResult {
         // explicit `#[ignore]`d measurement below, which runs them once and prints
         // the level it reached.
         let bound = saturating_levels();
-        let tier = usize::try_from(sim.rng().between(4, bound))
-            .unwrap_or(usize::try_from(bound).unwrap_or(4));
+        let tier = usize::try_from(sim.rng().between(4, bound))?;
         let dir = sim.scratch("repair-scale")?;
         let host = blocked_host(TENANTS[0], &dir)?;
         let declared = shared::journey_task()?;
@@ -965,7 +965,7 @@ fn the_declared_repair_tiers_are_measured() -> TestResult {
         .into());
     }
     for tier in TIERS {
-        let dir = shared::Scratch::new("repair-tier")?;
+        let dir = Scratch::new("repair-tier")?;
         let host = blocked_host(TENANTS[0], dir.path())?;
         let declared = shared::journey_task()?;
         let grants = exact_grant(candidate_needs().len());
@@ -1028,7 +1028,7 @@ fn the_step_that_reaches_is_the_step_that_blocks() -> TestResult {
     // T23's "one complete presently knowable NeedSet" at its extreme. The sweep
     // over the narrower widths is the family below.
     let declared_needs = candidate_needs();
-    let scratch = shared::Scratch::new("first-step")?;
+    let scratch = Scratch::new("first-step")?;
     let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let polls = Polls::shared();
     let declared = first_step_task(declared_needs.clone())?;
@@ -1092,7 +1092,7 @@ fn the_step_that_reaches_is_the_step_that_blocks() -> TestResult {
 fn a_wide_need_set_costs_one_analysis() -> TestResult {
     let whole = candidate_needs();
     for reach in 1..=whole.len() {
-        let scratch = shared::Scratch::new("wide-need")?;
+        let scratch = Scratch::new("wide-need")?;
         let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
         let polls = Polls::shared();
         let declared = shared::journey_task()?;
@@ -1151,7 +1151,7 @@ fn a_wide_need_set_costs_one_analysis() -> TestResult {
 /// time and the publication ran exactly once, on the run that asked for it.
 #[test]
 fn a_repaired_run_survives_a_reopened_host() -> TestResult {
-    let scratch = shared::Scratch::new("reopened-repair")?;
+    let scratch = Scratch::new("reopened-repair")?;
     let first = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let polls = Polls::shared();
     let declared = shared::journey_task()?;
@@ -1216,7 +1216,7 @@ fn a_repaired_run_survives_a_reopened_host() -> TestResult {
 fn a_custom_capability_is_refused_at_every_width() -> TestResult {
     let whole = candidate_needs();
     for reach in 1..=whole.len() {
-        let scratch = shared::Scratch::new("custom-cap")?;
+        let scratch = Scratch::new("custom-cap")?;
         let host = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
         let case = block(TENANTS[0], scratch.path(), reach)?;
         let bytes = ledger_bytes(&host)?;
@@ -1275,7 +1275,7 @@ fn a_custom_capability_is_refused_at_every_width() -> TestResult {
 /// tenant's run is not in it.
 #[test]
 fn a_ticket_never_names_another_tenants_run() -> TestResult {
-    let scratch = shared::Scratch::new("cross-tenant-ticket")?;
+    let scratch = Scratch::new("cross-tenant-ticket")?;
     let mine = repairable_host(TENANTS[0], scratch.path(), GrantSet::empty())?;
     let theirs = repairable_host(TENANTS[1], scratch.path(), GrantSet::empty())?;
     let declared = shared::journey_task()?;
@@ -1339,7 +1339,7 @@ fn a_ticket_never_names_another_tenants_run() -> TestResult {
 #[test]
 fn a_mixed_decision_order_pins_each_arm() -> TestResult {
     sim::assert_replays(Band::new(96, 8), |sim| {
-        let plan = plan(sim.rng());
+        let plan = plan(sim.rng())?;
         let dir = sim.scratch("repair-arms")?;
         let case = block(TENANTS[0], &dir, plan.reach)?;
         let Case {
@@ -1413,7 +1413,7 @@ fn a_mixed_decision_order_pins_each_arm() -> TestResult {
         let end = charged(host, run)?;
         assert_eq!(
             end.epoch(),
-            u64::try_from(end.applied()).unwrap_or(u64::MAX),
+            u64::try_from(end.applied())?,
             "the epoch and the applied count are one fact: one at each after a repair, zero \
              at both without one"
         );
@@ -1519,7 +1519,7 @@ fn a_reopen_reads_back_the_charged_budget() -> TestResult {
 #[test]
 fn every_repair_charges_the_root_budget_once() -> TestResult {
     sim::assert_replays(Band::new(104, 8), |sim| {
-        let plan = plan(sim.rng());
+        let plan = plan(sim.rng())?;
         let dir = sim.scratch("repair-charge")?;
         let case = block(TENANTS[0], &dir, plan.reach)?;
         let Case {
@@ -1676,9 +1676,7 @@ fn a_spent_budget_refuses_every_later_attempt() -> TestResult {
             admitted = admitted.saturating_add(1);
             assert_eq!(
                 after.attempts(),
-                opened
-                    .attempts()
-                    .saturating_add(u64::try_from(admitted).unwrap_or(u64::MAX)),
+                opened.attempts().saturating_add(u64::try_from(admitted)?),
                 "attempt {index}: every admitted attempt is charged once, so the count the \
                  ceiling is measured against is the number of attempts that ran"
             );
@@ -1696,7 +1694,7 @@ fn a_spent_budget_refuses_every_later_attempt() -> TestResult {
         );
         assert_eq!(
             admitted,
-            usize::try_from(ceiling.saturating_sub(1)).unwrap_or(usize::MAX),
+            usize::try_from(ceiling.saturating_sub(1))?,
             "the blocked attempt took one of the {ceiling} attempts and each resume took one \
              of the rest, so the refusal lands on the attempt after the last one admitted"
         );
@@ -1759,7 +1757,7 @@ fn a_spent_budget_refuses_every_later_attempt() -> TestResult {
 /// form, and INV-BOT-50's poison is what makes it the only one.
 #[test]
 fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
-    let dir = shared::Scratch::new("repair-recovery")?;
+    let dir = Scratch::new("repair-recovery")?;
     let host = bounded_host(TENANTS[0], dir.path(), ATTEMPT_CEILING, u64::MAX)?;
     let declared = shared::journey_task()?;
 
@@ -1786,7 +1784,7 @@ fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
     while arm == "blocked" {
         admitted = admitted.saturating_add(1);
         assert!(
-            admitted <= usize::try_from(ATTEMPT_CEILING).unwrap_or(usize::MAX),
+            admitted <= usize::try_from(ATTEMPT_CEILING)?,
             "a ceiling of {ATTEMPT_CEILING} refused nothing in {admitted} attempts: the bound \
              would be no bound at all"
         );
@@ -1803,7 +1801,7 @@ fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
     let spent = charged(&host, second.run)?;
     assert_eq!(
         spent.attempts(),
-        u64::try_from(admitted).unwrap_or(u64::MAX),
+        u64::try_from(admitted)?,
         "the refused attempt charged nothing: the run stands at the attempts it admitted"
     );
     assert_eq!(
@@ -1885,7 +1883,7 @@ fn a_host_spent_on_one_run_still_repairs_the_next() -> TestResult {
 #[test]
 fn a_bounded_sweep_repairs_every_ticket_once() -> TestResult {
     for tier in SWEPT_TIERS {
-        let dir = shared::Scratch::new("repair-sweep")?;
+        let dir = Scratch::new("repair-sweep")?;
         let host = blocked_host(TENANTS[0], dir.path())?;
         let declared = shared::journey_task()?;
         let grants = exact_grant(candidate_needs().len());

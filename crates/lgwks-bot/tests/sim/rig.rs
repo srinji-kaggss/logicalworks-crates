@@ -17,11 +17,6 @@
 //! instant it runs — the only vantage point from which a write-ahead claim
 //! means anything.
 
-#![allow(
-    dead_code,
-    reason = "each test binary that declares this module uses a different subset of it"
-)]
-
 use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::rc::Rc;
@@ -225,56 +220,34 @@ pub const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f10111213141516171819
 pub const DIGEST_HEX: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
 pub const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 
-/// The one `EffectKey::new` in the simulation layer, parameterised by the
-/// action and the fencing generation.
+/// A key for attempt `n` of [`RUN`], acting as `action`, at the first
+/// generation.
 ///
-/// Both public constructors below are this function. A second copy that drifted
-/// would make two families agree on an attempt number while writing different
-/// facts under a different generation, which is precisely the false green the
-/// trace hash exists to catch — and the takeover family in particular needs two
-/// keys that differ in the generation and in nothing else.
-fn key_as(action: ActionId, epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
+/// The one key constructor in the simulation layer, built from the constants
+/// above rather than from anything process-local, so a key is reproducible
+/// across machines and a trace hash means the same thing everywhere. A second
+/// copy that drifted would make two families agree on an attempt number while
+/// writing different facts, which is the false green the trace hash exists to
+/// catch. A family that needs the same key at another generation moves it with
+/// `EffectIdentity::at_epoch`, which changes that one field and nothing else.
+pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Error>> {
     let run = RunId::from_hex(RUN)?;
     let attempt = AttemptId::from_decimal(&n.to_string())?;
     let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
     let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
     let environment = EnvironmentId::from_hex(ENV)?;
-    let epoch = EnvironmentEpoch::from_decimal(&epoch.to_string())?;
-    Ok(EffectKey::new(
-        run,
+    Ok(EffectIdentity::new(run, environment, flow).key(
         action,
         attempt,
-        flow,
         digest,
-        environment,
-        epoch,
+        EnvironmentEpoch::FIRST,
     ))
-}
-
-/// A key for attempt `n` of [`RUN`], acting as `action`, at generation one.
-///
-/// Built from the constants above rather than from anything process-local, so a
-/// key is reproducible across machines and a trace hash means the same thing
-/// everywhere.
-pub fn attempt_key_as(action: ActionId, n: u64) -> Result<EffectKey, Box<dyn Error>> {
-    key_as(action, 1, n)
 }
 
 /// A key for attempt `n` of [`RUN`] under the shared [`ACTION`], at generation
 /// one.
 pub fn attempt_key(n: u64) -> Result<EffectKey, Box<dyn Error>> {
     attempt_key_as(ActionId::from_hex(ACTION)?, n)
-}
-
-/// A key for attempt `n` of [`RUN`] under the shared [`ACTION`], fenced at
-/// `epoch`.
-///
-/// The generation is the one field a takeover moves, so a family that proves a
-/// stale warrant is refused and the current one is accepted needs both keys
-/// differing in that field and in nothing else — which is why the generation is
-/// a parameter here rather than a constant.
-pub fn attempt_key_at(epoch: u64, n: u64) -> Result<EffectKey, Box<dyn Error>> {
-    key_as(ActionId::from_hex(ACTION)?, epoch, n)
 }
 
 /// The real ladder for one attempt: admitted, then prepared.
@@ -550,19 +523,6 @@ impl Run {
     /// The kinds the store holds, in order.
     pub fn kinds(&self) -> Result<Vec<EventKind>, Box<dyn Error>> {
         Ok(self.recorded()?.iter().map(|event| event.kind()).collect())
-    }
-
-    /// How many recorded events are of `kind`.
-    pub fn count(&self, kind: EventKind) -> Result<usize, Box<dyn Error>> {
-        Ok(self.kinds()?.iter().filter(|seen| **seen == kind).count())
-    }
-
-    /// The key the first recorded event is about.
-    pub fn first_key(&self) -> Result<EffectKey, Box<dyn Error>> {
-        self.recorded()?
-            .first()
-            .map(|event| event.key())
-            .ok_or_else(|| "the first attempt must have been recorded".into())
     }
 
     /// The distinct keys the store holds, in first-seen order.

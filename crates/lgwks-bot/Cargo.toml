@@ -202,3 +202,7 @@ required-features = ["script", "rt", "time", "sync", "process"]
 name = "poll_deadline_cost"
 path = "examples/poll_deadline_cost.rs"
 required-features = ["rt", "ephemeral"]
+
+[[example]]
+name = "journal_continuation"
+path = "examples/journal_continuation.rs"

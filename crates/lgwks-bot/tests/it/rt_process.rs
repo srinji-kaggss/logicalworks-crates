@@ -23,8 +23,10 @@
     feature = "process"
 ))]
 
+use crate::scratch::Scratch;
+
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
@@ -141,41 +143,6 @@ fn read_pid(path: &Path) -> Option<String> {
     }
 }
 
-/// A temporary directory for a test's pid files.
-///
-/// Named from the process id and the test's own name so two tests running at
-/// once cannot share one, and removed by its [`Drop`] so a passing run leaves
-/// nothing behind.
-struct PidDir {
-    /// The directory the test's command writes into.
-    path: PathBuf,
-}
-
-impl PidDir {
-    /// Create the directory for a test called `name`.
-    fn new(name: &str) -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("lgwks-bot-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    /// The path of one pid file inside it.
-    fn join(&self, file: &str) -> PathBuf {
-        self.path.join(file)
-    }
-}
-
-impl Drop for PidDir {
-    /// Remove the directory, best effort.
-    ///
-    /// A test that failed mid-way should not fail again on the way out, and the
-    /// directory is named for this process, so a leftover is inert rather than
-    /// shared.
-    fn drop(&mut self) {
-        let _ignored: std::io::Result<()> = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 #[test]
 fn a_command_that_exits_zero_is_reported_completed() -> TestResult {
     let runtime = Runtime::new()?;
@@ -225,9 +192,9 @@ fn a_non_zero_exit_is_reported_failed_with_its_status() -> TestResult {
 
 #[test]
 fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
-    let dir = PidDir::new("grandchild")?;
-    let shell_pid_file = dir.join("shell.pid");
-    let grandchild_pid_file = dir.join("grandchild.pid");
+    let dir = Scratch::new("grandchild")?;
+    let shell_pid_file = dir.path().join("shell.pid");
+    let grandchild_pid_file = dir.path().join("grandchild.pid");
     let script = format!(
         "sleep 30 & echo $! > {}; echo $$ > {}; wait",
         grandchild_pid_file.display(),

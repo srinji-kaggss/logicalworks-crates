@@ -5,10 +5,6 @@
 //! submission tests need, so the two targets cannot drift: a copy per file is
 //! how one target's "the body ran once" stops meaning the same thing as the
 //! other's.
-#![allow(
-    dead_code,
-    reason = "each including request target uses a different subset of the fixture"
-)]
 
 use std::cell::Cell;
 use std::error::Error;

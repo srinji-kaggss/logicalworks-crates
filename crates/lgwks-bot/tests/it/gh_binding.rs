@@ -274,7 +274,7 @@ fn a_review_list_past_the_ceiling_is_refused_not_truncated() -> TestResult {
             );
             assert_eq!(
                 reviews,
-                usize::try_from(over).unwrap_or(usize::MAX),
+                usize::try_from(over)?,
                 "the refusal reports what the client actually returned, so a caller \
                  can tell a long history from a short one"
             );
@@ -584,7 +584,7 @@ fn a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal() -> TestResult {
     );
     match error {
         GhError::DiffFileCeiling { files, ceiling, .. } => {
-            assert_eq!(files, usize::try_from(over).unwrap_or(usize::MAX));
+            assert_eq!(files, usize::try_from(over)?);
             assert_eq!(ceiling, lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL);
         }
         other => {

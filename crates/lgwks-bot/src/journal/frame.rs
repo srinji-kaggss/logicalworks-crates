@@ -33,6 +33,101 @@ use lgwks_std::hash::Digest;
 
 use super::JournalError;
 
+/// A narrowing conversion that saturates instead of failing.
+///
+/// The frame grammar counts in three widths — a `u32` length prefix on the wire,
+/// a `u64` file offset, and a `usize` buffer — and every count has to cross between
+/// two of them. The question each crossing asks is always the same: *what does
+/// this store do with a number it cannot hold?* and the answer in every case here
+/// is "treat it as the largest one", because every count in this grammar is a
+/// **ceiling** or a **capacity**: a length past what the wire can name is past
+/// every possible frame, an offset past what the host can address is past the end
+/// of the file, and a count past what a `usize` can size is past every buffer this
+/// store admits. Saturating therefore reaches the refusal that is already there,
+/// where a default would reach a *smaller* answer than the input and admit work the
+/// ceiling excludes.
+///
+/// A truncating `as` cast is the wrong tool for the same reason and is forbidden
+/// workspace-wide: it would answer with a small number nobody chose, and a small
+/// number is inside every ceiling here.
+///
+/// One trait rather than a helper per width, because a second spelling of
+/// "saturate" is a second answer to the question above.
+pub(crate) trait SaturatingFrom<T> {
+    /// `value` narrowed into this type, or this type's ceiling when it does not fit.
+    fn saturating_from(value: T) -> Self;
+}
+
+impl SaturatingFrom<usize> for u64 {
+    fn saturating_from(value: usize) -> Self {
+        // `usize` is at most 64 bits on every target this crate builds for, but the
+        // conversion is written to be correct on a wider one rather than assumed to
+        // be: a host whose index type outruns the file-offset type must still reach
+        // the ceiling, which is the refusal.
+        match u64::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_file_offset) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<u64> for usize {
+    fn saturating_from(value: u64) -> Self {
+        match usize::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_an_index) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<u32> for usize {
+    fn saturating_from(value: u32) -> Self {
+        match usize::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_an_index) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<usize> for u32 {
+    fn saturating_from(value: usize) -> Self {
+        match u32::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_length_prefix) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<u64> for u32 {
+    fn saturating_from(value: u64) -> Self {
+        // An attempt ordinal rendered as the count a failure report carries: one
+        // past what the report can name is reported as the most it can, which
+        // overstates how far along the entry is — the side a retry budget absorbs.
+        match u32::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_report_count) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<u128> for u64 {
+    fn saturating_from(value: u128) -> Self {
+        match u64::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_nanosecond_count) => Self::MAX,
+        }
+    }
+}
+
+impl SaturatingFrom<usize> for u8 {
+    fn saturating_from(value: usize) -> Self {
+        match u8::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_byte) => Self::MAX,
+        }
+    }
+}
+
 /// Read as much of `buf` as the reader will give, and report how much that was.
 ///
 /// `None` for a reader that has nothing left at all, `Some(n)` for one that
@@ -141,7 +236,7 @@ pub(crate) fn read_prefix(
 
 /// The payload length a whole prefix declares.
 pub(crate) fn declared_length(prefix: &[u8; LENGTH_BYTES]) -> usize {
-    usize::try_from(u32::from_be_bytes(*prefix)).unwrap_or(usize::MAX)
+    usize::saturating_from(u32::from_be_bytes(*prefix))
 }
 
 /// Whether a declared length can be true of any frame either store writes.
@@ -168,12 +263,11 @@ pub(crate) fn writable_length(payload_len: usize, max_frame_bytes: usize) -> Opt
 
 /// The bytes one frame occupies: prefix, payload, head.
 pub(crate) fn framed_len(payload_len: usize) -> u64 {
-    u64::try_from(
+    u64::saturating_from(
         LENGTH_BYTES
             .saturating_add(payload_len)
             .saturating_add(HEAD_BYTES),
     )
-    .unwrap_or(u64::MAX)
 }
 
 /// One framed record: its length prefix, its archived bytes, and the head the
@@ -190,13 +284,13 @@ pub(crate) fn framed_len(payload_len: usize) -> u64 {
 /// proof as an argument rather than repeating it is what keeps one definition of
 /// what a frame is from becoming two.
 pub(crate) fn encode(payload_len: u32, payload: &[u8], head: &Digest) -> Vec<u8> {
-    let claimed = usize::try_from(payload_len).unwrap_or(usize::MAX);
+    let claimed = usize::saturating_from(payload_len);
     debug_assert_eq!(
         claimed,
         payload.len(),
         "a caller framed a payload under a length that is not its own"
     );
-    let mut frame = Vec::with_capacity(usize::try_from(framed_len(claimed)).unwrap_or(usize::MAX));
+    let mut frame = Vec::with_capacity(usize::saturating_from(framed_len(claimed)));
     frame.extend_from_slice(&payload_len.to_be_bytes());
     frame.extend_from_slice(payload);
     frame.extend_from_slice(head.as_bytes());
@@ -409,10 +503,10 @@ where
     R: Read + Seek,
     H: Fn(&Digest, &[u8]) -> Option<Digest>,
 {
-    let start = offset.saturating_add(u64::try_from(LENGTH_BYTES).unwrap_or(u64::MAX));
+    let start = offset.saturating_add(u64::saturating_from(LENGTH_BYTES));
     let len = file.seek(SeekFrom::End(0)).map_err(storage)?;
     let behind = len.saturating_sub(start);
-    let ceiling = u64::try_from(max_frame_bytes.saturating_add(HEAD_BYTES)).unwrap_or(u64::MAX);
+    let ceiling = u64::saturating_from(max_frame_bytes.saturating_add(HEAD_BYTES));
     if behind > ceiling {
         let grew = Err(storage(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -426,7 +520,24 @@ where
         return grew;
     }
     file.seek(SeekFrom::Start(start)).map_err(storage)?;
-    let mut suffix = vec![0u8; usize::try_from(behind).unwrap_or(usize::MAX)];
+    // `behind` is at most `ceiling`, and the comparison above proved that ceiling
+    // is addressable as a `usize`, so a width that does not convert names a file
+    // longer than this host could read even a frame of — which is the store's own
+    // refusal to report rather than a width to allocate for. Saturating here would
+    // ask for `usize::MAX` bytes of zeroed memory, which is the opposite of the
+    // bound this function exists to keep.
+    let Ok(width) = usize::try_from(behind) else {
+        let wider = Err(storage(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file named more bytes than this host can hold a frame in",
+        )));
+        lgwks_std::trace::debug!(
+            behind,
+            "cut_holds_acknowledged: the tail is wider than this host's address space"
+        );
+        return wider;
+    };
+    let mut suffix = vec![0u8; width];
     file.read_exact(&mut suffix).map_err(storage)?;
     Ok(holds_acknowledged_frame(
         &suffix,
@@ -445,28 +556,54 @@ pub(crate) struct Raw {
     pub(crate) head: [u8; HEAD_BYTES],
 }
 
-/// An aligned copy of `payload` when it does not already sit where an archive can be
-/// read from it, and `None` when it does.
+/// The slice an archive read of `payload` may be handed.
 ///
 /// A payload found by the tail search lies at whatever offset the bytes before it
 /// happened to leave, and an archive read from a misaligned slice is refused rather
 /// than decoded, which would make a frame the writer really framed look like noise.
-/// The copy is made only for a misaligned candidate, so the search's many
-/// candidates that start where the buffer does cost nothing extra.
+/// A copy is made only for a misaligned candidate, so the search's many candidates
+/// that start where the buffer does cost nothing extra.
+///
+/// A sum type rather than an `Option` the caller resolves: "the aligned copy, or
+/// the payload itself" is the whole contract, and an `Option` let the decoding
+/// site write `copy.unwrap_or(payload)` — a substituted value, in the one place
+/// where reading the wrong bytes means decoding rot as a record.
 #[cfg(feature = "script")]
-pub(crate) fn misaligned_copy(payload: &[u8]) -> Option<lgwks_std::wire::AlignedVec> {
+pub(crate) enum Decodable<'a> {
+    /// The caller's own bytes: they already sit at an archive-aligned offset.
+    Borrowed(&'a [u8]),
+    /// A copy taken because the caller's bytes do not.
+    Copied(lgwks_std::wire::AlignedVec),
+}
+
+#[cfg(feature = "script")]
+impl<'a> Decodable<'a> {
+    /// The bytes to decode from, whichever of the two this is.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // The scrutinee is `*self`, so each pattern is the variant's own type: the
+        // borrowed slice binds by copy and the owned copy binds by `ref`, and
+        // neither arm has to dereference what it matched.
+        match *self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Copied(ref copy) => copy.as_slice(),
+        }
+    }
+}
+
+/// The bytes `payload` may be decoded from, copying only when it must.
+#[cfg(feature = "script")]
+pub(crate) fn decodable(payload: &[u8]) -> Decodable<'_> {
     const ARCHIVE_ALIGN: usize = 16;
     if payload.as_ptr().align_offset(ARCHIVE_ALIGN) == 0 {
-        return None;
+        return Decodable::Borrowed(payload);
     }
     let mut copy = lgwks_std::wire::AlignedVec::with_capacity(payload.len());
     copy.extend_from_slice(payload);
-    Some(copy)
+    Decodable::Copied(copy)
 }
 
-/// Which frame a reader is at: its ordinal, where its length prefix begins, and the
-/// head it chains from. The last two are what a reader needs to tell a cut append
-/// from a frame whose length lies.
+/// Where a reader is in a file's frames, and the chain head the frame before it
+/// committed to.
 #[cfg(feature = "script")]
 pub(crate) struct Cursor<'chain> {
     /// The frame's index, from zero.
@@ -549,12 +686,45 @@ where
 pub(crate) mod probe {
     use super::{LENGTH_BYTES, framed_len};
     #[cfg(feature = "script")]
-    use std::path::{Path, PathBuf};
-    #[cfg(feature = "script")]
+    use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// A scratch path under the temp root that no other run of this suite can own.
+    ///
+    /// One builder for every journal test, because the half that makes a scratch
+    /// file unique is not a detail a second copy may spell differently: nanos
+    /// separate this run from a stale file a *previous* run left, and the counter
+    /// separates two tests in *this* process. Neither half may be a default — a
+    /// substituted zero would leave the name unique only inside one process, and
+    /// the OS reuses both pids and file names, so a recycled one would let two
+    /// runs share a journal.
+    ///
+    /// Refused rather than named when the host's clock is before the epoch. That
+    /// is a misconfigured host, it has no elapsed time to offer, and the repair is
+    /// to set the clock: a name this function cannot make unique is worse than no
+    /// test at all, because it fails somewhere else.
+    pub(crate) fn scratch_path(prefix: &str, name: &str) -> Result<PathBuf, std::io::Error> {
+        let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        else {
+            let refusal = Err(std::io::Error::other(
+                "the host clock is before the Unix epoch, so no scratch path can be named uniquely",
+            ));
+            lgwks_std::trace::warn!(
+                %prefix,
+                %name,
+                "journal test scratch: the clock cannot name a unique path"
+            );
+            return refusal;
+        };
+        Ok(std::env::temp_dir().join(format!(
+            "lgwks-{prefix}-{name}-{}-{unique}",
+            since_epoch.as_nanos()
+        )))
+    }
+
     /// Gives concurrent tests distinct scratch names.
-    #[cfg(feature = "script")]
     static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// A scratch file path unique to one test, removed when the test ends.
@@ -568,13 +738,9 @@ pub(crate) mod probe {
     #[cfg(feature = "script")]
     impl Scratch {
         /// A fresh path under the temp directory, named for `name`.
-        pub(crate) fn new(name: &str) -> Self {
-            let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|since| since.as_nanos())
-                .unwrap_or_default();
-            Self(std::env::temp_dir().join(format!("lgwks-frame-{name}-{nanos}-{unique}")))
+        #[cfg(feature = "script")]
+        pub(crate) fn new(name: &str) -> Result<Self, std::io::Error> {
+            scratch_path("frame", name).map(Self)
         }
 
         /// Where the file is.
@@ -629,24 +795,16 @@ pub(crate) mod probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        Digest, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, Read, declared_length, encode, framed_len,
-        is_possible_length, read_piece, read_prefix, writable_length,
+        Digest, HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, SaturatingFrom, declared_length, encode,
+        framed_len, is_possible_length, read_piece, read_prefix, writable_length,
     };
     use std::io::Cursor;
 
-    /// The classification, with the device's refusal dropped.
-    ///
-    /// Every read here is over an in-memory cursor that cannot fail, so the error
-    /// arm is unreachable by construction; unwrapping it says so rather than
-    /// comparing a type that has no `PartialEq`.
-    fn prefix_of(reader: &mut impl Read, buf: &mut [u8; LENGTH_BYTES]) -> Prefix {
-        read_prefix(reader, buf).unwrap_or(Prefix::Eof)
-    }
-
-    /// One piece's classification, with the device's refusal dropped.
-    fn piece_of(reader: &mut impl Read, buf: &mut [u8]) -> Piece {
-        read_piece(reader, buf).unwrap_or(Piece::Filled)
-    }
+    /// These tests mix two error domains — the reader's `io::Error` and the
+    /// fixture's own `&str` — so they report `Box<dyn Error>` and propagate each
+    /// with `?` rather than reducing a failed read to a classification that
+    /// would read as a clean end.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     /// A head, for the encode tests. Any 32 bytes; nothing here hashes.
     fn head() -> Digest {
@@ -654,47 +812,45 @@ mod tests {
     }
 
     /// The bytes a payload frames into.
-    fn framed(payload: &[u8]) -> Vec<u8> {
-        let out = encode(
-            writable_length(payload.len(), usize::MAX).unwrap_or(0),
-            payload,
-            &head(),
-        );
+    fn framed(payload: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let length =
+            writable_length(payload.len(), usize::MAX).ok_or("the grammar framed this payload")?;
+        let out = encode(length, payload, &head());
         assert_eq!(
-            usize::try_from(framed_len(payload.len())).unwrap_or(usize::MAX),
+            usize::saturating_from(framed_len(payload.len())),
             out.len(),
             "a frame's bytes are exactly the length the grammar says a frame is"
         );
-        out
+        Ok(out)
     }
 
     /// A frame round-trips: the prefix names the payload, and the head is last.
     #[test]
-    fn a_frame_round_trips_through_the_shared_grammar() {
+    fn a_frame_round_trips_through_the_shared_grammar() -> TestResult {
         let payload: Vec<u8> = (0..200u16)
             .map(u8::try_from)
-            .collect::<Result<Vec<u8>, _>>()
-            .unwrap_or_default();
-        let bytes = framed(&payload);
+            .collect::<Result<Vec<u8>, _>>()?;
+        let bytes = framed(&payload)?;
         assert_eq!(&bytes[..LENGTH_BYTES], &200u32.to_be_bytes());
         assert_eq!(
             &bytes[LENGTH_BYTES..LENGTH_BYTES + payload.len()],
             &payload[..]
         );
         assert_eq!(&bytes[bytes.len() - HEAD_BYTES..], head().as_bytes());
+        Ok(())
     }
 
     /// A clean end of file is `Eof`, and a whole prefix is `Full`.
     #[test]
-    fn a_prefix_classifies_eof_full_and_torn() {
+    fn a_prefix_classifies_eof_full_and_torn() -> TestResult {
         let payload: Vec<u8> = vec![1u8, 2, 3];
-        let bytes = framed(&payload);
+        let bytes = framed(&payload)?;
         let mut clean = Cursor::new(Vec::new());
         let mut buffer = [0u8; LENGTH_BYTES];
-        assert_eq!(prefix_of(&mut clean, &mut buffer), Prefix::Eof);
+        assert_eq!(read_prefix(&mut clean, &mut buffer)?, Prefix::Eof);
 
         let mut whole = Cursor::new(bytes.clone());
-        assert_eq!(prefix_of(&mut whole, &mut buffer), Prefix::Full);
+        assert_eq!(read_prefix(&mut whole, &mut buffer)?, Prefix::Full);
         assert_eq!(declared_length(&buffer), 3);
 
         // Any prefix cut is an interrupted append, including one whose bytes are
@@ -703,15 +859,16 @@ mod tests {
             let zeroed: Vec<u8> = bytes[..cut].iter().map(|_| 0u8).collect();
             let mut torn = Cursor::new(zeroed);
             let mut scratch = [0u8; LENGTH_BYTES];
-            assert_eq!(prefix_of(&mut torn, &mut scratch), Prefix::Torn);
+            assert_eq!(read_prefix(&mut torn, &mut scratch)?, Prefix::Torn);
         }
+        Ok(())
     }
 
     /// A frame cut inside a piece reads as `Interrupted`, whatever the piece is.
     #[test]
-    fn a_frame_cut_inside_a_piece_is_interrupted() {
+    fn a_frame_cut_inside_a_piece_is_interrupted() -> TestResult {
         let payload: Vec<u8> = vec![9u8; 16];
-        let bytes = framed(&payload);
+        let bytes = framed(&payload)?;
         // Each cut leaves fewer bytes than a whole-frame read would ask for, which is
         // what "the source ended before the buffer did" means: the read wanted more
         // than arrived, rather than wanting a fixed eight bytes that happened to fit.
@@ -719,8 +876,9 @@ mod tests {
             let mut source = Cursor::new(bytes[..cut].to_vec());
             let wanted = bytes.len().saturating_sub(cut).saturating_add(1);
             let mut piece = vec![0u8; wanted];
-            assert_eq!(piece_of(&mut source, &mut piece), Piece::Interrupted);
+            assert_eq!(read_piece(&mut source, &mut piece)?, Piece::Interrupted);
         }
+        Ok(())
     }
 
     /// Only a non-zero length within the ceiling names a frame either store writes.
@@ -743,14 +901,10 @@ mod tests {
     /// A frame's bytes are exactly prefix, payload and head — the property both
     /// stores' readers rely on when they compute a frame's length from its parts.
     #[test]
-    fn a_frames_bytes_are_prefix_payload_and_head() {
+    fn a_frames_bytes_are_prefix_payload_and_head() -> TestResult {
         for size in [1usize, 64, 4096] {
             let payload = vec![7u8; size];
-            let bytes = encode(
-                writable_length(payload.len(), usize::MAX).unwrap_or(0),
-                &payload,
-                &head(),
-            );
+            let bytes = framed(&payload)?;
             assert_eq!(bytes.len(), LENGTH_BYTES + size + HEAD_BYTES);
             assert_eq!(&bytes[LENGTH_BYTES..LENGTH_BYTES + size], &payload[..]);
             assert_eq!(
@@ -759,6 +913,7 @@ mod tests {
                 "the stored head is the frame's last {HEAD_BYTES} bytes"
             );
         }
+        Ok(())
     }
 
     /// The head a store of plain chaining would store: a hash of the previous head
@@ -771,18 +926,19 @@ mod tests {
     }
 
     /// `count` chained frames laid out end to end, and the head each chained from.
-    fn chain_of(payloads: &[&[u8]]) -> (Vec<u8>, Vec<Digest>) {
+    fn chain_of(payloads: &[&[u8]]) -> Result<(Vec<u8>, Vec<Digest>), Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
         let mut previous = Digest::from_bytes([0u8; HEAD_BYTES]);
         let mut chained_from = Vec::new();
         for payload in payloads {
-            let head = chained(&previous, payload).unwrap_or(previous);
-            let length = writable_length(payload.len(), usize::MAX).unwrap_or(0);
+            let head = chained(&previous, payload).ok_or("chained refused to hash a head")?;
+            let length =
+                writable_length(payload.len(), CEILING).ok_or("the grammar framed this payload")?;
             bytes.extend_from_slice(&encode(length, payload, &head));
             chained_from.push(previous);
             previous = head;
         }
-        (bytes, chained_from)
+        Ok((bytes, chained_from))
     }
 
     const CEILING: usize = 64 * 1024;
@@ -790,9 +946,9 @@ mod tests {
     /// The cut frame under its true length authenticates, so the prefix lied; every
     /// shorter cut of the same bytes is a prefix of an append and holds nothing.
     #[test]
-    fn the_cut_frame_authenticates_only_when_it_is_whole_behind_a_lying_prefix() {
+    fn the_cut_frame_authenticates_only_when_it_is_whole_behind_a_lying_prefix() -> TestResult {
         let payload: Vec<u8> = (0u8..100).collect();
-        let (bytes, from) = chain_of(&[&payload]);
+        let (bytes, from) = chain_of(&[&payload])?;
         let previous = from[0];
         let behind_prefix = &bytes[LENGTH_BYTES..];
         assert!(super::holds_acknowledged_frame(
@@ -812,14 +968,15 @@ mod tests {
                 "a frame cut {cut} bytes in, short of its head, is an interrupted append"
             );
         }
+        Ok(())
     }
 
     /// A frame cut off from its head by one or more bytes, with its payload whole,
     /// holds nothing: the head that would authenticate it is not there.
     #[test]
-    fn a_whole_payload_with_a_short_head_authenticates_nothing() {
+    fn a_whole_payload_with_a_short_head_authenticates_nothing() -> TestResult {
         let payload = vec![9u8; 64];
-        let (bytes, from) = chain_of(&[&payload]);
+        let (bytes, from) = chain_of(&[&payload])?;
         let behind_prefix = &bytes[LENGTH_BYTES..];
         for missing in 1..=HEAD_BYTES {
             let cut = behind_prefix.len() - missing;
@@ -830,13 +987,14 @@ mod tests {
                 chained
             ));
         }
+        Ok(())
     }
 
     /// With the cut frame itself damaged, a later whole frame still authenticates
     /// against the head stored just before it.
     #[test]
-    fn a_later_frame_authenticates_when_the_cut_frame_cannot() {
-        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50], &[3u8; 60]]);
+    fn a_later_frame_authenticates_when_the_cut_frame_cannot() -> TestResult {
+        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50], &[3u8; 60]])?;
         let mut behind_prefix = bytes[LENGTH_BYTES..].to_vec();
         behind_prefix[5] ^= 0x80;
         assert!(super::holds_acknowledged_frame(
@@ -850,13 +1008,14 @@ mod tests {
         assert!(!super::holds_acknowledged_frame(
             first_only, &from[0], CEILING, chained
         ));
+        Ok(())
     }
 
     /// With the cut frame's own head damaged and exactly one frame behind it, that
     /// frame still chains from the head the cut frame's payload implies.
     #[test]
-    fn a_frame_behind_a_damaged_head_chains_from_the_head_its_payload_implies() {
-        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50]]);
+    fn a_frame_behind_a_damaged_head_chains_from_the_head_its_payload_implies() -> TestResult {
+        let (bytes, from) = chain_of(&[&[1u8; 40], &[2u8; 50]])?;
         let mut behind_prefix = bytes[LENGTH_BYTES..].to_vec();
         behind_prefix[40 + 7] ^= 0x01;
         assert!(super::holds_acknowledged_frame(
@@ -865,12 +1024,13 @@ mod tests {
             CEILING,
             chained
         ));
+        Ok(())
     }
 
     /// Bytes that never framed anything hold nothing, at the ceiling and empty, and
     /// the search answers in bounded time for the longest tail a short read can leave.
     #[test]
-    fn noise_and_the_longest_possible_tail_hold_nothing() {
+    fn noise_and_the_longest_possible_tail_hold_nothing() -> TestResult {
         let previous = Digest::from_bytes([5u8; HEAD_BYTES]);
         assert!(!super::holds_acknowledged_frame(
             &[],
@@ -878,19 +1038,22 @@ mod tests {
             CEILING,
             chained
         ));
+        // Noise, not a frame: every third byte is 250, which no `u32` length this
+        // grammar writes could produce in that position.
         let longest: Vec<u8> = (0..CEILING + HEAD_BYTES)
-            .map(|index| u8::try_from(index % 251).unwrap_or(0))
+            .map(|index| u8::saturating_from(index % 251))
             .collect();
         assert!(!super::holds_acknowledged_frame(
             &longest, &previous, CEILING, chained
         ));
         // A head function that refuses every payload can authenticate nothing.
-        let (bytes, from) = chain_of(&[&[7u8; 30]]);
+        let (bytes, from) = chain_of(&[&[7u8; 30]])?;
         assert!(!super::holds_acknowledged_frame(
             &bytes[LENGTH_BYTES..],
             &from[0],
             CEILING,
             |_previous, _payload| None
         ));
+        Ok(())
     }
 }

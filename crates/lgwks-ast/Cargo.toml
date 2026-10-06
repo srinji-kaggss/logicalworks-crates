@@ -15,9 +15,10 @@ keywords = ["parser", "ast", "tree-sitter", "static-analysis", "code-analysis"]
 # INV-AST-ONE-PARSER: this crate is the only multi-language AST
 # parser. Code tools identify a language, select a grammar, and parse through
 # it; they do not each depend on ast-grep and rebuild the language/extension
-# tables. Three external edges: ast-grep-core and ast-grep-language for the
-# grammars, and `thiserror` for the shared diagnostic derive this crate
-# re-exports so a downstream crate can derive without its own edge.
+# tables. External edges: ast-grep-core and ast-grep-language for the
+# grammars, `thiserror` for the shared diagnostic derive this crate re-exports
+# so a downstream crate can derive without its own edge, `tracing` for the
+# refusal signal, and `tree-sitter` for the parse deadline (#277).
 #
 # The crate also owns the shared typed-diagnostic
 # derive (`thiserror`), used by `ParseError` and re-exported so downstream
@@ -112,6 +113,14 @@ thiserror = { version = "2", default-features = false }
 # `lgwks_std` facade (INV-DEP-1), so it reaches `tracing` directly. Registered in
 # `contract/APPROVED.toml`; `attributes` stays off so no proc-macro stack enters.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+# #277: the parse deadline. `ast-grep-core` builds its `Parser` privately and
+# calls `parse` with no progress callback, so a parse through it cannot be
+# stopped; `Parser::parse_with_options` and `ParseOptions::progress_callback` can.
+# Admitted on the Director's word (2026-10-05) in `contract/APPROVED.toml`. The
+# requirement is the one `ast-grep-core` 0.45 already resolves (0.27.0, default
+# features), so this names an edge that was already compiled rather than adding
+# a crate: the `Tree` built here is the type `StrDoc` holds.
+tree-sitter = "0.27"
 
 [[example]]
 name = "parse"

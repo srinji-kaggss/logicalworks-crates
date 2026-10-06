@@ -67,6 +67,14 @@ that difference visible in the committed file. The percentile is computed with
 `sort_unstable` rather than any helper in `lgwks_std`, so this instrument and
 the code it measures share no code.
 
+**A `-` in a duration column means nothing was measured**, not zero: an empty
+sample set has no p95, and a `0 ns` there would claim an instant call that never
+happened in the exact column a reader compares against. Every scenario in
+[`results.txt`](results.txt) is measured, so no committed row shows a `-`; a
+scenario that failed to compile is listed under "scenarios this harness could not
+measure" instead. The `machine:` line follows the same rule — a core count the
+OS will not report is written as `cores=unknown` rather than `0`.
+
 The `jaccard unbounded` rows are the shape the #160 S4 comment reports, not a
 like-for-like re-measurement of its harness: same quadratic curve, different
 host and build, so the absolute values are not comparable to that comment's.

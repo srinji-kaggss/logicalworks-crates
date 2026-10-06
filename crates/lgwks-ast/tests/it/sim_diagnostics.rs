@@ -15,14 +15,12 @@
 //! disagrees with it for some seed.
 //!
 //! The seed substrate (`Rng`, `Trace`) is the one the `lgwks_bot` simulation
-//! families run on, included by path, so a seed means the same draw sequence
-//! in every suite.
+//! families run on, included by path from this binary's root so a seed means
+//! the same draw sequence in every module and in every suite.
 
 #![cfg(feature = "lang-rust")]
 
-#[path = "../../../lgwks-bot/tests/sim/seed.rs"]
-mod seed;
-
+use crate::seed;
 use std::collections::BTreeSet;
 use std::error::Error;
 
@@ -35,6 +33,12 @@ use seed::{Rng, Trace};
 
 /// What every family returns: a refusal reports itself.
 type TestResult = Result<(), Box<dyn Error>>;
+
+/// What a scenario step returns: the value it drew, or the refusal that stopped
+/// it. A draw this target cannot hold is reported rather than replaced with the
+/// pool's first entry, because a source written from a substituted fragment
+/// would still hash to a trace and still replay as one.
+type Scenario<T> = Result<T, Box<dyn Error>>;
 
 /// Sources written per family.
 const SEEDS: u64 = 64;
@@ -83,11 +87,19 @@ fn seed_for(family: u64, index: u64) -> u64 {
 }
 
 /// One element of `pool`, chosen by `rng`.
-fn pick<'pool>(rng: &mut Rng, pool: &[&'pool str]) -> &'pool str {
-    let count = u32::try_from(pool.len()).unwrap_or(1);
-    pool.get(usize::try_from(rng.below(count)).unwrap_or(0))
+///
+/// The generator draws `u32` and a slice is indexed by `usize`, and `usize` is
+/// sixteen bits on the smallest target Rust supports, so the conversion is
+/// genuinely fallible. Every pool here is a handful of fragments, so a host
+/// that cannot hold the draw is reported rather than answered with an empty
+/// fragment — a scenario built from substituted fragments would still produce a
+/// source, a position model and a trace hash.
+fn pick<'pool>(rng: &mut Rng, pool: &[&'pool str]) -> Scenario<&'pool str> {
+    let bound = u32::try_from(pool.len())?;
+    let at = usize::try_from(rng.below(bound))?;
+    pool.get(at)
         .copied()
-        .unwrap_or("")
+        .ok_or_else(|| format!("a draw from {} fragments names none of them", pool.len()).into())
 }
 
 /// A seeded source of up to `max_fragments` fragments, broken ones drawn
@@ -98,7 +110,7 @@ fn write_source(
     broken: &[&str],
     broken_per_mille: u32,
     max_fragments: u32,
-) -> String {
+) -> Scenario<String> {
     let fragments = rng.between(1, max_fragments);
     let mut source = String::new();
     for index in 0..fragments {
@@ -107,14 +119,14 @@ fn write_source(
         } else {
             clean
         };
-        source.push_str(&pick(rng, pool).replace("{n}", &index.to_string()));
-        source.push_str(pick(rng, &ENDINGS));
+        source.push_str(&pick(rng, pool)?.replace("{n}", &index.to_string()));
+        source.push_str(pick(rng, &ENDINGS)?);
     }
-    source
+    Ok(source)
 }
 
 /// A seeded Rust source mixing clean and broken fragments.
-fn mixed_rust(rng: &mut Rng) -> String {
+fn mixed_rust(rng: &mut Rng) -> Scenario<String> {
     let broken_per_mille = rng.between(0, 700);
     write_source(rng, &CLEAN_RUST, &BROKEN_RUST, broken_per_mille, 80)
 }
@@ -133,7 +145,7 @@ fn sweep(family: u64, mut check: impl FnMut(u64, &mut Rng, &str) -> TestResult) 
     for index in 0..SEEDS {
         let seed = seed_for(family, index);
         let mut rng = Rng::new(seed);
-        let source = mixed_rust(&mut rng);
+        let source = mixed_rust(&mut rng)?;
         check(seed, &mut rng, &source).map_err(|error| format!("seed {seed:#x}: {error}"))?;
     }
     Ok(())
@@ -275,7 +287,7 @@ fn a_clean_source_passes_the_checked_parse_with_no_findings() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(7, index);
         let mut rng = Rng::new(seed);
-        let source = write_source(&mut rng, &CLEAN_RUST, &BROKEN_RUST, 0, 60);
+        let source = write_source(&mut rng, &CLEAN_RUST, &BROKEN_RUST, 0, 60)?;
         let tree = try_parse(&source, Language::Rust)
             .map_err(|error| format!("seed {seed:#x}: {error}"))?;
         assert!(
@@ -387,7 +399,7 @@ fn a_syntax_refusal_points_at_the_earliest_recovery_node() -> TestResult {
         let Some((_, _, error)) = refusal(source) else {
             return Ok(());
         };
-        let label = pick(rng, &LABELS);
+        let label = pick(rng, &LABELS)?;
         let reported = error.to_diagnostic(label, source);
         let first = findings(source)
             .first()
@@ -421,7 +433,11 @@ fn a_syntax_refusal_points_at_the_earliest_recovery_node() -> TestResult {
 /// A whole-file refusal is zero-width at the end of the source.
 fn a_whole_file_refusal_is_zero_width_at_the_end() -> TestResult {
     sweep(12, |seed, rng, source| {
-        let actual = usize::try_from(rng.next_u64()).unwrap_or(usize::MAX);
+        // The observed size is drawn rather than written as a constant, and
+        // drawn inside a range every `usize` holds: a refusal whose `actual`
+        // could not be represented on this target would be a different refusal,
+        // not the same one.
+        let actual = usize::try_from(rng.below(u32::MAX))?;
         let reported = ParseError::SourceTooLarge {
             actual,
             limit: MAX_SOURCE_BYTES,
@@ -453,7 +469,7 @@ fn an_oversized_source_is_refused_naming_both_sizes() -> TestResult {
     for index in 0..4 {
         let seed = seed_for(13, index);
         let mut rng = Rng::new(seed);
-        let unit = mixed_rust(&mut rng);
+        let unit = mixed_rust(&mut rng)?;
         let mut source = String::with_capacity(MAX_SOURCE_BYTES.saturating_add(unit.len()));
         while source.len() <= MAX_SOURCE_BYTES {
             source.push_str(&unit);
@@ -492,7 +508,7 @@ fn the_end_of_a_source_matches_the_model() -> TestResult {
 /// A rendered finding is `path:line:column: W: message`, from its own fields.
 fn a_rendered_finding_matches_its_fields() -> TestResult {
     sweep(15, |seed, rng, source| {
-        let label = pick(rng, &LABELS);
+        let label = pick(rng, &LABELS)?;
         let tree = parse(source, Language::Rust);
         for found in tree_diagnostics(label, &tree, "rust") {
             let start = found.span().start;
@@ -531,7 +547,7 @@ fn an_unlabelled_finding_renders_a_placeholder() -> TestResult {
 /// Relabelling or escalating a finding keeps what it claims and where.
 fn relabelling_a_finding_keeps_its_claim_and_place() -> TestResult {
     sweep(17, |seed, rng, source| {
-        let label = pick(rng, &LABELS);
+        let label = pick(rng, &LABELS)?;
         for found in findings(source) {
             let moved = found.clone().in_file(label).with_severity(Severity::Error);
             assert_eq!(moved.span(), found.span(), "seed {seed:#x}: the span moved");
@@ -564,8 +580,12 @@ fn a_bounded_inspection_is_complete_exactly_within_its_limit() -> TestResult {
     sweep(18, |seed, rng, source| {
         let tree = parse(source, Language::Rust);
         let nodes = inspect_ast(&tree.root(), None).nodes;
-        let high = u32::try_from(nodes.saturating_add(2)).unwrap_or(u32::MAX);
-        let limit = usize::try_from(rng.between(0, high)).unwrap_or(0);
+        // The drawn limit spans the tree's own size, so every relationship
+        // between a cap and a walk is exercised; both conversions are drawn
+        // inside a range every target holds and refuse rather than substitute a
+        // cap of their own.
+        let high = u32::try_from(nodes.saturating_add(2))?;
+        let limit = usize::try_from(rng.between(0, high))?;
         let bounded = inspect_ast(&tree.root(), Some(limit));
         assert_eq!(
             bounded.complete,
@@ -638,7 +658,7 @@ fn positions_hold_for_a_second_grammar() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(20, index);
         let mut rng = Rng::new(seed);
-        let source = write_source(&mut rng, &CLEAN_PYTHON, &BROKEN_PYTHON, 500, 40);
+        let source = write_source(&mut rng, &CLEAN_PYTHON, &BROKEN_PYTHON, 500, 40)?;
         let tree = parse(&source, Language::Python);
         let found = tree_diagnostics("sim.py", &tree, Language::Python.name());
         assert_eq!(
@@ -662,11 +682,11 @@ fn positions_hold_for_a_second_grammar() -> TestResult {
 // ── Replay ─────────────────────────────────────────────────────────────────
 
 /// One seed's whole scenario: write, parse, locate, refuse, render.
-fn scenario(seed: u64) -> Trace {
+fn scenario(seed: u64) -> Scenario<Trace> {
     let mut rng = Rng::new(seed);
-    let source = mixed_rust(&mut rng);
+    let source = mixed_rust(&mut rng)?;
     let mut trace = Trace::new();
-    trace.record_count("bytes", source.len());
+    trace.record_number("bytes", source.len());
     for found in findings(&source) {
         trace.record(&found.render());
     }
@@ -674,36 +694,39 @@ fn scenario(seed: u64) -> Trace {
         Ok(_) => trace.record("accepted"),
         Err(error) => trace.record(&error.to_diagnostic("sim.rs", &source).render()),
     }
-    trace
+    Ok(trace)
 }
 
 #[test]
 /// The same seed replays to the same trace hash.
-fn the_same_seed_replays_to_the_same_trace() {
+fn the_same_seed_replays_to_the_same_trace() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(21, index);
-        let first = scenario(seed);
+        let first = scenario(seed)?;
         assert!(
             !first.is_empty(),
             "seed {seed:#x}: the scenario recorded nothing"
         );
         assert_eq!(
             first.hash(),
-            scenario(seed).hash(),
+            scenario(seed)?.hash(),
             "seed {seed:#x}: the replay diverged"
         );
     }
+    Ok(())
 }
 
 #[test]
 /// Different seeds write different sources.
-fn different_seeds_write_different_sources() {
-    let hashes: BTreeSet<u64> = (0..SEEDS)
-        .map(|index| scenario(seed_for(22, index)).hash())
-        .collect();
-    let distinct = u64::try_from(hashes.len()).unwrap_or(0);
+fn different_seeds_write_different_sources() -> TestResult {
+    let mut hashes: BTreeSet<u64> = BTreeSet::new();
+    for index in 0..SEEDS {
+        hashes.insert(scenario(seed_for(22, index))?.hash());
+    }
+    let distinct = u64::try_from(hashes.len())?;
     assert!(
         distinct.saturating_mul(4) >= SEEDS.saturating_mul(3),
         "only {distinct} distinct traces from {SEEDS} seeds"
     );
+    Ok(())
 }

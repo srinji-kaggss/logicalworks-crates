@@ -28,14 +28,13 @@
 //! real frame). They are named so they cannot quietly count as done.
 
 use lgwks_bot::effect::{EffectKey, Id128};
-/// The scratch-path and cleanup-guard fixtures this file shares with the
-/// journal liveness and scale families.
-///
-/// One definition of "a unique scratch path" and of "remove it when the test
-/// ends", so this observation cannot drift into asserting a different cleanup
-/// discipline than the families that also observe a real kill.
-#[path = "support/journal.rs"]
-mod shared;
+// The scratch-path and cleanup-guard fixtures this file shares with the
+// journal liveness and scale families.
+//
+// One definition of "a unique scratch path" and of "remove it when the test
+// ends", so this observation cannot drift into asserting a different cleanup
+// discipline than the families that also observe a real kill.
+use crate::journal_fixtures as shared;
 
 use shared::{ProbeGuard, TempGuard, key_for as key, pause, scratch_dir};
 
@@ -139,17 +138,6 @@ fn probe_body() -> TestResult {
     Err("the probe child parked for its whole bound and was never killed".into())
 }
 
-/// This test binary re-invoked as a named test with a fresh, empty environment.
-///
-/// One builder for every probe, so the executable and argument shape cannot
-/// drift between the acknowledged-append probes and the stalled-append one.
-fn probe_command(test_name: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
-    let executable = std::env::current_exe()?;
-    let mut command = std::process::Command::new(executable);
-    command.args([test_name, "--exact", "--nocapture"]);
-    Ok(command)
-}
-
 /// Spawn this test binary as a probe child ordered to append `events` ladder
 /// rungs and then park.
 fn spawn_probe(
@@ -159,7 +147,7 @@ fn spawn_probe(
     events: usize,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
     Ok(ProbeGuard(Some(
-        probe_command(test_name)?
+        crate::probe_command(&crate::probe_test(module_path!(), test_name))?
             .env(PROBE_ENV, "1")
             .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_EVENTS, events.to_string())
@@ -218,7 +206,7 @@ fn spawn_stalled_probe(
     marker_path: &std::path::Path,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
     Ok(ProbeGuard(Some(
-        probe_command(test_name)?
+        crate::probe_command(&crate::probe_test(module_path!(), test_name))?
             .env(PROBE_STALLED, "1")
             .env(PROBE_JOURNAL, journal_path)
             .env(PROBE_MARKER, marker_path)
@@ -394,7 +382,7 @@ fn spawn_boundary_probe(
     let journal_path = dir.join("journal.log");
     let marker = dir.join("marker");
     let report = dir.join("report");
-    let child = probe_command(test_name)?
+    let child = crate::probe_command(&crate::probe_test(module_path!(), test_name))?
         .env(PROBE_RUNG_ENV, rung.as_str())
         .env(PROBE_JOURNAL, &journal_path)
         .env(PROBE_MARKER, &marker)

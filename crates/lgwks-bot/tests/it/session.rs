@@ -15,6 +15,8 @@ use lgwks_bot::{
     VarType, Verdict,
 };
 
+use crate::lock::take_unpoisoned;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// A `Say` node speaking `text`.
@@ -658,12 +660,7 @@ fn a_degraded_resolver_reasks_without_claiming_absence() -> TestResult {
         roles.contains(&"resolver-degraded"),
         "the cause is recorded under its own role, got {roles:?}"
     );
-    let recorded = session
-        .transcript()
-        .iter()
-        .find(|entry| entry.role() == "resolver-degraded")
-        .map(TranscriptEntry::text)
-        .unwrap_or_default();
+    let recorded = recorded_under(&session, "resolver-degraded");
     assert_eq!(
         recorded, "Resolver unavailable: the embedder is unavailable",
         "the record names the cause rather than reporting an empty score"
@@ -702,12 +699,7 @@ fn an_unmeasurable_competitor_does_not_advance_the_session() -> TestResult {
         None,
         "no option was chosen, so the variable is not bound"
     );
-    let recorded = session
-        .transcript()
-        .iter()
-        .find(|entry| entry.role() == "resolver-degraded")
-        .map(TranscriptEntry::text)
-        .unwrap_or_default();
+    let recorded = recorded_under(&session, "resolver-degraded");
     assert_eq!(
         recorded, "Resolver unavailable: an embedding could not be measured",
         "the record names the unmeasurable embedding, not a missing dependency"
@@ -1028,14 +1020,18 @@ fn a_receipt_names_the_model_only_when_a_model_decided() -> TestResult {
 }
 
 /// Reads the single transcript record written under `role`, or an empty string.
+///
+/// Empty for a role nothing was recorded under, which is what the assertions that
+/// compare against an empty string are about. A record that *is* there and holds
+/// an empty text is indistinguishable from it here, so a caller that must tell the
+/// two apart reads [`Session::transcript`] itself — which is why the two arms of
+/// the ambiguity are spelled in this doc rather than left to a reader.
 fn recorded_under(session: &Session, role: &str) -> String {
     session
         .transcript()
         .iter()
         .find(|entry| entry.role() == role)
-        .map(TranscriptEntry::text)
-        .unwrap_or_default()
-        .to_owned()
+        .map_or_else(String::new, |entry| entry.text().to_owned())
 }
 
 /// The filed counterexample for #25, at session level: one resolver, two
@@ -1996,10 +1992,12 @@ fn every_option_of_every_accepted_ask_is_storable() -> TestResult {
     for (position, ask) in asks.iter().enumerate() {
         let (variable, declared, options) = (&ask.0, &ask.1, &ask.2);
         vars.insert(variable.clone(), declared.clone());
-        let target = ids
-            .get(position + 1)
-            .cloned()
-            .unwrap_or_else(|| String::from("end"));
+        // The last ask routes to the session's own end node, which has no id in
+        // the ask list; every earlier ask routes to the next one.
+        let target = match ids.get(position.saturating_add(1)) {
+            Some(next) => next.clone(),
+            None => String::from("end"),
+        };
         let routes = options
             .iter()
             .map(|option| (option.clone(), target.clone()))
@@ -3346,14 +3344,13 @@ impl RecordingJournal {
 
     /// Every record received so far, oldest first.
     ///
-    /// A poisoned lock yields the empty vector; the positive control in
-    /// `validation_refuses_before_any_journal_record` fails if that happens,
-    /// so an empty read cannot pass for the wrong reason.
+    /// A poisoned lock yields the records as they stand, because each one is
+    /// pushed by a single statement and a panic between two pushes cannot leave a
+    /// half-written entry; the positive control in
+    /// `validation_refuses_before_any_journal_record` fails if this read ever
+    /// comes back empty, so an empty read cannot pass for the wrong reason.
     fn records(&self) -> Vec<String> {
-        self.records
-            .lock()
-            .map(|records| records.clone())
-            .unwrap_or_default()
+        take_unpoisoned(&self.records).clone()
     }
 }
 

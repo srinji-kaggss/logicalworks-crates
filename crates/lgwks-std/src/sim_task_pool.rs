@@ -468,7 +468,10 @@ fn sweep(seed: u64) -> u64 {
 
 #[test]
 fn sim_every_admitted_job_runs_once_under_every_interleaving() {
-    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    // `SWEEP_SEEDS` is a non-empty const array, so its first seed is a value
+    // the pattern binds rather than one an `Option` could withhold.
+    let [first_seed, ..] = SWEEP_SEEDS;
+    let mut state = first_seed;
     for _ in 0..SEEDS {
         sweep(next_seed(&mut state));
     }

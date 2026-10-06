@@ -88,6 +88,1211 @@ the answer is not what the ratio used to imply.
   decomposition.
 
 
+### lgwks_deps — `long-try-chain` charges each `?` to its own statement
+
+The scan's `long-try-chain` rule counted every `?` inside a `for`, `while`,
+`loop` or `if` body against the enclosing statement as well as against the
+statement that holds it, including those under a `let`, which the rule's own
+contract says break a chain. A ten-statement loop of single-`?` bindings was
+reported as one ten-`?` chain at the loop's line. The counter no longer descends
+into a nested block, whose statements the walker inspects one by one, so a `?`
+is counted once, at its own line; a loop header is still its own statement's.
+`scan::tests::a_loop_is_not_charged_with_the_statements_in_its_body` and
+`a_chain_inside_a_loop_body_is_still_a_chain` failed before the change.
+
+### lgwks_bot — the effect journal continues as new instead of stopping at its ceiling (#267)
+
+A `FileJournal` refused every append at 100,000 events or 64 MiB, so a bot acting
+once a minute stopped after about seventeen days. A journal opened with
+`FileJournal::open_continuing` (or `open_continuing_with` and a
+`ContinuationPolicy`) now continues itself at 80% of either ceiling: one sealed
+checkpoint frame, written byte for byte into the predecessor and a successor at
+`<name>.cont/NNNNNN`, carrying one folded record per action and every unresolved
+attempt. `FileJournal::open_active` follows the chain from the original path;
+`EffectJournal::continuation_watermark` and `continue_as_new` are the trait's
+lifecycle; `ecs::Effects` asks the trigger on its own append path.
+
+Defects found and fixed on the way, each with a test that failed before the fix:
+
+- `committed_entry` indexed a successor's events from the genesis, so every
+  position a continued journal acknowledged read back as absent and a controller
+  settling an attempt across a boundary reported `EffectUnrecorded`.
+- A successor's own file was named generation one, so its successor's checkpoint
+  claimed a generation already held.
+- The successor writer asked whether it had created the generation directory
+  *after* creating it, so a new directory's name was never synced.
+- `Replay` refused at a successor's first frame, the seal it carries, and then
+  ended, so no file after the first continuation could be streamed at all. It now
+  gives both seal frames the open scan's dispositions and streams exactly
+  `events()` on every file of a chain.
+- `MAX_CHECKPOINT_SETTLED` was 256, whose widest checkpoint archives to 90,208
+  bytes in a 65,536-byte frame: a count no checkpoint could reach, refused by the
+  frame as a storage fault instead of by the count. A settled record no longer
+  stores its action and attempt beside the key that holds them (272 to 240
+  bytes), and the count is 160, whose widest checkpoint beside a full unresolved
+  carry is 58,976 bytes.
+- An ambiguous tail in a successor with no event of its own was resolved against
+  the genesis rather than the carried seal, so an acknowledged event under a
+  lengthened prefix was trimmed as a torn append. It is resolved against the last
+  whole frame.
+
+`tests/it/sim_continuation_seal.rs` pins the mechanism as 25 seeded properties,
+each swept twice for an identical trace: the watermark, the generation names, the
+seal frame, every refusal around a sealed or half-sealed chain, both checkpoint
+bounds, and what a reopen and a replay read back.
+
+Measured over 10,000,000 attempts and 488 continuations (production-readiness
+§4.6): oracle agreement at every boundary, every attempt refused a second time,
+live memory flat at about 20 MB, reopen p50 58–89 µs behind 1 K to 1 M attempts.
+`SIGKILL` at each of the four seal boundaries leaves exactly one authoritative
+journal. INV-BOT-152.
+### lgwks_bot — per-tenant capacity: one tenant cannot starve another (#268)
+
+- **New: `rt::tenancy`.** `TenancyPolicy` (per-tenant ceiling, per-tenant queue
+  bound, supervisor-wide waiting bound, per-tenant weights, each clamped to a
+  declared ceiling: `MAX_QUEUE_PER_TENANT`, `MAX_TOTAL_QUEUE`, `MAX_TENANT_WEIGHT`,
+  `MAX_WEIGHTED_TENANTS`), `TenancyError`, `SpawnRefused`, and the pure scheduler
+  `DeficitRoundRobin` with its `Arrival`, `TryArrival`, `Grant` and `GrantOutcome`.
+- **New on `Supervisor`:** `with_tenancy`, `spawn_for`, `run_process_for` (with
+  `RunForError`), `tenant_capacity` and `tenants_waiting`. Untenanted calls on a
+  tenanted supervisor are charged to one implicit tenant; a supervisor built
+  with `new` behaves exactly as before.
+- **Fixed before release: a late abandonment miscounted the tenant's queue.** An
+  owner that left between the round's liveness check and the delivery had its
+  abandonment corrected inside the pump *before* its own report added it, and the
+  count saturates at zero, so the report overcounted: `queued_of` read low and a
+  tenant could hold five live waiters past a queue bound of four. The shell now
+  marks that waiter withdrawn and the owner's report counts nothing;
+  `DeficitRoundRobin::note_grant_abandoned` is gone. Found by the new
+  `tests/it/sim_tenancy_model.rs` on its first run (seed 9); pinned by the
+  white-box `a_late_abandonment_leaves_the_live_count_exact`, which drives the
+  shell's own functions in the order the locks force and failed (2 of 3) before
+  the fix.
+- **Tests.** `tests/it/sim_tenancy_model.rs` model-checks the shipped scheduler
+  under an executor that follows the shell step for step — seventeen properties,
+  each over all 256 seeds twice. `tests/it/tenancy.rs` measures the live
+  supervisor: ten thousand loud submissions parked in the loud tenant's own queue
+  and released one controlled completion at a time, against the quiet tenant's
+  p99 alone; and a fail-at-once flood four times the neighbour's volume against
+  the neighbour's admission time alone (the median of 41 interleaved rounds
+  within 10% of the median alone, no sleep before either timed window).
+  INV-BOT-151.
+
+### lgwks_std tests — `fs::capability` is swept with hostile seeds
+
+`fs::capability` had 28 unit tests and no seeded sweep. It is the sandbox
+boundary that `Dir` promises, so `tests/it/sim_fs_capability.rs` now draws
+adversarial inputs per seed and watches a parent directory the handle was
+never given, which makes an escape observable rather than assumed absent:
+
+- names spelled from `..`, `.`, `/`, NUL, newline and multi-byte text are
+  refused with `InvalidInput` by all eight entry points, exactly when they are
+  not one component, and valid names land inside and nowhere else;
+- symlinks aimed up, absolute, and through `sub/../..` are reported as
+  symlinks with their targets verbatim, and are never opened, truncated or
+  descended under the default policy;
+- every created file and directory carries no group, world or special bits;
+- a held handle keeps writing into the directory it opened after that
+  directory's name is moved onto one to four successive replacements;
+- 2–16 tenants writing the same names concurrently each read back only their
+  own bytes;
+- a `try_clone` handle keeps resolving and creating after the original and
+  the other clones are dropped in a seeded order.
+
+The `lgwks-deps` sim substrate doc no longer claims `lgwks_std` shares
+`seed.rs`: the crate sits below `lgwks_bot` and keeps its own generator.
+
+```
+$ cargo nextest run -p lgwks_std --locked --features full
+691 tests run: 691 passed, 0 skipped        (36 in sim_fs_capability)
+```
+
+
+### tests — the simulation substrate's own contracts are swept, not assumed
+
+Every `sim_*` family rests on the seed substrate, the sweep and the scratch
+guard; nothing checked them. `lgwks_bot/tests/it/sim_substrate.rs` sweeps:
+
+- the sweep refuses exactly the seeds that recorded nothing, swept per band,
+  per seed, and against an all-empty and an all-recording control;
+- the generator replays exactly and `below`/`between` stay in bounds;
+- `chance(p)` is calibrated within five standard deviations;
+- the trace frames each record, so re-splitting the same bytes changes the
+  receipt;
+- concurrent scratch guards never share a directory and vanish on drop.
+
+`lgwks_deps/tests/it/sim_seed_draws.rs` sweeps `pick` reaching every element,
+a draw consuming one step whatever the table (empty included), and `receipt`
+refusing only an empty trace.
+
+```
+$ cargo nextest run --workspace --locked
+4339 tests run: 4339 passed (1 leaky), 0 skipped
+simulation-evidence: source_visible 1712/3383 = 50.61% (was 50.13%)
+```
+
+
+### lgwks_deps tests — one seed substrate for every workspace simulation
+
+The six `sim_*` policy families drew from their own LCG and hashed their replay
+receipts through `std`'s `DefaultHasher`, whose algorithm std leaves free to
+change between releases, so a receipt was not stable across toolchains and a
+seed meant a different stream here than in `lgwks_bot`, `lgwks_ast` and
+`lgwks_std`. They now include `lgwks_bot`'s `sim/seed.rs` and
+`sim/seed_helpers.rs` like every other crate:
+
+- `tests/support/sim.rs` is the crate's extension of the shared `Rng`: `pick`,
+  `pick_named`, one `coin` (the substrate's `chance(500)`, replacing three
+  copies that each read a different bit), and `receipt`, which refuses a run
+  whose trace is empty rather than hashing nothing.
+- Every receipt is an FNV-1a `Trace` of labelled records.
+- Bit-twiddled draws (`>> 20 & 0x3ff` in a retry loop, `>> 33 % 3`, `>> 41 & 1`,
+  `next_u64().checked_rem(3)`) are `between`, `below` and `coin`.
+
+```
+$ cargo nextest run -p lgwks_deps --locked -E 'not binary(storefront_consumers)'
+307 tests run: 307 passed, 0 skipped
+$ lgwks-deps scan
+OK  scan clean — 390 files, zero findings
+```
+
+
+### lgwks_bot — BREAKING: one way to build an `EffectKey`; every line of the crate and its tests through the guard (9-axis sweep)
+
+**Breaking.** `EffectKey::new(run, action, attempt, flow, digest, environment,
+epoch)` is removed. A key is built only as
+`EffectIdentity::new(run, environment, flow).key(action, attempt, digest, epoch)`:
+the three identity fields are the host's to supply once per run, and a
+seven-argument constructor let a caller transpose two ids of the same width
+with nothing to catch it. Every decoder (`broker`, `journal`, `retry`), the
+bench and the examples build keys this way.
+
+The source:
+
+- `task.rs`: the host's reactor owns its `Runtime` directly (the wrapper and its
+  `#[expect(dead_code)]` are gone); recorded and declared digests are chosen
+  with `match`, not `unwrap_or_else`; every lock goes through the one
+  `journal::owner::lock`.
+- `rt/supervise.rs`: its private `lock_unpoisoned` copy is replaced by the same
+  `journal::owner::lock`.
+- `journal.rs`, `journal/frame.rs`: event counts and payload lengths widen
+  through `SaturatingFrom`, never `try_from(..).unwrap_or(MAX)`.
+- `ecs.rs`, `spec.rs`: the spec tests build their scope with the ECS tests'
+  `test_effects` rather than a second copy of it.
+
+The tests (`crates/lgwks-bot/tests`, and the `seed.rs` substrate `lgwks_ast` and
+`lgwks_std` include):
+
+- **No suppression and no default.** Every `#![allow(dead_code)]` is removed,
+  along with every `unwrap_or`, `unwrap_or_default`, `unwrap_or_else` and
+  `expect`. A value the test asserts is present comes through `ok_or(..)?`, and a
+  conversion uses `?`. A wait measures `Instant::elapsed` against its budget,
+  never a deadline whose overflow defaulted to "now". A clock before the epoch
+  names how far before it. `thread::sleep` becomes `park_timeout`.
+- **Seven kill-probe binaries are modules of `it`.** These are
+  `durable_crash_group_commit`, `durable_crash_observation`,
+  `journal_writer_fence`, `owner_epoch_takeover`, `process_escape`,
+  `sim_clock_kill` and `task_resume`. Each support fixture now has one includer,
+  so nothing in it is dead in one binary and used in another. A probe re-executes
+  `it` through the one `probe_command`. The acceptance rows name `it::<module>::`.
+- **One copy of each fixture.**
+  - Six scratch-directory guards become one, `tests/support/scratch.rs`
+    (`new`, `path`, `AsRef<Path>`, removed on `Drop`), shared by `it` and the
+    measurement examples. Two of the six named their directory after
+    `std::process::id()`: a reused pid reopened a leftover directory and read
+    its stale pid files. The compile probe's leaked on any error between
+    create and remove. `check-std-first.py`'s exemption for the pid-named one
+    is gone with it.
+  - `FakeGh` and the process probe no longer name a fixture `0` when the
+    entropy source fails (`map_or(0, ..)`); the failure refuses the fixture.
+  - Three `percentile`s become one (`None` for an empty sample, never a zero).
+  - The spec sweep uses `spec_materialize`'s `Counter`, and a second copy of the
+    in-memory effect scope is removed.
+  - `sim_review_path`'s `Gh` binding is `FakeGh::binding`.
+  - `wrong_identity_evidence` rewrites one key field through `EffectIdentity`,
+    `at_epoch` and `with_attempt`, not a struct mirroring the key.
+- **Every fixture compiles under exactly the features its callers need.**
+  The parked-device instrument is `support/liveness.rs` (`rt`); the durable
+  resume scaffolding is `support/resume.rs` (`script` + `ephemeral`); the
+  compile probe's positive control and lint pass are `script`-only; `lgwks_ast`
+  includes the seed substrate under `lang-rust`. `attempt_key_at` was one
+  family's, and that family now moves the shared key with
+  `EffectIdentity::at_epoch`.
+- **The fault schedule holds only faults something injects.** `Faults` drew
+  `disk_refuse`, `disk_tear`, `crash_at` and `concurrency`, and no family ever
+  carried them out, so a schedule could claim coverage of a disaster that never
+  happened. They are removed, along with the family that checked the crash tick
+  of a crash nobody performed; the determinism family compares whole schedules
+  through a derived `Eq`.
+- **A replay that recorded nothing is a failure.** `sim::sweep` refuses a seed
+  whose run left the trace empty, because its hash is the empty trace's
+  whatever path it took. Three families had such seeds:
+  `forced_refresh_matches_the_schedule` when nothing was armed,
+  `a_refresh_that_never_lands_stays_marked` (which never touched its `Sim`),
+  and `retry_budget_holds` on an empty list. Each now records what it decided.
+  `two_tenants_on_one_digest_stay_isolated` checks a stranger that is never
+  in the tenant set, so the claim holds for the draw that chooses every tenant.
+- **No doubled blocks.** Sixteen `{ { let refusal = ..; return refusal; }; }`
+  blocks are flattened, one of them in `lgwks_std/src/http.rs`. A `for`
+  statement carrying more than three `?` became a named per-iteration function.
+- **Stable replay receipts.** `sim_review_path` and `sim_review_pr` hash through
+  the substrate's FNV-1a `Trace`, not `DefaultHasher`, whose algorithm std leaves
+  free to change between releases.
+- **The seed substrate.**
+  - `Trace::record_u64` and `Trace::record_count` wrote the same bytes, so they
+    are one `record_number`.
+  - `Trace::len` (only ever printed when it was zero) is removed.
+  - `chance` and `is_empty` move to `sim/seed_helpers.rs`, which is included
+    beside `seed.rs` by every target that calls them.
+  - The seed bands move to `sim/band.rs`, so `sim_review_path` includes the
+    bands and the generator and not the journal rig.
+
+```
+$ guard-files <every changed .rs file>
+98 file(s) checked, 0 finding block(s)
+$ cargo check --locked -p lgwks_bot --all-targets {--all-features | default | --no-default-features | --no-default-features --features process}
+0 errors, 0 warnings in each
+$ clippy: workspace, std/bot/ast all-features and no-default-features, deps tokio-full, bot process-only, bench/async — all -D warnings, all clean
+$ lgwks-deps scan
+OK  scan clean — 390 files, zero findings
+$ ci_local.py --lane simulation-evidence
+nextest_sim=2893 nextest_total=4307 nextest_percent=67.1697%; source_visible_sim=1680 source_visible_total=3351 source_visible_percent=50.1343%
+$ cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'
+4305 tests run: 4305 passed (1 leaky), 0 skipped        [215 s wall]
+$ cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'
+3947 tests run: 3947 passed (3 slow, 3 leaky), 6 skipped [337 s wall]
+$ cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
+2667 tests run: 2667 passed, 0 skipped                   [238 s wall]
+$ cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
+3 tests run: 3 passed (tiers 100 / 1,000 / 10,000)      [47 s wall]
+$ cargo nextest run -p lgwks_std --all-targets --locked --features full
+655 tests run: 655 passed, 0 skipped
+```
+
+The `full` lane's 337 s is over the five-minute gate budget; it was 331–385 s
+before this change, and that is still open.
+
+### lgwks_std — the nine-axis sweep: the ceiling assertion asserts, so the scan gate sees no unlogged refusal (9-axis sweep)
+
+`INV-SCAN-ZERO` refused this branch on the first CI run: the new
+`assert_refused_at_small_ceiling` helper returned `Err`, and the repo's own
+`lgwks-deps scan` detector (`unlogged-err-return`) only exempts a function the
+harness calls through an attribute it recognises (`#[test]`, `#[test_case]`,
+`#[rstest]`, or a `cfg` that requires `test`). A helper inside `mod tests` is
+not exempt, and no real `#[test_*]` attribute exists to mark it.
+
+The helper now asserts instead of returning. The only way it can fail is that
+the answer was not `Error::BodyTooLarge { limit: SMALL_CEILING }`, and an
+assertion carries that to the calling test with the answer in the message; a
+`Result` here would have handed the caller an error to propagate before the test
+could say what it saw. The three ceiling families keep their own framing and
+their own wording.
+
+```
+$ cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
+OK  scan clean — 384 files, zero findings
+```
+
+### lgwks_std — the nine-axis sweep: http names its spans, and every fixture thread is owned (9-axis sweep)
+
+`http.rs` carried 19 findings: eight defaults, one suppression and ten repeated
+blocks. All are repaired, and no request, refusal, timeout stage or body ceiling
+changes.
+
+- **URL validation and target redaction name their spans.** An authority with no
+  `/`, `?` or `#` after it runs to the end of the remainder, which is what a URL
+  ending at its authority looks like; redaction takes the authority, the suffix
+  and the path as slices between delimiters it found, so userinfo, query and
+  fragment are removed from spans that exist rather than spans that defaulted to
+  empty.
+- **The tests carry no suppression.** The `#[expect(clippy::disallowed_methods)]`
+  over the test module is deleted: the three waits use
+  `std::thread::park_timeout`, and the twelve fixture threads start through one
+  `fixture_thread` helper that uses a *named* `thread::Builder` and hands back
+  the handle the test already joins — the bare `std::thread::spawn` this
+  workspace bans is gone from the crate.
+- **One fixture, one assertion, three families.** `serve_held` is the silent and
+  the replying server with the reply as the difference;
+  `assert_refused_before_dialing` asserts each refused URL with its own text;
+  `assert_refused_at_small_ceiling` asserts the ceiling's refusal once, so the
+  chunked, close-delimited and non-UTF-8 families state only what their own
+  framing adds. The fixture server parses `Content-Length` into an accumulator
+  rather than out of an `Option`.
+
+Tests: 47 pass, including `a_deadline_bounds_the_whole_redirect_chain`,
+`a_deadline_bounds_a_trickled_body`, `body_timeout_preserves_stage_and_class`,
+`eof_probe_timeout_preserves_stage_and_class` and the seeded `sim_http` families.
+
+### lgwks_std — the nine-axis sweep: the hash suite hashes whole slices and whole frames (9-axis sweep)
+
+`sim_hash.rs` built its expectations out of nine defaults. Each is repaired, and
+every trace hash is unchanged: `the_same_seed_replays_to_the_same_hash_trace`
+and the other 22 tests pass.
+
+- A chunk of the message being walked is a slice, not a lookup that defaulted to
+  empty — a zero-length chunk would have hashed fewer bytes than the reference.
+- The three parts that must tile a message are compared as lengths, with no
+  narrowing between them and the sum.
+- The framed expectation builds the documented eight-byte length prefix from the
+  length's own bytes, in a `frame_prefix` written here from the contract rather
+  than taken from the crate, so the oracle stays independent.
+- A 63-character prefix of a 64-character digest hex is a slice of that hex.
+- Replacing one ASCII byte of ASCII hex keeps text, and the arm that says so
+  names that invariant instead of substituting an empty string.
+- The flipped bit is the draw itself, already below eight, so the mask is a
+  shift of a byte by at most seven.
+
+### lgwks_std — the nine-axis sweep: INV-CODEC-1 is one property with two facades (9-axis sweep)
+
+`json` and `ron` are two codecs over one `serde` surface, so the invariant
+INV-CODEC-1 states is one property, not two: an unescaped field is borrowed from
+the input and an escaped one is not. The assertion that proves it was written
+twice, once per codec, and the guard reads the two copies as the same block —
+which is the point: two copies of one property drift.
+
+- **The contract now lives in one test-only module.** Each codec contributes only
+  its own document and its own two entry points
+  (`serde_facade::json_borrow_contract`, `serde_facade::ron_borrow_contract`,
+  and the matching escaped-field halves); the borrow assertion, the
+  `Borrowed` fixture and the pointer-containment check are written once. Both
+  test names INV-CODEC-1 cites are kept, and each is now three lines that name
+  its codec's half.
+- **The round-trip fixture is named once per codec** (`POINT`), and each
+  malformed-document assertion carries its own fact, so the codec tests differ
+  only where the codecs do.
+- **`examples/digest_timing.rs` carries no sentinel.** The sample count is a
+  `usize` throughout, so neither the schedule's doubled total nor the warm-up
+  comparison needs a narrowing conversion; the crop index is an exact euclid
+  quotient; a batch too slow to record in a `u32` is a preemption and is dropped
+  rather than recorded as a maximum, which would have set the crop and kept
+  itself; and a run shorter than the crop keeps every sample.
+
+The dudect harness runs on the release build at 40,000 samples per class:
+`digest_eq t = 0.005` (no leak detected) against the `early_exit control
+t = 1962.447` (leak detected, as it must be). 67 codec, RON and JSON tests pass.
+
+### lgwks_std — the nine-axis sweep: one poison recovery per lock shape, and a thread that is owned (9-axis sweep)
+
+- **`task`'s lock-poison recovery is written once per lock shape.** `lock`, `wait`
+  and `wait_timeout` each answer a poisoned guard with `into_inner()` in a
+  `match`, and each carries the argument for why the guarded state is still
+  consistent: a critical section moves a whole `Job` in or out, writes no partial
+  state, and the panicking thread's panic is already resumed on its awaiter. Four
+  spellings of one recovery became three named helpers, one per shape.
+- **The blocking pool's tests carry no suppression.** Both
+  `#[expect(clippy::disallowed_methods)]` attributes are deleted: the six waits
+  in `task`'s tests and the four in `sim_pool_lifetime` use
+  `std::thread::park_timeout`, and the waker thread the `PendingThenReady` future
+  starts is a named `thread::Builder` thread whose handle the future owns and the
+  test joins, so nothing is detached. A spawn refusal is recorded on the future
+  so the test reports it instead of hanging on a wake that never comes.
+- **A capacity refusal reports the bound that was actually reached.**
+  `queue_limit.unwrap_or(usize::MAX)` named an unreachable queue limit as 2^64
+  jobs; the refusal now reports the caller's own limit, with the observed queue
+  depth as the stated fallback.
+- **`unreachable!` is gone from the pool tests.** A refusal of another shape is
+  now reported with the shape it actually had — an OS error's kind and message, or
+  the unexpected refusal — instead of a panic claiming none could arrive.
+- **`glob`'s three sentinels are gone**: a class close index reads the terminal
+  entry that says "unclosed", a scalar offset past the end of the input measures
+  the end of the input, and a radix bucket reads the key byte it masks. Its
+  malformed-pattern assertions share one helper, so the three cases cannot drift.
+- **`similarity`'s lossy `Similarity::score` states the loss once** (in one
+  `lossy_score` helper rather than three `unwrap_or(0.0)` sites), and emits each
+  refusal with the scorer's name.
+
+Tests: 30 pass for the `task` family (including both seeded pool simulations and
+their replay oracles) and 61 for the `glob`/`pattern` family (including
+`glob_agrees_with_a_regex_oracle_on_generated_patterns`); clippy clean with
+`--all-features` and `--no-default-features`.
+
+### lgwks_std — the nine-axis sweep: a refusal is a fact, and a test may not silence a lint (9-axis sweep)
+
+- **`online` no longer carries four `#[expect]`s.** Each parked a thread with
+  `std::thread::sleep`, which this workspace bans; the tests now use
+  `std::thread::park_timeout`, the sanctioned synchronous wait, so the reason a
+  dial has to wait lives in the test's own doc instead of in a suppression. The
+  budget split answers its own two sentinels too: the remaining-candidate count
+  is a `NonZeroU32` the loop's own bound proves non-zero, and a count of zero
+  means the whole remainder stands for the one candidate left.
+- **`similarity`'s lossy `Similarity::score` states the loss once.** The three
+  infallible impls called `unwrap_or(0.0)` on a checked score; one `lossy_score`
+  helper now answers a refusal with `0.0` and emits it with the scorer's name, so
+  a caller reading a zero off the compatibility path can see that it was a
+  refusal. `CheckedSimilarity` remains the authority-facing path, and the values
+  it returns are unchanged.
+- **The seeded pool simulations draw what they name.** `SCENARIOS` is destructured
+  into the match arms, so a fifth scenario is a compile error rather than a
+  silent fall-through; the handle count is folded through the sweep's own
+  `fold_usize` instead of a local saturating cast; and both families bind their
+  first seed with a slice pattern on a non-empty const array instead of
+  `first().unwrap_or_default()`.
+
+Tests: 63 pass (the online budget family, the similarity evidence contract, and
+both seeded pool simulations including `sim_a_seed_replays_its_pool_lifetime_trace`).
+
+### lgwks_std — the nine-axis sweep: the calendar divides where it is bounded (9-axis sweep)
+
+`time`'s conversions carried a `divide` helper whose `checked_div` refusal was
+answered with `0`, a sentinel narrower than any real quotient; a `days_in_month`
+that answered an out-of-range month with a zero month length; and three
+narrowings whose refusals were answered with `1`. None of them is reachable
+today, and each is a value a caller could not tell from a measurement.
+
+- **Every division is a `div_euclid`/`rem_euclid` over a non-negative numerator
+  and a non-zero constant**, which is what the module doc already claimed. The
+  `divide` helpers in `calendar` and `format` are gone, and the day-of-year
+  pipeline computes the month and day in the `u32` the public boundary names, so
+  `civil_from_days` narrows exactly once — on the era day offset, which
+  `shifted_to_era` bounds to `0..=146_096`.
+- **`days_in_month` is gone.** Its only caller was the parser, which now asks
+  `try_days_in_month` and propagates a typed `OutOfRange` naming the month; a
+  month length of `0` no longer stands in for "not a month".
+- **`days_from_civil` states its saturation.** A day count outside `i64`
+  saturates at the bound it crossed and emits a debug record, rather than
+  answering a narrowing refusal with whichever of `i64::MIN`/`i64::MAX` a
+  conditional picked.
+- **The RFC 3339 renderer is one integer domain.** Digits, two-digit pairs,
+  four-digit years and the time of day are all rendered from `i64` counts, so
+  the `u32`→`u8` and `i64`→`u32` narrowings are gone; one documented low-byte
+  read at the ASCII boundary is what remains. `from_unix_parts` carries a
+  nanosecond count into seconds with the euclid forms and widens a
+  non-negative second count by reinterpreting the same eight bytes.
+- **The deprecated lossy wrappers name their clamp.** `unix_parts_lossy` and
+  `from_unix_parts_lossy` still saturate exactly as documented, written as the
+  answer to a refusal; `from_unix_parts_lossy` now emits that loss as a debug
+  record so a caller that reaches for it by mistake can see it happened.
+
+Behaviour is unchanged for every value the RFC 3339 profile admits: 13
+`sim_time_profile` tests pass, including `seeded_calendar_model_replays_exactly`,
+`calendar_roundtrips_endpoints_neighbors_and_overflow_transition` and
+`t5_endpoints_are_exact_under_the_repaired_narrowing`.
+
+### lgwks_std — the nine-axis sweep: the codec and policy primitives, one value per width (9-axis sweep)
+
+Every line of this crate now meets the nine axes and every rust-guard finding is
+repaired at its cause instead of annotated. This first group is the codecs and
+the pure policies: each `unwrap_or` that stood in for a value that is not there
+is gone, replaced by what its case actually means. No public signature changes;
+the one public field-width change is stated below.
+
+- **`leb128` encodes at four widths through one algorithm.** `group_byte` narrowed
+  a masked group through `TryInto` and answered a refusal with `0`, a value no
+  caller could tell from a real group. The group is now read from the value's own
+  little-endian byte order — infallible at `u32`, `u64`, `i32` and `i64` alike —
+  and the four `encode_*_step` copies are one `Emittable` trait with the
+  termination rule per width, so an unsigned and a signed step are written once
+  each instead of four times. Encoded bytes, refusals and offsets are unchanged.
+- **`hex` and `encoding::base64` no longer invent the bytes they do not have.**
+  `decode_pair` indexed a two-character window it documented as panicking, and
+  the base64 encoder read a missing final byte as `0` before masking it away;
+  both now name the bytes they carry, so a short quantum is `Option`-shaped
+  rather than zero-filled. The half-length and quantum-count divisions are exact
+  `div_ceil`s instead of `checked_div(..).unwrap_or(0)`.
+- **`hash::write_framed` builds its length prefix from the length's own bytes.**
+  `u64::try_from(data.len()).unwrap_or(u64::MAX)` would have framed `u64::MAX` for
+  a part too long to name; the prefix is now assembled from the little-endian
+  bytes, which is the length itself on every target Rust supports. The frame
+  width, and so every digest, is unchanged.
+- **`wire::format_descriptor` reports widths in `usize`, the domain
+  `size_of`/`align_of` answer in.** Narrowing an alignment into a `u8` needed a
+  value to report when it did not fit, and that value was indistinguishable from
+  a measurement. `FormatDescriptor::pointer_width_bits` and
+  `::archived_u32_alignment` are now `usize`; the two pinned fixture constants
+  that compared against them moved with it. `Endianness::Unknown` remains the
+  only sentinel, and it is a named variant.
+- **`retry` states its own clamps.** `duration_from_nanos` replaced three
+  sentinels — zero seconds, `u64::MAX` seconds, zero nanoseconds — with the
+  nearest value a `Duration` can name at each bound, and the jitter window is
+  carried as a `NonZeroU128` so the divisor a remainder is taken over exists by
+  type. The backoff sequence, the cap and the inclusive jitter formula are
+  unchanged for every caller.
+- **`time::parse` refuses a fractional run it cannot read.** A missing byte in
+  the fraction was read as `0`, which left-aligns a short fraction correctly and
+  also hides a truncated document; `compute_fraction` now returns the typed
+  `TooShort` refusal the rest of the module returns. `trace::DebugConfig::from_env`
+  reads its three filter sources as three cases, each propagating its own
+  refusal, instead of chaining two reads through one default.
+
+Tests: 201 pass (`nextest -p lgwks_std --all-features`, the leb128, hex, hash,
+encoding, wire, retry and time families).
+### `bench/ai-authoring` — the reference solutions no longer blame a stage that succeeded
+
+Two of the three new-API reference solutions resolved a missing fact to a value
+that named the wrong thing. `new-aggregate` reported `SolveError::Fetch { id: 0 }`
+when no fetch had failed, and `new-pipeline` reported
+`PipelineError::Stage { name: FetchA }` when no stage had failed — both of which
+are false claims about a run, and both of which a model copying the reference
+would have learned to make.
+
+- **`new-aggregate`'s failure cell is `Option<u32>`**, `None` meaning no fetch
+  failed; the first failure is recorded and later ones cannot overwrite it, and
+  a fan-out error with no fetch failure is `Cancelled` with the cause on the
+  trace stream rather than a fabricated id.
+- **`new-pipeline` records `combine` and `publish` under their own names**, so a
+  stage that failed for its own sake names itself, and an error from the flow
+  itself is `Cancelled` with a diagnostic rather than a default of `FetchA` —
+  a stage that ran and succeeded.
+- Each file recovers from a poisoned lock through one documented `match`
+  instead of `unwrap_or_else(PoisonError::into_inner)`, saying why the guarded
+  value is still whole after a panic.
+
+Verified end to end through the benchmark runner, which copies each reference
+into a generated trial crate, builds it `--locked --offline` and runs the hidden
+oracle: `run.py --dry-run --apis new --tasks aggregate,pipeline,recovery
+--trials 1` gives aggregate 6/6, recovery 5/5, pipeline 5/5, all compiled, and
+`run.py --mutants` still fails exactly the clauses it is built to fail
+(aggregate 2/6, pipeline 1/5, recovery 1/5) — the harness's ability to detect a
+wrong solution is unchanged.
+
+### `bench/ai-authoring` — the harness refuses a value no run produced
+
+Four fixtures in the AI-authoring benchmark resolved a missing value to a number
+and three recovered from a poisoned lock four different ways. The first kind is
+the one that matters: `Stage::run` read `combine`'s inputs and `publish`'s input
+as `0` when no earlier stage had produced them, so a pipeline that ran `combine`
+first published `0` — a number no stage ever produced, and a number a reader of
+the oracle would read as a real result.
+
+- **`combine` refuses without both of `a` and `b`, and `publish` refuses without
+  a `combine`**, returning `StageError::Stage { name }` and naming the missing
+  input through `diagnostic`. The variant's doc now says what it means: a stage
+  produced no value, whether because it was configured to fail or because an
+  input it requires was never produced. Its shape is unchanged — the `pipeline`
+  prompt freezes `PipelineError`, and the reference solutions in other
+  partitions match on it exhaustively.
+- **`StageState` holds one `StageValues` under one lock** rather than three
+  `Mutex<Option<u64>>`, so `combine` reads a pair from one instant of the run
+  instead of two.
+- **`World::unit` refuses an index past the world's width** with a diagnostic,
+  rather than running a body for a unit that does not exist; the body's counter
+  is refused too, where the old code silently skipped the count and let the
+  recovery clauses read a body run that never happened.
+- **`UnitStats::runs(index) -> Option<u32>`**: `None` is *no such unit*, which is
+  not the same answer as `Some(0)` — a unit that exists and has not run. The
+  `recovery` prompt's two frozen call sites are updated to match; this is a
+  harness-contract change, and it is the one caller outside the partition that
+  had to change with it.
+- **One `crate::lock` decides what a poisoned lock means** for the crate, and
+  `recovery` draws its delay from the same `planned_delay` the rest of the
+  harness uses, which makes its "one plan governs every instrument" doc true.
+- **The recovery oracle stops allocating a counter vector per index per poll**:
+  `interrupt_after` reads one snapshot through `UnitStats::total_runs`, and its
+  scratch directory name propagates the `SystemTime` error instead of defaulting
+  the timestamp to `0`.
+- **Deleted `recovery::Signal`**, a `pub` type with no caller in any partition,
+  oracle or API sheet, whose `wait` was an unbounded 1 ms poll loop.
+
+Verified end to end through the benchmark runner itself: `run.py --dry-run
+--apis new --tasks aggregate,pipeline,recovery --trials 1` builds each reference
+solution into a generated trial crate and passes every oracle (aggregate 6/6,
+recovery 5/5, pipeline 5/5), and `run.py --mutants` still fails the clauses it is
+built to fail (aggregate 2/6, pipeline 1/5, recovery 1/5). `cargo clippy
+-p ai_task_support --all-targets --locked` is clean with `-D warnings` on the
+default and `--no-default-features` lanes.
+
+### `bench/std-measure` — a statistic that cannot be computed is absent, not zero
+
+The harness's percentile and mean reported `0` for two cases that are not zero:
+an empty sample set (no call was timed at all) and a rank the sample count could
+not express. A `0 ns` in the `p95` column is the one number a reader compares
+against, and both paths put a value there that no run observed.
+
+- **`Samples::percentile` and `Samples::mean` return `Option<u64>`**, where
+  `None` means *not measured*: an empty sample set, or a rank that does not
+  exist. An unmeasured cell renders as `-` in the same column a real number
+  occupies, so a row that collected nothing reads as absent rather than as the
+  fastest measurement in the table.
+- **`percent` is clamped to `0..=100`**, so p0 is the smallest observed sample
+  and p200 — or `u64::MAX` — is the largest, rather than either walking off the
+  end of the vector.
+- **`machine_description` records `cores=unknown`** when the OS will not report a
+  parallelism count, instead of fabricating `0`.
+- **The report goes through locked, flushed `stdout`/`stderr` handles** and
+  `main` returns `ExitCode`, so a report that cannot be printed is reported
+  rather than silently truncated; a failed output write still exits `2`.
+- **`as_nanos()` is narrowed by clamping**, not by a truncating cast.
+- **Seeded simulation tests** (`stats::sim`) check the ranking against an
+  independent order-statistic model at eight sample sizes × ten ranks, one seed
+  replaying the same trace hash and a neighbouring seed not, rank monotonicity
+  and observed bounds across all 101 ranks, a 64-seed batch asserting distinct
+  measurements hash distinctly, and the empty and one-sample cases simulated
+  rather than assumed.
+
+Verified: `cargo nextest run --locked` 15/15 pass; `cargo clippy --all-targets
+--locked` clean with `-D warnings` on the default and `--no-default-features`
+lanes. A full sweep on an Apple M5 Pro (15 cores, rustc 1.99.0, debug build)
+printed 23 scenarios and wrote its report; a write to a missing directory exits
+`2` with `could not write <path>: No such file or directory (os error 2)` on
+stderr. `bench/std-measure/results.txt` is untouched — it is committed
+measurement evidence, not regenerated by this change.
+### lgwks_bot — the nine-axis sweep: every rust-guard finding in this crate's domains, journal, proposal and script layers, fixed at its cause (Director 2026-10-05)
+
+Every finding in twenty-seven files was a real defect rather than a style
+preference, and each is fixed where the cause was rather than restated:
+
+- **One lock-poison recovery for the crate.** `journal::owner` already owned the
+  one `lock`; `wait`, `wait_timeout`, `wait_timeout_while` and the `RwLock` pair
+  `read`/`write` join it, and `script::{admit, each, fan_out, ready, trail}`,
+  `rt::cancel` and `domain::net`'s own fixture now call them instead of spelling
+  the recovery eleven times. Behaviour is unchanged — every one of those sites
+  already recovered rather than propagated.
+- **One saturating narrowing.** `journal::frame::SaturatingFrom` is the single
+  answer to "what does this store do with a number it cannot hold?", which is the
+  question every one of the ~40 `X::try_from(..).unwrap_or(X::MAX)` sites was
+  asking. Every count in this grammar is a ceiling or a capacity, so saturation is
+  what reaches the refusal already there, where a default would be a *smaller*
+  answer than the input — the direction that admits work a ceiling excludes.
+- **Two of those were conflating cases, and are fixed as defects.**
+  `cut_holds_acknowledged` allocated `vec![0u8; usize::MAX]` for a tail width it
+  could not convert; that is now the store's own refusal. And
+  `ReviewRecord::applied_comments` read a count too wide for `usize` as *zero*
+  comments landed, which is the fail-open direction: it now saturates.
+- **One scratch-path builder.** `journal::file` and `journal::frame` each
+  substituted zero for a pre-epoch clock, leaving a scratch name unique only
+  inside one process while the module's own doc says a reused id must never make
+  two runs share a journal. One `frame::probe::scratch_path` now refuses a clock
+  it cannot make unique.
+- **Observed fields are read, not edited.** `ChatMessage`, `notify::Message`,
+  `DataState` and `NetState` published `pub` fields a caller could change after
+  the domain observed them; each is private behind accessors and one constructor,
+  with a doctest as the external caller.
+- **One unbound-domain refusal.** `chat` and `notify` each spelled the same
+  six-line "check authority, then refuse with `binding required`";
+  `error::unbound_domain` is that one construction and emits the trace event
+  `scan` requires at the construction rather than at each site.
+- **Values that were invented are now real.** `Repository::new` substituted an
+  empty string for an absent `/repo` half; `Generation::next` returned
+  `u64::MAX` on a lost compare-and-swap, so a race could hand two instances the
+  same generation; `ready::admit` widened a cap into the counter's width and read
+  a cap that did not fit as "no cap"; `rt::runtime::Builder` carried
+  `Option<String>` for a thread name and substituted one in `build`; `frame`'s
+  tests dropped a failed read into `Prefix::Eof`, so a broken reader read as a
+  clean end; `script::run_store` discarded three task-local access errors, so a
+  future polled outside every scope read like a scope that installed the absence;
+  `script::control::backoff_delay` used a doubling factor of `u32::MAX` for a
+  shift it had already capped; `proposal::model` defaulted a table miss to
+  `Shape::WellFormed`; and `proposal::artifact`/`script::policy` defaulted a
+  poisoned lock and a zero fan-out respectively.
+- **Two suppressions and three repetitions are gone.** `task::ledger`'s
+  `#[expect(clippy::too_many_arguments)]` became `Charge` and `Ceilings`, so a
+  call site can no longer pass the cost as the ticket. `journal::file`'s three
+  seven-field `EffectKey` builders are one `key_for_attempt`, its twenty-one
+  scratch prologues are one `subject`, and `chat`'s two refusal sites share
+  `error::unbound_domain`.
+
+One caller outside this partition moved with a signature it depended on:
+`task::ledger`'s public `RunLedger::charge` keeps its parameters, and only its
+internals are named values.
+
+Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
+`--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
+lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
+failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the policy refusals report what the register said
+
+- **`declared_scope` is published.** Cargo spells an unconditional dependency
+  with no `target` key; the register spells the same declaration `target = ""`
+  (INV-DEP-13). The gate compared the two vocabularies through an inline
+  `unwrap_or("")` in two places, and the simulation suites carried their own
+  copy of the same rule. It is one public function now, with the rule in one doc
+  and a doctest that states both spellings.
+- **A drift refusal carries the bit the entry authored.** `DefaultFeaturesDrift`
+  and `OptionalityDrift` reported `approved` as a plain `bool` the gate filled with
+  `unwrap_or(true)` / `unwrap_or(false)`. The refusal only exists for an *authored*
+  dimension, so the invented bit was never the answer — it is `Option<bool>` now,
+  and the message prints the bit the register carries.
+- **A target refusal names both sides in the register's vocabulary.** An authored
+  `target = ""` and an absent `target` key both print `<none>`, through one named
+  `scope_label`.
+- **An unconstrained feature dimension prints that it admits no set**, rather than
+  an empty set that reads as a set with no members.
+- **The two manifest checks share one reader.** `dependency_declarations` and
+  `declared_name` replace two copies of the same six-line walk, so a table header
+  cannot be read one way in one manifest and the other way in the other.
+- **The `vendor.rs` test fixture's root name drops the process id.** `check-std-first`
+  refused it (a pid is reused by the OS, so it names no run) and the exemption that
+  had covered it is deleted rather than re-anchored. The discriminator is
+  nanoseconds plus the `NEXT` atomic, which is what that comment had already
+  concluded: the atomic separates two tests on two threads, the nanoseconds
+  separate two runs. `check-std-first`'s exemption list is one entry shorter.
+
+New regression test: `seeded_scope_pairs_render_both_spellings_of_an_unconditional_edge`
+(`tests/it/sim_policy_properties.rs`) drives the public API over every scope pairing
+the register grammar admits, one seed for both draws, and asserts the rendered
+refusal text — a refusal printing `""` for an unconditional edge would pass every
+verdict assertion and be unreadable to the operator who has to act on it.
+
+`python3 scripts/check-std-first.py`: std-first holds, 357 source files.
+`python3 scripts/check-doc-citations.py`: 100 pinned lines across 13 pages, all
+unchanged. `cargo clippy -p lgwks_deps --all-targets` passes on both
+`--all-features` and `--no-default-features`. 303 crate tests pass.
+## [Unreleased]
+
+### lgwks_deps — the metadata collection answers for what it could not read
+
+- **`poll_quantum` parks instead of sleeping.** The `#[expect(clippy::disallowed_methods)]`
+  on `std::thread::sleep` named a substitution where the ban already names a
+  replacement: `std::thread::park_timeout`, which is the bounded synchronous
+  wait in a crate with no reactor to block.
+- **A dependency the `--no-deps` read never resolved keeps no licence record.**
+  `direct_edges` wrote `DeclaredLicense { license: None, license_file: None }` for
+  a package that read did not see, which is indistinguishable from a package
+  that declares no licence — the one thing the licence audit (#208) exists to
+  tell apart. The fields stay `None` and the audit refuses an edge whose terms
+  are unknown.
+- **`Instant::checked_add` failing is not a deadline that expired.** The old
+  `unwrap_or_else(Instant::now)` refused every child immediately over a timeout
+  of a few centuries; an unrepresentable deadline is now `None`, which says the
+  clock's range ended and the byte budget is what bounds the child.
+- **`MAX_CAPTURE_BYTES` is one named bound** for the two `u64::try_from(stream_cap)`
+  sites, and `Resolve` names the two feature selections so the `cargo metadata`
+  argument list is written once. A copy of that list is where a flag goes
+  missing.
+- **A pre-epoch clock is refused on the wasm capture path** rather than floored to
+  the epoch, which named every capture of the process the same instant.
+- **The stdout and stderr flood families assert through one check**, so the two
+  cannot drift into testing different budgets.
+
+Verified end to end: `lgwks-deps check .` reports 33 approvals, 45 edges, 0
+refusals, exit 0, with the same contract and subject digests as before;
+`lgwks-deps invariants .` resolves 4 invariants; `lgwks-deps scan` reports 383
+files and zero findings. 176 lib tests pass, including the real-process deadline,
+descendant-capture and flood families.
+## [Unreleased]
+
+### lgwks_deps — the invariant register answers for what it did not read
+
+`build` read `id` through `.map_or_else(|| "<unnamed>".to_owned(), …)`, so every
+refusal about a block that declared no identifier named an invariant no register
+ever wrote. `ErrorKind::MissingField` now carries the block's own line and an
+`Option<String>` id, and the message is `line N: invariant block is missing
+required field "id"`.
+
+Five more readers each resolved an absent value to a stand-in:
+
+- **`lint_table` names both spellings.** `[workspace.lints.clippy]` and
+  `[lints.clippy]` declare one namespace — the second inherited by every member —
+  and the equivalence is now written as two arms rather than as a default.
+- **`lint_level` states the terminator's two cases**: the level ends at the first
+  `,` or `}`, or runs to the end of the tail when the writer closed the table on
+  the same line.
+- **`check_scope` uses `split_once`**, so a scope with no `::` is a crate name
+  carrying no module path, by the type rather than by a substituted first
+  segment.
+- **`strip_item_prefix` names the two `extern` shapes**: `extern "C" fn f()` names
+  an ABI and `extern fn f()` does not, and both are stepped past deliberately.
+- **`split_attribute` splits instead of defaulting.** Both cuts were
+  `body.get(..).unwrap_or("")`; `char_indices` yields only boundary offsets and
+  `]` is one byte, so both cuts are on a boundary by construction.
+
+The required-field loop is what proves `approved_on` and `id` are present before
+the refusals that name them, and each is a refusal rather than a substitution if
+that ever stops holding.
+
+Verified end to end: `lgwks-deps invariants .` on this repository resolves 4
+invariants; a truncated register reports `line 1: invariant block is missing
+required field "id"`, and a named block reports its own line. 176 lib tests and
+44 register tests pass.
+## [Unreleased]
+
+### lgwks_deps — a `cfg` the scanner cannot evaluate is its own verdict
+
+The `test`-scope detectors decided "is this item test-only?" by evaluating its
+`cfg` expression under every assignment of its free atoms. An atom the
+assignment had not recorded was read as `true`, which made the expression easier
+to satisfy and so kept the item in scope — the safe direction, and a value the
+expression never had. `unwrap_or(true)` hid that from every caller above it.
+
+- **`Verdict` is three states** — `Satisfied`, `Unsatisfied`, `Unevaluated` —
+  and `all` / `any` / `not` fold between them. `may_hold` resolves `Unevaluated`
+  once, at the one place that decides whether an item is test-only, and it
+  resolves it towards keeping the item: an item in scope is a candidate for a
+  finding, and an item dropped is a clean report for source nobody read.
+- **`Hit`'s fields are private** with `rule()`, `line()` and `snippet()`. A
+  consumer now borrows the evidence it was shown instead of holding a `String`
+  it could edit into a different finding.
+- **An empty test-scope stack is no scope**, stated as `matches!` on the stack's
+  top rather than a `false` substituted for a missing entry.
+- **`enter_function` keeps "no enclosing function" as `Option<usize>`** instead
+  of flattening it to line `0` and re-expanding it on exit — a sentinel a walk
+  could mistake for a real line.
+
+Verified against planted controls on the shipped binary: a bare `.ok()` swallow
+in production is reported; the same line under `#[cfg(test)]` is clean; under
+`#[cfg(feature = "never")]`, `#[cfg(not(test))]` and `#[cfg(any(test, …))]` it
+is reported, which is the fail-open-for-findings direction. `lgwks-deps scan` on
+this repository: 383 files, zero findings. 176 lib tests and 51 scan tests pass.
+## [Unreleased]
+
+### lgwks_deps — the resolved graph, the vendor report and the CLI's target resolution
+
+The readers that build the gate's inputs each answered a value it did not have,
+and the CLI each resolved "no path given" on its own.
+
+- **A `[[package]]` block with no `version` is refused**
+  (`LockError::VersionlessPackage`) instead of being read with an empty version.
+  A resolved package is an identity of name *and* version, and an empty version
+  is a value no line declared — `freshness` compared it with the registry's
+  latest and the audit compared it with the approval's pin, so both decided on
+  it. This is the same refusal `NamelessPackage` already was, for the other half
+  of the identity. Cargo writes `version` for every locked package, so only a
+  hand-edited or truncated lockfile reaches it.
+- **`lock::Resolved`, `vendor::Missing` and `vendor::Report` are read through
+  accessors.** `#[non_exhaustive]` blocks construction outside the crate, not
+  mutation of a value a caller holds; these three are the readers' own output.
+  `Report::missing()` returns a slice and `Report::is_complete()` is the verdict,
+  so a caller can no longer empty the list that decides the exit code.
+- **One `subject_path` resolves every command's target.** Six call sites each
+  substituted `.` for an absent path; a command given no path audits the
+  repository the operator is standing in, and that is now one named fact.
+- **A verdict that arrives without a repository is refused.** `check` printed its
+  receipt against `.` when the collection reached a verdict without a root,
+  which is the exact defect `check_cli` pins — a receipt for a repository nobody
+  asked about.
+- **No command and an unknown command are distinct refusals**, each with its own
+  message and the usage block, instead of an empty command name.
+- **The debugger surface reads the `lgwks_std` manifest's own vocabulary**: an
+  absent `default`/`trace` assignment is `None` and answers "does this list
+  include that entry" for itself, rather than being read as an empty list.
+- **A registry that publishes no version is `None`**, not an empty string, so
+  `stale` is decided only between two versions crates.io and the lock both named.
+- **`serde_json_number` keeps counts; `schema_number` renders the register's
+  `u32` version.** The version went through a widening conversion whose failure
+  was reported as `usize::MAX` — a register version this binary could not name.
+- **`scan`'s excluded-directory test reads the directory's own name.** A name
+  that is not UTF-8 was read as empty, and an empty name matches no excluded
+  directory only by inventing a name the filesystem does not carry.
+
+### lgwks_deps — the seeded generators draw through one total generator
+
+The simulation suites substituted a value for every draw they could not make: a
+zero table length became `1`, a failed `u64`/`usize` conversion became index `0`,
+and a zero modulus became `0`. Each of those answered a case with a number the
+seed never chose, and one of them (`.max(1)` on an empty table) turned "no
+elements to draw" into an out-of-range read rather than a refusal.
+
+- **`Rng::pick` refuses an empty table** with `Option`, and **`Rng::pick_named`**
+  refuses it with a typed `EmptyTable` naming the table that was empty. The draw
+  is consumed before the table is inspected, so a seed's sequence no longer
+  depends on how long the table it drew from was.
+- **`sim_metadata_dimensions` uses the shared generator** instead of its own
+  splitmix64 copy: two index/draw implementations in one test binary is the
+  duplication the sweep exists to remove, and the suite's model — not the
+  generator — is what its assertions are about.
+- **Every generator in that suite is fallible** (`Outcome<T>`), so a draw the
+  fixture could not make reaches the test that owns the seed as that draw's own
+  refusal instead of as a value the generator invented.
+- **A truncation cut is a drawn eighth of the document**, not a drawn raw
+  offset: the family no longer has to convert a bound that a short document
+  could reduce to zero, and every cut is a strict prefix by construction.
+- **The register's `target` spelling is one named conversion** (`declared_scope`):
+  Cargo's absent target and the register's `target = ""` are two spellings of
+  one declaration, and the conversion between the two vocabularies was being
+  written out at five call sites.
+- Draws use `checked_rem`/`checked_div` rather than a masked modulus, which is
+  what `clippy::arithmetic_side_effects` and `clippy::integer_division` require;
+  the `max(1)` that made the old code read as total was the opposite.
+
+Behaviour is unchanged for every reachable case: every table the suites draw from
+is a non-empty constant or a slice whose emptiness the caller already tested.
+The new arms are what an emptied fixture table *means*, and each is reachable
+only by editing a fixture.
+### lgwks_std — the test sweep's own fixtures, held to the same contract (9-axis sweep)
+
+Every rust-guard finding in `crates/lgwks-std/tests/` is fixed at its cause. No
+library behaviour changed; the traces every seeded family folds differ, because
+the byte stream they draw from does.
+
+- **The seeded stream is finalised.** `seeded_sweep::next_seed` was an
+  unfinalised linear-congruential step, which has period `2**k` in its low `k`
+  bits: `next_byte` therefore repeated one 256-byte block for ever, and a 4 KiB
+  payload in the hex, LEB128 and UUID families was sixteen copies of it. It is
+  now `xorshift64*`, the standard remedy. Measured on this host: the old low byte
+  covered 160 of 256 values in 256 draws — the period exactly — while the
+  finalised one covers 249 of 256 in 1024 draws with chi-square 260.5 at 255
+  degrees of freedom (5% critical 293), and 1024 whole draws are 1024 distinct
+  words. Two new tests hold both facts.
+- **One lock-poison recovery per file.** The six `PoisonError::into_inner`
+  closures in the pool fixture's `Gate`/`Release` become one `guard()` that
+  takes the `LockResult` `Mutex::lock()` and `Condvar::wait()` both return, and
+  the file's own tests replace the `allow(dead_code)` that hid half of it.
+- **No fixture is silenced.** All seven `#![allow(dead_code)]` suppressions in
+  `tests/support/` are deleted and each fixture carries its own tests instead, so
+  no binary's unused half is hidden.
+- **A missing measurement is named.** `consumer_probe::MISSING_MEASUREMENT`
+  replaces an inline `u64::MAX`, and the shared-policy tiers now refuse a tier
+  whose resident-size figure is absent rather than reading it as a reported zero.
+- **Every draw is made in the width it is used in.** Widths were narrowed at
+  every site with `try_from(..).unwrap_or(..)`: an identifier's sixteen bytes are
+  drawn into an array rather than converted from a `Vec`, LEB128 group numbers
+  are counted in the width a shift amount takes, the measurement harness counts in
+  the width its paths take their arguments in, and the tenant weights, retry
+  attempts, set members, alphabet letters and calendar fields are values their own
+  tables or byte windows name. Each site's replacement is a total expression:
+  `as` is `as_conversions = forbid`, `From<usize>` for `u64` does not exist, and
+  a sentinel for a value is a value the fixture invented.
+- **A missing score is not a score of -1.0.** The evidence contract compares a
+  verdict's score through one helper that names a withdrawal, propagates the
+  checked scorer's own refusal with `?`, and reports a panicked prober as the
+  largest possible disagreement rather than as a count of zero.
+- **The deprecated lossy time endpoints are no longer called.** A test that has
+  to suppress `deprecated` to reach the code it checks is no longer evidence
+  about it; the refusal the lossy spellings warned about is now asserted against
+  the endpoints a caller migrates to.
+- Two cases asserted what their own generator could produce and then deny — a
+  hex payload rendering two spellings with no letter in it, and a document with
+  no trailing content being refused for having some. Each now draws or states the
+  case it means.
+
+### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
+
+`Supervisor` had no awaitable join, so a caller that wanted every task finished
+polled `reap()` in a sleep loop, and Tokio's 1 ms timer granularity charged each
+drain 1.3–1.6 ms that raw Tokio (awaiting `JoinSet::join_next`) never paid. That
+was the whole of the 3–5x p99 gap `bench/async` reported on its quiet rows.
+
+- **`Supervisor::wait_idle().await`** joins every task on the set's own wakeup,
+  cancels nothing, returns how many it joined, and leaves the supervisor usable.
+- **`spawn` at a full bound waits on the task set**, the semaphore or the
+  supervisor's token — whichever resolves first — instead of a timed retry. A
+  permit held by a process group still being cleaned up is rechecked every
+  100 ms, and a newly registered cleanup owner wakes the waiter.
+- `bench/async` drains through `wait_idle`; its output goes through
+  `lgwks_std::trace`.
+- **Supervised processes start through the std form of the engine's
+  `Command`** and are owned by a private `OwnedChild` that reaps with
+  `try_wait`, and kills and parks the child if dropped unreaped — so
+  `tokio::process::Command::spawn` stays banned with no exception in the crate.
+
+Measured on an Apple M5 Pro, `bench/async --rounds=15 --alloc-report`, load
+average 11.60, on the committed tree: facade/raw-Tokio p99 ratio 1.25x
+(quiet-async-bot), 1.00x (high-fanout), 1.14x (at-capacity), 1.07x
+(single-permit); p50 ratio 1.18x / 1.02x / 1.09x / 1.08x. Before, 4.87x on the
+quiet row. The `--tiers` ladder to 100,000 tasks ends at facade p99 104 ms
+against raw Tokio's 107 ms. Peak memory footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
+64 at a time, so it exercises batching and finishes in 10–12 s alone instead of
+83–116 s.
+
+### lgwks_bot — the supervisor's per-task cost, measured and cut (#269)
+
+Measured on an Apple M5 Pro with `bench/async`'s allocation attribution, 1,024
+tasks at bound 8, release: **`Supervisor`'s per-task allocations went from 15.33
+to 3.61** against a raw Tokio baseline's 2.02, and the facade's excess over that
+baseline from 13.31 to 1.59. The issue's ≤ 6 allocations/task target is met. Two
+changes, no public API change and no behaviour change:
+
+- **`CancellationToken`'s signal channel is built on first use.** `Inner` held a
+  `watch::Sender` constructed eagerly, so every token and every child token paid
+  for a channel that nothing awaited: `CancellationToken::new` cost 11 heap
+  allocations and `child_token` another 11. The `AtomicBool` is the authority
+  and a channel only *wakes* waiters, so the channel is a `OnceLock` built by the
+  first subscriber, which re-reads the flag after installing it. Both are now 1
+  allocation. Two regression tests cover the window a lazy channel opens — a
+  cancel that finds no channel, and a child cancelled before its own — because
+  every existing test either waits before the cancel or cancels after a wait has
+  already built one.
+- **`Supervisor::claim` no longer arms a 100 ms timer on an uncontended spawn.**
+  It raced the permit against the token through `timeout(100 ms)` inside
+  `run_until_cancelled`, which costs 13 allocations and a timer-wheel
+  registration, for a wait an uncontended spawn never takes. It now takes a free
+  permit and re-checks cancellation on it — the same decision, the same
+  cancellation-wins-the-race rule, and the contended path untouched.
+  `claim_now` now shares one non-counting `try_take`, so a full pool on the
+  backpressure door stays backpressure rather than becoming a refusal.
+
+`INV-BOT-12`, `-13` and `-31` are unchanged: the fast path keeps the cancel-first
+gate, the reap-before-admit order and the re-check on the permit, and neither the
+identity map nor the capped report buffer was touched.
+
+**The latency half of the same target is not met, and that is the finding.**
+Removing 76% of the allocations moved the paired p50/p99 ratios not at all:
+`quiet-async-bot` is 4.49x the raw baseline against 4.65x before, on the same
+harness. The remaining gap is work — the per-spawn reap, the identity map, the
+`TaskOutcome` the wrapper builds — not allocation. The full measurement, the item
+by item breakdown, the six-bound saturation curve, the in-flight tiers to
+1,048,576 concurrently admitted tasks and the overload/recovery run are in
+`bench/async/README.md`.
+
+### The saturation curve, the open-loop driver and the in-flight tiers (#269)
+
+`bench/async` gained an open-loop driver: offered rate as a parameter, each
+arrival's latency measured from its **intended** start rather than from when the
+generator reached it, and a HdrHistogram-style log-bucketed recorder implemented
+in the bench crate with no new published-crate edge. Latency is bucketed at
+1/256 relative error at every magnitude, so a 40 ns body and a 4 s stall are both
+representable; min, max and total are exact and samples past the ceiling are
+counted rather than folded in.
+
+Measured on an Apple M5 Pro (15 cores, 24 GB, macOS 27.0, rustc 1.99.0):
+
+- **A saturation curve at six in-flight bounds** — 64, 1,024, 10,000, 16,384,
+  100,000, 131,072 — with the knee declared on both `Supervisor` and raw Tokio.
+  **The two declare the same knee at every bound**, agreeing to within 0.5% on
+  achieved rate at five of six. The body cost is derived per bound so every
+  ceiling's declared capacity lands on one declared target; a constant body cost
+  put the wide ceilings above what an in-process generator can offer, and every
+  rung above the first then measured the generator's backlog rather than the
+  ceiling's.
+- **Past the knee `Supervisor` refuses rather than growing.** At 320,000
+  arrivals/s, a bound of 16,384 admitted **exactly 16,384** tasks, 100,000
+  admitted **exactly 100,000**, 131,072 admitted **exactly 131,072** — the
+  declared bound to the task, on both sides — refusing and counting 59% of the
+  offer, with the p99 of what was admitted still one service time.
+- **1,048,576 tasks concurrently admitted** and all completed, on both sides:
+  peak RSS **2,039 bytes per in-flight task** for the facade against the
+  baseline's 2,595, 2.14 GB resident for the process.
+- **Overload and recovery**: 30 s at twice the knee built a 229,554-arrival queue
+  and took the served p99 from 6.7 ms to 11.4 s with nothing refused and nothing
+  lost (offered = admitted = completed, gated); the facade drained in 0.023 ms
+  against 4.801 ms, and both sides were back inside their own baseline p99 at the
+  first recovery window, 500.7 ms and 505.1 ms.
+- **17 seeded simulation tests** for the driver's schedule arithmetic, all with a
+  trace-hash replay assertion, the ladder bracketing its knee at every declared
+  bound and body cost, both sides offered the same arrivals, the derived body
+  putting every ceiling at the declared target, and the knee budget separating
+  the regimes at 1x and 16x capacity.
+
+**The 1–2 vCPU / 1–2 GB VPS profile is NOT measured** and is stated as such in
+`bench/async/README.md` and `docs/production-readiness.md` §4.2. macOS exposes no
+cgroup, no `taskset`, no `taskpolicy` CPU set and no `cpulimit`; the closest
+runnable thing, `--workers=2`, produced knees identical to `--workers=15` because
+every body in the sweep is a timer, so a thread count is not a vCPU count and
+this workload would not separate them.
+
+### Acceptance evidence is now executable (#271)
+
+Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
+the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
+previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
+those tests through one anchored nextest filter and records each row's outcome
+in a SQLite database under the state directory, one row per revision, row, test,
+platform and feature set.
+
+The receipt can lower a row's claimed state and never raise one, so a green run
+cannot promote `present` to `exercised`, and it exits non-zero when a named test
+is absent, failing, or a row claims more than the run shows. The one promotion,
+`accepted`, requires the receipt's revision to be the head being rendered. The
+spec's per-row table is rendered from the database for one exact revision between
+`<!-- acceptance-table: start -->` markers, `--check` fails when the committed
+table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
+`--test` runs the generator's own fifteen regression cases. No new dependency:
+the database is Python's standard-library `sqlite3`.
+
+CI builds the receipt from what the suite already ran. The `ci` nextest profile
+writes a JUnit report per shard, and a job with no Rust toolchain merges the four
+with `--from-junit` in about 0.2 s, rather than executing the 215 named tests a
+second time.
+
+Every row now also answers to its own id in a test name: 15 new row-addressed
+tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
+`crates/lgwks-bot/tests/it/sim_t_rows.rs`, so
+`cargo nextest list --workspace -E 'test(/_t07$/)'` says which tests address a
+row without reading the map. Six of them are seeded sweeps replay-checked against
+their trace hash. They are new tests rather than renames precisely so that every
+existing citation of an existing test keeps resolving. No crate's public API
+changed.
+
+### lgwks_ast — the parse had no time bound, and the walk was quadratic (#277)
+
+Two bounds the crate already claimed, and the numbers behind them.
+
+- **The validation walk is linear now, and was not.** `inspect_ast` and
+  `diagnostic::diagnostics` reached each child through
+  `ast_grep_core::Node::child(i)` by index, which is `O(i)` on a node whose
+  visible children are not its structural children — exactly what a
+  recovery-heavy parse produces. Measured on Rust source of unbalanced
+  delimiters: 16 385 nodes wide and 2 deep spent **1.39 s in the walk against
+  1.06 ms in the parser**, and doubling the width quadrupled the walk, inside
+  `try_parse`. At the crate's 2 MiB ceiling that is hours of CPU for one file.
+  Both walks now drive a tree-sitter cursor, whose only retained state is its
+  own ancestor stack: **40 ns per node on the same source, at every width from
+  2 KiB to 2 MiB**. No `tree-sitter` edge is authored and no `tree-sitter` type
+  is named; the cursor is reached through the node the walk already holds.
+- **`MAX_AST_DEPTH` (512), with `ParseError::AstTooDeep`.** A source of `(((…` is
+  a few bytes per nesting level, so the byte and node ceilings admit a tree
+  hundreds of thousands of levels deep. A checked parse now refuses that, and
+  the public `inspect_ast` walk stays uncapped in depth on purpose: a caller
+  inspecting a malformed tree on purpose learns how deep it is rather than
+  reading back the ceiling.
+- **A deadline that stops tree-sitter mid-parse: NOT DONE.** It needs
+  `Parser::parse_with_options` and its progress callback, which
+  `ast-grep-core` 0.45 does not expose (`parse_lang` builds the `Parser`
+  internally). Naming `tree-sitter` directly is the only route, and #277
+  reserves that for the Director's word. Nothing here fakes it with a thread
+  that cannot be stopped.
+- **Measured, per grammar, in `bench/README.md` and
+  `bench/ast-budget.tsv`** (224 rows): throughput p50/p99 and peak RSS at the
+  2 MiB ceiling on representative and adversarial input, the share of a checked
+  parse spent in the validation walk, and p99 plus peak RSS for a bounded
+  fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced by
+  `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`. Three
+  findings from it:
+  - **The documented memory ceiling is 723 MiB resident** for one parse of a
+    2 MiB file with the Ruby grammar, against a 2.1 MiB process floor; the
+    cheapest grammar at the same size is `solidity` at 100 MiB, so a caller
+    cannot size a parser from the input alone.
+  - **The parser, not the walk, is the unbounded work on hostile input.** The
+    validation walk is 10–15 ms on the three worst adversarial rows and the parse
+    is 25–97 seconds — 256 KiB of nested braces takes the Dart grammar
+    **97.5 seconds**, and at the 2 MiB ceiling it did not finish in 120 s. This
+    is precisely what the missing deadline would bound and cannot be bounded from
+    inside this crate.
+  - **Peak RSS is flat in the concurrency level** — 195 to 198 MiB for `rust`
+    across 100 to 100 000 concurrent 64 KiB parses — because the per-parse bound
+    is what makes a fleet of them bounded.
+- **The markdown grammar no longer aborts the process.** It did:
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`, so `"- "` repeated 255 times
+  (510 bytes) ended the process with `SIGABRT` rather than returning anything —
+  reachable from a hostile PR that adds a nested list to a README. The grammar
+  arrives compiled through `ast-grep-language`, so the crate cannot patch the
+  scanner; it refuses the source before the scanner sees it.
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and the new
+  `ParseError::ContainerNestingTooDeep` apply
+  `lgwks_ast::markdown_containers` on the markdown path only, in one `O(bytes)`
+  pass with `O(1)` state. The bound is measured, not guessed: seventeen
+  container shapes were bisected from a child process, and **every shape that
+  aborts does so at 255 open containers** — 255 repetitions of `- `, 128 of
+  `> - `, 85 of `>>> `, and the same 255 for indentation-nested lists, fenced
+  and indented code inside quotes. Three shapes never abort, because markdown
+  does not nest blockquotes, ordered lists or tab runs by indentation. The
+  count over-estimates where indentation and markers both carry depth, so 64
+  cannot be 255: a margin of about 4x, on the safe side. `tests/it/hostile.rs`
+  proves it from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes, 1 065
+  children, zero `SIGABRT`. An exhaustive sweep of all seventeen shapes through
+  every depth from 1 to 512 (8 704 pairs) also exits cleanly.
+  Residual, stated rather than hidden: the guard is on the **checked** parse.
+  `parse` and `parse_with` return a `Parsed` rather than a `Result`, so a refusal
+  has nowhere to go there, and their documentation now says so.
+- Two test modules: `tests/it/hostile.rs` (four adversarial generators per
+  compiled grammar, every answer typed or a tree inside the bounds) and
+  `tests/it/sim_parse_bounds.rs` (96 seeds per test over four generated shapes,
+  same seed same trace hash, the shape-to-arm map pinned). Both run under a
+  nextest `slow-timeout` with `terminate-after`, because they exist to catch a
+  walk that stops making progress.
+
+Order changes with the traversal and is additive to the API: nodes arrive in
+source order rather than reverse-sibling order, so the node cap's `limit + 1`
+witness is the earliest node rather than the last. Every published guarantee
+survives it — `AstMetrics` folds order-independently, retained diagnostics are
+the earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before being
+returned — and `diagnostics` sorts its own output. `try_parse` keeps its
+signature.
+
+### Tests: the entropy replay simulation no longer folds drawn bytes (#276)
+
+- `sim_random_error`'s replay trace folded whether each draw came back
+  entirely equal to the sentinel byte. A one-byte draw from a working source
+  does that one time in 256, so the same seed produced two different traces
+  about 3% of runs, and `untouched_draws == 0` failed about 1.6% of runs (PR
+  #302, run 37355259369). The trace now folds lengths only, a draw is
+  classified untouched only from eight bytes up (`2^-64` by chance), and
+  `the_trace_folds_no_drawn_byte` pins both without entropy. 300 runs of the
+  two tests: 0 failures.
+
 ### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
 
 The two items #286 and #289 left open on the bounded blocking pool. Both are
@@ -197,6 +1402,770 @@ additive: no signature changed and no existing behaviour did.
   CPU (212.6 user, 253.8 system), peak RSS 71.7 MB, before; 46.35 s wall and
   380 s CPU (221.1 user, 158.5 system), peak RSS 65.6 MB, after, with the
   machine more loaded for the second run.
+- The `gpui-windows` lane builds its fixture into the workspace `target` with
+  `--target-dir target`. The fixture is its own workspace, so it built into a
+  directory the CI cache never saved and recompiled the GPUI stack on every
+  run (3 min 03 s, 134 crates, the run's critical path at 242 s). The CI cache
+  step takes a new key so the first `main` run saves those artifacts.
+- The `test` profile emits line tables instead of full debuginfo
+  (`debug = "line-tables-only"`). Backtraces still name function, file and
+  line. Each `Tests (lgwks-bot full)` shard spent 152 s of a 233 s job compiling
+  and linking on a full dependency-cache hit, and the four shards are the run's
+  critical path. CI sets the same value as `CARGO_PROFILE_TEST_DEBUG`, because
+  Swatinem/rust-cache ignores `[profile]` when it hashes manifests: without
+  it the restore stayed a full match on the old key and nothing was saved.
+
+### lgwks_ast — `parse_budget`: a column with no measurement prints `-`
+
+The measurement rig converted its own numbers with `unwrap_or` defaults, so a row
+that never reached the parser printed a rate of zero. A rate over nothing is not
+a rate.
+
+- **`ratio` returns `Option<u128>`** and `integer_division` is forbidden
+  workspace-wide, so the checked division's `None` *is* the answer: a zero
+  denominator is a shape the crate refused before the parser ran. A rate column
+  with no measurement prints `-`, and the row's `outcome` column names the
+  refusal beside it. The refused markdown rows now read
+  `… 0 0 0 0 172375 172375 - - 380194 380194 - - 0 0 container-nesting-too-deep`
+  where they used to read four zeros that could be mistaken for measurements.
+- **`Measured::bytes` and `TierRow::bytes` are `u128`**, so a rate divides without
+  widening a `usize` at every column, and `tier_line`'s throughput is
+  `u128::from(level) * bytes` rather than a narrowing conversion of the level.
+- **`percentile` refuses an empty sample list**, which is what a row with no
+  timed round is; `measure` and `measure_tier` refuse a run whose rounds measured
+  nothing rather than reporting `unmeasured` in the outcome column.
+- **`levels_for` refuses a shape with no nesting fragment** rather than measuring
+  zero levels, and `--tier 0` is refused with the byte budgets, because a tier of
+  zero parses admits no worker and prints a percentile of nothing.
+- **A tier worker returns its own `Result`**, so a refusal inside a worker names
+  the shortfall instead of reporting a row over fewer parses than its level.
+
+Verified by running the shipped example: `--grammar rust --shape nested --tier 100
+--threads 4` prints a tier row (p50 6.03 ms, p99 10.22 ms, max 10.79 ms, 100/100
+admitted), `--grammar markdown --shape nested` prints the `-` columns above, and
+`--tier 0`, `--bytes 0` and `--grammar cobol` each refuse by name.
+
+### lgwks_macros — the nine-axis sweep: no stand-in for a value that is not there
+
+Every `unwrap_or`/`unwrap_or_else`/`unwrap_or_default` in `lgwks_macros` read a
+missing value as a plausible one. Each is now either the thing itself or a typed
+refusal, and the fourteen spellings of "the tokens after this keyword" are one
+shared reading.
+
+- **`lines::after(tokens, count)`** is the one place that reads "the tokens after
+  the word the caller already matched", so an `each` whose clause has no items
+  cannot answer differently from a `for` whose clause has none.
+- **`split_at_keyword`** and **`pattern_and_items`** are the one search for
+  `<keyword> in <items>`, shared by `each`, `for` and `retry`; `pattern_and_items`
+  owns the empty-pattern and empty-items refusals both forms reported separately.
+- **`run_call` returns the tokens left after the call** instead of a count, so
+  `rewrite` and `run_only` carry the tail rather than re-deriving an index, and
+  `run_only`'s "the call is the whole line" test is `remaining.is_empty()`.
+- **`Line::keyword` returns the `&Ident`** and `Line::starts_with` answers the
+  question each emitter was really asking, which removes the empty keyword string
+  three call sites defaulted to — and the per-line `String` allocation with it.
+- **`Line::finish` returns `Option<Line>`**: a line with no tokens is not a line
+  whose position and span are invented from `Span::call_site`.
+- **`refuse` searches the literal whole.** Every machine-path prefix opens with
+  `/`, `~` or `C`, none of which is a literal's own delimiter, so stripping `r`,
+  `#` and the quotes could never stand between a prefix and the path it starts.
+- **A duration literal with no unit, and a number with no decimal point, are two
+  readings and not a fallback**: both arms are stated where the split is made.
+- **`line_literal` saturates**, so a source longer than `u32::MAX` lines keeps the
+  last line there is instead of wrapping onto another line's number.
+- **Two split points were off by one**, and the crate's own tests could not see
+  either: `split_let` bound `let x =` as the pattern of a binding, and `run_call`
+  skipped the callee path twice when it reported the tokens left after the call.
+  Both reached `lgwks_bot`'s `script!` users as un-compilable expansions, which is
+  how they were found. `emit::words::tests::an_expansion_with_a_run_call_is_still_rust`
+  pins them: it expands every shape a `run` call reaches — the whole line, a
+  `let` binding, a binding inside `together:`, a `::` callee with tokens after the
+  call — and asserts the expansion re-parses as Rust, that the tokens after a call
+  survive, and that a `let` binds its name. Reintroducing either defect fails it.
+
+Behaviour is unchanged. All 10 `lgwks_macros` tests pass, including the property
+suite that renders trees, reads them back and asserts a line moved off its column
+is refused at that line, and `lgwks_bot`'s 192 `script!` tests pass against the
+rewritten emitter.
+### lgwks_bot — `sim_observe_refresh`: a schedule cell the run did not draw is `None`
+
+The observe/refresh simulation had 60 places where a failed width conversion was
+folded onto a number, and four where a *missing* schedule cell became a real one.
+The largest of the four was a tenant or pace window the schedule does not
+declare: it arrived as a healthy plan, a fast window carrying the value `1`, a
+healthy fallback tenant, or a domain id borrowed from another tenant's row — and
+a `domain()` is precisely what a caller triaging two forced refreshes reads, so
+that last one would have blamed the wrong source.
+
+- **`TenantSchedule::tenant` and `PacePlan::at` return `Option`.** Every caller
+  propagates, and the assertions that already compared a report against the
+  schedule now fail on a cell that does not exist rather than passing against a
+  stand-in.
+- **`domain_of` names the unmapped pair.** The wrap into a row is a mask over a
+  width the table declares (`1 << DOMAIN_ROW_BITS`), so the mask and the row
+  cannot drift apart, and a pair outside the table is `test::unmapped`.
+- The remaining conversions are each loop or draw drawn in the width its consumer
+  already uses, so there is no conversion left to stand in for.
+
+(9-axis sweep)
+
+### lgwks_bot — the journal and inspection test fixtures are read, not re-spelled
+
+Four test files each carried their own copy of an identity the shared fixture
+already owns, and three carried a bounded wait whose "no deadline" arm turned
+the bound off.
+
+- **The run identity and the ladder are read, not re-spelled.**
+  `effect_journal.rs` built its own `EffectKey` from its own copies of the run,
+  action, environment, flow and digest constants and walked the ladder in its own
+  loop; `effect_identity.rs` copied the same five constants. Both now read
+  `tests/support/journal.rs`, and the admit-and-prepare walk takes its rungs from
+  the shared `ladder`, so a second spelling cannot fence a different world under
+  what looks like the same key (INV-BOT-58).
+- **`authority.rs`'s doubles open through `tests/support/poll.rs`.** A scripted
+  source now admits through the shared `admit_poll` helper and counts there, and
+  a source that runs past its own script refuses with a typed error instead of
+  answering a value the test never scripted.
+- **`inspect_contract.rs` bounds its waits by elapsed time.** Three waits
+  compared against `now + PATIENCE`, and the arm where that addition is
+  unrepresentable returned `now` — which is an unbounded wait, the opposite of
+  what the helper is for. The budget is now an elapsed comparison, which cannot
+  fail to represent "longer than this".
+- **`registry.rs` fails when there is no refusal to inspect.** A hostile
+  identifier that *was* accepted rendered as the empty string and passed an
+  assertion about newlines for free; it is now the failure the test means.
+- `process_ownership.rs` refuses a host whose clock reads before 1970 rather
+  than naming its scratch directory with a stand-in zero, which would have
+  folded that host into the namespace of every epoch-aligned run; `rt_runtime_stack.rs`'s
+  frame padding comes from a conversion that cannot fail; and
+  `inspect_support/mod.rs`'s `allow(dead_code)` is gone, because every fixture in
+  it is reachable from the one integration binary (#272).
+
+### lgwks_bot — the measurement examples: no sentinel stands in for a reading
+
+Every `unwrap_or` family call across the ten example harnesses was a fabricated
+number, a fabricated identity, or a fabricated error, and each is now either the
+reading the operation produced or a typed refusal. The published numbers change
+in three places, all of them cases where the old output claimed a measurement
+nobody made.
+
+- **No example substitutes a default for a missing value.** A percentile over an
+  empty sample is `null` (INV-BOT-142's spelling of *not measured*) rather than
+  `0`, a run whose elapsed window is below the clock's own resolution reports no
+  rate rather than a fabricated maximum, `fsyncs/records` is `none` when nothing
+  was staged, and `peak_rss_kib` is `null` off Linux instead of `0` — a printed
+  zero beside a memory field reads as a process that used none.
+- **One percentile definition.** `inspect_scale` and `measure_overhead` carried
+  private percentile functions beside the shared instrument at
+  `examples/support/measure.rs` that the other three harnesses use; both now
+  report through it, so every harness's p50/p95/p99 means the same thing.
+  `measure_overhead`'s two JSON lines become that instrument's line format, and
+  `inspect_scale`'s tier line carries the same `n=`/`max=` fields the others do.
+- **One scratch directory.** `examples/support/scratch.rs` owns the random-named
+  temp root four harnesses built by hand and removed only on the success path;
+  a refusal half way through a sweep now leaves nothing behind for the next run
+  to inherit (INV-BOT-116). One recovery from a poisoned `Mutex` lives at
+  `tests/support/lock.rs` and is included by path from the tests and the
+  examples, so no harness carries a second opinion about what a panic leaves.
+- **An unknown mode is a refusal.** `inspect_scale` folded any unrecognised
+  argument into the tier sweep, so a mistyped mode measured the wrong thing
+  silently; it now names the two modes and refuses the rest. `review_pr_bench`
+  refuses a tier of zero, whose percentiles would have been readings of an
+  empty sample, and its usage and diagnostic lines go through locked handles
+  whose write errors are handled.
+- `script_tenants` and `compare_orchestration` spell their retry ceiling inside
+  the loop instead of carrying an `Option` whose `None` arm stood in for a
+  refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
+  the two `unwrap()`s it used to carry so the audit record demonstrates one
+  claim rather than two.
+### lgwks_bot — `spec`'s test doubles are declared once, and the sleep is no longer suppressed (nine-axis sweep)
+
+- **`hold_pool_thread_for` parks instead of sleeping.** It carried an
+  `#[expect(clippy::disallowed_methods)]` because `rt::time::sleep` has no
+  timer driver on `lgwks_std::task::block_on` and `std::thread::sleep` is banned.
+  `std::thread::park_timeout` is the substitution the codebook names for the
+  banned call, so the suppression is gone. The one thing `sleep` promised and
+  `park_timeout` does not is that it does not return early; nothing unparks that
+  thread, so a premature return can only shorten the overlap, never remove it.
+- **One action double instead of four.** `Noop`, `Counting`, `CountAction` and
+  `FakeAction` were four `Execute` impls differing only in whether they owned a
+  counter — and, between the two counters, in a memory ordering no test reads.
+  `Action { counter: Option<Arc<AtomicUsize>> }` is one impl; `Action::new()` is
+  the no-op and `Action::counting(..)` the counter.
+- **One `NetSource` instead of three**, carrying the value it resolves with, and
+  one `FakeSource` instead of two. A double that appears twice can differ in its
+  cap as well as its value, and the cap is what those tests are about.
+
+### docs — citations re-anchored after the ranker and predicate walks moved lines
+
+`check-doc-citations.py` pins the *text* of every line a guide cites, so code
+added above a cited line moves it. 24 citations across `general-bot-fold.md`,
+`guides/lgwks-bot/resolution.md` and `guides/lgwks-bot/sessions.md` were
+re-anchored to the line that now holds the pinned text; 11 were dropped by the
+tool as duplicates of an anchor already recorded. No citation changed what it
+points at.
+
+### lgwks_bot — one score comparator, one predicate walk, one field under test (nine-axis sweep)
+
+- **`session::by_score_descending` is the crate's one ranker.** The lexicon and
+  the semantic tier each sorted with `partial_cmp(..).unwrap_or(Ordering::Equal)`;
+  they now share one comparator, because two rankers that disagree put the order
+  in the tier rather than the score, and a NaN on either side sorts *last* rather
+  than winning or tying.
+- **`comparison_operands` is the one list of comparisons.** `collect_predicate_
+  variables` and `validate_predicate` each restated the six `Eq`/`Ne`/`Lt`/`Le`/
+  `Gt`/`Ge` variants; a new comparison would have been collected by one and
+  skipped by the other.
+- **`semantic`'s tests share the field they ask about** (`the_field`,
+  `resolve_with`, `near_tie_vectors`). The option *texts* are part of each
+  premise — a misspelled one is measuring a field the lexicon resolves
+  differently, and that is invisible in a diff full of vectors — and two tests
+  built the identical `0.73`/`0.71` vectors by hand.
+- **`integer_bytes` counts digits in `usize`, never narrowing.** It walked
+  `checked_ilog10`'s `u32` into a `usize` width through a fallback that put a
+  number in a byte count; it now walks the magnitude's base-ten thresholds in
+  `u64` and counts in `usize`, so nothing is converted.
+- **`prompt_bytes` saturates.** It returned `None` on overflow and the caller read
+  that through `unwrap_or(usize::MAX)`; it now saturates in its own arithmetic and
+  the caller's ceiling check answers a saturated width without being told which it
+  was.
+- **`FlowBounds::effective_resources` names the absent case.** A document that
+  declares no byte ceilings is held to `SHIPPED_LIMITS` — the case the field's own
+  documentation describes — instead of `unwrap_or_default()`, which said nothing
+  about which of the two limit sets a request-less document is held to.
+
+### lgwks_bot — inspect and frontier stop substituting values for answers (nine-axis sweep)
+
+- **`macro_head` splits once.** `split(..).next().unwrap_or("")` cannot fail —
+  `split` always yields a piece — and a headless invocation was reported as the
+  empty name, which matches no rule. It is now `split_once`, whose two answers
+  are both real: text with no terminator *is* its own head.
+- **`bounded_preview` refuses a range that names nothing.** A byte range outside
+  the source, or across a non-boundary, has no text to preview; that is the empty
+  preview *with* the truncated flag set, so a caller cannot read it as a node with
+  genuinely empty text.
+- **`inspect`'s parse-timeout receipt saturates instead of defaulting.** It
+  narrowed `Duration::as_millis` with `unwrap_or(u64::MAX)`, so a deadline the
+  parser never reached would have been reported as half a million years. It now
+  splits the duration through its two infallible projections and saturates in
+  arithmetic. It lives beside its only caller rather than beside
+  `duration_to_nanos` because the `inspect` feature is what uses it, and a
+  clock helper gated on nothing is dead code in every other build.
+- **`Frontier::decide` names its two answers.** No saturated constraint is
+  `Admit`; a saturated one carries the fold's latest deferral.
+- **Two frontier tests refuse rather than default**: a selection round trip with
+  no host selected, and an origin index whose `checked_rem` cannot fail.
+
+### lgwks_bot — the lexicon ranks a score it cannot order last, not as a tie (nine-axis sweep)
+
+`score_all` ranked candidates with `partial_cmp(..).unwrap_or(Ordering::Equal)`.
+
+- **An unorderable score now sorts last.** `partial_cmp` returns `None` for
+  exactly one pair of `f64` values — a NaN on either side — and the blend above
+  cannot produce one from two clamped unit scores and non-negative weights, so
+  the arm is unreachable today. `total_cmp` alone would have ranked a NaN
+  *first*, handing the win to the one candidate that measured nothing; treating
+  it as a tie left an unorderable entry in the list `decide` then computed its
+  lead over.
+- **`INPUT_BOUND_CHARS`** is the input bound at the width the policy digest
+  carries, replacing `u32::try_from(MAX_UTTERANCE_CHARS).unwrap_or(u32::MAX)` —
+  a narrowing conversion whose failure arm would have put a bound in the digest
+  that the resolver does not apply. `the_digest_input_bound_is_the_shipped_bound`
+  asserts the two spellings are one number; run as a mutant (512 → 256) it fails.
+
+### lgwks_bot — a lost publication response and a contradicted one are one match (nine-axis sweep)
+
+`review.rs` selected between `Reconcile::None` twice — once through a guard that
+proved `created_id` was `Some` and then read it through
+`created_id.unwrap_or_default()`. The two arms are now one match on the id
+itself, so the value that decides the outcome is the value the arms read.
+
+### lgwks_bot — `retry`'s contract tests start from one fixture (nine-axis sweep)
+
+Eight of `retry`'s tests wrote out the same `RetryFacts::new(...)` preamble by
+hand, and two of them were byte-identical. They differ from each other in
+exactly one clause — the contract, its retention window, or its late-arrival
+behaviour — and that is the property the assertions rest on: a refusal is only
+attributable if nothing else moved.
+
+- **`unresolved()` is that fixture**: a live authority over an attempt that may
+  have landed, zero attempts used, zero elapsed, the shared payload. Every
+  contract test now changes one clause on top of it, so a second difference
+  cannot creep in unnoticed.
+- `permissive(class)` is unchanged and still the fixture for the tests that move
+  the class.
+
+No behaviour change.
+
+### lgwks_bot — the broker's dispatch tests build their subject once (nine-axis sweep)
+
+Four of `broker`'s tests each assembled the same five lines — a broker, a
+registered environment, the key carrying its generation, a journal, and an
+admitted attempt. Two of them were byte-identical, which is how one of them
+drifts: a test that assembles its own may admit one key and authorize another,
+and every assertion after that is about a situation the module cannot produce.
+
+- **`AdmittedEnvironment` is now the fixture** those four tests share, and all
+  four build from it. The generation the broker authorizes, the key that carries
+  it, and the admission already on the journal are one value now, so they cannot
+  disagree.
+- **`Broker::environments` declares its bound.** One entry per environment the
+  host created, added by `register` or `adopt`, never refilled on its own, and
+  `close` marks an entry closed rather than removing it — so a warrant for a
+  closed environment is refused as `Closed` rather than looking like one for an
+  environment the broker never heard of.
+
+No behaviour change.
+
+### lgwks_bot — the logical clock saturates in its own arithmetic (nine-axis sweep)
+
+`Clock::virtual_at` narrows an origin `Duration` into the `u64` nanosecond
+counter every budget, deadline and snapshot is derived from, and it did that
+through a `try_from` whose failure arm substituted `u64::MAX`.
+
+- **`duration_to_nanos` splits the duration** into `as_secs` and
+  `subsec_nanos` — two infallible projections — and does the scaling with
+  `saturating_mul`/`saturating_add`. The ceiling is now produced by the
+  arithmetic rather than by a fallback value standing in for a conversion that
+  failed, and the function cannot return an error to ignore.
+- **`Inner::origin` names its two cases.** A wall clock carries the instant it
+  was placed at; a virtual clock has none, and `Instant::now()` is that clock's
+  only honest origin, not a substitute for a missing one.
+- **The saturation identity is now measured, not asserted.** A seeded sweep over
+  the whole representable range — zero, sub-second, whole-second, one second
+  below the ceiling, at the ceiling, and `Duration::MAX` — pins
+  `virtual_at(origin).now() == min(origin, ceiling)` and the same identity for
+  `advance`. Two mutants were run against it: dropping the sub-second term and
+  truncating instead of saturating are each caught by
+  `the_nanos_conversion_keeps_subsecond_precision_and_stops_at_the_ceiling` and
+  `no_swept_origin_reads_outside_the_representable_range`.
+- `sim_clock`'s receipt carries `Duration` rather than a `u64` nanosecond count,
+  because narrowing one needs a fallback and a fallback makes a wrapped reading
+  and an unstarted clock the same number in the receipt.
+
+Behaviour is unchanged: the old fallback and the new saturation both report
+`u64::MAX` nanoseconds for an origin past the ceiling.
+
+### lgwks_bot — the four verb traits declare return-position `impl Future` (nine-axis sweep)
+
+The crate carried exactly one lint suppression: a crate-level
+`#![allow(async_fn_in_trait)]` whose reason was that the verbs must stay
+non-`Send`. `rust-guard` refuses every `allow`/`expect`, crate root included,
+and a suppression is a rule that does not exist, so the shape moved instead of
+the attribute.
+
+- **`Observe::poll`, `Execute::execute_action` and `Query::query` are declared
+  `fn … -> impl Future<Output = Result<_, BotError>>`** instead of `async fn`.
+  A domain still writes `async fn` in its impl — the erased
+  [`BoxFuture`] boundary is unchanged — so this is a declaration change, not an
+  authoring change, and no `Send` bound is introduced: the future stays local to
+  the driving thread, which is what `Bot::tick` and the `lgwks_std::task`
+  driver are built for.
+- **`Execute`'s doc comment was a truncated duplicate** and had swallowed
+  `EffectLifetime`'s own documentation, so the enum's rustdoc read as a run-on
+  of the trait's first paragraph. Each item carries its own text again.
+- `BoxFuture`'s doc no longer claims the traits are "native `async fn`".
+
+### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
+
+`Supervisor` had no awaitable join, so a caller that wanted every task finished
+polled `reap()` in a sleep loop, and Tokio's 1 ms timer granularity charged each
+drain 1.3–1.6 ms that raw Tokio (awaiting `JoinSet::join_next`) never paid. That
+was the whole of the 3–5x p99 gap `bench/async` reported on its quiet rows.
+
+- **`Supervisor::wait_idle().await`** joins every task on the set's own wakeup,
+  cancels nothing, returns how many it joined, and leaves the supervisor usable.
+- **`spawn` at a full bound waits on the task set**, the semaphore or the
+  supervisor's token — whichever resolves first — instead of a timed retry. A
+  permit held by a process group still being cleaned up is rechecked every
+  100 ms, and a newly registered cleanup owner wakes the waiter.
+- `bench/async` drains through `wait_idle`; its output goes through
+  `lgwks_std::trace`.
+- **Supervised processes start through the std form of the engine's
+  `Command`** and are owned by a private `OwnedChild` that reaps with
+  `try_wait`, and kills and parks the child if dropped unreaped — so
+  `tokio::process::Command::spawn` stays banned with no exception in the crate.
+
+Measured on an Apple M5 Pro, `bench/async --rounds=15 --alloc-report`, load
+average 11.60, on the committed tree: facade/raw-Tokio p99 ratio 1.25x
+(quiet-async-bot), 1.00x (high-fanout), 1.14x (at-capacity), 1.07x
+(single-permit); p50 ratio 1.18x / 1.02x / 1.09x / 1.08x. Before, 4.87x on the
+quiet row. The `--tiers` ladder to 100,000 tasks ends at facade p99 104 ms
+against raw Tokio's 107 ms. Peak memory footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
+64 at a time, so it exercises batching and finishes in 10–12 s alone instead of
+83–116 s.
+
+### lgwks_bot — the supervisor's per-task cost, measured and cut (#269)
+
+Measured on an Apple M5 Pro with `bench/async`'s allocation attribution, 1,024
+tasks at bound 8, release: **`Supervisor`'s per-task allocations went from 15.33
+to 3.61** against a raw Tokio baseline's 2.02, and the facade's excess over that
+baseline from 13.31 to 1.59. The issue's ≤ 6 allocations/task target is met. Two
+changes, no public API change and no behaviour change:
+
+- **`CancellationToken`'s signal channel is built on first use.** `Inner` held a
+  `watch::Sender` constructed eagerly, so every token and every child token paid
+  for a channel that nothing awaited: `CancellationToken::new` cost 11 heap
+  allocations and `child_token` another 11. The `AtomicBool` is the authority
+  and a channel only *wakes* waiters, so the channel is a `OnceLock` built by the
+  first subscriber, which re-reads the flag after installing it. Both are now 1
+  allocation. Two regression tests cover the window a lazy channel opens — a
+  cancel that finds no channel, and a child cancelled before its own — because
+  every existing test either waits before the cancel or cancels after a wait has
+  already built one.
+- **`Supervisor::claim` no longer arms a 100 ms timer on an uncontended spawn.**
+  It raced the permit against the token through `timeout(100 ms)` inside
+  `run_until_cancelled`, which costs 13 allocations and a timer-wheel
+  registration, for a wait an uncontended spawn never takes. It now takes a free
+  permit and re-checks cancellation on it — the same decision, the same
+  cancellation-wins-the-race rule, and the contended path untouched.
+  `claim_now` now shares one non-counting `try_take`, so a full pool on the
+  backpressure door stays backpressure rather than becoming a refusal.
+
+`INV-BOT-12`, `-13` and `-31` are unchanged: the fast path keeps the cancel-first
+gate, the reap-before-admit order and the re-check on the permit, and neither the
+identity map nor the capped report buffer was touched.
+
+**The latency half of the same target is not met, and that is the finding.**
+Removing 76% of the allocations moved the paired p50/p99 ratios not at all:
+`quiet-async-bot` is 4.49x the raw baseline against 4.65x before, on the same
+harness. The remaining gap is work — the per-spawn reap, the identity map, the
+`TaskOutcome` the wrapper builds — not allocation. The full measurement, the item
+by item breakdown, the six-bound saturation curve, the in-flight tiers to
+1,048,576 concurrently admitted tasks and the overload/recovery run are in
+`bench/async/README.md`.
+
+### The saturation curve, the open-loop driver and the in-flight tiers (#269)
+
+`bench/async` gained an open-loop driver: offered rate as a parameter, each
+arrival's latency measured from its **intended** start rather than from when the
+generator reached it, and a HdrHistogram-style log-bucketed recorder implemented
+in the bench crate with no new published-crate edge. Latency is bucketed at
+1/256 relative error at every magnitude, so a 40 ns body and a 4 s stall are both
+representable; min, max and total are exact and samples past the ceiling are
+counted rather than folded in.
+
+Measured on an Apple M5 Pro (15 cores, 24 GB, macOS 27.0, rustc 1.99.0):
+
+- **A saturation curve at six in-flight bounds** — 64, 1,024, 10,000, 16,384,
+  100,000, 131,072 — with the knee declared on both `Supervisor` and raw Tokio.
+  **The two declare the same knee at every bound**, agreeing to within 0.5% on
+  achieved rate at five of six. The body cost is derived per bound so every
+  ceiling's declared capacity lands on one declared target; a constant body cost
+  put the wide ceilings above what an in-process generator can offer, and every
+  rung above the first then measured the generator's backlog rather than the
+  ceiling's.
+- **Past the knee `Supervisor` refuses rather than growing.** At 320,000
+  arrivals/s, a bound of 16,384 admitted **exactly 16,384** tasks, 100,000
+  admitted **exactly 100,000**, 131,072 admitted **exactly 131,072** — the
+  declared bound to the task, on both sides — refusing and counting 59% of the
+  offer, with the p99 of what was admitted still one service time.
+- **1,048,576 tasks concurrently admitted** and all completed, on both sides:
+  peak RSS **2,039 bytes per in-flight task** for the facade against the
+  baseline's 2,595, 2.14 GB resident for the process.
+- **Overload and recovery**: 30 s at twice the knee built a 229,554-arrival queue
+  and took the served p99 from 6.7 ms to 11.4 s with nothing refused and nothing
+  lost (offered = admitted = completed, gated); the facade drained in 0.023 ms
+  against 4.801 ms, and both sides were back inside their own baseline p99 at the
+  first recovery window, 500.7 ms and 505.1 ms.
+- **17 seeded simulation tests** for the driver's schedule arithmetic, all with a
+  trace-hash replay assertion, the ladder bracketing its knee at every declared
+  bound and body cost, both sides offered the same arrivals, the derived body
+  putting every ceiling at the declared target, and the knee budget separating
+  the regimes at 1x and 16x capacity.
+
+**The 1–2 vCPU / 1–2 GB VPS profile is NOT measured** and is stated as such in
+`bench/async/README.md` and `docs/production-readiness.md` §4.2. macOS exposes no
+cgroup, no `taskset`, no `taskpolicy` CPU set and no `cpulimit`; the closest
+runnable thing, `--workers=2`, produced knees identical to `--workers=15` because
+every body in the sweep is a timer, so a thread count is not a vCPU count and
+this workload would not separate them.
+
+### Acceptance evidence is now executable (#271)
+
+Every T01–T36 falsifier row in `docs/orchestration-acceptance.spec.md` names
+the tests that address it, in `docs/acceptance/t-rows.toml`. That claim was
+previously unfalsifiable; `scripts/acceptance-receipts.py` now runs exactly
+those tests through one anchored nextest filter and records each row's outcome
+in a SQLite database under the state directory, one row per revision, row, test,
+platform and feature set.
+
+The receipt can lower a row's claimed state and never raise one, so a green run
+cannot promote `present` to `exercised`, and it exits non-zero when a named test
+is absent, failing, or a row claims more than the run shows. The one promotion,
+`accepted`, requires the receipt's revision to be the head being rendered. The
+spec's per-row table is rendered from the database for one exact revision between
+`<!-- acceptance-table: start -->` markers, `--check` fails when the committed
+table disagrees with it, `--export` writes one JSON artifact for a CI upload, and
+`--test` runs the generator's own fifteen regression cases. No new dependency:
+the database is Python's standard-library `sqlite3`.
+
+CI builds the receipt from what the suite already ran. The `ci` nextest profile
+writes a JUnit report per shard, and a job with no Rust toolchain merges the four
+with `--from-junit` in about 0.2 s, rather than executing the 215 named tests a
+second time.
+
+Every row now also answers to its own id in a test name: 15 new row-addressed
+tests across `crates/lgwks-bot/tests/it/t_rows.rs` and
+`crates/lgwks-bot/tests/it/sim_t_rows.rs`, so
+`cargo nextest list --workspace -E 'test(/_t07$/)'` says which tests address a
+row without reading the map. Six of them are seeded sweeps replay-checked against
+their trace hash. They are new tests rather than renames precisely so that every
+existing citation of an existing test keeps resolving. No crate's public API
+changed.
+
+### lgwks_ast — the parse had no time bound, and the walk was quadratic (#277)
+
+Two bounds the crate already claimed, and the numbers behind them.
+
+- **The validation walk is linear now, and was not.** `inspect_ast` and
+  `diagnostic::diagnostics` reached each child through
+  `ast_grep_core::Node::child(i)` by index, which is `O(i)` on a node whose
+  visible children are not its structural children — exactly what a
+  recovery-heavy parse produces. Measured on Rust source of unbalanced
+  delimiters: 16 385 nodes wide and 2 deep spent **1.39 s in the walk against
+  1.06 ms in the parser**, and doubling the width quadrupled the walk, inside
+  `try_parse`. At the crate's 2 MiB ceiling that is hours of CPU for one file.
+  Both walks now drive a tree-sitter cursor, whose only retained state is its
+  own ancestor stack: **40 ns per node on the same source, at every width from
+  2 KiB to 2 MiB**. No `tree-sitter` edge is authored and no `tree-sitter` type
+  is named; the cursor is reached through the node the walk already holds.
+- **`MAX_AST_DEPTH` (512), with `ParseError::AstTooDeep`.** A source of `(((…` is
+  a few bytes per nesting level, so the byte and node ceilings admit a tree
+  hundreds of thousands of levels deep. A checked parse now refuses that, and
+  the public `inspect_ast` walk stays uncapped in depth on purpose: a caller
+  inspecting a malformed tree on purpose learns how deep it is rather than
+  reading back the ceiling.
+- **A deadline that stops tree-sitter mid-parse: NOT DONE.** It needs
+  `Parser::parse_with_options` and its progress callback, which
+  `ast-grep-core` 0.45 does not expose (`parse_lang` builds the `Parser`
+  internally). Naming `tree-sitter` directly is the only route, and #277
+  reserves that for the Director's word. Nothing here fakes it with a thread
+  that cannot be stopped.
+- **Measured, per grammar, in `bench/README.md` and
+  `bench/ast-budget.tsv`** (224 rows): throughput p50/p99 and peak RSS at the
+  2 MiB ceiling on representative and adversarial input, the share of a checked
+  parse spent in the validation walk, and p99 plus peak RSS for a bounded
+  fan-out at 100, 1 000, 10 000 and 100 000 concurrent parses. Produced by
+  `examples/parse_budget.rs` under `scripts/measure-ast-budget.sh`. Three
+  findings from it:
+  - **The documented memory ceiling is 723 MiB resident** for one parse of a
+    2 MiB file with the Ruby grammar, against a 2.1 MiB process floor; the
+    cheapest grammar at the same size is `solidity` at 100 MiB, so a caller
+    cannot size a parser from the input alone.
+  - **The parser, not the walk, is the unbounded work on hostile input.** The
+    validation walk is 10–15 ms on the three worst adversarial rows and the parse
+    is 25–97 seconds — 256 KiB of nested braces takes the Dart grammar
+    **97.5 seconds**, and at the 2 MiB ceiling it did not finish in 120 s. This
+    is precisely what the missing deadline would bound and cannot be bounded from
+    inside this crate.
+  - **Peak RSS is flat in the concurrency level** — 195 to 198 MiB for `rust`
+    across 100 to 100 000 concurrent 64 KiB parses — because the per-parse bound
+    is what makes a fleet of them bounded.
+- **The markdown grammar no longer aborts the process.** It did:
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`, so `"- "` repeated 255 times
+  (510 bytes) ended the process with `SIGABRT` rather than returning anything —
+  reachable from a hostile PR that adds a nested list to a README. The grammar
+  arrives compiled through `ast-grep-language`, so the crate cannot patch the
+  scanner; it refuses the source before the scanner sees it.
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and the new
+  `ParseError::ContainerNestingTooDeep` apply
+  `lgwks_ast::markdown_containers` on the markdown path only, in one `O(bytes)`
+  pass with `O(1)` state. The bound is measured, not guessed: seventeen
+  container shapes were bisected from a child process, and **every shape that
+  aborts does so at 255 open containers** — 255 repetitions of `- `, 128 of
+  `> - `, 85 of `>>> `, and the same 255 for indentation-nested lists, fenced
+  and indented code inside quotes. Three shapes never abort, because markdown
+  does not nest blockquotes, ordered lists or tab runs by indentation. The
+  count over-estimates where indentation and markers both carry depth, so 64
+  cannot be 255: a margin of about 4x, on the safe side. `tests/it/hostile.rs`
+  proves it from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes, 1 065
+  children, zero `SIGABRT`. An exhaustive sweep of all seventeen shapes through
+  every depth from 1 to 512 (8 704 pairs) also exits cleanly.
+  Residual, stated rather than hidden: the guard is on the **checked** parse.
+  `parse` and `parse_with` return a `Parsed` rather than a `Result`, so a refusal
+  has nowhere to go there, and their documentation now says so.
+- Two test modules: `tests/it/hostile.rs` (four adversarial generators per
+  compiled grammar, every answer typed or a tree inside the bounds) and
+  `tests/it/sim_parse_bounds.rs` (96 seeds per test over four generated shapes,
+  same seed same trace hash, the shape-to-arm map pinned). Both run under a
+  nextest `slow-timeout` with `terminate-after`, because they exist to catch a
+  walk that stops making progress.
+
+Order changes with the traversal and is additive to the API: nodes arrive in
+source order rather than reverse-sibling order, so the node cap's `limit + 1`
+witness is the earliest node rather than the last. Every published guarantee
+survives it — `AstMetrics` folds order-independently, retained diagnostics are
+the earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before being
+returned — and `diagnostics` sorts its own output. `try_parse` keeps its
+signature.
+
+### Tests: the entropy replay simulation no longer folds drawn bytes (#276)
+
+- `sim_random_error`'s replay trace folded whether each draw came back
+  entirely equal to the sentinel byte. A one-byte draw from a working source
+  does that one time in 256, so the same seed produced two different traces
+  about 3% of runs, and `untouched_draws == 0` failed about 1.6% of runs (PR
+  #302, run 37355259369). The trace now folds lengths only, a draw is
+  classified untouched only from eight bytes up (`2^-64` by chance), and
+  `the_trace_folds_no_drawn_byte` pins both without entropy. 300 runs of the
+  two tests: 0 failures.
+
+### lgwks_std — the blocking pool's ceiling and its shutdown (#264)
+
+The two items #286 and #289 left open on the bounded blocking pool. Both are
+additive: no signature changed and no existing behaviour did.
+
+- `task::configure_blocking_pool(threads)` fixes the pool's thread ceiling
+  once, before the pool first runs a job. The pool's own creation is the
+  arbitration — a configure and a first use race to build it, so neither can
+  miss the other's write — and a ceiling is therefore never silently ignored.
+  A later attempt is refused with the new `PoolConfigError`: `InUse` once the
+  pool has run work, `AlreadyConfigured` naming the ceiling in force,
+  `InvalidCeiling` for a ceiling below one. Asking again for the ceiling
+  already in force succeeds: the pool is at it.
+- `task::shutdown_blocking_pool(within)` closes admission, lets the queued
+  and running jobs finish, and joins every pool thread inside the deadline.
+  A thread with no job leaves instead of parking, and a parked thread is woken
+  to take a waiting job or leave, so the pool empties by finishing its work
+  rather than by cancelling it. The new `PoolShutdown` reports what the wait
+  found: `Drained { threads }` means every thread was joined and none outlives
+  the call; `DeadlineExceeded { joined, running, queued }` names the threads
+  still executing and the jobs still waiting, and their handles stay
+  registered so a later shutdown joins them.
+- `task::SpawnError::Shutdown` is the refusal both entry points give after a
+  shutdown. `try_spawn_blocking` returns it; `spawn_blocking`, whose 1.0
+  contract is that it never refuses, fails its awaiter with it as the
+  payload, as it already did for an `Os` refusal. The closure never runs.
+- A thread is no longer detached. Each start registers its handle under the
+  same lock that counted the thread, so a shutdown can never observe a thread
+  it cannot join.
+- **A start now joins the threads that have already returned**, so a process
+  whose load is bursty — a burst, an idle period, a burst — no longer keeps
+  one handle per exited thread for ever. What the handle list holds is exactly
+  `live + (threads that have left the accounting and not yet returned)`: every
+  entry beyond `live` is a real thread still executing its last instructions,
+  and that second group has no constant bound, because a departure frees its
+  slot immediately. What is bounded is the accumulation: every thread that
+  *has* returned is joined at the next start or at a shutdown.
+- The pool is an `Arc`, so a thread owns its own reference and a caller can own
+  and drop a pool; the tests' last `Box::leak` is gone.
+- Two seeded simulation families cover the new paths: `sim_pool` drives the
+  accounting through configure attempts that move nothing and a shutdown
+  closing admission mid-schedule (2,000 seeds × 2,000 steps), and
+  `sim_pool_lifetime` drives real OS threads through burst drains, an expired
+  deadline, a parked thread, a refused ceiling, and burst/idle cycles that
+  would grow the handle list if nothing reaped it. A process-owning test
+  binary exercises the two public functions against the real process-wide
+  pool, because a shutdown closes admission for the life of its process.
+
+### lgwks_std — `random` reaches every target its backend does, and says why it failed (#276)
+
+- `random` no longer refuses to compile on every target but Linux, macOS and
+  Windows. The three-target `compile_error!` was a narrower claim than the
+  backend it wraps, so it refused FreeBSD, the other BSDs, illumos, Solaris,
+  Android, iOS, `wasm32-wasip1` and every other target `getrandom` already
+  supported. The backend is the one authority on where an entropy source
+  exists, so its own refusal is now the single compile-time gate and this crate
+  holds no target list that could drift narrower.
+- `EntropyError` carries the cause as data instead of a `String`: a
+  `#[non_exhaustive]` `EntropyErrorKind`, `raw_os_error()` for the OS's own
+  code, and `io_error_kind()` for its portable `std::io` classification. A UEFI
+  status wider than `i32` is dropped rather than truncated into a code naming a
+  different failure. Additive for 1.x: `backend()` and the `Display` rendering
+  are unchanged, and the `String` was never in the public surface.
+- `fill_bytes` documents that a refused draw leaves the buffer **unspecified**
+  and must not be read; `bytes` has no such window, since a failed draw returns
+  no array. A test drives the refused path through a crate-private seam, because
+  `getrandom` offers no constructor for a backend failure carrying an OS code
+  and an integration test cannot reach a private seam.
+- New `tests/it/sim_random_error.rs`: seeded sweeps over draw lengths from empty
+  to a mebibyte, concurrent drawers at 100, 1 000, 10 000 and 100 000, the UUID
+  version and variant masks, and a seeded generator that must not be able to
+  predict a draw.
+
+### The gate: every `lgwks_std` feature alone, and the declared target matrix (#276)
+
+- The `feat-std` lane now builds all twelve non-`full` features, each alone.
+  `core`, `trace`, `random`, `ron` and `process` were built by nothing except
+  the rustdoc lane, so a feature that quietly depended on a second feature was
+  invisible to every build receipt.
+- New required lanes `tests-std-per-feature-a`, `-b` and `-c`: one
+  `cargo nextest run --no-default-features --features <f>` per feature, because
+  a build receipt is not an execution receipt. Three shards of four features,
+  each its own CI job: the twelve runs as one step took 228 s on GitHub and put
+  the run at 307 s, past the five-minute budget.
+- New required lane `target-matrix`, running the new
+  `scripts/check-target-matrix.sh`. It installs each declared target with
+  `rustup` and checks `lgwks_std`, `lgwks_ast` and `lgwks_deps` against it: the
+  Rust-only surface is required everywhere, and a check that needs a C
+  toolchain the runner lacks is recorded with its exact error and a named
+  reason instead of being dropped. A failure that is not that reason fails the
+  lane. It runs as its own CI job rather than on the critical path.
+- Measured on aarch64-apple-darwin: 42 checks, 69 s from an empty target
+  directory. `lgwks_std --features random` builds on all seven cross targets;
+  nine `full`/`lgwks_ast` checks are exempt for a missing C cross-compiler.
+
+### The gate: the saturation tiers spawn the fake the way a default binding does (#272)
+
+- The `sim_review_path` saturation tiers bound the fake `gh` through a `PATH`
+  override and a bare program name. With that combination `std` cannot hand the
+  child to `posix_spawn`: it searches the `PATH` itself and falls back to
+  `fork` + `execvp`, so each of the 50,000 calls at the 10,000 tier forked a
+  test process holding 64 runs in flight. The tiers now name the fake by its
+  absolute path with no `PATH` override (`gh_spawned_directly`), which is the
+  spawn a default `Gh` binding makes. Every other family keeps the `PATH`
+  binding, so `PATH` resolution stays covered. The assertions are unchanged.
+- Measured on an Apple M5 Pro, the 10,000 tier alone: 65.98 s wall and 466 s
+  CPU (212.6 user, 253.8 system), peak RSS 71.7 MB, before; 46.35 s wall and
+  380 s CPU (221.1 user, 158.5 system), peak RSS 65.6 MB, after, with the
+  machine more loaded for the second run.
+- The `gpui-windows` lane builds its fixture into the workspace `target` with
+  `--target-dir target`. The fixture is its own workspace, so it built into a
+  directory the CI cache never saved and recompiled the GPUI stack on every
+  run (3 min 03 s, 134 crates, the run's critical path at 242 s). The CI cache
+  step takes a new key so the first `main` run saves those artifacts.
+- The `test` profile emits line tables instead of full debuginfo
+  (`debug = "line-tables-only"`). Backtraces still name function, file and
+  line. Each `Tests (lgwks-bot full)` shard spent 152 s of a 233 s job compiling
+  and linking on a full dependency-cache hit, and the four shards are the run's
+  critical path. CI sets the same value as `CARGO_PROFILE_TEST_DEBUG`, because
+  Swatinem/rust-cache ignores `[profile]` when it hashes manifests: without
+  it the restore stayed a full match on the old key and nothing was saved.
+## [lgwks_deps 2.0.0] - 2026-10-05
+
+### lgwks_deps — the gate compiles in no repository's policy (breaking)
+
+`lgwks_deps` is published and audits other repositories, but it compiled in
+this repository's licence set (`ACCEPTED_LICENSES`), its five surface names and
+URL (`SURFACES`, `SURFACE_REPOSITORY`), its frozen surface and tier
+(`FROZEN_SURFACES`, `FROZEN_TIER`), and a maintainer's e-mail address in the
+crates.io `User-Agent`. No consumer could change any of them, so the estate's
+own MPL-2.0 `lgwks_bot` was refused in every repository that ran the gate.
+All of it now comes from the register's `[policy]` (INV-DEP-16).
+
+- **Removed** `lgwks_deps::accepted_licenses()`: the accepted set is a register
+  decision, read back with `Contract::accepted_licenses()`.
+- **Added** `[policy]` keys `accepted_licenses`, `surfaces`, `frozen_surfaces`
+  and `frozen_tier`, each a comma-separated string refused whole on an empty,
+  repeated or malformed member; `Refusal::LicensePolicyUndeclared`;
+  `ContractError::IncompletePolicy` (a freeze written without its tier, or the
+  reverse); the `check --json` receipt's `contract.accepted_licenses`.
+- **Changed**: a register that approves an observed edge and declares no
+  `accepted_licenses` is refused once, naming the line to add, rather than
+  judged by a set compiled into the gate. A register that declares no
+  `surfaces` or freeze binds none, which is what every repository other than
+  this one already got.
+- **Fixed**: the `freshness` crates.io lookup's `User-Agent` is the tool's name,
+  its real version and its repository, read from the manifest (it said `0.1`
+  and carried a personal address).
+- **Migration**: add one line to `[policy]`, e.g.
+  `accepted_licenses = "MIT, Apache-2.0, MPL-2.0"`. This repository's register
+  declares exactly the set the gate used to compile in, plus its surfaces and
+  `lgwks_ast`'s freeze, so its own verdict is unchanged.
 
 ## [lgwks_std 1.1.0 / lgwks_deps 1.1.0 / lgwks_macros 1.1.0 / lgwks_bot 1.1.0] - 2026-10-05
 

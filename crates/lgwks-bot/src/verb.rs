@@ -8,6 +8,7 @@
 
 use super::cap::{Auth, Cap};
 use super::error::BotError;
+use std::future::Future;
 
 // ── Observe ────────────────────────────────────────────────────────────────
 
@@ -114,10 +115,14 @@ pub trait Observe {
 
     /// Poll the source for the current state.
     ///
-    /// Async: the returned future is local to the driving thread (not `Send`),
-    /// because `lgwks_std::task` drives bots on one thread and a domain may hold
-    /// thread-local state. `Bot::tick` polls every source concurrently.
-    async fn poll(&self, call: (Auth, ())) -> Result<Self::Output, BotError>;
+    /// Declared as a return-position [`Future`] rather than `async fn` so the
+    /// trait carries no crate-level lint suppression: the returned future is
+    /// local to the driving thread (not `Send`), because `lgwks_std::task`
+    /// drives bots on one thread and a domain may hold thread-local state; a
+    /// `Send` bound would force every domain to be `Send` and rule out the
+    /// thread-local state `Bot::tick` is built for. `Bot::tick` polls every
+    /// source concurrently.
+    fn poll(&self, call: (Auth, ())) -> impl Future<Output = Result<Self::Output, BotError>>;
 
     /// The state of this source's own caching, when it has one.
     ///
@@ -266,20 +271,14 @@ where
 
 // ── Execute ────────────────────────────────────────────────────────────────
 
-/// Perform a side effect. Capability-gated. The callable surface, the
-/// `action` half of the `(condition, action)` tuple, invoked as
-/// [`Execute::execute_action`].
-///
-/// Takes an `(Auth, input)` tuple: the proof must cover
-/// [`required_caps`](Execute::required_caps) or `execute_action` denies before
 /// Whether the effect an action models reaches outside this process.
 ///
 /// The distinction an ephemeral journal exists to enforce: a local effect is
 /// gone with the process, and an external one outlives it. An adapter that
-/// does not declare is treated as [`Self::External`] — the conservative
-/// default, because an unclassified handoff is exactly the one that must not
-/// be allowed to leave on a record that cannot survive the writer (issue
-/// #100).
+/// does not declare is treated as [`EffectLifetime::External`] — the
+/// conservative default, because an unclassified handoff is exactly the one
+/// that must not be allowed to leave on a record that cannot survive the writer
+/// (issue #100).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EffectLifetime {
@@ -320,7 +319,14 @@ pub trait Execute {
     /// Perform the effect this action models, after `call.0` proves the
     /// required caps. Awaited by `Bot::tick` in chain order; blocking work
     /// belongs on a `lgwks_std::task::spawn_blocking` thread inside the domain.
-    async fn execute_action(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    ///
+    /// Declared as a return-position [`Future`] for the same reason as
+    /// [`Observe::poll`]: no crate-level suppression, and the future stays
+    /// local to the driving thread.
+    fn execute_action(
+        &self,
+        call: (Auth, &Self::Input),
+    ) -> impl Future<Output = Result<Self::Output, BotError>>;
 
     /// The domain identifier (e.g. `"notify::slack"`).
     fn domain_id(&self) -> &str;
@@ -344,8 +350,13 @@ pub trait Query {
 
     /// Run the query.
     ///
-    /// Async for the same reason as [`Observe::poll`].
-    async fn query(&self, call: (Auth, &Self::Input)) -> Result<Self::Output, BotError>;
+    /// Declared as a return-position [`Future`] for the same reason as
+    /// [`Observe::poll`]: the future stays local to the driving thread and the
+    /// trait needs no crate-level lint suppression.
+    fn query(
+        &self,
+        call: (Auth, &Self::Input),
+    ) -> impl Future<Output = Result<Self::Output, BotError>>;
 
     /// The identifier the query reports in findings (e.g. `"gh::pr_status"`).
     fn domain_id(&self) -> &str;
@@ -369,13 +380,17 @@ mod tests {
             let Some(rest) = line.trim().strip_prefix("pub trait ") else {
                 continue;
             };
-            let name: &str = rest
+            // A split yields at least one piece, so the first piece is the
+            // declared name; an empty piece (or none) means the line names no
+            // trait and the line is skipped rather than recorded under "".
+            let Some(name) = rest
                 .split(|character: char| !(character.is_alphanumeric() || character == '_'))
                 .next()
-                .unwrap_or("");
-            if !name.is_empty() {
-                names.push(name);
-            }
+                .filter(|name: &&str| !name.is_empty())
+            else {
+                continue;
+            };
+            names.push(name);
         }
         names
     }

@@ -85,16 +85,24 @@ impl Repository {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
             return refusal;
         }
-        let mut parts = spec.split('/');
-        let owner = parts.next().unwrap_or_default();
-        let name = parts.next().unwrap_or_default();
-        if parts.next().is_some() {
+        // `split_once` rather than a walk with a substituted empty string for
+        // an absent segment: the owner half is present whenever a `/` is, so a
+        // reference with no `/` at all is the one case where a half is
+        // missing, and it is refused by the check below for the same reason an
+        // empty half is — `owner` alone is not `owner/repo`.
+        let Some((owner, rest)) = spec.split_once('/') else {
+            let refusal = Err(invalid("both `owner` and `repo` must be non-empty"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
+        };
+        if rest.contains('/') {
             let refusal = Err(invalid(
                 "a repository reference is `owner/repo`, with exactly one `/`",
             ));
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
             return refusal;
         }
+        let name = rest;
         if owner.is_empty() || name.is_empty() {
             let refusal = Err(invalid("both `owner` and `repo` must be non-empty"));
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
@@ -284,9 +292,19 @@ impl ReviewRecord {
     /// reports the difference rather than assuming it away.
     #[must_use]
     pub fn applied_comments(&self) -> usize {
-        self.comment_count
-            .and_then(|count| usize::try_from(count).ok())
-            .unwrap_or(0)
+        let Some(count) = self.comment_count else {
+            return 0;
+        };
+        // Saturation rather than a second default: a count wider than this
+        // host's `usize` is more comments than this process could have
+        // intended, because the intended side is a slice length, so it cannot
+        // match any payload either way. Reporting zero would additionally claim
+        // that no comment landed where the receiver said more than could be
+        // counted.
+        match usize::try_from(count) {
+            Ok(applied) => applied,
+            Err(_wider_than_this_host_counts) => usize::MAX,
+        }
     }
 
     /// Whether the receiver reports this review as an unsubmitted draft.

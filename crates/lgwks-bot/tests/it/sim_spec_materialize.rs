@@ -15,23 +15,18 @@
 //! `Source`/`Action` handles and `MemoryJournal` are all driven; only the seed
 //! is virtual.
 
+use crate::effects::memory_scope;
 use crate::sim;
+use crate::spec_materialize::{Counter, parse_count};
 
 use std::error::Error;
 
-use lgwks_bot::broker::Broker;
-use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-use lgwks_bot::journal::MemoryJournal;
-use lgwks_bot::spec::{ActionSpec, Bot, BotSpec, ChainSpec, EffectIdentity, EffectScope};
+use lgwks_bot::spec::{ActionSpec, Bot, BotSpec, ChainSpec};
 use lgwks_bot::{
-    Action, Admission, Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Need, Observe,
-    Source, domains,
+    Action, Admission, Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Need, domains,
 };
 
 use sim::{Band, Sim};
-
-/// The flow revision every simulated scope uses.
-const FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 /// The cause message the counter constructors produce for a target that is not
 /// a count, so the model can name it without re-running the constructor.
@@ -48,71 +43,6 @@ const SEEDS: u64 = 1024;
 
 // ── Domains ────────────────────────────────────────────────────────────────
 
-/// A source that reports the count its target parsed to.
-struct SimCounter {
-    /// The value to report.
-    value: u16,
-    /// The capabilities it requires.
-    caps: Vec<Cap>,
-}
-
-/// Parse a target as a count, or refuse it — the malformed-input case a
-/// constructor reports through admission.
-///
-/// The `ParseIntError` is recorded rather than dropped: `target` is untrusted
-/// text, and the parse error's own message ("invalid digit found in string",
-/// "cannot parse integer from empty string") is the part that says whether the
-/// value was empty or merely non-numeric. `BotError::IncompleteSpec` renders it
-/// through `Escaped`, so the untrusted text it quotes cannot forge a log line.
-fn parse_sim_count(target: &str) -> Result<u16, BotError> {
-    target
-        .parse::<u16>()
-        .map_err(|not_a_count| BotError::IncompleteSpec {
-            field: "target",
-            cause: not_a_count.to_string(),
-        })
-}
-
-impl SimCounter {
-    /// Build one with the given capabilities directly.
-    fn with_caps(value: u16, caps: Vec<Cap>) -> Self {
-        Self { value, caps }
-    }
-
-    /// Build a cap-free one from the `target` its spec names.
-    fn from_target(target: &str) -> Result<Source, BotError> {
-        Ok(Source::ordered(Self::with_caps(
-            parse_sim_count(target)?,
-            Vec::new(),
-        )))
-    }
-
-    /// Build one that requires `bot.net`.
-    fn net_from_target(target: &str) -> Result<Source, BotError> {
-        Ok(Source::ordered(Self::with_caps(
-            parse_sim_count(target)?,
-            vec![Cap::net()],
-        )))
-    }
-}
-
-impl Observe for SimCounter {
-    type Output = u16;
-
-    fn required_caps(&self) -> &[Cap] {
-        &self.caps
-    }
-
-    async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
-        call.0.check(&self.caps)?;
-        Ok(self.value)
-    }
-
-    fn domain_id(&self) -> &str {
-        "sim::counter"
-    }
-}
-
 /// An action that accepts a count.
 struct SimPage {
     /// The capabilities it requires.
@@ -127,13 +57,13 @@ impl SimPage {
 
     /// Build a cap-free one from the `target` its spec names.
     fn from_target(target: &str) -> Result<Action, BotError> {
-        parse_sim_count(target)?;
+        parse_count(target)?;
         Ok(Action::new(Self::with_caps(Vec::new())))
     }
 
     /// Build one that requires `bot.net`.
     fn net_from_target(target: &str) -> Result<Action, BotError> {
-        parse_sim_count(target)?;
+        parse_count(target)?;
         Ok(Action::new(Self::with_caps(vec![Cap::net()])))
     }
 }
@@ -164,8 +94,8 @@ domains! {
     /// The domains the sweep draws from.
     pub SIM_DOMAINS {
         observe {
-            "sim::counter" => SimCounter::from_target,
-            "sim::net_counter" => SimCounter::net_from_target,
+            "test::counter" => Counter::from_target,
+            "test::net_counter" => Counter::net_from_target,
         }
         execute {
             "sim::page" => SimPage::from_target,
@@ -175,22 +105,6 @@ domains! {
 }
 
 // ── The scenario ───────────────────────────────────────────────────────────
-
-/// A fresh effect scope over an in-memory journal.
-fn scope() -> Result<EffectScope, Box<dyn Error>> {
-    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    let mut broker = Broker::new();
-    broker.register(environment)?;
-    Ok(EffectScope::new(
-        EffectIdentity::new(
-            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-            environment,
-            FlowRevision::from_tagged("blake3_256", FLOW)?,
-        ),
-        broker,
-        Box::new(MemoryJournal::new()),
-    ))
-}
 
 /// The condition a draw names, and whether it is outside the vocabulary.
 fn draw_condition(sim: &mut Sim) -> (String, bool) {
@@ -270,17 +184,17 @@ fn draw_chain(
             let target = format!("bad{}", sim.rng().below(8));
             needs.push(Need::SourceTargetRejected {
                 chain: chain_index,
-                domain: "sim::counter".to_owned(),
+                domain: "test::counter".to_owned(),
                 cause: TARGET_CAUSE.to_owned(),
             });
-            ChainSpec::new("sim::counter", target, Vec::new())
+            ChainSpec::new("test::counter", target, Vec::new())
         }
         // A resolvable source, with its capability need and its entries.
         pick => {
             let (domain, network) = if pick == 0 {
-                ("sim::counter", false)
+                ("test::counter", false)
             } else {
-                ("sim::net_counter", true)
+                ("test::net_counter", true)
             };
             if network && !grants.grants(&Cap::net()) {
                 needs.push(Need::MissingCapability {
@@ -291,9 +205,9 @@ fn draw_chain(
                 });
             }
             let value = sim.rng().between(0, 20);
-            let entry_count = usize::try_from(sim.rng().between(0, 3)).unwrap_or(0);
+            let entries = sim.rng().between(0, 3);
             let mut on = Vec::new();
-            for action_index in 0..entry_count {
+            for (action_index, _) in (0..entries).enumerate() {
                 let (condition, unknown) = draw_condition(sim);
                 let action = draw_action(sim, chain_index, action_index, grants, needs);
                 if unknown {
@@ -321,9 +235,9 @@ fn generate(sim: &mut Sim) -> (GrantSet, BotSpec, Vec<Need>) {
         GrantSet::empty()
     };
     let chain_count = sim.rng().between(1, 4);
-    let mut chains = Vec::with_capacity(usize::try_from(chain_count).unwrap_or(0));
+    let mut chains = Vec::new();
     let mut needs = Vec::new();
-    for chain_index in 0..usize::try_from(chain_count).unwrap_or(0) {
+    for (chain_index, _) in (0..chain_count).enumerate() {
         chains.push(draw_chain(sim, chain_index, &grants, &mut needs));
     }
     (grants, BotSpec::new("sim", chains), needs)
@@ -345,7 +259,7 @@ fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
 
     // The in-memory spec: succeed iff the model injected no need, and report
     // exactly the injected set.
-    let outcome = Bot::from_spec(&spec, &SIM_DOMAINS, &grants, scope()?);
+    let outcome = Bot::from_spec(&spec, &SIM_DOMAINS, &grants, memory_scope()?);
     let described = describe(&outcome);
     match outcome {
         Ok(bot) => assert!(
@@ -379,12 +293,9 @@ fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
             return refusal;
         }
         Err(_) => {
-            {
-                let refusal =
-                    Err(format!("seed {}: unexpected admission variant", sim.seed).into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "one_seed: returning an error to the caller");
-                return refusal;
-            };
+            let refusal = Err(format!("seed {}: unexpected admission variant", sim.seed).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "one_seed: returning an error to the caller");
+            return refusal;
         }
     }
     sim.record(&described);
@@ -393,7 +304,7 @@ fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
     // outcome, because the materializer's input is the same document.
     let json = spec.to_json()?;
     let reparsed = BotSpec::from_json(&json)?;
-    let replayed = Bot::from_spec(&reparsed, &SIM_DOMAINS, &grants, scope()?);
+    let replayed = Bot::from_spec(&reparsed, &SIM_DOMAINS, &grants, memory_scope()?);
     assert_eq!(
         describe(&replayed),
         described,
@@ -406,8 +317,7 @@ fn one_seed(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
     let mut glyphs: Vec<char> = json.chars().collect();
     if !glyphs.is_empty() {
         let last = glyphs.len().saturating_sub(1);
-        let at =
-            usize::try_from(sim.rng().between(0, u32::try_from(last).unwrap_or(0))).unwrap_or(0);
+        let at = usize::try_from(sim.rng().between(0, u32::try_from(last)?))?;
         if let Some(slot) = glyphs.get_mut(at) {
             *slot = '@';
         }

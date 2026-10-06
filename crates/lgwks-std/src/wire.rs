@@ -67,15 +67,20 @@ pub enum Endianness {
 ///
 /// This is not a schema identifier or a complete archive version. Persist or
 /// exchange it alongside an application-owned schema/version identifier.
+///
+/// The two measured properties are reported in `usize`, the domain
+/// `size_of` and `align_of` answer in. A width or an alignment narrowed into a
+/// `u8` would need a value to report when it did not fit, and that value would
+/// be indistinguishable from a real measurement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct FormatDescriptor {
     /// Effective byte order observed by serializing a `u32` sentinel.
     pub endianness: Endianness,
     /// Width used for archived `usize` and `isize`, in bits.
-    pub pointer_width_bits: u8,
+    pub pointer_width_bits: usize,
     /// Alignment of rkyv's archived `u32` primitive, in bytes.
-    pub archived_u32_alignment: u8,
+    pub archived_u32_alignment: usize,
     /// rkyv codec compatibility series used by this facade.
     pub codec_series: &'static str,
 }
@@ -113,14 +118,11 @@ pub fn format_descriptor() -> Result<FormatDescriptor, WireError> {
 
     Ok(FormatDescriptor {
         endianness,
-        pointer_width_bits: match size_of::<rkyv::primitive::ArchivedUsize>() {
-            2 => 16,
-            4 => 32,
-            8 => 64,
-            _ => u8::MAX,
-        },
-        archived_u32_alignment: u8::try_from(align_of::<rkyv::primitive::ArchivedU32>())
-            .unwrap_or(u8::MAX),
+        // The archived pointer is two, four or eight bytes, so the bit width is
+        // that size times eight; saturating states the bound rather than
+        // wrapping, and no value the probe can observe comes near it.
+        pointer_width_bits: size_of::<rkyv::primitive::ArchivedUsize>().saturating_mul(8),
+        archived_u32_alignment: align_of::<rkyv::primitive::ArchivedU32>(),
         codec_series: "rkyv 0.8",
     })
 }

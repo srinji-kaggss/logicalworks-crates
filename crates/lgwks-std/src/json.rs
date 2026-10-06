@@ -85,27 +85,23 @@ mod tests {
         y: i32,
     }
 
-    #[derive(Deserialize)]
-    struct Borrowed<'a> {
-        value: &'a str,
-    }
+    /// The round-trip fixture the codec's own tests render, shape and parse.
+    const POINT: Point = Point { x: 1, y: 2 };
 
     // These tests return `Result` rather than unwrapping: a JSON refusal
     // reports its own `Debug` on failure, which is the same report `.unwrap`
     // would have panicked with, without an `unwrap` in the tree.
     #[test]
     fn roundtrips_through_string() -> Result<(), Error> {
-        let point = Point { x: 1, y: 2 };
-        let text = to_string(&point)?;
+        let text = to_string(&POINT)?;
         let restored: Point = from_str(&text)?;
-        assert_eq!(point, restored);
+        assert_eq!(POINT, restored);
         Ok(())
     }
 
     #[test]
     fn compact_output_has_no_whitespace() -> Result<(), Error> {
-        let point = Point { x: 1, y: 2 };
-        let text = to_string(&point)?;
+        let text = to_string(&POINT)?;
         assert!(!text.contains('\n'));
         assert!(!text.contains("  "));
         Ok(())
@@ -113,53 +109,35 @@ mod tests {
 
     #[test]
     fn pretty_output_has_indentation() -> Result<(), Error> {
-        let point = Point { x: 1, y: 2 };
-        let text = to_string_pretty(&point)?;
-        assert!(text.contains('\n'));
+        assert!(
+            to_string_pretty(&POINT)?.contains('\n'),
+            "pretty JSON spans lines"
+        );
         Ok(())
     }
 
     #[test]
     fn from_str_rejects_invalid() {
-        let result: Result<Point, _> = from_str("{");
-        assert!(result.is_err());
+        assert!(
+            from_str::<Point>("{").is_err(),
+            "a truncated document is refused"
+        );
     }
 
+    /// INV-CODEC-1 for this codec: an unescaped field borrows from the input,
+    /// through both the text and the slice entry point.
     #[test]
-    fn unescaped_string_fields_borrow_from_text_and_slice() -> Result<(), Error> {
-        let text = r#"{"value":"borrowed"}"#;
-        let decoded: Borrowed<'_> = from_str(text)?;
-        assert_eq!(
-            decoded.value, "borrowed",
-            "the parsed field retains its value"
-        );
-        assert!(
-            text.as_ptr() <= decoded.value.as_ptr()
-                && decoded.value.as_ptr() < text.as_ptr().wrapping_add(text.len()),
-            "unescaped JSON text borrows from the supplied input"
-        );
-
-        let bytes = text.as_bytes();
-        let decoded: Borrowed<'_> = from_slice(bytes)?;
-        assert_eq!(
-            decoded.value, "borrowed",
-            "the parsed slice field retains its value"
-        );
-        assert!(
-            bytes.as_ptr() <= decoded.value.as_ptr()
-                && decoded.value.as_ptr() < bytes.as_ptr().wrapping_add(bytes.len()),
-            "unescaped JSON slice text borrows from the supplied input"
-        );
+    fn unescaped_string_fields_borrow_from_text_and_slice() -> Result<(), Box<dyn std::error::Error>>
+    {
+        crate::serde_facade::json_borrow_contract()?;
         Ok(())
     }
 
+    /// The other half of INV-CODEC-1 for this codec: an escaped field cannot
+    /// come back as a borrow, because it needs owned decoded storage.
     #[test]
     fn escaped_string_cannot_be_returned_as_a_borrowed_str() {
-        let result: Result<Borrowed<'_>, _> = from_str(r#"{"value":"line\nfeed"}"#);
-        assert!(
-            result.is_err(),
-            "escaped JSON text requires owned decoded storage"
-        );
+        crate::serde_facade::json_escaped_field_is_refused();
     }
 
     #[test]

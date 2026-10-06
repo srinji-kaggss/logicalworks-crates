@@ -11,10 +11,21 @@ use lgwks_std::similarity::{
 
 use crate::seeded_sweep;
 
+use crate::seeded_bytes::next_byte;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_score,
-    fold_usize, initial_trace, next_seed,
+    fold_usize, initial_trace, next_index, next_seed,
 };
+
+/// The set window the sweep draws its set members from, in the width the set
+/// element type is.
+const SET_WINDOW: u32 = 12;
+
+/// The trace arm a raw score whose named mapping refused folds as.
+///
+/// A raw score with no mapped score is not a score at all, so it gets a trace
+/// value no score can take rather than a float standing in for one.
+const NO_NAMED_MAPPING_ARM: u64 = u64::MAX.saturating_sub(1);
 
 /// Runs the seeded sweep and returns its deterministic trace.
 ///
@@ -31,14 +42,12 @@ fn run_seeded_sweep(seed: u64) -> u64 {
     for _ in 0..2_000 {
         // Vectors: opposite, orthogonal, equal, zero-magnitude, non-finite, and
         // dimension-mismatched, chosen by the seed.
-        let length = usize::try_from(next_seed(&mut state).rem_euclid(4))
-            .unwrap_or(1)
-            .saturating_add(1);
+        let length = next_index(&mut state).rem_euclid(4).saturating_add(1);
         let mut left = Vec::with_capacity(length);
         let mut right = Vec::with_capacity(length);
         for _ in 0..length {
-            let left_value = i16::try_from(next_seed(&mut state).rem_euclid(5))
-                .unwrap_or(0)
+            let left_value = i16::from(next_byte(&mut state))
+                .rem_euclid(5)
                 .saturating_sub(2);
             // The seeded pairing decides which family this iteration is.
             let family = next_seed(&mut state).rem_euclid(6);
@@ -56,7 +65,19 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         match cosine.try_score(&left, &right) {
             Ok(raw) => {
                 fold_score(&mut trace, raw);
-                let normalized = cosine.normalized_score(&left, &right).unwrap_or(-1.0);
+                // The named mapping refused where the raw score did not, which is
+                // the one case this family must see as itself rather than as a
+                // score: the refusal is folded as a refusal — its own arm and the
+                // length of what it said — and the comparisons below do not run
+                // on a value the mapping never produced.
+                let normalized = match cosine.normalized_score(&left, &right) {
+                    Ok(normalized) => normalized,
+                    Err(reason) => {
+                        fold(&mut trace, NO_NAMED_MAPPING_ARM);
+                        fold_usize(&mut trace, reason.to_string().len());
+                        continue;
+                    }
+                };
                 fold_score(&mut trace, normalized);
                 let shared = Similarity::score(&cosine, &left, &right);
                 assert!(
@@ -99,9 +120,7 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         }
 
         // Text: over-budget and within-budget pairs exercise the normalized unit.
-        let word_length = usize::try_from(next_seed(&mut state).rem_euclid(9))
-            .unwrap_or(1)
-            .saturating_add(1);
+        let word_length = next_index(&mut state).rem_euclid(9).saturating_add(1);
         let left_text: String = std::iter::repeat_n('a', word_length).collect();
         let right_text: String = std::iter::repeat_n('b', word_length).collect();
         match edit.try_score(&left_text, &right_text) {
@@ -134,15 +153,14 @@ fn run_seeded_sweep(seed: u64) -> u64 {
         fold_usize(&mut trace, turkish.normalized_length("İ"));
 
         // Sets: budgeted and unbounded scorers agree within the budget.
-        let set_length = usize::try_from(next_seed(&mut state).rem_euclid(12))
-            .unwrap_or(0)
+        // The set window is one byte wide, so `u8` into `u32` carries the length
+        // and every member: the two sets are offsets of each other in the width
+        // the set element type is, and neither is a narrowed index.
+        let set_length = u32::from(next_byte(&mut state))
+            .rem_euclid(SET_WINDOW)
             .saturating_add(1);
-        let left_set: Vec<u32> = (0..set_length)
-            .map(|index| u32::try_from(index).unwrap_or(0))
-            .collect();
-        let right_set: Vec<u32> = (0..set_length)
-            .map(|index| u32::try_from(index.saturating_add(1)).unwrap_or(0))
-            .collect();
+        let left_set: Vec<u32> = (0..set_length).collect();
+        let right_set: Vec<u32> = (1..=set_length).collect();
         let unbounded = Jaccard::<u32>::new();
         fold_score(&mut trace, unbounded.score(&left_set, &right_set));
         match CheckedSimilarity::try_score(&bounded, &left_set, &right_set) {

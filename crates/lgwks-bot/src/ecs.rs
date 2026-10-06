@@ -172,7 +172,7 @@ use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU128};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
@@ -189,6 +189,9 @@ use lgwks_deps::bevy_ecs::{
     },
 };
 use lgwks_std::hash::{Digest, Hasher};
+
+use crate::journal::frame::SaturatingFrom;
+use crate::journal::owner::{lock, wait_timeout};
 
 use super::broker::{Authority, Broker, DispatchError, prepare_dispatch};
 use super::cap::{Deficit, Demand, Shortage};
@@ -290,7 +293,7 @@ fn hash_parts(parts: &[&[u8]]) -> Digest {
 /// so the same bot derived different identities on each. Every index that
 /// enters a digest goes through here.
 fn portable_index(index: usize) -> u64 {
-    u64::try_from(index).unwrap_or(u64::MAX)
+    u64::saturating_from(index)
 }
 
 /// The fallback identity for a binding that cannot name itself.
@@ -317,7 +320,10 @@ fn id_from_digest(digest: &Digest) -> Id128 {
     for (slot, byte) in wide.iter_mut().zip(bytes.iter()) {
         *slot = *byte;
     }
-    Id128::from_nonzero(NonZeroU128::new(u128::from_be_bytes(wide)).unwrap_or(NonZeroU128::MIN))
+    match NonZeroU128::new(u128::from_be_bytes(wide)) {
+        Some(identity) => Id128::from_nonzero(identity),
+        None => Id128::from_nonzero(NonZeroU128::MIN),
+    }
 }
 
 /// The logical intent of one entry of one chain.
@@ -827,6 +833,42 @@ impl Effects {
         ))
     }
 
+    /// Continue the run's journal if it has reached its watermark.
+    ///
+    /// Asked on the shipped append path rather than by a caller a test wrote,
+    /// because a lifecycle policy nobody consults is a policy that does not exist
+    /// (issue #267). The question is one call and one answer on every append: a
+    /// journal that does not continue says so and the append proceeds exactly as
+    /// it always did, which is why adding this changed no existing behaviour.
+    ///
+    /// The whole controller state moves with the journal, and that is the point:
+    /// `unsettled`, `recording`, `applied_latest` and `attempted` are this
+    /// controller's fold of the history, and the successor carries the same facts
+    /// in its checkpoint, so the two agree by construction. Only the *fence* moves
+    /// and it moves to the successor's own tail, which is the position after its
+    /// seal frame — the append that follows is the successor's second event, and
+    /// it is fenced on the successor's chain rather than the predecessor's.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the continuation reports. A journal that cannot continue at this
+    /// size refuses the *continuation*, not the append, and the append then lands
+    /// in the journal it was always going to land in — which is what leaves the
+    /// ladder's own reservation the last line of defence rather than the first.
+    fn continue_if_due(&mut self) -> Result<(), JournalError> {
+        if !self.scope.journal().continuation_watermark()?.is_due() {
+            return Ok(());
+        }
+        let successor = match self.scope.journal_mut().continue_as_new()? {
+            Some(successor) => successor,
+            None => return Ok(()),
+        };
+        let adopted = successor.tail();
+        self.scope.journal = successor;
+        self.tail = adopted;
+        Ok(())
+    }
+
     /// Append one fact, fencing on the tail represented by this controller's
     /// recovery fold.
     ///
@@ -837,6 +879,7 @@ impl Effects {
     ///
     /// Whatever the journal refuses.
     fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
+        self.continue_if_due()?;
         self.scope
             .journal_mut()
             .compare_and_append(self.tail, event)
@@ -848,7 +891,12 @@ impl Effects {
     /// is a statement about that caller and not about the append. A dispatch
     /// path is on an executor, where a journal whose durability path blocks
     /// would charge the device's latency to everything else on the thread.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses.
     async fn append_async(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
+        self.continue_if_due()?;
         self.scope
             .journal_mut()
             .compare_and_append_async(self.tail, event)
@@ -1219,12 +1267,12 @@ impl Effects {
         key: EffectKey,
         evidence: EffectEvidence,
     ) -> Result<(), JournalError> {
-        let required = self
-            .requirements
-            .iter()
-            .find(|entry| entry.0 == key)
-            .map(|entry| entry.1)
-            .unwrap_or_else(|| self.scope.journal().durability());
+        // A key with no requirement of its own is held to the journal's grade:
+        // that is the promise every other key in the scope is held to.
+        let required = match self.requirements.iter().find(|entry| entry.0 == key) {
+            Some(&(_, declared)) => declared,
+            None => self.scope.journal().durability(),
+        };
         if let Some(recorded) = self.outcome_for(&key)? {
             if recorded != evidence {
                 let refusal = Err(changed_outcome(key));
@@ -1382,6 +1430,32 @@ struct TickError(Option<BotError>);
 /// The source entities in chain order.
 #[derive(Resource, Debug, Default)]
 struct Order(Vec<Entity>);
+
+/// The observation phase's reusable buffers.
+///
+/// Every buffer here was a fresh heap allocation on every tick, and each of them
+/// was paid by a tick that changed nothing: a quiet tick allocated a
+/// `Vec<Option<RefreshReason>>` the size of the world, a `Vec<usize>` for stalls
+/// that stayed empty, and a `Vec<(usize, &EcsChain)>` holding the whole wave
+/// before deciding that none of the wave had to be polled. A substrate that asks
+/// "has anything moved?" once per chain per tick and then allocates several
+/// times per chain to ask it is not measuring the question.
+///
+/// So the buffers live here, are taken out for the phase, and go back with their
+/// capacity: the first tick pays for them and no tick after pays again. The
+/// contents are cleared every tick and never retained — a scratch that kept its
+/// entries would be a cache, and what these hold is per-tick state whose whole
+/// meaning is that it does not survive.
+#[derive(Resource, Debug, Default)]
+struct PollScratch {
+    /// One entry per chain: what that chain's source declared about its own
+    /// caching, read once per tick.
+    declared: Vec<Option<RefreshReason>>,
+    /// The chains whose poll the wave gave up on, in declaration order.
+    stalled: Vec<usize>,
+    /// The current wave's own indices that have to be polled.
+    slots: Vec<usize>,
+}
 
 /// The change ticks: the revision each chain's committed value was read at, and
 /// the revision each source reported on this tick.
@@ -1826,8 +1900,12 @@ impl Committed {
     }
 
     /// The admission of `chain`'s committed value, for the supersession check.
-    fn slot(&self, chain: usize) -> SlotAdmission {
-        self.slots.get(chain).copied().unwrap_or_default()
+    ///
+    /// `None` for a chain this bot does not have: the slots are sized to the
+    /// chains at build, so that is a caller's index error, and it is answered as
+    /// absent rather than as a chain that has committed nothing.
+    fn slot(&self, chain: usize) -> Option<SlotAdmission> {
+        self.slots.get(chain).copied()
     }
 }
 
@@ -2015,19 +2093,6 @@ pub const DEFAULT_POLL_DEADLINE: Duration = Duration::from_secs(30);
 /// needs longer than this is making a statement about their whole fan-out, and
 /// the refusal is where that statement belongs.
 pub const MAX_POLL_DEADLINE: Duration = Duration::from_secs(600);
-
-/// Take `mutex`, treating poisoning as non-fatal.
-///
-/// The watchdog state is three writes that have to happen in one order across
-/// two threads. Every critical section here moves whole values in or out and
-/// writes no partial state, so a poisoned lock still guards a consistent value
-/// and the panic is already the watchdog's to report. Recovering the guard is
-/// therefore correct, and it is why this is not an `unwrap`.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// One observation wave's deadline watchdog, shared with every poll in it.
 ///
@@ -2306,10 +2371,7 @@ fn reaper(clock: &Clock, watchdog: &WatchdogShared) {
         // a slot on the way into the wait is the mistake this comment exists for:
         // it loses the wakeup on exactly the turn the wave needs it, and the
         // symptom is a tick that never returns.
-        let (woken, _) = watchdog
-            .settled
-            .wait_timeout(state, remaining)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (woken, _) = wait_timeout(&watchdog.settled, state, remaining);
         state = woken;
         if state.expired || state.released {
             return;
@@ -2495,7 +2557,7 @@ impl Drop for WavePoll<'_> {
 async fn bounded_wave(
     deadline: Duration,
     watchdog: &PollWatchdog,
-    polls: Vec<WavePoll<'_>>,
+    polls: impl IntoIterator<Item = WavePoll<'_>>,
 ) -> (Vec<Result<Option<Erased>, BotError>>, bool) {
     let clock = Clock::wall();
     // The wave-level mirror the report reads, set only on the path that really
@@ -3739,7 +3801,7 @@ impl Ledger {
     /// which reports an entry as further along than it is, and that is the
     /// direction a retry budget can absorb.
     fn fail(&mut self, id: WorkId, error: &BotError, attempt: AttemptId, budget: u32) -> bool {
-        let attempts = u32::try_from(attempt.get()).unwrap_or(u32::MAX);
+        let attempts = u32::saturating_from(attempt.get());
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -4278,7 +4340,7 @@ fn plan_admissions(world: &World, moving: &[bool], kinds: &mut [AdmitKind]) {
             // The change-tick skip is what makes this reachable rather than
             // theoretical: a quiet source commits nothing, so its slot stays empty
             // however many ticks the filter keeps calling it moved.
-            None if moving.get(chain).copied().unwrap_or(false)
+            None if moving.get(chain).copied().is_some_and(|held| held)
                 && world
                     .non_send::<Observed>()
                     .0
@@ -4618,7 +4680,7 @@ fn observe_fold(world: &mut World) {
     // chain that took a value commits the revision that value was read at, and
     // every other chain's revision stays exactly where it was.
     for index in 0..changed.len() {
-        if changed.get(index).copied().unwrap_or(false) {
+        if changed.get(index).copied().is_some_and(|held| held) {
             let reported = revisions.get(index).copied().flatten();
             world.non_send_mut::<ChangeTicks>().commit(index, reported);
         }
@@ -4628,9 +4690,8 @@ fn observe_fold(world: &mut World) {
 
     // Walked by index rather than over a cloned `Order`: the entity is one
     // `copy` away and the clone was a heap allocation per tick to avoid it.
-    let count = changed.len();
-    for index in 0..count {
-        if !changed.get(index).copied().unwrap_or(false) {
+    for (index, moved) in changed.iter().copied().enumerate() {
+        if !moved {
             continue;
         }
         let Some(entity) = world.resource::<Order>().0.get(index).copied() else {
@@ -4656,8 +4717,9 @@ fn observe_fold(world: &mut World) {
         .enumerate()
         .filter_map(|(index, moved)| moved.then_some(index))
     {
-        let previous = world.non_send::<Committed>().slot(index);
-        if previous.state == SlotState::Unacted {
+        if let Some(previous) = world.non_send::<Committed>().slot(index)
+            && previous.state == SlotState::Unacted
+        {
             superseded.push(SupersededObservation {
                 chain: index,
                 revision: previous.revision,
@@ -4788,7 +4850,12 @@ fn fire_plan(world: &mut World) {
     for index in 0..count {
         let held = world.non_send_mut::<Ledger>().take(index);
         let admit = Admit::bind(
-            kinds.get(index).copied().unwrap_or(AdmitKind::Idle),
+            // A chain the compare pass did not reach is idle, which is the same
+            // answer the buffer's own initial value carries.
+            match kinds.get(index).copied() {
+                Some(kind) => kind,
+                None => AdmitKind::Idle,
+            },
             inputs.get(index).copied().flatten(),
         );
         let Some(mut transition) = resume(world, index, admit, held) else {
@@ -5399,10 +5466,20 @@ impl EcsBot {
         // observation phase's scratch: this method holds `&self` across every
         // poll, so it cannot write the world it is reading.
         let mut revisions = std::mem::take(&mut self.world.non_send_mut::<ChangeTicks>().polled);
+        // Taken rather than borrowed for the same reason `revisions` is, and
+        // because the observation phase is the tick's only writer of these
+        // buffers. It goes back with its capacity, which is the entire point:
+        // a quiet tick fills the buffers, publishes them, and hands them to the
+        // next tick instead of asking the allocator for them again.
+        let mut scratch = {
+            let mut guard = self.world.non_send_mut::<PollScratch>();
+            std::mem::take(&mut *guard)
+        };
         #[cfg(feature = "profile")]
         let poll_charge = Charge::new(TickStage::Poll);
-        let (invalidations, stalled, watchdogs) =
-            self.poll_sources(&mut polled, &mut revisions).await;
+        let watchdogs = self
+            .poll_sources(&mut polled, &mut revisions, &mut scratch)
+            .await;
         #[cfg(feature = "profile")]
         drop(poll_charge);
         self.world.non_send_mut::<Polled>().0 = polled;
@@ -5415,9 +5492,10 @@ impl EcsBot {
         // the effects phase never runs. A caller reading the report after a
         // failed tick is exactly the caller who needs to know a source had
         // already declared its cache unsound when it failed.
-        self.record_invalidations(&invalidations);
+        self.record_invalidations(&scratch.declared);
         self.publish_refreshes();
-        self.publish_stalls(&stalled, watchdogs);
+        self.publish_stalls(&scratch.stalled, watchdogs);
+        *self.world.non_send_mut::<PollScratch>() = scratch;
 
         #[cfg(feature = "profile")]
         let schedule_charge = Charge::new(TickStage::Schedule);
@@ -5686,7 +5764,8 @@ impl EcsBot {
         &self,
         polled: &mut Vec<Result<Option<Erased>, BotError>>,
         revisions: &mut Vec<Option<u64>>,
-    ) -> (Vec<Option<RefreshReason>>, Vec<usize>, u32) {
+        scratch: &mut PollScratch,
+    ) -> u32 {
         let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
@@ -5698,37 +5777,36 @@ impl EcsBot {
         // the polls: the marks are written after the polls resolve, and the
         // closures below borrow the world's sources immutably for their whole
         // life.
-        let mut declared = self.declared_refresh(count);
+        self.declared_refresh(&mut scratch.declared, count);
         // The chains whose poll was cancelled, in declaration order. Collected
         // here rather than published by the caller because the poll phase is the
         // only place that knows which poll was cut short, and the report must be
         // published before the schedule step runs on the strength of this tick's
         // observation — a tick that then failed still has to say which source it
         // gave up on.
-        let mut stalled: Vec<usize> = Vec::new();
+        scratch.stalled.clear();
+        let PollScratch {
+            ref mut declared,
+            ref mut stalled,
+            ref mut slots,
+        } = *scratch;
         // The deadline threads this tick actually started, one per wave that had
         // a poll left pending. Published beside the stalls they may have caused,
         // because a caller triaging a wedged source wants to know whether the bot
         // spent a thread on it and how many.
         let mut watchdogs = 0_u32;
 
+        // One guard for the whole phase, held across every await, rather than a
+        // fresh `Vec` of `(chain, source)` pairs per wave. The old code copied the
+        // wave out because `join_all_boxed` takes an iterator of futures and each
+        // of those borrows the world, and the borrow was thought to need an owner
+        // rather than a guard: it does not. `Chains` is borrowed shared, nothing
+        // in this function is mutably borrowed, and no system runs while a poll is
+        // pending — so the guard *is* the owner, and the wave's pairs cost nothing.
+        let chains = self.world.non_send::<Chains>();
         for wave_index in 0..count.div_ceil(MAX_IN_FLIGHT_POLLS) {
             let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
-            // The wave as `(chain index, source)` pairs, read out before the
-            // await: `join_all_boxed` takes an iterator of futures, and each of
-            // those borrows the world, so the slice has to be owned by the time
-            // the first one exists. A `Vec` of references into a resource that
-            // is not written across the await is the borrow; nothing here is
-            // `mut` borrowed while any poll is pending.
-            let wave: Vec<(usize, &EcsChain)> = self
-                .world
-                .non_send::<Chains>()
-                .0
-                .iter()
-                .enumerate()
-                .skip(base)
-                .take(MAX_IN_FLIGHT_POLLS)
-                .collect();
+            let width = count.saturating_sub(base).min(MAX_IN_FLIGHT_POLLS);
 
             // Which chains in this wave must be polled. A chain is **skipped**
             // when it reported a revision equal to the one its committed value
@@ -5739,40 +5817,59 @@ impl EcsBot {
             // The indices are the *wave's* own slots, not positions in `polls`,
             // so each `WavePoll::slot` is still its own index in the wave's wakers
             // and the results below land on the chains that produced them.
-            let slots: Vec<usize> = {
+            slots.clear();
+            {
                 let ticks = self.world.non_send::<ChangeTicks>();
-                (0..wave.len())
-                    .filter(|slot| {
-                        let (index, chain) = wave[*slot];
-                        let unsound = declared
-                            .get(index)
-                            .copied()
-                            .flatten()
-                            .is_some_and(|reason| reason.invalidates_baseline());
-                        let reported = chain.source.revision();
-                        if let Some(slot) = revisions.get_mut(index) {
-                            *slot = reported;
-                        }
-                        // `None` from a source that cannot report a revision is
-                        // never quiet: that is the value-comparison path, and it
-                        // runs on every tick as it always has.
-                        !(ticks.quiet(index, reported) && !unsound)
-                    })
-                    .collect()
-            };
+                for slot in 0..width {
+                    let index = base.saturating_add(slot);
+                    let Some(chain) = chains.0.get(index) else {
+                        continue;
+                    };
+                    let unsound = declared
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|reason| reason.invalidates_baseline());
+                    let reported = chain.source.revision();
+                    if let Some(slot) = revisions.get_mut(index) {
+                        *slot = reported;
+                    }
+                    // `None` from a source that cannot report a revision is never
+                    // quiet: that is the value-comparison path, and it runs on
+                    // every tick as it always has.
+                    if !(ticks.quiet(index, reported) && !unsound) {
+                        slots.push(slot);
+                    }
+                }
+            }
+
+            // A wave whose every source was skipped is a tick that asked and was
+            // told nothing had moved. There is no future to join, no deadline to
+            // keep, and no watcher to arm — the watchdog is two `Arc`s and its
+            // state is a `Mutex`, so arming one for a wave with no members to
+            // watch was a thread's worth of bookkeeping spent on the answer
+            // "nothing happened".
+            if slots.is_empty() {
+                continue;
+            }
 
             // One watchdog for the wave rather than one per poll, and one
             // deadline the whole wave shares: `bounded_wave` owns it and reports
             // whether it really did start a thread, which is the number the tick
             // report names. Its width is the number of polls that will actually
-            // run, so a wave of entirely-skipped sources never arms a watcher.
+            // run.
             let wave_watchdog = PollWatchdog::new(self.poll_deadline, slots.len());
             let (results, armed) = {
-                let polls: Vec<WavePoll<'_>> = slots
-                    .iter()
-                    .map(|slot| {
-                        let slot = *slot;
-                        let (index, chain) = wave[slot];
+                // Scoped to the wave, because each poll borrows that wave's
+                // watchdog and a buffer outliving the watchdog would be a buffer
+                // holding dangling borrows. Built from `drain(..)` into the wave
+                // rather than moved, so a bot with more chains than fit in one
+                // wave reuses one allocation across its waves.
+                let mut polls: Vec<WavePoll<'_>> = Vec::new();
+                for &slot in slots.iter() {
+                    {
+                        let index = base.saturating_add(slot);
+                        let chain = &chains.0[index];
                         let seen = self.world.non_send::<Observed>();
                         let ledger = self.world.non_send::<Ledger>();
                         let grants = self.world.resource::<Grants>();
@@ -5797,16 +5894,16 @@ impl EcsBot {
                                 .and_then(|slot| slot.as_ref())
                                 .or_else(|| ledger.bound(index))
                         };
-                        WavePoll {
+                        polls.push(WavePoll {
                             chain: index,
                             slot,
                             installed: false,
                             poll: Box::pin(chain.source.poll_any(&grants.0, baseline)),
                             watchdog: &wave_watchdog,
-                        }
-                    })
-                    .collect();
-                bounded_wave(self.poll_deadline, &wave_watchdog, polls).await
+                        });
+                    }
+                }
+                bounded_wave(self.poll_deadline, &wave_watchdog, polls.drain(..)).await
             };
             watchdogs = watchdogs.saturating_add(u32::from(armed));
 
@@ -5816,7 +5913,7 @@ impl EcsBot {
             // chain — a mis-pairing the rendezvous would then refuse as a type
             // mismatch, or, worse, commit one chain's value to another's.
             for (&slot, result) in slots.iter().zip(results) {
-                let (index, _) = wave[slot];
+                let index = base.saturating_add(slot);
                 let Some(slot) = polled.get_mut(index) else {
                     continue;
                 };
@@ -5833,7 +5930,6 @@ impl EcsBot {
         // after it resolved: a source that reached its failure *inside* the poll
         // has only now recorded it, and asking before the poll would have asked
         // about the previous tick's state.
-        let chains = self.world.non_send::<Chains>();
         for (index, reason) in declared.iter_mut().enumerate() {
             let Some(chain) = chains.0.get(index) else {
                 continue;
@@ -5869,7 +5965,7 @@ impl EcsBot {
         // depended on which wave finished first could not be compared across two
         // runs of one seed.
         stalled.sort_unstable();
-        (declared, stalled, watchdogs)
+        watchdogs
     }
 
     /// What each of `count` chains declares about its own caching right now.
@@ -5880,10 +5976,11 @@ impl EcsBot {
     /// the mark is the substrate's record that the baseline it forced a read for
     /// was never successfully replaced, and clearing it on silence would be the
     /// permanent quiet state, one cause at a time.
-    fn declared_refresh(&self, count: usize) -> Vec<Option<RefreshReason>> {
+    fn declared_refresh(&self, declared: &mut Vec<Option<RefreshReason>>, count: usize) {
         let chains = self.world.non_send::<Chains>();
         let invalidated = self.world.non_send::<Invalidated>();
-        let mut declared: Vec<Option<RefreshReason>> = vec![None; count];
+        declared.clear();
+        declared.resize(count, None);
         for (index, chain) in chains.0.iter().enumerate() {
             // A chain already marked this tick keeps the mark it has: re-reading
             // it would let a later poll within the same tick overwrite the reason
@@ -5895,7 +5992,6 @@ impl EcsBot {
                 declared[index] = Some(reason);
             }
         }
-        declared
     }
 
     /// Write this tick's marks into the world, so the schedule step and the
@@ -7215,6 +7311,11 @@ impl EcsBot {
         world.insert_non_send(AdmitScratch::default());
         world.insert_non_send(Moved::default());
         world.insert_non_send(Plan::default());
+        // The observation phase's own scratch, empty on purpose: the first tick
+        // sizes these to the world and every tick after reuses that capacity,
+        // which is the whole of how a tick that changed nothing came to cost no
+        // allocations at all.
+        world.insert_non_send(PollScratch::default());
         // One slot per chain, sized here so the observation phase never resizes
         // it: a `resize` per tick would be an allocation the first time and a
         // capacity check every tick after, for a buffer whose length is the
@@ -7291,9 +7392,10 @@ impl<S> core::fmt::Debug for EcsObserveBuilder<S> {
 // a substrate whose guarantees are claims.
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::{Cell, RefCell};
     use std::future::Future;
+    use std::marker::PhantomData;
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
 
@@ -7306,7 +7408,22 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// A scripted source: yields the next value from `values` on each poll.
+    /// A domain refusal from a test source, recorded before it is returned.
+    ///
+    /// Every fixture that refuses says the same three things — which domain, that
+    /// nothing was delivered, and why — so they say it here once.
+    fn domain_refusal<T>(domain: &str, cause: &str) -> Result<T, BotError> {
+        let refusal = Err(BotError::DomainError {
+            domain: domain.into(),
+            certainty: DispatchCertainty::NotDelivered,
+            cause: cause.into(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a test source refused its poll");
+        refusal
+    }
+
+    /// A scripted source: yields the next value from `values` on each poll,
+    /// and refuses a poll past the end of its script rather than inventing one.
     ///
     /// Deliberately `Rc`-based and therefore `!Send`, which is the property the
     /// verbs actually have and the reason this whole module routes through
@@ -7338,7 +7455,10 @@ mod tests {
             call.0.check(&self.caps)?;
             let index = self.cursor.get();
             self.cursor.set(index.saturating_add(1));
-            Ok(self.values.borrow().get(index).copied().unwrap_or(0))
+            match self.values.borrow().get(index).copied() {
+                Some(value) => Ok(value),
+                None => domain_refusal("test::script", "polled past the end of its script"),
+            }
         }
 
         fn domain_id(&self) -> &str {
@@ -7509,7 +7629,12 @@ mod tests {
         for step in 0..6u64 {
             // The value and the revision move together, every other tick: the
             // promise `Observe::revision` asks for, kept in both directions.
-            let held = step.checked_div(2).unwrap_or(0);
+            // Halving a `u64` by a literal cannot overflow or divide by zero,
+            // so the refusal is a statement about that rather than a path a
+            // reader has to imagine.
+            let held = step
+                .checked_div(2)
+                .ok_or("halving a u64 by two cannot fail")?;
             value.set(held);
             rev.set(held);
             fired.push(bot.tick()?);
@@ -7555,13 +7680,7 @@ mod tests {
             let left = self.remaining.get();
             self.remaining.set(left.saturating_sub(1));
             if left == 0 {
-                let refusal = Err(BotError::DomainError {
-                    domain: "test::exhausting".into(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: "script exhausted".into(),
-                });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
-                return refusal;
+                return domain_refusal("test::exhausting", "script exhausted");
             }
             Ok(200)
         }
@@ -7607,13 +7726,7 @@ mod tests {
             call.0.check(&self.caps)?;
             self.polls.set(self.polls.get().saturating_add(1));
             if self.fail.get() {
-                let refusal = Err(BotError::DomainError {
-                    domain: "test::switched".into(),
-                    certainty: DispatchCertainty::NotDelivered,
-                    cause: "switch is off".into(),
-                });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "poll: returning an error to the caller");
-                return refusal;
+                return domain_refusal("test::switched", "switch is off");
             }
             Ok(self.value.get())
         }
@@ -7879,8 +7992,38 @@ mod tests {
         bot.pending().first().map(|work| work.hold().clone())
     }
 
-    /// An action that always refuses, counting the attempts it received.
-    struct Refuses(Rc<Cell<usize>>);
+    /// An action that always refuses, counting the attempts it received, in
+    /// one of the two shapes a refusal takes.
+    struct Refuses {
+        attempts: Rc<Cell<usize>>,
+        domain: &'static str,
+        certainty: DispatchCertainty,
+        cause: &'static str,
+    }
+
+    impl Refuses {
+        /// Refuses after the attempt without delivering anything: a failure a
+        /// retry may cure.
+        fn undelivered(attempts: Rc<Cell<usize>>) -> Self {
+            Self {
+                attempts,
+                domain: "test::refuses",
+                certainty: DispatchCertainty::NotDelivered,
+                cause: "refused",
+            }
+        }
+
+        /// Refuses permanently, before dispatch: the shape every "binding
+        /// required" domain has.
+        fn permanently(attempts: Rc<Cell<usize>>) -> Self {
+            Self {
+                attempts,
+                domain: "test::permanent",
+                certainty: DispatchCertainty::Refused,
+                cause: "no binding is installed for this domain",
+            }
+        }
+    }
 
     impl Execute for Refuses {
         type Input = u16;
@@ -7896,16 +8039,16 @@ mod tests {
 
         async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
             call.0.check(&[])?;
-            self.0.set(self.0.get().saturating_add(1));
+            self.attempts.set(self.attempts.get().saturating_add(1));
             Err(BotError::DomainError {
-                domain: "test::refuses".into(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: "refused".into(),
+                domain: self.domain.into(),
+                certainty: self.certainty,
+                cause: self.cause.into(),
             })
         }
 
         fn domain_id(&self) -> &str {
-            "test::refuses"
+            self.domain
         }
     }
 
@@ -7926,32 +8069,6 @@ mod tests {
 
         fn condition_id(&self) -> &str {
             "test::refuses"
-        }
-    }
-
-    /// A source requiring exactly the capabilities it is handed, so a test can
-    /// put more than one unmet requirement in front of admission. `Script`
-    /// fixes its own list to `bot.net`, which is one requirement and therefore
-    /// cannot distinguish a whole shortfall from its first element.
-    struct Needs {
-        caps: Vec<Cap>,
-        value: u16,
-    }
-
-    impl Observe for Needs {
-        type Output = u16;
-
-        fn required_caps(&self) -> &[Cap] {
-            &self.caps
-        }
-
-        async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
-            call.0.check(&self.caps)?;
-            Ok(self.value)
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::needs"
         }
     }
 
@@ -8022,44 +8139,60 @@ mod tests {
     /// The environment is registered because a broker that owns none mints no
     /// authority, so an unregistered one would make every dispatch refuse with
     /// `UnknownEnvironment` and no test would reach the path it is about.
-    fn test_effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
-        let environment = EnvironmentId::from_hex(TEST_ENV)?;
-        let mut broker = Broker::new();
-        broker.register(environment)?;
-        Ok(EffectScope::new(
-            EffectIdentity::new(
-                RunId::from_hex(TEST_RUN)?,
-                environment,
-                FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
-            ),
-            broker,
-            Box::new(MemoryJournal::new()),
-        ))
+    pub(crate) fn test_effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
+        test_effects_with(Box::new(MemoryJournal::new()))
     }
 
-    /// A journal that can refuse appends by event kind, counting what it saw.
+    /// A memory journal with injectable append faults, counting what it saw.
     ///
-    /// Exists for issue #102's acceptance: an append failure *after* the action
-    /// ran must not be reported as a pre-dispatch refusal, and a retry of the
-    /// recording must not re-enter the action. Wrapping [`MemoryJournal`] keeps
-    /// the real ladder and chain checks underneath the injected fault.
-    struct SelectiveJournal {
+    /// One fixture for every journal fault these tests arm, wrapping
+    /// [`MemoryJournal`] so the real ladder and chain checks stay underneath the
+    /// injected fault:
+    ///
+    /// - refusing an append by event kind — issue #102's acceptance: an append
+    ///   failure *after* the action ran is not a pre-dispatch refusal, and a
+    ///   retry of the recording does not re-enter the action;
+    /// - the two halves of the [`JournalError::OutcomeUnknown`] contract, each a
+    ///   one-shot: commit-then-lost-reply (the record is in the store and the
+    ///   caller settles by readback) and unknown-without-commit (nothing landed,
+    ///   so the retry re-appends — safe precisely because the readback, not
+    ///   hope, authorized it).
+    ///
+    /// [`Self::durable`] grades it as surviving a process crash and gives it the
+    /// receipt operation a file-backed adapter has: it attests an outcome only
+    /// when that outcome is actually in the store. The ephemeral form keeps the
+    /// trait's refusal.
+    struct FaultJournal {
         inner: Rc<RefCell<MemoryJournal>>,
+        durable: bool,
         refuse_intent: Rc<Cell<bool>>,
         refuse_prepare: Rc<Cell<bool>>,
         refuse_outcome: Rc<Cell<bool>>,
-        commit_then_error: Rc<Cell<bool>>,
+        lose_reply_once: Rc<Cell<bool>>,
+        unknown_once: Rc<Cell<bool>>,
         outcome_appends: Rc<Cell<usize>>,
     }
 
-    impl SelectiveJournal {
+    impl FaultJournal {
+        /// An ephemeral journal, graded as the memory journal it wraps.
         fn new() -> Self {
+            Self::graded(false)
+        }
+
+        /// A journal graded to survive a process crash, with a receipt operation.
+        fn durable() -> Self {
+            Self::graded(true)
+        }
+
+        fn graded(durable: bool) -> Self {
             Self {
                 inner: Rc::new(RefCell::new(MemoryJournal::new())),
+                durable,
                 refuse_intent: Rc::new(Cell::new(false)),
                 refuse_prepare: Rc::new(Cell::new(false)),
                 refuse_outcome: Rc::new(Cell::new(false)),
-                commit_then_error: Rc::new(Cell::new(false)),
+                lose_reply_once: Rc::new(Cell::new(false)),
+                unknown_once: Rc::new(Cell::new(false)),
                 outcome_appends: Rc::new(Cell::new(0)),
             }
         }
@@ -8080,8 +8213,15 @@ mod tests {
             Rc::clone(&self.outcome_appends)
         }
 
-        fn commit_then_error(&self) -> Rc<Cell<bool>> {
-            Rc::clone(&self.commit_then_error)
+        /// One-shot: commit the next outcome append and lose its reply.
+        fn lose_reply_once(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.lose_reply_once)
+        }
+
+        /// One-shot: the next outcome append reports an unknown outcome without
+        /// committing anything.
+        fn unknown_once(&self) -> Rc<Cell<bool>> {
+            Rc::clone(&self.unknown_once)
         }
 
         fn store(&self) -> Rc<RefCell<MemoryJournal>> {
@@ -8089,9 +8229,20 @@ mod tests {
         }
     }
 
-    impl EffectJournal for SelectiveJournal {
+    /// An injected journal failure, recorded before it is returned.
+    fn injected<T>(error: JournalError) -> Result<T, JournalError> {
+        let refusal = Err(error);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a test journal injected a fault");
+        refusal
+    }
+
+    impl EffectJournal for FaultJournal {
         fn durability(&self) -> DurabilityPromise {
-            self.inner.borrow().durability()
+            if self.durable {
+                DurabilityPromise::ProcessCrash
+            } else {
+                self.inner.borrow().durability()
+            }
         }
 
         fn tail(&self) -> JournalPosition {
@@ -8113,6 +8264,7 @@ mod tests {
             expected_tail: JournalPosition,
             event: &EffectEvent,
         ) -> Result<DurableAck, JournalError> {
+            let is_outcome = matches!(event, EffectEvent::OutcomeObserved { .. });
             let refuse = match *event {
                 EffectEvent::IntentAdmitted { .. } => self.refuse_intent.get(),
                 EffectEvent::DispatchPrepared { .. } => self.refuse_prepare.get(),
@@ -8124,30 +8276,99 @@ mod tests {
                 EffectEvent::Verified { .. } => false,
             };
             if refuse {
-                let refusal = Err(JournalError::Storage(io::Error::other(
+                return injected(JournalError::Storage(io::Error::other(
                     "injected append refusal",
                 )));
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
-                return refusal;
+            }
+            if is_outcome && self.unknown_once.take() {
+                return injected(JournalError::OutcomeUnknown {
+                    cause: io::Error::other("injected unknown outcome, nothing written"),
+                });
             }
             let ack = self
                 .inner
                 .borrow_mut()
                 .compare_and_append(expected_tail, event)?;
-            if matches!(event, EffectEvent::OutcomeObserved { .. })
-                && self.commit_then_error.replace(false)
-            {
-                // Conforming ambiguity: the event is in the store and the
-                // reply is lost. `Storage` would claim the journal is
-                // unchanged, which the committed event below contradicts.
-                let refusal = Err(JournalError::OutcomeUnknown {
+            if is_outcome && self.lose_reply_once.take() {
+                // Conforming ambiguity: the event is in the store and the reply
+                // is lost. `Storage` would claim the journal is unchanged, which
+                // the committed event contradicts.
+                return injected(JournalError::OutcomeUnknown {
                     cause: io::Error::other("injected post-commit lost reply"),
                 });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
-                return refusal;
             }
             Ok(ack)
         }
+
+        fn confirm_outcome(
+            &mut self,
+            key: crate::effect::EffectKey,
+            evidence: EffectEvidence,
+            position: JournalPosition,
+            required: DurabilityPromise,
+        ) -> Result<DurableAck, JournalError> {
+            let held = self.durable
+                && EffectJournal::committed(&*self.inner.borrow())?.iter().any(
+                    |event| matches!(*event, EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
+                        if held == key && held_evidence == evidence),
+                );
+            if !held {
+                return injected(JournalError::ReceiptUnavailable { required });
+            }
+            Ok(DurableAck::new(position, self.durability()))
+        }
+    }
+
+    /// The error a tick that has to refuse returned.
+    ///
+    /// A tick that fires instead is a test failure, named by `reported` with the
+    /// count it fired, so every refusal test fails the same way and reads only
+    /// the assertions about the error it expected.
+    fn refused(
+        ticked: Result<usize, BotError>,
+        reported: impl FnOnce(usize) -> String,
+    ) -> Result<BotError, Box<dyn std::error::Error>> {
+        match ticked {
+            Ok(fired) => Err(reported(fired).into()),
+            Err(error) => Ok(error),
+        }
+    }
+
+    /// A bot whose one chain's first effect is indeterminate, logging every
+    /// effect that ran into `log`: the shape the evidence tests settle by hand.
+    fn indeterminate_once_bot(
+        name: &str,
+        log: &Rc<RefCell<Vec<u16>>>,
+    ) -> Result<EcsBot, Box<dyn std::error::Error>> {
+        Ok(EcsBot::builder(name)
+            .observe(Script::new(vec![200, 200, 200]))
+            .on(
+                |value: &u16| *value >= 200,
+                Flaky {
+                    remaining: Rc::new(Cell::new(1)),
+                    log: Rc::clone(log),
+                    kind: FlakyKind::Indeterminate,
+                },
+            )
+            .with_effects(test_effects()?)
+            .build(&net_grants())?)
+    }
+
+    /// A bot over one settled source whose chain counts its runs into `runs`,
+    /// recording through `effects`.
+    ///
+    /// The journal-fault tests differ in which fault they arm and when, not in
+    /// the bot they arm it against, so the bot is built here once.
+    fn counting_bot(
+        name: &str,
+        runs: &Rc<Cell<usize>>,
+        effects: EffectScope,
+    ) -> Result<EcsBot, Box<dyn std::error::Error>> {
+        Ok(EcsBot::builder(name)
+            .observe(Holds::new(200))
+            .on(|value: &u16| *value >= 200, Count(Rc::clone(runs)))
+            .with_effects(effects)
+            .build(&net_grants())?)
     }
 
     #[test]
@@ -8162,16 +8383,16 @@ mod tests {
     #[test]
     fn an_ambiguous_commit_then_error_is_idempotent() -> TestResult {
         let runs = Rc::new(Cell::new(0));
-        let journal = SelectiveJournal::new();
-        let commit_then_error = journal.commit_then_error();
+        let journal = FaultJournal::new();
+        let lose_reply = journal.lose_reply_once();
         let store = journal.store();
-        let mut bot = EcsBot::builder("ambiguous-commit")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot(
+            "ambiguous-commit",
+            &runs,
+            test_effects_with(Box::new(journal))?,
+        )?;
 
-        commit_then_error.set(true);
+        lose_reply.set(true);
         // The reply is lost, but the readback finds the record and the tick
         // settles in the same breath: an effect whose record is provably in
         // the journal is settled work, not an ambiguity to stall on.
@@ -8243,16 +8464,18 @@ mod tests {
     /// controller's fold (R05 wrong-event control; #122 item 2).
     #[test]
     fn a_position_holding_a_different_event_is_a_mismatch_not_an_acknowledgement() -> TestResult {
-        let key = EffectKey::new(
+        let key = crate::effect::EffectIdentity::new(
             RunId::from_hex(TEST_RUN)?,
+            EnvironmentId::from_hex(TEST_ENV)?,
+            crate::effect::FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+        )
+        .key(
             crate::effect::ActionId::from_hex("1112131415161718191a1b1c1d1e1f20")?,
             crate::effect::AttemptId::from_decimal("1")?,
-            crate::effect::FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
             crate::effect::ActionDigest::from_tagged(
                 "blake3_256",
                 "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
             )?,
-            EnvironmentId::from_hex(TEST_ENV)?,
             crate::effect::EnvironmentEpoch::from_decimal("1")?,
         );
         let admitted = EffectEvent::IntentAdmitted { key };
@@ -8284,124 +8507,13 @@ mod tests {
         Ok(())
     }
 
-    /// A journal that grades itself durable and can attest a committed
-    /// outcome through its receipt operation — the shape a file-backed
-    /// adapter has.
-    ///
-    /// Two one-shot faults cover the two halves of the
-    /// [`JournalError::OutcomeUnknown`] contract: commit-then-lost-reply
-    /// (the record is in the store, the caller settles by readback and
-    /// receipt) and unknown-without-commit (nothing landed, the caller
-    /// reports the occurrence and the retry re-appends — which is safe
-    /// precisely because the readback, not hope, authorized it).
-    /// [`Self::confirm_outcome`] is the receipt half: it attests only an
-    /// outcome that is actually in the store, at the position the caller
-    /// names.
-    struct DurableConfirmingJournal {
-        inner: Rc<RefCell<MemoryJournal>>,
-        /// One-shot: commit the next outcome append and lose its reply.
-        ambiguous_once: Rc<Cell<bool>>,
-        /// One-shot: the next outcome append reports an unknown outcome
-        /// without committing anything.
-        unknown_once: Rc<Cell<bool>>,
-    }
-
-    impl DurableConfirmingJournal {
-        fn new() -> Self {
-            Self {
-                inner: Rc::new(RefCell::new(MemoryJournal::new())),
-                ambiguous_once: Rc::new(Cell::new(false)),
-                unknown_once: Rc::new(Cell::new(false)),
-            }
-        }
-
-        fn ambiguous_once(&self) -> Rc<Cell<bool>> {
-            Rc::clone(&self.ambiguous_once)
-        }
-
-        fn unknown_once(&self) -> Rc<Cell<bool>> {
-            Rc::clone(&self.unknown_once)
-        }
-
-        fn store(&self) -> Rc<RefCell<MemoryJournal>> {
-            Rc::clone(&self.inner)
-        }
-    }
-
-    impl EffectJournal for DurableConfirmingJournal {
-        fn durability(&self) -> DurabilityPromise {
-            DurabilityPromise::ProcessCrash
-        }
-
-        fn tail(&self) -> JournalPosition {
-            self.inner.borrow().tail()
-        }
-
-        fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
-            EffectJournal::committed(&*self.inner.borrow())
-        }
-
-        fn committed_entries(&self) -> Result<Vec<crate::journal::JournalEntry>, JournalError> {
-            Ok(self.inner.borrow().committed().to_vec())
-        }
-
-        fn compare_and_append(
-            &mut self,
-            expected_tail: JournalPosition,
-            event: &EffectEvent,
-        ) -> Result<DurableAck, JournalError> {
-            if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.unknown_once.take() {
-                let refusal = Err(JournalError::OutcomeUnknown {
-                    cause: io::Error::other("injected unknown outcome, nothing written"),
-                });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
-                return refusal;
-            }
-            let ack = self
-                .inner
-                .borrow_mut()
-                .compare_and_append(expected_tail, event)?;
-            if matches!(event, EffectEvent::OutcomeObserved { .. }) && self.ambiguous_once.take() {
-                let refusal = Err(JournalError::OutcomeUnknown {
-                    cause: io::Error::other("injected lost reply"),
-                });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
-                return refusal;
-            }
-            Ok(ack)
-        }
-
-        fn confirm_outcome(
-            &mut self,
-            key: crate::effect::EffectKey,
-            evidence: EffectEvidence,
-            position: JournalPosition,
-            required: DurabilityPromise,
-        ) -> Result<DurableAck, JournalError> {
-            let held = EffectJournal::committed(&*self.inner.borrow())?.iter().any(
-                |event| matches!(*event, EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
-                        if held == key && held_evidence == evidence),
-            );
-            if !held {
-                let refusal = Err(JournalError::ReceiptUnavailable { required });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
-                return refusal;
-            }
-            Ok(DurableAck::new(position, self.durability()))
-        }
-    }
-
     #[test]
     fn a_durable_retry_after_a_lost_reply_settles_instead_of_stalling() -> TestResult {
         let runs = Rc::new(Cell::new(0));
-        let journal = DurableConfirmingJournal::new();
-        let ambiguous_once = journal.ambiguous_once();
+        let journal = FaultJournal::durable();
+        let ambiguous_once = journal.lose_reply_once();
         let store = journal.store();
-        let mut bot = EcsBot::builder("lost-reply")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot("lost-reply", &runs, test_effects_with(Box::new(journal))?)?;
 
         // Half one: the record landed, the reply did not. The readback finds
         // it, the journal attests its grade, and the tick settles in the same
@@ -8429,14 +8541,14 @@ mod tests {
         // A separate bot: half one's `Applied` settlement retired that
         // generation, and a retired generation is owed no second append.
         let runs = Rc::new(Cell::new(0));
-        let journal = DurableConfirmingJournal::new();
+        let journal = FaultJournal::durable();
         let unknown_once = journal.unknown_once();
         let store = journal.store();
-        let mut bot = EcsBot::builder("unknown-refused")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot(
+            "unknown-refused",
+            &runs,
+            test_effects_with(Box::new(journal))?,
+        )?;
 
         unknown_once.set(true);
         match bot.tick() {
@@ -8495,39 +8607,33 @@ mod tests {
     #[test]
     fn a_post_applied_append_failure_is_a_recording_failure_not_a_refusal() -> TestResult {
         let runs = Rc::new(Cell::new(0));
-        let journal = SelectiveJournal::new();
+        let journal = FaultJournal::new();
         let refuse_outcome = journal.refuse_outcome();
         let outcome_appends = journal.outcome_appends();
-        let mut bot = EcsBot::builder("unrecorded-applied")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot(
+            "unrecorded-applied",
+            &runs,
+            test_effects_with(Box::new(journal))?,
+        )?;
 
         refuse_outcome.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("a refused outcome append was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => {
-                assert!(
-                    matches!(error, BotError::EffectUnrecorded { .. }),
-                    "expected EffectUnrecorded, got {error:?}"
-                );
-                assert_eq!(
-                    error.dispatch_certainty(),
-                    DispatchCertainty::Occurred,
-                    "the effect happened: the certainty must not be Refused or NotDelivered"
-                );
-                assert_eq!(
-                    error.retry_class(),
-                    RetryClass::Never,
-                    "the action is never re-entered for a recording failure"
-                );
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused outcome append was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectUnrecorded { .. }),
+            "expected EffectUnrecorded, got {error:?}"
+        );
+        assert_eq!(
+            error.dispatch_certainty(),
+            DispatchCertainty::Occurred,
+            "the effect happened: the certainty must not be Refused or NotDelivered"
+        );
+        assert_eq!(
+            error.retry_class(),
+            RetryClass::Never,
+            "the action is never re-entered for a recording failure"
+        );
         assert_eq!(runs.get(), 1, "the action ran exactly once");
         assert_eq!(
             outcome_appends.get(),
@@ -8575,44 +8681,41 @@ mod tests {
     #[test]
     fn a_post_failure_append_failure_keeps_the_not_applied_fact() -> TestResult {
         let runs = Rc::new(Cell::new(0));
-        let journal = SelectiveJournal::new();
+        let journal = FaultJournal::new();
         let refuse_outcome = journal.refuse_outcome();
         let mut bot = EcsBot::builder("unrecorded-not-applied")
             .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&runs)))
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(&runs)),
+            )
             .with_effects(test_effects_with(Box::new(journal))?)
             .build(&net_grants())?;
 
         refuse_outcome.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("a refused outcome append was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => {
-                assert!(
-                    matches!(
-                        error,
-                        BotError::EffectUnrecorded {
-                            evidence: EffectEvidence::NotApplied,
-                            ..
-                        }
-                    ),
-                    "expected EffectUnrecorded carrying NotApplied, got {error:?}"
-                );
-                assert_eq!(
-                    error.dispatch_certainty(),
-                    DispatchCertainty::NotDelivered,
-                    "the effect definitely did not happen"
-                );
-                assert_eq!(
-                    error.retry_class(),
-                    RetryClass::Never,
-                    "a recording failure never re-enters the action"
-                );
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused outcome append was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(
+                error,
+                BotError::EffectUnrecorded {
+                    evidence: EffectEvidence::NotApplied,
+                    ..
+                }
+            ),
+            "expected EffectUnrecorded carrying NotApplied, got {error:?}"
+        );
+        assert_eq!(
+            error.dispatch_certainty(),
+            DispatchCertainty::NotDelivered,
+            "the effect definitely did not happen"
+        );
+        assert_eq!(
+            error.retry_class(),
+            RetryClass::Never,
+            "a recording failure never re-enters the action"
+        );
         assert_eq!(runs.get(), 1, "the action ran exactly once");
         assert!(
             matches!(
@@ -8629,13 +8732,13 @@ mod tests {
         // response to "it did not happen", not a retry of the recording
         // failure. It is still open work, so the tick reports it rather than
         // claiming a clean finish.
-        match bot.tick() {
-            Ok(fired) => return Err(format!("an open entry was reported as {fired} fired").into()),
-            Err(error) => assert!(
-                matches!(error, BotError::PendingTransition { .. }),
-                "expected the still-open entry, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an open entry was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the still-open entry, got {error:?}"
+        );
         assert_eq!(
             runs.get(),
             1,
@@ -8662,53 +8765,41 @@ mod tests {
         let runs = Rc::new(Cell::new(0));
 
         // Before intent.
-        let journal = SelectiveJournal::new();
+        let journal = FaultJournal::new();
         let refuse_intent = journal.refuse_intent();
-        let mut bot = EcsBot::builder("refuse-intent")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot(
+            "refuse-intent",
+            &runs,
+            test_effects_with(Box::new(journal))?,
+        )?;
         refuse_intent.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("a refused intent append was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => {
-                assert!(
-                    matches!(error, BotError::EffectRefused { .. }),
-                    "expected EffectRefused before intent, got {error:?}"
-                );
-                assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused intent append was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectRefused { .. }),
+            "expected EffectRefused before intent, got {error:?}"
+        );
+        assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
         assert_eq!(runs.get(), 0, "the action never ran");
 
         // Before preparation.
-        let journal = SelectiveJournal::new();
+        let journal = FaultJournal::new();
         let refuse_prepare = journal.refuse_prepare();
-        let mut bot = EcsBot::builder("refuse-prepare")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
-            .with_effects(test_effects_with(Box::new(journal))?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot(
+            "refuse-prepare",
+            &runs,
+            test_effects_with(Box::new(journal))?,
+        )?;
         refuse_prepare.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("a refused prepare append was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => {
-                assert!(
-                    matches!(error, BotError::EffectRefused { .. }),
-                    "expected EffectRefused before preparation, got {error:?}"
-                );
-                assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused prepare append was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectRefused { .. }),
+            "expected EffectRefused before preparation, got {error:?}"
+        );
+        assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
         assert_eq!(runs.get(), 0, "the action never ran");
         Ok(())
     }
@@ -8732,7 +8823,12 @@ mod tests {
         let mut revisions = Vec::new();
         for _ in 0..5 {
             fired.push(bot.tick()?);
-            revisions.push(bot.revisions().first().copied().unwrap_or_default());
+            revisions.push(
+                bot.revisions()
+                    .first()
+                    .copied()
+                    .ok_or("a bot with one chain reports one revision")?,
+            );
         }
 
         // `Revision` moves on the ticks the value actually moved: the first
@@ -8771,11 +8867,7 @@ mod tests {
     #[test]
     fn a_settled_chain_does_not_fire_again_on_every_later_tick() -> TestResult {
         let counter = Rc::new(Cell::new(0));
-        let mut bot = EcsBot::builder("held")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
-            .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot("held", &counter, test_effects()?)?;
 
         // The first tick is the movement: the chain opens and the effect runs.
         assert_eq!(bot.tick()?, 1, "the movement opens the chain");
@@ -8800,8 +8892,8 @@ mod tests {
         // The revision is the substrate's own record of movement, and it is the
         // other half of the same claim: one movement, one bump.
         assert_eq!(
-            bot.revisions().first().copied().unwrap_or_default(),
-            1,
+            bot.revisions().first().copied(),
+            Some(1),
             "Revision counts movements, so a settled chain's is still 1"
         );
         Ok(())
@@ -8930,11 +9022,7 @@ mod tests {
     #[test]
     fn a_source_without_a_digest_is_polled_every_tick() -> TestResult {
         let counter = Rc::new(Cell::new(0));
-        let mut bot = EcsBot::builder("unguarded")
-            .observe(Holds::new(200))
-            .on(|value: &u16| *value >= 200, Count(Rc::clone(&counter)))
-            .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        let mut bot = counting_bot("unguarded", &counter, test_effects()?)?;
 
         assert_eq!(bot.tick()?, 1);
         for _ in 0..5 {
@@ -8981,10 +9069,7 @@ mod tests {
     #[test]
     fn admission_names_every_unmet_requirement_and_the_domain_that_declared_it() -> TestResult {
         match EcsBot::builder("short")
-            .observe(Needs {
-                caps: vec![Cap::net()],
-                value: 1,
-            })
+            .observe(Holds::new(1))
             .on(
                 |value: &u16| *value > 0,
                 NeedsCaps {
@@ -9009,7 +9094,7 @@ mod tests {
                 assert_eq!(
                     named,
                     vec![
-                        (Cap::NET, Some("test::needs")),
+                        (Cap::NET, Some("test::holds")),
                         (Cap::FS, Some("test::writes")),
                     ],
                     "one refusal must name both requirements and both domains: {deficit}"
@@ -9050,13 +9135,13 @@ mod tests {
         // The second poll fails. The tick reports it, and the observed value
         // from the first tick must survive: a failed tick leaves the world as
         // it was rather than half-updated.
-        match bot.tick() {
-            Ok(_) => return Err("a failing poll was reported as a successful tick".into()),
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the observer's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |_| {
+            String::from("a failing poll was reported as a successful tick")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the observer's own error, got {error:?}"
+        );
         assert_eq!(
             bot.revisions(),
             after_success,
@@ -9098,15 +9183,13 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a failing sibling was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the sibling's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a failing sibling was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the sibling's own error, got {error:?}"
+        );
         assert!(
             seen.borrow().is_empty(),
             "the failed fold must not commit A's payload"
@@ -9160,15 +9243,13 @@ mod tests {
 
         left_value.set(1);
         mid_fail.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a failing sibling was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the sibling's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a failing sibling was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the sibling's own error, got {error:?}"
+        );
         assert!(
             seen.borrow().is_empty(),
             "the failed fold must not commit A=1"
@@ -9325,17 +9406,13 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("an indeterminate effect was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EffectIndeterminate { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an indeterminate effect was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectIndeterminate { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(identities(&bot), vec![(0, 0)], "the held entry is named");
         assert!(
             matches!(
@@ -9350,15 +9427,13 @@ mod tests {
         // A sibling failure aborts the fold before any newer candidate can be
         // admitted. The held entry is untouched: same identity, same hold.
         mid_fail.set(true);
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a failing sibling was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the sibling's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a failing sibling was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the sibling's own error, got {error:?}"
+        );
         assert_eq!(
             identities(&bot),
             vec![(0, 0)],
@@ -9440,15 +9515,13 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a refused action was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused action was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(
             *first.borrow(),
             vec![200],
@@ -9519,21 +9592,27 @@ mod tests {
         // which is reported rather than silent.
         let attempts = Rc::new(Cell::new(0));
         let log = Rc::new(RefCell::new(Vec::new()));
+        // Seven polls: four at the threshold, then three below it, so the ticks
+        // after the abandonment open no new entry and the ledger it leaves is
+        // the one asserted on.
         let mut bot = EcsBot::builder("refusing")
-            .observe(Script::new(vec![200, 200, 200, 200]))
-            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
+            .observe(Script::new(vec![200, 200, 200, 200, 0, 0, 0]))
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(&attempts)),
+            )
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
         for round in 1..=2 {
-            match bot.tick() {
-                Ok(fired) => return Err(format!("round {round} reported {fired} fired").into()),
-                Err(error) => assert!(
-                    matches!(error, BotError::DomainError { .. }),
-                    "round {round}: expected the action's own error, got {error:?}"
-                ),
-            }
+            let error = refused(bot.tick(), |fired| {
+                format!("round {round} reported {fired} fired")
+            })?;
+            assert!(
+                matches!(error, BotError::DomainError { .. }),
+                "round {round}: expected the action's own error, got {error:?}"
+            );
         }
         assert_eq!(attempts.get(), 2, "two ticks, two attempts");
         assert!(
@@ -9550,13 +9629,13 @@ mod tests {
         // rather than retried forever. The tick reports the action's own typed
         // error, not a summary of it: a caller classifies a retry by matching
         // the variant, and rendering it into a string would throw that away.
-        match bot.tick() {
-            Ok(fired) => return Err(format!("a spent budget was reported as {fired} fired").into()),
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "the abandonment does not replace the error that caused it: {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a spent budget was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "the abandonment does not replace the error that caused it: {error:?}"
+        );
         assert_eq!(attempts.get(), 3, "exactly the declared budget was spent");
 
         // Giving up is reported, never silent: the entry is named with the
@@ -9588,19 +9667,16 @@ mod tests {
             log.borrow().is_empty(),
             "the successor is not run ahead of the entry that was just decided"
         );
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!(
-                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
-                    log.borrow()
-                )
-                .into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::PendingTransition { .. }),
-                "expected the unresolved chain to be reported, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!(
+                "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                log.borrow()
+            )
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the unresolved chain to be reported, got {error:?}"
+        );
         assert!(
             log.borrow().is_empty(),
             "the unattempted work does not run past the entry that was given up on"
@@ -9609,20 +9685,17 @@ mod tests {
         // Terminal, and the rest of the chain is blocked behind it, so the
         // transition stays reported: the abandonment first, because it is the
         // entry that explains the one behind it.
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!(
-                    "an abandoned entry was reported as {fired} fired while pending() still \
+        let error = refused(bot.tick(), |fired| {
+            format!(
+                "an abandoned entry was reported as {fired} fired while pending() still \
                      names it: {:?}",
-                    bot.pending()
-                )
-                .into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::PendingTransition { .. }),
-                "expected the unresolved chain to be reported, got {error:?}"
-            ),
-        }
+                bot.pending()
+            )
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the unresolved chain to be reported, got {error:?}"
+        );
         assert!(
             identities(&bot) == vec![(0, 0), (0, 1)],
             "the abandoned entry and the entry it blocks are what is left to report: {:?}",
@@ -9640,18 +9713,21 @@ mod tests {
         let mut bot = EcsBot::builder("impatient")
             .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
             .observe(Script::new(vec![200, 200, 200]))
-            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(&attempts)),
+            )
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => return Err(format!("a refusal was reported as {fired} fired").into()),
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(attempts.get(), 1, "the declared budget is one attempt");
         assert!(
             log.borrow().is_empty(),
@@ -9666,19 +9742,16 @@ mod tests {
         // the send behind an unreserved draft must not run. It is corrected
         // rather than loosened — the tick is now expected to refuse, which is
         // strictly more than it was expected to do before.
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!(
-                    "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
-                    log.borrow()
-                )
-                .into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::PendingTransition { .. }),
-                "expected the unresolved chain to be reported, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!(
+                "a tick with an abandoned prerequisite reported {fired} fired and ran {:?}",
+                log.borrow()
+            )
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the unresolved chain to be reported, got {error:?}"
+        );
         assert_eq!(attempts.get(), 1, "the abandoned entry is not retried");
         assert!(
             log.borrow().is_empty(),
@@ -9698,15 +9771,13 @@ mod tests {
         // promise the retry will succeed.
         let blocked = bot.pending().into_iter().next().ok_or("held")?;
         bot.resolve_effect(&held_key(&blocked)?, EffectEvidence::NotApplied)?;
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a refusal was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the retry's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the retry's own error, got {error:?}"
+        );
         assert_eq!(attempts.get(), 2, "the revived entry attempted again");
         assert!(
             log.borrow().is_empty(),
@@ -9724,21 +9795,22 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut bot = EcsBot::builder("two-chains")
             .observe(Script::new(vec![200, 200]))
-            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&attempts)))
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(&attempts)),
+            )
             .observe(Script::new(vec![200, 200]))
             .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a refused action was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused action was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(
             *log.borrow(),
             vec![200],
@@ -9759,30 +9831,15 @@ mod tests {
         // substrate refuses to guess: it holds the entry, reports it every
         // tick, and waits for evidence.
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut bot = EcsBot::builder("indeterminate")
-            .observe(Script::new(vec![200, 200, 200]))
-            .on(
-                |value: &u16| *value >= 200,
-                Flaky {
-                    remaining: Rc::new(Cell::new(1)),
-                    log: Rc::clone(&log),
-                    kind: FlakyKind::Indeterminate,
-                },
-            )
-            .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        let mut bot = indeterminate_once_bot("indeterminate", &log)?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("an indeterminate effect was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EffectIndeterminate { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an indeterminate effect was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectIndeterminate { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert!(
             log.borrow().is_empty(),
             "an indeterminate effect is not an effect: nothing was recorded"
@@ -9790,33 +9847,29 @@ mod tests {
 
         // The source has not moved, and the entry is not re-attempted: a blind
         // retry is exactly the duplicate this state exists to prevent.
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a held effect was reported as {fired} fired").into());
-            }
-            Err(error) => {
-                let BotError::PendingTransition { work, outstanding } = error else {
-                    return Err(format!("expected PendingTransition, got {error:?}").into());
-                };
-                assert_eq!(identity(&work), (0, 0), "the held entry is named");
-                assert!(
-                    matches!(
-                        work.hold(),
-                        TransitionHold::OutcomeUnknown { attempts: 1, .. }
-                    ),
-                    "the hold carries the attempt that could not be settled: {:?}",
-                    work.hold()
-                );
-                assert_eq!(outstanding, 1, "one entry is still open");
-                assert!(
-                    bot.pending()
-                        .iter()
-                        .all(|work| !matches!(work.hold(), TransitionHold::Abandoned { .. })),
-                    "nothing was given up on: {:?}",
-                    bot.pending()
-                );
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a held effect was reported as {fired} fired")
+        })?;
+        let BotError::PendingTransition { work, outstanding } = error else {
+            return Err(format!("expected PendingTransition, got {error:?}").into());
+        };
+        assert_eq!(identity(&work), (0, 0), "the held entry is named");
+        assert!(
+            matches!(
+                work.hold(),
+                TransitionHold::OutcomeUnknown { attempts: 1, .. }
+            ),
+            "the hold carries the attempt that could not be settled: {:?}",
+            work.hold()
+        );
+        assert_eq!(outstanding, 1, "one entry is still open");
+        assert!(
+            bot.pending()
+                .iter()
+                .all(|work| !matches!(work.hold(), TransitionHold::Abandoned { .. })),
+            "nothing was given up on: {:?}",
+            bot.pending()
+        );
         assert!(
             log.borrow().is_empty(),
             "a held effect is not attempted again without evidence"
@@ -9848,30 +9901,15 @@ mod tests {
         // duplicate: the caller knows the effect is live, so it is acknowledged
         // and never attempted again.
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut bot = EcsBot::builder("acknowledged")
-            .observe(Script::new(vec![200, 200, 200]))
-            .on(
-                |value: &u16| *value >= 200,
-                Flaky {
-                    remaining: Rc::new(Cell::new(1)),
-                    log: Rc::clone(&log),
-                    kind: FlakyKind::Indeterminate,
-                },
-            )
-            .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        let mut bot = indeterminate_once_bot("acknowledged", &log)?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(
-                    format!("an indeterminate effect was reported as {fired} fired").into(),
-                );
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EffectIndeterminate { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an indeterminate effect was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectIndeterminate { .. }),
+            "expected the action's own error, got {error:?}"
+        );
 
         let held = bot
             .pending()
@@ -9949,13 +9987,13 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => return Err(format!("a refusal was reported as {fired} fired").into()),
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(*first.borrow(), vec![200], "the first entry ran once");
         assert!(second.borrow().is_empty(), "the second entry refused");
 
@@ -10047,7 +10085,7 @@ mod tests {
         // would make the later `NotApplied` a contradiction rather than a
         // settlement, and the journal is the fact that wins (issue #106).
         let log = Rc::new(RefCell::new(Vec::new()));
-        let journal = SelectiveJournal::new();
+        let journal = FaultJournal::new();
         let refuse_outcome = journal.refuse_outcome();
         refuse_outcome.set(true);
         let mut bot = EcsBot::builder("interrupted")
@@ -10056,15 +10094,13 @@ mod tests {
             .with_effects(test_effects_with(Box::new(journal))?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a refused outcome append reported {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EffectUnrecorded { .. }),
-                "expected the outcome append's own failure, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused outcome append reported {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EffectUnrecorded { .. }),
+            "expected the outcome append's own failure, got {error:?}"
+        );
         assert_eq!(*log.borrow(), vec![200], "the action ran once");
         refuse_outcome.set(false);
         {
@@ -10119,19 +10155,17 @@ mod tests {
             "the interrupted attempt is reported as unrecorded: {:?}",
             first_hold(&bot)
         );
-        match bot.tick() {
-            Ok(fired) => return Err(format!("an unrecorded attempt fired {fired}").into()),
-            Err(error) => {
-                let BotError::PendingTransition { work, .. } = error else {
-                    return Err(format!("expected PendingTransition, got {error:?}").into());
-                };
-                assert!(
-                    matches!(work.hold(), TransitionHold::Unrecorded),
-                    "the tick reports it as held, not as handled: {:?}",
-                    work.hold()
-                );
-            }
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an unrecorded attempt fired {fired}")
+        })?;
+        let BotError::PendingTransition { work, .. } = error else {
+            return Err(format!("expected PendingTransition, got {error:?}").into());
+        };
+        assert!(
+            matches!(work.hold(), TransitionHold::Unrecorded),
+            "the tick reports it as held, not as handled: {:?}",
+            work.hold()
+        );
         assert_eq!(
             *log.borrow(),
             vec![200],
@@ -10247,15 +10281,13 @@ mod tests {
             typed_entry::<_, _, String>(|value: &String| value.len() >= 3, Record(Rc::clone(&log))),
         );
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("an evaluate error was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EvaluateError { .. }),
-                "expected the condition's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("an evaluate error was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EvaluateError { .. }),
+            "expected the condition's own error, got {error:?}"
+        );
         assert!(log.borrow().is_empty(), "nothing was attempted");
         assert_eq!(
             identities(&bot),
@@ -10272,13 +10304,13 @@ mod tests {
 
         // And it stays that way rather than decaying into an abandonment: the
         // report is the truth, not a stage on the way to losing the work.
-        match bot.tick() {
-            Ok(fired) => return Err(format!("the second tick reported {fired} fired").into()),
-            Err(error) => assert!(
-                matches!(error, BotError::EvaluateError { .. }),
-                "the condition is evaluated again, not silently given up on: {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("the second tick reported {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EvaluateError { .. }),
+            "the condition is evaluated again, not silently given up on: {error:?}"
+        );
         assert!(log.borrow().is_empty(), "and still nothing was attempted");
         Ok(())
     }
@@ -10305,15 +10337,13 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a refused condition was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::EvaluateError { .. }),
-                "expected the condition's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a refused condition was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::EvaluateError { .. }),
+            "expected the condition's own error, got {error:?}"
+        );
         assert_eq!(
             *log.borrow(),
             vec![200],
@@ -10389,37 +10419,6 @@ mod tests {
         }
     }
 
-    /// An action whose failure is permanent and happens before dispatch: the
-    /// shape every "binding required" domain has.
-    struct RefusesPermanently(Rc<Cell<usize>>);
-
-    impl Execute for RefusesPermanently {
-        type Input = u16;
-        type Output = ();
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        fn effect_lifetime(&self) -> EffectLifetime {
-            EffectLifetime::Local
-        }
-
-        async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
-            call.0.check(&[])?;
-            self.0.set(self.0.get().saturating_add(1));
-            Err(BotError::DomainError {
-                domain: "test::permanent".into(),
-                certainty: DispatchCertainty::Refused,
-                cause: "no binding is installed for this domain".into(),
-            })
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::permanent"
-        }
-    }
-
     #[test]
     fn a_mispairing_behind_the_erasure_is_a_witness_miss() -> TestResult {
         // The pairing from `Chains` to `Observed` is by index, and a vector
@@ -10441,7 +10440,10 @@ mod tests {
         let ran = Rc::new(Cell::new(0));
         let mut bot = EcsBot::builder("mispairing")
             .observe(Script::new(vec![200]))
-            .on(|value: &u16| *value >= 200, Refuses(Rc::clone(&ran)))
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(&ran)),
+            )
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
@@ -10512,23 +10514,21 @@ mod tests {
         bot.world.non_send_mut::<Chains>().0[0].entries[0] =
             typed_entry::<_, _, u16>(|value: &u16| *value >= 200, CountsU32(Rc::clone(&ran)));
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a wiring mismatch was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(
-                    error,
-                    BotError::TypeMismatch {
-                        site: "spec::typed_entry",
-                        expected: "u32",
-                        observed: "u16",
-                        ..
-                    }
-                ),
-                "a wiring defect is a type mismatch naming both types, not a domain failure: {error:?}"
+        let error = refused(bot.tick(), |fired| {
+            format!("a wiring mismatch was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(
+                error,
+                BotError::TypeMismatch {
+                    site: "spec::typed_entry",
+                    expected: "u32",
+                    observed: "u16",
+                    ..
+                }
             ),
-        }
+            "a wiring defect is a type mismatch naming both types, not a domain failure: {error:?}"
+        );
         assert_eq!(
             ran.get(),
             0,
@@ -10550,15 +10550,13 @@ mod tests {
         // That is the observable difference the budget makes: `AttemptsExhausted`
         // is a fact about how many times the substrate was willing to ask, and
         // asking twice here buys nothing.
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a retried wiring mismatch reported {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::PendingTransition { .. }),
-                "the abandoned entry is the barrier the next tick reports, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a retried wiring mismatch reported {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "the abandoned entry is the barrier the next tick reports, got {error:?}"
+        );
         Ok(())
     }
 
@@ -10573,20 +10571,18 @@ mod tests {
             .observe(Script::new(vec![200, 200, 200, 200]))
             .on(
                 |value: &u16| *value >= 200,
-                RefusesPermanently(Rc::clone(&attempts)),
+                Refuses::permanently(Rc::clone(&attempts)),
             )
             .with_effects(test_effects()?)
             .build(&net_grants())?;
 
-        match bot.tick() {
-            Ok(fired) => {
-                return Err(format!("a permanent refusal was reported as {fired} fired").into());
-            }
-            Err(error) => assert!(
-                matches!(error, BotError::DomainError { .. }),
-                "expected the action's own error, got {error:?}"
-            ),
-        }
+        let error = refused(bot.tick(), |fired| {
+            format!("a permanent refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
         assert_eq!(attempts.get(), 1, "a permanent refusal is attempted once");
         assert!(
             matches!(
@@ -10654,95 +10650,27 @@ mod tests {
         }
     }
 
-    struct PrefixSource;
+    /// The source type for the identity known-answer vectors.
+    ///
+    /// [`identify_output`] reads only a source's output type, so these tests name
+    /// a source without building or ticking a bot over it. One generic type
+    /// stands for every output they derive an identity for, and a poll — which
+    /// none of them makes — is refused rather than answered.
+    struct Unpolled<T>(PhantomData<fn() -> T>);
 
-    impl Observe for PrefixSource {
-        type Output = PrefixProbe;
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbe, BotError> {
-            unreachable!("identity fixtures are never polled")
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::prefix_probe"
-        }
-    }
-
-    struct PrefixTailSource;
-
-    impl Observe for PrefixTailSource {
-        type Output = PrefixProbeTail;
+    impl<T> Observe for Unpolled<T> {
+        type Output = T;
 
         fn required_caps(&self) -> &[Cap] {
             &[]
         }
 
-        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbeTail, BotError> {
-            unreachable!("identity fixtures are never polled")
+        async fn poll(&self, _call: (Auth, ())) -> Result<T, BotError> {
+            domain_refusal("test::unpolled", "identity fixtures are never polled")
         }
 
         fn domain_id(&self) -> &str {
-            "test::prefix_probe_tail"
-        }
-    }
-
-    struct PrefixNextSchemaSource;
-
-    impl Observe for PrefixNextSchemaSource {
-        type Output = PrefixProbeNextSchema;
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        async fn poll(&self, _call: (Auth, ())) -> Result<PrefixProbeNextSchema, BotError> {
-            unreachable!("identity fixtures are never polled")
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::prefix_probe_next"
-        }
-    }
-
-    /// A `String`-valued source for the identity known-answer vectors.
-    struct Words;
-
-    impl Observe for Words {
-        type Output = String;
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        async fn poll(&self, _call: (Auth, ())) -> Result<String, BotError> {
-            unreachable!("identity fixtures are never polled")
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::words"
-        }
-    }
-
-    /// An [`EventId`]-valued source for the identity known-answer vectors.
-    struct Ticks;
-
-    impl Observe for Ticks {
-        type Output = EventId<u64>;
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        async fn poll(&self, _call: (Auth, ())) -> Result<EventId<u64>, BotError> {
-            unreachable!("identity fixtures are never polled")
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::ticks"
+            "test::unpolled"
         }
     }
 
@@ -10760,28 +10688,10 @@ mod tests {
         }
     }
 
-    struct TicksAlt;
-
-    impl Observe for TicksAlt {
-        type Output = EventId<AltTick>;
-
-        fn required_caps(&self) -> &[Cap] {
-            &[]
-        }
-
-        async fn poll(&self, _call: (Auth, ())) -> Result<EventId<AltTick>, BotError> {
-            unreachable!("identity fixtures are never polled")
-        }
-
-        fn domain_id(&self) -> &str {
-            "test::ticks_alt"
-        }
-    }
-
     #[test]
     fn two_output_types_sharing_a_name_prefix_hash_two_identities() {
-        let plain = identify_output::<PrefixSource>(&PrefixProbe);
-        let tail = identify_output::<PrefixTailSource>(&PrefixProbeTail);
+        let plain = identify_output::<Unpolled<PrefixProbe>>(&PrefixProbe);
+        let tail = identify_output::<Unpolled<PrefixProbeTail>>(&PrefixProbeTail);
         assert_ne!(
             plain.identity, tail.identity,
             "the declared schema ids must separate the pair their name and \
@@ -10795,8 +10705,8 @@ mod tests {
         // different schema id are different admitted inputs. A recovered
         // journal from the old schema therefore derives a different dispatch
         // digest and is refused as superseded rather than folded.
-        let current = identify_output::<PrefixSource>(&PrefixProbe);
-        let next = identify_output::<PrefixNextSchemaSource>(&PrefixProbeNextSchema);
+        let current = identify_output::<Unpolled<PrefixProbe>>(&PrefixProbe);
+        let next = identify_output::<Unpolled<PrefixProbeNextSchema>>(&PrefixProbeNextSchema);
         assert_ne!(current.identity, next.identity);
     }
 
@@ -10820,21 +10730,22 @@ mod tests {
 
     #[test]
     fn the_same_event_twice_and_two_events_hash_as_documented() {
-        let redelivery = identify_output::<Ticks>(&EventId::new(5_u64, 7_u64));
-        let again = identify_output::<Ticks>(&EventId::new(5_u64, 7_u64));
+        let redelivery = identify_output::<Unpolled<EventId<u64>>>(&EventId::new(5_u64, 7_u64));
+        let again = identify_output::<Unpolled<EventId<u64>>>(&EventId::new(5_u64, 7_u64));
         assert_eq!(
             redelivery.identity, again.identity,
             "the same event id over the same payload is one event"
         );
         assert!(redelivery.event, "EventId names an event");
 
-        let other_id = identify_output::<Ticks>(&EventId::new(6_u64, 7_u64));
+        let other_id = identify_output::<Unpolled<EventId<u64>>>(&EventId::new(6_u64, 7_u64));
         assert_ne!(redelivery.identity, other_id.identity);
 
         // The payload's schema rides inside the wrapper's stream, so equal
         // ids over identical written bytes from different payload types stay
         // distinct.
-        let other_payload = identify_output::<TicksAlt>(&EventId::new(5_u64, AltTick(7_u64)));
+        let other_payload =
+            identify_output::<Unpolled<EventId<AltTick>>>(&EventId::new(5_u64, AltTick(7_u64)));
         assert_ne!(redelivery.identity, other_payload.identity);
     }
 
@@ -10860,14 +10771,14 @@ mod tests {
             "the u16 vector moved: the v2 identity scheme changed"
         );
 
-        let str_value = identify_output::<Words>(&String::from("settle")).identity;
+        let str_value = identify_output::<Unpolled<String>>(&String::from("settle")).identity;
         assert_eq!(
             hex(str_value),
             "174d75182e8e31c49374da2f22e0b353",
             "the string vector moved: the v2 identity scheme changed"
         );
 
-        let event = identify_output::<Ticks>(&EventId::new(9_u64, true)).identity;
+        let event = identify_output::<Unpolled<EventId<u64>>>(&EventId::new(9_u64, true)).identity;
         assert_eq!(
             hex(event),
             "f4d5d8a77b9fed69dd1474cf0620348a",
@@ -10909,8 +10820,8 @@ mod tests {
         }
         /// The coordinates `applied_in` would ask about for `index`.
         fn coordinates(index: u64) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-            let chain = index.checked_rem(16).unwrap_or(0);
-            let entry = index.checked_div(16).unwrap_or(0);
+            let chain = index.checked_rem(16).ok_or("sixteen chains is not zero")?;
+            let entry = index.checked_div(16).ok_or("sixteen chains is not zero")?;
             Ok((usize::try_from(chain)?, usize::try_from(entry)?))
         }
 
@@ -10926,13 +10837,10 @@ mod tests {
 
         for index in 0..COUNT {
             let (chain, entry) = coordinates(index)?;
-            let key = EffectKey::new(
-                run,
+            let key = crate::effect::EffectIdentity::new(run, environment, flow).key(
                 action_for(index)?,
                 attempt,
-                flow,
                 derive_action_digest(flow, chain, entry, &input),
-                environment,
                 epoch,
             );
             effects.note_applied(key);
@@ -10940,15 +10848,14 @@ mod tests {
 
         // A duplicate settlement must not grow either index.
         let (chain, entry) = coordinates(0)?;
-        effects.note_applied(EffectKey::new(
-            run,
-            action_for(0)?,
-            attempt,
-            flow,
-            derive_action_digest(flow, chain, entry, &input),
-            environment,
-            epoch,
-        ));
+        effects.note_applied(
+            crate::effect::EffectIdentity::new(run, environment, flow).key(
+                action_for(0)?,
+                attempt,
+                derive_action_digest(flow, chain, entry, &input),
+                epoch,
+            ),
+        );
         assert_eq!(
             effects.applied_events.len(),
             usize::try_from(COUNT)?,
@@ -11045,16 +10952,18 @@ mod tests {
         };
         let scope = test_effects_with(Box::new(journal))?;
         let mut effects = Effects::new(scope, JournalPosition::genesis());
-        let key = EffectKey::new(
+        let key = crate::effect::EffectIdentity::new(
             RunId::from_hex(TEST_RUN)?,
+            EnvironmentId::from_hex(TEST_ENV)?,
+            FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
+        )
+        .key(
             ActionId::from_hex("1112131415161718191a1b1c1d1e1f20")?,
             AttemptId::from_decimal("1")?,
-            FlowRevision::from_tagged("blake3_256", TEST_FLOW)?,
             ActionDigest::from_tagged(
                 "blake3_256",
                 "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
             )?,
-            EnvironmentId::from_hex(TEST_ENV)?,
             EnvironmentEpoch::from_decimal("1")?,
         );
 

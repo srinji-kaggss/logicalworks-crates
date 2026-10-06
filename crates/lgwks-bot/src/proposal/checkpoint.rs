@@ -23,6 +23,7 @@
 //! this type is archivable rather than merely in memory: a checkpoint held only
 //! in the instance that wrote it does not survive the reset it exists for.
 
+use crate::journal::frame::SaturatingFrom;
 use std::fmt;
 
 use lgwks_std::wire::{Archive, Deserialize, Serialize};
@@ -362,8 +363,8 @@ fn check_push<T>(list: &[T], ceiling: usize, what: &'static str) -> Result<(), C
     if would_hold > ceiling {
         let refusal = Err(CheckpointError::Limit {
             what,
-            got: u64::try_from(would_hold).unwrap_or(u64::MAX),
-            limit: u64::try_from(ceiling).unwrap_or(u64::MAX),
+            got: u64::saturating_from(would_hold),
+            limit: u64::saturating_from(ceiling),
         });
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_push: returning an error to the caller");
         return refusal;

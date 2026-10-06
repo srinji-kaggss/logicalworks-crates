@@ -50,22 +50,6 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// A uniform draw in `[0, 1)`, from the top 53 bits (the mantissa width of
-    /// an `f64`), so every representable value in range is reachable.
-    ///
-    /// The other half of this generator's surface and nothing in the rig
-    /// resamples a continuous statistic today, so it is held deliberately:
-    /// removing it would make the next continuous bootstrap a change to a
-    /// statistical primitive rather than a change to a caller.
-    #[expect(
-        dead_code,
-        reason = "the generator's uniform draw is half its surface and no scenario resamples a continuous statistic today; deleting it would make the next continuous bootstrap a change to a statistical primitive rather than to a caller"
-    )]
-    pub fn next_unit(&mut self) -> f64 {
-        let bits = self.next_u64() >> 11;
-        (bits as f64) / ((1u64 << 53) as f64)
-    }
-
     /// A uniform index in `[0, n)`, or `0` when `n` is zero.
     pub fn below(&mut self, n: usize) -> usize {
         if n == 0 {
@@ -88,7 +72,7 @@ pub fn quantile(values: &mut [f64], q: f64) -> f64 {
     if values.is_empty() {
         return f64::NAN;
     }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values.sort_by(f64::total_cmp);
     let q = q.clamp(0.0, 1.0);
     let last = values.len() - 1;
     let position = q * (last as f64);

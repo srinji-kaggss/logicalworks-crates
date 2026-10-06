@@ -216,15 +216,11 @@ fn discard_marker(marker: &std::path::Path) -> TestResult {
 /// reactor, so the workspace's ban on `std::thread::sleep` — which exists
 /// because blocking an executor thread stalls every task on it — has nothing to
 /// protect here: there is no executor, and the wait is this watchdog's subject
-/// rather than its scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the watchdog's parent branch is a plain process with no async runtime and no \
-              reactor to stall; a poll interval is the wait's subject, and `rt::time::sleep` \
-              cannot be awaited here"
-)]
+/// rather than its scaffolding. A park is the synchronous wait the workspace
+/// names instead; it returns early only if this thread is unparked, and nothing
+/// unparks it, so the interval is the poll interval either way.
 fn pause_between_polls() {
-    std::thread::sleep(GUARD_POLL_INTERVAL);
+    std::thread::park_timeout(GUARD_POLL_INTERVAL);
 }
 
 // ── Futures that need no reactor ───────────────────────────────────────────
@@ -419,6 +415,105 @@ fn is_sentinel(seen: &u32) -> bool {
     *seen == SENTINEL
 }
 
+/// The log every action in this file appends its label to.
+type Log = Rc<RefCell<Vec<&'static str>>>;
+
+/// A one-chain bot over a timer-backed source that always selects its effect.
+///
+/// The fixture three rows share: the current-thread runtime and the one-worker
+/// runtime both refuse a synchronous tick on this bot, and the awaited tick that
+/// follows must run the one effect. Written once because a per-row copy is free
+/// to drift on which source it drives, and a row that drove a different one would
+/// be testing something else while claiming this.
+fn timer_bot(name: &str, log: &Log) -> Result<Bot, Box<dyn std::error::Error>> {
+    Ok(Bot::builder(name)
+        .observe(TimerSource {
+            value: 1,
+            delay: TIMER_DELAY,
+        })
+        .on(
+            is_one,
+            TimerAction {
+                label: "ticked",
+                log: Rc::clone(log),
+            },
+        )
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?)
+}
+
+/// A one-chain bot over a channel-backed source, receiving on `receiver`.
+///
+/// The fixture the sibling-completion and cancelled-tick rows share: both need a
+/// receive that a tick can be cancelled *during*, which is the whole of what
+/// distinguishes them.
+fn channel_bot(
+    name: &str,
+    receiver: mpsc::Receiver<u32>,
+    log: Log,
+) -> Result<Bot, Box<dyn std::error::Error>> {
+    Ok(Bot::builder(name)
+        .observe(ChannelSource {
+            receiver: Mutex::new(Some(receiver)),
+        })
+        .on(
+            is_sentinel,
+            YieldAction {
+                label: "received",
+                log,
+            },
+        )
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?)
+}
+
+/// A one-chain bot whose only effect never settles: the fixture both identity
+/// rows drive.
+///
+/// The generation row and the attempt row are the same property read from two
+/// fields of the same binding, so they share one bot: a copy could differ in the
+/// action's own bookkeeping and the two rows would then be asserting about
+/// different machines.
+fn doubtful_bot(
+    name: &str,
+    value: &Rc<Cell<u32>>,
+    uncertain: &Rc<Cell<bool>>,
+    seen: &Rc<RefCell<Vec<u32>>>,
+) -> Result<Bot, Box<dyn std::error::Error>> {
+    Ok(Bot::builder(name)
+        .observe(Dial {
+            value: Rc::clone(value),
+        })
+        .on(
+            |_observed: &u32| true,
+            Doubtful {
+                uncertain: Rc::clone(uncertain),
+                seen: Rc::clone(seen),
+            },
+        )
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?)
+}
+
+/// A one-chain bot over a source that needs no reactor at all.
+///
+/// The fixture the runtime row and the thread-parking row share, so "the shipped
+/// runtime runs it" and "the adapter runs it without a driver" are asserted about
+/// the same bot.
+fn immediate_bot(name: &str, log: &Log) -> Result<Bot, Box<dyn std::error::Error>> {
+    Ok(Bot::builder(name)
+        .observe(YieldSource { value: 1 })
+        .on(
+            is_one,
+            YieldAction {
+                label: "ran",
+                log: Rc::clone(log),
+            },
+        )
+        .with_effects(test_effects()?)
+        .build(&GrantSet::empty())?)
+}
+
 /// `true` for any value the socket source can yield.
 #[cfg(all(feature = "io", feature = "net"))]
 fn is_positive(seen: &u32) -> bool {
@@ -436,20 +531,7 @@ fn is_positive(seen: &u32) -> bool {
 /// than the error.
 fn refusal_current_thread() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("refusal-current-thread")
-        .observe(TimerSource {
-            value: 1,
-            delay: TIMER_DELAY,
-        })
-        .on(
-            is_one,
-            TimerAction {
-                label: "ticked",
-                log: Rc::clone(&log),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = timer_bot("refusal-current-thread", &log)?;
 
     // The shipped current-thread runtime: `lgwks_bot::block_on` builds one per
     // call, and on this runtime the calling thread is the driver.
@@ -501,20 +583,7 @@ fn refusal_one_worker() -> TestResult {
     let runtime = Builder::new().worker_threads(Some(workers)).build()?;
 
     let log = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("refusal-one-worker")
-        .observe(TimerSource {
-            value: 1,
-            delay: TIMER_DELAY,
-        })
-        .on(
-            is_one,
-            TimerAction {
-                label: "ticked",
-                log: Rc::clone(&log),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = timer_bot("refusal-one-worker", &log)?;
 
     let refused = runtime.block_on(async { bot.tick() });
     match refused {
@@ -537,12 +606,10 @@ fn refusal_one_worker() -> TestResult {
             "the awaited tick must run the one effect the timer source selects"
         ),
         Ok(Err(error)) => {
-            {
-                let refusal =
-                    Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+            return refusal;
         }
         Err(_elapsed) => {
             let refusal = Err(format!(
@@ -569,10 +636,17 @@ fn refusal_one_worker() -> TestResult {
 /// show up here as a flipped log. Both chains are selected on the same tick, so
 /// the log is the tick's whole effect program.
 fn timer_effects_in_order() -> TestResult {
+    // The two chains named rather than numbered inline, because the order claim
+    // is about *these two* effects: a name says which one a log line is, and a
+    // second copy of the builder differing only in a literal is a row that can
+    // drift without anything noticing.
+    const FIRST: u32 = 1;
+    const SECOND: u32 = 2;
+
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut bot = Bot::builder("timer-order")
         .observe(TimerSource {
-            value: 1,
+            value: FIRST,
             delay: TIMER_DELAY,
         })
         .on(
@@ -583,7 +657,7 @@ fn timer_effects_in_order() -> TestResult {
             },
         )
         .observe(TimerSource {
-            value: 2,
+            value: SECOND,
             delay: TIMER_DELAY,
         })
         .on(
@@ -605,12 +679,10 @@ fn timer_effects_in_order() -> TestResult {
             return refusal;
         }
         Err(_elapsed) => {
-            {
-                let refusal =
-                    Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
+            return refusal;
         }
     }
     assert_eq!(
@@ -636,19 +708,7 @@ fn sibling_channel_completion() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
     let action_log = Rc::clone(&log);
 
-    let mut bot = Bot::builder("sibling")
-        .observe(ChannelSource {
-            receiver: Mutex::new(Some(receiver)),
-        })
-        .on(
-            is_sentinel,
-            YieldAction {
-                label: "received",
-                log: action_log,
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = channel_bot("sibling", receiver, action_log)?;
 
     let ticked: usize = block_on(async move {
         // A tracked set, not a handle this scope could drop: the sibling is
@@ -732,19 +792,7 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
     let action_log = Rc::clone(&log);
 
-    let mut bot = Bot::builder("cancelled")
-        .observe(ChannelSource {
-            receiver: Mutex::new(Some(receiver)),
-        })
-        .on(
-            is_sentinel,
-            YieldAction {
-                label: "received",
-                log: action_log,
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = channel_bot("cancelled", receiver, action_log)?;
 
     let outcome: (bool, usize) = block_on(async move {
         let mut siblings = JoinSet::new();
@@ -793,17 +841,7 @@ fn a_cancelled_tick_leaves_the_bot_usable() -> TestResult {
 /// change that makes the *simple* case runtime-dependent fails loudly.
 fn immediate_verbs_on_the_shipped_runtime() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("immediate")
-        .observe(YieldSource { value: 1 })
-        .on(
-            is_one,
-            YieldAction {
-                label: "ran",
-                log: Rc::clone(&log),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = immediate_bot("immediate", &log)?;
 
     let fired = block_on(async { bot.tick_async().await })?;
     assert_eq!(
@@ -829,17 +867,7 @@ fn immediate_verbs_on_the_shipped_runtime() -> TestResult {
 /// not have.
 fn runtime_independent_verbs_on_the_sync_adapter() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("sync-adapter")
-        .observe(YieldSource { value: 1 })
-        .on(
-            is_one,
-            YieldAction {
-                label: "ran",
-                log: Rc::clone(&log),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = immediate_bot("sync-adapter", &log)?;
 
     let fired = bot.tick()?;
     assert_eq!(
@@ -1246,19 +1274,7 @@ fn a_settlement_names_the_binding_it_settles_and_no_other() -> TestResult {
     let value = Rc::new(Cell::new(1));
     let uncertain = Rc::new(Cell::new(true));
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("generations")
-        .observe(Dial {
-            value: Rc::clone(&value),
-        })
-        .on(
-            |_observed: &u32| true,
-            Doubtful {
-                uncertain: Rc::clone(&uncertain),
-                seen: Rc::clone(&seen),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = doubtful_bot("generations", &value, &uncertain, &seen)?;
 
     // Revision 1, held: the attempt may be live, so nothing settles it on its
     // own and the tick says so rather than guessing.
@@ -1340,55 +1356,42 @@ fn a_settlement_names_the_binding_it_settles_and_no_other() -> TestResult {
     // generic refusal would leave it guessing whether to retry the report or
     // re-read the work.
     let delayed = first_binding;
-    match bot.resolve_effect(&delayed, EffectEvidence::Applied) {
-        Ok(()) => {
-            return Err(
-                "a settlement computed against the first binding was accepted against the \
-                 second"
-                    .into(),
-            );
+    // Both evidence kinds are refused by the same check, so they are refused by
+    // the same closure: a helper written for `Applied` alone would let
+    // `NotApplied` pass for a reason nobody checked.
+    let refuse_as_superseded = |bot: &mut Bot, evidence: EffectEvidence| -> TestResult {
+        match bot.resolve_effect(&delayed, evidence) {
+            Ok(()) => Err(format!(
+                "{evidence:?} for the first binding was accepted against the second"
+            )
+            .into()),
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error,
+                        BotError::EvidenceSuperseded { work, named, current }
+                            if work == second.id()
+                                && named == delayed.digest()
+                                && current == second_binding.digest()
+                    ),
+                    "expected the named binding and the live one to be reported, got {error:?}"
+                );
+                assert_eq!(
+                    held(bot).map(|(chain, entry, key, _)| (chain, entry, key)),
+                    Some((0, 0, Some(second_binding))),
+                    "the refusal left the held binding exactly as it was: {:?}",
+                    bot.pending()
+                );
+                Ok(())
+            }
         }
-        Err(error) => assert!(
-            matches!(
-                error,
-                BotError::EvidenceSuperseded { work, named, current }
-                    if work == second.id()
-                        && named == delayed.digest()
-                        && current == second_binding.digest()
-            ),
-            "expected the named binding and the live one to be reported, got {error:?}"
-        ),
-    }
-    assert_eq!(
-        held(&bot).map(|(chain, entry, key, _)| (chain, entry, key)),
-        Some((0, 0, Some(second_binding))),
-        "the refusal left the held binding exactly as it was: {:?}",
-        bot.pending()
-    );
+    };
+    refuse_as_superseded(&mut bot, EffectEvidence::Applied)?;
 
     // `NotApplied` is the sharper half: accepting it would make an attempt the
     // caller was never asked about eligible to run again. It is refused by the
     // same variant — the reason is the binding, not the evidence.
-    match bot.resolve_effect(&delayed, EffectEvidence::NotApplied) {
-        Ok(()) => {
-            return Err(
-                "NotApplied for the first binding was accepted against the second, \
-                 authorising a retry of an attempt the caller was never shown"
-                    .into(),
-            );
-        }
-        Err(error) => assert!(
-            matches!(
-                error,
-                BotError::EvidenceSuperseded { work, named, current }
-                    if work == second.id()
-                        && named == delayed.digest()
-                        && current == second_binding.digest()
-            ),
-            "a stale binding is a binding complaint, not a contradiction and not \
-             'no such work': {error:?}"
-        ),
-    }
+    refuse_as_superseded(&mut bot, EffectEvidence::NotApplied)?;
     assert_eq!(
         held(&bot).map(|(chain, entry, key, _)| (chain, entry, key)),
         Some((0, 0, Some(second_binding))),
@@ -2056,19 +2059,7 @@ fn a_settlement_names_the_attempt_it_settles_and_no_other() -> TestResult {
     let value = Rc::new(Cell::new(1));
     let uncertain = Rc::new(Cell::new(true));
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let mut bot = Bot::builder("attempts")
-        .observe(Dial {
-            value: Rc::clone(&value),
-        })
-        .on(
-            |_observed: &u32| true,
-            Doubtful {
-                uncertain: Rc::clone(&uncertain),
-                seen: Rc::clone(&seen),
-            },
-        )
-        .with_effects(test_effects()?)
-        .build(&GrantSet::empty())?;
+    let mut bot = doubtful_bot("attempts", &value, &uncertain, &seen)?;
 
     // Attempt 1, first generation: held, because the effect may be live.
     tick_expecting_held(&mut bot)?;

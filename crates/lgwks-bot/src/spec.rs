@@ -1170,10 +1170,7 @@ impl std::fmt::Display for Need {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::Broker;
-    use crate::effect::{EnvironmentId, FlowRevision, RunId};
     use crate::error::DispatchCertainty;
-    use crate::journal::MemoryJournal;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1185,7 +1182,8 @@ mod tests {
     /// the failure with `?` rather than flattening it into a variant it is not.
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-    /// The effect scope a test's bot runs under.
+    /// The effect scope a test's bot runs under: the bot's own, so the spec
+    /// tests and the ECS tests build one scope rather than two that could drift.
     ///
     /// A bot has no dispatch path without one, so every builder in this module
     /// hands over a scope; the ones whose subject is spec validation still do,
@@ -1193,21 +1191,7 @@ mod tests {
     /// wrong thing and the assertion around it would read as the validation it
     /// claims to test.
     fn test_effects() -> TestResult<EffectScope> {
-        let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-        let mut broker = Broker::new();
-        broker.register(environment)?;
-        Ok(EffectScope::new(
-            EffectIdentity::new(
-                RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-                environment,
-                FlowRevision::from_tagged(
-                    "blake3_256",
-                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-                )?,
-            ),
-            broker,
-            Box::new(MemoryJournal::new()),
-        ))
+        crate::ecs::tests::test_effects()
     }
 
     /// The failure a test reports when its precondition did not hold. Tests
@@ -1231,16 +1215,85 @@ mod tests {
     /// property under test is wall-clock overlap between two polls, and holding
     /// a real thread is the only way to express it on this executor.
     ///
-    /// The suppression is the narrow, test-scoped exception `Cargo.toml`
-    /// documents for the two `deny` API bans: no replacement exists for a
-    /// blocking sleep on a pool thread under a thread-parking executor.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a test of a thread-parking executor must block a thread, and the sync executor \
-                  offers no timed wait to do it with"
-    )]
+    /// `park_timeout` and not `rt::time::sleep`: the async form has no timer
+    /// driver on `lgwks_std::task::block_on`, and that absence is the thing under
+    /// test. It is also the substitution the codebook names for a banned
+    /// `std::thread::sleep`, so nothing here needs a suppression.
+    ///
+    /// What `sleep` promised and `park_timeout` does not is that it does not
+    /// return early: the API allows a spurious wake-up, and a pool thread can
+    /// carry an unpark token its executor left behind, which ends the next park
+    /// at once. So the park repeats until the deadline has actually passed, and
+    /// the thread is held for the whole of `duration` either way.
     fn hold_pool_thread_for(duration: std::time::Duration) {
-        std::thread::sleep(duration);
+        let started = std::time::Instant::now();
+        while let Some(left) = duration.checked_sub(started.elapsed()) {
+            if left.is_zero() {
+                break;
+            }
+            std::thread::park_timeout(left);
+        }
+    }
+
+    /// An observer that needs `bot.net` and resolves with a value the caller
+    /// chooses.
+    ///
+    /// One double for both boundary tests. The callee refuses it under an empty
+    /// proof and admits it under an issued one; the only thing that differs
+    /// between the two runs is the value read back, which is a field here rather
+    /// than a second declaration that could differ in the cap as well.
+    struct NetSource {
+        /// The caps this source requires.
+        caps: Vec<Cap>,
+        /// What `poll` resolves with.
+        value: u32,
+    }
+    impl NetSource {
+        /// A `bot.net` source resolving with `value`.
+        fn net(value: u32) -> Self {
+            Self {
+                caps: vec![Cap::net()],
+                value,
+            }
+        }
+    }
+    impl crate::verb::Observe for NetSource {
+        type Output = u32;
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(crate::verb::Observe::required_caps(self))?;
+            Ok(self.value)
+        }
+        fn domain_id(&self) -> &str {
+            "test::net_source"
+        }
+    }
+
+    /// An observer that resolves with `42` and needs `bot.net`.
+    ///
+    /// Declared once for both capability tests: two copies are two chances to
+    /// change one arm and leave the other asserting the old thing, and the cap it
+    /// requires *is* what those tests are about.
+    struct FakeSource(Vec<Cap>);
+    impl FakeSource {
+        fn net() -> Self {
+            Self(vec![Cap::net()])
+        }
+    }
+    impl crate::verb::Observe for FakeSource {
+        type Output = u32;
+        fn required_caps(&self) -> &[Cap] {
+            &self.0
+        }
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(crate::verb::Observe::required_caps(self))?;
+            Ok(42)
+        }
+        fn domain_id(&self) -> &str {
+            "test::source"
+        }
     }
 
     /// An observer that resolves immediately with `1`.
@@ -1311,10 +1364,33 @@ mod tests {
         }
     }
 
-    /// A counting action.
+    /// An action that proves the caps, and counts how often it ran when it was
+    /// given a counter to count into.
+    ///
+    /// One implementation for both jobs. The counting tests read the counter and
+    /// the build-shape tests pass [`Action::new`]; two doubles differed only in
+    /// whether they owned a counter, and that is a field rather than a type — a
+    /// second impl is a second place for the two to disagree about what an action
+    /// requires or how long its effect lives.
     #[derive(Clone)]
-    struct Counting(Arc<AtomicUsize>);
-    impl crate::verb::Execute for Counting {
+    struct Action {
+        /// Where each invocation is recorded, when the test cares.
+        counter: Option<Arc<AtomicUsize>>,
+    }
+    impl Action {
+        /// An action that records nothing.
+        fn new() -> Self {
+            Self { counter: None }
+        }
+
+        /// An action that records each invocation into `counter`.
+        fn counting(counter: Arc<AtomicUsize>) -> Self {
+            Self {
+                counter: Some(counter),
+            }
+        }
+    }
+    impl crate::verb::Execute for Action {
         type Input = u32;
         type Output = ();
         fn required_caps(&self) -> &[Cap] {
@@ -1326,11 +1402,13 @@ mod tests {
         }
         async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
             call.0.check(crate::verb::Execute::required_caps(self))?;
-            self.0.fetch_add(1, Ordering::SeqCst);
+            if let Some(ref counter) = self.counter {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(())
         }
         fn domain_id(&self) -> &str {
-            "test::counting"
+            "test::action"
         }
     }
 
@@ -1448,26 +1526,6 @@ mod tests {
                 "test::needs_net"
             }
         }
-        struct Noop;
-        impl crate::verb::Execute for Noop {
-            type Input = u32;
-            type Output = ();
-            fn required_caps(&self) -> &[Cap] {
-                &[]
-            }
-
-            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
-                crate::verb::EffectLifetime::Local
-            }
-            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
-                call.0.check(crate::verb::Execute::required_caps(self))?;
-                Ok(())
-            }
-            fn domain_id(&self) -> &str {
-                "test::noop"
-            }
-        }
-
         // No-chains entry point (`BotBuilder::build`).
         assert!(
             matches!(
@@ -1498,7 +1556,7 @@ mod tests {
         // And both admit capabilities the same way.
         let denied = Bot::builder("x")
             .observe(NeedsNet(vec![Cap::net()]))
-            .on(|_: &u32| true, Noop)
+            .on(|_: &u32| true, Action::new())
             .with_effects(test_effects()?)
             .build(&GrantSet::empty());
         assert!(
@@ -1522,49 +1580,9 @@ mod tests {
 
     #[test]
     fn capability_denied_without_grant() -> TestResult<()> {
-        struct FakeSource(Vec<Cap>);
-        impl FakeSource {
-            fn net() -> Self {
-                Self(vec![Cap::net()])
-            }
-        }
-        impl crate::verb::Observe for FakeSource {
-            type Output = u32;
-            fn required_caps(&self) -> &[Cap] {
-                &self.0
-            }
-            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-                call.0.check(crate::verb::Observe::required_caps(self))?;
-                Ok(42)
-            }
-            fn domain_id(&self) -> &str {
-                "test::source"
-            }
-        }
-
-        struct FakeAction;
-        impl crate::verb::Execute for FakeAction {
-            type Input = u32;
-            type Output = ();
-            fn required_caps(&self) -> &[Cap] {
-                &[]
-            }
-
-            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
-                crate::verb::EffectLifetime::Local
-            }
-            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
-                call.0.check(crate::verb::Execute::required_caps(self))?;
-                Ok(())
-            }
-            fn domain_id(&self) -> &str {
-                "test::action"
-            }
-        }
-
         let result = Bot::builder("test")
             .observe(FakeSource::net())
-            .on(|_: &u32| true, FakeAction)
+            .on(|_: &u32| true, Action::new())
             .with_effects(test_effects()?)
             .build(&GrantSet::empty());
         assert!(
@@ -1576,50 +1594,10 @@ mod tests {
 
     #[test]
     fn capability_granted_builds_ok() -> TestResult<()> {
-        struct FakeSource(Vec<Cap>);
-        impl FakeSource {
-            fn net() -> Self {
-                Self(vec![Cap::net()])
-            }
-        }
-        impl crate::verb::Observe for FakeSource {
-            type Output = u32;
-            fn required_caps(&self) -> &[Cap] {
-                &self.0
-            }
-            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-                call.0.check(crate::verb::Observe::required_caps(self))?;
-                Ok(42)
-            }
-            fn domain_id(&self) -> &str {
-                "test::source"
-            }
-        }
-
-        struct FakeAction;
-        impl crate::verb::Execute for FakeAction {
-            type Input = u32;
-            type Output = ();
-            fn required_caps(&self) -> &[Cap] {
-                &[]
-            }
-
-            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
-                crate::verb::EffectLifetime::Local
-            }
-            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
-                call.0.check(crate::verb::Execute::required_caps(self))?;
-                Ok(())
-            }
-            fn domain_id(&self) -> &str {
-                "test::action"
-            }
-        }
-
         let grants = GrantSet::empty().grant(Cap::net());
         let bot = Bot::builder("test")
             .observe(FakeSource::net())
-            .on(|_: &u32| true, FakeAction)
+            .on(|_: &u32| true, Action::new())
             .with_effects(test_effects()?)
             .build(&grants)?;
         assert_eq!(bot.name(), "test");
@@ -1647,34 +1625,18 @@ mod tests {
             }
         }
 
-        #[derive(Clone)]
-        struct CountAction(Arc<AtomicUsize>);
-        impl crate::verb::Execute for CountAction {
-            type Input = u32;
-            type Output = ();
-            fn required_caps(&self) -> &[Cap] {
-                &[]
-            }
-
-            fn effect_lifetime(&self) -> crate::verb::EffectLifetime {
-                crate::verb::EffectLifetime::Local
-            }
-            async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
-                call.0.check(crate::verb::Execute::required_caps(self))?;
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            fn domain_id(&self) -> &str {
-                "test::count_action"
-            }
-        }
-
         let counter = Arc::new(AtomicUsize::new(0));
 
         let mut bot = Bot::builder("ticker")
             .observe(CountSource)
-            .on(|seen: &u32| *seen > 5, CountAction(Arc::clone(&counter)))
-            .on(|seen: &u32| *seen > 100, CountAction(Arc::clone(&counter)))
+            .on(
+                |seen: &u32| *seen > 5,
+                Action::counting(Arc::clone(&counter)),
+            )
+            .on(
+                |seen: &u32| *seen > 100,
+                Action::counting(Arc::clone(&counter)),
+            )
             .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
 
@@ -1700,23 +1662,8 @@ mod tests {
     fn call_with_empty_proof_is_denied_at_the_callee() -> Result<(), BotError> {
         use crate::verb::Observe;
 
-        struct NetSource([Cap; 1]);
-        impl Observe for NetSource {
-            type Output = u32;
-            fn required_caps(&self) -> &[Cap] {
-                &self.0
-            }
-            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-                call.0.check(crate::verb::Observe::required_caps(self))?;
-                Ok(1)
-            }
-            fn domain_id(&self) -> &str {
-                "test::net"
-            }
-        }
-
         let vacuous = GrantSet::empty().issue(&[])?;
-        match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((vacuous, ()))) {
+        match lgwks_std::task::block_on(NetSource::net(1).poll((vacuous, ()))) {
             Err(BotError::CapabilityDenied { deficit }) => {
                 assert_eq!(deficit.first().required(), &Cap::net());
                 Ok(())
@@ -1731,23 +1678,8 @@ mod tests {
     fn wrong_scope_proof_is_denied_confused_deputy() -> Result<(), BotError> {
         use crate::verb::Observe;
 
-        struct NetSource([Cap; 1]);
-        impl Observe for NetSource {
-            type Output = u32;
-            fn required_caps(&self) -> &[Cap] {
-                &self.0
-            }
-            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-                call.0.check(crate::verb::Observe::required_caps(self))?;
-                Ok(1)
-            }
-            fn domain_id(&self) -> &str {
-                "test::net"
-            }
-        }
-
         let fs_only = GrantSet::empty().grant(Cap::fs()).issue(&[Cap::fs()])?;
-        match lgwks_std::task::block_on(NetSource([Cap::net()]).poll((fs_only, ()))) {
+        match lgwks_std::task::block_on(NetSource::net(1).poll((fs_only, ()))) {
             Err(BotError::CapabilityDenied { deficit }) => {
                 assert_eq!(deficit.first().required(), &Cap::net());
                 Ok(())
@@ -1762,24 +1694,9 @@ mod tests {
     fn issued_proof_authorizes_the_call() -> Result<(), BotError> {
         use crate::verb::Observe;
 
-        struct NetSource([Cap; 1]);
-        impl Observe for NetSource {
-            type Output = u32;
-            fn required_caps(&self) -> &[Cap] {
-                &self.0
-            }
-            async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-                call.0.check(crate::verb::Observe::required_caps(self))?;
-                Ok(7)
-            }
-            fn domain_id(&self) -> &str {
-                "test::net"
-            }
-        }
-
         let auth = GrantSet::empty().grant(Cap::net()).issue(&[Cap::net()])?;
         assert_eq!(
-            lgwks_std::task::block_on(NetSource([Cap::net()]).poll((auth, ())))?,
+            lgwks_std::task::block_on(NetSource::net(7).poll((auth, ())))?,
             7
         );
         Ok(())
@@ -1790,7 +1707,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut bot = Bot::builder("direct")
             .observe(Immediate)
-            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .on(|_: &u32| true, Action::counting(Arc::clone(&counter)))
             .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         let fired = bot.tick()?;
@@ -1811,9 +1728,15 @@ mod tests {
         };
         let mut bot = Bot::builder("concurrent")
             .observe(source())
-            .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
+            .on(
+                |_: &u32| true,
+                Action::counting(Arc::new(AtomicUsize::new(0))),
+            )
             .observe(source())
-            .on(|_: &u32| true, Counting(Arc::new(AtomicUsize::new(0))))
+            .on(
+                |_: &u32| true,
+                Action::counting(Arc::new(AtomicUsize::new(0))),
+            )
             .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         assert_eq!(bot.tick()?, 2);
@@ -1832,11 +1755,11 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut builder = Bot::builder("waves")
             .observe(Immediate)
-            .on(|_: &u32| true, Counting(Arc::clone(&counter)));
+            .on(|_: &u32| true, Action::counting(Arc::clone(&counter)));
         for _ in 0..39 {
             builder = builder
                 .observe(Immediate)
-                .on(|_: &u32| true, Counting(Arc::clone(&counter)));
+                .on(|_: &u32| true, Action::counting(Arc::clone(&counter)));
         }
         let mut bot = builder
             .with_effects(test_effects()?)
@@ -1852,9 +1775,9 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut bot = Bot::builder("ordered")
             .observe(Immediate)
-            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .on(|_: &u32| true, Action::counting(Arc::clone(&counter)))
             .observe(Failing)
-            .on(|_: &u32| true, Counting(Arc::clone(&counter)))
+            .on(|_: &u32| true, Action::counting(Arc::clone(&counter)))
             .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         match bot.tick() {

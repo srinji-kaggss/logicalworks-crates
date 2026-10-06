@@ -38,15 +38,14 @@
 //! against a writer that never asks for it, and cross-host fencing needs a
 //! lease, which this crate does not claim to provide.
 
-/// The scratch-path, kill-guard and pause fixtures this file shares with the
-/// journal liveness, scale, fence and crash-observation families.
-///
-/// One definition of "a unique scratch path", of "kill and reap a child", and of
-/// the wait a plain process may take without an executor, so this observation
-/// cannot drift into asserting a different cleanup discipline than the families
-/// that also run real children.
-#[path = "support/journal.rs"]
-mod shared;
+// The scratch-path, kill-guard and pause fixtures this file shares with the
+// journal liveness, scale, fence and crash-observation families.
+//
+// One definition of "a unique scratch path", of "kill and reap a child", and of
+// the wait a plain process may take without an executor, so this observation
+// cannot drift into asserting a different cleanup discipline than the families
+// that also run real children.
+use crate::journal_fixtures as shared;
 
 use shared::{ENV, FLOW_HEX, ProbeGuard, RUN, TempGuard, pause, scratch_dir, walk_ladder};
 
@@ -101,15 +100,10 @@ fn takeover_key(attempt: &str, epoch: &str) -> Result<EffectKey, Box<dyn std::er
     let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
     let environment = EnvironmentId::from_hex(ENV)?;
     let epoch = EnvironmentEpoch::from_decimal(epoch)?;
-    Ok(EffectKey::new(
-        run,
-        action,
-        attempt,
-        flow,
-        digest,
-        environment,
-        epoch,
-    ))
+    Ok(
+        lgwks_bot::effect::EffectIdentity::new(run, environment, flow)
+            .key(action, attempt, digest, epoch),
+    )
 }
 
 /// A broker that has already registered the shared environment at its first
@@ -159,12 +153,9 @@ fn old_worker_body() -> TestResult {
         .committed_entry(prepared.position())?
         .ok_or("the acknowledged preparation must be readable at its own position")?;
     if receipt.event().kind() != EventKind::DispatchPrepared {
-        {
-            let refusal =
-                Err("the receipt names a position that does not hold the preparation".into());
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
-            return refusal;
-        };
+        let refusal = Err("the receipt names a position that does not hold the preparation".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+        return refusal;
     }
 
     std::fs::write(&orders.parked, b"parked")?;
@@ -178,12 +169,10 @@ fn old_worker_body() -> TestResult {
         pause(100);
     }
     if !orders.release.exists() {
-        {
-            let refusal =
-                Err("the old worker parked for its whole bound and was never released".into());
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
-            return refusal;
-        };
+        let refusal =
+            Err("the old worker parked for its whole bound and was never released".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "old_worker_body: returning an error to the caller");
+        return refusal;
     }
 
     // Everything below happens *after* the takeover, and this is the row: the old
@@ -350,12 +339,16 @@ fn returning_worker_body() -> TestResult {
 }
 
 /// The old worker's report for one of the four lines it writes.
-fn reported(report: &str, field: &str) -> String {
+///
+/// A report without the line is refused, naming the line: an empty answer would
+/// reach the caller's assertion as "not replaced" and blame the broker for what
+/// is the worker's missing output.
+fn reported(report: &str, field: &str) -> Result<String, Box<dyn std::error::Error>> {
     report
         .lines()
         .find_map(|line| line.strip_prefix(field))
-        .unwrap_or_default()
-        .to_owned()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("the old worker reported no `{field}` line: {report}").into())
 }
 
 /// This test binary re-invoked as the named test, in probe mode.
@@ -367,12 +360,8 @@ fn spawn_old_worker(
     settled_path: &std::path::Path,
     parked_path: &std::path::Path,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
-    let executable = std::env::current_exe()?;
     Ok(ProbeGuard(Some(
-        std::process::Command::new(executable)
-            .arg("owner_epoch_takeover")
-            .arg("--exact")
-            .arg(test_name)
+        crate::probe_command(&crate::probe_test(module_path!(), test_name))?
             .env(OWNER_ENV, "1")
             .env(OWNER_MODE, mode)
             .env(OWNER_JOURNAL, journal_path)
@@ -550,14 +539,14 @@ fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize() -> Test
     // The returning worker is reaped by its guard's `Drop`, which is the backstop
     // the harness itself can forget.
 
-    let dispatch = reported(&report, "dispatch=");
+    let dispatch = reported(&report, "dispatch=")?;
     assert!(
         dispatch.contains("replaced"),
         "the returning worker re-presented a warrant from generation {before} after \
          the broker moved to {after}: {report}"
     );
     assert!(
-        reported(&report, "minted=").contains("replaced"),
+        reported(&report, "minted=")?.contains("replaced"),
         "and a fresh attempt under the old generation is refused the same way: {report}"
     );
 

@@ -25,7 +25,7 @@ use lgwks_std::leb128::{
 use seeded_bytes::{below, fold_bytes, fold_refusal, next_byte, next_bytes};
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    initial_trace, next_seed,
 };
 
 /// Draws a byte and reinterprets it as a signed `i8`, so a seeded value spans
@@ -55,21 +55,28 @@ enum Refusal {
     },
 }
 
-/// The masks that decide whether an unsigned encoding can be shortened: the
-/// top group of a `u64` has one usable bit, and of a `u32` four.
-fn unsigned_limits(bits: u32) -> usize {
-    usize::try_from(bits.div_ceil(7)).unwrap_or(usize::MAX)
+/// The number of 7-bit groups a value of `bits` bits occupies at most: the top
+/// group of a `u64` has one usable bit, and of a `u32` four.
+///
+/// The count is a `u32` because that is the width the shift arithmetic below is
+/// computed in, so nothing about a group number crosses a width boundary on its
+/// way from a bit width to a shift amount.
+fn unsigned_limits(bits: u32) -> u32 {
+    bits.div_ceil(7)
 }
 
-/// The bit shift at which the group at `index` contributes to the value.
-fn group_shift(index: usize) -> u32 {
-    u32::try_from(index).unwrap_or(0).saturating_mul(7)
+/// The bit shift at which group `group` contributes to the value.
+///
+/// The group number is the one the loop counted in the shift's own width, so the
+/// shift is a saturating multiply of a `u32` by seven and never a conversion.
+fn group_shift(group: u32) -> u32 {
+    group.saturating_mul(7)
 }
 
 /// The number of bits of `bits` that are still available to the group at
 /// `index`, or `None` when the group has already run past the width.
-fn usable_bits(bits: u32, index: usize) -> Option<u32> {
-    bits.checked_sub(group_shift(index))
+fn usable_bits(bits: u32, group: u32) -> Option<u32> {
+    bits.checked_sub(group_shift(group))
 }
 
 /// The mask over the bits a final group may occupy at `usable` bits of width.
@@ -90,33 +97,47 @@ fn width_mask(usable: u32) -> u64 {
 fn reference_decode_unsigned(bytes: &[u8], bits: u32) -> Result<(u64, usize), Refusal> {
     let limit = unsigned_limits(bits);
     let mut value = 0u64;
-    for (index, &byte) in bytes.iter().enumerate().take(limit) {
+    // The loop carries both numbers a group has: `offset` is where the group
+    // sits in the input, which is the coordinate every refusal names, and
+    // `group` is which group it is, which is the shift. The zip with `0..limit`
+    // is the width bound, and a run longer than the value's group count stops
+    // where the range stops and is the unexpected end below.
+    for ((offset, &byte), group) in bytes.iter().enumerate().zip(0..limit) {
         let payload = u64::from(byte & 0x7f);
         // The last group that can fit: its payload must be inside the width and
         // it must terminate the sequence.
-        if index.saturating_add(1) == limit {
-            let Some(usable) = usable_bits(bits, index) else {
-                let refusal = Err(Refusal::Overflow { at: index });
+        if group.saturating_add(1) == limit {
+            let Some(usable) = usable_bits(bits, group) else {
+                let refusal = Err(Refusal::Overflow { at: offset });
                 #[cfg(feature = "trace")]
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
                 return refusal;
             };
             if payload > width_mask(usable) || byte & 0x80 != 0 {
-                let refusal = Err(Refusal::Overflow { at: index });
+                let refusal = Err(Refusal::Overflow { at: offset });
                 #[cfg(feature = "trace")]
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
                 return refusal;
             }
         }
-        value |= payload.checked_shl(group_shift(index)).unwrap_or(0);
+        // A group whose shift is past the value's own width is the overflow arm,
+        // so a shift that cannot be performed is refused rather than folded in
+        // as a zero contribution.
+        let Some(shifted) = payload.checked_shl(group_shift(group)) else {
+            let refusal = Err(Refusal::Overflow { at: offset });
+            #[cfg(feature = "trace")]
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
+            return refusal;
+        };
+        value |= shifted;
         if byte & 0x80 == 0 {
-            if index > 0 && payload == 0 {
-                let refusal = Err(Refusal::NonMinimal { at: index });
+            if group > 0 && payload == 0 {
+                let refusal = Err(Refusal::NonMinimal { at: offset });
                 #[cfg(feature = "trace")]
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_unsigned: returning an error to the caller");
                 return refusal;
             }
-            return Ok((value, index.saturating_add(1)));
+            return Ok((value, offset.saturating_add(1)));
         }
     }
     Err(Refusal::UnexpectedEnd { at: bytes.len() })
@@ -128,7 +149,7 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
     let limit = unsigned_limits(bits);
     let mut raw = 0u64;
     let mut previous_negative = false;
-    for (index, &byte) in bytes.iter().enumerate().take(limit) {
+    for ((offset, &byte), group) in bytes.iter().enumerate().zip(0..limit) {
         let payload = u64::from(byte & 0x7f);
         let negative = payload & 0x40 != 0;
         // The final group of a signed encoding is a sign extension: over the bits it
@@ -136,20 +157,20 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
         // Every earlier group is unconstrained by width, so the check belongs
         // here and nowhere else — a check applied to each group would refuse
         // perfectly legal runs.
-        if index.saturating_add(1) == limit {
-            match usable_bits(bits, index) {
+        if group.saturating_add(1) == limit {
+            match usable_bits(bits, group) {
                 Some(usable) if usable < 64 => {
                     let mask = width_mask(usable);
                     let high = payload & mask;
                     if (high != 0 && high != mask) || byte & 0x80 != 0 {
-                        let refusal = Err(Refusal::Overflow { at: index });
+                        let refusal = Err(Refusal::Overflow { at: offset });
                         #[cfg(feature = "trace")]
                         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
                         return refusal;
                     }
                 }
                 None => {
-                    let refusal = Err(Refusal::Overflow { at: index });
+                    let refusal = Err(Refusal::Overflow { at: offset });
                     #[cfg(feature = "trace")]
                     lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
                     return refusal;
@@ -157,16 +178,22 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
                 Some(_) => {}
             }
         }
-        let shift = group_shift(index);
-        raw |= payload.checked_shl(shift).unwrap_or(0);
+        let shift = group_shift(group);
+        let Some(shifted) = payload.checked_shl(shift) else {
+            let refusal = Err(Refusal::Overflow { at: offset });
+            #[cfg(feature = "trace")]
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
+            return refusal;
+        };
+        raw |= shifted;
         if byte & 0x80 == 0 {
             let redundant = if previous_negative {
                 payload == 0x7f
             } else {
                 payload == 0
             };
-            if index > 0 && redundant {
-                let refusal = Err(Refusal::NonMinimal { at: index });
+            if group > 0 && redundant {
+                let refusal = Err(Refusal::NonMinimal { at: offset });
                 #[cfg(feature = "trace")]
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "reference_decode_signed: returning an error to the caller");
                 return refusal;
@@ -176,7 +203,7 @@ fn reference_decode_signed(bytes: &[u8], bits: u32) -> Result<(i64, usize), Refu
             }
             return Ok((
                 i64::from_le_bytes(raw.to_le_bytes()),
-                index.saturating_add(1),
+                offset.saturating_add(1),
             ));
         }
         previous_negative = negative;
@@ -227,19 +254,33 @@ macro_rules! agree {
 /// value.
 ///
 /// The model's *verdict* — the arm and the offset — is width-independent and is
-/// compared unchanged; only a decoded value is narrowed, and it is narrowed
-/// with a checked conversion so a model that decoded something a `u32` cannot
-/// hold fails as the disagreement it is rather than as a silent truncation.
+/// compared unchanged; only a decoded value is narrowed. The narrowing keeps its
+/// own answer rather than substituting one: a model that decoded something the
+/// narrow width cannot hold is reported as the disagreement it is, beside the
+/// refusal the decoder actually gave.
 macro_rules! agree_narrow {
     ($seed:expr, $observed:expr, $expected:expr, $what:literal) => {
         match $expected {
-            Ok((value, consumed)) => assert_eq!(
-                $observed,
-                Ok((u32::try_from(value).unwrap_or(u32::MAX), consumed)),
-                "seed {}: {} must agree with the reference model",
-                $seed,
-                $what
-            ),
+            Ok((value, consumed)) => match u32::try_from(value) {
+                Ok(narrow) => assert_eq!(
+                    &$observed,
+                    &Ok((narrow, consumed)),
+                    "seed {}: {} must agree with the reference model",
+                    $seed,
+                    $what
+                ),
+                // A model that decoded a value the narrow width cannot hold is a
+                // disagreement, and this is where it is reported: the value is
+                // not narrowed into something the comparison could call equal.
+                Err(refusal) => assert_eq!(
+                    &$observed,
+                    &Err(DecodeError::Overflow { at: consumed }),
+                    "seed {}: {} decoded {value} as a value a u32 cannot hold ({refusal}) \
+                     while the decoder reported this refusal",
+                    $seed,
+                    $what
+                ),
+            },
             Err(other) => agree!($seed, $observed, Err(other), $what),
         }
     };
@@ -249,13 +290,26 @@ macro_rules! agree_narrow {
 macro_rules! agree_narrow_signed {
     ($seed:expr, $observed:expr, $expected:expr, $what:literal) => {
         match $expected {
-            Ok((value, consumed)) => assert_eq!(
-                $observed,
-                Ok((i32::try_from(value).unwrap_or(i32::MAX), consumed)),
-                "seed {}: {} must agree with the reference model",
-                $seed,
-                $what
-            ),
+            Ok((value, consumed)) => match i32::try_from(value) {
+                Ok(narrow) => assert_eq!(
+                    &$observed,
+                    &Ok((narrow, consumed)),
+                    "seed {}: {} must agree with the reference model",
+                    $seed,
+                    $what
+                ),
+                // A model that decoded a value the narrow width cannot hold is a
+                // disagreement, and this is where it is reported: the value is
+                // not narrowed into something the comparison could call equal.
+                Err(refusal) => assert_eq!(
+                    &$observed,
+                    &Err(DecodeError::Overflow { at: consumed }),
+                    "seed {}: {} decoded {value} as a value a i32 cannot hold ({refusal}) \
+                     while the decoder reported this refusal",
+                    $seed,
+                    $what
+                ),
+            },
             Err(other) => agree!($seed, $observed, Err(other), $what),
         }
     };
@@ -281,11 +335,16 @@ fn leb128_trace(seed: u64) -> u64 {
                     reference_decode_unsigned(&encoded, 64),
                     "u64"
                 );
-                assert_eq!(
-                    decoded.unwrap_or_default().0,
-                    u64::from(value),
-                    "seed {seed}: a u64 must decode back to the byte it was made from"
-                );
+                // The agreement above compared this decode against the model in
+                // every arm, refusal included, so the value it decoded to is what
+                // is left to read here.
+                if let Ok((round_tripped, _)) = decoded {
+                    assert_eq!(
+                        round_tripped,
+                        u64::from(value),
+                        "seed {seed}: a u64 must decode back to the byte it was made from"
+                    );
+                }
                 fold_bytes(&mut trace, &encoded);
             }
             1 => {
@@ -299,11 +358,12 @@ fn leb128_trace(seed: u64) -> u64 {
                     reference_decode_unsigned(&encoded, 32),
                     "u32"
                 );
-                assert_eq!(
-                    decoded.unwrap_or_default().0,
-                    value,
-                    "seed {seed}: a u32 must decode back to the value it was made from"
-                );
+                if let Ok((round_tripped, _)) = decoded {
+                    assert_eq!(
+                        round_tripped, value,
+                        "seed {seed}: a u32 must decode back to the value it was made from"
+                    );
+                }
                 fold_bytes(&mut trace, &encoded);
             }
             2 => {
@@ -312,17 +372,19 @@ fn leb128_trace(seed: u64) -> u64 {
                 encode_i64(i64::from(value), &mut encoded);
                 let decoded = decode_i64(&encoded);
                 agree!(seed, decoded, reference_decode_signed(&encoded, 64), "i64");
-                assert_eq!(
-                    decoded.unwrap_or_default().0,
-                    i64::from(value),
-                    "seed {seed}: an i64 must decode back to the value it was made from"
-                );
+                if let Ok((round_tripped, _)) = decoded {
+                    assert_eq!(
+                        round_tripped,
+                        i64::from(value),
+                        "seed {seed}: an i64 must decode back to the value it was made from"
+                    );
+                }
                 fold_bytes(&mut trace, &encoded);
             }
             _ => {
                 let value = next_signed_byte(&mut state);
                 let mut encoded = Vec::new();
-                encode_i32(i64::from(value).try_into().unwrap_or(0), &mut encoded);
+                encode_i32(i32::from(value), &mut encoded);
                 let decoded = decode_i32(&encoded);
                 agree_narrow_signed!(seed, decoded, reference_decode_signed(&encoded, 32), "i32");
                 fold_bytes(&mut trace, &encoded);
@@ -339,9 +401,12 @@ fn a_seeded_unsigned_value_round_trips_at_both_widths() -> Result<(), DecodeErro
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..48 {
-            let byte = next_byte(&mut state);
-            let wide = u64::from(byte).saturating_mul(2_654_435_761);
-            let narrow = u32::try_from(wide & 0x0000_ffff).unwrap_or(0);
+            // The narrow value is drawn in the narrow width and the wide value
+            // is that same number widened, so both round-trips are exercised at
+            // a value each width can hold and neither crosses a width boundary
+            // on the way there.
+            let narrow = u32::from(next_byte(&mut state)).saturating_mul(65_537);
+            let wide = u64::from(narrow).saturating_mul(2_654_435_761);
 
             let mut wide_bytes = Vec::new();
             encode_u64(wide, &mut wide_bytes);
@@ -384,9 +449,11 @@ fn a_seeded_signed_value_round_trips_at_both_widths() -> Result<(), DecodeError>
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..48 {
-            let byte = next_byte(&mut state);
-            let wide = i64::from(byte).saturating_mul(8_975_611_131);
-            let narrow = i32::try_from(wide & 0x0000_ffff).unwrap_or(0);
+            // The narrow value is drawn in the narrow width and the wide value
+            // is that same number widened, sign included, so both round-trips
+            // are exercised at a value each width can hold.
+            let narrow = i32::from(next_signed_byte(&mut state)).saturating_mul(16_383);
+            let wide = i64::from(narrow).saturating_mul(8_975_611_131);
 
             let mut wide_bytes = Vec::new();
             encode_i64(wide, &mut wide_bytes);
@@ -422,9 +489,21 @@ fn a_seeded_signed_value_round_trips_at_both_widths() -> Result<(), DecodeError>
 
 /// The number of 7-bit groups an unsigned value's minimal encoding occupies:
 /// one group per seven significant bits, and one group for zero itself.
+///
+/// The count is computed in the index width this family compares rendered
+/// lengths in, by halving the value until it is spent: a LEB128 group count is
+/// at most ten, so it is the same number at either width, and counting the bits
+/// is how this model reaches it without a conversion between the value's width
+/// and the index's. Zero is the one value with no significant bits and it is
+/// still one group.
 fn minimal_groups(value: u64) -> usize {
-    let significant = u64::BITS.saturating_sub(value.leading_zeros());
-    usize::try_from(significant.div_ceil(7).max(1)).unwrap_or(usize::MAX)
+    let mut significant = 0_usize;
+    let mut remaining = value;
+    while remaining > 0 {
+        significant = significant.saturating_add(1);
+        remaining >>= 1;
+    }
+    significant.max(1).div_ceil(7)
 }
 
 #[test]
@@ -472,7 +551,13 @@ fn every_boundary_value_is_encoded_minimally() -> Result<(), DecodeError> {
             "u64 boundary"
         );
 
-        let narrow = u32::try_from(value & 0xffff_ffff).unwrap_or(0);
+        // The boundary's narrow counterpart is what the wide value holds in its
+        // own low half, read from the value's bytes rather than from a truncated
+        // copy of the number.
+        let narrow = u32::from(u16::from_le_bytes([
+            value.to_le_bytes()[0],
+            value.to_le_bytes()[1],
+        ]));
         let mut narrow_bytes = Vec::new();
         encode_u32(narrow, &mut narrow_bytes);
         let narrow_expected = minimal_groups(u64::from(narrow));
@@ -695,11 +780,14 @@ fn every_truncation_of_an_encoding_is_refused() -> Result<(), DecodeError> {
         for _ in 0..32 {
             let value = u64::from(next_byte(&mut state))
                 .saturating_mul(2_654_435_761)
-                .saturating_add(u64::try_from(below(&mut state, 97)).unwrap_or(0));
+                .saturating_add(next_seed(&mut state).rem_euclid(97));
             let mut encoded = Vec::new();
             encode_u64(value, &mut encoded);
             for cut in 0..encoded.len() {
-                let prefix = encoded.get(..cut).unwrap_or(&[]);
+                // The run is bytes, so every offset in this range is a slice of
+                // it; there is no character boundary to be on and no absent
+                // prefix to substitute for.
+                let prefix = &encoded[..cut];
                 assert_eq!(
                     decode_u64(prefix),
                     Err(DecodeError::UnexpectedEnd { at: cut }),
@@ -814,7 +902,7 @@ fn refusals_fold_their_arm_and_their_offset() {
             let run = next_bytes(&mut state, length);
             match decode_u64(&run) {
                 Ok((value, consumed)) => {
-                    fold_usize(&mut trace, usize::try_from(value).unwrap_or(0));
+                    fold(&mut trace, value);
                     fold_usize(&mut trace, consumed);
                 }
                 Err(DecodeError::UnexpectedEnd { at }) => fold_refusal(&mut trace, 1, at, at),
@@ -868,7 +956,11 @@ fn the_encoder_appends_to_the_buffer_it_is_given() -> Result<(), DecodeError> {
 
         let mut cursor = 0usize;
         for value in &values {
-            let (decoded, consumed) = decode_u64(stream.get(cursor..).unwrap_or(&[]))?;
+            assert!(
+                cursor <= stream.len(),
+                "seed {seed}: the cursor must stay inside the stream it walks"
+            );
+            let (decoded, consumed) = decode_u64(&stream[cursor..])?;
             assert_eq!(
                 decoded, *value,
                 "seed {seed}: the stream decodes back in the order it was written"
@@ -887,9 +979,15 @@ fn the_encoder_appends_to_the_buffer_it_is_given() -> Result<(), DecodeError> {
             }),
             "seed {seed}: nothing is left over to read"
         );
-        fold(
-            &mut initial_trace(),
-            u64::try_from(values.len()).unwrap_or(0),
+        // The fold goes into a trace this family asserts on. Folding into a
+        // fresh `initial_trace()` folded into a temporary, which is an
+        // observation nothing could ever read.
+        let mut trace = initial_trace();
+        fold_usize(&mut trace, values.len());
+        assert_ne!(
+            trace,
+            initial_trace(),
+            "the twelve drawn integers must fold into a trace value"
         );
     }
     Ok(())

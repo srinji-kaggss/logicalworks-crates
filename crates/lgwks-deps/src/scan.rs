@@ -41,11 +41,34 @@ use syn::visit::{self, Visit};
 pub struct Hit {
     /// Detector rule name, verbatim (`ERROR-SWALLOW`, `unlogged-err-return`,
     /// `ALLOW-SILENCE`, `long-try-chain`, `tautological-doc`).
-    pub rule: &'static str,
+    rule: &'static str,
     /// 1-based line number.
-    pub line: usize,
+    line: usize,
     /// Human-readable evidence.
-    pub snippet: String,
+    snippet: String,
+}
+
+impl Hit {
+    /// The detector rule name, verbatim.
+    #[must_use]
+    pub const fn rule(&self) -> &'static str {
+        self.rule
+    }
+
+    /// The 1-based line the finding was observed on.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// The human-readable evidence the detector read at that line.
+    ///
+    /// Borrowed, so a consumer renders a finding without being able to edit what
+    /// it was shown.
+    #[must_use]
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
 }
 
 /// Why a file could not be scanned. Unparseable source is a refusal, not a
@@ -152,8 +175,65 @@ fn cfg_requires_test(meta: &syn::Meta) -> bool {
             .enumerate()
             .map(|(index, atom)| (atom.as_str(), assignment & (1 << index) != 0))
             .collect::<HashMap<_, _>>();
-        eval_cfg(meta, false, &values)
+        eval_cfg(meta, false, &values).may_hold()
     })
+}
+
+/// What one `cfg` expression evaluates to under one assignment of its atoms.
+///
+/// `Unevaluated` is an answer of its own rather than a value substituted for a
+/// missing one: an atom the assignment never recorded means the walk that
+/// collected the atoms and the evaluation that reads them understood different
+/// shapes out of one expression, which is this scanner disagreeing with itself.
+/// That is not a value the expression has, and folding it into `Satisfied`
+/// would make the disagreement invisible to every caller above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The expression holds under this assignment.
+    Satisfied,
+    /// The expression does not hold under this assignment.
+    Unsatisfied,
+    /// The expression could not be evaluated under this assignment.
+    Unevaluated,
+}
+
+impl Verdict {
+    /// Whether the expression can hold under some assignment.
+    ///
+    /// An expression this scanner could not evaluate is one it refuses to call
+    /// test-only: an item kept in scope is a candidate for a finding, and an
+    /// item dropped is a clean report for source nobody read.
+    fn may_hold(self) -> bool {
+        matches!(self, Self::Satisfied | Self::Unevaluated)
+    }
+
+    /// `all` of two conjuncts: one unsatisfied conjunct is enough.
+    fn all(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unsatisfied, _) | (_, Self::Unsatisfied) => Self::Unsatisfied,
+            (Self::Satisfied, Self::Satisfied) => Self::Satisfied,
+            _ => Self::Unevaluated,
+        }
+    }
+
+    /// `any` of two disjuncts: one satisfied disjunct is enough.
+    fn any(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Satisfied, _) | (_, Self::Satisfied) => Self::Satisfied,
+            (Self::Unsatisfied, Self::Unsatisfied) => Self::Unsatisfied,
+            _ => Self::Unevaluated,
+        }
+    }
+
+    /// `not` of one argument. An argument this scanner could not evaluate leaves
+    /// the whole expression unevaluated: negating "unknown" is still unknown.
+    const fn negate(self) -> Self {
+        match self {
+            Self::Satisfied => Self::Unsatisfied,
+            Self::Unsatisfied => Self::Satisfied,
+            Self::Unevaluated => Self::Unevaluated,
+        }
+    }
 }
 
 /// Collects every free atom of a `cfg` expression into `atoms`, recursing
@@ -286,64 +366,94 @@ fn cfg_children(
 /// Evaluates a `cfg` expression under one assignment of its free atoms, with
 /// the `test` atom fixed to the `test` argument.
 ///
-/// A combinator whose arguments fail to parse folds to `false` via `is_some_and`
-/// on the `all` / `any` arms; `not` falls back to [`atom_value`]. Unknown
-/// paths evaluate through `values`, which defaults an unassigned atom to
-/// `true`, the conservative direction, since a `true` atom makes an
-/// expression easier to satisfy and so less likely to be called test-only.
-fn eval_cfg(meta: &syn::Meta, test: bool, values: &HashMap<&str, bool>) -> bool {
+/// A combinator whose arguments fail to parse is `Unevaluated` through the
+/// `all` / `any` arms, and `not` falls back to the atom it was given. An atom
+/// the assignment never recorded is `Unevaluated` too, and
+/// [`Verdict::may_hold`] is where that is resolved — once, at the one place
+/// that decides whether an item is test-only.
+fn eval_cfg(meta: &syn::Meta, test: bool, values: &HashMap<&str, bool>) -> Verdict {
     match *meta {
-        syn::Meta::Path(ref path) if path.is_ident("test") => test,
+        syn::Meta::Path(ref path) if path.is_ident("test") => {
+            if test {
+                Verdict::Satisfied
+            } else {
+                Verdict::Unsatisfied
+            }
+        }
         syn::Meta::List(ref list) if list.path.is_ident("all") => eval_cfg_all(list, test, values),
         syn::Meta::List(ref list) if list.path.is_ident("any") => eval_cfg_any(list, test, values),
         syn::Meta::List(ref list) if list.path.is_ident("not") => {
             eval_cfg_not(meta, list, test, values)
         }
-        _ => atom_value(meta, values),
+        _ => atom_verdict(meta, values),
     }
 }
 
-/// True when every conjunct holds. An unparseable argument list answers
-/// `false`: `all` of an unknown set cannot be shown to hold.
-fn eval_cfg_all(list: &syn::MetaList, test: bool, values: &HashMap<&str, bool>) -> bool {
-    cfg_children(list)
-        .is_some_and(|children| children.iter().all(|child| eval_cfg(child, test, values)))
+/// Every conjunct holds. An argument list that does not parse is `Unevaluated`:
+/// `all` of a set nobody read cannot be shown to hold.
+fn eval_cfg_all(list: &syn::MetaList, test: bool, values: &HashMap<&str, bool>) -> Verdict {
+    let Some(children) = cfg_children(list) else {
+        return Verdict::Unevaluated;
+    };
+    // `all` of nothing holds, which is a property of the operator: the seed is
+    // that identity, not a value standing in for a child that was not there.
+    children.iter().fold(Verdict::Satisfied, |held, child| {
+        held.all(eval_cfg(child, test, values))
+    })
 }
 
-/// True when any disjunct holds. An unparseable argument list answers
-/// `false` for the same reason as [`eval_cfg_all`].
-fn eval_cfg_any(list: &syn::MetaList, test: bool, values: &HashMap<&str, bool>) -> bool {
-    cfg_children(list)
-        .is_some_and(|children| children.iter().any(|child| eval_cfg(child, test, values)))
+/// Any disjunct holds, for the same reason [`eval_cfg_all`] is `Unevaluated`
+/// rather than false.
+fn eval_cfg_any(list: &syn::MetaList, test: bool, values: &HashMap<&str, bool>) -> Verdict {
+    let Some(children) = cfg_children(list) else {
+        return Verdict::Unevaluated;
+    };
+    // `any` of nothing holds nothing, for the same reason `all` of nothing
+    // holds everything: the seed is the operator's identity.
+    children.iter().fold(Verdict::Unsatisfied, |held, child| {
+        held.any(eval_cfg(child, test, values))
+    })
 }
 
 /// Negates the single argument of a `not`. A `not` with zero or more than one
-/// argument is malformed Rust; it degrades to [`atom_value`] rather than
+/// argument is malformed Rust; it degrades to the atom it was given rather than
 /// guessing which argument was meant.
 fn eval_cfg_not(
     meta: &syn::Meta,
     list: &syn::MetaList,
     test: bool,
     values: &HashMap<&str, bool>,
-) -> bool {
+) -> Verdict {
     let Some(children) = cfg_children(list) else {
-        return atom_value(meta, values);
+        return atom_verdict(meta, values);
     };
     let mut children = children.iter();
     match (children.next(), children.next()) {
-        (Some(child), None) => !eval_cfg(child, test, values),
-        _ => atom_value(meta, values),
+        (Some(child), None) => eval_cfg(child, test, values).negate(),
+        _ => atom_verdict(meta, values),
     }
 }
 
-/// Looks up one atom's assigned value.
+/// One atom's verdict under the current assignment.
 ///
-/// An atom absent from `values` answers `true`: [`collect_cfg_atoms`] inserts
-/// every atom it walks, so an absent key means the walk and the evaluation
-/// disagreed about the expression's shape, and `true` is the direction that
-/// refuses to call the item test-only.
-fn atom_value(meta: &syn::Meta, values: &HashMap<&str, bool>) -> bool {
-    values.get(atom_key(meta).as_str()).copied().unwrap_or(true)
+/// `None` is this scanner disagreeing with itself: [`collect_cfg_atoms`] inserts
+/// every atom it walks, so an atom missing from the assignment means the walk
+/// and the evaluation read different shapes out of one expression.
+fn atom_value(meta: &syn::Meta, values: &HashMap<&str, bool>) -> Option<bool> {
+    values.get(atom_key(meta).as_str()).copied()
+}
+
+/// One atom's assigned value, or `Unevaluated` when the assignment never
+/// recorded it.
+///
+/// The `None` arm is the whole disagreement named once, so no caller has to
+/// invent a value for an atom the walk did not reach.
+fn atom_verdict(meta: &syn::Meta, values: &HashMap<&str, bool>) -> Verdict {
+    match atom_value(meta, values) {
+        Some(true) => Verdict::Satisfied,
+        Some(false) => Verdict::Unsatisfied,
+        None => Verdict::Unevaluated,
+    }
 }
 
 /// True when a module is itself test-only: `#[cfg(test)] mod tests`, or a
@@ -1533,7 +1643,10 @@ impl ErrReturnWalker<'_> {
     /// outside any function (a `const` initializer, say) is not disabled,
     /// which is why an empty stack answers `false`.
     fn is_scope_disabled(&self) -> bool {
-        *self.test_scope_stack.last().unwrap_or(&false)
+        // An empty stack is a `return` outside any function, which is not a
+        // disabled scope: the question is what the innermost scope says, and an
+        // empty stack has no innermost to say anything.
+        matches!(self.test_scope_stack.last(), Some(disabled) if *disabled)
     }
 
     /// Records a finding when a `return Err(..)` in production code has no log
@@ -1714,6 +1827,15 @@ impl<'ast> Visit<'ast> for TryCounter {
     /// Closure bodies are not descended into: a `?` inside a closure belongs
     /// to the closure's own control flow, not to the statement being counted.
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+    /// Nested blocks are not descended into either: each statement inside one
+    /// is inspected on its own by [`TryChainWalker`], so counting it here as
+    /// well charged a loop with every `?` in its body — including those under a
+    /// `let`, which this detector's contract says breaks the chain — and named
+    /// a ten-statement loop a ten-`?` chain. What stays counted is the
+    /// statement's own expression: a `for` iterator, a `while` or `if`
+    /// condition, a `match` scrutinee and an arm written without braces.
+    fn visit_block(&mut self, _block: &'ast syn::Block) {}
 }
 
 /// Counts the `?` operators in a statement's own expression.
@@ -1739,36 +1861,34 @@ impl TryChainWalker<'_> {
     ///
     /// An exempt function answers `None` and leaves the current state alone, so
     /// statements inside it keep the enclosing function's coordinates rather
-    /// than being attributed to a function that is never inspected. The wrapped
-    /// line is `None` outside any function; it is flattened to `0` here and
-    /// re-expanded on exit, so a top-level statement is not attributed to a
+    /// than being attributed to a function that is never inspected. The
+    /// displaced line stays the `Option` it is — `None` means there was no
+    /// enclosing function — so a top-level statement is not attributed to a
     /// function that does not exist.
     fn enter_function(
         &mut self,
         attrs: &[syn::Attribute],
         sig: &syn::Signature,
-    ) -> Option<(usize, bool)> {
+    ) -> Option<(Option<usize>, bool)> {
         if is_test_or_helper_attr(attrs) {
             return None;
         }
         let line_number = sig.ident.span().start().line;
+        // The displaced state is the pair as it is, including "no enclosing
+        // function": flattening that into a number would need a sentinel this
+        // walk could then mistake for a line.
         let previous = (self.current_fn_line, self.current_fn_skipped);
         self.current_fn_line = Some(line_number);
         self.current_fn_skipped = false;
-        Some((previous.0.unwrap_or(0), previous.1))
+        Some(previous)
     }
 
-    /// Restores the state [`Self::enter_function`] displaced, re-expanding the
-    /// `0` sentinel into `None` so "no enclosing function" survives a round
-    /// trip while a real function on line 0 remains impossible (syn lines are
-    /// 1-based).
-    fn exit_function(&mut self, previous: Option<(usize, bool)>) {
+    /// Restores the state [`Self::enter_function`] displaced. "No enclosing
+    /// function" is a value of its own rather than a flattened sentinel, so a
+    /// nested function cannot leave the outer one reporting its line.
+    fn exit_function(&mut self, previous: Option<(Option<usize>, bool)>) {
         if let Some((line_number, allowed)) = previous {
-            self.current_fn_line = if line_number == 0 {
-                None
-            } else {
-                Some(line_number)
-            };
+            self.current_fn_line = line_number;
             self.current_fn_skipped = allowed;
         }
     }
@@ -2621,6 +2741,40 @@ pub fn count() -> usize {
     fn three_try_in_one_statement_is_clean() -> TestResult {
         let hits = scan("fn f() -> Result<(), E> {\n    g()?.h()?.i()?;\n    Ok(())\n}\n")?;
         assert!(!rules(&hits).contains(&"long-try-chain"), "{hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_loop_is_not_charged_with_the_statements_in_its_body() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    for x in g()? {\n        let a = x.h()?;\n        let b = a.i()?;\n        b.j()?;\n        b.k()?;\n    }\n    Ok(())\n}\n",
+        )?;
+        assert!(!rules(&hits).contains(&"long-try-chain"), "{hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_chain_inside_a_loop_body_is_still_a_chain() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    loop {\n        g()?.h()?.i()?.j()?;\n    }\n}\n",
+        )?;
+        let hit = hits
+            .iter()
+            .find(|hit| hit.rule == "long-try-chain")
+            .ok_or("a four-`?` statement inside a loop is a chain")?;
+        assert_eq!(
+            hit.line, 3,
+            "the chain is named at its own line, not the loop's"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_loop_header_still_counts_toward_its_own_statement() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    while g()?.h()?.i()?.j()? {\n        let a = k()?;\n    }\n    Ok(())\n}\n",
+        )?;
+        assert!(rules(&hits).contains(&"long-try-chain"), "{hits:?}");
         Ok(())
     }
 

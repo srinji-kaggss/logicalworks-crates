@@ -39,8 +39,8 @@ use std::rc::Rc;
 use lgwks_bot::broker::{Broker, DispatchError};
 use lgwks_bot::effect::{AttemptId, EffectKey, FlowRevision};
 use lgwks_bot::journal::{
-    DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind, JournalEntry,
-    JournalError, JournalPosition, MemoryJournal,
+    ContinuationPolicy, DurabilityPromise, DurableAck, EffectEvent, EffectJournal, EventKind,
+    FileJournal, JournalEntry, JournalError, JournalPosition, MemoryJournal,
 };
 use lgwks_bot::spec::{Bot, EffectEvidence, EffectIdentity, EffectScope, TransitionHold};
 use lgwks_bot::{
@@ -1077,8 +1077,10 @@ impl ScriptedJournal {
 
 impl EffectJournal for ScriptedJournal {
     fn durability(&self) -> DurabilityPromise {
-        self.advertised
-            .unwrap_or_else(|| self.store.borrow().durability())
+        match self.advertised {
+            Some(advertised) => advertised,
+            None => self.store.borrow().durability(),
+        }
     }
 
     fn tail(&self) -> JournalPosition {
@@ -1398,6 +1400,72 @@ fn a_successor_dispatches_after_a_settled_handoff() -> TestResult {
         first_key,
         "a distinct input is a distinct key, which is what makes the stale-controller \
          falsifier a real one and this transfer a real transfer"
+    );
+    Ok(())
+}
+
+/// How many ticks the continuing controller is driven through.
+///
+/// Each tick settles one local effect in three events, so at the sixty-four-event
+/// trigger below this is a little over four continuations: enough that the
+/// controller has crossed a boundary *after* already crossing one, which is the
+/// case a fence that stayed on the predecessor's chain would fail.
+const CONTINUING_TICKS: u64 = 96;
+
+/// The event trigger the continuing controller's journal is opened with.
+const CONTINUING_EVENT_WATERMARK: u64 = 64;
+
+/// The controller continues its own journal on the shipped append path.
+///
+/// Nothing in this test asks for a continuation. A bot is built over a continuing
+/// file journal and ticked, and every continuation is the one `ecs`'s own append
+/// takes when the journal's watermark is due (#267). So the assertions are about
+/// what a host sees afterwards: every tick dispatched exactly once, the chain of
+/// files moved past its base more than once, and a reopen through the original
+/// path finds a live journal with nothing left uncertain.
+#[test]
+fn the_controller_continues_its_own_journal_on_the_shipped_append_path() -> TestResult {
+    let dir = crate::journal_fixtures::scratch_dir("controller-continues")?;
+    let _guard = crate::journal_fixtures::TempGuard(dir.clone());
+    let base = dir.join("run.jrnl");
+    let policy = ContinuationPolicy::new(CONTINUING_EVENT_WATERMARK, 4 * 1024 * 1024)?;
+    let journal = FileJournal::open_continuing_with(&base, policy)?;
+    let identity = identity()?;
+    let input = Rc::new(RefCell::new(EventId::new(0, 0)));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut bot = every_request(
+        Rc::clone(&input),
+        Records(Rc::clone(&log)),
+        EffectScope::new(identity, broker(identity.environment())?, Box::new(journal)),
+    )?;
+
+    for tick in 1..=CONTINUING_TICKS {
+        let payload = u32::try_from(tick)?;
+        *input.borrow_mut() = EventId::new(tick, payload);
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "tick {tick} dispatched its one action across the continuations"
+        );
+    }
+    drop(bot);
+
+    assert_eq!(
+        log.borrow().len(),
+        usize::try_from(CONTINUING_TICKS)?,
+        "every tick entered its action exactly once: no continuation dropped or \
+         replayed an effect"
+    );
+    let live = FileJournal::open_active(&base)?;
+    assert!(
+        live.generation() > 2,
+        "the controller's own appends continued its journal more than once; the live \
+         journal is generation {}",
+        live.generation()
+    );
+    assert!(
+        live.recover().uncertain().is_empty(),
+        "every effect the controller dispatched is settled in the journal it ended on"
     );
     Ok(())
 }
@@ -2073,9 +2141,16 @@ fn a_readable_contradictory_outcome_is_still_contradicted() -> TestResult {
 }
 
 /// Whether the named kind was appended for any key.
-fn journal_has(store: &Rc<RefCell<MemoryJournal>>, kind: EventKind) -> bool {
-    let committed = EffectJournal::committed(&*store.borrow()).unwrap_or_default();
-    committed.iter().any(|event| event.kind() == kind)
+///
+/// The store's own error propagates: a read that failed is not a journal with no
+/// such entry, and answering "no" here would let a dispatch test pass on a store
+/// it could not read.
+fn journal_has(
+    store: &Rc<RefCell<MemoryJournal>>,
+    kind: EventKind,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let committed = EffectJournal::committed(&*store.borrow())?;
+    Ok(committed.iter().any(|event| event.kind() == kind))
 }
 
 /// A handoff refused before the action ran must not leave a false
@@ -2100,7 +2175,7 @@ fn a_refused_handoff_leaves_no_unrecorded_barrier() -> TestResult {
     // `MemoryJournal` advertises `Ephemeral`, so admission refuses before the
     // intent is written. Nothing may be prepared either way.
     assert!(
-        !journal_has(&store, EventKind::DispatchPrepared),
+        !journal_has(&store, EventKind::DispatchPrepared)?,
         "a handoff that cannot outlive the process must not be prepared"
     );
 
@@ -2149,11 +2224,11 @@ fn a_weak_ack_does_not_record_dispatch_prepared() -> TestResult {
     }
     assert!(!entered.get(), "the action did not run on a weak ack");
     assert!(
-        journal_has(&store, EventKind::IntentAdmitted),
+        journal_has(&store, EventKind::IntentAdmitted)?,
         "the intent is the write-ahead fact that was actually committed"
     );
     assert!(
-        !journal_has(&store, EventKind::DispatchPrepared),
+        !journal_has(&store, EventKind::DispatchPrepared)?,
         "no DispatchPrepared for a handoff refused on its acknowledgment"
     );
 

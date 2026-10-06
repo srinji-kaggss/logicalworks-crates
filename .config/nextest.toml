@@ -1,3 +1,14 @@
+# Every test is bounded. nextest's default has no timeout, so a test that parks
+# forever holds the whole gate open, and "the suite hung" reads exactly like "the
+# suite is still running": on 2026-10-05 a tenancy test with every tokio worker
+# parked ran for 12.5 minutes at 0% CPU before anyone looked. A test that reports
+# no progress for five 60 s periods is killed and fails the run, naming itself.
+# 300 s is the whole budget for a gate, so no single test may take longer; the
+# per-module overrides below are tighter where their tests are known to be
+# shorter, and an override's own slow-timeout takes precedence over this one.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # journal_scale measures how many OS threads the process can create and then
 # holds that many tenant journals open. On Linux the thread limit is per user,
 # so a sibling test forked meanwhile can fail to spawn with EAGAIN (main CI run
@@ -10,6 +21,27 @@
 filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'
 
+# #277: two lgwks_ast modules exist to catch a walk that stops making progress,
+# so they are the last place a missing bound would show up as a run that never
+# ends. nextest's default has no timeout at all, which means "the suite hung"
+# and "the suite passed" are the same observation; these two get a hard
+# slow-timeout instead, so a hang fails the run rather than holding it open.
+#
+# The periods are generous because these tests measure real 2 MiB parses and a
+# loaded CI runner is slow. `terminate-after` is the bound that matters: three
+# periods without a progress report and the test process is killed and the run
+# fails. The abort test in `hostile` spawns a child of its own, so its period
+# has to cover the child as well as the parent.
+[[profile.default.overrides]]
+filter = 'package(lgwks_ast) & binary(it) & test(/^hostile::/)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# The seeded family: 96 seeds per test, each a real parse. Same reasoning, one
+# period shorter because no test here owns a child process.
+[[profile.default.overrides]]
+filter = 'package(lgwks_ast) & binary(it) & test(/^sim_parse_bounds::/)'
+slow-timeout = { period = "90s", terminate-after = 2 }
+
 # sim_random_error drives concurrent entropy drawers at 100, 1 000, 10 000 and
 # 100 000 OS threads — the same per-user thread ceiling as above, on a crate
 # whose tests run in the same binary as every other lgwks_std suite. A refusal
@@ -20,3 +52,19 @@ threads-required = 'num-test-threads'
 [[profile.default.overrides]]
 filter = 'package(lgwks_std) & binary(it) & test(/^sim_random_error::/)'
 threads-required = 'num-test-threads'
+
+# The CI profile: the same runs, each writing a JUnit report of what it actually
+# ran, so the acceptance receipt can be built from the suite's own output instead
+# of running it a second time. `store-success-output = false` keeps a report to
+# what a reader needs -- per test, one status and one duration -- rather than the
+# captured stdout of every passing test, which for this crate is megabytes.
+#
+# `path` is a bare filename on purpose. nextest resolves it relative to the
+# runner's own report directory, so a path carrying directories in it is appended
+# to that directory and lands at `target/nextest/ci/target/nextest/ci/junit.xml`.
+# Wherever it lands it is under `target/`, which is already ignored, so a report
+# is a derived artifact and never reaches the repository.
+[profile.ci]
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false

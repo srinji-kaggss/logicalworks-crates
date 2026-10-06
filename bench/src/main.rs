@@ -47,6 +47,7 @@ use lgwks_bot::{
     Auth, Bot, BotError, Cap, EffectLifetime, Evaluate, Execute, GrantSet, Observe, TickProfile,
     TickStage,
 };
+use lgwks_std::trace::info;
 
 // ── The allocation counter ───────────────────────────────────────────────────
 //
@@ -232,7 +233,7 @@ struct Even(Rc<Cell<u64>>);
 impl Evaluate<u64> for Even {
     fn check(&self, value: &u64) -> Result<bool, BotError> {
         self.0.set(self.0.get().saturating_add(1));
-        Ok(*value % 2 == 0)
+        Ok(value.is_multiple_of(2))
     }
 
     fn condition_id(&self) -> &'static str {
@@ -280,7 +281,7 @@ impl HandRolled {
         let mut fired = 0;
         for _ in 0..self.entries {
             evals.set(evals.get().saturating_add(1));
-            if value % 2 == 0 {
+            if value.is_multiple_of(2) {
                 fired += 1;
             }
         }
@@ -1014,6 +1015,11 @@ fn scenario_report(
     )?;
     writeln!(
         human,
+        "  journal   {} events retained after the busiest round, ceiling {}",
+        m.journal_events, m.journal_ceiling
+    )?;
+    writeln!(
+        human,
         "  build     {} chains admitted in {:.3} ms\n",
         scenario.sources,
         m.build_bot.as_secs_f64() * 1e3
@@ -1025,7 +1031,7 @@ fn scenario_report(
          \"rounds\": {}, \"effects\": {}, \"evaluations\": {}, \
          \"bot_ticks_per_sec\": {:.1}, \"baseline_ticks_per_sec\": {:.1}, \
          \"ratio_median\": {:.4}, \"ratio_ci95\": [{:.4}, {:.4}], \
-         \"build_ms\": {:.4} }},",
+         \"journal_events\": {}, \"journal_ceiling\": {}, \"build_ms\": {:.4} }},",
         m.name,
         scenario.sources,
         scenario.entries,
@@ -1038,22 +1044,27 @@ fn scenario_report(
         ratio_median,
         ci_lo,
         ci_hi,
+        m.journal_events,
+        m.journal_ceiling,
         m.build_bot.as_secs_f64() * 1e3
     )?;
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The report goes through the estate's tracing, not `println!`: levelled,
+    // filterable through `LGWKS_LOG`, and never a panic on a closed pipe.
+    lgwks_std::trace::install_default("lgwks-bench")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
 
     if args.iter().any(|a| a == "--alloc-report") {
-        print!("{}", alloc_report()?);
+        info!("{}", alloc_report()?);
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--profile") {
-        print!("{}", stage_report()?);
+        info!("{}", stage_report()?);
         return Ok(());
     }
 
@@ -1088,11 +1099,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ns / (*count as f64)
         )?;
     }
-    let first_caps = scaling.first().map(|(c, _)| *c as f64).unwrap_or(1.0);
-    let last_caps = scaling.last().map(|(c, _)| *c as f64).unwrap_or(1.0);
-    let first_ns = scaling.first().map(|(_, ns)| *ns).unwrap_or(f64::NAN);
-    let last_ns = scaling.last().map(|(_, ns)| *ns).unwrap_or(f64::NAN);
-    let growth = last_caps / first_caps;
+    // A scaling line needs both ends; a run that produced no points has no growth
+    // to report, and inventing one (a 1.0 or a NaN) would print a number nobody
+    // measured.
+    let (Some(&(first_caps, first_ns)), Some(&(last_caps, last_ns))) =
+        (scaling.first(), scaling.last())
+    else {
+        let refusal: Result<(), Box<dyn std::error::Error>> =
+            Err("the capability-scaling run produced no points".into());
+        lgwks_std::trace::warn!(error = ?refusal.as_ref().err(), "capability scaling: no points to report");
+        return refusal;
+    };
+    let growth = last_caps as f64 / first_caps as f64;
     writeln!(
         human,
         "  growth    {:.1}x cost for {:.0}x capabilities (quadratic would be {:.0}x)\n",
@@ -1132,12 +1150,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build_64.as_secs_f64() * 1e3
     ));
 
-    print!("{human}");
+    info!("{human}");
 
     if let Some(path) = args.iter().find(|a| a.starts_with("--json=")) {
         let path = path.trim_start_matches("--json=");
         std::fs::write(path, &json)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
 
     Ok(())

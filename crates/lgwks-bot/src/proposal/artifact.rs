@@ -33,9 +33,11 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use lgwks_std::hash::{Digest, Hasher};
+
+use crate::journal::frame::SaturatingFrom;
 
 /// The most bytes one artifact may hold.
 pub const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
@@ -119,17 +121,6 @@ pub enum WriteOutcome {
     },
 }
 
-/// Recover from a poisoned lock rather than propagating.
-///
-/// Every lock here guards an in-memory index whose values have no `Drop` that
-/// can fail, so no panic path can leave a half-written state behind — and a
-/// caller that is reading an artifact should not be turned away by a panic that
-/// happened in an unrelated tenant's writer. Named once so every lock site reads
-/// the same way.
-fn recover<T>(poisoned: PoisonError<T>) -> T {
-    poisoned.into_inner()
-}
-
 /// One artifact's stored bytes and the digest they hash to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Held {
@@ -191,17 +182,13 @@ impl ArtifactStore {
     /// How many tenants this store holds shelves for.
     #[must_use]
     pub fn tenants(&self) -> usize {
-        self.shelves.read().unwrap_or_else(recover).len()
+        crate::journal::owner::read(&self.shelves).len()
     }
 
     /// How many artifacts `tenant` holds.
     #[must_use]
     pub fn artifacts(&self, tenant: &str) -> usize {
-        self.shelf(tenant)
-            .artifacts
-            .read()
-            .unwrap_or_else(recover)
-            .len()
+        crate::journal::owner::read(&self.shelf(tenant).artifacts).len()
     }
 
     /// The digest `bytes` hash to, which is the identity a write is filed under.
@@ -240,8 +227,8 @@ impl ArtifactStore {
         // path as well as the read path — one derivation, two doors.
         let _key = ArtifactKey::of(tenant, &digest);
         let shelf = self.shelf(tenant);
-        let _serialized = shelf.writer.lock().unwrap_or_else(recover);
-        let mut held = shelf.artifacts.write().unwrap_or_else(recover);
+        let _serialized = crate::journal::owner::lock(&shelf.writer);
+        let mut held = crate::journal::owner::write(&shelf.artifacts);
         match held.get_mut(&digest) {
             Some(existing) => {
                 existing.writers = existing.writers.saturating_add(1);
@@ -280,10 +267,7 @@ impl ArtifactStore {
     /// than a check a caller has to remember.
     #[must_use]
     pub fn read(&self, tenant: &str, digest: &Digest) -> Option<Arc<[u8]>> {
-        self.shelf(tenant)
-            .artifacts
-            .read()
-            .unwrap_or_else(recover)
+        crate::journal::owner::read(&self.shelf(tenant).artifacts)
             .get(digest)
             .map(|held| Arc::clone(&held.bytes))
     }
@@ -295,10 +279,7 @@ impl ArtifactStore {
     /// per key so two tenants writing their own copies never share it.
     #[must_use]
     pub fn writers(&self, tenant: &str, digest: &Digest) -> u64 {
-        self.shelf(tenant)
-            .artifacts
-            .read()
-            .unwrap_or_else(recover)
+        crate::journal::owner::read(&self.shelf(tenant).artifacts)
             .get(digest)
             .map_or(0, |held| held.writers)
     }
@@ -317,10 +298,10 @@ impl ArtifactStore {
     /// insertion order. The shelf is a handle over `Arc`-ed locks, so every
     /// caller that asks for this tenant reaches the same writer lock.
     fn shelf(&self, tenant: &str) -> TenantShelf {
-        if let Some(shelf) = self.shelves.read().unwrap_or_else(recover).get(tenant) {
+        if let Some(shelf) = crate::journal::owner::read(&self.shelves).get(tenant) {
             return shelf.clone();
         }
-        let mut shelves = self.shelves.write().unwrap_or_else(recover);
+        let mut shelves = crate::journal::owner::write(&self.shelves);
         shelves.entry(tenant.to_owned()).or_default().clone()
     }
 }
@@ -336,8 +317,8 @@ impl Default for ArtifactStore {
 fn check_bytes(len: usize) -> Result<(), ArtifactError> {
     if len > MAX_ARTIFACT_BYTES {
         let refusal = Err(ArtifactError::TooLarge {
-            got: u64::try_from(len).unwrap_or(u64::MAX),
-            limit: u64::try_from(MAX_ARTIFACT_BYTES).unwrap_or(u64::MAX),
+            got: u64::saturating_from(len),
+            limit: u64::saturating_from(MAX_ARTIFACT_BYTES),
         });
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check_bytes: returning an error to the caller");
         return refusal;
@@ -425,8 +406,8 @@ impl From<ArtifactError> for super::Refusal {
             },
             ArtifactError::Full { tenant: _, held } => Self::Limit {
                 what: "the artifacts held by a tenant",
-                got: u64::try_from(held).unwrap_or(u64::MAX).saturating_add(1),
-                limit: u64::try_from(MAX_ARTIFACTS_PER_TENANT).unwrap_or(u64::MAX),
+                got: u64::saturating_from(held).saturating_add(1),
+                limit: u64::saturating_from(MAX_ARTIFACTS_PER_TENANT),
             },
             ArtifactError::InvalidTenant { .. } => Self::Malformed {
                 cause: "a tenant name that cannot key an artifact",

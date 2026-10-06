@@ -28,8 +28,6 @@
 // them — which would be a compile failure reported as a missing module.
 #![cfg(all(feature = "script", feature = "process"))]
 
-use std::hash::{Hash, Hasher};
-
 /// What a simulation reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -145,18 +143,22 @@ struct Receiver {
 
 impl Receiver {
     /// Apply one create at `commit`, returning the id it was given.
-    fn apply(&mut self, commit: &str, payload: &ReviewPayload) -> u64 {
+    fn apply(
+        &mut self,
+        commit: &str,
+        payload: &ReviewPayload,
+    ) -> Result<u64, std::num::TryFromIntError> {
         // `saturating_add`, because a receiver that somehow held `u64::MAX`
         // reviews would otherwise wrap to zero ids and make two reviews share
         // one identity — which is the exact defect these tests hunt.
-        let id = 9000u64.saturating_add(u64::try_from(self.reviews.len()).unwrap_or(u64::MAX));
+        let id = 9000u64.saturating_add(u64::try_from(self.reviews.len())?);
         self.reviews.push(ReviewRecord::new(
             id,
             commit,
             payload.state(),
             payload.body(),
         ));
-        id
+        Ok(id)
     }
 
     /// The first review matching `payload`, or `None`.
@@ -208,7 +210,7 @@ fn simulate(reviewed: &str, fault: Fault, body: &str) -> Result<Trace, Box<dyn s
         Fault::CreateRefused => None,
         _ => {
             creates = creates.saturating_add(1);
-            let id = receiver.apply(reviewed, &payload);
+            let id = receiver.apply(reviewed, &payload)?;
             Some(id)
         }
     };
@@ -228,7 +230,7 @@ fn simulate(reviewed: &str, fault: Fault, body: &str) -> Result<Trace, Box<dyn s
                 .map_err(|source| source.to_string())?;
             let elsewhere = ReviewPayload::new(&other, "COMMENT", body, "marker")
                 .map_err(|source| source.to_string())?;
-            receiver.apply(other.as_str(), &elsewhere);
+            receiver.apply(other.as_str(), &elsewhere)?;
             receiver.verified(&payload)
         }
         _ => receiver.verified(&payload),
@@ -261,13 +263,23 @@ fn unknown(reviewed: &str, creates: usize) -> Trace {
 }
 
 /// A stable hash of a trace, so a replay is checkable rather than asserted.
+///
+/// Through the substrate's FNV-1a receipt rather than `DefaultHasher`, whose
+/// algorithm std leaves free to change between releases: a hash recorded before
+/// a toolchain bump must still compare equal after it.
 fn trace_hash(trace: &Trace) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    trace.reviewed.hash(&mut hasher);
-    trace.reported.hash(&mut hasher);
-    trace.outcome.label().hash(&mut hasher);
-    trace.creates.hash(&mut hasher);
-    hasher.finish()
+    let mut receipt = crate::sim::Trace::new();
+    receipt.record(&trace.reviewed);
+    match trace.reported.as_deref() {
+        Some(reported) => {
+            receipt.record("reported");
+            receipt.record(reported);
+        }
+        None => receipt.record("unreported"),
+    }
+    receipt.record(trace.outcome.label());
+    receipt.record_number("creates", trace.creates);
+    receipt.hash()
 }
 
 // ── The families ────────────────────────────────────────────────────────────
@@ -278,7 +290,7 @@ fn subject_r64() -> TestResult {
     let mut hashes = Vec::new();
     for index in 0..64u64 {
         let fault = Fault::for_index(index);
-        let trace = simulate(subject(index), fault, "body")?;
+        let trace = simulate(subject(index)?, fault, "body")?;
         hashes.push(trace_hash(&trace));
 
         if fault == Fault::HeadMoved {
@@ -314,7 +326,7 @@ fn publication_r64() -> TestResult {
     let mut hashes = Vec::new();
     for index in 0..64u64 {
         let fault = Fault::for_index(index);
-        let trace = simulate(subject(index), fault, "body")?;
+        let trace = simulate(subject(index)?, fault, "body")?;
         hashes.push(trace_hash(&trace));
 
         assert!(
@@ -356,7 +368,7 @@ fn identity_r64() -> TestResult {
     let mut hashes = Vec::new();
     for index in 0..64u64 {
         let fault = Fault::for_index(index);
-        let commit = subject(index);
+        let commit = subject(index)?;
         let mine = simulate(commit, fault, &format!("identity-{index}"))?;
 
         // A second identity on the same repository, same subject, other body.
@@ -397,7 +409,7 @@ fn identity_r64() -> TestResult {
 fn same_seed_same_trace_hash() -> TestResult {
     for index in 0..64u64 {
         let fault = Fault::for_index(index);
-        let commit = subject(index);
+        let commit = subject(index)?;
         let first = simulate(commit, fault, "body")?;
         let second = simulate(commit, fault, "body")?;
         assert_eq!(
@@ -416,7 +428,7 @@ fn same_seed_same_trace_hash() -> TestResult {
 fn every_outcome_is_reachable_in_the_family() -> TestResult {
     let mut seen = std::collections::HashSet::new();
     for index in 0..64u64 {
-        let trace = simulate(subject(index), Fault::for_index(index), "body")?;
+        let trace = simulate(subject(index)?, Fault::for_index(index), "body")?;
         seen.insert(trace.outcome.label());
     }
     for expected in ["published", "unknown", "moved", "refused"] {
@@ -433,13 +445,12 @@ fn every_outcome_is_reachable_in_the_family() -> TestResult {
 /// One helper because four families need the same mapping and a per-family
 /// expression is four chances to shift one of them, which would make a trace
 /// hash from one family incomparable with another's.
-fn subject(index: u64) -> &'static str {
-    let width = u64::try_from(SHIFTS.len()).unwrap_or(u64::MAX);
-    // `width` is the slice length and is never zero, so the remainder is
-    // below it; the `checked_rem` makes that a fact the type carries rather
-    // than an argument, and a zero width would refuse instead of panicking.
-    let position = usize::try_from(index.checked_rem(width).unwrap_or(0)).unwrap_or(0);
-    SHIFTS.get(position).copied().unwrap_or(SHIFTS[0])
+fn subject(index: u64) -> Result<&'static str, Box<dyn std::error::Error>> {
+    let position = pick(index, SHIFTS.len())?;
+    SHIFTS
+        .get(position)
+        .copied()
+        .ok_or_else(|| format!("no commit at position {position}").into())
 }
 
 /// The commit under review across the families: full lowercase shas, because a
@@ -510,8 +521,8 @@ fn argument_vectors_r64() -> TestResult {
     ];
     let mut hashes = Vec::new();
     for index in 0..64u64 {
-        let method = methods[pick(index, methods.len())];
-        let path = paths[pick(index, paths.len())];
+        let method = methods[pick(index, methods.len())?];
+        let path = paths[pick(index, paths.len())?];
         let extra: &[&str] = if index % 3 == 0 { &["--paginate"] } else { &[] };
         let mut rest = vec!["--method", method, path];
         rest.extend_from_slice(extra);
@@ -707,7 +718,7 @@ fn pull_object_contract_r64() -> TestResult {
             base_object,
             format!("\"title\":\"change {index}\""),
         ];
-        let rotate = pick(index, fields.len());
+        let rotate = pick(index, fields.len())?;
         let ordered: Vec<&str> = fields[rotate..]
             .iter()
             .chain(fields[..rotate].iter())
@@ -796,7 +807,7 @@ fn review_state_and_marker_r64() -> TestResult {
     ];
     for index in 0..64u64 {
         let subject = CommitId::new(seeded_sha(index, 3))?;
-        let (event, state) = reported[pick(index, reported.len())];
+        let (event, state) = reported[pick(index, reported.len())?];
         let body = format!("finding {index}: {}", text_hash(&index.to_string()));
         let marker = if index % 4 == 0 {
             String::new()
@@ -846,9 +857,9 @@ fn marker_escape_r64() -> TestResult {
     let subject = CommitId::new(seeded_sha(7, 4))?;
     let hostile = ["--", "-->", "<", ">", "\n", "\r", "\u{0}", "\t"];
     for index in 0..64u64 {
-        let token = hostile[pick(index, hostile.len())];
-        let prefix = "p".repeat(pick(index, 9));
-        let suffix = "s".repeat(pick(index.wrapping_mul(3), 7));
+        let token = hostile[pick(index, hostile.len())?];
+        let prefix = "p".repeat(pick(index, 9)?);
+        let suffix = "s".repeat(pick(index.wrapping_mul(3), 7)?);
         let marker = format!("{prefix}{token}{suffix}");
         assert!(
             matches!(
@@ -857,7 +868,7 @@ fn marker_escape_r64() -> TestResult {
             ),
             "seed {index}: {marker:?} could break out of the comment"
         );
-        let length = 250_usize.saturating_add(pick(index, 13));
+        let length = 250_usize.saturating_add(pick(index, 13)?);
         let long = "m".repeat(length);
         let accepted = ReviewPayload::new(&subject, "COMMENT", "body", long.as_str()).is_ok();
         assert_eq!(
@@ -872,11 +883,11 @@ fn marker_escape_r64() -> TestResult {
 /// `.` and `..` are path segments, not repository names: `../..` would turn
 /// `repos/{owner}/{repo}/pulls` into a request for another endpoint.
 #[test]
-fn repository_segments_r64() {
+fn repository_segments_r64() -> TestResult {
     let dots = [".", ".."];
     for index in 0..64u64 {
         let name = format!("repo-{index}");
-        let dot = dots[pick(index, dots.len())];
+        let dot = dots[pick(index, dots.len())?];
         let spec = if index % 2 == 0 {
             format!("{dot}/{name}")
         } else {
@@ -895,6 +906,7 @@ fn repository_segments_r64() {
             "seed {index}: {dotted:?} merely contains dots and is a name"
         );
     }
+    Ok(())
 }
 
 /// The position `index` selects in a table of `width` entries.
@@ -902,14 +914,22 @@ fn repository_segments_r64() {
 /// One helper rather than a per-family expression: `index % width` needs the
 /// two types to agree, and four families each writing that conversion is four
 /// chances for one of them to use a different modulus.
-fn pick(index: u64, width: usize) -> usize {
-    let width_u64 = u64::try_from(width).unwrap_or(u64::MAX);
-    usize::try_from(index.checked_rem(width_u64).unwrap_or(0)).unwrap_or(0)
+///
+/// An empty table has no position, and is refused rather than read as the first.
+fn pick(index: u64, width: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let position = index
+        .checked_rem(u64::try_from(width)?)
+        .ok_or("an empty table has no position to pick")?;
+    Ok(usize::try_from(position)?)
 }
 
 /// A stable hash of plain text, for a family whose values are not traces.
+///
+/// Through the substrate's FNV-1a receipt rather than `DefaultHasher`, whose
+/// algorithm std leaves free to change between releases: a hash recorded before
+/// a toolchain bump must still compare equal after it.
 fn text_hash(text: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+    let mut receipt = crate::sim::Trace::new();
+    receipt.record(text);
+    receipt.hash()
 }

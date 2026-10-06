@@ -24,6 +24,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use std::error::Error;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -31,8 +33,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::resume_fixtures as shared;
-
-use shared::Scratch;
 
 use lgwks_bot::effect::{InputIdentity, RunId};
 use lgwks_bot::script::{FlowError, Scope, remember};
@@ -163,7 +163,7 @@ struct Seeded {
 ///
 /// Whatever the store, the task or the first attempt reports.
 fn seeded(scratch: &Scratch) -> Result<Seeded, Box<dyn Error>> {
-    let dir = scratch.join("store");
+    let dir = scratch.path().join("store");
     let work = one_step()?;
     let (host, run) = first_attempt(&dir, &work)?;
     drop(host);

@@ -31,7 +31,7 @@ use lgwks_std::process::{
 };
 
 use crate::rng::Rng;
-use crate::seeded_sweep::{SWEEP_SEEDS, fold, fold_usize, initial_trace};
+use crate::seeded_sweep::{SWEEP_SEEDS, fold, fold_usize, initial_trace, word_of};
 
 /// What every test here returns: a fixture that cannot be built fails the
 /// test with its cause instead of panicking.
@@ -715,8 +715,10 @@ fn concurrent_probes_agree_with_the_model() -> TestResult {
             // Every prober is started before any is joined, so the probes overlap.
             let mut probers = Vec::with_capacity(PROBERS);
             for prober in 0..PROBERS {
-                let mut rng =
-                    Rng::new(seed.wrapping_add(u64::try_from(prober).unwrap_or(u64::MAX)));
+                // Each prober's seed is its own position mixed into the sweep's,
+                // read through the shared word fold, so no two probers share a
+                // stream and the mix carries every bit of the position.
+                let mut rng = Rng::new(seed.wrapping_add(word_of(prober)));
                 probers.push(scope.spawn(move || {
                     let mut wrong = 0_usize;
                     for _ in 0..PROBES {
@@ -730,9 +732,15 @@ fn concurrent_probes_agree_with_the_model() -> TestResult {
                     wrong
                 }));
             }
+            // A prober that panicked is a disagreement, not a count of zero: it
+            // contributes the largest possible wrong count, so the assertion
+            // below fails on the panic rather than passing beside it.
             probers
                 .into_iter()
-                .map(|prober| prober.join().unwrap_or(usize::MAX))
+                .map(|prober| match prober.join() {
+                    Ok(wrong) => wrong,
+                    Err(_) => usize::MAX,
+                })
                 .fold(0_usize, usize::saturating_add)
         });
         assert_eq!(

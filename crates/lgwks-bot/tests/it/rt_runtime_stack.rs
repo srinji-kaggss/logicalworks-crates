@@ -15,13 +15,17 @@ use lgwks_bot::rt::task::JoinSet;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// Recurse `depth` frames, each holding a 256-byte array the optimizer may not drop.
+///
+/// The array's bytes come from a conversion that cannot fail rather than from a
+/// narrowed one: a byte that stood in for a failed conversion would be a frame
+/// the optimizer could reason about, which is the frame this measurement needs.
 fn deep(depth: usize) -> usize {
     if depth == 0 {
         return 0;
     }
-    let padding = [u8::try_from(depth % 251).unwrap_or(0); 256];
+    let padding = [u8::from(depth.is_multiple_of(2)); 256];
     std::hint::black_box(&padding);
-    deep(depth.saturating_sub(1)).saturating_add(usize::from(padding[0] & 1))
+    deep(depth.saturating_sub(1)).saturating_add(usize::from(padding[0]))
 }
 
 #[test]

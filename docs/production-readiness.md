@@ -27,14 +27,14 @@ numbers.
 eight invariants. Every repair landed by 2026-09-22 (#99 as #110, #107 as #117,
 #108 as #116, and the five ladder rows), and #109 was closed on 2026-09-23 by
 commit `7d9ad29f` (#142). That commit ran **five of the eight external
-observations** in `tests/durable_crash_observation.rs`: the journal-ladder rows
+observations** in `tests/it/durable_crash_observation.rs`: the journal-ladder rows
 (#100, #101, #102, #104, #106) were driven against a real file-backed journal,
 killed mid-ladder with a real `SIGKILL`, restarted, and the recovered answer
 asserted against the one the design names. The other three closed on their
 repair and its in-process regression tests, not on an external observation:
 #99 (the ECS poll path) has no real-store run and #108 (`locator_eligibility`)
 has no real frame. Of #107's rows, T21 is now observed by
-`tests/process_escape.rs`, which drives a real descendant that calls `setsid`
+`tests/it/process_escape.rs`, which drives a real descendant that calls `setsid`
 out of the group and asserts the receipt does not claim the tree was cleaned
 (INV-BOT-112) — an honest report of a containment gap, open as
 [#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) — and
@@ -73,9 +73,27 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   be one commit in the history of `HEAD` and the enforcer must be unchanged since,
   or the entry is refused; where Git cannot answer, it is refused. Five scratch-repo
   tests in `lgwks_deps::invariants`.
-- **Acceptance rows T07, T10, T28 and T36** each gained the test the spec text asks
-  for. By the coverage map taken earlier in this work, that moves four rows from
-  partial to covered; eight stay partial.
+- **All 36 acceptance rows now name the tests that address them**, in
+  `docs/acceptance/t-rows.toml`, and `scripts/acceptance-receipts.py` ran exactly
+  those tests against the checked-out head into a SQLite database under the
+  state directory (`$XDG_STATE_HOME/lgwks-acceptance/receipts.sqlite`, or
+  `~/.local/state/...`), one row per revision, row, test, platform and feature
+  set, so a re-run is idempotent and two revisions coexist.
+  The run at `740d3c68` passed 215 of 215 named tests in 44.4s: 30 rows observed
+  `exercised`, and six still `present` with the gap written down rather than
+  rounded up — T10, T11, T14, T17, T21 and T31. Fifteen of the named tests are
+  row-addressed, so `cargo nextest list --workspace -E 'test(/_t07$/)'` answers
+  which tests address a row without reading the map. The receipt can lower a
+  row's claim and never raise one, and `scripts/acceptance-receipts.py --check`
+  fails when the spec's generated table disagrees with the map and the receipt
+  for one exact revision. In CI that receipt is built from the JUnit reports the
+  four lgwks-bot shards already wrote, by a job that needs no Rust toolchain and
+  no build and takes about 0.2 s, so the named tests execute once per run rather
+  than twice. A row reads `accepted` only when that revision is the
+  head being rendered. No row is `accepted`; the externally bounded subprocess
+  and per-backend OS campaign has not run. `--check` reads the local database, so
+  it is a local gate rather than a CI step: a CI checkout has no receipt for its
+  own head until the run records one.
 - **The authoring contract (#87, §7 item 6) was measured four ways**, not argued:
   160 fixed-model trials across the old surface, the facade, the facade plus
   `FanOut`, and the `futures` crate. See `bench/ai-authoring/README.md`. The finding
@@ -92,10 +110,19 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   concurrency**: sixteen threads, two grant sets, 256 rounds, and the proof-cover
   checks in both directions.
 
-What did not move: hyperscale (§4.2) is still not measured at any level, CI is
-still over five minutes, process containment is still Unix-only, the seeded sweeps
-still have no shrinking, and `process_escape`'s intermittent failure is still
-unexplained. The verdict above is unchanged.
+- **Hyperscale moved off ❌** (#269). An open-loop saturation curve at six
+  in-flight bounds from 64 to 131,072 with the knee declared on both the facade
+  and a raw Tokio baseline; 1,048,576 tasks concurrently admitted with peak RSS
+  per in-flight task reported; a 30-second overload at twice the knee that
+  recovered with nothing lost; and the facade's per-task allocations cut from
+  15.33 to 3.61 against the issue's ≤ 6 target. §4.2 is ⚠️, not ✅: the
+  1–2 vCPU / 1–2 GB VPS profile the estate asks for is **not measured** and
+  cannot be on this host, and the async path's per-task overhead is still
+  1.4x–4.5x raw Tokio on a short body.
+
+What did not move: CI is still over five minutes, process containment is still
+Unix-only, the seeded sweeps still have no shrinking, and `process_escape`'s
+intermittent failure is still unexplained. The verdict above is unchanged.
 
 **Update, 2026-10-05.** The hold the journal module documentation named, an
 acknowledged final frame whose length field was changed being truncated on open,
@@ -214,20 +241,100 @@ position, and no one has looked for one since the survey ran.
 
 ### 4.2 Hyperscale — more than a million concurrent, correct
 
-**❌ — measured closed-loop at one bound; no saturation curve.**
+**⚠️ — measured at a million concurrent and through a saturation curve on this
+host; the estate's VPS profile is still not measured, and the async path's
+per-task overhead against raw Tokio is still 1.4x–4.5x on short bodies.**
 
-What exists: `bench/async --tiers` drives `Supervisor` and pinned raw Tokio
-through 100, 1,000, 10,000 and 100,000 tasks, all at an in-flight bound of 64,
-with p50/p95/p99 per tier (100,000 tasks: facade p50 0.232 s against raw 0.134 s;
-peak RSS 3.6 MB for the ladder), and `tests/it/task_million.rs`
-(`LGWKS_MILLION=1`) holds 1,048,576 admitted `Host::run` executions suspended at
-once across sixteen tenant hosts (peak RSS 6.45 GB). What does not: nothing
-above 64 in flight, no open-loop driver (so coordinated omission is not
-excluded), no burst, no queue-depth series, and no knee.
+Every number is from `bench/async`, is this host, this toolchain and this run,
+and is read with its condition beside it. Host: **Apple M5 Pro, 15 cores, 24 GB,
+macOS 27.0, rustc 1.99.0.** That host is **shared** and its one-minute load
+average ran from 2 to 97 across the work, so the rig now reads and prints the
+load with every run: a scenario table taken with three other builds running on
+it reported the *baseline* at 1.08 ms where an idle host reported 0.35 ms, a 3x
+shift in the control leg of a paired comparison. Each table below carries its
+load, and the paired facade-versus-baseline columns are not contaminated by it
+because both sides of a point see the same load.
 
-*To close it:* a stated concurrency target, then a saturation curve with the
-declared bound where it starts dropping work. Until that exists, "runs for
-weeks" is a design intent and not a measurement.
+**The knee, at six in-flight bounds** (backpressure door, load 79.13, 6:48.56
+wall, peak RSS 250,953,728 bytes). Offered rate against a derived per-bound body
+cost so every ceiling's declared capacity is 20,000 arrivals/s; knee read against
+`max(50 ms, one further service time)`:
+
+| bound | facade knee offered/s | achieved/s | p99 at knee | baseline knee | baseline achieved/s |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 5,000 | 4,987 | 6.5 ms | 5,000 | 4,979 |
+| 1,024 | 5,000 | 4,763 | 59.7 ms | 5,000 | 4,754 |
+| 10,000 | 20,000 | 13,340 | 504.9 ms | 20,000 | 13,329 |
+| 16,384 | 20,000 | 10,968 | 831.5 ms | 20,000 | 11,009 |
+| 100,000 | 80,000 | 13,331 | 5,008.0 ms | 80,000 | 13,339 |
+| 131,072 | 80,000 | 10,589 | 6,551.5 ms | 80,000 | 10,593 |
+
+**The facade and the raw baseline declare the same knee at every bound**, to
+within 0.5% on achieved rate at five of the six. At a service time of 3.2 ms or
+more the ceiling is the binding constraint, not the accounting.
+
+**Past the knee it refuses, and it refuses at exactly the declared bound.**
+`try_spawn` at 320,000 arrivals/s: bound 16,384 admitted **exactly 16,384**,
+bound 100,000 admitted **exactly 100,000**, bound 131,072 admitted **exactly
+131,072**, both sides, to the same number; 59% of arrivals refused and counted in
+`Stats::refused`; peak RSS unchanged at the bound's worth of state; the p99 of
+what *was* admitted still one service time.
+
+**A million concurrent, reached.** 1,048,576 tasks **concurrently admitted** —
+the tier is the bound and every body parks until the whole tier is admitted, so
+the peak is observed rather than inferred — all completed, on both sides:
+
+| tier | facade peak RSS | facade RSS per in-flight task | baseline RSS/task | facade p50 | baseline p50 |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 27,115,520 B | 2,712 B | 3,267 B | 16.3 ms | 12.2 ms |
+| 100,000 | 210,501,632 B | 2,105 B | 2,672 B | 100.8 ms | 72.0 ms |
+| 1,048,576 | 2,137,751,552 B | **2,039 B** | 2,595 B | 1,007.7 ms | 726.7 ms |
+
+**Peak RSS per in-flight task at the million tier: 2,039 bytes**, against the raw
+baseline's 2,595 — memory favours the facade, by 21%. Admission latency does not:
+1.39x the baseline's at both wide tiers.
+
+**Overload and recovery** (load 19.88): a 30-second overload at twice the knee
+built a 229,554-arrival queue and took the served p99 from 6.7 ms to 11.4 s, with
+**nothing refused and nothing lost** — offered = admitted = completed on both
+sides, checked by the rig's conservation gate. The facade drained in 0.023 ms
+against the baseline's 4.801 ms; both sides' served p99 was back inside its own
+baseline at the first recovery window, 500.7 ms and 505.1 ms after the overload
+stopped. The recovery figure is a **bound at one 500 ms window's resolution**, not
+a point estimate.
+
+**Allocations, per supervised task**, 1,024 tasks at bound 8, one harness:
+**15.33 before, 3.61 after**, against a raw baseline's 2.02 — the issue's ≤ 6
+target met, by cutting an eagerly-built `watch` channel per cancellation token
+and a 100 ms timer armed on every uncontended spawn. The remaining 3.61 is
+itemised in `bench/async/README.md` with the guarantee each allocation pays for.
+
+**The latency target was not met, and that is the finding.** The issue asks for
+≤ 2x the baseline at p99 on every scenario; `quiet-async-bot` is **4.49x**. The
+same 76% cut in allocations moved the paired ratios not at all — the remaining
+gap is work (the per-spawn reap, the identity map, the `TaskOutcome` the wrapper
+builds), not allocation, and closing it is a different change.
+
+*Not covered, and named:*
+
+- **The 1–2 vCPU / 1–2 GB VPS profile is NOT measured.** macOS exposes no
+  cgroup, no `taskset`, no `taskpolicy` CPU set and no `cpulimit` — all four
+  checked on the reference host, all four absent — so no run here can be
+  presented as that profile's. The closest runnable thing, `--workers=2`,
+  produced **identical knees at every bound**, because every body in the sweep is
+  a timer: a thread count is not a vCPU count, and this workload would not
+  separate them. A CPU-bound profile needs a CPU-bound body and a machine whose
+  cores are 1–2, and neither exists here.
+- The synchronous rig still reports only `ns/tick` for a schedule of up to 256
+  sources, and `Bot::tick` beyond 256 sources is still unmeasured.
+- The per-task overhead against raw Tokio is still 1.4x–4.5x on a ~1 µs body,
+  with the 4.49x worst case named above rather than averaged away.
+- Every figure is one host. Nothing here is a cross-platform claim.
+
+*To close the axis:* the VPS profile on a real 1–2 vCPU box with a CPU-bound
+body, and the per-task overhead reduced on the short-body path. "Runs for weeks"
+is now a measured knee and a measured recovery rather than a design intent, and
+it is still not a measured week.
 
 ### 4.3 Idiomatic — ownership, errors, lifetimes sound
 
@@ -355,7 +462,7 @@ Now five of them have been proved on one that does not. `FileJournal`
 written and `sync_all`-ed before the acknowledgment is minted, whose stored
 chain heads make a tampered frame a refusal rather than a trim, and whose torn
 tail — an append a killed writer never finished — is truncated on open
-because it was never acknowledged. `tests/durable_crash_observation.rs` runs
+because it was never acknowledged. `tests/it/durable_crash_observation.rs` runs
 the register's observations against it:
 
 - **#106**: a child process walked a key to `OutcomeObserved(Applied)`, was
@@ -435,21 +542,73 @@ acknowledgment still minted after the shared flush. The per-key ladder check
 is indexed, so an append's cost does not grow with the journal's length
 (measured flat from an empty journal to 32,000 prior attempts, against the
 linear walk it replaces, which measured 98× slower at 8,000). Replay holds
-every committed entry in memory and reopens in time linear in the file;
-rotation and compaction are still not provided.
+every committed entry *of one generation* in memory and reopens in time linear
+in that generation's file, which the continuation below bounds.
 
-**What ships instead of unbounded growth is a hard ceiling, and a hard refusal
-is not a long-running-service availability proof.** Both `open` and `append`
-refuse with `JournalError::CapacityExceeded`, naming the limit, rather than
-truncating, compacting or partially replaying: the file is bounded by
-`MAX_JOURNAL_BYTES` and `MAX_JOURNAL_EVENTS`. The refusal writes nothing and
-preserves the committed history, so it is safe — and it is still **stopping**.
-A controller that runs for weeks on one store reaches the ceiling and needs a
-rotation or continuation strategy that does not exist yet (#122/#143). And the
-ceiling bounds the *file*, not the records needed to settle work already handed
-off to the outside world, so it is not a settlement-capacity proof either.
-Read this row as "the file adapter refuses to grow without bound", not as "this
-service can run indefinitely on a single store".
+**The ceiling is a backstop now, and continuation is what a long run meets
+(#267).** Both `open` and `append` still refuse with
+`JournalError::CapacityExceeded` at `MAX_JOURNAL_BYTES` or `MAX_JOURNAL_EVENTS`,
+naming the limit, and never truncate. A journal opened with
+`FileJournal::open_continuing` continues itself before it gets there: at 80% of
+either ceiling (`ContinuationPolicy::declared`, which leaves the settlement
+headroom #143 asked for) it writes one sealed checkpoint frame, byte for byte, into
+itself and into a successor (`<name>.cont/000001`, then the next six-digit name).
+The checkpoint carries the folded state, one record per action for what is settled
+and every unresolved attempt in full, so an attempt that was `OutcomeUnknown` stays
+`OutcomeUnknown` across the boundary until evidence settles it, and a settled
+attempt presented again is refused rather than re-admitted. The controller asks the
+trigger on its own append path (`ecs::Effects::append`), so a bot built over a
+continuing journal continues without the host doing anything
+(`durable_dispatch::the_controller_continues_its_own_journal_on_the_shipped_append_path`).
+
+Measured, not estimated
+(`cargo run --locked --release -p lgwks_bot --example journal_continuation`,
+Apple silicon, one run each, the shipped trigger):
+
+| | default allocator | `MallocSpaceEfficient=1` |
+|---|---|---|
+| 10,000,000 attempts (1% unknown, 2% failing verification) | 488 continuations, 81 s | 488 continuations, 106 s |
+| oracle agreement | at every one of the 488 boundaries, and after a reopen | same |
+| every attempt presented a second time | 10,000,000 refused | same |
+| resident set at 1 M / 5 M / 10 M attempts | 1,152 / 1,155 / 870 MB | 24.6 / 16.3 / 18.8 MB |
+| peak resident set, whole process (`/usr/bin/time -l`) | 1,205 MB | 53 MB |
+| reopen of the live successor behind 1 K / 100 K / 1 M attempts, p50 | 79 / 59 / 58 µs | 89 / 65 / 64 µs |
+| reopen p99 | 104 / 78 / 79 µs | 135 / 97 / 85 µs |
+| live successor on disk behind 1 K / 100 K / 1 M attempts | 19,780 / 20,100 / 20,100 bytes | same |
+
+The two columns are one program. The journal's live memory is the right column,
+flat at about 20 MB; the left column's resident set is macOS's allocator keeping
+freed large blocks for reuse (`vmmap` attributes 276 MB at 300,000 attempts to
+"Malloc Large (empty)" against 28 MB of live heap), which a host under memory
+pressure gets back and which glibc returns for blocks over its mmap threshold.
+Neither column grows with the history: a successor weighs its carry, not what is
+behind it.
+
+Crash safety is proved with real processes:
+`journal_continuation::a_kill_at_every_seal_boundary_leaves_exactly_one_authoritative_journal`
+`SIGKILL`s a child at each of the four write and sync boundaries inside a
+continuation. Each reopen through the original path finds exactly one journal that
+takes appends, holds every settled attempt as settled and refuses each a second
+time, still holds the unknown attempt as unknown, and continues again on demand.
+`tests/it/sim_continuation_seal.rs` sweeps the mechanism underneath as 25 seeded
+properties, each replayed for an identical trace: where each trigger falls, the
+generation names, the seal frame's bytes in both files, every refusal around a
+sealed or half-sealed chain, both checkpoint bounds at their size and one past it,
+and what a reopen and a streaming replay read back on every file of a chain. The
+sweep found three defects the example tests had not: a successor could not be
+streamed at all, the action bound was a count no checkpoint could reach, and a
+lengthened event behind a carried seal was trimmed as a torn append.
+
+**Not claimed.** Sealed predecessors are kept until the host removes them; the
+journal has no retention policy of its own, and the measurement above deletes each
+one once its successor exists. A run holding more than 128 unresolved attempts at a
+boundary cannot continue (`MAX_CHECKPOINT_UNRESOLVED`), and it is refused rather
+than truncated, so a controller that never reconciles still meets the ceiling. A
+checkpoint folds at most 160 actions (`MAX_CHECKPOINT_SETTLED`), the most whose
+widest records fit the one 64 KiB frame beside a full unresolved carry, so a bot
+with more actions than that cannot continue and is refused by that count. And
+the byte watermark bounds the file, not the records needed to settle work already
+handed to the outside world.
 
 ### 4.7 Portable — same semantics on all declared targets
 
@@ -665,7 +824,7 @@ world mess is one of the seven covered rows in §4.4.
 To change the verdict, in the order that matters:
 
 1. **Finish #109's eight external observations.** Five are run
-   (`tests/durable_crash_observation.rs`): the journal-ladder rows have a real
+   (`tests/it/durable_crash_observation.rs`): the journal-ladder rows have a real
    store, a real kill, a restart and the designed answer. #109 closed with the
    other three repaired but not externally observed: #99 needs the poll path
    under a real store, #108 a real frame, and #107's T21 a descendant the
@@ -678,7 +837,13 @@ To change the verdict, in the order that matters:
 3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
    and 7.6x the allocations per task (#269).
 4. **Multi-tenant negative tests.** §4.8.
-5. **Hyperscale.** §4.2. A stated concurrency target and a saturation curve.
+5. **Hyperscale, on the profile the estate names.** §4.2 has the saturation
+   curve, the declared knees, a million concurrent tasks and the recovery
+   measurement. What it does not have is the **1–2 vCPU / 1–2 GB VPS** figure
+   the axis asks for, which needs a machine whose cores are one or two and a
+   CPU-bound body — macOS offers no cgroup, no `taskset` and no `taskpolicy` CPU
+   set, and the two-thread run this host *can* do produces identical knees to a
+   fifteen-thread one because the workload is timer-bound.
 6. **Measure the authoring case on tasks that ask for it.** #87's contract is
    built and the fixed-model run says `futures` is the better surface on the
    tasks it asked (§4.1); the tasks that exercise what this crate adds are

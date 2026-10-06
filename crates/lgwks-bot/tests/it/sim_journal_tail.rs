@@ -66,41 +66,56 @@ impl Written {
         self.starts.len()
     }
 
-    fn start_of(&self, index: usize) -> usize {
-        self.starts.get(index).copied().unwrap_or(0)
+    /// The offset frame `index` begins at, or `None` past the last frame.
+    fn start_of(&self, index: usize) -> Option<usize> {
+        self.starts.get(index).copied()
     }
 
-    /// The offset one past the last byte of frame `index`.
-    fn end_of(&self, index: usize) -> usize {
-        self.starts
-            .get(index.saturating_add(1))
-            .copied()
-            .unwrap_or(self.bytes.len())
+    /// The offset one past the last byte of frame `index`, or `None` past the
+    /// last frame.
+    ///
+    /// The buffer's own end is *not* the end of the last frame: a subject here is
+    /// written precisely so it can carry a tail after it, and a caller asking past
+    /// the last frame is asking about a frame the file does not contain.
+    fn end_of(&self, index: usize) -> Option<usize> {
+        self.starts.get(index.saturating_add(1)).copied()
     }
 
-    fn declared(&self, index: usize) -> u32 {
-        prefix_at(&self.bytes, self.start_of(index))
+    fn declared(&self, index: usize) -> Result<u32, Box<dyn Error>> {
+        Ok(prefix_at(&self.bytes, self.start(index)?))
+    }
+
+    /// The offset frame `index` begins at, naming the frame when it is absent.
+    fn start(&self, index: usize) -> Result<usize, Box<dyn Error>> {
+        self.start_of(index)
+            .ok_or_else(|| format!("frame {index} is not in this journal").into())
+    }
+
+    /// The offset one past the last byte of frame `index`, naming it when absent.
+    fn end(&self, index: usize) -> Result<usize, Box<dyn Error>> {
+        self.end_of(index)
+            .ok_or_else(|| format!("frame {index} is the last one, so it has no end offset").into())
     }
 
     /// How many bytes follow frame `index`'s length prefix to the end of the file.
     fn behind(&self, index: usize) -> Result<u32, Box<dyn Error>> {
-        let after_prefix = self.start_of(index).saturating_add(LENGTH_BYTES);
+        let after_prefix = self.start(index)?.saturating_add(LENGTH_BYTES);
         Ok(u32::try_from(
             self.bytes.len().saturating_sub(after_prefix),
         )?)
     }
 
     /// The file with frame `index`'s length prefix replaced.
-    fn with_declared(&self, index: usize, declared: u32) -> Vec<u8> {
+    fn with_declared(&self, index: usize, declared: u32) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut out = self.bytes.clone();
         for (slot, byte) in out
             .iter_mut()
-            .skip(self.start_of(index))
+            .skip(self.start(index)?)
             .zip(declared.to_be_bytes())
         {
             *slot = byte;
         }
-        out
+        Ok(out)
     }
 }
 
@@ -151,7 +166,7 @@ fn refuse_declared(
     declared: u32,
     why: &str,
 ) -> TestResult {
-    let lied = written.with_declared(index, declared);
+    let lied = written.with_declared(index, declared)?;
     refuse_bytes(path, &lied, why)
 }
 
@@ -188,7 +203,7 @@ fn inflated_past_the_end(
         .behind(index)?
         .saturating_add(sim.rng().between(0, 600))
         .min(MAX_FRAME_BYTES);
-    Ok((declared > written.declared(index)).then_some(declared))
+    Ok((declared > written.declared(index)?).then_some(declared))
 }
 
 /// Any one-fault change to a length prefix is refused and nothing is touched.
@@ -206,7 +221,7 @@ fn lying_lengths(band: Band) -> TestResult {
         let mut extras: Vec<u32> = (1..=40).collect();
         extras.extend((0..16).map(|_| sim.rng().between(41, 4096)));
         for extra in extras {
-            let declared = written.declared(last).saturating_add(extra);
+            let declared = written.declared(last)?.saturating_add(extra);
             refuse_declared(
                 &path,
                 &written,
@@ -235,7 +250,7 @@ fn lying_lengths(band: Band) -> TestResult {
         // Deflated and bit-flipped prefixes on a seeded frame.
         for _ in 0..8 {
             let index = some_frame(sim, frames)?;
-            let true_len = written.declared(index);
+            let true_len = written.declared(index)?;
             let deflated = sim.rng().between(1, true_len.saturating_sub(1).max(1));
             let flipped = true_len ^ (1u32 << sim.rng().below(16));
             for (declared, name) in [(deflated, "deflated"), (flipped, "flipped")] {
@@ -253,8 +268,8 @@ fn lying_lengths(band: Band) -> TestResult {
         }
 
         sim.record("lying-lengths-refused-untouched");
-        sim.trace.record_count("lying-frames", frames);
-        sim.trace.record_u64("lying-cases", cases);
+        sim.trace.record_number("lying-frames", frames);
+        sim.trace.record_number("lying-cases", cases);
         Ok(())
     })
 }
@@ -272,7 +287,7 @@ fn cut_appends(band: Band) -> TestResult {
         // byte: the first and last byte of the final frame, which are the two edges
         // of "cut inside it", and a seeded handful anywhere in the file. Every byte
         // of a final frame is swept by the unit test beside the resolver.
-        let final_start = written.start_of(frames.saturating_sub(1));
+        let final_start = written.start(frames.saturating_sub(1))?;
         let mut cuts = vec![final_start.saturating_add(1), total.saturating_sub(1)];
         for _ in 0..10 {
             cuts.push(usize::try_from(sim.rng().below(u32::try_from(total)?))?);
@@ -281,11 +296,12 @@ fn cut_appends(band: Band) -> TestResult {
         for cut in &cuts {
             std::fs::write(&path, &written.bytes[..*cut])?;
             let whole = (0..frames)
-                .filter(|index| written.end_of(*index) <= *cut)
+                .filter(|index| written.end_of(*index).is_some_and(|end| end <= *cut))
                 .count();
-            let boundary = whole
-                .checked_sub(1)
-                .map_or(0, |index| written.end_of(index));
+            let boundary = match whole.checked_sub(1) {
+                Some(last_whole) => written.end(last_whole)?,
+                None => 0,
+            };
             let reopened = FileJournal::open(&path).map_err(|error| {
                 format!(
                     "seed {} cut at {cut}/{total} was refused: {error}",
@@ -314,9 +330,9 @@ fn cut_appends(band: Band) -> TestResult {
             repaired = repaired.saturating_add(u64::from(*cut != boundary));
         }
         sim.record("cut-appends-keep-the-whole-frames");
-        sim.trace.record_count("cut-frames", frames);
-        sim.trace.record_count("cut-cases", cuts.len());
-        sim.trace.record_u64("cut-repaired", repaired);
+        sim.trace.record_number("cut-frames", frames);
+        sim.trace.record_number("cut-cases", cuts.len());
+        sim.trace.record_number("cut-repaired", repaired);
         Ok(())
     })
 }
@@ -329,12 +345,12 @@ fn damaged_lie(
     index: usize,
     declared: u32,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut lied = written.with_declared(index, declared);
-    let span = usize::try_from(written.declared(index))?.saturating_add(HEAD_BYTES);
+    let mut lied = written.with_declared(index, declared)?;
+    let span = usize::try_from(written.declared(index)?)?.saturating_add(HEAD_BYTES);
     let reach = u32::try_from(span)?;
     let into_frame = usize::try_from(sim.rng().below(reach))?;
     let hit = written
-        .start_of(index)
+        .start(index)?
         .saturating_add(LENGTH_BYTES)
         .saturating_add(into_frame);
     if let Some(byte) = lied.get_mut(hit) {
@@ -374,8 +390,8 @@ fn damaged_cut_frames(band: Band) -> TestResult {
             cases = cases.saturating_add(u64::from(damage_one(sim, &path, &written)?));
         }
         sim.record("damaged-cut-frames-refused");
-        sim.trace.record_count("damaged-frames", frames);
-        sim.trace.record_u64("damaged-cases", cases);
+        sim.trace.record_number("damaged-frames", frames);
+        sim.trace.record_number("damaged-cases", cases);
         Ok(())
     })
 }
@@ -397,11 +413,13 @@ fn open_concurrently(tenants: &[Tenant]) -> Vec<Result<usize, JournalError>> {
         }
         let mut outcomes = Vec::new();
         for handle in handles {
-            outcomes.push(
-                handle
-                    .join()
-                    .unwrap_or_else(|panicked| std::panic::resume_unwind(panicked)),
-            );
+            outcomes.push(match handle.join() {
+                Ok(outcome) => outcome,
+                // A probe thread that panicked hands its payload back to the test
+                // thread, so the failure is reported where it happened rather
+                // than as a join error that names nothing.
+                Err(panicked) => std::panic::resume_unwind(panicked),
+            });
         }
         outcomes
     })
@@ -426,9 +444,9 @@ fn tenants_beside_a_refusal(band: Band) -> TestResult {
         let last = victim.written.frames().saturating_sub(1);
         let declared = victim
             .written
-            .declared(last)
+            .declared(last)?
             .saturating_add(sim.rng().between(1, 64));
-        let lied = victim.written.with_declared(last, declared);
+        let lied = victim.written.with_declared(last, declared)?;
         std::fs::write(&victim.path, &lied)?;
 
         let outcomes = open_concurrently(&tenants);
@@ -461,7 +479,7 @@ fn tenants_beside_a_refusal(band: Band) -> TestResult {
             }
         }
         sim.record("a-refusal-stayed-with-its-tenant");
-        sim.trace.record_count("tenants", count);
+        sim.trace.record_number("tenants", count);
         Ok(())
     })
 }

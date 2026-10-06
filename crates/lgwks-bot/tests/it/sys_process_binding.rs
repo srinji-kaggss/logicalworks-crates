@@ -29,6 +29,8 @@
     feature = "process"
 ))]
 
+use crate::scratch::Scratch;
+
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -45,7 +47,7 @@ use lgwks_bot::{Auth, BotError, Cap, DispatchCertainty, Execute, GrantSet, Obser
 // other process test targets, so there is one copy of each.
 use crate::process_probe;
 
-use process_probe::{PidDir, drop_after_pid, read_pid, wait_group_gone, wait_group_stopped};
+use process_probe::{drop_after_pid, read_pid, wait_group_gone, wait_group_stopped};
 
 /// What a test reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -65,9 +67,12 @@ fn shell(script: &str) -> ProcessSpec {
 /// A shell spec with the given capture ceilings and no deadline.
 fn captured_shell(script: &str, limit: usize) -> ProcessSpec {
     let mut spec = shell(script);
-    let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
-    spec.capture_stdout(limit);
-    spec.capture_stderr(limit);
+    // A zero limit captures nothing, so the streams are left as they are rather
+    // than captured at a one-byte ceiling nobody asked for.
+    if let Some(limit) = NonZeroUsize::new(limit) {
+        spec.capture_stdout(limit);
+        spec.capture_stderr(limit);
+    }
     spec
 }
 
@@ -609,7 +614,7 @@ fn a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused() -> Test
     // room left and declares 40, so it is a well-formed record with nowhere to go.
     let mut bytes: Vec<u8> = Vec::new();
     for _ in 0..2 {
-        bytes.extend_from_slice(&u32::try_from(RECORD).unwrap_or(0).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(RECORD)?.to_be_bytes());
         bytes.extend(std::iter::repeat_n(7_u8, RECORD));
     }
     let mut stream: &[u8] = &bytes;
@@ -644,7 +649,7 @@ fn a_legal_record_without_room_is_the_ceiling_and_rot_is_still_refused() -> Test
             "a length past the ceiling names no record this reader writes",
         ),
     ] {
-        let mut rot: &[u8] = &u32::try_from(declared).unwrap_or(0).to_be_bytes();
+        let mut rot: &[u8] = &u32::try_from(declared)?.to_be_bytes();
         let refused = read_frames(&mut rot, CEILING)?;
         assert_eq!(
             refused.ended(),
@@ -693,8 +698,8 @@ fn a_prefix_past_the_ceiling_is_refused_before_it_is_allocated() -> TestResult {
 /// A deadline stops the whole group and says so.
 #[test]
 fn a_deadline_kill_is_reported_as_a_deadline_and_reaps_the_group() -> TestResult {
-    let dir = PidDir::new("deadline")?;
-    let pid_file = dir.join("shell.pid");
+    let dir = Scratch::new("deadline")?;
+    let pid_file = dir.path().join("shell.pid");
     let script = format!("echo $$ > {}; sleep 60", pid_file.display());
     let mut spec = shell(&script);
     // The deadline is the input under test, and any value short of the 60 s
@@ -731,9 +736,9 @@ fn a_deadline_kill_is_reported_as_a_deadline_and_reaps_the_group() -> TestResult
 /// cleanup while a descendant lives.
 #[test]
 fn a_zero_exit_reaps_a_living_descendant_before_claiming_cleanup() -> TestResult {
-    let dir = PidDir::new("zero-exit")?;
-    let child_file = dir.join("child.pid");
-    let shell_file = dir.join("shell.pid");
+    let dir = Scratch::new("zero-exit")?;
+    let child_file = dir.path().join("child.pid");
+    let shell_file = dir.path().join("shell.pid");
     let script = format!(
         "sleep 60 & echo $! > {}; echo $$ > {}; exit 0",
         child_file.display(),
@@ -829,14 +834,14 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
     // many live markers it saw, and moves its marker out before exiting. The
     // highest record is a lower bound on the real concurrency, so it can only
     // exceed the bound if the bound was not enforced.
-    let live = PidDir::new("bound-live")?;
-    let seen = PidDir::new("bound-seen")?;
-    let done = PidDir::new("bound-done")?;
+    let live = Scratch::new("bound-live")?;
+    let seen = Scratch::new("bound-seen")?;
+    let done = Scratch::new("bound-done")?;
     let script = format!(
         "touch {live}/$$; ls {live} | wc -l > {seen}/$$; sleep 0.02; mv {live}/$$ {done}/",
-        live = live.join("").display(),
-        seen = seen.join("").display(),
-        done = done.join("").display(),
+        live = live.path().join("").display(),
+        seen = seen.path().join("").display(),
+        done = done.path().join("").display(),
     );
     let runtime = lgwks_bot::Runtime::new()?;
     let (completed, succeeded) = runtime.block_on(async {
@@ -844,12 +849,10 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
         for _ in 0..PROCESSES {
             supervisor.spawn_process(&shell(&script)).await?;
         }
-        let deadline = std::time::Instant::now()
-            .checked_add(BUDGET)
-            .unwrap_or_else(std::time::Instant::now);
+        let started = std::time::Instant::now();
         while supervisor.stats().in_flight() > 0 {
             supervisor.reap();
-            if std::time::Instant::now() >= deadline {
+            if started.elapsed() >= BUDGET {
                 return Err(std::io::Error::other(
                     "processes did not settle within the budget",
                 ));
@@ -861,7 +864,7 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
     })?;
     let mut high_water = 0_usize;
     let mut records = 0_usize;
-    for entry in std::fs::read_dir(seen.join(""))? {
+    for entry in std::fs::read_dir(seen.path().join(""))? {
         let count = std::fs::read_to_string(entry?.path())?;
         high_water = high_water.max(count.trim().parse::<usize>()?);
         records = records.saturating_add(1);
@@ -887,8 +890,8 @@ fn many_processes_stay_within_the_in_flight_bound() -> TestResult {
 /// T20: dropping the run future after the fork leaves no orphan.
 #[test]
 fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
-    let dir = PidDir::new("drop")?;
-    let pid_file = dir.join("shell.pid");
+    let dir = Scratch::new("drop")?;
+    let pid_file = dir.path().join("shell.pid");
     // The descendant is forked before the pid is written, so the drop lands
     // after the fork (T20), never while one is in progress.
     let script = format!("sleep 60 & echo $$ > {}; wait", pid_file.display());
@@ -919,8 +922,8 @@ fn dropping_a_run_future_after_the_fork_leaves_no_orphan() -> TestResult {
 /// Dropping the run future before its first poll starts nothing at all.
 #[test]
 fn dropping_a_run_future_before_its_first_poll_starts_nothing() -> TestResult {
-    let dir = PidDir::new("pre-poll")?;
-    let marker = dir.join("marker");
+    let dir = Scratch::new("pre-poll")?;
+    let marker = dir.path().join("marker");
     let script = format!("touch {}", marker.display());
     let mut supervisor = Supervisor::new(1);
     let spec = shell(&script);
@@ -1033,8 +1036,8 @@ fn a_missing_program_is_a_refusal_with_nothing_run() -> TestResult {
 
 #[test]
 fn a_missing_capability_is_refused_before_any_spawn() -> TestResult {
-    let dir = PidDir::new("cap")?;
-    let marker = dir.join("marker");
+    let dir = Scratch::new("cap")?;
+    let marker = dir.path().join("marker");
     let process = process_for(&format!("touch {}", marker.display()));
     let error = lgwks_bot::block_on(async { process.execute_action((empty_auth()?, &())).await })
         .err()
@@ -1078,17 +1081,17 @@ fn the_default_constructor_runs_a_real_child() -> TestResult {
 fn concurrent_calls_on_one_process_share_its_ceiling() -> TestResult {
     const CALLS: usize = 64;
     const CEILING: usize = 4;
-    let live = PidDir::new("ceiling-live")?;
-    let done = PidDir::new("ceiling-done")?;
-    let live_dir = live.join("");
-    let done_dir = done.join("");
+    let live = Scratch::new("ceiling-live")?;
+    let done = Scratch::new("ceiling-done")?;
+    let live_dir = live.path().join("");
+    let done_dir = done.path().join("");
     let script = format!(
         "touch {live}/$$; ls {live} | wc -l; sleep 0.2; mv {live}/$$ {done}/",
         live = live_dir.display(),
         done = done_dir.display(),
     );
     let process = process_for(&script)
-        .max_concurrent(NonZeroUsize::new(CEILING).unwrap_or(NonZeroUsize::MIN));
+        .max_concurrent(NonZeroUsize::new(CEILING).ok_or("the ceiling admits at least one call")?);
     let auth = sys_auth()?;
     let states = lgwks_bot::block_on(lgwks_std::task::join_all(
         (0..CALLS).map(|_| process.execute_action((auth.clone(), &()))),
@@ -1117,8 +1120,8 @@ fn concurrent_calls_on_one_process_share_its_ceiling() -> TestResult {
 /// The capture builders set the data policy the runner reads, and the ceiling
 /// is non-zero by its type.
 #[test]
-fn capture_builders_set_the_declared_policy() {
-    let limit = NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN);
+fn capture_builders_set_the_declared_policy() -> TestResult {
+    let limit = NonZeroUsize::new(1024).ok_or("a capture limit of 1024 is not zero")?;
     let mut spec = ProcessSpec::new("true");
     spec.capture_stdout(limit);
     spec.capture_stderr(limit);
@@ -1132,6 +1135,7 @@ fn capture_builders_set_the_declared_policy() {
         StdioPolicy::Capture(limit),
         "capture_stderr must set the Capture policy"
     );
+    Ok(())
 }
 
 // ── domain::sys::Process, the production door to the frame grammar ──────────

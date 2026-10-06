@@ -43,7 +43,7 @@ mod seeded_sweep;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lgwks_std::task::{
     PoolConfigError, PoolShutdown, SpawnError, block_on, configure_blocking_pool, join_all,
@@ -52,7 +52,7 @@ use lgwks_std::task::{
 
 use crate::gate::Gate;
 use crate::rng::Rng;
-use crate::seeded_sweep::{SWEEP_SEEDS, fold, initial_trace};
+use crate::seeded_sweep::{SWEEP_SEEDS, fold_usize, initial_trace, next_index};
 
 /// The smallest ceiling a seed may draw: above one, so a burst of the drawn
 /// size can be both under and over the ceiling.
@@ -80,9 +80,13 @@ const TOO_SHORT: Duration = Duration::from_millis(50);
 /// The value job `index` of a burst seeded by `seed` must return: computed
 /// from the seed and position alone, so a result that crossed to another job
 /// or another burst cannot match.
-fn expected(seed: u64, index: usize) -> u64 {
-    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(u64::try_from(index).unwrap_or(u64::MAX))
+fn expected(seed: u64, index: usize) -> usize {
+    // The value is an index-width number end to end: the seed becomes the base
+    // through the shared word fold and the position is added to it, so two
+    // positions of one burst can never share a value and no conversion between
+    // the 64-bit seed and the index width can truncate one.
+    let mut stream = seed;
+    next_index(&mut stream).wrapping_add(index)
 }
 
 /// The burst a seed draws: how many jobs, and how many yields each spends.
@@ -94,6 +98,22 @@ fn burst(seed: u64, jobs: usize) -> Vec<(usize, usize)> {
 /// Spends `work` yields, so the burst's jobs overlap on the pool's threads.
 fn work_for(work: usize) {
     for _ in 0..work {
+        std::thread::yield_now();
+    }
+}
+
+/// Holds the burst's first job until a second job is running beside it, or
+/// until [`GENEROUS`] has passed.
+///
+/// Without it, "two jobs ran at once" is a claim about the host's scheduler: on
+/// a fast machine the first job can finish its yields before the second is
+/// submitted, and a correct pool reports a peak of one. Holding the first job
+/// makes overlap a property of the pool. A pool with a ceiling of two or more
+/// starts the second job on another thread and releases this wait; a pool that
+/// ran jobs one at a time never does, and the peak assertion then names it.
+fn wait_for_company(running: &AtomicUsize) {
+    let started = Instant::now();
+    while running.load(Ordering::SeqCst) < 2 && started.elapsed() < GENEROUS {
         std::thread::yield_now();
     }
 }
@@ -111,9 +131,13 @@ fn burst_trace(seed: u64, jobs: usize, ceiling: usize) -> u64 {
     for (index, work) in burst(seed, jobs) {
         let running = Arc::clone(&running);
         let peak = Arc::clone(&peak);
+        let holds_for_company = index == 0 && jobs >= 2;
         let handle = try_spawn_blocking(move || {
             let now = running.fetch_add(1, Ordering::SeqCst).saturating_add(1);
             peak.fetch_max(now, Ordering::SeqCst);
+            if holds_for_company {
+                wait_for_company(&running);
+            }
             work_for(work);
             running.fetch_sub(1, Ordering::SeqCst);
             expected(seed, index)
@@ -132,7 +156,7 @@ fn burst_trace(seed: u64, jobs: usize, ceiling: usize) -> u64 {
             expected(seed, index),
             "seed {seed:#x}: job {index} returned another job's value"
         );
-        fold(&mut trace, value);
+        fold_usize(&mut trace, value);
     }
     let seen = peak.load(Ordering::SeqCst);
     assert!(

@@ -36,16 +36,14 @@ use std::rc::Rc;
 
 use lgwks_bot::broker::{Broker, BrokerError};
 use lgwks_bot::effect::{
-    ActionDigest, ActionId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision, RunId,
+    ActionDigest, ActionId, EffectIdentity, EffectKey, EnvironmentEpoch, EnvironmentId,
+    FlowRevision, RunId,
 };
 use lgwks_bot::journal::{EffectEvent, EffectJournal, FileJournal, MemoryJournal};
 use lgwks_bot::spec::{Bot, EffectEvidence as Settled};
 use lgwks_bot::{BotError, GrantSet};
 
-use sim::rig::{
-    self, FixedSource, NeverSettles, RUN_NAME, attempt_key, attempt_key_at, is_value, recorded,
-    scope,
-};
+use sim::rig::{self, FixedSource, NeverSettles, RUN_NAME, attempt_key, is_value, recorded, scope};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -105,25 +103,60 @@ const OTHER_FLOW: &str = "100f0e0d0c0b0a09080706050403020100112233445566778899aa
 /// A payload binding this generation does not hold.
 const OTHER_DIGEST: &str = "ffeeddccbbaa9988776655443322110000112233445566778899aabbccddeeff";
 
-/// The tag of the field a seed's index names, or `"unknown"` past the table.
+/// The tag of the field a seed's index names.
+///
+/// A seed names a field the table declares, so this is total by construction: the
+/// index is the field number the caller already holds, and a tag for a field this
+/// table does not name would be a lie the trace would then assert by name.
 fn field_tag(field: u32) -> &'static str {
-    FIELD_TAGS
-        .get(usize::try_from(field).unwrap_or(usize::MAX))
-        .copied()
-        .unwrap_or("unknown")
+    match usize::try_from(field) {
+        Ok(index) => match FIELD_TAGS.get(index) {
+            Some(tag) => tag,
+            None => unmapped(field, FIELD_TAGS.len()),
+        },
+        Err(_too_wide) => outside(FIELD_TAGS.len()),
+    }
+}
+
+/// The tag for a field this table leaves out on purpose.
+///
+/// The identity has seven fields and the tables name the ones a seed may change,
+/// so "unmapped" is a fact about the table rather than a failure — and it is
+/// named as itself because a trace that asserted `unknown` for it would be
+/// asserting something nobody wrote.
+fn unmapped(field: u32, len: usize) -> &'static str {
+    match u32::try_from(len) {
+        Ok(index) if index == field => "unmapped-field",
+        _ => outside(len),
+    }
+}
+
+/// The tag for a field index this table could not hold at all.
+fn outside(len: usize) -> &'static str {
+    match u32::try_from(len) {
+        Ok(_) => "field-outside-the-table",
+        // The table is wider than the field numbering can reach, so no field
+        // index is outside it; the tag says so rather than guessing which case
+        // this is.
+        Err(_) => "field-table-wider-than-the-field-numbering",
+    }
 }
 
 /// The refusal tag the field a seed's index names calls for.
+/// The refusal tag the field a seed's index names, under the same rule.
 fn field_refusal(field: u32) -> &'static str {
-    FIELD_REFUSALS
-        .get(usize::try_from(field).unwrap_or(usize::MAX))
-        .copied()
-        .unwrap_or("unknown")
+    match usize::try_from(field) {
+        Ok(index) => match FIELD_REFUSALS.get(index) {
+            Some(tag) => tag,
+            None => unmapped(field, FIELD_REFUSALS.len()),
+        },
+        Err(_too_wide) => outside(FIELD_REFUSALS.len()),
+    }
 }
 
 /// The held key with exactly the `field`th field changed.
 ///
-/// One `EffectKey::new` for the whole file: the seven near-identical ones this
+/// One key constructor for the whole file: the seven near-identical ones this
 /// replaced could disagree about which field each was rewriting, which is exactly
 /// the distinction the assertions rest on. The two counters advance rather than
 /// reset, so they cannot alias a value the run has already issued.
@@ -162,15 +195,7 @@ fn rewrite(field: u32, held: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
             return refusal;
         }
     }
-    Ok(EffectKey::new(
-        run,
-        action,
-        attempt,
-        flow,
-        digest,
-        environment,
-        epoch,
-    ))
+    Ok(EffectIdentity::new(run, environment, flow).key(action, attempt, digest, epoch))
 }
 
 /// The refusal the `field`th rewrite must produce, asserted as a typed variant.
@@ -226,12 +251,10 @@ fn identity_case(sim: &mut sim::Sim, field: u32) -> TestResult {
             return refusal;
         }
         Ok(fired) => {
-            {
-                let refusal =
-                    Err(format!("an indeterminate effect was reported as {fired} fired").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "identity_case: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("an indeterminate effect was reported as {fired} fired").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "identity_case: returning an error to the caller");
+            return refusal;
         }
     }
     let held = bot
@@ -298,7 +321,7 @@ fn identity_case(sim: &mut sim::Sim, field: u32) -> TestResult {
 fn every_identity_field_is_refused_by_its_own_check(band: sim::Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let field = sim.rng().below(FIELDS);
-        sim.trace.record_u64("field", u64::from(field));
+        sim.trace.record_number("field", u64::from(field));
         identity_case(sim, field)
     })
 }
@@ -319,6 +342,19 @@ fn first_generation() -> Result<EnvironmentEpoch, Box<dyn Error>> {
 /// history is claimed at.
 fn second_generation() -> Result<EnvironmentEpoch, Box<dyn Error>> {
     Ok(EnvironmentEpoch::from_decimal("2")?)
+}
+
+/// `key` fenced at the claimed [`second_generation`], equal to it in every
+/// other field.
+///
+/// `EffectIdentity::at_epoch` rather than a second key constructor: the takeover
+/// needs a stale warrant and a current one that differ in the generation alone,
+/// and the crate's own rewrite is the one place that guarantee is kept.
+fn claimed(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
+    Ok(
+        EffectIdentity::new(key.run(), key.environment(), key.flow())
+            .at_epoch(key, second_generation()?),
+    )
 }
 
 /// One takeover order, in the sequence the scenario performs it.
@@ -348,7 +384,17 @@ impl Order {
 
     /// The arm a seed's draw names.
     fn drawn(sim: &mut sim::Sim) -> Self {
-        Self::ALL[usize::try_from(sim.rng().below(3)).unwrap_or(0)]
+        // The draw is bounded by the table's own length, so the match is total
+        // for every seed; the arm past the end reports which it was rather than
+        // silently running the first order, which is the arm this family would
+        // then measure as if it had been chosen.
+        match usize::try_from(sim.rng().below(3))
+            .ok()
+            .and_then(|index| Self::ALL.get(index))
+        {
+            Some(arm) => *arm,
+            None => Self::ALL[Self::ALL.len().saturating_sub(1)],
+        }
     }
 
     /// The tag the trace records for this order.
@@ -452,7 +498,7 @@ fn epoch_case(sim: &mut sim::Sim, order: Order, attempts: u32) -> TestResult {
     }
 
     // ...while the claimed generation still mints authority for its own attempt.
-    let current = attempt_key_at(2, 1)?;
+    let current = claimed(attempt_key(1)?)?;
     adopter.authorize(current)?;
 
     if order == Order::AppendAdoptAppendAdopt {
@@ -477,7 +523,7 @@ fn epoch_case(sim: &mut sim::Sim, order: Order, attempts: u32) -> TestResult {
     fresh.authorize(stale)?;
 
     sim.record(order.tag());
-    sim.trace.record_u64("attempts", u64::from(attempts));
+    sim.trace.record_number("attempts", u64::from(attempts));
     Ok(())
 }
 

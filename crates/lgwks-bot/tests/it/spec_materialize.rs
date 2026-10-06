@@ -65,7 +65,7 @@ fn take_trace() -> Vec<String> {
 /// "cannot parse integer from empty string") is the part that says whether the
 /// value was empty or merely non-numeric. `BotError::IncompleteSpec` renders it
 /// through `Escaped`, so the untrusted text it quotes cannot forge a log line.
-fn parse_count(target: &str) -> Result<u16, BotError> {
+pub(crate) fn parse_count(target: &str) -> Result<u16, BotError> {
     target
         .parse::<u16>()
         .map_err(|not_a_count| BotError::IncompleteSpec {
@@ -75,7 +75,10 @@ fn parse_count(target: &str) -> Result<u16, BotError> {
 }
 
 /// A source that reports the count its `target` parsed to.
-struct Counter {
+///
+/// Shared with `sim_spec_materialize`, whose sweep admits specs over the same
+/// source rather than a copy of it.
+pub(crate) struct Counter {
     /// The value to report.
     value: u16,
     /// The capabilities this instance requires.
@@ -94,7 +97,7 @@ impl Counter {
     }
 
     /// Build a cap-free one from the `target` its spec names.
-    fn from_target(target: &str) -> Result<Source, BotError> {
+    pub(crate) fn from_target(target: &str) -> Result<Source, BotError> {
         Ok(Source::ordered(Self::with_caps(
             parse_count(target)?,
             Vec::new(),
@@ -102,7 +105,7 @@ impl Counter {
     }
 
     /// Build one requiring `bot.net` from the `target` its spec names.
-    fn net_from_target(target: &str) -> Result<Source, BotError> {
+    pub(crate) fn net_from_target(target: &str) -> Result<Source, BotError> {
         Ok(Source::ordered(Self::with_caps(
             parse_count(target)?,
             vec![Cap::net()],

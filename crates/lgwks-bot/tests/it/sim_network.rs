@@ -105,9 +105,11 @@ fn apply_deliveries(path: &std::path::Path, deliveries: &[&[u8]]) -> Result<usiz
 /// Run one sweep of the network under the seed's fault schedule and hand the
 /// scenario its deliveries, so every family reads the same run.
 fn deliveries_for(sim: &mut sim::Sim, count: u64) -> Result<Vec<sim::Envelope>, Box<dyn Error>> {
-    for n in 0..count {
+    // The envelope index is a `u32` because that is the width the payload
+    // grammar names, so the loop is drawn in that width rather than narrowed per
+    // iteration: a count this host cannot address is a refusal.
+    for index in 0..u32::try_from(count)? {
         let due = sim.tick(1).saturating_add(u64::from(sim.rng().below(4)));
-        let index = u32::try_from(n).unwrap_or(0);
         sim.send(index % 4, index % 2, payload(index % 4, index), due);
     }
     let now = sim.tick(16);
@@ -149,10 +151,10 @@ fn at_least_once(band: Band) -> TestResult {
             "{delivered} delivered and {dropped} dropped is not the {sent} that were sent"
         );
         sim.record("nothing-vanished");
-        sim.trace.record_count("aloast-returned", returned.len());
-        sim.trace.record_u64("aloast-sent", sent);
+        sim.trace.record_number("aloast-returned", returned.len());
+        sim.trace.record_number("aloast-sent", sent);
         sim.trace
-            .record_u64("aloast-delivered", u64::from(delivered));
+            .record_number("aloast-delivered", u64::from(delivered));
         Ok(())
     })
 }
@@ -186,8 +188,8 @@ fn dup_suppressed(band: Band) -> TestResult {
             );
             assert!(applied >= distinct.len(), "the journal lost accepted facts");
             sim.record("duplicates-suppressed");
-            sim.trace.record_count("dup-applied", applied);
-            sim.trace.record_count("dup-keys", keys.len());
+            sim.trace.record_number("dup-applied", applied);
+            sim.trace.record_number("dup-keys", keys.len());
             Ok(())
         })
     })
@@ -206,7 +208,7 @@ fn reorder_tolerated(band: Band) -> TestResult {
                 "a chain that survived reordering must still end at this handle's own tail"
             );
             sim.record("reorder-verifies");
-            sim.trace.record_count("reorder-entries", entries.len());
+            sim.trace.record_number("reorder-entries", entries.len());
             Ok(())
         })
     })
@@ -248,11 +250,12 @@ fn partition_recovers(band: Band) -> TestResult {
             sim.faults.partition_until
         );
         sim.record("partition-recovers");
-        sim.trace.record_u64("partition-during", u64::from(during));
         sim.trace
-            .record_u64("partition-dropped", u64::from(dropped));
-        sim.trace.record_u64("partition-probe", u64::from(probe));
-        sim.trace.record_count("partition-resumed", resumed.len());
+            .record_number("partition-during", u64::from(during));
+        sim.trace
+            .record_number("partition-dropped", u64::from(dropped));
+        sim.trace.record_number("partition-probe", u64::from(probe));
+        sim.trace.record_number("partition-resumed", resumed.len());
         Ok(())
     })
 }
@@ -260,9 +263,9 @@ fn partition_recovers(band: Band) -> TestResult {
 /// The trace records that duplicates occur, so no exactly-once claim is made.
 fn at_least_once_claimed(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let sent = 64u64;
-        for n in 0..sent {
-            sim.send_now(0, 1, payload(0, u32::try_from(n).unwrap_or(0)));
+        let sent = u32::try_from(64_u64)?;
+        for index in 0..sent {
+            sim.send_now(0, 1, payload(0, index));
         }
         let now = sim.tick(256);
         let deliveries = sim.drain(now);
@@ -271,10 +274,11 @@ fn at_least_once_claimed(band: Band) -> TestResult {
         // Whatever the seed decided, the receipt has to carry the fact: a
         // consumer that cannot see duplication will claim exactly-once.
         sim.trace
-            .record_u64("alonce-duplicates", u64::from(duplicated));
-        sim.trace.record_u64("alonce-dropped", u64::from(dropped));
+            .record_number("alonce-duplicates", u64::from(duplicated));
         sim.trace
-            .record_u64("alonce-repeat-seen", u64::from(repeat));
+            .record_number("alonce-dropped", u64::from(dropped));
+        sim.trace
+            .record_number("alonce-repeat-seen", u64::from(repeat));
         sim.record("at-least-once-is-claimed");
         Ok(())
     })
@@ -287,15 +291,15 @@ fn accounting(band: Band) -> TestResult {
         let deliveries = deliveries_for(sim, sent)?;
         let (delivered, dropped, _) = sim.net.counts();
         let held = sim.net.in_flight();
-        let accounted = u64::from(delivered.saturating_add(dropped))
-            .saturating_add(u64::try_from(held).unwrap_or(0));
+        let accounted =
+            u64::from(delivered.saturating_add(dropped)).saturating_add(u64::try_from(held)?);
         assert!(
-            accounted >= u64::try_from(deliveries.len()).unwrap_or(0),
+            accounted >= u64::try_from(deliveries.len())?,
             "the network accounted for fewer envelopes than it returned"
         );
         sim.record("accounting-balances");
-        sim.trace.record_u64("acct-sent", sent);
-        sim.trace.record_count("acct-in-flight", held);
+        sim.trace.record_number("acct-sent", sent);
+        sim.trace.record_number("acct-in-flight", held);
         Ok(())
     })
 }
@@ -303,9 +307,8 @@ fn accounting(band: Band) -> TestResult {
 /// An envelope reaches its addressee and nobody else.
 fn routes(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let pairs = u64::from(sim.rng().between(1, 8));
-        for n in 0..pairs {
-            let tenant = u32::try_from(n).unwrap_or(0);
+        let pairs = sim.rng().between(1, 8);
+        for tenant in 0..pairs {
             sim.send_now(tenant, tenant.saturating_add(1), payload(tenant, tenant));
         }
         let now = sim.tick(32);
@@ -326,7 +329,7 @@ fn routes(band: Band) -> TestResult {
             );
         }
         sim.record("routes-to-addressee");
-        sim.trace.record_count("routed", deliveries.len());
+        sim.trace.record_number("routed", deliveries.len());
         Ok(())
     })
 }
@@ -354,8 +357,8 @@ fn retry_same(band: Band) -> TestResult {
             );
         }
         sim.record("retry-carries-same-bytes");
-        sim.trace.record_count("retry-first", first.len());
-        sim.trace.record_count("retry-second", second.len());
+        sim.trace.record_number("retry-first", first.len());
+        sim.trace.record_number("retry-second", second.len());
         Ok(())
     })
 }
@@ -372,7 +375,7 @@ fn idle_net(band: Band) -> TestResult {
         );
         assert_eq!(sim.net.in_flight(), 0, "an idle network held traffic");
         sim.record("idle-net-quiet");
-        sim.trace.record_count("idle-deliveries", deliveries.len());
+        sim.trace.record_number("idle-deliveries", deliveries.len());
         Ok(())
     })
 }
@@ -380,21 +383,20 @@ fn idle_net(band: Band) -> TestResult {
 /// A burst delivered in one tick arrives whole.
 fn burst(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let burst = u64::from(sim.rng().between(1, 16));
-        for n in 0..burst {
-            let index = u32::try_from(n).unwrap_or(0);
+        let burst = sim.rng().between(1, 16);
+        for index in 0..burst {
             sim.send(0, 1, payload(0, index), 0);
         }
         let deliveries = sim.drain(0);
         let (delivered, _, _) = sim.net.counts();
         assert_eq!(
             u64::from(delivered),
-            u64::try_from(deliveries.len()).unwrap_or(0),
+            u64::try_from(deliveries.len())?,
             "the scheduler's return disagrees with its own accounting"
         );
         sim.record("burst-accounted");
-        sim.trace.record_u64("burst-size", burst);
-        sim.trace.record_count("burst-delivered", deliveries.len());
+        sim.trace.record_number("burst-size", u64::from(burst));
+        sim.trace.record_number("burst-delivered", deliveries.len());
         Ok(())
     })
 }
@@ -414,7 +416,7 @@ fn drop_redo(band: Band) -> TestResult {
             "re-sending the same fact grew the journal, so a re-send became a second event"
         );
         sim.record("re-send-is-one-fact");
-        sim.trace.record_count("redo-events", second);
+        sim.trace.record_number("redo-events", second);
         Ok(())
     })
 }
@@ -447,7 +449,7 @@ fn late_verify(band: Band) -> TestResult {
         );
         assert!(total >= early_bodies.len(), "the late wave lost history");
         sim.record("late-delivery-verifies");
-        sim.trace.record_count("late-events", total);
+        sim.trace.record_number("late-events", total);
         Ok(())
     })
 }
@@ -455,9 +457,9 @@ fn late_verify(band: Band) -> TestResult {
 /// A duplicate is visible as more than one attempt.
 fn dup_visible(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let sent = 64u64;
-        for n in 0..sent {
-            sim.send_now(0, 1, payload(0, u32::try_from(n).unwrap_or(0)));
+        let sent = u32::try_from(64_u64)?;
+        for index in 0..sent {
+            sim.send_now(0, 1, payload(0, index));
         }
         let deliveries = sim.advance_and_drain(512);
         for envelope in &deliveries {
@@ -472,7 +474,7 @@ fn dup_visible(band: Band) -> TestResult {
             .filter(|envelope| envelope.attempts() > 1)
             .count();
         sim.record("duplicates-are-visible");
-        sim.trace.record_count("dup-repeats", repeats);
+        sim.trace.record_number("dup-repeats", repeats);
         Ok(())
     })
 }
@@ -485,9 +487,9 @@ fn partition_journal(band: Band) -> TestResult {
         let before = apply_deliveries(&path, &[])?;
         let size = path.metadata()?.len();
 
-        let sent = u64::from(sim.rng().between(1, 8));
-        for n in 0..sent {
-            sim.send_now(0, 1, payload(0, u32::try_from(n).unwrap_or(0)));
+        let sent = sim.rng().between(1, 8);
+        for index in 0..sent {
+            sim.send_now(0, 1, payload(0, index));
         }
         let _ = sim.advance_and_drain(64);
         let after = apply_deliveries(&path, &[])?;
@@ -498,7 +500,7 @@ fn partition_journal(band: Band) -> TestResult {
             "a network partition changed the journal's bytes"
         );
         sim.record("partition-leaves-journal");
-        sim.trace.record_u64("partition-sent", sent);
+        sim.trace.record_number("partition-sent", u64::from(sent));
         Ok(())
     })
 }
@@ -507,25 +509,25 @@ fn partition_journal(band: Band) -> TestResult {
 fn flood(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let flood = u64::from(sim.rng().between(1, 64));
-        for n in 0..flood {
-            let index = u32::try_from(n).unwrap_or(0);
+        for index in 0..flood {
+            let index = u32::try_from(index)?;
             sim.send(0, 1, payload(0, index), u64::MAX);
         }
         let held = sim.net.in_flight();
         assert_eq!(
-            u64::try_from(held).unwrap_or(0),
+            u64::try_from(held)?,
             flood,
             "the network did not retain what it was given, or retained more than it was"
         );
         // A flood that is never due must not block the next tick.
         let _ = sim.advance_and_drain(1);
         assert_eq!(
-            u64::try_from(sim.net.in_flight()).unwrap_or(0),
+            u64::try_from(sim.net.in_flight())?,
             flood,
             "a tick released traffic that was not due"
         );
         sim.record("flood-bounded");
-        sim.trace.record_u64("flood-size", flood);
+        sim.trace.record_number("flood-size", flood);
         Ok(())
     })
 }
@@ -533,10 +535,9 @@ fn flood(band: Band) -> TestResult {
 /// One seed delivers in exactly one order, every time.
 fn deterministic(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
-        let sent = u64::from(sim.rng().between(1, 12));
-        for n in 0..sent {
+        let sent = sim.rng().between(1, 12);
+        for index in 0..sent {
             let due = sim.tick(1).saturating_add(u64::from(sim.rng().below(8)));
-            let index = u32::try_from(n).unwrap_or(0);
             sim.send(index, 1, payload(0, index), due);
         }
         let mut order: Vec<String> = Vec::new();
@@ -544,11 +545,12 @@ fn deterministic(band: Band) -> TestResult {
         for _ in 0..16 {
             now = now.saturating_add(4);
             for envelope in sim.drain(now) {
-                let (tenant, attempt) = subject(envelope.body()).unwrap_or((0, 0));
+                let (tenant, attempt) = subject(envelope.body())
+                    .ok_or("a delivered envelope carried a body this file did not write")?;
                 order.push(format!("{tenant}:{attempt}"));
             }
         }
-        sim.trace.record_count("order-length", order.len());
+        sim.trace.record_number("order-length", order.len());
         for entry in &order {
             sim.trace.record(entry);
         }

@@ -163,82 +163,15 @@ impl WrongField {
     }
 }
 
-/// The seven fields of a key, so a rewrite names which ones change.
-///
-/// A struct rather than seven parameters at each call site, because the row is
-/// about *which field* disagreed: reading `Rewrites { run: other, .. }` is left
-/// to say "the run moved" and not "the third argument moved".
-#[derive(Debug, Clone)]
-struct Rewrites {
-    /// The run the key speaks for.
-    run: Option<RunId>,
-    /// The action the key names.
-    action: Option<ActionId>,
-    /// The attempt the key is for.
-    attempt: Option<AttemptId>,
-    /// The flow revision the attempt was admitted under.
-    flow: Option<FlowRevision>,
-    /// The payload the attempt was bound to.
-    digest: Option<ActionDigest>,
-    /// The environment the attempt acts on.
-    environment: Option<EnvironmentId>,
-    /// The generation of that environment.
-    epoch: Option<EnvironmentEpoch>,
+/// The identity `key` was minted under: its run, environment and flow.
+const fn identity_of(key: EffectKey) -> EffectIdentity {
+    EffectIdentity::new(key.run(), key.environment(), key.flow())
 }
 
-impl Rewrites {
-    /// A rewrite that names no changed field; the caller adds the one it means.
-    const fn none() -> Self {
-        Self {
-            run: None,
-            action: None,
-            attempt: None,
-            flow: None,
-            digest: None,
-            environment: None,
-            epoch: None,
-        }
-    }
-}
-
-/// Every rewrite except the attempt one keeps the held attempt, which is spelled
-/// by this constructor so no arm can forget it.
-impl Rewrites {
-    /// A rewrite that changes `field` and keeps everything else.
-    ///
-    /// Three constructors rather than seven struct literals with a `..` update,
-    /// because the `..` silently overwrites the field the caller set before it —
-    /// which is exactly the bug this replaced.
-    fn keeping_attempt_of(key: EffectKey) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            attempt: Some(key.attempt()),
-            ..Self::none()
-        })
-    }
-
-    /// This rewrite applied to `key`.
-    ///
-    /// One `EffectKey::new` for the whole file. Seven near-identical ones is how
-    /// two of them come to disagree about which field each was rewriting, which
-    /// is exactly the distinction this file's assertions rest on.
-    ///
-    /// The attempt is *required*, because a rewrite that left it `None` would
-    /// silently advance it and every arm would then also be an attempt drift —
-    /// which is what made the epoch arm report `EvidenceStaleAttempt`.
-    fn apply(&self, key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-        let attempt = self
-            .attempt
-            .ok_or("a rewrite must name the attempt it keeps, or advance it deliberately")?;
-        Ok(EffectKey::new(
-            self.run.unwrap_or(key.run()),
-            self.action.unwrap_or(key.action()),
-            attempt,
-            self.flow.unwrap_or(key.flow()),
-            self.digest.unwrap_or(key.digest()),
-            self.environment.unwrap_or(key.environment()),
-            self.epoch.unwrap_or(key.epoch()),
-        ))
-    }
+/// `key`'s own attempt — its action, attempt, digest and epoch — minted under
+/// `identity`, which is what a rewrite of the run or the flow asks for.
+const fn under(identity: EffectIdentity, key: EffectKey) -> EffectKey {
+    identity.key(key.action(), key.attempt(), key.digest(), key.epoch())
 }
 
 /// An action id this run's bots do not declare.
@@ -253,58 +186,50 @@ impl Rewrites {
 /// the constant, is what carries the guarantee.
 const UNHELD_ACTION: &str = "ee00112233445566778899aabbccddee";
 
-/// [`Rewrites`] that changes only the run.
+/// A key that differs from `key` in its run alone.
+///
 /// Every rewrite function is named after the enum arm it serves and documented
 /// only by the field it moves: the arm's own doc already says which field that
 /// is, and a second copy of the sentence is a second statement to keep in step.
 fn replace_run(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-    Rewrites {
-        run: Some(RunId::from_hex("1112131415161718191a1b1c1d1e1f20")?),
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+    let run = RunId::from_hex("1112131415161718191a1b1c1d1e1f20")?;
+    Ok(under(
+        EffectIdentity::new(run, key.environment(), key.flow()),
+        key,
+    ))
 }
 
-/// [`Rewrites`] that changes only the action.
+/// A key that differs from `key` in its action alone.
 fn replace_action(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-    Rewrites {
-        action: Some(ActionId::from_hex(UNHELD_ACTION)?),
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+    let action = ActionId::from_hex(UNHELD_ACTION)?;
+    Ok(identity_of(key).key(action, key.attempt(), key.digest(), key.epoch()))
 }
 
-/// [`Rewrites`] that changes only the payload digest.
+/// A key that differs from `key` in its payload digest alone.
 fn replace_digest(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-    Rewrites {
-        digest: Some(ActionDigest::from_tagged(
-            "blake3_256",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e2f",
-        )?),
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+    let digest = ActionDigest::from_tagged(
+        "blake3_256",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e2f",
+    )?;
+    Ok(identity_of(key).key(key.action(), key.attempt(), digest, key.epoch()))
 }
 
-/// [`Rewrites`] that changes only the flow revision.
+/// A key that differs from `key` in its flow revision alone.
 fn replace_flow(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-    Rewrites {
-        flow: Some(FlowRevision::from_tagged(
-            "blake3_256",
-            "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
-        )?),
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+    let flow = FlowRevision::from_tagged(
+        "blake3_256",
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+    )?;
+    Ok(under(
+        EffectIdentity::new(key.run(), key.environment(), flow),
+        key,
+    ))
 }
 
-/// [`Rewrites`] that changes only the environment.
+/// A key that differs from `key` in its environment alone.
 fn replace_environment(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
-    Rewrites {
-        environment: Some(EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f31")?),
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f31")?;
+    Ok(EffectIdentity::new(key.run(), environment, key.flow()).at_epoch(key, key.epoch()))
 }
 
 /// A key naming a different generation of the right environment.
@@ -320,12 +245,9 @@ fn replace_epoch(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
         .checked_next()
         .and_then(EnvironmentEpoch::checked_next)
         .filter(|ahead| *ahead != key.epoch())
-        .or_else(|| (key.epoch() != EnvironmentEpoch::FIRST).then_some(EnvironmentEpoch::FIRST));
-    Rewrites {
-        epoch: ahead,
-        ..Rewrites::keeping_attempt_of(key)?
-    }
-    .apply(key)
+        .or_else(|| (key.epoch() != EnvironmentEpoch::FIRST).then_some(EnvironmentEpoch::FIRST))
+        .ok_or("no generation differs from the held one")?;
+    Ok(identity_of(key).at_epoch(key, ahead))
 }
 
 /// A key naming a later attempt on the same entry, and no other change.
@@ -334,11 +256,7 @@ fn replace_attempt(key: EffectKey) -> Result<EffectKey, Box<dyn Error>> {
         .attempt()
         .checked_next()
         .ok_or("an attempt counter with one value left cannot be advanced")?;
-    Rewrites {
-        attempt: Some(attempt),
-        ..Rewrites::none()
-    }
-    .apply(key)
+    Ok(key.with_attempt(attempt))
 }
 
 // ── The bot-shaped rows ─────────────────────────────────────────────────────
@@ -387,21 +305,16 @@ fn held_under(store: Rc<RefCell<MemoryJournal>>) -> Result<Held, Box<dyn Error>>
         .build(&GrantSet::empty())?;
     match bot.tick() {
         Ok(fired) => {
-            {
-                let refusal =
-                    Err(format!("an indeterminate effect was reported as {fired} fired").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("an indeterminate effect was reported as {fired} fired").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
+            return refusal;
         }
         Err(error) => {
             if !matches!(error, BotError::EffectIndeterminate { .. }) {
-                {
-                    let refusal =
-                        Err(format!("expected the action's own error, got {error:?}").into());
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
-                    return refusal;
-                };
+                let refusal = Err(format!("expected the action's own error, got {error:?}").into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "held_under: returning an error to the caller");
+                return refusal;
             }
         }
     }

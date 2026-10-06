@@ -46,6 +46,8 @@
     feature = "process"
 ))]
 
+use crate::scratch::Scratch;
+
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
@@ -53,14 +55,12 @@ use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::rt::supervise::{CleanupReceipt, Supervisor, TaskOutcome};
 
 // The pid-file scratch directory, the signal-free liveness probes and the
-// session escape are shared with the other process test targets, so there is one
-// copy of each rather than one per file that could drift on what a "cleanup"
-// means.
-#[path = "support/process.rs"]
-mod process_probe;
+// session escape are shared with the other process tests, so there is one copy
+// of each rather than one per file that could drift on what a "cleanup" means.
+use crate::process_probe;
 
 use process_probe::{
-    PidDir, escape_command, escape_unavailable_reason, pid_is_alive, sources_are_apostrophe_free,
+    escape_command, escape_unavailable_reason, pid_is_alive, sources_are_apostrophe_free,
     wait_for_pid, wait_for_pid_gone,
 };
 
@@ -112,10 +112,10 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
          the candidate records no pid and the failure would look like a host that cannot escape"
     );
     let escape = escape_command().ok_or_else(escape_unavailable_reason)?;
-    let dir = PidDir::new("escape")?;
-    let escape_file = dir.join("escaped.pid");
-    let leader_file = dir.join("leader.pid");
-    let sibling_file = dir.join("sibling.pid");
+    let dir = Scratch::new("escape")?;
+    let escape_file = dir.path().join("escaped.pid");
+    let leader_file = dir.path().join("leader.pid");
+    let sibling_file = dir.path().join("sibling.pid");
 
     // `setsid` runs, and only then does the process record its pid, so the pid on
     // disk belongs to a process that has already left the group. The leader
@@ -221,9 +221,9 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
 /// neither failure mode is silent.
 #[test]
 fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult {
-    let dir = PidDir::new("unrelated")?;
-    let sibling_file = dir.join("sibling.pid");
-    let leader_file = dir.join("leader.pid");
+    let dir = Scratch::new("unrelated")?;
+    let sibling_file = dir.path().join("sibling.pid");
+    let leader_file = dir.path().join("leader.pid");
 
     let runtime = Runtime::new()?;
     let (mut sibling, sibling_pid, leader) = runtime.block_on(async {

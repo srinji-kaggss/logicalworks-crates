@@ -106,16 +106,27 @@ fn an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retr
     let mut bot = bot_with(journal, Rc::clone(&entered))?;
 
     unknown_once.set(true);
-    match bot.tick() {
-        Err(error @ BotError::EffectUnrecorded { .. }) => {
-            assert_eq!(
-                error.dispatch_certainty(),
-                DispatchCertainty::Occurred,
-                "the effect ran; only its record's reply was lost: {error:?}"
-            );
+    // The tick is asked once and the answer read twice, because "the tick
+    // succeeded" and "the tick refused with the lost-reply variant" are two
+    // different failures and a single `match` arm can only name one of them.
+    let answered = match bot.tick() {
+        Err(answered) => answered,
+        other => {
+            let refusal = Err(format!("expected a lost reply, got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry: returning an error to the caller");
+            return refusal;
         }
-        other => return Err(format!("expected a lost reply, got {other:?}").into()),
+    };
+    if !matches!(answered, BotError::EffectUnrecorded { .. }) {
+        let refusal = Err(format!("expected a lost reply, got {answered:?}").into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "an_unknown_outcome_that_did_not_commit_reports_occurrence_and_records_on_retry: returning an error to the caller");
+        return refusal;
     }
+    assert_eq!(
+        answered.dispatch_certainty(),
+        DispatchCertainty::Occurred,
+        "the effect ran; only its record's reply was lost: {answered:?}"
+    );
     assert_eq!(entered.get(), 1);
     assert!(
         !recorded(&store)?

@@ -168,6 +168,23 @@ pub fn keyed(key: &[u8; 32], data: &[u8]) -> Digest {
     Digest(*blake3::keyed_hash(key, data).as_bytes())
 }
 
+/// The eight-byte little-endian length prefix of one framed part.
+///
+/// Assembled from the length's own little-endian bytes rather than narrowed into
+/// a `u64`, so no conversion can fail and no length can be folded onto a
+/// neighbouring one: every target Rust supports has a `usize` of at most 64
+/// bits, so the eight bytes are the length itself, and a narrower target's
+/// shorter byte order simply leaves the prefix's tail zero, which is the same
+/// eight-byte value. A length is what the prefix names, so a framed stream is
+/// unambiguous at the boundaries a plain concatenation would conflate.
+fn length_prefix(length: usize) -> [u8; 8] {
+    let mut prefix = [0u8; 8];
+    for (slot, byte) in prefix.iter_mut().zip(length.to_le_bytes()) {
+        *slot = byte;
+    }
+    prefix
+}
+
 /// Incremental hasher for streaming data.
 ///
 /// Manual `Debug` rather than a derive: the wrapped engine hasher's own
@@ -213,8 +230,7 @@ impl Hasher {
     ///
     /// Returns `&mut Self` so calls chain, for the same reason `update` does.
     pub fn write_framed(&mut self, data: &[u8]) -> &mut Self {
-        let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-        self.0.update(&len.to_le_bytes());
+        self.0.update(&length_prefix(data.len()));
         self.0.update(data);
         self
     }

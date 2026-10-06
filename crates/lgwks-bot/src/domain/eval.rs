@@ -129,7 +129,7 @@ impl Evaluate<String> for Contains {
 
 impl Evaluate<super::chat::ChatMessage> for Contains {
     fn check(&self, value: &super::chat::ChatMessage) -> Result<bool, BotError> {
-        Ok(value.text.contains(&self.pattern))
+        Ok(value.text().contains(&self.pattern))
     }
 
     fn condition_id(&self) -> &str {

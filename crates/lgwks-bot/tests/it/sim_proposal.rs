@@ -60,6 +60,10 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// The tenants the isolation and saturation families run over.
 const TENANTS: [&str; 4] = ["acme", "globex", "initech", "umbrella"];
 
+/// A tenant no family ever chooses, so "a tenant outside the set" exists for
+/// every draw rather than only for the draws that leave one out.
+const STRANGER: &str = "hooli";
+
 /// The declared saturation tiers, per INV-BOT-16: the requested level, the level
 /// reached, and the ceiling are recorded together so a reader is never told a
 /// concurrency number nobody ran.
@@ -134,7 +138,7 @@ fn seeded_shapes_match_the_declared_outcome(band: Band) -> TestResult {
                 // order. A table would have to enumerate the surface × ceiling
                 // cross product to stay right; this computes the one arm the
                 // order produces.
-                let expected = declared_refusal(name, &surface, &decoder_limits);
+                let expected = declared_refusal(&shape_payload(name)?, &surface, &decoder_limits);
                 assert_eq!(
                     refusal.label(),
                     expected,
@@ -159,6 +163,15 @@ fn seeded_shapes_match_the_declared_outcome(band: Band) -> TestResult {
     })
 }
 
+/// The payload the shape named `shape` builds, refused for a name no shape has.
+fn shape_payload(shape: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    support::SHAPES
+        .iter()
+        .find(|entry| entry.0 == shape)
+        .map(|entry| entry.1())
+        .ok_or_else(|| format!("no payload shape is named {shape:?}").into())
+}
+
 /// The refusal arm the decoder produces for `shape` on `surface` under `limits`.
 ///
 /// A mirror of the decoder's own check order rather than a table per shape,
@@ -175,12 +188,7 @@ fn seeded_shapes_match_the_declared_outcome(band: Band) -> TestResult {
 /// 5. the field-count ceiling — `Limit`;
 /// 6. authorization: an unregistered name, then a capability the run lacks —
 ///    `UnknownOperation`, `CapabilityNotHeld`.
-fn declared_refusal(shape: &str, surface: &Surface, limits: &PlanLimits) -> &'static str {
-    let payload = support::SHAPES
-        .iter()
-        .find(|entry| entry.0 == shape)
-        .map(|entry| entry.1())
-        .unwrap_or_default();
+fn declared_refusal(payload: &[u8], surface: &Surface, limits: &PlanLimits) -> &'static str {
     if payload.len() > limits.max_bytes {
         return "Oversized";
     }
@@ -292,7 +300,7 @@ fn draw_case(rng: &mut Rng) -> Result<Drawn, Box<dyn Error>> {
         .ok_or("the drawn shape index is outside the table")?;
     let payload = build();
     let surface = surface_for(rng)?;
-    let limits = limits_for(rng);
+    let limits = limits_for(rng)?;
     Ok(Drawn {
         name,
         payload,
@@ -302,13 +310,14 @@ fn draw_case(rng: &mut Rng) -> Result<Drawn, Box<dyn Error>> {
 }
 
 /// The decoder's ceilings drawn from the seed, within the crate's defaults.
-fn limits_for(rng: &mut Rng) -> PlanLimits {
+fn limits_for(rng: &mut Rng) -> Result<PlanLimits, Box<dyn Error>> {
     let base = PlanLimits::default();
-    base.with_max_bytes(
-        base.max_bytes
-            .saturating_mul(usize::try_from(u64::from(rng.between(1, 4))).unwrap_or(1)),
-    )
-    .with_max_fields(rng.between(1, 8))
+    Ok(base
+        .with_max_bytes(
+            base.max_bytes
+                .saturating_mul(usize::try_from(u64::from(rng.between(1, 4)))?),
+        )
+        .with_max_fields(rng.between(1, 8)))
 }
 
 // ── Multi-tenant ─────────────────────────────────────────────────────────────
@@ -369,23 +378,16 @@ fn two_tenants_on_one_digest_stay_isolated(band: Band) -> TestResult {
             "every tenant's key for the same digest is distinct"
         );
         // A tenant outside the set reads nothing, whatever digest it names. The
-        // draw may pick the whole tenant set, in which case there is no stranger
-        // in *this* store — so the claim is checked against a store that has
-        // never been written to, which is the same index and always has one.
-        let stranger = TENANTS
-            .iter()
-            .find(|tenant| !chosen.contains(tenant))
-            .copied()
-            .unwrap_or(TENANTS[0]);
+        // stranger is never in `TENANTS`, so the claim holds for every draw —
+        // including the one that chooses the whole set — and it is checked both
+        // against the store every chosen tenant wrote and against one nobody did.
         let untouched = ArtifactStore::new();
         assert!(
-            store
-                .read(stranger, &digest)
-                .is_none_or(|read| chosen.contains(&stranger) && read.len() == shared.len()),
-            "tenant {stranger} reads only its own copy of the shared digest"
+            store.read(STRANGER, &digest).is_none(),
+            "tenant {STRANGER} wrote nothing and reads nothing of the shared digest"
         );
         assert!(
-            untouched.read(stranger, &digest).is_none(),
+            untouched.read(STRANGER, &digest).is_none(),
             "a store that has never been written reads nothing, whatever digest it names"
         );
         sim.record(&format!(
@@ -484,7 +486,7 @@ fn concurrent_readers_and_conflicting_writers(band: Band) -> TestResult {
         );
         assert_eq!(
             store.writers(support::TENANT, &digest),
-            u64::try_from(writers).unwrap_or(u64::MAX),
+            u64::try_from(writers)?,
             "the serialization receipt counts every writer that reached the key"
         );
         // A reader never sees a *partial* artifact. Seeing none before the first
@@ -596,24 +598,17 @@ fn saturation_reaches_100_1000_and_10000() -> TestResult {
         // The three numbers together, so a reader is never told a level nobody
         // ran. Recorded in the trace rather than printed, which is where the
         // rest of this layer keeps its tier receipts.
-        trace.record_u64(
-            "tier-requested",
-            u64::try_from(requested).unwrap_or(u64::MAX),
-        );
-        trace.record_u64("tier-reached", u64::try_from(workers).unwrap_or(u64::MAX));
-        trace.record_u64(
-            "tier-ceiling",
-            u64::try_from(MAX_WORKERS).unwrap_or(u64::MAX),
-        );
+        trace.record_number("tier-requested", u64::try_from(requested)?);
+        trace.record_number("tier-reached", u64::try_from(workers)?);
+        trace.record_number("tier-ceiling", u64::try_from(MAX_WORKERS)?);
         trace.record("tier-tenant");
         trace.record(support::TENANT);
-        trace.record_count("tier-bytes", content.len());
+        trace.record_number("tier-bytes", content.len());
     }
     assert!(
         !trace.is_empty(),
         "every tier recorded its requested, reached and ceiling levels, so the receipt is \
-         readable: {} bytes of trace",
-        trace.len()
+         readable"
     );
     Ok(())
 }
@@ -679,9 +674,7 @@ fn two_tenant_saturation_keeps_its_shelves_apart() -> TestResult {
         // a count of exactly the tier would mean the seed write was not counted.
         assert_eq!(
             store.writers(tenant, &digest),
-            u64::try_from(per_tenant)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
+            u64::try_from(per_tenant)?.saturating_add(1),
             "tenant {tenant}: every concurrent writer plus the seeding write reached the key and \
              was serialized into one commit"
         );
@@ -703,7 +696,7 @@ fn same_seed_same_trace_hash(band: Band) -> TestResult {
             .ok_or("the drawn shape index is outside the table")?;
         let payload = build();
         let surface = surface_for(sim.rng())?;
-        let decoder = lgwks_bot::proposal::Decoder::new(limits_for(sim.rng()));
+        let decoder = lgwks_bot::proposal::Decoder::new(limits_for(sim.rng())?);
         let outcome = decoder.decode(&surface, &payload, Source::Model);
 
         // `LedgerLimits::new` takes a `usize` for the distinct-fingerprint bound
@@ -786,7 +779,7 @@ fn seeded_runs_reach_the_declared_disposition(band: Band) -> TestResult {
         } = draw_case(sim.rng())?;
         let tenant = surface.tenant().to_owned();
         let gate = gate_for(&surface, decoder_limits)?;
-        let expected = declared_refusal(name, &surface, &decoder_limits);
+        let expected = declared_refusal(&shape_payload(name)?, &surface, &decoder_limits);
 
         // The run's own ceiling, drawn: a run whose deadline is a nanosecond would
         // be a timeout rather than a disposition, and the family would then be
@@ -873,7 +866,7 @@ fn gate_for(surface: &Surface, limits: PlanLimits) -> Result<Gate, Box<dyn Error
 /// above the gate's ceiling would only be measuring the host's semaphore.
 fn host_for(tenant: &str, rng: &mut Rng) -> Result<Host, Box<dyn Error>> {
     let draws = usize::try_from(u64::from(rng.between(1, 8)))?;
-    let ceiling = draws.clamp(1, usize::try_from(support::ADMISSIONS).unwrap_or(1));
+    let ceiling = draws.clamp(1, usize::try_from(support::ADMISSIONS)?);
     let limit = NonZeroUsize::new(ceiling).ok_or("the ceiling must be at least one")?;
     Ok(Host::builder(tenant)?.max_concurrent_tasks(limit).build()?)
 }
@@ -890,7 +883,7 @@ fn refusal_for_tenant(
         .operation(support::READ, &[Cap::fs()])?
         .holding(&[Cap::fs()])
         .build();
-    let gate = gate_for(&surface, limits_for(sim.rng()))?;
+    let gate = gate_for(&surface, limits_for(sim.rng())?)?;
     let host = host_for(name, sim.rng())?;
     let report = support::drive(host.run(work, (gate, payload.to_vec())));
     let error = report
@@ -1007,7 +1000,7 @@ fn saturation_over_admit_conserves_the_budget() -> TestResult {
             .count();
         assert_eq!(
             admitted,
-            usize::try_from(support::ADMISSIONS).unwrap_or(0),
+            usize::try_from(support::ADMISSIONS)?,
             "tier {tier}: exactly the gate's admission ceiling was spent across {workers} \
              concurrent runs — not one ceiling per run"
         );
@@ -1046,24 +1039,16 @@ fn saturation_over_admit_conserves_the_budget() -> TestResult {
 
         // The three numbers together, so a reader is never told a level nobody ran
         // (INV-BOT-16).
-        trace.record_u64(
-            "tier-requested",
-            u64::try_from(requested).unwrap_or(u64::MAX),
-        );
-        trace.record_u64("tier-reached", u64::try_from(workers).unwrap_or(u64::MAX));
-        trace.record_u64(
-            "tier-ceiling",
-            u64::try_from(MAX_WORKERS).unwrap_or(u64::MAX),
-        );
-        trace.record_u64("tier-admitted", u64::try_from(admitted).unwrap_or(u64::MAX));
+        trace.record_number("tier-requested", u64::try_from(requested)?);
+        trace.record_number("tier-reached", u64::try_from(workers)?);
+        trace.record_number("tier-ceiling", u64::try_from(MAX_WORKERS)?);
+        trace.record_number("tier-admitted", u64::try_from(admitted)?);
         trace.record("tier-tenant");
         trace.record(support::TENANT);
     }
     assert!(
         !trace.is_empty(),
-        "every tier recorded its requested, reached, ceiling and admitted levels: {} bytes of \
-         trace",
-        trace.len()
+        "every tier recorded its requested, reached, ceiling and admitted levels"
     );
     Ok(())
 }

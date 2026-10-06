@@ -20,15 +20,57 @@ pub struct JsonStore {
 ///
 /// `#[non_exhaustive]`: the store's reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
+///
+/// Both fields are private behind accessors because the pair is one reading: the
+/// flag says the store's contents moved, and the bytes are what it moved to. A
+/// caller that could edit `raw` while leaving `changed` alone would hold a
+/// reading that claims to be new and is not, and the `changed` condition would
+/// fire on a body nobody read from the store.
+///
+/// ```
+/// use lgwks_bot::domain::data::DataState;
+///
+/// let reading = DataState::new(false, "{\"ok\":true}");
+/// assert!(!reading.changed());
+/// assert_eq!(reading.raw(), "{\"ok\":true}");
+/// ```
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct DataState {
     /// Whether the store contents changed since last poll.
-    pub changed: bool,
+    changed: bool,
     /// The raw JSON string, exactly as read. It is not parsed here: a store
     /// whose contents are malformed JSON is reported, not rejected, so a
     /// condition can act on the malformed state.
-    pub raw: String,
+    raw: String,
+}
+
+impl DataState {
+    /// Build the reading a poll or query of the store produced.
+    ///
+    /// The one constructor, because the fields are private: a `DataState` is
+    /// assembled whole, so the flag and the bytes it describes cannot drift
+    /// apart between the producer that set them and the condition that reads
+    /// them.
+    #[must_use]
+    pub fn new(changed: bool, raw: impl Into<String>) -> Self {
+        Self {
+            changed,
+            raw: raw.into(),
+        }
+    }
+
+    /// Whether the store contents changed since last poll.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// The store's bytes exactly as they were read, unparsed.
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
 }
 
 impl JsonStore {
@@ -58,10 +100,7 @@ impl verb::Observe for JsonStore {
                 certainty: DispatchCertainty::NotDelivered,
                 cause: error.to_string(),
             })?;
-        Ok(DataState {
-            changed: false,
-            raw,
-        })
+        Ok(DataState::new(false, raw))
     }
 
     fn domain_id(&self) -> &str {

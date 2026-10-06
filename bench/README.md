@@ -478,3 +478,184 @@ whose stated design point is running for weeks — the crate's own framing — a
 tick rate of ~390 000/s is not a binding constraint, and the guarantees are the
 reason to choose this crate over a for-loop. For a hot path, the loop wins and
 this rig says so with a number.
+
+---
+
+# The `lgwks_ast` parse-budget rig
+
+Per-grammar parse throughput, peak resident set size, and the share of a checked
+parse spent in the validation walk, measured against the three grammars' inputs a
+hostile file actually carries. Produced by
+`crates/lgwks-ast/examples/parse_budget.rs`; the committed evidence is
+[`ast-budget.tsv`](ast-budget.tsv), 224 rows.
+
+```sh
+cargo run --release -p lgwks_ast --features full --example parse_budget -- --help-ish
+# one process per (grammar, shape) and per tier, because peak RSS is a process
+# high-water mark and one process over everything could only report the widest:
+AST_BUDGET_SHAPE_BYTES=262144 AST_BUDGET_TIMEOUT=120 \
+  scripts/measure-ast-budget.sh /tmp/lgwks-ast-budget
+```
+
+**Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.99.0,
+release profile. One machine, one run: these are absolute numbers for this host,
+not a cross-platform claim. The process floor — the same binary, all 28 grammar
+tables linked in, parsing nothing — is **2.1 MiB**, and every "over floor" figure
+below is that subtracted, because the binary carries every grammar whether or not
+this run used it.
+
+## Four shapes per grammar, at the crate's own byte ceiling
+
+| shape | what it is | why it is a different failure |
+|---|---|---|
+| `representative` | the grammar's own valid source tiled to 2 MiB | the number a tool sees on real code |
+| `nested` | a delimiter pair (or an indentation run) nested as deep as the budget allows | the input `MAX_AST_DEPTH` exists for |
+| `longline` | the representative source with its newlines removed | one line of megabytes; the worst parser case in the set |
+| `unbalanced` | the nested openers with no closers | forces recovery at the deepest level |
+
+`nested` and `unbalanced` are measured at **256 KiB**, not the 2 MiB ceiling, and
+that is a measurement finding rather than a convenience: at 256 KiB of nested
+braces the **Dart** grammar takes **97.5 seconds** in the parser, and at 2 MiB it
+did not finish in 120 s. The two ceilings are named separately in
+`ast-budget.tsv` (`bytes` on every row) so a smaller figure is never read as the
+ceiling's. Representative and `longline` are at the full 2 MiB.
+
+## Throughput and peak RSS at 2 MiB, per grammar
+
+`parse` is bare `tree_sitter::Parser::parse`; `checked` is the whole
+`try_parse`; `walk share` is the validation walk's share of parse-plus-walk.
+
+| grammar | parse MB/s p50 | p99 | checked MB/s p50 | walk share | peak RSS MiB | over floor |
+|---|---:|---:|---:|---:|---:|---:|
+| `solidity` | 17 | 17 | 14 | 25% | 100 | 98 |
+| `yaml` | 16 | 16 | 15 | 8% | 137 | 136 |
+| `rust` | 12 | 11 | 10 | 24% | 198 | 197 |
+| `c` | 11 | 10 | 9 | 21% | 220 | 218 |
+| `cpp` | 11 | 11 | 9 | 19% | 220 | 218 |
+| `css` | 11 | 9 | 8 | 18% | 170 | 169 |
+| `go` | 10 | 9 | 8 | 18% | 146 | 144 |
+| `python` | 10 | 9 | 8 | 18% | 203 | 202 |
+| `typescript` | 9 | 8 | 7 | 22% | 240 | 238 |
+| `bash` | 8 | 8 | 7 | 15% | 218 | 216 |
+| `csharp` | 8 | 7 | 7 | 18% | 330 | 328 |
+| `haskell` | 8 | 7 | 6 | 17% | 301 | 299 |
+| `dart` | 7 | 7 | 6 | 19% | 325 | 323 |
+| `elixir` | 7 | 6 | 5 | 16% | 277 | 275 |
+| `java` | 7 | 6 | 6 | 18% | 196 | 195 |
+| `tsx` | 7 | 6 | 6 | 20% | 286 | 285 |
+| `nix` | 6 | 5 | 5 | 12% | 114 | 112 |
+| `scala` | 6 | 6 | 6 | 16% | 317 | 316 |
+| `hcl` | 5 | 4 | 4 | 18% | 319 | 317 |
+| `swift` | 5 | 4 | 5 | 20% | 361 | 359 |
+| `html` | 4 | 4 | 3 | 10% | 153 | 152 |
+| `json` | 4 | 3 | 3 | 37% | 294 | 292 |
+| `kotlin` | 4 | 4 | 3 | 20% | 264 | 262 |
+| `markdown` | 4 | 4 | 3 | 20% | 460 | 458 |
+| `ruby` | 4 | 4 | 3 | 15% | 723 | 721 |
+| `javascript` | 3 | 1 | 2 | 14% | 253 | 252 |
+| `php` | 3 | 2 | 3 | 10% | 273 | 271 |
+| `lua` | 2 | 2 | 2 | 19% | 310 | 309 |
+
+**The documented ceiling: 723 MiB resident, for one parse of a 2 MiB file with the
+Ruby grammar.** That is the worst grammar at the crate's own byte ceiling, and it
+is what the crate's own ceiling costs in resident memory. `ruby` is 6.4x the
+cheapest (`solidity`, 100 MiB) for the same 2 MiB, so a caller cannot size a
+parser from the input alone — it has to name the grammar.
+
+**The validation walk is 8%–37% of a checked parse on clean source**, and the
+share is a *floor*, not a typical figure: it is measured on the walk the public
+`inspect_ast` performs under a node cap, while the checked parse's own walk also
+carries the depth cap, so it is cheaper. The walk is the larger share where the
+tree is many nodes for few bytes — `json` at 37% is 1.5 M nodes in 2 MiB, while
+`yaml` at 8% is a much smaller tree for the same bytes.
+
+## The adversarial shapes, and the finding behind them
+
+Sorted by bare-parse p50. These are the rows where the crate's bounds earn their
+keep, and the rows where they do not reach.
+
+| grammar | shape | bytes | parse p50 | walk p50 | walk share | peak RSS |
+|---|---|---:|---:|---:|---:|---:|
+| `dart` | nested | 262 144 | **97.500 s** | 15.5 ms | 0.0% | 11 MiB |
+| `scala` | longline | 501 490 | **29.812 s** | 10.3 ms | 0.0% | 75 MiB |
+| `dart` | unbalanced | 131 072 | 24.897 s | 7.8 ms | 0.0% | — (killed at 120 s) |
+| `ruby` | longline | 1 647 756 | 5.591 s | 59.0 ms | 1.0% | 692 MiB |
+| `html` | nested | 262 141 | 4.484 s | 10.6 ms | 0.2% | 152 MiB |
+| `haskell` | longline | 1 997 280 | 1.508 s | 60.1 ms | 3.8% | 310 MiB |
+| `go` | longline | 1 880 190 | 1.075 s | 54.5 ms | 4.8% | 226 MiB |
+
+**The parser, not the walk, is the unbounded work on hostile input.** On the three
+worst rows the validation walk is 10–15 ms and the parse is 25–97 seconds: the
+walk is three to four orders of magnitude cheaper. `dart` at 256 KiB of nested
+braces is the extreme measured case — **97.5 seconds for a quarter of the byte
+ceiling**, and at the ceiling it did not finish in 120 s. tree-sitter's GLR parser
+is super-linear in nesting depth on some grammars. These are the **bare** parse
+times, with no deadline. A checked parse (`try_parse`) now stops the parser at
+`DEFAULT_PARSE_DEADLINE`, 10 s, and answers `ParseError::TimedOut`; a caller
+names a tighter one through `try_parse_within`. The parser checks every hundred
+operations, so the thread is released within the deadline plus microseconds
+rather than after 97 s (INV-AST-5).
+
+Two rows are recorded as killed rather than finished: `dart` `nested` and
+`unbalanced` at 2 MiB, and `scala` `longline` at 2 MiB, all by the rig's own
+120-second bound. `scala` `longline` is in the table at **512 KiB**, where it
+completes in 29.8 s; the row in `ast-budget.tsv` carries
+`note bytes=524288_not_2097152_unfinished_at_120s`. A rig that stopped at the
+first of those would have reported 108 rows instead of 112, which is why the
+timeout records the partial row rather than dropping it.
+
+## Markdown is refused before the grammar sees it
+
+`nested` and `unbalanced` on the markdown grammar are not slow: they are refused.
+
+| shape | bytes | outcome | peak RSS |
+|---|---:|---|---:|
+| `representative` | 2 097 147 | accepted | 460 MiB |
+| `longline` | 1 828 282 | accepted | 308 MiB |
+| `nested` | 262 144 | `container-nesting-too-deep` | 4 MiB |
+| `unbalanced` | 262 144 | `container-nesting-too-deep` | 4 MiB |
+
+4 MiB against a 2.1 MiB floor, because nothing was parsed. Before
+`MAX_MARKDOWN_CONTAINERS_PER_LINE` existed, those two rows *aborted the process*:
+tree-sitter-markdown's external scanner serializes its open block containers into
+a fixed 1 024-byte buffer and asserts when they do not fit, and every container
+shape that overflows does so at 255 open containers. The full measurement — 17
+shapes bisected from a child process, and the guard proved from 1 065 of them —
+is in `INVARIANTS.md` under INV-AST-4.
+
+## Bounded fan-out: 100, 1 000, 10 000, 100 000
+
+`try_parse` of a 64 KiB source per parse, over a bounded fan-out. The level's
+index range is split into one contiguous slice per worker at admission, so there
+is no queue to overflow and no lock to hold, and `thread::scope` joins every
+worker. Eight workers on fifteen cores; **the host's cap is fifteen, so eight was
+chosen and named rather than assumed**.
+
+| grammar | level | p50 | p99 | max | wall | throughput | peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rust` | 100 | 5 625 ns | 181 125 ns | 194 875 ns | 0.0004 s | 15 519 MB/s | 195 MiB |
+| `rust` | 1 000 | 2 500 ns | 21 500 ns | 211 541 ns | 0.0009 s | 73 340 MB/s | 195 MiB |
+| `rust` | 10 000 | 1 042 ns | 5 000 ns | 84 875 ns | 0.0030 s | 217 045 MB/s | 196 MiB |
+| `rust` | 100 000 | 292 ns | 3 125 ns | 718 833 ns | 0.0122 s | 544 714 MB/s | 198 MiB |
+| `dart` | 100 | 708 ns | 50 667 ns | 81 666 ns | 0.0004 s | 14 665 MB/s | 327 MiB |
+| `dart` | 1 000 | 1 916 ns | 9 833 ns | 581 375 ns | 0.0009 s | 68 744 MB/s | 329 MiB |
+| `dart` | 10 000 | 750 ns | 3 625 ns | 263 834 ns | 0.0030 s | 188 787 MB/s | 330 MiB |
+| `dart` | 100 000 | 458 ns | 2 000 ns | 4 941 542 ns | 0.0332 s | 200 275 MB/s | 329 MiB |
+| `javascript` | 100 | 2 458 ns | 186 833 ns | 189 750 ns | 0.0004 s | 17 495 MB/s | 258 MiB |
+| `javascript` | 1 000 | 2 084 ns | 12 125 ns | 194 500 ns | 0.0008 s | 85 925 MB/s | 258 MiB |
+| `javascript` | 10 000 | 1 167 ns | 4 333 ns | 182 541 ns | 0.0031 s | 209 961 MB/s | 257 MiB |
+| `javascript` | 100 000 | 375 ns | 2 917 ns | 3 333 583 ns | 0.0119 s | 552 395 MB/s | 259 MiB |
+
+All 112 tier runs exited 0 and refused nothing: 64 KiB of each grammar's own
+source is inside every ceiling. **Peak RSS is flat in the level** — 195 to 198 MiB
+across four orders of magnitude of concurrency for `rust`, because each worker
+holds one tree at a time and the trees are 64 KiB sources. That is the number
+worth having: the per-parse bound is what makes a fleet of them bounded.
+
+The p99 falls as the level rises because a worker finishing its slice is retired
+and the level's per-parse latency is measured over fewer contending threads, not
+because the parse got cheaper: throughput rises by 35x from 100 to 100 000 for
+`rust`, which is the eight workers being filled rather than any per-parse
+improvement. `dart`'s 4.94 ms maximum at 100 000 is a scheduler artifact of eight
+workers on a fifteen-core host, not a parse: `dart`'s p99 at the same level is
+2.0 us.

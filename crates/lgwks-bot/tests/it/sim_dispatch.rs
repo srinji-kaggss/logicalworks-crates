@@ -166,9 +166,14 @@ impl Run {
         self.entered.get()
     }
 
-    /// A count drawn from this run's seed, in `1..=span`.
-    fn churn(&self, sim: &mut sim::Sim, span: u32) -> usize {
-        usize::try_from(sim.rng().between(1, span)).unwrap_or(1)
+    /// A count drawn from this run's seed, in `1..=span`, or `None` when the
+    /// draw does not fit this host's address space.
+    ///
+    /// `None` rather than a count of one: a stand-in here would be a scenario
+    /// that churned once on a host that could not address the draw, and the
+    /// failure this family looks for is exactly a scenario that did not run.
+    fn churn(&self, sim: &mut sim::Sim, span: u32) -> Option<usize> {
+        usize::try_from(sim.rng().between(1, span)).ok()
     }
 }
 
@@ -205,7 +210,7 @@ fn write_ahead(band: Band) -> TestResult {
         // fact with its own failure mode.
         sim.record("write-ahead-holds");
         sim.trace
-            .record_count("write-ahead-kinds", at_handoff.len());
+            .record_number("write-ahead-kinds", at_handoff.len());
         Ok(())
     })
 }
@@ -228,7 +233,7 @@ fn outcome_after(band: Band) -> TestResult {
         );
         sim.record("outcome-recorded-last");
         sim.trace
-            .record_count("outcome-events", run.recorded()?.len());
+            .record_number("outcome-events", run.recorded()?.len());
         Ok(())
     })
 }
@@ -259,9 +264,9 @@ fn restart_holds(band: Band) -> TestResult {
         );
         sim.record("recovered-unknown-held");
         sim.trace
-            .record_u64("restart-entered", u64::from(run.entered()));
+            .record_number("restart-entered", u64::from(run.entered()));
         sim.trace
-            .record_count("restart-pending", second.pending().len());
+            .record_number("restart-pending", second.pending().len());
         Ok(())
     })
 }
@@ -293,7 +298,7 @@ fn restart_lands(band: Band) -> TestResult {
         );
         sim.record("landed-attempt-retired");
         sim.trace
-            .record_u64("land-entered", u64::from(run.entered()));
+            .record_number("land-entered", u64::from(run.entered()));
         Ok(())
     })
 }
@@ -338,7 +343,7 @@ fn not_applied_retries(band: Band) -> TestResult {
         );
         sim.record("not-applied-reopens");
         sim.trace
-            .record_count("retry-events", run.recorded()?.len());
+            .record_number("retry-events", run.recorded()?.len());
         Ok(())
     })
 }
@@ -350,14 +355,16 @@ fn applied_never_retries(band: Band) -> TestResult {
         let mut second = restart_and_settle(&run, EffectEvidence::Applied)?;
         let after_settle = run.entered();
 
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..later {
             drop(second.tick());
         }
         assert_eq!(run.entered(), after_settle, "a settled attempt ran again");
         sim.record("applied-never-reopens");
         sim.trace
-            .record_u64("applied-entered", u64::from(run.entered()));
+            .record_number("applied-entered", u64::from(run.entered()));
         Ok(())
     })
 }
@@ -367,7 +374,9 @@ fn ladder_once(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let run = Run::new();
         let mut bot = run.lands()?;
-        let ticks = run.churn(sim, 4);
+        let ticks = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..ticks {
             drop(bot.tick());
         }
@@ -379,9 +388,9 @@ fn ladder_once(band: Band) -> TestResult {
             "a prepared dispatch with no recorded outcome is a ladder that stopped halfway"
         );
         sim.record("ladder-closed");
-        sim.trace.record_count("ladder-prepared", prepared);
-        sim.trace.record_count("ladder-outcomes", outcomes);
-        sim.trace.record_count("ladder-ticks", ticks);
+        sim.trace.record_number("ladder-prepared", prepared);
+        sim.trace.record_number("ladder-outcomes", outcomes);
+        sim.trace.record_number("ladder-ticks", ticks);
         Ok(())
     })
 }
@@ -406,7 +415,7 @@ fn attempt_continues(band: Band) -> TestResult {
              make every recovered key foreign"
         );
         sim.record("attempt-sequence-continues");
-        sim.trace.record_count("attempt-keys", keys.len());
+        sim.trace.record_number("attempt-keys", keys.len());
         Ok(())
     })
 }
@@ -422,7 +431,7 @@ fn pending_names_key(band: Band) -> TestResult {
         let pending = bot.pending();
         if pending.is_empty() {
             sim.record("nothing-outstanding");
-            sim.trace.record_count("pending-none", 0);
+            sim.trace.record_number("pending-none", 0);
             return Ok(());
         }
         for work in &pending {
@@ -433,7 +442,7 @@ fn pending_names_key(band: Band) -> TestResult {
             );
         }
         sim.record("pending-names-key");
-        sim.trace.record_count("pending", pending.len());
+        sim.trace.record_number("pending", pending.len());
         Ok(())
     })
 }
@@ -447,7 +456,9 @@ fn held_not_exhausted(band: Band) -> TestResult {
         let mut second = run.never()?;
         let held = second.tick();
         let before = run.entered();
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..later {
             drop(second.tick());
         }
@@ -457,10 +468,10 @@ fn held_not_exhausted(band: Band) -> TestResult {
             "a held attempt re-entered the body on a later tick, so it was not held"
         );
         sim.record("held-not-retried");
-        sim.trace.record_u64("held-entered", u64::from(before));
+        sim.trace.record_number("held-entered", u64::from(before));
         sim.trace
-            .record_u64("held-tick-refused", u64::from(held.is_err()));
-        sim.trace.record_count("held-later-ticks", later);
+            .record_number("held-tick-refused", u64::from(held.is_err()));
+        sim.trace.record_number("held-later-ticks", later);
         Ok(())
     })
 }
@@ -481,8 +492,8 @@ fn settlement_journaled(band: Band) -> TestResult {
              back with the same unknown it just cleared"
         );
         sim.record("settlement-journaled");
-        sim.trace.record_count("settle-before", before);
-        sim.trace.record_count("settle-after", after);
+        sim.trace.record_number("settle-before", before);
+        sim.trace.record_number("settle-after", after);
         Ok(())
     })
 }
@@ -497,7 +508,9 @@ fn settle_is_idempotent(band: Band) -> TestResult {
 
         bot.resolve_effect(&key, EffectEvidence::NotApplied)?;
         let after_first = run.recorded()?.len();
-        let repeats = run.churn(sim, 4);
+        let repeats = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..repeats {
             drop(bot.resolve_effect(&key, EffectEvidence::NotApplied));
         }
@@ -507,8 +520,8 @@ fn settle_is_idempotent(band: Band) -> TestResult {
             "settling the same key again appended another outcome"
         );
         sim.record("settle-idempotent");
-        sim.trace.record_count("idempotent-events", after_first);
-        sim.trace.record_count("idempotent-repeats", repeats);
+        sim.trace.record_number("idempotent-events", after_first);
+        sim.trace.record_number("idempotent-repeats", repeats);
         Ok(())
     })
 }
@@ -538,9 +551,9 @@ fn store_isolation(band: Band) -> TestResult {
             "the second controller disturbed the first store's record"
         );
         sim.record("stores-isolated");
-        sim.trace.record_count("isolation-first", first_events);
+        sim.trace.record_number("isolation-first", first_events);
         sim.trace
-            .record_count("isolation-second", second.recorded()?.len());
+            .record_number("isolation-second", second.recorded()?.len());
         Ok(())
     })
 }
@@ -549,7 +562,9 @@ fn store_isolation(band: Band) -> TestResult {
 fn crash_loop(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let run = Run::new();
-        let cycles = run.churn(sim, 8);
+        let cycles = run
+            .churn(sim, 8)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..cycles {
             drop(run.lands()?.tick());
         }
@@ -560,7 +575,7 @@ fn crash_loop(band: Band) -> TestResult {
              loop that re-sends what already landed is the duplicate this is about"
         );
         sim.record("crash-loop-converges");
-        sim.trace.record_count("crash-cycles", cycles);
+        sim.trace.record_number("crash-cycles", cycles);
         Ok(())
     })
 }
@@ -573,7 +588,9 @@ fn unknown_survives(band: Band) -> TestResult {
         drop(bot.tick());
         let key = run.first_key()?;
         let before = run.recorded()?.len();
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
 
         for _ in 0..later {
             drop(bot.tick());
@@ -589,8 +606,8 @@ fn unknown_survives(band: Band) -> TestResult {
         );
         sim.record("unknown-survives-ticks");
         sim.trace
-            .record_count("survive-events", run.recorded()?.len());
-        sim.trace.record_count("survive-ticks", later);
+            .record_number("survive-events", run.recorded()?.len());
+        sim.trace.record_number("survive-ticks", later);
         Ok(())
     })
 }
@@ -610,7 +627,9 @@ fn repeat_settle_safe(band: Band) -> TestResult {
         bot.resolve_effect(&key, evidence)?;
         let settled = run.count(EventKind::OutcomeObserved)?;
 
-        let churn = run.churn(sim, 8);
+        let churn = run
+            .churn(sim, 8)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..churn {
             drop(bot.tick());
             drop(bot.resolve_effect(&key, evidence));
@@ -621,8 +640,8 @@ fn repeat_settle_safe(band: Band) -> TestResult {
             "churning ticks and settles after a settlement duplicated the outcome"
         );
         sim.record("repeat-churn-safe");
-        sim.trace.record_count("churn-rounds", churn);
-        sim.trace.record_count("churn-outcomes", settled);
+        sim.trace.record_number("churn-rounds", churn);
+        sim.trace.record_number("churn-outcomes", settled);
         Ok(())
     })
 }

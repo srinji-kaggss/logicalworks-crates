@@ -24,16 +24,50 @@
 #[non_exhaustive]
 pub struct Resolved {
     /// Package name exactly as `Cargo.lock` spells it.
-    pub name: String,
+    name: String,
     /// Resolved version.
-    pub version: String,
+    version: String,
     /// True when the package has no `source` key, meaning Cargo resolved it
     /// from the filesystem: a workspace member or a path dependency.
-    pub local: bool,
+    local: bool,
     /// The `checksum` key when present: sha256 of the `.crate` file for
     /// registry packages. Absent for local packages and for git sources,
     /// which Cargo tracks by revision instead.
-    pub checksum: Option<String>,
+    checksum: Option<String>,
+}
+
+impl Resolved {
+    /// Package name exactly as `Cargo.lock` spells it.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The version Cargo resolved this package to.
+    ///
+    /// A resolved package always has one: a block that declares no version is
+    /// refused as [`LockError::VersionlessPackage`] rather than read with an
+    /// invented one, because every comparison this value feeds is a comparison
+    /// about the version the build actually resolved.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Whether Cargo resolved this package from the filesystem: a workspace
+    /// member or a path dependency, which is a package with no `source` key.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        self.local
+    }
+
+    /// The `checksum` key when present: sha256 of the `.crate` file for a
+    /// registry package, and `None` for a local package and for a git source,
+    /// which Cargo tracks by revision instead.
+    #[must_use]
+    pub fn checksum(&self) -> Option<&str> {
+        self.checksum.as_deref()
+    }
 }
 
 /// A `[[package]]` block that could not be read.
@@ -46,6 +80,17 @@ pub struct Resolved {
 pub enum LockError {
     /// A package block declared no `name`.
     NamelessPackage {
+        /// Line where the offending block opened.
+        line: usize,
+    },
+    /// A package block declared no `version`.
+    ///
+    /// Refused rather than read with an empty version: a resolved package is an
+    /// identity of name *and* version, and a version that no line declared is a
+    /// value every downstream comparison would then decide on. Cargo writes
+    /// `version` for every locked package, so this is a hand-edited or truncated
+    /// file, which is the shape this reader refuses everywhere else.
+    VersionlessPackage {
         /// Line where the offending block opened.
         line: usize,
     },
@@ -70,6 +115,9 @@ impl std::fmt::Display for LockError {
         match *self {
             Self::NamelessPackage { line } => {
                 write!(f, "[[package]] block at line {line} has no name")
+            }
+            Self::VersionlessPackage { line } => {
+                write!(f, "[[package]] block at line {line} has no version")
             }
             Self::DuplicateKey { ref key, line } => {
                 write!(
@@ -101,8 +149,8 @@ struct Pending {
     /// The `name` key. Absent until the block declares one; a block that ends
     /// without it is refused.
     name: Option<String>,
-    /// The `version` key. A lockfile that omits it yields an empty version
-    /// rather than dropping the package from the audited graph.
+    /// The `version` key. A block that omits it is refused at its own line
+    /// rather than reported with a version no line declared.
     version: Option<String>,
     /// Whether a `source` key was seen. Its absence is Cargo's encoding of a
     /// filesystem-resolved package, which is what `Resolved::local` reports.
@@ -213,31 +261,38 @@ pub fn parse(text: &str) -> Result<Vec<Resolved>, LockError> {
     Ok(out)
 }
 
-/// Takes the block's version, treating an omitted key as the empty string.
-///
-/// Cargo always writes `version` for a locked package, so an absent key means a
-/// hand-edited or truncated file. Reporting the package with an empty version
-/// keeps it visible in the resolved graph instead of dropping it, which is the
-/// conservative direction: an unversioned entry is still audited.
-fn extract_version(pending: &mut Pending) -> String {
-    // If a package has no version declared in lockfile, default to empty string.
-    pending.version.take().unwrap_or_default()
-}
-
 /// Emits the block in progress and clears the accumulator.
 ///
-/// A block that opened but never declared a `name` is a hard refusal at its own
-/// line: dropping it would shrink the audited graph, which is the failure this
-/// reader exists to prevent. A no-op when no block is open, so the trailing
-/// call at end of input is safe.
+/// A block that opened but never declared a `name` or a `version` is a hard
+/// refusal at its own line: dropping it would shrink the audited graph, and
+/// reading it with an invented version would put a value into the resolved
+/// graph that no line declared. Both are the failures this reader exists to
+/// prevent. A no-op when no block is open, so the trailing call at end of input
+/// is safe.
 fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError> {
     if !pending.open {
         return Ok(());
     }
-    let name = pending.name.take().ok_or(LockError::NamelessPackage {
-        line: pending.opened_at,
-    })?;
-    let version = extract_version(pending);
+    let name = match pending.name.take() {
+        Some(name) => name,
+        None => {
+            let refusal = Err(LockError::NamelessPackage {
+                line: pending.opened_at,
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flush: a package block declares no name");
+            return refusal;
+        }
+    };
+    let version = match pending.version.take() {
+        Some(version) => version,
+        None => {
+            let refusal = Err(LockError::VersionlessPackage {
+                line: pending.opened_at,
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flush: a package block declares no version");
+            return refusal;
+        }
+    };
     out.push(Resolved {
         name,
         version,
@@ -315,10 +370,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         let pkgs = parse(SAMPLE)?;
         let local = pkgs
             .iter()
-            .find(|package| package.name == "lgwks_std")
+            .find(|package| package.name() == "lgwks_std")
             .ok_or("lgwks_std should be in the resolved graph")?;
-        assert!(local.local);
-        assert_eq!(local.version, "0.1.0");
+        assert!(local.is_local());
+        assert_eq!(local.version(), "0.1.0");
         Ok(())
     }
 
@@ -327,10 +382,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         let pkgs = parse(SAMPLE)?;
         let serde = pkgs
             .iter()
-            .find(|package| package.name == "serde")
+            .find(|package| package.name() == "serde")
             .ok_or("serde should be in the resolved graph")?;
-        assert!(!serde.local);
-        assert_eq!(serde.version, "1.0.219");
+        assert!(!serde.is_local());
+        assert_eq!(serde.version(), "1.0.219");
         Ok(())
     }
 
@@ -338,7 +393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     fn a_checksum_key_is_captured_for_registry_packages() -> TestResult {
         let input = "[[package]]\nname = \"serde\"\nversion = \"1.0.219\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"abc123def456\"\n";
         let pkgs = parse(input)?;
-        assert_eq!(pkgs[0].checksum.as_deref(), Some("abc123def456"));
+        assert_eq!(pkgs[0].checksum(), Some("abc123def456"));
         Ok(())
     }
 
@@ -347,9 +402,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         let pkgs = parse(SAMPLE)?;
         let local = pkgs
             .iter()
-            .find(|package| package.name == "lgwks_std")
+            .find(|package| package.name() == "lgwks_std")
             .ok_or("lgwks_std should be in the resolved graph")?;
-        assert_eq!(local.checksum, None);
+        assert_eq!(local.checksum(), None);
         Ok(())
     }
 
@@ -357,6 +412,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     fn a_nameless_package_block_is_refused() {
         let input = "[[package]]\nversion = \"1.0.0\"\n";
         assert_eq!(parse(input), Err(LockError::NamelessPackage { line: 1 }));
+    }
+
+    /// A block with a name and no version is not a resolved package: it is
+    /// refused at its own line, where the version belongs, rather than read
+    /// with an empty version every later comparison would then trust.
+    #[test]
+    fn a_versionless_package_block_is_refused() {
+        let input = "[[package]]\nname = \"serde\"\n";
+        assert_eq!(parse(input), Err(LockError::VersionlessPackage { line: 1 }));
     }
 
     #[test]
@@ -371,7 +435,7 @@ version = "0.1.0"
 "#;
         let pkgs = parse(input)?;
         assert_eq!(pkgs.len(), 1);
-        assert_eq!(pkgs[0].name, "lgwks_std");
+        assert_eq!(pkgs[0].name(), "lgwks_std");
         Ok(())
     }
 }

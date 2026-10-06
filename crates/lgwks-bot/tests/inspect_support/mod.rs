@@ -6,12 +6,6 @@
 //! factory here means the estate's inspection fixtures exist once rather than
 //! being copied between the two targets.
 
-// Each target uses a different subset of these fixtures.
-#![allow(
-    dead_code,
-    reason = "each inspection wiring target uses a different subset of these fixtures"
-)]
-
 /// The deterministic simulation substrate, re-included so this module can build
 /// a real effect scope without a second copy of the construction.
 pub(crate) use crate::sim;

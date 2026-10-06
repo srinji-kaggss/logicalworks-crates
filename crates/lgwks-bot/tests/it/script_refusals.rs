@@ -34,7 +34,7 @@ fn a_correct_flow_passes_the_consumers_clippy() -> TestResult {
         &consumer(
             "",
             "",
-            "let kept = guard.len()\n        give back code + i32::try_from(kept).unwrap_or(0)",
+            "let empty = guard.is_empty()\n        give back code + i32::from(empty)",
         ),
     )?;
     assert_compiles(&output);

@@ -4,8 +4,8 @@
 //! rather than a slow unit test:
 //!
 //! 1. **One seed controls everything.** A scenario is a single `u64`. From it
-//!    are derived the fault schedule, the tenant count, the concurrency, the
-//!    partition windows and every draw the scenario makes afterwards. Nothing
+//!    are derived the fault schedule, the tenant count, the partition windows
+//!    and every draw the scenario makes afterwards. Nothing
 //!    reads the clock, the OS scheduler or an unseeded source of entropy, so a
 //!    seed replays exactly.
 //! 2. **Time is virtual.** [`SimClock`] is a `u64` tick counter. The wall
@@ -39,17 +39,8 @@
 //! from a crate, because a simulation whose entropy source is a dependency is
 //! not reproducible across a lockfile bump.
 
-// Each `sim_*` target is its own crate and drives a different subset of this
-// harness, so every family sees items the others never touch. The lint is real
-// per-crate and the allowance is inherent to sharing one harness across them.
-#![allow(
-    dead_code,
-    reason = "each sim_* target uses a different subset of the shared harness"
-)]
-
 pub mod rig;
 
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,8 +48,12 @@ use std::path::{Path, PathBuf};
 // ── Randomness and the trace ──────────────────────────────────────────────
 
 pub(crate) mod seed;
+mod seed_helpers;
 
 pub use seed::{Rng, Trace};
+
+mod band;
+pub use band::{BANDS, Band, SEED_SPACE, band_of, bands};
 
 // ── Time ───────────────────────────────────────────────────────────────────
 
@@ -98,26 +93,22 @@ impl SimClock {
 /// that a scenario sweeps a *range* of severity instead of a fixed one: a
 /// single "network drops things" toggle proves far less than a sweep from one
 /// drop in a thousand to a total partition.
-#[derive(Clone, Copy, Debug)]
+///
+/// Every field is one the substrate or a family carries out. A schedule that
+/// drew a disk fault or a crash tick nobody injected would let a family report
+/// coverage of a disaster that never happened, so a fault a family injects on
+/// its own — a torn tail, a killed child — is drawn by that family from the
+/// run's stream rather than declared here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Faults {
-    /// Per-mille chance a device write is refused outright.
-    pub disk_refuse: u32,
-    /// Per-mille chance a write is torn: the bytes reach the file and the tail
-    /// is garbage, which is the only failure that produces a *lying* journal
-    /// rather than a refusing one.
-    pub disk_tear: u32,
     /// Per-mille chance a message is dropped in flight.
     pub net_drop: u32,
     /// Per-mille chance a message is delivered twice.
     pub net_duplicate: u32,
     /// The tick before which the network is wholly partitioned.
     pub partition_until: u64,
-    /// The tick at which the process dies, if it does.
-    pub crash_at: u64,
     /// How many tenants share the run.
     pub tenants: u32,
-    /// How many effects are in flight at once.
-    pub concurrency: u32,
     /// How many journal generations the run puts in play, so chain forks are
     /// exercised rather than assumed away.
     pub generations: u32,
@@ -126,17 +117,14 @@ pub struct Faults {
 impl Faults {
     /// The schedule for `seed`.
     ///
-    /// The tenant and concurrency counts are cut first, from their own draws,
-    /// so that a change to a fault probability does not renumber every tenant
-    /// in every other scenario. A schedule that shifted wholesale would make
-    /// a regression in one dimension unbisectable in the others.
+    /// The tenant count is cut first, from its own draw, so that a change to a
+    /// fault probability does not renumber every tenant in every other
+    /// scenario. A schedule that shifted wholesale would make a regression in
+    /// one dimension unbisectable in the others.
     pub fn for_seed(seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let tenants = rng.between(1, 65);
-        let concurrency = rng.between(1, 257);
         Self {
-            disk_refuse: rng.between(0, 200),
-            disk_tear: rng.between(0, 120),
             net_drop: rng.between(0, 300),
             net_duplicate: rng.between(0, 150),
             partition_until: if rng.chance(250) {
@@ -144,13 +132,7 @@ impl Faults {
             } else {
                 0
             },
-            crash_at: if rng.chance(300) {
-                u64::from(rng.between(1, 1024))
-            } else {
-                u64::MAX
-            },
             tenants,
-            concurrency,
             generations: rng.between(1, 4),
         }
     }
@@ -196,11 +178,6 @@ impl Envelope {
     /// able to rewrite what the network carried.
     pub fn body(&self) -> &[u8] {
         &self.body
-    }
-
-    /// The tick this envelope became visible at.
-    pub fn due(&self) -> u64 {
-        self.due
     }
 
     /// How many times this envelope has been put on the wire. Above one means
@@ -339,7 +316,7 @@ impl Sim {
     /// Move the virtual clock forward, recording it.
     pub fn tick(&mut self, ticks: u64) -> u64 {
         self.clock.advance(ticks);
-        self.trace.record_u64("tick", self.clock.now());
+        self.trace.record_number("tick", self.clock.now());
         self.clock.now()
     }
 
@@ -379,11 +356,6 @@ impl Sim {
     pub fn advance_and_drain(&mut self, ticks: u64) -> Vec<Envelope> {
         let now = self.tick(ticks);
         self.drain(now)
-    }
-
-    /// Whether the process has died by this point in the run.
-    pub fn has_crashed(&self) -> bool {
-        self.clock.now() >= self.faults.crash_at
     }
 
     /// Append a fact to this run's replay trace.
@@ -442,33 +414,6 @@ impl Drop for Sim {
 
 // ── Scenario drivers ──────────────────────────────────────────────────────
 
-/// A seed band: the seeds one declared test sweeps.
-///
-/// A band rather than a single seed so that a test is a *sweep* and not a
-/// point sample, and a band rather than every seed so that a failure names the
-/// band and the offending seed is recovered from the recorded trace. The union
-/// of the bands is a contiguous sweep of the whole space, so no seed is
-/// quietly untested because of how the bands were cut.
-#[derive(Clone, Copy, Debug)]
-pub struct Band {
-    /// The first seed, inclusive.
-    pub first: u64,
-    /// How many seeds the band covers.
-    pub count: u64,
-}
-
-impl Band {
-    /// A band of `count` seeds starting at `first`.
-    pub const fn new(first: u64, count: u64) -> Self {
-        Self { first, count }
-    }
-
-    /// Every seed in the band.
-    pub fn seeds(&self) -> impl Iterator<Item = u64> + '_ {
-        self.first..self.first.saturating_add(self.count)
-    }
-}
-
 /// Run `body` once per seed in `band`, collecting each run's trace hash.
 ///
 /// Returns the hashes in seed order, so a caller can assert the whole sweep is
@@ -479,72 +424,26 @@ pub fn sweep<F>(band: Band, mut body: F) -> Result<Vec<u64>, Box<dyn Error>>
 where
     F: FnMut(&mut Sim) -> Result<(), Box<dyn Error>>,
 {
-    let mut hashes = Vec::with_capacity(usize::try_from(band.count).unwrap_or(0));
+    let mut hashes = Vec::with_capacity(usize::try_from(band.count)?);
     for seed in band.seeds() {
         let mut sim = Sim::new(seed);
-        if let Err(err) = body(&mut sim) {
-            {
-                let refusal =
-                    Err(format!("seed {seed} did not satisfy the scenario: {err}").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: returning an error to the caller");
-                return refusal;
-            };
+        let failure = match body(&mut sim) {
+            Err(err) => Some(format!("seed {seed} did not satisfy the scenario: {err}")),
+            // A run that recorded nothing hashes to the empty trace whatever path
+            // it took, so its replay would pass without having compared anything.
+            Ok(()) if sim.trace.is_empty() => Some(format!(
+                "seed {seed} recorded nothing, so its replay hash proves nothing"
+            )),
+            Ok(()) => None,
+        };
+        if let Some(reason) = failure {
+            let refusal: Result<Vec<u64>, Box<dyn Error>> = Err(reason.into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: a seed failed its scenario");
+            return refusal;
         }
         hashes.push(sim.hash());
     }
     Ok(hashes)
-}
-
-/// The bands that partition `0..total` into `parts` of them.
-///
-/// Even division with the remainder spread over the low bands, so the bands
-/// are contiguous, disjoint, and together cover every seed with no gap and no
-/// overlap. A suite that leaves a hole in the seed space would be reporting a
-/// coverage it does not have.
-/// The seed space every family sweeps, and how many bands it is cut into.
-///
-/// One pair for the whole simulation layer. Each file that declared its own
-/// would be free to drift, and a family sweeping 64 seeds next to one sweeping
-/// 128 would make a pass rate that means nothing. The seed space is doubled
-/// alongside the band count, so every band holds eight seeds rather than eight
-/// families sharing one — a family registered against band 30 would otherwise
-/// silently sweep the same eight seeds as band 14.
-pub const SEED_SPACE: u64 = 256;
-pub const BANDS: u64 = 32;
-
-/// The one band of seeds a declared test sweeps.
-///
-/// `index` is a registration, not a computation: every call site is a literal
-/// written beside the family that declares it, so an index past the last band is a
-/// registration mistake. It is folded onto a declared band rather than refused,
-/// because `swap_remove` answered it with an out-of-bounds panic whose message
-/// names the length rather than the mistake — and because the alternative,
-/// `expect`, is forbidden here too. Folding means a mistyped band silently reuses
-/// another family's seeds, so the band count is doubled alongside the seed space
-/// and every declared index stays inside it.
-pub fn band_of(index: usize) -> Band {
-    let table = bands(SEED_SPACE, BANDS);
-    let mut widened = table.clone();
-    while widened.len() <= index {
-        match table.last().copied() {
-            Some(last) => widened.push(last),
-            None => return Band::new(0, 1),
-        }
-    }
-    widened.get(index).copied().unwrap_or(Band::new(0, 1))
-}
-
-pub fn bands(total: u64, parts: u64) -> Vec<Band> {
-    let base = total.checked_div(parts).unwrap_or(0);
-    let remainder = total.checked_rem(parts).unwrap_or(0);
-    let mut out = Vec::with_capacity(usize::try_from(parts).unwrap_or(0));
-    let mut cursor = 0u64;
-    for index in 0..parts {
-        let count = base.saturating_add(u64::from(index < remainder));
-        out.push(Band::new(cursor, count));
-        cursor = cursor.saturating_add(count);
-    }
-    out
 }
 
 /// Assert that `body` replays exactly, for every seed in `band`.
@@ -567,62 +466,3 @@ where
     );
     Ok(())
 }
-
-/// The observation a scenario ends with, for cross-family comparison.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outcome {
-    /// Events the journal holds.
-    pub committed: usize,
-    /// Attempts left uncertain by recovery.
-    pub uncertain: usize,
-    /// Attempts recovery knows the status of.
-    pub attempts: usize,
-    /// Effects that actually ran.
-    pub executed: u32,
-    /// Deliveries the network made.
-    pub delivered: u32,
-    /// Deliveries the network lost.
-    pub dropped: u32,
-    /// Deliveries the network made twice.
-    pub duplicated: u32,
-}
-
-impl Outcome {
-    /// Fold an outcome into a trace, so a family that runs a different
-    /// scenario can still be compared with one that runs this one.
-    pub fn record(&self, trace: &mut Trace) {
-        trace.record_u64("committed", u64::try_from(self.committed).unwrap_or(0));
-        trace.record_u64("uncertain", u64::try_from(self.uncertain).unwrap_or(0));
-        trace.record_u64("attempts", u64::try_from(self.attempts).unwrap_or(0));
-        trace.record_u64("executed", u64::from(self.executed));
-        trace.record_u64("delivered", u64::from(self.delivered));
-        trace.record_u64("dropped", u64::from(self.dropped));
-        trace.record_u64("duplicated", u64::from(self.duplicated));
-    }
-
-    /// The outcome a run that achieved nothing reports.
-    ///
-    /// One definition rather than a literal per call site, because a family
-    /// that spelled the zero case differently from another would make the two
-    /// families' traces incomparable, which is the one thing the receipt
-    /// exists to prevent.
-    pub fn empty() -> Self {
-        Self {
-            committed: 0,
-            uncertain: 0,
-            attempts: 0,
-            executed: 0,
-            delivered: 0,
-            dropped: 0,
-            duplicated: 0,
-        }
-    }
-}
-
-/// A per-tenant tally, used by the multi-tenant families to prove isolation
-/// rather than to report an aggregate.
-///
-/// A map rather than a counter because "5,000 tenants, all fine" is a claim
-/// about an aggregate and a defect in one tenant hides inside it. The families
-/// that use this read every entry rather than summing them.
-pub type Tenants = BTreeMap<u32, u32>;
