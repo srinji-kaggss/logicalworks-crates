@@ -43,7 +43,7 @@ mod seeded_sweep;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lgwks_std::task::{
     PoolConfigError, PoolShutdown, SpawnError, block_on, configure_blocking_pool, join_all,
@@ -102,6 +102,22 @@ fn work_for(work: usize) {
     }
 }
 
+/// Holds the burst's first job until a second job is running beside it, or
+/// until [`GENEROUS`] has passed.
+///
+/// Without it, "two jobs ran at once" is a claim about the host's scheduler: on
+/// a fast machine the first job can finish its yields before the second is
+/// submitted, and a correct pool reports a peak of one. Holding the first job
+/// makes overlap a property of the pool. A pool with a ceiling of two or more
+/// starts the second job on another thread and releases this wait; a pool that
+/// ran jobs one at a time never does, and the peak assertion then names it.
+fn wait_for_company(running: &AtomicUsize) {
+    let started = Instant::now();
+    while running.load(Ordering::SeqCst) < 2 && started.elapsed() < GENEROUS {
+        std::thread::yield_now();
+    }
+}
+
 /// One seeded burst through the public bounded entry point, as its trace.
 ///
 /// The peak is asserted but not folded: how many threads the burst had free at
@@ -115,9 +131,13 @@ fn burst_trace(seed: u64, jobs: usize, ceiling: usize) -> u64 {
     for (index, work) in burst(seed, jobs) {
         let running = Arc::clone(&running);
         let peak = Arc::clone(&peak);
+        let holds_for_company = index == 0 && jobs >= 2;
         let handle = try_spawn_blocking(move || {
             let now = running.fetch_add(1, Ordering::SeqCst).saturating_add(1);
             peak.fetch_max(now, Ordering::SeqCst);
+            if holds_for_company {
+                wait_for_company(&running);
+            }
             work_for(work);
             running.fetch_sub(1, Ordering::SeqCst);
             expected(seed, index)
