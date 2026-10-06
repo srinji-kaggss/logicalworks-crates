@@ -758,6 +758,22 @@ fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
     (slice[..cutoff].to_owned(), truncated)
 }
 
+/// Milliseconds in `duration`, saturating at the representable ceiling.
+///
+/// Split through the two infallible `Duration` projections so the ceiling comes
+/// out of saturating arithmetic rather than out of a narrowing conversion whose
+/// failure arm would have had to report a deadline the parser never reached.
+/// `u64::MAX` milliseconds is about half a million years, so the ceiling is
+/// unreachable by a real parse and exists so a caller asking past it gets a
+/// stated bound rather than a wrapped one.
+fn deadline_millis(duration: std::time::Duration) -> u64 {
+    const MILLIS_PER_SEC: u64 = 1_000;
+    duration
+        .as_secs()
+        .saturating_mul(MILLIS_PER_SEC)
+        .saturating_add(u64::from(duration.subsec_millis()))
+}
+
 /// The parser this operation calls, as a seam.
 ///
 /// The shipped value is [`lgwks_ast::try_parse`], and the only other value is a
@@ -1003,7 +1019,7 @@ fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> 
             return base(
                 Verdict::Incomplete {
                     reason: IncompleteReason::ParseDeadlineExceeded {
-                        deadline_ms: crate::clock::duration_to_millis(after),
+                        deadline_ms: deadline_millis(after),
                     },
                 },
                 Some(language_name),

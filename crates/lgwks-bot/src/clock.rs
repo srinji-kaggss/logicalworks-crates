@@ -544,20 +544,6 @@ fn duration_to_nanos(duration: Duration) -> u64 {
         .saturating_add(u64::from(duration.subsec_nanos()))
 }
 
-/// Milliseconds in `duration`, saturating at the representable ceiling.
-///
-/// The sibling of [`duration_to_nanos`] for the callers that *report* a deadline
-/// in milliseconds. Split and saturating for the same reasons: two infallible
-/// projections, and the ceiling produced by the arithmetic rather than by a
-/// value standing in for a conversion that failed.
-pub(crate) fn duration_to_millis(duration: Duration) -> u64 {
-    const MILLIS_PER_SEC: u64 = 1_000;
-    duration
-        .as_secs()
-        .saturating_mul(MILLIS_PER_SEC)
-        .saturating_add(u64::from(duration.subsec_millis()))
-}
-
 /// `nanos` nanoseconds as a [`Duration`].
 ///
 /// The inverse of [`duration_to_nanos`] with no intermediate arithmetic, so

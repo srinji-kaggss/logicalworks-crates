@@ -182,10 +182,13 @@ nobody made.
   the source, or across a non-boundary, has no text to preview; that is the empty
   preview *with* the truncated flag set, so a caller cannot read it as a node with
   genuinely empty text.
-- **`duration_to_millis` is the ceiling's sibling.** `inspect`'s parse-timeout
-  receipt narrowed `Duration::as_millis` with `unwrap_or(u64::MAX)`; it now calls
-  the crate's saturating conversion beside `duration_to_nanos`, so one duration is
-  converted the same way everywhere.
+- **`inspect`'s parse-timeout receipt saturates instead of defaulting.** It
+  narrowed `Duration::as_millis` with `unwrap_or(u64::MAX)`, so a deadline the
+  parser never reached would have been reported as half a million years. It now
+  splits the duration through its two infallible projections and saturates in
+  arithmetic. It lives beside its only caller rather than beside
+  `duration_to_nanos` because the `inspect` feature is what uses it, and a
+  clock helper gated on nothing is dead code in every other build.
 - **`Frontier::decide` names its two answers.** No saturated constraint is
   `Admit`; a saturated one carries the fold's latest deferral.
 - **Two frontier tests refuse rather than default**: a selection round trip with
