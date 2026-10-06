@@ -1827,6 +1827,15 @@ impl<'ast> Visit<'ast> for TryCounter {
     /// Closure bodies are not descended into: a `?` inside a closure belongs
     /// to the closure's own control flow, not to the statement being counted.
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+    /// Nested blocks are not descended into either: each statement inside one
+    /// is inspected on its own by [`TryChainWalker`], so counting it here as
+    /// well charged a loop with every `?` in its body — including those under a
+    /// `let`, which this detector's contract says breaks the chain — and named
+    /// a ten-statement loop a ten-`?` chain. What stays counted is the
+    /// statement's own expression: a `for` iterator, a `while` or `if`
+    /// condition, a `match` scrutinee and an arm written without braces.
+    fn visit_block(&mut self, _block: &'ast syn::Block) {}
 }
 
 /// Counts the `?` operators in a statement's own expression.
@@ -2732,6 +2741,40 @@ pub fn count() -> usize {
     fn three_try_in_one_statement_is_clean() -> TestResult {
         let hits = scan("fn f() -> Result<(), E> {\n    g()?.h()?.i()?;\n    Ok(())\n}\n")?;
         assert!(!rules(&hits).contains(&"long-try-chain"), "{hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_loop_is_not_charged_with_the_statements_in_its_body() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    for x in g()? {\n        let a = x.h()?;\n        let b = a.i()?;\n        b.j()?;\n        b.k()?;\n    }\n    Ok(())\n}\n",
+        )?;
+        assert!(!rules(&hits).contains(&"long-try-chain"), "{hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_chain_inside_a_loop_body_is_still_a_chain() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    loop {\n        g()?.h()?.i()?.j()?;\n    }\n}\n",
+        )?;
+        let hit = hits
+            .iter()
+            .find(|hit| hit.rule == "long-try-chain")
+            .ok_or("a four-`?` statement inside a loop is a chain")?;
+        assert_eq!(
+            hit.line, 3,
+            "the chain is named at its own line, not the loop's"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_loop_header_still_counts_toward_its_own_statement() -> TestResult {
+        let hits = scan(
+            "fn f() -> Result<(), E> {\n    while g()?.h()?.i()?.j()? {\n        let a = k()?;\n    }\n    Ok(())\n}\n",
+        )?;
+        assert!(rules(&hits).contains(&"long-try-chain"), "{hits:?}");
         Ok(())
     }
 
