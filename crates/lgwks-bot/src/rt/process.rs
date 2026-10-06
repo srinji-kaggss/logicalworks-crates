@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use lgwks_deps::tokio::process::Command;
 
-use super::supervise::CleanupReceipt;
+use super::supervise::{CleanupReceipt, Containment};
 
 // The one frame grammar this crate already has (INV-BOT-51): a `u32`
 // big-endian length prefix and the payload it names. Its reading half is reused
@@ -476,15 +476,17 @@ impl CapturedStream {
 pub struct ProcessRun {
     /// The status the engine reported, or `None` when the supervisor stopped
     /// the child (deadline) or could not read a status.
-    status: Option<ExitStatus>,
+    pub(crate) status: Option<ExitStatus>,
     /// Whether this supervisor stopped the child because its deadline elapsed.
-    deadline_fired: bool,
+    pub(crate) deadline_fired: bool,
     /// Captured stdout, empty when the policy was not `Capture`.
-    stdout: CapturedStream,
+    pub(crate) stdout: CapturedStream,
     /// Captured stderr, empty when the policy was not `Capture`.
-    stderr: CapturedStream,
+    pub(crate) stderr: CapturedStream,
     /// Process-group cleanup evidence.
-    cleanup: CleanupReceipt,
+    pub(crate) cleanup: CleanupReceipt,
+    /// What the cleanup read, signalled and could not account for.
+    pub(crate) containment: Containment,
 }
 
 impl ProcessRun {
@@ -554,29 +556,32 @@ impl ProcessRun {
     }
 
     /// Process-group cleanup evidence.
+    ///
+    /// A borrow, where this returned the receipt by value: the receipt carries the
+    /// pids it could not prove gone, so a by-value read would copy that list per
+    /// call.
     #[must_use]
-    pub const fn cleanup(&self) -> CleanupReceipt {
-        self.cleanup
+    pub const fn cleanup(&self) -> &CleanupReceipt {
+        &self.cleanup
     }
 
-    /// Build one run report. Crate-internal: the only producer is the
-    /// supervisor.
-    #[cfg(unix)]
-    pub(crate) fn new(
-        status: Option<ExitStatus>,
-        deadline_fired: bool,
-        stdout: CapturedStream,
-        stderr: CapturedStream,
-        cleanup: CleanupReceipt,
-    ) -> Self {
-        Self {
-            status,
-            deadline_fired,
-            stdout,
-            stderr,
-            cleanup,
-        }
+    /// What the cleanup read, signalled, and could not account for.
+    ///
+    /// The receipt says whether the tree was stopped; this says how much was
+    /// looked at to say it — which mechanism read the process table, how many
+    /// descendants it named, how many a signal reached, which of them were still
+    /// running when the drain ended, and which limit of the mechanism produced
+    /// that. A caller that has to report or re-drive the cleanup reads this.
+    #[must_use]
+    pub const fn containment(&self) -> &Containment {
+        &self.containment
     }
+
+    // No constructor, deliberately. One over these six values is a second copy of
+    // this struct's own field list, and a second copy of a field list is a place
+    // a field can be forgotten — the supervisor is inside the crate, so it fills
+    // the literal, and a caller outside it cannot construct a `#[non_exhaustive]`
+    // type at all.
 }
 /// The retained-byte ceiling [`read_frames`] uses when the caller names none.
 ///

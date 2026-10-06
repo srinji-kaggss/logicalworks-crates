@@ -9,6 +9,84 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — the supervised tree is captured, signalled by pid, and reported (#263)
+
+A group kill reaches the members that exist when it is sent. A descendant that
+called `setsid` has left the group by construction, so this cleanup now names
+every process descended from the leader, signals each one by pid, and reports
+which mechanism ran and which pids it could not prove gone.
+
+- **`Containment` on every report.** `TaskOutcome::containment()` and
+  `ProcessRun::containment()` report the mechanism
+  (`ContainmentMechanism::ProcessTableSnapshot` here, `ProcChildrenTree` on
+  Linux), how many descendants the capture named, how many a signal reached,
+  which of them were still running when the drain ended, and — as
+  `ResidualRisk::{TableUnreadable, CaptureTruncated}` — the limit of the
+  mechanism when there is one. A consumer no longer has to walk the process
+  table itself to answer "what did you stop, and what did you miss".
+- **`CleanupReceipt::CleanupSurvivors { survivors }`.** Its own arm: "the group is
+  gone but a `setsid` descendant of it is still running" and "the group itself is
+  still there" are different facts with different repairs. The pids are named and
+  never truncated.
+- **Breaking, and the reason:** `TaskOutcome::cleanup()` and `ProcessRun::cleanup()`
+  return a reference, and `CleanupReceipt` is no longer `Copy`. The receipt now
+  carries a pid list, and a by-value read would copy it per call.
+  `TaskOutcome::{Completed, Cancelled, Failed}` also gained a `containment` field
+  (private; read it through the accessor). `ShutdownReport::is_clean()` now
+  requires a complete containment report as well as a complete receipt.
+- **The 64-yield retry is gone**, replaced by `CONTAINMENT_ROUNDS = 4`
+  capture-and-signal rounds. Each round re-reads the tree, re-signals the group,
+  signals every captured pid, and observes which are still *running*; the bound is
+  on rounds of evidence rather than on how long a scheduler took. The drop-time
+  fallback keeps a bounded `GROUP_SIGNAL_ATTEMPTS = 4` repeat for the one window a
+  capture cannot reach — a member the leader forks after the capture and before it
+  dies — and signals never follow the reap, so no id is signalled once the OS may
+  reissue it (INV-BOT-12).
+- **Present is not running.** An observation distinguishes a process that has not
+  exited from one that has and awaits its reap, so a child that ended is not
+  reported as a survivor, and the post-reap pass can clear a survivor the platform
+  has since reaped.
+
+**Not claimed.** The capture is a snapshot of the parent relation taken while the
+leader is alive, so a descendant forked *after* the last capture and left in the
+same window, and a descendant orphaned before the cleanup ran, are not signalled.
+Linux `PR_SET_CHILD_SUBREAPER` would re-parent the second class here, which makes
+it findable and unattributable at the same time — a process never observed under
+this root cannot be proved to have come from it rather than from another supervisor
+in the same process — so the read is a tree walk and not an orphan adoption. Both
+limits are named on the receipt through `Containment::residual_risk()` and
+`Containment::is_complete()` rather than left to be inferred from a green test.
+
+Seeded family in `rt::supervise::tests`
+(`sim_a_seeded_drain_reaches_the_models_receipt`,
+`sim_the_same_seed_replays_the_same_drain_trace`,
+`sim_distinct_seeds_drive_distinct_drains`,
+`sim_every_receipt_arm_is_reachable_in_the_family`) drives the real drain against a
+scripted capture, signaller and observer over twelve named seeds, checking every
+receipt arm, every containment count and the post-reap settlement against a model.
+
+- **A real `setsid` escape is stopped, and observed stopped.**
+  `tests/it/process_escape.rs::a_session_escape_is_captured_and_stopped_by_pid`
+  (renamed from `a_session_escape_is_not_reported_as_complete_tree_cleanup`,
+  whose claim was the old group-only boundary) asserts the escapee is gone by
+  `kill -0`, the receipt is `CleanupConfirmed`, and the containment report names
+  a table-reading mechanism, counts the escapee and is complete (INV-BOT-112).
+- **Shutdown no longer aborts a cleanup mid-drain (INV-BOT-156).** This was the
+  root cause of `process_escape`'s unexplained intermittent failure. After its
+  50 ms cooperative grace, `Supervisor::shutdown` aborted every task still
+  running. That included process tasks that had answered the token and were
+  spending capture rounds against `ps`, at p50 16 ms and max 68 ms per snapshot
+  under load. Each such task was then reported `Aborted` with no receipt. That
+  happened in 10 of 1,000 iterations at load 15. Shutdown now keeps
+  absorbing while a spawned process task is live, bounded by
+  `PROCESS_CLEANUP_GRACE` (2 s). The module passes 1,000 of 1,000 at load up to
+  16.6. `shutdown_reports_every_draining_cleanup_rather_than_aborting_it` shuts
+  down 32 trees at once and fails 20 of 20 runs with the bound set to zero.
+- **The escape tests no longer leak.** Their sibling ran `sh -c 'echo; sleep 30'`.
+  Killing the shell orphaned the `sleep`, which kept holding the test's output
+  pipe. That was the "by design" `leaky` verdict the module used to explain away.
+  The sibling now `exec`s its sleep.
+
 ### lgwks_std — `process`: descendant capture, per-process signals, running-set observation (#263)
 
 The `process` feature could stop a group and could not stop a tree. These four
