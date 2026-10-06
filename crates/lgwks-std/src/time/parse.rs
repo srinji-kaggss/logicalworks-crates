@@ -176,29 +176,31 @@ fn parse_time(bytes: &[u8]) -> Result<(u32, u32, u32), ParseError> {
     Ok((hour, minute, second))
 }
 
-/// Computes scaled nanoseconds from variable fractional digit slice.
+/// Computes scaled nanoseconds from a variable fractional digit slice.
 ///
-/// `digits` is `1..=9`. Position `digit_idx` is read only while
-/// `digit_idx < digits`, so every index is inside the fractional run the caller
-/// measured; a byte that is not there contributes `0`, which is exactly what
-/// left-aligning a short fraction means (`0.12` is `120_000_000` ns). Nine
-/// digits scale to at most `999_999_999`, so neither `saturating_*` below can
-/// saturate.
-fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> u32 {
+/// `digits` is `1..=9` and names a run the caller has already measured, so
+/// every position below `digits` is inside the input and a byte that is not
+/// there is refused rather than read as a zero. The positions from `digits`
+/// to nine are the fraction's right-aligned tail: a short fraction
+/// contributes zeros, which is exactly what left-aligning means (`0.12` is
+/// `120_000_000` ns). Nine digits scale to at most `999_999_999`, so neither
+/// `saturating_*` below can saturate.
+fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> Result<u32, ParseError> {
     let mut scaled = 0u32;
     for digit_idx in 0..9 {
         let digit = if digit_idx < digits {
-            let byte = bytes
-                .get(start.saturating_add(digit_idx))
-                .copied()
-                .unwrap_or(b'0');
+            let at = start.saturating_add(digit_idx);
+            let byte = *bytes.get(at).ok_or(ParseError::TooShort {
+                len: bytes.len(),
+                at,
+            })?;
             u32::from(byte.saturating_sub(b'0'))
         } else {
             0
         };
         scaled = scaled.saturating_mul(10).saturating_add(digit);
     }
-    scaled
+    Ok(scaled)
 }
 
 /// Collects and scales fractional digits after the decimal dot.
@@ -220,13 +222,15 @@ fn parse_fraction_digits(
     // `bytes.len()`.
     let digits = cursor.saturating_sub(start);
     if digits == 0 || digits > 9 {
-        Err(ParseError::FractionWidth {
+        let refusal = Err(ParseError::FractionWidth {
             digits,
             at: dot_pos,
-        })
-    } else {
-        Ok(compute_fraction(bytes, start, digits))
+        });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "parse_fraction_digits: refusing a fraction that is empty or over-wide");
+        return refusal;
     }
+    compute_fraction(bytes, start, digits)
 }
 
 /// Parses optional fractional nanoseconds if present.

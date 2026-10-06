@@ -9,6 +9,55 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: the codec and policy primitives, one value per width (9-axis sweep)
+
+Every line of this crate now meets the nine axes and every rust-guard finding is
+repaired at its cause instead of annotated. This first group is the codecs and
+the pure policies: each `unwrap_or` that stood in for a value that is not there
+is gone, replaced by what its case actually means. No public signature changes;
+the one public field-width change is stated below.
+
+- **`leb128` encodes at four widths through one algorithm.** `group_byte` narrowed
+  a masked group through `TryInto` and answered a refusal with `0`, a value no
+  caller could tell from a real group. The group is now read from the value's own
+  little-endian byte order — infallible at `u32`, `u64`, `i32` and `i64` alike —
+  and the four `encode_*_step` copies are one `Emittable` trait with the
+  termination rule per width, so an unsigned and a signed step are written once
+  each instead of four times. Encoded bytes, refusals and offsets are unchanged.
+- **`hex` and `encoding::base64` no longer invent the bytes they do not have.**
+  `decode_pair` indexed a two-character window it documented as panicking, and
+  the base64 encoder read a missing final byte as `0` before masking it away;
+  both now name the bytes they carry, so a short quantum is `Option`-shaped
+  rather than zero-filled. The half-length and quantum-count divisions are exact
+  `div_ceil`s instead of `checked_div(..).unwrap_or(0)`.
+- **`hash::write_framed` builds its length prefix from the length's own bytes.**
+  `u64::try_from(data.len()).unwrap_or(u64::MAX)` would have framed `u64::MAX` for
+  a part too long to name; the prefix is now assembled from the little-endian
+  bytes, which is the length itself on every target Rust supports. The frame
+  width, and so every digest, is unchanged.
+- **`wire::format_descriptor` reports widths in `usize`, the domain
+  `size_of`/`align_of` answer in.** Narrowing an alignment into a `u8` needed a
+  value to report when it did not fit, and that value was indistinguishable from
+  a measurement. `FormatDescriptor::pointer_width_bits` and
+  `::archived_u32_alignment` are now `usize`; the two pinned fixture constants
+  that compared against them moved with it. `Endianness::Unknown` remains the
+  only sentinel, and it is a named variant.
+- **`retry` states its own clamps.** `duration_from_nanos` replaced three
+  sentinels — zero seconds, `u64::MAX` seconds, zero nanoseconds — with the
+  nearest value a `Duration` can name at each bound, and the jitter window is
+  carried as a `NonZeroU128` so the divisor a remainder is taken over exists by
+  type. The backoff sequence, the cap and the inclusive jitter formula are
+  unchanged for every caller.
+- **`time::parse` refuses a fractional run it cannot read.** A missing byte in
+  the fraction was read as `0`, which left-aligns a short fraction correctly and
+  also hides a truncated document; `compute_fraction` now returns the typed
+  `TooShort` refusal the rest of the module returns. `trace::DebugConfig::from_env`
+  reads its three filter sources as three cases, each propagating its own
+  refusal, instead of chaining two reads through one default.
+
+Tests: 201 pass (`nextest -p lgwks_std --all-features`, the leb128, hex, hash,
+encoding, wire, retry and time families).
+
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 
 `Supervisor` had no awaitable join, so a caller that wanted every task finished
