@@ -465,8 +465,6 @@ fn program_after_env<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a
 
 /// Whether an interpreter name is `name` itself, or a versioned spelling of it.
 ///
-/// Whether an interpreter name is the language `name`, allowing a version.
-///
 /// A shebang spells the interpreter the way the language names itself, which is
 /// not how the file extension is spelled: `python3` is the interpreter and `py`
 /// is the extension. So the comparison is against the language's canonical name
@@ -1328,7 +1326,12 @@ fn run_parser(
     };
     let bytes = code.as_bytes();
     let tree = parser.parse_with_options(
-        &mut |offset, _| bytes.get(offset..).unwrap_or_default(),
+        // The parser reads the source through a closure that must answer with a
+        // slice, so the end of the source is expressed as an empty one. Clamping
+        // the offset to the source's length is what makes the split total: an
+        // offset at or past the last byte then yields exactly the empty slice,
+        // which is what the parser reads as the end of its input.
+        &mut |offset, _| bytes.split_at(offset.min(bytes.len())).1,
         None,
         Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
     );
@@ -1418,8 +1421,10 @@ pub fn markdown_containers(source: &str, limit: usize) -> Option<usize> {
         let (indent_columns, rest) = split_indent(line);
         // Two spaces per level of indentation-nested container: the narrowest
         // indent a real nested list carries. A tab is four columns, which is the
-        // width every markdown tool agrees on for one.
-        let from_indent = indent_columns.checked_div(2).unwrap_or(0);
+        // width every markdown tool agrees on for one. The divisor is a
+        // non-zero constant, so the division saturates rather than standing in a
+        // column count for a divisor that does not exist.
+        let from_indent = indent_columns.saturating_div(2);
         let counted = from_indent.saturating_add(count_markers(rest));
         if counted > limit {
             return Some(counted);
@@ -2018,7 +2023,8 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_costs_the_same_per_node_however_wide_the_tree_is() {
+    fn the_walk_costs_the_same_per_node_however_wide_the_tree_is()
+    -> Result<(), Box<dyn std::error::Error>> {
         // The measured regression behind #277, asserted as a bound rather than
         // a timing: the old walk indexed children, which is `O(index)` on a
         // recovery-heavy tree, so the per-node cost grew with the root's width.
@@ -2035,24 +2041,44 @@ mod tests {
             let source = "(".repeat(width);
             let parsed = parse(&source, Language::Rust);
             let root = parsed.root();
+            // The root counts as a node, so the model never reports zero and the
+            // divisor below is a count rather than a stand-in for one.
             let nodes = positional_walk(&root).0.max(1);
             let started = std::time::Instant::now();
             let metrics = inspect_ast(&root, None);
             let elapsed = started.elapsed().as_nanos();
             assert_eq!(metrics.nodes, nodes, "the model and the walk disagree");
-            per_node_nanos.push(
-                elapsed
-                    .checked_div(u128::try_from(nodes).unwrap_or(1))
-                    .unwrap_or(0),
-            );
+            per_node_nanos.push(elapsed.saturating_div(nanos_per(nodes)?));
         }
-        let cheapest = per_node_nanos.iter().copied().min().unwrap_or(0);
-        let dearest = per_node_nanos.iter().copied().max().unwrap_or(0);
+        let cheapest = per_node_nanos
+            .iter()
+            .copied()
+            .min()
+            .ok_or("four widths produced no per-node cost")?;
+        let dearest = per_node_nanos
+            .iter()
+            .copied()
+            .max()
+            .ok_or("four widths produced no per-node cost")?;
         assert!(
             dearest <= cheapest.saturating_mul(4),
             "per-node walk cost {cheapest}..={dearest} ns across widths \
              {WIDTHS:?}; the cost must not scale with fan-out"
         );
+        Ok(())
+    }
+
+    /// `nodes` as the divisor a per-node cost is taken over.
+    ///
+    /// The node count is a `usize` because the walk counts in one, and a per-node
+    /// nanosecond figure is a `u128` because a wide tree's elapsed time is; the
+    /// conversion is stated here rather than substituted for at each call site.
+    fn nanos_per(nodes: usize) -> Result<u128, Box<dyn std::error::Error>> {
+        let divisor = u128::try_from(nodes)?;
+        if divisor == 0 {
+            return Err("a per-node cost over no nodes is not a cost".into());
+        }
+        Ok(divisor)
     }
 
     #[test]
@@ -2463,7 +2489,6 @@ mod tests {
         // extension to read.
         assert_shebang_is_rust("#!/usr/bin/env rust\n");
         // A version-pinned interpreter names the same language.
-        // A version-pinned interpreter names the same language.
         assert_shebang_is_rust("#!/usr/bin/rust\n");
         // `rustc` is a Rust *tool*, not the interpreter the table claims,
         // and the trailing `c` is not a version suffix. Resolving it would
@@ -2849,7 +2874,8 @@ mod tests {
     }
 
     #[test]
-    fn the_container_count_names_the_shapes_the_scanner_overflows_on() {
+    fn the_container_count_names_the_shapes_the_scanner_overflows_on()
+    -> Result<(), Box<dyn std::error::Error>> {
         // The counting rules against the sources the scanner was measured to
         // abort on: at that depth the guard must refuse, and at a depth inside
         // the bound it must not. The count is the number of containers the
@@ -2876,8 +2902,15 @@ mod tests {
                  {limit}, and must pass",
                 per_repetition.saturating_mul(inside)
             );
-            let counted = markdown_containers(&format!("{}x\n", fragment.repeat(aborts_at)), limit)
-                .unwrap_or(0);
+            let Some(counted) =
+                markdown_containers(&format!("{}x\n", fragment.repeat(aborts_at)), limit)
+            else {
+                return Err(format!(
+                    "{fragment:?} at {aborts_at} repetitions sits inside the bound of {limit}, so it \
+                     cannot exercise the margin the guard keeps"
+                )
+                .into());
+            };
             assert!(
                 counted >= per_repetition.saturating_mul(aborts_at),
                 "{fragment:?} at {aborts_at} repetitions opens {} containers, which the \
@@ -2885,6 +2918,7 @@ mod tests {
                 per_repetition.saturating_mul(aborts_at)
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -3211,15 +3245,13 @@ mod feature_matrix_tests {
     /// per row.
     const DECLARED_GRAMMARS: usize = 28;
 
-    /// What one declared grammar must accept and refuse.
-    struct GrammarFixture {
-        /// The [`Language::name`] this row covers.
-        language: &'static str,
-        /// Source the compiled grammar must accept without a recovery node.
-        valid: &'static str,
-        /// Source the compiled grammar must refuse as `InvalidSyntax`.
-        malformed: &'static str,
-    }
+    /// One row of the fixture table: the grammar's stable name, source it must
+    /// accept, and source it must refuse.
+    ///
+    /// A tuple rather than a struct with three named fields because the table is
+    /// twenty-eight rows of data and a row's shape says nothing the type does
+    /// not: every reader destructures it, so each use names the field it reads.
+    type GrammarFixture = (&'static str, &'static str, &'static str);
 
     /// One valid and one malformed fixture per declared grammar.
     ///
@@ -3234,87 +3266,55 @@ mod feature_matrix_tests {
     /// variant, because a row must be nameable in a build whose feature did not
     /// compile the variant: this table is complete in every configuration, and
     /// `Language::ALL` decides which rows a given build runs.
+    ///
+    /// ```text
+    /// (name, valid source, malformed source)
+    /// ```
     const FIXTURES: &[GrammarFixture] = &[
-        GrammarFixture {
-            language: "bash",
-            valid: "echo hello\n",
-            malformed: "echo \"unterminated\n",
-        },
-        GrammarFixture {
-            language: "c",
-            valid: "int main(void) { return 0; }\n",
-            malformed: "int main(void) { return 0;\n",
-        },
-        GrammarFixture {
-            language: "cpp",
-            valid: "int main() { return 0; }\n",
-            malformed: "int main() { return 0;\n",
-        },
-        GrammarFixture {
-            language: "csharp",
-            valid: "class A { }\n",
-            malformed: "class A {\n",
-        },
-        GrammarFixture {
-            language: "css",
-            valid: "a { color: red; }\n",
-            malformed: "a { color: red;\n",
-        },
-        GrammarFixture {
-            language: "dart",
-            valid: "void main() {}\n",
-            malformed: "void main() {\n",
-        },
-        GrammarFixture {
-            language: "elixir",
-            valid: "defmodule A do\n  def f, do: 1\nend\n",
-            malformed: "defmodule A do\n  def f, do: 1\n",
-        },
-        GrammarFixture {
-            language: "go",
-            valid: "package main\n\nfunc main() {}\n",
-            malformed: "package main\n\nfunc main() {\n",
-        },
-        GrammarFixture {
-            language: "haskell",
-            valid: "main = putStrLn \"hi\"\n",
-            malformed: "main = putStrLn \"hi\n",
-        },
-        GrammarFixture {
-            language: "hcl",
-            valid: "resource \"a\" \"b\" {\n}\n",
-            malformed: "resource \"a\" \"b\" {\n",
-        },
-        GrammarFixture {
-            language: "html",
-            valid: "<!DOCTYPE html>\n<html><body><p>hi</p></body></html>\n",
-            malformed: "<html><body><p>hi\n",
-        },
-        GrammarFixture {
-            language: "java",
-            valid: "class A {}\n",
-            malformed: "class A {\n",
-        },
-        GrammarFixture {
-            language: "javascript",
-            valid: "const a = 1;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "json",
-            valid: "{\"a\": 1}\n",
-            malformed: "{\"a\": 1\n",
-        },
-        GrammarFixture {
-            language: "kotlin",
-            valid: "fun main() {}\n",
-            malformed: "fun main() {\n",
-        },
-        GrammarFixture {
-            language: "lua",
-            valid: "local a = 1\n",
-            malformed: "function f(\n",
-        },
+        ("bash", "echo hello\n", "echo \"unterminated\n"),
+        (
+            "c",
+            "int main(void) { return 0; }\n",
+            "int main(void) { return 0;\n",
+        ),
+        (
+            "cpp",
+            "int main() { return 0; }\n",
+            "int main() { return 0;\n",
+        ),
+        ("csharp", "class A { }\n", "class A {\n"),
+        ("css", "a { color: red; }\n", "a { color: red;\n"),
+        ("dart", "void main() {}\n", "void main() {\n"),
+        (
+            "elixir",
+            "defmodule A do\n  def f, do: 1\nend\n",
+            "defmodule A do\n  def f, do: 1\n",
+        ),
+        (
+            "go",
+            "package main\n\nfunc main() {}\n",
+            "package main\n\nfunc main() {\n",
+        ),
+        (
+            "haskell",
+            "main = putStrLn \"hi\"\n",
+            "main = putStrLn \"hi\n",
+        ),
+        (
+            "hcl",
+            "resource \"a\" \"b\" {\n}\n",
+            "resource \"a\" \"b\" {\n",
+        ),
+        (
+            "html",
+            "<!DOCTYPE html>\n<html><body><p>hi</p></body></html>\n",
+            "<html><body><p>hi\n",
+        ),
+        ("java", "class A {}\n", "class A {\n"),
+        ("javascript", "const a = 1;\n", "function f() {\n"),
+        ("json", "{\"a\": 1}\n", "{\"a\": 1\n"),
+        ("kotlin", "fun main() {}\n", "fun main() {\n"),
+        ("lua", "local a = 1\n", "function f(\n"),
         // Markdown's refusal surface is its table scanner:
         // `pipe_table_delimiter_row` in the block grammar requires a `|` after
         // every delimiter cell, so a header row followed by `|---` cannot
@@ -3323,66 +3323,30 @@ mod feature_matrix_tests {
         // *this* compiled grammar refuses, so a grammar bump that starts
         // accepting it fails this row rather than passing quietly. The valid
         // row carries a table written the way that scanner accepts it.
-        GrammarFixture {
-            language: "markdown",
-            valid: "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
-            malformed: "| a |\n|---\n| b |\n",
-        },
-        GrammarFixture {
-            language: "nix",
-            valid: "{ pkgs }: pkgs.hello\n",
-            malformed: "let a = 1;\n",
-        },
-        GrammarFixture {
-            language: "php",
-            valid: "<?php echo \"hi\";\n",
-            malformed: "<?php function f() {\n",
-        },
-        GrammarFixture {
-            language: "python",
-            valid: "def f():\n    return 1\n",
-            malformed: "def f(:\n    return 1\n",
-        },
-        GrammarFixture {
-            language: "ruby",
-            valid: "def f\n  1\nend\n",
-            malformed: "def f\n  1\n",
-        },
-        GrammarFixture {
-            language: "rust",
-            valid: "fn main() {}\n",
-            malformed: "fn main( {\n",
-        },
-        GrammarFixture {
-            language: "scala",
-            valid: "object A { def f = 1 }\n",
-            malformed: "object A { def f = 1\n",
-        },
-        GrammarFixture {
-            language: "solidity",
-            valid: "contract A {}\n",
-            malformed: "contract A {\n",
-        },
-        GrammarFixture {
-            language: "swift",
-            valid: "func f() {}\n",
-            malformed: "func f() {\n",
-        },
-        GrammarFixture {
-            language: "tsx",
-            valid: "const A = () => <div />;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "typescript",
-            valid: "const a: number = 1;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "yaml",
-            valid: "a: 1\n",
-            malformed: "a: [1, 2\n",
-        },
+        (
+            "markdown",
+            "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "| a |\n|---\n| b |\n",
+        ),
+        ("nix", "{ pkgs }: pkgs.hello\n", "let a = 1;\n"),
+        ("php", "<?php echo \"hi\";\n", "<?php function f() {\n"),
+        (
+            "python",
+            "def f():\n    return 1\n",
+            "def f(:\n    return 1\n",
+        ),
+        ("ruby", "def f\n  1\nend\n", "def f\n  1\n"),
+        ("rust", "fn main() {}\n", "fn main( {\n"),
+        (
+            "scala",
+            "object A { def f = 1 }\n",
+            "object A { def f = 1\n",
+        ),
+        ("solidity", "contract A {}\n", "contract A {\n"),
+        ("swift", "func f() {}\n", "func f() {\n"),
+        ("tsx", "const A = () => <div />;\n", "function f() {\n"),
+        ("typescript", "const a: number = 1;\n", "function f() {\n"),
+        ("yaml", "a: 1\n", "a: [1, 2\n"),
     ];
 
     /// Every compiled grammar reads its own language, and refuses a source that
@@ -3400,18 +3364,17 @@ mod feature_matrix_tests {
         let mut failures: Vec<String> = Vec::new();
         for &language in Language::ALL {
             let name = language.name();
-            let Some(fixture) = FIXTURES.iter().find(|row| row.language == name) else {
+            let Some(&(_, valid, malformed)) = FIXTURES.iter().find(|row| row.0 == name) else {
                 failures.push(format!("`{name}` is compiled but has no fixture row"));
                 continue;
             };
-            if let Err(refusal) = try_parse(fixture.valid, language) {
+            if let Err(refusal) = try_parse(valid, language) {
                 failures.push(format!("`{name}` refused its valid fixture: {refusal}"));
             }
-            match try_parse(fixture.malformed, language) {
+            match try_parse(malformed, language) {
                 Err(ParseError::InvalidSyntax { .. }) => {}
                 Ok(_) => failures.push(format!(
-                    "`{name}` accepted a malformed fixture: {:?}",
-                    fixture.malformed
+                    "`{name}` accepted a malformed fixture: {malformed:?}"
                 )),
                 Err(other) => failures.push(format!(
                     "`{name}` refused a malformed fixture as {other}, not InvalidSyntax"
@@ -3433,13 +3396,9 @@ mod feature_matrix_tests {
     #[test]
     fn fixture_table_is_one_row_per_declared_grammar() {
         let mut covered: Vec<&str> = Vec::new();
-        for row in FIXTURES {
-            assert!(
-                !covered.contains(&row.language),
-                "two fixture rows cover `{}`",
-                row.language
-            );
-            covered.push(row.language);
+        for &(name, _, _) in FIXTURES {
+            assert!(!covered.contains(&name), "two fixture rows cover `{name}`");
+            covered.push(name);
         }
         assert_eq!(
             covered.len(),
@@ -3454,13 +3413,10 @@ mod feature_matrix_tests {
     #[cfg(feature = "full")]
     #[test]
     fn fixture_table_names_exactly_the_grammars_full_compiles() {
-        for row in FIXTURES {
+        for &(name, _, _) in FIXTURES {
             assert!(
-                Language::ALL
-                    .iter()
-                    .any(|language| language.name() == row.language),
-                "fixture row `{}` names no grammar that `full` compiled",
-                row.language
+                Language::ALL.iter().any(|language| language.name() == name),
+                "fixture row `{name}` names no grammar that `full` compiled"
             );
         }
         assert_eq!(
