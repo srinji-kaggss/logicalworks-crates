@@ -46,6 +46,8 @@
 //! # }
 //! ```
 
+use crate::journal::frame::SaturatingFrom;
+
 /// The shape a seeded payload takes.
 ///
 /// Drawn per seed rather than per call, so one scenario is one story about one
@@ -94,12 +96,14 @@ impl StubModel {
     pub fn from_seed(seed: u64) -> Self {
         let mut state = seed ^ 0x9109_2d4d_5eed_0f11;
         let draw = next(&mut state);
-        // The table's length is a constant, so the modulo is exact and the index
-        // is in bounds by construction; `usize::try_from` narrows rather than
-        // casts, per the crate's no-`as` rule.
-        let span = u64::try_from(SHAPES.len()).unwrap_or(1);
-        let index = usize::try_from(draw.checked_rem(span).unwrap_or(0)).unwrap_or_default();
-        let shape = SHAPES.get(index).copied().unwrap_or(Shape::WellFormed);
+        // Reduce the draw into the table's range with `rem_euclid`, which is
+        // total for every non-zero divisor and the table's length is a non-zero
+        // constant — the `assert!` beside `SHAPES` is the compiler's own check of
+        // that, because a seed that named no shape could not produce a model at
+        // all. The index is therefore inside the table by construction, and the
+        // shape is one the table really holds rather than a stand-in for a miss.
+        let index = usize::saturating_from(draw.rem_euclid(u64::saturating_from(SHAPES.len())));
+        let shape = SHAPES[index];
         let bytes = render(shape, seed, next(&mut state));
         Self { seed, shape, bytes }
     }

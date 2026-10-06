@@ -80,6 +80,8 @@ use std::collections::VecDeque;
 use std::fs::File;
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(feature = "script")]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -130,6 +132,33 @@ pub(crate) const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// for that argument to go stale.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Read `lock`, recovering the guard when a previous holder panicked.
+///
+/// The read half of [`lock`], for the same reason: a shared index whose values
+/// have no `Drop` that can fail cannot be left half-written by a panic, and a
+/// reader should not be turned away by a panic in an unrelated writer.
+///
+/// `script`-gated because the crate's `RwLock` user is the proposal artifact
+/// shelf, which sits on that feature; a build without it has no shared index.
+#[cfg(feature = "script")]
+pub(crate) fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Write `lock`, recovering the guard when a previous holder panicked.
+///
+/// The exclusive half of [`lock`], for the same reason.
+#[cfg(feature = "script")]
+pub(crate) fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }

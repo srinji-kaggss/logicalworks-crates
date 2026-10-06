@@ -98,6 +98,15 @@ impl SaturatingFrom<usize> for u32 {
     }
 }
 
+impl SaturatingFrom<u128> for u64 {
+    fn saturating_from(value: u128) -> Self {
+        match u64::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_nanosecond_count) => Self::MAX,
+        }
+    }
+}
+
 impl SaturatingFrom<usize> for u8 {
     fn saturating_from(value: usize) -> Self {
         match u8::try_from(value) {
