@@ -1700,6 +1700,28 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/it/sys_process_binding.rs` (including
   `concurrent_calls_on_one_process_share_its_ceiling`), `tests/it/sim_process.rs`,
   `tests/it/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
+- **INV-BOT-159** A supervised child's environment is the in-order fold of its
+  spec's deltas, and `ProcessSpec::env_clear` makes it an allowlist. The deltas
+  (`EnvDelta::Set`, `Remove`, `Clear`) are applied in the order they were
+  recorded, so a `Clear` drops every variable the supervisor would pass down
+  **and** every delta recorded before it, and the child's whole environment is
+  the assignments made after the last `Clear`: a secret, a token or a database
+  path in the supervisor's environment reaches an untrusted command only when
+  the caller names it again. `Clear` is applied by `ProcessSpec::configure`, the
+  one place both `Supervisor::spawn_process` and `run_process` build a command,
+  so there is no spawn path that skips it. A program named without a directory is
+  looked up in the `PATH` the child receives, which after a clear that sets none
+  is the platform's default search, not the supervisor's. **Not claimed:**
+  containment. A cleared child can still read any file its user can; the
+  after-fork, before-exec hook #337 also asks for (Landlock, `sandbox_init`)
+  needs `unsafe`, which this crate forbids. · why: #337, logical_ci#84 (a lane
+  read every tenant's signing key) · enforced by: `tests/it/sim_process_env.rs`
+  (`fold_band_00..03`, which draws ordered `env`/`env_remove`/`env_clear` lists
+  and compares the real `/usr/bin/env` child against the fold, swept twice for
+  one trace hash; `a_hundred_cleared_tenants_never_cross`,
+  `a_thousand_cleared_tenants_never_cross`,
+  `ten_thousand_cleared_tenants_never_cross`), all seven of which fail with the
+  `Clear` arm removed from `configure`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is

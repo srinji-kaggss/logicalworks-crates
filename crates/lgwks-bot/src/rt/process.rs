@@ -82,6 +82,15 @@ pub enum EnvDelta {
         /// Variable name.
         key: OsString,
     },
+    /// Start the child from an empty environment.
+    ///
+    /// Every variable the supervisor would otherwise pass down is dropped, and so
+    /// is every delta recorded before this one; deltas recorded after it apply
+    /// to the empty set. The child therefore sees exactly the assignments made
+    /// after the last `Clear`, which is the allowlist a caller running an
+    /// untrusted command needs: nothing of the supervisor's environment reaches
+    /// the child unless the caller names it again.
+    Clear,
 }
 
 /// Pure, inspectable data describing one supervised process.
@@ -150,6 +159,21 @@ impl ProcessSpec {
         self.env.push(EnvDelta::Remove {
             key: key.as_ref().to_os_string(),
         });
+        self
+    }
+
+    /// Start the child from an empty environment, dropping every inherited
+    /// variable and every assignment recorded before this call.
+    ///
+    /// Assignments made after it are the child's whole environment, so a
+    /// supervisor's credentials, tokens and paths reach an untrusted command
+    /// only when the caller names them again. A program named without a
+    /// directory is looked up in the `PATH` the child receives, so a cleared
+    /// environment that sets no `PATH` searches the platform's default path
+    /// rather than the supervisor's; name the program by its absolute path, or
+    /// set `PATH` after the clear, when that difference matters.
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.env.push(EnvDelta::Clear);
         self
     }
 
@@ -322,6 +346,9 @@ impl ProcessSpec {
                 }
                 EnvDelta::Remove { ref key } => {
                     command.env_remove(key);
+                }
+                EnvDelta::Clear => {
+                    command.env_clear();
                 }
             }
         }

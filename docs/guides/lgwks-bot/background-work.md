@@ -237,7 +237,7 @@ the payload bytes one pass keeps, and the capture's own
 can actually refuse. Prefer `frames()` when the bytes are already in hand.
 
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:1134`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:1161`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.

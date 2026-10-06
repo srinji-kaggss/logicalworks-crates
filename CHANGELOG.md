@@ -9,6 +9,18 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a supervised child can start from an empty environment (#337)
+
+A supervised child inherited the supervisor's whole environment, less whatever
+the caller remembered to `env_remove` one name at a time. A CI lane run this way
+read every tenant's signing key (logical_ci#84).
+
+- **lgwks_bot** — `ProcessSpec::env_clear` and the `EnvDelta::Clear` variant
+  (`EnvDelta` is non-exhaustive). Deltas apply in recorded order, so the child's
+  environment is exactly what is set after the last clear (INV-BOT-159).
+- Not in this change: the after-fork containment hook #337 also asks for needs
+  `unsafe`, which the crate forbids.
+
 ## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
 
 ### Upgrading

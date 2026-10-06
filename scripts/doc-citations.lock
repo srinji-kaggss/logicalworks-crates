@@ -55,8 +55,8 @@ crates/lgwks-bot/src/rt/mod.rs:86	//! This is not a scheduler with realtime guar
 crates/lgwks-bot/src/rt/mod.rs:106	/// engine's `task_local!` needs only the `rt` feature this module already
 crates/lgwks-bot/src/rt/mod.rs:117	#[cfg(feature = "io")]
 crates/lgwks-bot/src/rt/process.rs:64	Capture(NonZeroUsize),
-crates/lgwks-bot/src/rt/process.rs:489	pub struct ProcessRun {
-crates/lgwks-bot/src/rt/process.rs:1134	pub enum ProcessRunError {
+crates/lgwks-bot/src/rt/process.rs:489	pass
+crates/lgwks-bot/src/rt/process.rs:1161	pub enum ProcessRunError {
 crates/lgwks-bot/src/rt/runtime.rs:176	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
 crates/lgwks-bot/src/rt/runtime.rs:179	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
