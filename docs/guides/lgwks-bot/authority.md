@@ -121,8 +121,11 @@ The consequences, stated plainly:
 - Dropping or changing the `GrantSet` you passed to `build` does not narrow the
   bot. It keeps the authority it was admitted with for its whole life.
 - An `Auth` you hold stays valid for the capabilities it covers. It is a
-  capability-membership proof inside this process, not a signature, not an
-  identity, and not a lease with an expiry.
+  capability-membership proof inside this process, not a signature and not an
+  identity. A proof minted from an expiring grant lapses when its lifetime has
+  passed (see "A credential can lapse" below), but that lifetime is fixed at the
+  mint and a built bot mints afresh on every call, so it does not narrow a
+  running bot.
 - Narrowing a running bot is a decision made outside this API. Build it from a
   narrower set, or stop calling `tick`.
 

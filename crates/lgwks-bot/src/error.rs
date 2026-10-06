@@ -295,8 +295,8 @@ pub enum BotError {
     /// A receiver refused the credential an adapter presented.
     ///
     /// Distinct from [`Self::CapabilityDenied`] because the authority *was*
-    /// granted and the receiver rejected it anyway: revoked, rotated or expired
-    /// upstream. The repair is carried in the error as a
+    /// granted and the receiver rejected it anyway: its issuer cancelled,
+    /// rotated or expired it upstream. The repair is carried in the error as a
     /// [`NeedSet`](crate::spec::NeedSet), so a caller reads what to re-grant
     /// rather than reconstructing it from a status code — and it is a `NeedSet`,
     /// not a string, so the whole shortfall arrives at once the way every other

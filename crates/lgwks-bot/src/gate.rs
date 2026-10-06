@@ -72,7 +72,7 @@ impl GrantSet {
     /// A capability granted twice keeps the **shorter** lifetime. The shorter
     /// one is the one the caller asked for last, and widening a credential's
     /// life by re-granting it is the shape of a bug that is invisible until a
-    /// revoked token keeps working.
+    /// token its issuer cancelled keeps working.
     #[must_use]
     pub fn grant_expiring(mut self, cap: Cap, ttl: Duration) -> Self {
         self.granted.insert(cap.clone());

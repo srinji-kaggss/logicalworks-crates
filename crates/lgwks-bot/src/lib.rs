@@ -12,7 +12,10 @@
 //! set into the bot and `GrantSet` has no revoke operation, so changing or
 //! dropping the caller's set afterwards does not narrow a bot already built. An
 //! `Auth` in hand is likewise a capability-membership proof over the caps it was
-//! issued with: not a signature, not an identity, and not isolation. Narrowing
+//! issued with: not a signature, not an identity, and not isolation. A proof
+//! minted from a grant that named a lifetime lapses once that lifetime has
+//! passed, but the lifetime is fixed at the mint and a bot mints afresh on
+//! every call, so it bounds a proof in hand rather than a running bot. Narrowing
 //! a running bot's authority needs a mechanism this crate does not have yet,
 //! and the boundary is spelled out under "Authority is a snapshot" in the crate
 //! `README.md`.

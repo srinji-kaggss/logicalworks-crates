@@ -182,7 +182,7 @@ fn a_grant_without_a_lifetime_never_expires() -> TestResult {
 /// A proof covering two capabilities with different lifetimes takes the
 /// shortest: a proof is presented as a whole and must not outlive its weakest
 /// part. Re-granting the same capability with a longer lifetime must not widen
-/// it either, which is the shape of a revoked token quietly keeping working.
+/// it either, which is the shape of a token its issuer cancelled quietly keeping working.
 #[test]
 fn a_proof_takes_the_shortest_of_its_capabilities_lifetimes() -> TestResult {
     let clock = Clock::virtual_at(Duration::ZERO);

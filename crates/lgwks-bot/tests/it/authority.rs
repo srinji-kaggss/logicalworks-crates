@@ -380,6 +380,21 @@ const REVOCATION_OPERATIONS: [&str; 9] = [
     "fn grant_revision",
 ];
 
+/// Whether `text` declares `operation` (`fn <name>`) as an identifier.
+///
+/// The name may continue only with `_`, so `fn expire` and `fn expire_now` are
+/// the operation and `fn expires_at` is not: an accessor that reads a lifetime
+/// fixed at the mint is a different word from an operation that ends one. A
+/// plain substring test could not tell the two apart, and the first lifetime
+/// accessor (#278 row 3) tripped it.
+fn declares(text: &str, operation: &str) -> bool {
+    text.match_indices(operation).any(|(at, _)| {
+        text.get(at.saturating_add(operation.len())..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|next| !next.is_ascii_alphanumeric())
+    })
+}
+
 /// Read a file inside this crate, by a path relative to its manifest.
 fn read_crate_file(relative: &str) -> Result<String, Box<dyn Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -405,10 +420,23 @@ fn the_authority_source_offers_no_revoke_operation() -> TestResult {
         "control: `check` is missing from the scanned `cap.rs`"
     );
 
+    // The matcher's own controls: it must flag the operation and its `_`
+    // extensions, and must not flag a different word that shares the prefix.
+    for operation in ["pub fn expire(&mut self)", "fn expire_now()", "fn expire<T>()"] {
+        assert!(
+            declares(operation, "fn expire"),
+            "control: `{operation}` declares the operation and must be flagged"
+        );
+    }
+    assert!(
+        !declares("pub fn expires_at(&self)", "fn expire"),
+        "control: an accessor named `expires_at` is not the `expire` operation"
+    );
+
     for (file, text) in [("src/gate.rs", gate.as_str()), ("src/cap.rs", cap.as_str())] {
         for operation in REVOCATION_OPERATIONS {
             assert!(
-                !text.contains(operation),
+                !declares(text, operation),
                 "{file} declares `{operation}`, which `lib.rs`, `ecs.rs`, `README.md`, \
                  `docs/security-posture.md` and `docs/general-bot-fold.md` all say does not exist. \
                  If it is real now, those claims change in the same commit as this operation"

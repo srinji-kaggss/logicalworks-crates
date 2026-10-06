@@ -544,7 +544,7 @@ else
   case "$shape" in
     denied-*)
       # A credential the receiver no longer honours: the line `gh` prints for
-      # an expired or revoked token, with the status the scenario named.
+      # an expired or cancelled token, with the status the scenario named.
       printf 'gh: Bad credentials (HTTP %s)\n' "${shape#denied-}" >&2
       exit 1
       ;;
@@ -798,7 +798,7 @@ impl Scenario {
     }
 
     /// The pull-request read refuses the credential `gh` holds with `status`:
-    /// `401` for an expired or revoked token, `403` for one that lost the
+    /// `401` for an expired or cancelled token, `403` for one that lost the
     /// scope, `404` for a resource it can no longer see. Any other status is
     /// not a credential refusal and leaves the read answering normally.
     #[must_use]

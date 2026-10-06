@@ -550,7 +550,7 @@ pub const fn is_credential_status(status: u16) -> bool {
 /// A distinct variant from [`BotError::CapabilityDenied`] because the two are
 /// opposite facts. A denied capability was never granted; a rejected
 /// credential **was** granted and the receiver refused it anyway, which means
-/// the authority behind the proof has been revoked, rotated or expired. The
+/// its issuer has cancelled, rotated or expired the authority behind it. The
 /// repair is the same shape — a [`NeedSet`](crate::spec::NeedSet) naming the
 /// capabilities to re-grant — and it is carried in the error so a caller cannot
 /// read the status and then have to reconstruct what to do about it.

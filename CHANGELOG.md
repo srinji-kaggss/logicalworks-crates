@@ -24,8 +24,11 @@ the same refused token.
   instant has no epoch, means nothing on another host, and is the value
   INV-BOT-30 refuses to persist. Re-granting the same capability with a longer
   lifetime does **not** widen it — the shorter one wins — because widening a
-  credential's life by re-granting is how a revoked token keeps working. A proof
-  covering several capabilities expires with the shortest of them.
+  credential's life by re-granting is how a token its issuer cancelled keeps
+  working. A proof covering several capabilities expires with the shortest of
+  them. A lifetime bounds a proof **in hand**: a built bot mints a fresh proof
+  per call from the set it retained, so a lifetime does not narrow a running
+  bot, and there is still no revocation.
 - `Auth::check` refuses a lapsed proof before it checks coverage, as
   `BotError::CredentialExpired { capabilities, expired_at, now }`. It is a
   separate arm from `CapabilityDenied` because the repairs are opposite: a

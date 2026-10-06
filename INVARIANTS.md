@@ -1432,7 +1432,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   one `GhError::credential_rejection`, so the review path's head read reports the
   repair rather than a `DomainError` a retry policy would repeat against the same
   token. **Not claimed:** refreshing a token; the repair is reported, and
-  re-granting is the caller's. · why: #278 row 3 · enforced by:
+  re-granting is the caller's. Nor that a lifetime narrows a built bot: the
+  bot mints a fresh proof per call from the set it retained, so a lifetime
+  bounds a proof in hand, and there is still no revocation. · why: #278 row 3 · enforced by:
   `tests/it/credential.rs` (`a_proof_that_lapses_mid_run_refuses_the_verb`,
   `a_fresh_grant_mints_a_working_proof_again`,
   `a_grant_without_a_lifetime_never_expires`,

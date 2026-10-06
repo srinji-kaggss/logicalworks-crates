@@ -357,8 +357,15 @@ A built bot owns a *clone* of the grant set it was built with. `GrantSet` has no
 - Changing or dropping the `GrantSet` you passed to `build` does not narrow the
   bot. It keeps the authority it was admitted with for its whole life.
 - An `Auth` in hand stays valid for the capabilities it covers. It is a
-  capability-membership proof inside this process — not a signature, not an
-  identity, and not a lease with an expiry.
+  capability-membership proof inside this process — not a signature and not an
+  identity. A proof minted from a grant that named a lifetime
+  (`GrantSet::grant_expiring`) lapses when that lifetime, measured on the
+  minting clock from the mint, has passed, and is then refused as
+  `CredentialExpired` (INV-BOT-154). That lifetime is fixed at the mint and
+  nothing shortens it afterwards, so it is not a live lease either.
+- A lifetime bounds a proof *in hand*, not a built bot: the bot mints a fresh
+  proof from the set it retained on every call, so each call's proof starts a
+  fresh lifetime.
 - Narrowing a running bot is therefore a decision made *outside* this API: build
   it from a narrower set, or stop calling `tick`. There is no in-process
   revocation, and nothing here should be described as one.
