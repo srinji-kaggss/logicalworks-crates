@@ -39,4 +39,5 @@ mod sim_metadata_dimensions;
 mod sim_origin;
 mod sim_policy_properties;
 mod sim_register_policy;
+mod sim_seed_draws;
 mod workstream_c;

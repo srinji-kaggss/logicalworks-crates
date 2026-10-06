@@ -9,6 +9,30 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### tests — the simulation substrate's own contracts are swept, not assumed
+
+Every `sim_*` family rests on the seed substrate, the sweep and the scratch
+guard; nothing checked them. `lgwks_bot/tests/it/sim_substrate.rs` sweeps:
+
+- the sweep refuses exactly the seeds that recorded nothing, swept per band,
+  per seed, and against an all-empty and an all-recording control;
+- the generator replays exactly and `below`/`between` stay in bounds;
+- `chance(p)` is calibrated within five standard deviations;
+- the trace frames each record, so re-splitting the same bytes changes the
+  receipt;
+- concurrent scratch guards never share a directory and vanish on drop.
+
+`lgwks_deps/tests/it/sim_seed_draws.rs` sweeps `pick` reaching every element,
+a draw consuming one step whatever the table (empty included), and `receipt`
+refusing only an empty trace.
+
+```
+$ cargo nextest run --workspace --locked
+4339 tests run: 4339 passed (1 leaky), 0 skipped
+simulation-evidence: source_visible 1712/3383 = 50.61% (was 50.13%)
+```
+
+
 ### lgwks_deps tests — one seed substrate for every workspace simulation
 
 The six `sim_*` policy families drew from their own LCG and hashed their replay
