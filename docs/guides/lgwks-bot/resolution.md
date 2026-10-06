@@ -118,9 +118,9 @@ any matching happens, and the two readings share no tier.
 ### An `Integer` answer is decoded and compared as a value
 
 The raw utterance goes through the resolver's integer decoder
-(`crates/lgwks-bot/src/session.rs:472`), which runs the same `parse::<i64>` over
+(`crates/lgwks-bot/src/session.rs:489`), which runs the same `parse::<i64>` over
 the same trimmed bytes as the store's `VarType::decode_answer`
-(`crates/lgwks-bot/src/session.rs:416`) — so an answer the resolver can compare
+(`crates/lgwks-bot/src/session.rs:433`) — so an answer the resolver can compare
 is an answer the variable can hold, and the two cannot disagree about which
 answers are whole numbers. It trims surrounding space and accepts a leading
 sign, so `" 5 "`, `"+5"` and `"5"` all name the value `5`, while `"5.0"`,
@@ -163,13 +163,13 @@ tier that produced it.
 
 They are ordered tiers rather than one weighted sum because an exact match has to
 short-circuit, and a weighted sum cannot express that. `MatchTier` is reported
-rather than inferred (`crates/lgwks-bot/src/session.rs:2946`), because the tier
+rather than inferred (`crates/lgwks-bot/src/session.rs:3034`), because the tier
 names the repair: an `Exact` miss is a learned alias pointing at the wrong
 option, a `Phonetic` miss is the English bias of the sound-alike key, a `Fuzzy`
 miss is a threshold.
 
 **Precedence is over the whole candidate set, not per option**
-(`crates/lgwks-bot/src/language.rs:283`). The best tier that any option reached is
+(`crates/lgwks-bot/src/language.rs:294`). The best tier that any option reached is
 the tier the question is answered in, and every option below it is discarded
 before the margin is applied. An option does not win by scoring higher than an
 option in a stronger tier, and it does not take an `Ambiguous` verdict from a
@@ -180,7 +180,7 @@ and the tier order would be decoration.
 
 The three constants are `MATCH_THRESHOLD = 0.55`
 (`crates/lgwks-bot/src/language.rs:85`), `MATCH_MARGIN = 0.08`
-(`crates/lgwks-bot/src/language.rs:88`) and `MAX_UTTERANCE_CHARS = 512`
+(`crates/lgwks-bot/src/language.rs:99`) and `MAX_UTTERANCE_CHARS = 512`
 (`crates/lgwks-bot/src/language.rs:76`). A score at or above the threshold that
 does not lead the runner-up **in its own tier** by the margin is `Ambiguous`, not
 `Resolved`. An utterance longer than the bound degrades rather than panicking.
@@ -212,10 +212,10 @@ confirmation that still names an option it offers.
 
 | Operation | Effect |
 |---|---|
-| `learn(question, utterance, option)` (`crates/lgwks-bot/src/language.rs:603`) | binds the phrase, returning the binding it replaced, if any |
+| `learn(question, utterance, option)` (`crates/lgwks-bot/src/language.rs:611`) | binds the phrase, returning the binding it replaced, if any |
 | `forget(question, utterance)` (`crates/lgwks-bot/src/language.rs:616`) | removes one binding, returning it |
 | `with_aliases(aliases)` (`crates/lgwks-bot/src/language.rs:580`) | loads a shipped table, normalizing each phrase as it is stored |
-| `aliases()` (`crates/lgwks-bot/src/language.rs:641`) | exports the table, so a session's confirmations survive a restart |
+| `aliases()` (`crates/lgwks-bot/src/language.rs:649`) | exports the table, so a session's confirmations survive a restart |
 
 Two properties make this safe to spend. The phrase is normalized once, on the way
 in, so a shipped table and a learned binding are compared the same way. And a
@@ -263,7 +263,7 @@ receipt below.
 ## The decision receipt
 
 Every answer a `Session` takes is recorded as a `DecisionReceipt`
-(`crates/lgwks-bot/src/session.rs:3137`) through
+(`crates/lgwks-bot/src/session.rs:3225`) through
 `Journal::record_decision`. The receipt is the run's audit record; the
 transcript is a rendering of the conversation and cannot be one, because it
 says what was said and the receipt says what was decided. Its fields:

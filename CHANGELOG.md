@@ -172,6 +172,15 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### docs — citations re-anchored after the ranker and predicate walks moved lines
+
+`check-doc-citations.py` pins the *text* of every line a guide cites, so code
+added above a cited line moves it. 24 citations across `general-bot-fold.md`,
+`guides/lgwks-bot/resolution.md` and `guides/lgwks-bot/sessions.md` were
+re-anchored to the line that now holds the pinned text; 11 were dropped by the
+tool as duplicates of an anchor already recorded. No citation changed what it
+points at.
+
 ### lgwks_bot — one score comparator, one predicate walk, one field under test (nine-axis sweep)
 
 - **`session::by_score_descending` is the crate's one ranker.** The lexicon and
