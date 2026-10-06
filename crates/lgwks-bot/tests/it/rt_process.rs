@@ -271,7 +271,7 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
         "a process this supervisor stopped is cancelled, not failed: {task_outcome:?}"
     );
     match (task_outcome.cleanup(), cleanup_receipt) {
-        (Some(lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed), None) => {
+        (Some(&lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed), None) => {
             assert_eq!(outcomes.len(), 1, "immediate proof needs no later receipt");
         }
         (Some(_), Some(receipt)) => {
@@ -279,7 +279,7 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
             assert_eq!(task_outcome.task(), receipt.task());
             assert_eq!(
                 receipt.cleanup(),
-                Some(lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed),
+                Some(&lgwks_bot::rt::supervise::CleanupReceipt::CleanupConfirmed),
                 "only observed group absence may emit the terminal receipt"
             );
         }

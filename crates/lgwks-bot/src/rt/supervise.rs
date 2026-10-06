@@ -113,12 +113,18 @@ use std::time::Duration;
 use std::io;
 
 #[cfg(all(unix, feature = "process"))]
-use lgwks_deps::tokio::sync::Notify;
-use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use crate::rt::sync::Notify;
+use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
 #[cfg(all(unix, feature = "process"))]
 use lgwks_deps::tokio::process::{ChildStderr, ChildStdout, Command};
+
+/// Re-exported so a consumer reading a [`Containment`] report needs one import,
+/// not two: the mechanism is named by the estate's process primitives and read
+/// off this crate's receipt.
+#[cfg(feature = "process")]
+pub use lgwks_std::process::ContainmentMechanism;
 
 use super::cancel::CancellationToken;
 use super::clock::{Clock, TimeSource};
@@ -359,6 +365,9 @@ pub enum TaskOutcome {
         task: TaskId,
         /// Process-tree cleanup evidence, when this was a supervised process.
         cleanup: Option<CleanupReceipt>,
+        /// What the cleanup read, signalled and could not account for.
+        #[cfg(feature = "process")]
+        containment: Option<Containment>,
     },
     /// The body returned while cancellation was in force.
     ///
@@ -376,6 +385,9 @@ pub enum TaskOutcome {
         task: TaskId,
         /// Process-tree cleanup evidence, when this was a supervised process.
         cleanup: Option<CleanupReceipt>,
+        /// What the cleanup read, signalled and could not account for.
+        #[cfg(feature = "process")]
+        containment: Option<Containment>,
     },
     /// The runtime dropped the body before it finished.
     ///
@@ -428,6 +440,9 @@ pub enum TaskOutcome {
         status: Option<ExitStatus>,
         /// Process-tree cleanup evidence, when this was a supervised process.
         cleanup: Option<CleanupReceipt>,
+        /// What the cleanup read, signalled and could not account for.
+        #[cfg(feature = "process")]
+        containment: Option<Containment>,
     },
     /// A retained process-group cleanup owner later proved the group absent.
     #[cfg(all(unix, feature = "process"))]
@@ -436,6 +451,8 @@ pub enum TaskOutcome {
         task: TaskId,
         /// Terminal cleanup evidence.
         cleanup: CleanupReceipt,
+        /// What the retained cleanup read, signalled and could not account for.
+        containment: Containment,
     },
 }
 
@@ -443,33 +460,212 @@ pub enum TaskOutcome {
 /// requested termination.
 ///
 /// Unix process groups are weaker than a kernel job object: a descendant that
-/// deliberately creates a new session is outside this guarantee. `Pending`
-/// therefore remains a truthful result when SIGKILL was delivered while the
-/// unreaped leader pinned the group id, but this supervisor could not prove
-/// that every member had disappeared before its bounded drain ended.
+/// deliberately creates a new session is outside the group itself. This cleanup
+/// therefore does not stop at the group — it captures the leader's descendants
+/// first and signals each of them by pid — but a capture is a snapshot, and the
+/// receipt is where that limit is stated rather than implied.
 ///
 /// # What `CleanupConfirmed` does and does not claim
 ///
 /// **It claims: every process that was still in the supervised group when the
-/// group was last observed is gone.** The observation is `killpg(group, 0)`, and
-/// a process that called `setsid` has left the group by construction, so it is
-/// not a member and its survival is not a counterexample to the claim.
+/// group was last observed is gone, and every descendant this cleanup captured
+/// had stopped running by the time the bounded drain ended.** The group claim is
+/// `killpg(group, 0)` and the descendant claim is
+/// `Containment::is_complete` over the pids
+/// `lgwks_std::process::capture_descendants` returned while the leader was
+/// alive (both behind the `process` feature, which every receipt that carries a
+/// capture was built with).
 ///
-/// It does **not** claim that no process this supervisor started is still
-/// running. That is the honest limit of a process group, and a caller that needs
-/// it needs a kernel job object or a cgroup, neither of which this module has.
-/// `tests/it/process_escape.rs` exercises a real `setsid` escape and states this
-/// boundary against a live process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// It does **not** claim that no process this supervisor ever started is still
+/// running. Two cases survive that claim, and both are named on the receipt
+/// rather than left to be inferred from a green test:
+///
+/// - A descendant forked *after* the last capture and left the group in the same
+///   window. The capture is a snapshot of the parent relation, and a process
+///   that was not in it cannot be signalled by pid.
+/// - A descendant orphaned before the cleanup ran. It has been adopted by the
+///   platform's init and no longer names the leader, so no walk from the leader
+///   can reach it.
+///
+/// Closing either needs a kernel-level owner — a cgroup v2 `cgroup.kill`, or a
+/// Windows job object — which this crate does not have.
+///
+/// `tests/it/process_escape.rs` exercises a real `setsid` escape and states
+/// this boundary against a live process.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CleanupReceipt {
-    /// The group no longer exists after the bounded termination/drain.
+    /// The group no longer exists, and every captured descendant stopped running.
     CleanupConfirmed,
     /// SIGKILL was delivered while the unreaped leader pinned the group id,
     /// but the bounded drain did not prove removal.
     CleanupPending,
     /// The operating system refused the termination request.
     CleanupFailed,
+    /// The group is accounted for, and these captured descendants were still
+    /// running when the bounded drain ended.
+    ///
+    /// Its own arm rather than a `Pending`: "the group is gone but a `setsid`
+    /// descendant of it is still running" and "the group itself is still there"
+    /// are different facts with different repairs, and folding them into one
+    /// pending state would report a stopped tree as an unstopped one. The pids
+    /// are named so an operator can act on them, and
+    /// `Containment::residual_risk` says which limit produced them.
+    CleanupSurvivors {
+        /// The captured pids that were still running when the drain ended,
+        /// sorted. Never truncated: a survivor list a caller cannot read in full
+        /// is a list it cannot act on.
+        survivors: Vec<i32>,
+    },
+}
+
+impl CleanupReceipt {
+    /// Whether this receipt claims the supervised tree was stopped.
+    ///
+    /// `true` only for [`Self::CleanupConfirmed`], and `false` for the pending,
+    /// failed and survivor arms alike — a caller asking "is it gone" must not
+    /// read an unresolved cleanup as a clean one.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::CleanupConfirmed)
+    }
+
+    /// The captured pids this receipt reports as still running, sorted.
+    ///
+    /// Empty for every other arm: a group that is present, a refused kill and a
+    /// clean sweep all report no *named* survivors, and the difference between
+    /// them is [`Self::is_complete`], not this list.
+    #[must_use]
+    pub fn survivors(&self) -> &[i32] {
+        match *self {
+            Self::CleanupSurvivors { ref survivors } => survivors.as_slice(),
+            Self::CleanupConfirmed | Self::CleanupPending | Self::CleanupFailed => &[],
+        }
+    }
+}
+
+/// Why a cleanup could not account for every process it started.
+///
+/// Each arm is a limit of the mechanism that ran, reported so an operator reads
+/// the receipt's scope instead of taking its silence for a claim.
+#[cfg(feature = "process")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResidualRisk {
+    /// No process table could be read, so nothing outside the group was captured
+    /// and a member that forked and left the group is not accounted for.
+    TableUnreadable,
+    /// The capture stopped at
+    /// [`lgwks_std::process::MAX_CAPTURED_DESCENDANTS`], so it held a prefix of
+    /// the tree rather than the tree.
+    CaptureTruncated,
+}
+
+/// What one cleanup attempt read, signalled, and could not account for.
+///
+/// Carried by every supervised-process [`TaskOutcome`] and by every
+/// [`ProcessRun`], because the question a caller
+/// actually has after "stop the process" is *which mechanism ran* and *which pids
+/// are still up* — and a single boolean cannot answer either.
+///
+/// Behind the `process` feature with the rest of the containment vocabulary: a
+/// build without it starts no child process, so it has no tree to account for.
+///
+/// [`ProcessRun`]: crate::rt::process::ProcessRun
+#[cfg(feature = "process")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Containment {
+    /// How the descendant tree was read.
+    mechanism: ContainmentMechanism,
+    /// How many distinct descendants the capture held.
+    captured: usize,
+    /// How many of them a signal was delivered to.
+    signalled: usize,
+    /// The captured pids still running when the drain ended, sorted.
+    survivors: Vec<i32>,
+    /// The limit of the mechanism that ran, when there is one.
+    residual: Option<ResidualRisk>,
+}
+
+#[cfg(feature = "process")]
+impl Containment {
+    /// How the descendant tree was read.
+    ///
+    /// [`ContainmentMechanism::ProcessGroupOnly`] means no process table was
+    /// read at all, and every descendant claim this report could otherwise make
+    /// is absent rather than satisfied.
+    #[must_use]
+    pub const fn mechanism(&self) -> ContainmentMechanism {
+        self.mechanism
+    }
+
+    /// How many distinct descendants the capture held.
+    #[must_use]
+    pub const fn captured(&self) -> usize {
+        self.captured
+    }
+
+    /// How many captured descendants a signal was delivered to.
+    ///
+    /// Below [`Self::captured`] when a pid was already gone when it was named:
+    /// a signal to a process that has ended is refused with `ESRCH`, which is the
+    /// answer that process has finished and not a failure.
+    #[must_use]
+    pub const fn signalled(&self) -> usize {
+        self.signalled
+    }
+
+    /// The captured pids still running when the bounded drain ended, sorted.
+    #[must_use]
+    pub fn survivors(&self) -> &[i32] {
+        &self.survivors
+    }
+
+    /// The limit of the mechanism that ran, or `None` when it ran whole.
+    #[must_use]
+    pub const fn residual_risk(&self) -> Option<ResidualRisk> {
+        self.residual
+    }
+
+    /// Whether the capture was whole and every captured descendant stopped.
+    ///
+    /// `false` for a survivor, for a truncated capture and for a target that
+    /// exposed no process table: all three are "this report does not account for
+    /// the whole tree", which is the one question the flag answers.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.survivors.is_empty() && self.residual.is_none() && self.mechanism.read_a_table()
+    }
+
+    /// Fold one capture into this report.
+    #[cfg(all(unix, feature = "process"))]
+    fn record_capture(&mut self, set: &Capture) {
+        self.mechanism = set.mechanism.strongest(self.mechanism);
+        if set.truncated {
+            self.note(ResidualRisk::CaptureTruncated);
+        }
+        self.captured = self.captured.max(set.pids.len());
+    }
+
+    /// Record that a signal reached one captured pid.
+    fn record_signal(&mut self) {
+        self.signalled = self.signalled.saturating_add(1);
+    }
+
+    /// Record which captured pids are still running.
+    fn record_survivors(&mut self, running: &[i32]) {
+        self.survivors = running.to_vec();
+    }
+
+    /// Record the limit of the mechanism that ran.
+    fn note(&mut self, risk: ResidualRisk) {
+        // First limit wins: a capture that never ran is the whole story, and a
+        // later truncation of the group-only fallback adds nothing to it.
+        if self.residual.is_none() {
+            self.residual = Some(risk);
+        }
+    }
 }
 
 impl TaskOutcome {
@@ -544,15 +740,46 @@ impl TaskOutcome {
     }
 
     /// Process-tree cleanup evidence, when this outcome belongs to a process.
+    ///
+    /// A borrow, where this returned the receipt by value: the receipt now
+    /// carries the pids it could not prove gone, so a by-value return would copy
+    /// that list per read and would make `Copy` unsound for a type whose whole
+    /// purpose is to name processes.
     #[must_use]
-    pub const fn cleanup(&self) -> Option<CleanupReceipt> {
+    pub const fn cleanup(&self) -> Option<&CleanupReceipt> {
         match *self {
-            Self::Completed { cleanup, .. }
-            | Self::Cancelled { cleanup, .. }
-            | Self::Failed { cleanup, .. } => cleanup,
+            Self::Completed { ref cleanup, .. }
+            | Self::Cancelled { ref cleanup, .. }
+            | Self::Failed { ref cleanup, .. } => cleanup.as_ref(),
             Self::Aborted { .. } | Self::Panicked { .. } => None,
             #[cfg(all(unix, feature = "process"))]
-            Self::CleanupSettled { cleanup, .. } => Some(cleanup),
+            Self::CleanupSettled { ref cleanup, .. } => Some(cleanup),
+        }
+    }
+
+    /// What this outcome's cleanup read, signalled, and could not account for.
+    ///
+    /// `None` for every state that is not a supervised process, and for one whose
+    /// cleanup never ran. The receipt says whether the tree was stopped;
+    /// this says *how much was looked at* to say it.
+    #[cfg(feature = "process")]
+    #[must_use]
+    pub const fn containment(&self) -> Option<&Containment> {
+        match *self {
+            Self::Completed {
+                ref containment, ..
+            }
+            | Self::Cancelled {
+                ref containment, ..
+            }
+            | Self::Failed {
+                ref containment, ..
+            } => containment.as_ref(),
+            Self::Aborted { .. } | Self::Panicked { .. } => None,
+            #[cfg(all(unix, feature = "process"))]
+            Self::CleanupSettled {
+                ref containment, ..
+            } => Some(containment),
         }
     }
 
@@ -640,17 +867,17 @@ impl ShutdownReport {
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.outcomes.iter().all(|outcome| {
-            outcome.is_success()
-                && !matches!(
-                    outcome.cleanup(),
-                    Some(CleanupReceipt::CleanupPending | CleanupReceipt::CleanupFailed)
-                )
+            outcome.is_success() && outcome.cleanup().is_none_or(CleanupReceipt::is_complete)
         }) && {
-            #[cfg(all(unix, feature = "process"))]
+            #[cfg(feature = "process")]
             {
                 self.pending_cleanup_count() == 0
+                    && self
+                        .outcomes
+                        .iter()
+                        .all(|outcome| outcome.containment().is_none_or(Containment::is_complete))
             }
-            #[cfg(not(all(unix, feature = "process")))]
+            #[cfg(not(feature = "process"))]
             {
                 true
             }
@@ -690,10 +917,15 @@ impl ShutdownReport {
         let settled = self.cleanup_owners.drive(observer, |_| false);
         let count = settled.len();
         self.outcomes
-            .extend(settled.into_iter().map(|task| TaskOutcome::CleanupSettled {
-                task,
-                cleanup: CleanupReceipt::CleanupConfirmed,
-            }));
+            .extend(
+                settled
+                    .into_iter()
+                    .map(|(task, containment)| TaskOutcome::CleanupSettled {
+                        task,
+                        cleanup: settled_receipt(&containment),
+                        containment,
+                    }),
+            );
         count
     }
 }
@@ -881,7 +1113,7 @@ mod tenancy_support {
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
-    use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
+    use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 
     use super::Lease;
     use crate::rt::tenancy::{Arrival, DeficitRoundRobin, Grant, GrantOutcome, TryArrival};
@@ -1318,7 +1550,7 @@ mod tenancy_support {
         use std::error::Error;
         use std::sync::Arc;
 
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         use super::{Departure, TenancyShell, WaitSlot};
         use crate::rt::tenancy::{Arrival, GrantOutcome, TenancyPolicy};
@@ -1475,23 +1707,23 @@ pub struct Supervisor {
 /// means, because only the wrapper knows whether the body was built to observe
 /// its token. A `JoinError` is the third and fourth case, and is not a `TaskEnd`
 /// at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskEnd {
     /// The body ran to the end of its own work.
     Completed,
-    /// A supervised process exited and its process-group cleanup was checked.
+    /// A supervised process exited and its cleanup was checked.
     #[cfg(feature = "process")]
     CompletedWithCleanup {
-        /// Process-group cleanup evidence.
-        cleanup: CleanupReceipt,
+        /// The receipt and the containment report, as one owned fact.
+        cleanup: ProcessCleanup,
     },
     /// The body stopped because its token was cancelled.
     Cancelled,
-    /// A supervised process was cancelled and its process-group cleanup was checked.
+    /// A supervised process was cancelled and its cleanup was checked.
     #[cfg(feature = "process")]
     CancelledWithCleanup {
-        /// Process-group cleanup evidence.
-        cleanup: CleanupReceipt,
+        /// The receipt and the containment report, as one owned fact.
+        cleanup: ProcessCleanup,
     },
     /// A supervised process ended without exiting successfully.
     ///
@@ -1509,8 +1741,8 @@ enum TaskEnd {
     Failed {
         /// The status the engine reported, if it reported one.
         status: Option<ExitStatus>,
-        /// Process-group cleanup evidence.
-        cleanup: CleanupReceipt,
+        /// The receipt and the containment report, as one owned fact.
+        cleanup: ProcessCleanup,
     },
 }
 
@@ -1529,6 +1761,29 @@ enum Wait {
     Cancelled,
     /// A permit may be held by a cleanup owner that only a reap releases.
     Recheck,
+}
+
+/// One supervised process's cleanup: the receipt and what it was based on.
+///
+/// A pair rather than two parameters because they are one fact: a receipt with no
+/// containment report cannot say which mechanism produced it, and a containment
+/// report with no receipt is a count of processes nobody stopped. Every producer
+/// builds both, so neither can travel alone.
+#[cfg(feature = "process")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessCleanup {
+    /// The terminal receipt.
+    receipt: CleanupReceipt,
+    /// What the cleanup read, signalled and could not account for.
+    containment: Containment,
+}
+
+#[cfg(feature = "process")]
+impl ProcessCleanup {
+    /// Split the pair into the two public shapes a report carries.
+    fn into_parts(self) -> (CleanupReceipt, Containment) {
+        (self.receipt, self.containment)
+    }
 }
 
 /// Whether a terminal outcome is subject to the retention cap.
@@ -1574,9 +1829,102 @@ const MAX_PANIC_MESSAGE_CHARS: usize = 512;
 /// cheaper than a misreported outcome.
 const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
-/// Number of bounded group probes used after a leader exits.
+/// How many finished tasks one tenanted admission joins before it is placed.
+///
+/// Two, because every admission adds one task: joining up to two per call
+/// drains a backlog rather than growing it, so the finished-but-unjoined set
+/// stays proportional to the in-flight ceiling — only a task that was in flight
+/// between two calls can finish between them. An unbounded reap made a call's
+/// bookkeeping every task *any* tenant finished since the last call, so a tenant
+/// whose bodies end at once charged its own joins to whichever neighbour
+/// admitted next (#268's adversarial row). [`Supervisor::reap`],
+/// [`Supervisor::wait_idle`] and shutdown still join everything.
+#[cfg(feature = "script")]
+const REAP_PER_ADMISSION: usize = 2;
+
+/// How much longer [`Supervisor::shutdown`] waits, past
+/// [`COOPERATIVE_DRAIN_GRACE`], while a supervised process task is still live.
+///
+/// A process task is cooperative by construction — its wait races the token —
+/// but answering the token *is* its cleanup: up to [`CONTAINMENT_ROUNDS`]
+/// captures of the process table, each a `ps` snapshot off Linux, then the reap
+/// and the post-reap observation. One snapshot measured p50 16 ms, p99 45 ms and
+/// max 68 ms over 200 reads on a host at load 9.6, so a whole drain is a few
+/// hundred milliseconds under load and the 50 ms grace aborted it part-way:
+/// `process_escape` then saw an `Aborted` outcome with no receipt for a task that
+/// had already stopped its tree (10 of 1,000 iterations at load 15). Two
+/// seconds is about six times the worst drain that measurement allows. It bounds
+/// the wait rather than charging it: a drain that finishes is absorbed at once,
+/// and only a process task still live when this runs out is aborted, its
+/// drop-time fallback still signalling the group.
 #[cfg(all(unix, feature = "process"))]
-const PROCESS_CLEANUP_ATTEMPTS: usize = 64;
+const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+
+/// Bounded capture-and-signal rounds one cleanup performs.
+///
+/// This is the bound the descendant capture replaced. A group signal reaches the
+/// members that exist when it is sent, so a fork in flight can miss it; the old
+/// answer was to repeat the signal 64 times and hope a scheduler had finished the
+/// fork. The capture is the real answer — it names every process descended from
+/// the leader, including one that has left the group — so what is left to bound is
+/// how many times the cleanup re-reads the tree and re-signals what is still
+/// running. Four rounds is the measured bound on the window this needs: the fork
+/// race is a single `fork(2)` returning, and each round's re-capture admits the
+/// forks the previous round's signals let through. Where no capture is available
+/// the residual is recorded as [`ResidualRisk::TableUnreadable`] rather than
+/// absorbed into a longer retry.
+#[cfg(all(unix, feature = "process"))]
+const CONTAINMENT_ROUNDS: usize = 4;
+
+/// Group signals delivered on the drop-time path, while the unreaped leader still
+/// pins the group id.
+///
+/// Bounded for the same reason the drain is: it covers the one window a capture
+/// cannot — a member the leader forks after the capture and before it dies — and
+/// the leader's death ends that window. It is a count of signals rather than a
+/// sleep, so it costs nothing on the paths that stop early.
+#[cfg(all(unix, feature = "process"))]
+const GROUP_SIGNAL_ATTEMPTS: usize = 4;
+
+/// What one group signal delivered and what the OS then said.
+#[cfg(all(unix, feature = "process"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupSignal {
+    /// Delivered; the group is present and its members were sent SIGKILL.
+    Delivered,
+    /// No group holds the id: the group is gone.
+    Absent,
+    /// The group is present but cannot be signalled again — an unreaped zombie
+    /// leader, which macOS and the BSDs answer with `EPERM` (INV-BOT-19).
+    Present,
+    /// The operating system refused the termination.
+    Refused,
+}
+
+/// Whether `error` is the OS's "no such process".
+///
+/// The errno and not the [`io::ErrorKind`]: macOS classifies `ESRCH` as
+/// uncategorised where Linux calls it `NotFound`, so the kind is a property of the
+/// platform and the errno is the fact both share.
+#[cfg(all(unix, feature = "process"))]
+fn is_absence(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(ESRCH)
+}
+
+/// `ESRCH`, "no such process", on every Unix this crate targets.
+#[cfg(all(unix, feature = "process"))]
+const ESRCH: i32 = 3;
+
+/// `EPERM`, "operation not permitted", on every Unix this crate targets.
+#[cfg(all(unix, feature = "process"))]
+const EPERM: i32 = 1;
+
+/// Whether `error` says the group is present but unsignalable, rather than that
+/// the kill was refused. See [`GroupSignal::Present`].
+#[cfg(all(unix, feature = "process"))]
+fn is_present_but_unsignalable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(EPERM)
+}
 
 /// How often a spawn waiting at the bound re-drives the cleanup owners while one
 /// of them holds a permit.
@@ -1882,17 +2230,31 @@ impl Supervisor {
     /// Join every task that has already finished, returning how many were
     /// joined.
     ///
-    /// Each entry point calls this before spawning, which is what keeps the
+    /// Each entry point reaps before placing its task, which is what keeps the
     /// retained set proportional to the live bound rather than to the total
-    /// number of spawns. It is public because a caller who has stopped spawning
+    /// number of spawns; the tenanted entry joins a bounded number per call
+    /// (`REAP_PER_ADMISSION`), which keeps the same bound. It is public because a caller who has stopped spawning
     /// and wants the counters to settle should not have to spawn a task to make
     /// that happen.
     ///
     /// Every joined task produces exactly one [`TaskOutcome`], readable through
     /// [`Supervisor::next_report`].
     pub fn reap(&mut self) -> usize {
+        self.reap_at_most(usize::MAX)
+    }
+
+    /// Join at most `limit` already-finished tasks, returning how many were
+    /// joined.
+    ///
+    /// The bounded form a tenanted admission takes (`REAP_PER_ADMISSION`), so
+    /// one call's bookkeeping is a constant rather than every task any tenant
+    /// finished since the last call.
+    fn reap_at_most(&mut self, limit: usize) -> usize {
         let mut reaped: usize = 0;
-        while let Some(joined) = self.set.try_join_next_with_id() {
+        while reaped < limit {
+            let Some(joined) = self.set.try_join_next_with_id() else {
+                break;
+            };
             self.absorb(joined, Retention::Capped);
             reaped = reaped.saturating_add(1);
         }
@@ -2021,7 +2383,6 @@ impl Supervisor {
             self.spawn(body).await;
             return Ok(());
         };
-        self.reap();
         let lease = match self.claim_tenanted(&shell, tenant).await {
             Ok(lease) => lease,
             Err(refusal) => {
@@ -2192,8 +2553,10 @@ impl Supervisor {
         // cleanup fallback for a process that native spawning already started.
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(group_id, task, permit, Arc::clone(&self.cleanup_owners));
+        let live = LiveProcess::enter(&self.cleanup_owners);
         Ok(self.place_owned(task, async move {
             let end = drive_process(&clock, child, &token, group, bounds).await;
+            drop(live);
             task_end(end)
         }))
     }
@@ -2402,13 +2765,14 @@ impl Supervisor {
         } else {
             None
         };
-        Ok(ProcessRun::new(
+        Ok(ProcessRun {
             status,
             deadline_fired,
-            end.stdout,
-            end.stderr,
-            end.cleanup,
-        ))
+            stdout: end.stdout,
+            stderr: end.stderr,
+            cleanup: end.cleanup.receipt,
+            containment: end.cleanup.containment,
+        })
     }
 
     /// Process-group containment is unavailable on non-Unix targets.
@@ -2509,8 +2873,13 @@ impl Supervisor {
                 self.absorb(joined, Retention::Draining);
             }
             // The set emptying is the real exit condition; the grace is the
-            // ceiling on how long the loop may keep trying.
-            if self.set.is_empty() || watchdog.elapsed() >= deadline {
+            // ceiling on how long the loop may keep trying, extended only while a
+            // process task is still draining its bounded cleanup.
+            let elapsed = watchdog.elapsed();
+            if self.set.is_empty()
+                || (elapsed >= deadline
+                    && !self.cleanup_holds_grace(elapsed.saturating_sub(deadline)))
+            {
                 break;
             }
             yield_now().await;
@@ -2531,6 +2900,25 @@ impl Supervisor {
             #[cfg(all(unix, feature = "process"))]
             cleanup_owners: Arc::clone(&self.cleanup_owners),
         }
+    }
+
+    /// Whether shutdown keeps waiting `overrun` past its cooperative grace: only
+    /// while a process task is live and [`PROCESS_CLEANUP_GRACE`] has not run out.
+    #[cfg(all(unix, feature = "process"))]
+    fn cleanup_holds_grace(&self, overrun: Duration) -> bool {
+        overrun < PROCESS_CLEANUP_GRACE
+            && self
+                .cleanup_owners
+                .live
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+    }
+
+    /// Without supervised processes nothing drains a cleanup, so the cooperative
+    /// grace is the whole wait.
+    #[cfg(not(all(unix, feature = "process")))]
+    const fn cleanup_holds_grace(&self, _overrun: Duration) -> bool {
+        false
     }
 
     /// Take a permit, waiting for one if the bound is reached, and reap first.
@@ -2609,6 +2997,17 @@ impl Supervisor {
     /// produces exactly one waiter, and the round's queue is FIFO, so a second
     /// attempt would not make progress faster — it would forfeit the place the
     /// first attempt earned.
+    ///
+    /// Reaping is bookkeeping, not admission — a lease is released inside its
+    /// task the moment the body ends, never at the reap — so it happens once per
+    /// call, *after* the round has decided, and joins at most
+    /// `REAP_PER_ADMISSION` tasks. A queued caller reaps while its grant is on
+    /// the way, so the joins cost it nothing it was not already waiting
+    /// through. Reaping everything first put every task any tenant had finished
+    /// on the critical path of whichever tenant called next, which is how a
+    /// tenant whose bodies end at once charged its own bookkeeping to its
+    /// neighbour (#268's adversarial row). A grant delivered during the reap
+    /// waits in the waiter's slot, which the first poll takes.
     #[cfg(feature = "script")]
     async fn claim_tenanted(
         &mut self,
@@ -2620,9 +3019,9 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "claim_tenanted: returning an error to the caller");
             return refusal;
         }
-        self.reap();
         match shell.admit(tenant) {
             tenancy_support::Admission::Admitted(lease) => {
+                self.reap_at_most(REAP_PER_ADMISSION);
                 // Cancellation wins the race for a permit that landed in the
                 // same instant, and the lease's drop returns the capacity to the
                 // round either way.
@@ -2650,6 +3049,7 @@ impl Supervisor {
                 // `run_until_cancelled` wakes on the token too, so neither
                 // direction needs a timer.
                 let mut waiter = std::pin::pin!(waiter);
+                self.reap_at_most(REAP_PER_ADMISSION);
                 let token = self.token.clone();
                 match token.run_until_cancelled(waiter.as_mut()).await {
                     None => Err(SpawnRefused::Cancelled),
@@ -2865,13 +3265,14 @@ impl Supervisor {
     /// Refresh retained owners and append terminal receipts when report capacity
     /// allows it.
     fn refresh_cleanup_owners(&mut self) {
-        for task in self.cleanup_owners.drive(&NATIVE_GROUP_OBSERVER, |task| {
+        for (task, containment) in self.cleanup_owners.drive(&NATIVE_GROUP_OBSERVER, |task| {
             self.identities.values().any(|live| *live == task)
         }) {
             if self.reports.len() < self.report_cap {
                 self.reports.push_back(TaskOutcome::CleanupSettled {
                     task,
-                    cleanup: CleanupReceipt::CleanupConfirmed,
+                    cleanup: settled_receipt(&containment),
+                    containment,
                 });
             } else {
                 self.reports_dropped = self.reports_dropped.saturating_add(1);
@@ -2906,16 +3307,21 @@ impl Supervisor {
                     .map(|task| TaskOutcome::Completed {
                         task,
                         cleanup: None,
+                        #[cfg(feature = "process")]
+                        containment: None,
                     })
             }
             #[cfg(feature = "process")]
             Ok((_, TaskEnd::CompletedWithCleanup { cleanup })) => {
                 self.succeeded = self.succeeded.saturating_add(1);
+                let (receipt, containment) = cleanup.into_parts();
                 self.identities
                     .remove(&raw)
                     .map(|task| TaskOutcome::Completed {
                         task,
-                        cleanup: Some(cleanup),
+                        cleanup: Some(receipt),
+                        #[cfg(feature = "process")]
+                        containment: Some(containment),
                     })
             }
             Ok((_, TaskEnd::Cancelled)) => {
@@ -2925,22 +3331,28 @@ impl Supervisor {
                     .map(|task| TaskOutcome::Cancelled {
                         task,
                         cleanup: None,
+                        #[cfg(feature = "process")]
+                        containment: None,
                     })
             }
             #[cfg(feature = "process")]
             Ok((_, TaskEnd::CancelledWithCleanup { cleanup })) => {
                 self.cancelled = self.cancelled.saturating_add(1);
+                let (receipt, containment) = cleanup.into_parts();
                 self.identities
                     .remove(&raw)
                     .map(|task| TaskOutcome::Cancelled {
                         task,
-                        cleanup: Some(cleanup),
+                        cleanup: Some(receipt),
+                        #[cfg(feature = "process")]
+                        containment: Some(containment),
                     })
             }
             // Gated with the variant and with the feature that produces it:
             // nothing else in this crate can report a non-zero process exit.
             #[cfg(feature = "process")]
             Ok((_, TaskEnd::Failed { status, cleanup })) => {
+                let (receipt, containment) = cleanup.into_parts();
                 // Counted as its own kind rather than folded into `succeeded`:
                 // a process that exited 1 is work that did not do what it was
                 // asked, and a counter that cannot see the difference reports a
@@ -2952,7 +3364,9 @@ impl Supervisor {
                     .map(|task| TaskOutcome::Failed {
                         task,
                         status,
-                        cleanup: Some(cleanup),
+                        cleanup: Some(receipt),
+                        #[cfg(feature = "process")]
+                        containment: Some(containment),
                     })
             }
             Err(error) if error.is_panic() => {
@@ -3391,10 +3805,25 @@ struct ProcessGroup<'ops> {
     armed: bool,
     /// Whether the leader has been reaped and the numeric id released.
     leader_reaped: bool,
+    /// Whether the group was observed absent: by a signal refusal, or by the
+    /// post-reap signal-zero probe.
+    group_absent: bool,
+    /// What the cleanup read, signalled, and could not account for.
+    containment: Containment,
+    /// Captured pids a signal has already been delivered to.
+    ///
+    /// The set is what keeps "signal every captured pid" from becoming "signal
+    /// every captured pid once per round": a pid is signalled the first round it
+    /// is captured in, and a pid that is still running afterwards is signalled
+    /// again **only** because the observation proved it alive, which is the same
+    /// rule the group follows for its own id.
+    signalled_pids: std::collections::BTreeSet<i32>,
     /// The process-group signalling boundary, injectable for regression tests.
     signaller: &'ops dyn GroupSignaller,
     /// Non-mutating group existence boundary, injectable for regression tests.
     observer: &'ops dyn GroupObserver,
+    /// The per-process containment boundary, injectable for regression tests.
+    capture: &'ops dyn DescendantCapture,
 }
 
 /// One process-group signalling operation.
@@ -3411,6 +3840,60 @@ trait GroupObserver: Sync {
     fn exists(&self, group: i32) -> io::Result<bool>;
 }
 
+/// One capture's finding: which mechanism read it, and which pids it named.
+///
+/// The crate's own shape rather than
+/// [`lgwks_std::process::DescendantSet`] itself, for two reasons: the estate type
+/// is `#[non_exhaustive]` with private fields, so a test in this crate could not
+/// build one and the seam could not be driven against a scripted tree at all; and
+/// what the drain needs is three facts, not a process-table abstraction.
+#[cfg(all(unix, feature = "process"))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Capture {
+    /// How the pids were found.
+    mechanism: ContainmentMechanism,
+    /// The pids the reading named, sorted and deduplicated.
+    pids: Vec<i32>,
+    /// Whether a bound stopped the reading before the tree ended.
+    truncated: bool,
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl Capture {
+    /// The finding the audited `lgwks_std::process` reading produced.
+    fn from_set(set: &lgwks_std::process::DescendantSet) -> Self {
+        Self {
+            mechanism: set.mechanism(),
+            pids: set.pids().to_vec(),
+            truncated: set.is_truncated(),
+        }
+    }
+
+    /// Whether the reading named nothing.
+    fn is_empty(&self) -> bool {
+        self.pids.is_empty()
+    }
+}
+
+/// The per-process containment boundary: name the tree, stop one of its members,
+/// and observe which of them are still running.
+///
+/// Three operations rather than one, because they answer three different
+/// questions and each has its own failure mode: a capture that read nothing is
+/// not a capture that found nothing, a signal to a pid that has ended is `ESRCH`
+/// rather than a failure, and an observation is the only one of the three that is
+/// safe to repeat. Injectable so the drain's decision table can be exercised
+/// against every combination of those failures without forking a process.
+#[cfg(all(unix, feature = "process"))]
+trait DescendantCapture: Sync {
+    /// Every process descended from `root` right now.
+    fn capture(&self, root: i32) -> io::Result<Capture>;
+    /// Send SIGKILL to one captured pid.
+    fn signal(&self, pid: i32) -> io::Result<()>;
+    /// Which of `pids` are still running, as opposed to present-but-reaped.
+    fn running(&self, pids: &[i32]) -> io::Result<Vec<i32>>;
+}
+
 /// A cleanup obligation retained after its original task ends.
 #[cfg(all(unix, feature = "process"))]
 struct PendingCleanup {
@@ -3424,6 +3907,8 @@ struct PendingCleanup {
     _lease: Lease,
     /// Absence was observed before its task's terminal report was joined.
     absence_observed: bool,
+    /// What the retained cleanup read and signalled, for its terminal receipt.
+    containment: Containment,
 }
 
 /// Bounded owners for groups whose leader task could not prove cleanup.
@@ -3437,17 +3922,48 @@ struct CleanupOwners {
     /// Signalled on every registration, so a spawn waiting at the bound learns
     /// that a permit has moved to an owner that only a reap will release.
     registered: Notify,
+    /// Spawned process tasks that have not yet returned; see [`LiveProcess`].
+    live: std::sync::atomic::AtomicUsize,
+}
+
+/// One spawned process task that has not yet returned.
+///
+/// Moved into the task's future, so it is dropped when the task returns *or* is
+/// aborted, and [`Supervisor::shutdown`] can tell a process still draining its
+/// cleanup from a body that ignores its token.
+#[cfg(all(unix, feature = "process"))]
+struct LiveProcess(Arc<CleanupOwners>);
+
+#[cfg(all(unix, feature = "process"))]
+impl LiveProcess {
+    /// Count one more live process task against `owners`.
+    fn enter(owners: &Arc<CleanupOwners>) -> Self {
+        owners
+            .live
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(Arc::clone(owners))
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl Drop for LiveProcess {
+    fn drop(&mut self) {
+        self.0
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 #[cfg(all(unix, feature = "process"))]
 impl CleanupOwners {
     /// Transfer a live task's lease and cleanup obligation to this registry.
-    fn register(&self, task: TaskId, group: i32, lease: Lease) {
+    fn register(&self, task: TaskId, group: i32, lease: Lease, containment: Containment) {
         crate::journal::owner::lock(&self.pending).push(PendingCleanup {
             task,
             group,
             _lease: lease,
             absence_observed: false,
+            containment,
         });
         self.registered.notify_one();
     }
@@ -3462,7 +3978,7 @@ impl CleanupOwners {
         &self,
         observer: &dyn GroupObserver,
         task_is_live: impl Fn(TaskId) -> bool,
-    ) -> Vec<TaskId> {
+    ) -> Vec<(TaskId, Containment)> {
         let mut pending = crate::journal::owner::lock(&self.pending);
         let mut retained = Vec::with_capacity(pending.len());
         let mut settled = Vec::new();
@@ -3474,7 +3990,7 @@ impl CleanupOwners {
                     owner.absence_observed = true;
                     retained.push(owner);
                 } else {
-                    settled.push(owner.task);
+                    settled.push((owner.task, owner.containment));
                 }
             } else {
                 retained.push(owner);
@@ -3543,6 +4059,52 @@ static NATIVE_GROUP_SIGNALLER: NativeGroupSignaller = NativeGroupSignaller;
 #[cfg(all(unix, feature = "process"))]
 /// The static observer used by process-group cleanup.
 static NATIVE_GROUP_OBSERVER: NativeGroupObserver = NativeGroupObserver;
+
+#[cfg(all(unix, feature = "process"))]
+/// The production per-process containment adapter.
+struct NativeDescendantCapture;
+
+#[cfg(all(unix, feature = "process"))]
+impl DescendantCapture for NativeDescendantCapture {
+    /// Read the tree through the audited `lgwks_std::process` primitives, which
+    /// is where the rustix edge and the bounded walk live.
+    fn capture(&self, root: i32) -> io::Result<Capture> {
+        lgwks_std::process::capture_descendants(root).map(|set| Capture::from_set(&set))
+    }
+
+    fn signal(&self, pid: i32) -> io::Result<()> {
+        lgwks_std::process::kill_process(pid)
+    }
+
+    fn running(&self, pids: &[i32]) -> io::Result<Vec<i32>> {
+        Ok(lgwks_std::process::running_processes(pids)?
+            .into_iter()
+            .collect())
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+/// One static production capture, so a process future holds no borrowed state.
+static NATIVE_DESCENDANT_CAPTURE: NativeDescendantCapture = NativeDescendantCapture;
+
+/// The terminal receipt a retained cleanup earns when its group is observed
+/// absent.
+///
+/// Not always `CleanupConfirmed`: an obligation transferred to the registry still
+/// carries the containment report its task ended with, and a cleanup that left a
+/// survivor has not reclaimed the tree however absent the group became. Naming
+/// the mechanism here is what lets a consumer read one settled receipt and know
+/// both.
+#[cfg(all(unix, feature = "process"))]
+fn settled_receipt(containment: &Containment) -> CleanupReceipt {
+    if containment.survivors().is_empty() {
+        CleanupReceipt::CleanupConfirmed
+    } else {
+        CleanupReceipt::CleanupSurvivors {
+            survivors: containment.survivors().to_vec(),
+        }
+    }
+}
 
 /// What happened while observing a supervised child without releasing its pid.
 #[derive(Clone, Copy)]
@@ -3636,8 +4198,8 @@ struct ProcessEnd {
     observation: ProcessObservation,
     /// The status the engine reported, when there is one.
     status: Option<ExitStatus>,
-    /// Process-group cleanup evidence.
-    cleanup: CleanupReceipt,
+    /// The cleanup receipt and what it was based on.
+    cleanup: ProcessCleanup,
     /// Captured stdout.
     stdout: CapturedStream,
     /// Captured stderr.
@@ -3648,29 +4210,24 @@ struct ProcessEnd {
 /// task-end, so the public `TaskOutcome` is derived from one place.
 #[cfg(all(unix, feature = "process"))]
 fn task_end(end: ProcessEnd) -> TaskEnd {
-    // The signal phase ran while the leader was unreaped; group signals are
-    // over by the time this is constructed. A `Pending` cleanup stays in this
-    // task through the bounded post-reap, signal-zero probe.
-    match end.observation {
-        ProcessObservation::Exited => match end.status {
-            Some(status) if status.success() => TaskEnd::CompletedWithCleanup {
-                cleanup: end.cleanup,
-            },
-            Some(status) => TaskEnd::Failed {
-                status: Some(status),
-                cleanup: end.cleanup,
-            },
-            None => TaskEnd::Failed {
-                status: None,
-                cleanup: end.cleanup,
-            },
+    // The signal phase ran while the leader was unreaped; signals are over by the
+    // time this is constructed. A `Pending` cleanup stays in this task through the
+    // bounded post-reap, signal-zero probe.
+    let ProcessEnd {
+        observation,
+        status,
+        cleanup,
+        ..
+    } = end;
+    match observation {
+        ProcessObservation::Exited => match status {
+            Some(ref observed) if observed.success() => TaskEnd::CompletedWithCleanup { cleanup },
+            status => TaskEnd::Failed { status, cleanup },
         },
-        ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup {
-            cleanup: end.cleanup,
-        },
+        ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
         ProcessObservation::Deadline | ProcessObservation::Unobservable => TaskEnd::Failed {
             status: None,
-            cleanup: end.cleanup,
+            cleanup,
         },
     }
 }
@@ -3755,37 +4312,60 @@ async fn drive_process_observed(
         let cleanup = group.cleanup().await;
         (observation, cleanup)
     };
-    let (stdout, stderr, (observation, mut cleanup)) = join3(capture_out, capture_err, wait).await;
+    let (stdout, stderr, (observation, mut receipt)) = join3(capture_out, capture_err, wait).await;
 
-    if matches!(cleanup, CleanupReceipt::CleanupFailed)
+    if matches!(receipt, CleanupReceipt::CleanupFailed)
         && !matches!(observation, ProcessObservation::Exited)
     {
         // Do not wait on a child whose group signal could not be delivered. The
         // owned child is dropped immediately after this return, and
         // `kill_on_drop` remains the direct-child fallback.
+        let containment = group.containment().clone();
         drop(group);
         return ProcessEnd {
             observation,
             status: None,
-            cleanup,
+            cleanup: ProcessCleanup {
+                receipt,
+                containment,
+            },
             stdout,
             stderr,
         };
     }
-    let status = if matches!(cleanup, CleanupReceipt::CleanupFailed) {
+    let (status, cleanup) = if matches!(receipt, CleanupReceipt::CleanupFailed) {
         // Keep the leader unreaped while the armed guard makes its final
         // synchronous kill attempt. The receipt reports the syscall failure;
         // dropping the child then relinquishes it to the platform's orphan
         // reaper rather than signalling a stale numeric group id.
+        let containment = group.containment().clone();
         drop(group);
-        child.reap().await.ok()
+        let status = child.reap().await.ok();
+        (
+            status,
+            ProcessCleanup {
+                receipt,
+                containment,
+            },
+        )
     } else {
         let status = child.reap().await.ok();
         group.mark_reaped();
-        if matches!(cleanup, CleanupReceipt::CleanupPending) {
-            cleanup = group.confirm_absence().await;
+        // Every unresolved arm goes through the post-reap pass, not only
+        // `Pending`: a survivor list is exactly what a further observation can
+        // clear, since the platform reaps what stopped running once the leader is
+        // gone. No arm is promoted to `Confirmed` by anything but that pass.
+        if !matches!(receipt, CleanupReceipt::CleanupConfirmed) {
+            receipt = group.confirm_absence().await;
         }
-        status
+        let containment = group.containment().clone();
+        (
+            status,
+            ProcessCleanup {
+                receipt,
+                containment,
+            },
+        )
     };
     ProcessEnd {
         observation,
@@ -3998,13 +4578,41 @@ impl<'ops> ProcessGroup<'ops> {
             owners,
             armed: true,
             leader_reaped: false,
+            group_absent: false,
+            containment: Containment::default(),
+            signalled_pids: std::collections::BTreeSet::new(),
             signaller: &NATIVE_GROUP_SIGNALLER,
             observer: &NATIVE_GROUP_OBSERVER,
+            capture: &NATIVE_DESCENDANT_CAPTURE,
         }
     }
 
-    /// Terminate the group and probe until it disappears or the bounded drain
-    /// is exhausted. A successful signal is not treated as proof of cleanup.
+    /// Capture the tree, signal the group and every captured pid, and observe
+    /// until nothing captured is still running or the bounded drain is exhausted.
+    ///
+    /// Four phases per round, and the order is the whole design:
+    ///
+    /// 1. **Capture**, once per round and before any signal of that round. Before
+    ///    the *first* signal the leader is still alive and its descendants still
+    ///    name it as their parent; after the leader exits they are adopted
+    ///    elsewhere and no walk from the leader reaches them. Within the drain,
+    ///    re-capturing each round is what catches a fork that completed while an
+    ///    earlier round's signal was in flight.
+    /// 2. **Signal the group.** The floor, and the only thing that reaches a
+    ///    member forked after the round's capture.
+    /// 3. **Signal every captured pid.** A `setsid` descendant is in no group this
+    ///    supervisor owns, so a pid signal is the only thing that reaches it.
+    /// 4. **Observe** which captured pids are still *running**, as opposed to
+    ///    present and unreaped.
+    ///
+    /// The rounds replace the 64-yield retry the group alone needed. Each round
+    /// proves more than the last — it admits the forks the previous round's window
+    /// let through, and re-signals anything the previous round's observation
+    /// proved alive — so the bound is on *rounds of evidence* rather than on how
+    /// long a scheduler happened to take. A delivered signal is still not proof of
+    /// cleanup: only the observations settle it, and the group's own absence is
+    /// settled after the reap by [`Self::confirm_absence`], because an unreaped
+    /// zombie leader keeps its group present by construction.
     async fn cleanup(&mut self) -> CleanupReceipt {
         if self.leader_reaped {
             return CleanupReceipt::CleanupFailed;
@@ -4012,98 +4620,249 @@ impl<'ops> ProcessGroup<'ops> {
         if self.group <= 0 {
             return CleanupReceipt::CleanupFailed;
         }
-        let mut signalled = false;
-        for attempt in 0..PROCESS_CLEANUP_ATTEMPTS {
-            match self.signaller.signal(self.group) {
-                Ok(()) => {
-                    signalled = true;
-                    if attempt.saturating_add(1) < PROCESS_CLEANUP_ATTEMPTS {
-                        yield_now().await;
-                    }
-                }
-                Err(error)
-                    if error.kind() == io::ErrorKind::NotFound
-                        || error.raw_os_error() == Some(3) =>
-                {
-                    self.disarm();
-                    return CleanupReceipt::CleanupConfirmed;
-                }
-                // `EPERM` after a delivered SIGKILL is not a termination
-                // refusal: on macOS/BSD a process group whose leader is an
-                // unreaped zombie (which is exactly the state the first signal
-                // produced) reports `EPERM` for a further `killpg`, while the
-                // group — the zombie leader included — is still present. It is
-                // therefore the same fact `exists` reports as `Ok(true)`: the
-                // group is still there. Returning `Failed` here would claim the
-                // OS refused a kill it already delivered, and would report a
-                // deadline kill as a cleanup failure. The absence is settled by
-                // the post-reap signal-zero probe, so this stays pending.
-                Err(error)
-                    if error.kind() == io::ErrorKind::PermissionDenied
-                        || error.raw_os_error() == Some(1) =>
-                {
-                    return CleanupReceipt::CleanupPending;
-                }
-                Err(_) => return CleanupReceipt::CleanupFailed,
+        for round in 0..CONTAINMENT_ROUNDS {
+            let tree = self.read_tree();
+            if matches!(self.signal_group(), GroupSignal::Refused) {
+                return CleanupReceipt::CleanupFailed;
+            }
+            if let Some(ref captured) = tree {
+                self.signal_captured(captured);
+                self.observe_captured(captured);
+            }
+            if self.no_survivors() {
+                break;
+            }
+            if round.saturating_add(1) < CONTAINMENT_ROUNDS {
+                yield_now().await;
             }
         }
-        // Every signal above ran while the leader still pinned this id. Keep
-        // the caller in this task: after reaping it performs only the harmless
-        // signal-zero probe, retaining its task permit meanwhile.
-        if signalled {
-            CleanupReceipt::CleanupPending
-        } else {
-            CleanupReceipt::CleanupFailed
+        self.receipt()
+    }
+
+    /// Read the leader's descendants now, folding them into this report.
+    ///
+    /// `None` when no process table could be read at all, which is a **fact about
+    /// the mechanism** rather than an empty tree: it records
+    /// [`ResidualRisk::TableUnreadable`], leaves the group signal as the only
+    /// thing this cleanup can rely on, and stops the per-process phases of the
+    /// round rather than reporting "every descendant was".
+    fn read_tree(&mut self) -> Option<Capture> {
+        match self.capture.capture(self.group) {
+            Ok(set) => {
+                self.containment.record_capture(&set);
+                Some(set)
+            }
+            Err(_) => {
+                self.containment.note(ResidualRisk::TableUnreadable);
+                None
+            }
         }
     }
 
-    /// Confirm process-group absence after `child.wait()` has released the pid.
-    ///
-    /// The observer sends no signal; a reused identifier can therefore never
-    /// cause this supervisor to affect an unrelated group. Errors and a still
-    /// present group consume the same bounded observation budget and remain
-    /// `Pending` rather than being promoted to proof of absence.
-    async fn confirm_absence(&mut self) -> CleanupReceipt {
-        if !self.leader_reaped || self.group <= 0 {
-            return CleanupReceipt::CleanupFailed;
+    /// Send SIGKILL to the group and report what the OS answered.
+    fn signal_group(&mut self) -> GroupSignal {
+        match self.signaller.signal(self.group) {
+            Ok(()) => GroupSignal::Delivered,
+            Err(error) if is_absence(&error) => {
+                self.group_absent = true;
+                GroupSignal::Absent
+            }
+            // `EPERM` after a delivered SIGKILL is not a termination refusal: on
+            // macOS/BSD a process group whose leader is an unreaped zombie
+            // (exactly the state the first signal produced) reports `EPERM` for a
+            // further `killpg` while the group — the zombie leader included — is
+            // still present. It is the same fact `exists` reports as `Ok(true)`:
+            // the group is still there. Reporting `Failed` would claim the OS
+            // refused a kill it already delivered, and would report a deadline
+            // kill as a cleanup failure (INV-BOT-19). The absence is settled by
+            // the post-reap signal-zero probe.
+            Err(error) if is_present_but_unsignalable(&error) => GroupSignal::Present,
+            Err(_) => GroupSignal::Refused,
         }
-        for attempt in 0..PROCESS_CLEANUP_ATTEMPTS {
-            if let Ok(false) = self.observer.exists(self.group) {
-                self.disarm();
-                return CleanupReceipt::CleanupConfirmed;
+    }
+
+    /// SIGKILL every captured pid this cleanup has not signalled, or that the last
+    /// observation proved alive.
+    ///
+    /// The "or proved alive" is the T21 fence. A pid captured in an earlier round
+    /// and already signalled is not signalled again on its own: its process may
+    /// have died and its id been reissued, and signalling a number is signalling
+    /// whoever holds it now. A pid the last observation reported **running** is
+    /// that same process, still holding its id, so the repeat is safe — and is the
+    /// only thing that reaches a descendant that ignored the first.
+    fn signal_captured(&mut self, captured: &Capture) {
+        let observed = self.containment.survivors.clone();
+        for pid in &captured.pids {
+            let fresh = !self.signalled_pids.contains(pid);
+            if !fresh && !observed.contains(pid) {
+                continue;
             }
-            if attempt.saturating_add(1) < PROCESS_CLEANUP_ATTEMPTS {
-                yield_now().await;
+            match self.capture.signal(*pid) {
+                Ok(()) => {
+                    self.signalled_pids.insert(*pid);
+                    self.containment.record_signal();
+                }
+                // The process has ended: `ESRCH` is its answer rather than a
+                // failure, and the pid is not signalled again.
+                Err(error) if is_absence(&error) => {
+                    self.signalled_pids.remove(pid);
+                }
+                // Anything else — including a refusal to signal somebody else's
+                // process — leaves the pid unsignalled, and the round's own
+                // observation then reports it: an unexplainable survivor belongs
+                // in the receipt, not in a swallowed error.
+                Err(_) => {}
             }
+        }
+    }
+
+    /// Replace the survivor list with what the table says is still running.
+    ///
+    /// Signal-free, so it is safe to repeat and safe against a pid this supervisor
+    /// no longer owns: the question is only ever asked about pids this cleanup
+    /// captured. An unreadable observation claims nothing and reports every
+    /// captured pid as running, the direction that understates the cleanup rather
+    /// than overstating it.
+    fn observe_captured(&mut self, captured: &Capture) {
+        if captured.is_empty() {
+            self.containment.record_survivors(&[]);
+            return;
+        }
+        self.observe_running(&captured.pids);
+    }
+
+    /// Replace the survivor list with which of `pids` are still running.
+    ///
+    /// The one observation both phases make: [`Self::observe_captured`] asks it
+    /// of a fresh capture, [`Self::confirm_absence`] of the pids an earlier
+    /// observation proved running. An unreadable table records every pid asked
+    /// about as running, the answer that understates the cleanup.
+    fn observe_running(&mut self, pids: &[i32]) {
+        match self.capture.running(pids) {
+            Ok(running) => self.containment.record_survivors(&running),
+            Err(_) => self.containment.record_survivors(pids),
+        }
+    }
+
+    /// Whether no captured pid was still running at the last observation.
+    fn no_survivors(&self) -> bool {
+        self.containment.survivors.is_empty()
+    }
+
+    /// The receipt this cleanup has earned from what its rounds observed.
+    ///
+    /// One decision in one place, because the arms are three facts. A survivor
+    /// outranks the group's own state — a `setsid` descendant is still a process
+    /// this supervisor started, however absent its group became — and the group is
+    /// reported absent only once something actually observed it absent.
+    fn receipt(&mut self) -> CleanupReceipt {
+        if !self.containment.survivors.is_empty() {
+            return CleanupReceipt::CleanupSurvivors {
+                survivors: self.containment.survivors.clone(),
+            };
+        }
+        if self.group_absent {
+            self.disarm();
+            return CleanupReceipt::CleanupConfirmed;
         }
         CleanupReceipt::CleanupPending
     }
 
-    /// Signal the whole group as a drop-time safety fallback.
+    /// Confirm absence after `child.wait()` has released the leader's pid.
     ///
-    /// One signal is not enough. A group signal reaches the members that exist
-    /// when it is sent, so a child the leader is forking at that instant can
-    /// miss it, outlive its killed parent and run on reparented to init — a
-    /// dropped run's `sh -c 'echo; sleep'` left exactly that `sleep` behind.
-    /// The kill therefore repeats, yielding the thread between attempts so a
-    /// fork in progress completes and is reached, for as long as the group is
-    /// still present (`Ok`, or `EPERM` for a zombie leader, INV-BOT-19). It
-    /// stops at absence or any other error, and never runs after the leader is
-    /// reaped, so the id it signals is still pinned (INV-BOT-12).
-    fn kill(&self) {
+    /// Both halves are **observation**: the probe sends no signal, so a reused
+    /// identifier can never cause this supervisor to affect an unrelated group,
+    /// and a still-present group consumes the same bounded budget and stays
+    /// `Pending` rather than being promoted to proof of absence (INV-BOT-12,
+    /// INV-BOT-13). The descendant half is observed for the same reason and
+    /// because nothing more can be done about it here: the leader is reaped, so
+    /// signalling any captured pid now could reach a reissued id.
+    ///
+    /// It observes the survivors the pinned phase captured and **does not capture
+    /// again**. The leader's id is released by the reap, so a walk from it names
+    /// whoever holds that number now — another process's children, attributed to
+    /// this task — and the descendants it did have were re-parented away when it
+    /// exited, so the walk could not find them either. It was also the dear half:
+    /// a reaped root has no `/proc/<pid>/task`, so the Linux reading fell back to
+    /// a whole-table `ps` spawn on every process a supervisor ran, which tripled
+    /// `sim_review_path`'s 10,000-run tier on CI (62 s on main, 181 s with the
+    /// re-capture). With no survivor the observation reads no table at all.
+    ///
+    /// The reap is what makes this pass able to succeed at all — an unreaped
+    /// zombie leader keeps its group present, which is why the pinned phase could
+    /// only ever report `Pending`.
+    async fn confirm_absence(&mut self) -> CleanupReceipt {
+        if !self.leader_reaped || self.group <= 0 {
+            return CleanupReceipt::CleanupFailed;
+        }
+        for round in 0..CONTAINMENT_ROUNDS {
+            if matches!(self.observer.exists(self.group), Ok(false)) {
+                self.group_absent = true;
+            }
+            if !self.no_survivors() {
+                let survivors = self.containment.survivors.clone();
+                self.observe_running(&survivors);
+            }
+            if self.group_absent && self.no_survivors() {
+                return self.receipt();
+            }
+            if round.saturating_add(1) < CONTAINMENT_ROUNDS {
+                yield_now().await;
+            }
+        }
+        self.receipt()
+    }
+
+    /// Signal the whole group and every captured pid as a drop-time fallback.
+    ///
+    /// A dropped future cannot await, so this is one synchronous pass rather than
+    /// the drain above: capture once, name each captured pid once, then repeat the
+    /// group signal a bounded number of times while the unreaped leader still pins
+    /// the id. The repeats exist for the one thing a capture cannot reach — a
+    /// member the leader forks after the capture and before it dies — and they are
+    /// bounded rather than open because the leader's death is the event that ends
+    /// the window.
+    ///
+    /// The capture is a blocking table read on this path: on a host whose reading
+    /// is a `ps` invocation it costs one process spawn, which is a price worth
+    /// paying on a terminal path that has just abandoned its task and a price the
+    /// drain above would otherwise pay repeatedly. It is deliberately **not**
+    /// routed through a blocking pool: a refused pool admission would silently
+    /// degrade containment to the group alone at exactly the concurrency where
+    /// containment matters most.
+    fn kill(&mut self) {
         if self.leader_reaped || self.group <= 0 {
             return;
         }
-        for _ in 0..PROCESS_CLEANUP_ATTEMPTS {
-            match self.signaller.signal(self.group) {
-                Ok(()) => {}
-                Err(error)
-                    if error.kind() == io::ErrorKind::PermissionDenied
-                        || error.raw_os_error() == Some(1) => {}
-                Err(_) => return,
+        if let Some(ref captured) = self.read_tree() {
+            for pid in &captured.pids {
+                if self.capture.signal(*pid).is_ok() {
+                    self.signalled_pids.insert(*pid);
+                    self.containment.record_signal();
+                }
             }
-            std::thread::yield_now();
         }
+        for _ in 0..GROUP_SIGNAL_ATTEMPTS {
+            match self.signal_group() {
+                // Absent and unsignalable are both "still there or already gone,
+                // and neither is a reason to stop trying"; `Absent` ends it.
+                GroupSignal::Absent => break,
+                GroupSignal::Delivered | GroupSignal::Present => {
+                    std::thread::yield_now();
+                }
+                GroupSignal::Refused => break,
+            }
+        }
+    }
+
+    /// What this cleanup read, signalled, and could not account for.
+    ///
+    /// Read by the driver to carry the report onto the outcome, and by [`Drop`] to
+    /// hand it to the retained-cleanup registry: an obligation that outlives its
+    /// task has to carry the same report its task ended with, or the settled
+    /// receipt would claim a mechanism nobody ran.
+    fn containment(&self) -> &Containment {
+        &self.containment
     }
 
     /// Mark the group as already gone, so [`Drop`] does not signal it.
@@ -4130,7 +4889,8 @@ impl Drop for ProcessGroup<'_> {
                 self.kill();
             }
             if let Some(permit) = self.permit.take() {
-                self.owners.register(self.task, self.group, permit);
+                self.owners
+                    .register(self.task, self.group, permit, self.containment.clone());
             }
         }
     }
@@ -4407,6 +5167,8 @@ impl core::fmt::Debug for Supervisor {
 mod tests {
     #[cfg(all(unix, feature = "process"))]
     use super::CleanupOwners;
+    #[cfg(feature = "process")]
+    use super::CleanupReceipt;
     #[cfg(all(not(unix), feature = "process"))]
     use super::ProcessSpec;
     #[cfg(feature = "script")]
@@ -4417,8 +5179,11 @@ mod tests {
         Budget, Clock, Lease, MAX_PANIC_MESSAGE_CHARS, Outcome, Supervisor, TaskId, TaskOutcome,
         TrySpawnRefusal, repeat, truncate_panic_message,
     };
-    #[cfg(feature = "process")]
-    use super::{CleanupReceipt, GroupObserver, GroupSignaller, ProcessGroup};
+    #[cfg(all(unix, feature = "process"))]
+    use super::{
+        CONTAINMENT_ROUNDS, Containment, ContainmentMechanism, DescendantCapture, EPERM, ESRCH,
+        GroupObserver, GroupSignaller, ProcessGroup, ResidualRisk,
+    };
     use crate::rt::cancel::CancellationToken;
     use crate::rt::runtime::block_on;
     use crate::rt::task::yield_now;
@@ -4543,6 +5308,216 @@ mod tests {
         }
     }
 
+    /// A capture driven by the test rather than by the process table.
+    ///
+    /// Every combination the drain can meet — a tree nobody can read, a pid that
+    /// refuses its signal, a pid that stays running whatever is sent, a truncated
+    /// reading — is a value here rather than a process, which is what makes the
+    /// decision table testable at all. The counters are how a test observes what
+    /// the drain *did*, as opposed to what it reported.
+    #[cfg(all(unix, feature = "process"))]
+    #[derive(Default)]
+    struct ScriptedCapture {
+        /// The pids every reading names.
+        tree: Vec<i32>,
+        /// The pids a signal is refused for, as `ESRCH` would be for a process
+        /// that has already ended.
+        gone: Vec<i32>,
+        /// The pids that keep running whatever is sent to them.
+        immortal: Vec<i32>,
+        /// Whether every reading fails, the way a target with no process table
+        /// reports.
+        unreadable: bool,
+        /// Whether the reading is truncated at its bound.
+        truncated: bool,
+        /// How many readings the drain took.
+        reads: AtomicUsize,
+        /// How many signals the drain delivered.
+        signals: AtomicUsize,
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    impl ScriptedCapture {
+        /// A reading that names `tree`.
+        fn of(tree: &[i32]) -> Self {
+            Self {
+                tree: tree.to_vec(),
+                ..Self::default()
+            }
+        }
+
+        /// Readings, so a test can count them.
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::Relaxed)
+        }
+
+        /// Delivered signals, so a test can count them.
+        fn signals(&self) -> usize {
+            self.signals.load(Ordering::Relaxed)
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    impl DescendantCapture for ScriptedCapture {
+        fn capture(&self, _root: i32) -> std::io::Result<super::Capture> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.unreadable {
+                let refusal = Err(std::io::Error::other("injected unreadable process table"));
+                lgwks_std::trace::debug!(
+                    error = ?refusal.as_ref().err(),
+                    "scripted capture: returning an error to the caller"
+                );
+                return refusal;
+            }
+            Ok(super::Capture {
+                mechanism: ContainmentMechanism::ProcessTableSnapshot,
+                pids: self.tree.clone(),
+                truncated: self.truncated,
+            })
+        }
+
+        fn signal(&self, pid: i32) -> std::io::Result<()> {
+            if self.gone.contains(&pid) {
+                let refusal = Err(std::io::Error::from_raw_os_error(3));
+                lgwks_std::trace::debug!(
+                    pid,
+                    error = ?refusal.as_ref().err(),
+                    "scripted signal: returning an error to the caller"
+                );
+                return refusal;
+            }
+            self.signals.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn running(&self, pids: &[i32]) -> std::io::Result<Vec<i32>> {
+            Ok(pids
+                .iter()
+                .copied()
+                .filter(|pid| self.immortal.contains(pid))
+                .collect())
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// A report from a whole reading that found no descendant.
+    ///
+    /// What a real drain carries when the process table was read and the tree was
+    /// empty. `Containment::default()` is the *absence* of a report — a group-only
+    /// cleanup — and a registry entry holding one is never clean, which is the
+    /// point: an obligation that never captured anything has not shown it stopped
+    /// the whole tree.
+    fn whole_capture() -> Containment {
+        Containment {
+            mechanism: ContainmentMechanism::ProcessTableSnapshot,
+            captured: 0,
+            signalled: 0,
+            survivors: Vec::new(),
+            residual: None,
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The task ids one drive settled, for the attribution assertions.
+    ///
+    /// The settled pairs carry the report each obligation ended with; these tests
+    /// are about which task a receipt belongs to, and a shared reader keeps the
+    /// pattern off both call sites.
+    fn settled_tasks(settled: &[(TaskId, Containment)]) -> Vec<TaskId> {
+        settled.iter().map(|pair| pair.0).collect()
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// A group armed for one test, with every seam it drives.
+    ///
+    /// One constructor rather than seven literals: the drain grew three fields, and
+    /// a literal per test is how half of them end up unset in exactly one arm.
+    fn armed_group<'ops>(
+        group: i32,
+        task: TaskId,
+        leader_reaped: bool,
+        permit: Option<Lease>,
+        owners: Arc<CleanupOwners>,
+        seams: Seams<'ops>,
+    ) -> ProcessGroup<'ops> {
+        ProcessGroup {
+            group,
+            task,
+            permit,
+            owners,
+            armed: true,
+            leader_reaped,
+            group_absent: false,
+            containment: Containment::default(),
+            signalled_pids: std::collections::BTreeSet::new(),
+            signaller: seams.signaller,
+            observer: seams.observer,
+            capture: seams.capture,
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The three boundaries a cleanup test drives, as one value.
+    ///
+    /// They are one thing to a reader: what the drain is allowed to *see* and
+    /// *touch*. Passing them as three arguments beside the group's own identity
+    /// made every call site a list of eight values whose order nothing checked.
+    #[derive(Copy, Clone)]
+    struct Seams<'ops> {
+        /// The group-signalling boundary.
+        signaller: &'ops dyn GroupSignaller,
+        /// The group-existence boundary.
+        observer: &'ops dyn GroupObserver,
+        /// The per-process containment boundary.
+        capture: &'ops dyn DescendantCapture,
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The seams a group-only test drives: a signaller and observer of the test's
+    /// own, and a reading that names nothing.
+    fn group_seams<'ops>(
+        signaller: &'ops dyn GroupSignaller,
+        observer: &'ops dyn GroupObserver,
+    ) -> Seams<'ops> {
+        Seams {
+            signaller,
+            observer,
+            capture: &NO_CAPTURE,
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The seams a containment test drives, with its own reading.
+    fn capture_seams<'ops>(
+        signaller: &'ops dyn GroupSignaller,
+        observer: &'ops dyn GroupObserver,
+        capture: &'ops dyn DescendantCapture,
+    ) -> Seams<'ops> {
+        Seams {
+            signaller,
+            observer,
+            capture,
+        }
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The reading every group-only test uses: a table that named nothing.
+    ///
+    /// The reading every group-only test uses: a table that named nothing.
+    ///
+    /// A `static` rather than a `const`, because the seams hold a reference to it
+    /// and a `const` would be a fresh temporary per use. Its counters are never
+    /// read by a test that uses it: a group-only test is about the group.
+    static NO_CAPTURE: ScriptedCapture = ScriptedCapture {
+        tree: Vec::new(),
+        gone: Vec::new(),
+        immortal: Vec::new(),
+        unreadable: false,
+        truncated: false,
+        reads: AtomicUsize::new(0),
+        signals: AtomicUsize::new(0),
+    };
+
     #[cfg(all(unix, feature = "process"))]
     struct FailingGroupObserver;
 
@@ -4560,16 +5535,32 @@ mod tests {
         observer: &'ops dyn GroupObserver,
         leader_reaped: bool,
     ) -> ProcessGroup<'ops> {
-        ProcessGroup {
-            group: 42,
-            task: TaskId(0),
-            permit: test_lease(),
-            owners: Arc::new(CleanupOwners::default()),
-            armed: true,
+        armed_group(
+            42,
+            TaskId(0),
             leader_reaped,
-            signaller,
-            observer,
-        }
+            test_lease(),
+            Arc::new(CleanupOwners::default()),
+            group_seams(signaller, observer),
+        )
+    }
+
+    /// A containment test's guard: test group 42 with an unreaped leader, its
+    /// own lease and owners, and the reading the test scripts.
+    #[cfg(all(unix, feature = "process"))]
+    fn capture_group<'ops>(
+        signaller: &'ops dyn GroupSignaller,
+        observer: &'ops dyn GroupObserver,
+        capture: &'ops dyn DescendantCapture,
+    ) -> ProcessGroup<'ops> {
+        armed_group(
+            42,
+            TaskId(0),
+            false,
+            test_lease(),
+            Arc::new(CleanupOwners::default()),
+            capture_seams(signaller, observer, capture),
+        )
     }
 
     /// An observer that reports the group present `present_before_absent`
@@ -4592,7 +5583,7 @@ mod tests {
 
     #[cfg(all(unix, feature = "process"))]
     fn test_lease() -> Option<Lease> {
-        let permit = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
+        let permit = Arc::new(crate::rt::sync::Semaphore::new(1))
             .try_acquire_owned()
             .ok()?;
         Some(Lease::plain(permit))
@@ -4653,6 +5644,221 @@ mod tests {
         drop(group);
     }
 
+    /// A group whose drain reports a named survivor, and the receipt that says so.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_descendant_that_keeps_running_is_named_in_the_receipt() {
+        let signaller = recording();
+        let observer = sequence(usize::MAX);
+        let capture = ScriptedCapture {
+            tree: vec![70, 71],
+            immortal: vec![71],
+            ..ScriptedCapture::default()
+        };
+        let mut group = capture_group(&signaller, &observer, &capture);
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupSurvivors {
+                survivors: vec![71],
+            },
+            "a captured descendant that ignored every signal must be named, not absorbed \
+             into a pending group"
+        );
+        let report = group.containment();
+        assert_eq!(
+            report.captured(),
+            2,
+            "the report must account for both captured pids"
+        );
+        assert_eq!(
+            report.signalled(),
+            1 + CONTAINMENT_ROUNDS,
+            "one signal for the descendant that stopped and one per round for the one that \
+             did not: a repeat is only ever sent while an observation proves the pid alive"
+        );
+        assert_eq!(
+            report.survivors(),
+            [71],
+            "the survivor list is the running pid and nothing else"
+        );
+        assert_eq!(
+            report.mechanism(),
+            ContainmentMechanism::ProcessTableSnapshot,
+            "the mechanism that read the table is the one reported"
+        );
+        assert_eq!(
+            report.residual_risk(),
+            None,
+            "a whole reading with no survivor carries no residual risk"
+        );
+        assert!(
+            !report.is_complete(),
+            "a named survivor is by definition an incomplete containment"
+        );
+        // Nothing more can be done about it after the reap, so the pass observes
+        // rather than signals and keeps the receipt it earned. It observes the
+        // survivor by pid and never walks the tree again: a walk from a reaped
+        // leader names whoever holds its id now.
+        let pinned_reads = capture.reads();
+        group.mark_reaped();
+        assert_eq!(
+            block_on(group.confirm_absence()),
+            CleanupReceipt::CleanupSurvivors {
+                survivors: vec![71],
+            },
+            "a survivor is never promoted to a clean cleanup by a later observation"
+        );
+        assert_eq!(
+            capture.reads(),
+            pinned_reads,
+            "the post-reap pass observes the captured survivor and reads no tree"
+        );
+        assert_eq!(
+            capture.signals(),
+            1 + CONTAINMENT_ROUNDS,
+            "the survivor is signalled once in the round that captured it and once per later \
+             round, and only because an observation proves it alive; the descendant that \
+             stopped is signalled exactly once"
+        );
+        assert!(
+            group.armed,
+            "an unresolved cleanup stays armed for its registry transfer"
+        );
+        drop(group);
+    }
+
+    /// A captured descendant that had already ended is not a survivor.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_captured_pid_that_had_ended_is_not_reported_as_a_survivor() {
+        let signaller = recording();
+        let observer = sequence(0);
+        let capture = ScriptedCapture {
+            tree: vec![70],
+            gone: vec![70],
+            ..ScriptedCapture::default()
+        };
+        let mut group = capture_group(&signaller, &observer, &capture);
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "the group is still pinned by its unreaped leader, so the pinned phase is pending"
+        );
+        let pinned_reads = capture.reads();
+        group.mark_reaped();
+        assert_eq!(
+            block_on(group.confirm_absence()),
+            CleanupReceipt::CleanupConfirmed,
+            "an absent group and no running descendant is a complete cleanup"
+        );
+        assert_eq!(
+            capture.reads(),
+            pinned_reads,
+            "a clean post-reap pass reads no tree: on Linux a walk from a reaped leader \
+             was a whole-table `ps` spawn per process"
+        );
+        assert!(
+            group.containment().is_complete(),
+            "the report must name the mechanism it ran and carry no survivor"
+        );
+        drop(group);
+    }
+
+    /// A pid is signalled once per drain, not once per observation of it.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_captured_pid_is_signalled_once_and_not_once_per_observation() {
+        let signaller = recording();
+        let observer = sequence(usize::MAX);
+        let capture = ScriptedCapture::of(&[70, 71, 72]);
+        let mut group = capture_group(&signaller, &observer, &capture);
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "nothing is running, so the pinned phase is pending on the group alone"
+        );
+        assert_eq!(
+            capture.signals(),
+            3,
+            "three captured pids, three signals: a repeat would be a signal to an id whose \
+             process has since ended"
+        );
+        assert_eq!(
+            capture.reads(),
+            1,
+            "the drain stops on the first round once nothing captured is running"
+        );
+        drop(group);
+    }
+
+    /// No process table at all is a stated limit, not an empty tree.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn an_unreadable_process_table_leaves_the_group_as_the_only_mechanism() {
+        let signaller = recording();
+        let observer = sequence(usize::MAX);
+        let capture = ScriptedCapture {
+            unreadable: true,
+            ..ScriptedCapture::default()
+        };
+        let mut group = capture_group(&signaller, &observer, &capture);
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "the group was signalled and nothing else could be read"
+        );
+        let report = group.containment();
+        assert_eq!(
+            report.mechanism(),
+            ContainmentMechanism::ProcessGroupOnly,
+            "no table was read, so the mechanism must say the group was all there was"
+        );
+        assert_eq!(
+            report.residual_risk(),
+            Some(ResidualRisk::TableUnreadable),
+            "the limit is named rather than left to be inferred from an empty capture"
+        );
+        assert_eq!(
+            report.captured(),
+            0,
+            "nothing was captured, so nothing may be reported as captured"
+        );
+        assert!(
+            !report.is_complete(),
+            "a group-only cleanup never claims the whole tree"
+        );
+        drop(group);
+    }
+
+    /// A truncated reading is a prefix, and the receipt says so.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_truncated_capture_is_reported_as_a_prefix_and_not_as_the_tree() {
+        let signaller = recording();
+        let observer = sequence(usize::MAX);
+        let capture = ScriptedCapture {
+            tree: vec![70, 71],
+            truncated: true,
+            ..ScriptedCapture::default()
+        };
+        let mut group = capture_group(&signaller, &observer, &capture);
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "the group is pinned by its unreaped leader"
+        );
+        assert_eq!(
+            group.containment().residual_risk(),
+            Some(ResidualRisk::CaptureTruncated),
+            "a reading stopped at its bound must be reported as a prefix"
+        );
+        assert!(
+            !group.containment().is_complete(),
+            "a prefix cannot claim the whole tree"
+        );
+        drop(group);
+    }
+
     #[cfg(all(unix, feature = "process"))]
     #[test]
     fn bounded_group_termination_keeps_cleanup_owned_until_absence_is_observed() {
@@ -4666,8 +5872,9 @@ mod tests {
         );
         let before_reap = signaller.calls.load(Ordering::Relaxed);
         assert_eq!(
-            before_reap, 64,
-            "the bounded pinned phase must signal each configured attempt"
+            before_reap, 1,
+            "the drain stops as soon as nothing captured is still running, so a group with no \
+             descendants is signalled once and not once per configured round"
         );
         assert!(
             group.armed,
@@ -4693,7 +5900,7 @@ mod tests {
     fn pending_cleanup_owner_keeps_its_permit_until_later_absence_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::CleanupOwners;
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -4703,16 +5910,14 @@ mod tests {
         let task = TaskId(9);
         let cleanup_observer = sequence(usize::MAX);
         let signaller = recording();
-        let mut group = ProcessGroup {
-            group: 42,
+        let mut group = armed_group(
+            42,
             task,
-            armed: true,
-            leader_reaped: false,
-            permit: Some(Lease::plain(permit)),
-            owners: Arc::clone(&owners),
-            signaller: &signaller,
-            observer: &cleanup_observer,
-        };
+            false,
+            Some(Lease::plain(permit)),
+            Arc::clone(&owners),
+            group_seams(&signaller, &cleanup_observer),
+        );
 
         assert_eq!(
             block_on(group.cleanup()),
@@ -4751,8 +5956,10 @@ mod tests {
         );
         assert_eq!(semaphore.available_permits(), 0);
         let settled = owners.drive(&later_observer, |_| false);
+        // Attribution and capacity are this test's subject; what the report says
+        // about the tree is the containment family's subject.
         assert_eq!(
-            settled,
+            settled_tasks(&settled),
             vec![task],
             "later absence is attributed to its task"
         );
@@ -4762,7 +5969,12 @@ mod tests {
             "terminal proof releases capacity"
         );
         assert_eq!(owners.pending_count(), 0);
-        assert_eq!(signaller.calls.load(Ordering::Relaxed), 64);
+        assert_eq!(
+            signaller.calls.load(Ordering::Relaxed),
+            1,
+            "one signal from the drain, and none after the reap: the id is released then, and \
+             the drop-time fallback must not signal a number the OS may reissue"
+        );
         Ok(())
     }
 
@@ -4771,7 +5983,7 @@ mod tests {
     fn cleanup_failed_transfers_its_lease_until_absence_is_observed()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::CleanupOwners;
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -4781,16 +5993,14 @@ mod tests {
         let task = TaskId(10);
         let observer = sequence(0);
         let signaller = recording();
-        let mut group = ProcessGroup {
-            group: 43,
+        let mut group = armed_group(
+            43,
             task,
-            armed: true,
-            leader_reaped: true,
-            permit: Some(Lease::plain(permit)),
-            owners: Arc::clone(&owners),
-            signaller: &signaller,
-            observer: &observer,
-        };
+            true,
+            Some(Lease::plain(permit)),
+            Arc::clone(&owners),
+            group_seams(&signaller, &observer),
+        );
 
         assert_eq!(
             block_on(group.cleanup()),
@@ -4800,7 +6010,11 @@ mod tests {
         drop(group);
         assert_eq!(owners.pending_count(), 1, "failed cleanup remains owned");
         assert_eq!(semaphore.available_permits(), 0);
-        assert_eq!(owners.drive(&observer, |_| false), vec![task]);
+        assert_eq!(
+            settled_tasks(&owners.drive(&observer, |_| false)),
+            vec![task],
+            "an absent group settles the obligation it was transferred for"
+        );
         assert_eq!(semaphore.available_permits(), 1);
         assert_eq!(signaller.calls.load(Ordering::Relaxed), 0);
         Ok(())
@@ -4810,7 +6024,7 @@ mod tests {
     #[test]
     fn shutdown_report_keeps_pending_cleanup_and_emits_later_terminal_receipt()
     -> Result<(), Box<dyn std::error::Error>> {
-        use lgwks_deps::tokio::sync::Semaphore;
+        use crate::rt::sync::Semaphore;
 
         let semaphore = Arc::new(Semaphore::new(1));
         let Some(permit) = Arc::clone(&semaphore).try_acquire_owned().ok() else {
@@ -4820,7 +6034,7 @@ mod tests {
         let report = block_on(Supervisor::new(1).shutdown());
         report
             .cleanup_owners
-            .register(task, 44, Lease::plain(permit));
+            .register(task, 44, Lease::plain(permit), whole_capture());
         assert_eq!(report.pending_cleanup_count(), 1);
         assert!(
             !report.is_clean(),
@@ -4857,6 +6071,7 @@ mod tests {
             vec![TaskOutcome::CleanupSettled {
                 task,
                 cleanup: CleanupReceipt::CleanupConfirmed,
+                containment: whole_capture(),
             }]
         );
         Ok(())
@@ -5926,6 +7141,380 @@ mod tests {
         });
     }
 
+    // ── The drain's decision table, as a seeded simulation ───────────────────
+    //
+    // The arms above are the cases a reader thinks of. This family is the rest:
+    // one seed draws a whole world — how many descendants a reading names, which
+    // of them have already ended, which ignore every signal, whether the table
+    // can be read at all, whether the reading is truncated, what the group signal
+    // answers and when the group is observed absent — and a model written from
+    // the documented contract says what the drain must then report. Every world
+    // is driven through the real `ProcessGroup`, so the arms the simulation
+    // covers are the arms production runs.
+
+    #[cfg(all(unix, feature = "process"))]
+    /// Reduce `value` into `0..bound` without a modulo operator.
+    ///
+    /// `clippy::modulo_arithmetic` is forbidden workspace-wide, and a bound drawn
+    /// as a `%` is exactly the "bound I did not think about" this module forbids
+    /// elsewhere. Multiply-shift keeps it in one place: the high half of a
+    /// 64×64 product is below `bound`, so the narrowing cannot refuse, and it is
+    /// still propagated rather than defaulted.
+    fn reduce(value: u64, bound: NonZeroU64) -> Result<u64, std::num::TryFromIntError> {
+        let wide = u128::from(value).wrapping_mul(u128::from(bound.get()));
+        u64::try_from(wide >> 64)
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// One seeded world's draws, keyed by field rather than drawn as a stream.
+    ///
+    /// A stream hides which choice a failure came from; a field name is the seed
+    /// and the decision in one line, so a reported seed reproduces the world.
+    struct Seed(u64);
+
+    #[cfg(all(unix, feature = "process"))]
+    impl Seed {
+        /// The draw for `field` in `0..bound`.
+        fn draw(&self, field: u64, bound: NonZeroU64) -> Result<u64, std::num::TryFromIntError> {
+            reduce(
+                self.0
+                    .wrapping_add(field.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                    .wrapping_mul(0x2545_F491_4F6C_DD1D),
+                bound,
+            )
+        }
+
+        /// A draw in `0..=max`.
+        fn below(&self, field: u64, max: u64) -> Result<u64, std::num::TryFromIntError> {
+            self.draw(field, NonZeroU64::MIN.saturating_add(max))
+        }
+    }
+
+    /// How the group answers the one signal the drain may need.
+    #[cfg(all(unix, feature = "process"))]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum WorldGroup {
+        /// Delivered, group still present.
+        Delivered,
+        /// Delivered and the group is already gone.
+        Absent,
+        /// Present but unsignalable, as an unreaped zombie leader is.
+        Present,
+        /// Refused.
+        Refused,
+    }
+
+    /// One seeded world: the scripted capture, the scripted group, and the model.
+    #[cfg(all(unix, feature = "process"))]
+    struct World {
+        /// The pids the reading names.
+        tree: Vec<i32>,
+        /// The pids that have already ended, so a signal answers `ESRCH`.
+        gone: Vec<i32>,
+        /// The pids that ignore every signal.
+        immortal: Vec<i32>,
+        /// Whether the process table cannot be read.
+        unreadable: bool,
+        /// Whether the reading stopped at its bound.
+        truncated: bool,
+        /// What the group signal answers.
+        group: WorldGroup,
+        /// How many post-reap probes answer "present" before one answers "absent".
+        present_probes: usize,
+        /// The receipt the pinned phase must produce.
+        expected: CleanupReceipt,
+        /// The containment report the pinned phase must produce.
+        containment: Containment,
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    impl World {
+        /// Draw the world `seed` names, with the model's answers beside it.
+        fn draw(seed: u64) -> Result<Self, std::num::TryFromIntError> {
+            let draws = Seed(seed);
+            let length = draws.below(0, 3)?;
+            let mut tree = Vec::with_capacity(usize::try_from(length)?);
+            let mut gone = Vec::new();
+            let mut immortal = Vec::new();
+            for index in 0..length {
+                let pid_field = index.saturating_add(1);
+                let pid = i32::try_from(draws.below(pid_field, 60)?)?;
+                if tree.contains(&pid) {
+                    continue;
+                }
+                tree.push(pid);
+                // Two fields per pid, so "already ended" and "ignores signals" are
+                // disjoint by construction: a pid cannot be both, and a world
+                // that could say otherwise would be testing an impossible state.
+                let ends = draws.below(index.saturating_add(20), 1)? == 0;
+                let ignores = draws.below(index.saturating_add(40), 1)? == 0;
+                if ends {
+                    gone.push(pid);
+                } else if ignores {
+                    immortal.push(pid);
+                }
+            }
+            tree.sort_unstable();
+            gone.sort_unstable();
+            immortal.sort_unstable();
+            let unreadable = draws.below(3, 3)? == 0;
+            let truncated = !unreadable && draws.below(4, 3)? == 0;
+            let group = match draws.below(5, 3)? {
+                0 => WorldGroup::Absent,
+                1 => WorldGroup::Present,
+                2 => WorldGroup::Refused,
+                _ => WorldGroup::Delivered,
+            };
+            let present_probes = usize::try_from(draws.below(6, 2)?)?;
+            // An unreadable table names nothing, so the model of a world whose
+            // reading failed is an empty tree: the drain's per-process phases do
+            // not run at all, and a model that still counted the drawn pids would
+            // be reporting a capture that never happened.
+            let named: Vec<i32> = if unreadable { Vec::new() } else { tree.clone() };
+            let survivors: Vec<i32> = named
+                .iter()
+                .copied()
+                .filter(|pid| immortal.contains(pid))
+                .collect();
+            // One round when nothing is left running, every round while something
+            // is: that is the loop's own exit condition, not a choice.
+            let rounds = if survivors.is_empty() {
+                1
+            } else {
+                CONTAINMENT_ROUNDS
+            };
+            let delivered = named.iter().filter(|pid| !gone.contains(pid)).count();
+            let signalled =
+                delivered.saturating_add(survivors.len().saturating_mul(rounds.saturating_sub(1)));
+            let residual = if unreadable {
+                Some(ResidualRisk::TableUnreadable)
+            } else if truncated {
+                Some(ResidualRisk::CaptureTruncated)
+            } else {
+                None
+            };
+            let expected = match group {
+                WorldGroup::Refused => CleanupReceipt::CleanupFailed,
+                _ if !survivors.is_empty() => CleanupReceipt::CleanupSurvivors {
+                    survivors: survivors.clone(),
+                },
+                WorldGroup::Absent => CleanupReceipt::CleanupConfirmed,
+                WorldGroup::Delivered | WorldGroup::Present => CleanupReceipt::CleanupPending,
+            };
+            Ok(Self {
+                tree,
+                gone,
+                immortal,
+                unreadable,
+                truncated,
+                group,
+                present_probes,
+                expected,
+                containment: Containment {
+                    mechanism: if unreadable {
+                        ContainmentMechanism::ProcessGroupOnly
+                    } else {
+                        ContainmentMechanism::ProcessTableSnapshot
+                    },
+                    captured: named.len(),
+                    signalled: if unreadable { 0 } else { signalled },
+                    survivors,
+                    residual,
+                },
+            })
+        }
+
+        /// The scripted capture this world drives.
+        fn capture(&self) -> ScriptedCapture {
+            ScriptedCapture {
+                tree: self.tree.clone(),
+                gone: self.gone.clone(),
+                immortal: self.immortal.clone(),
+                unreadable: self.unreadable,
+                truncated: self.truncated,
+                reads: AtomicUsize::new(0),
+                signals: AtomicUsize::new(0),
+            }
+        }
+
+        /// The scripted signaller this world drives.
+        fn signaller(&self) -> WorldSignaller {
+            WorldSignaller(self.group)
+        }
+    }
+
+    /// A group signal that answers whatever the seeded world says.
+    #[cfg(all(unix, feature = "process"))]
+    struct WorldSignaller(WorldGroup);
+
+    #[cfg(all(unix, feature = "process"))]
+    impl GroupSignaller for WorldSignaller {
+        fn signal(&self, _group: i32) -> std::io::Result<()> {
+            match self.0 {
+                WorldGroup::Absent => Err(std::io::Error::from_raw_os_error(ESRCH)),
+                WorldGroup::Present => Err(std::io::Error::from_raw_os_error(EPERM)),
+                WorldGroup::Refused => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "injected refusal",
+                )),
+                WorldGroup::Delivered => Ok(()),
+            }
+        }
+    }
+
+    /// The receipt's arm as a number, for the coverage check.
+    #[cfg(all(unix, feature = "process"))]
+    fn receipt_arm(receipt: &CleanupReceipt) -> u64 {
+        match *receipt {
+            CleanupReceipt::CleanupConfirmed => 1,
+            CleanupReceipt::CleanupPending => 2,
+            CleanupReceipt::CleanupFailed => 3,
+            CleanupReceipt::CleanupSurvivors { .. } => 4,
+        }
+    }
+
+    /// The receipt's arm and survivor count as one number, for the trace.
+    ///
+    /// Both, because a family's replay oracle is only meaningful if two worlds
+    /// that differ only in *how many* pids survived cannot collapse into one
+    /// trace.
+    #[cfg(all(unix, feature = "process"))]
+    fn receipt_code(receipt: &CleanupReceipt) -> Result<u64, std::num::TryFromIntError> {
+        Ok(match *receipt {
+            CleanupReceipt::CleanupSurvivors { ref survivors } => {
+                u64::try_from(survivors.len())?.saturating_add(4)
+            }
+            _ => receipt_arm(receipt),
+        })
+    }
+
+    /// Drive one seeded world through the real drain and check it against the model.
+    #[cfg(all(unix, feature = "process"))]
+    fn sim_drain(seed: u64) -> Result<u64, Box<dyn std::error::Error>> {
+        let world = World::draw(seed)?;
+        let at = format!("seed {seed:#018x}");
+        let capture = world.capture();
+        let signaller = world.signaller();
+        let observer = sequence(world.present_probes);
+        let mut group = capture_group(&signaller, &observer, &capture);
+        // The model's survivor list is moved into the second receipt below, so it
+        // is taken once here rather than borrowed out of a value the assertion
+        // above already compared.
+        let modelled_survivors = world.containment.survivors.clone();
+        let pinned = block_on(group.cleanup());
+        assert_eq!(
+            pinned, world.expected,
+            "{at}: the pinned phase must report the model's receipt"
+        );
+        assert_eq!(
+            *group.containment(),
+            world.containment,
+            "{at}: the containment report must carry the model's counts and limits"
+        );
+        assert_eq!(
+            capture.signals(),
+            world.containment.signalled(),
+            "{at}: the drain must deliver exactly the signals the model counts"
+        );
+        // The post-reap pass decides the group, and a survivor is never promoted.
+        group.mark_reaped();
+        let settled = block_on(group.confirm_absence());
+        let absent = matches!(observer.exists(42), Ok(false));
+        let expected = if modelled_survivors.is_empty() {
+            if absent {
+                CleanupReceipt::CleanupConfirmed
+            } else {
+                CleanupReceipt::CleanupPending
+            }
+        } else {
+            CleanupReceipt::CleanupSurvivors {
+                survivors: modelled_survivors,
+            }
+        };
+        assert_eq!(
+            settled, expected,
+            "{at}: only an observed absence settles the group, and a survivor is never \
+             promoted to a clean cleanup"
+        );
+        let captured = u64::try_from(group.containment().captured())?;
+        let signalled = u64::try_from(group.containment().signalled())?;
+        let pinned_code = receipt_code(&pinned)?;
+        let settled_code = receipt_code(&settled)?;
+        Ok(pinned_code
+            .wrapping_add(captured)
+            .wrapping_add(signalled)
+            .wrapping_add(settled_code))
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    /// The seeds this family replays, named so a failure names one.
+    const DRAIN_SEEDS: [u64; 12] = [
+        0x5EED_2630_0000_0001,
+        0x5EED_2630_0000_0002,
+        0x5EED_2630_0000_0003,
+        0x5EED_2630_0000_0004,
+        0x5EED_2630_0000_0005,
+        0x5EED_2630_0000_0006,
+        0x5EED_2630_0000_0007,
+        0x5EED_2630_0000_0008,
+        0x5EED_2630_FFFF_FFFF,
+        0x5EED_2631_0000_0001,
+        0xDEAD_BEEF_0263_0001,
+        0xC0FF_EE00_2630_0001,
+    ];
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn sim_a_seeded_drain_reaches_the_models_receipt() -> Result<(), Box<dyn std::error::Error>> {
+        for seed in DRAIN_SEEDS {
+            sim_drain(seed)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn sim_the_same_seed_replays_the_same_drain_trace() -> Result<(), Box<dyn std::error::Error>> {
+        for seed in DRAIN_SEEDS {
+            assert_eq!(
+                sim_drain(seed)?,
+                sim_drain(seed)?,
+                "seed {seed:#018x}: the same seed must drive the same world and the same report"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn sim_every_receipt_arm_is_reachable_in_the_family() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let arms = DRAIN_SEEDS
+            .iter()
+            .map(|seed| World::draw(*seed).map(|world| receipt_arm(&world.expected)))
+            .collect::<Result<Vec<u64>, _>>()?;
+        for arm in [1_u64, 2, 3, 4] {
+            assert!(
+                arms.contains(&arm),
+                "the family must reach receipt arm {arm}; it drew {arms:?} over {} seeds",
+                DRAIN_SEEDS.len()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn sim_distinct_seeds_drive_distinct_drains() -> Result<(), Box<dyn std::error::Error>> {
+        let [first, second, ..] = DRAIN_SEEDS;
+        assert_ne!(
+            sim_drain(first)?,
+            sim_drain(second)?,
+            "seeds {first:#018x} and {second:#018x} must draw different worlds"
+        );
+        Ok(())
+    }
+
     #[test]
     fn an_over_long_panic_message_is_truncated_not_dropped() {
         let long = "x".repeat(MAX_PANIC_MESSAGE_CHARS.saturating_add(1));
@@ -6044,6 +7633,98 @@ mod tests {
         })
     }
 
+    /// A tenanted admission joins at most `REAP_PER_ADMISSION` finished
+    /// tasks, so a tenant whose bodies end at once cannot charge its joins to
+    /// the neighbour that admits next (#268's adversarial row), and the bounded
+    /// reap still keeps the retained set at the in-flight ceiling.
+    ///
+    /// The flood is created, not raced: every attacker body has finished before
+    /// the neighbour's admission, so an unbounded reap would join all of them
+    /// inside that one call. The second half drives 10,000 admissions of bodies
+    /// that end at once, alternating tenants, and reads the retained set after
+    /// each: it never exceeds the ceiling, because every call that finds two or
+    /// more finished tasks joins two and places one.
+    #[cfg(feature = "script")]
+    #[test]
+    fn a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::REAP_PER_ADMISSION;
+        use crate::rt::tenancy::TenancyPolicy;
+        use crate::script::Tenant;
+
+        const LIMIT: usize = 64;
+        const FLOOD: usize = 32;
+        const ADMISSIONS: usize = 10_000;
+        // The bound is only a bound if it is smaller than the flood: an
+        // unbounded reap joins all `FLOOD` below, so a constant at or past it
+        // fails this test at compile time rather than passing vacuously.
+        const _: () = assert!(
+            REAP_PER_ADMISSION < FLOOD,
+            "a per-admission reap must be smaller than the flood it bounds"
+        );
+
+        block_on(async {
+            let mut supervisor = Supervisor::with_tenancy(LIMIT, TenancyPolicy::new(FLOOD, LIMIT));
+            let attacker = Tenant::new("attacker")?;
+            let neighbour = Tenant::new("neighbour")?;
+            let ended = Arc::new(AtomicUsize::new(0));
+            for _ in 0..FLOOD {
+                let ended = Arc::clone(&ended);
+                supervisor
+                    .spawn_for(&attacker, move |_token| async move {
+                        ended.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .await
+                    .map_err(|refusal| format!("a flood body was refused: {refusal}"))?;
+            }
+            assert!(
+                yield_until(|| ended.load(Ordering::SeqCst) >= FLOOD, 10_000).await,
+                "the flood bodies never ended, so the premise of this test did not hold"
+            );
+            // Let every ended body's task complete in the set, not just run.
+            for _ in 0..FLOOD {
+                yield_now().await;
+            }
+            let before = supervisor.stats().succeeded;
+            supervisor
+                .spawn_for(&neighbour, |_token| async {})
+                .await
+                .map_err(|refusal| format!("the neighbour was refused: {refusal}"))?;
+            let joined = supervisor.stats().succeeded.saturating_sub(before);
+            assert!(
+                joined <= u64::try_from(REAP_PER_ADMISSION)?,
+                "the neighbour's admission joined {joined} of the flood's finished tasks; \
+                 at most {REAP_PER_ADMISSION} may land on its critical path"
+            );
+
+            let mut largest = 0_usize;
+            for admission in 0..ADMISSIONS {
+                let tenant = if admission % 2 == 0 {
+                    &attacker
+                } else {
+                    &neighbour
+                };
+                supervisor
+                    .spawn_for(tenant, |_token| async {})
+                    .await
+                    .map_err(|refusal| format!("admission {admission} was refused: {refusal}"))?;
+                largest = largest.max(supervisor.set.len());
+                yield_now().await;
+            }
+            assert!(
+                largest <= LIMIT,
+                "the retained set reached {largest} tasks against an in-flight ceiling of {LIMIT}"
+            );
+            let report = supervisor.shutdown().await;
+            assert_eq!(
+                report.stats.succeeded,
+                u64::try_from(FLOOD + 1 + ADMISSIONS)?,
+                "every body is joined and counted by shutdown"
+            );
+            Ok(())
+        })
+    }
+
     /// A parked admission keeps its place in its tenant's FIFO queue, and leaves
     /// nothing abandoned behind it, however long it waits.
     ///
@@ -6057,9 +7738,9 @@ mod tests {
     #[test]
     fn a_parked_tenant_admission_keeps_its_place_in_the_queue()
     -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rt::sync::OwnedSemaphorePermit;
         use crate::rt::tenancy::TenancyPolicy;
         use crate::script::Tenant;
-        use lgwks_deps::tokio::sync::OwnedSemaphorePermit;
         use std::future::Future;
         use std::task::{Context, Poll, Waker};
 
@@ -6237,7 +7918,7 @@ mod tests {
         const LIMIT: Duration = Duration::from_secs(2);
 
         block_on(async {
-            let pool = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1));
+            let pool = Arc::new(crate::rt::sync::Semaphore::new(1));
             let mut first = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
             let mut second = Supervisor::assembled(1, Arc::clone(&pool), Clock::wall());
             let mut held = match Arc::clone(&pool).try_acquire_owned() {
@@ -6419,9 +8100,12 @@ mod tests {
             // so the owner settles on the first reap that drives it — which only
             // the waiting spawn's recheck performs.
             let task = TaskId(u64::MAX);
-            supervisor
-                .cleanup_owners
-                .register(task, 0x7fff_fff0, Lease::plain(permit));
+            supervisor.cleanup_owners.register(
+                task,
+                0x7fff_fff0,
+                Lease::plain(permit),
+                whole_capture(),
+            );
             let admitted = crate::rt::time::timeout(
                 Duration::from_secs(5),
                 supervisor.spawn(|_token| async {}),

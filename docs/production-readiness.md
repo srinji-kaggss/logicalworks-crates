@@ -35,10 +35,11 @@ repair and its in-process regression tests, not on an external observation:
 #99 (the ECS poll path) has no real-store run and #108 (`locator_eligibility`)
 has no real frame. Of #107's rows, T21 is now observed by
 `tests/it/process_escape.rs`, which drives a real descendant that calls `setsid`
-out of the group and asserts the receipt does not claim the tree was cleaned
-(INV-BOT-112) — an honest report of a containment gap, open as
-[#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) — and
-T22's `ProcessSpec` surface landed in #128. A closed issue is not a green
+out of the group and asserts that the cleanup captured it while its leader lived,
+stopped it by pid (`kill -0` reports it gone) and says so in a complete
+containment report (INV-BOT-112,
+[#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263)) — on
+Unix only — and T22's `ProcessSpec` surface landed in #128. A closed issue is not a green
 observation of the machine: the verdict below stands until those rows have one
 and the mess rows of §4.4 close.
 
@@ -391,7 +392,7 @@ The state of that, honestly:
 | The request may or may not have landed before the process died | ✅ tested | `durable_dispatch`, `OutcomeUnknown` barrier |
 | The journal itself cannot be read | ✅ tested | `durable_dispatch`, `#123` |
 | An event returns, or a payload is equal but the event is new | ✅ tested | `durable_dispatch`, `#129` |
-| A spawned process left orphans | ⚠️ partly | `process_ownership` (T19/T20); `process_escape` observes a `setsid` descendant escaping and the receipt not claiming it (T21) — containment of that descendant is open as #263 |
+| A spawned process left orphans | ⚠️ partly | `process_ownership` (T19/T20); `process_escape` stops a real `setsid` descendant by pid and observes it gone (T21, INV-BOT-112); a descendant orphaned to init before the cleanup, and every non-Unix target, are still uncontained (#263) |
 | A locator resolved to the wrong frame or wrong kind | ✅ tested | `locator_eligibility`, `#108` |
 | Two equal payloads, distinct event ids | ✅ tested | `durable_dispatch` |
 | A contradictory outcome overwriting a settled one | ✅ tested | `durable_dispatch`, refused |
@@ -660,6 +661,15 @@ BSD or WASI at all. It now holds no target list of its own, and its typed
 `EntropyError` is what a caller on any of these targets gets when the source
 fails.
 
+**Containment per OS, as executed evidence (#263).** On Unix the supervisor
+captures the leader's descendants and stops each by pid as well as signalling
+the group, so a `setsid` escapee is stopped: `tests/it/process_escape.rs`
+observes it gone with `kill -0` (1,000 of 1,000 iterations on
+`aarch64-apple-darwin` through the `ps` snapshot; the `/proc` child-list reader is
+compiled for `x86_64-unknown-linux-gnu` and executed by the `ubuntu-latest` test
+lanes). A descendant orphaned to init before the cleanup ran is not reachable
+from the leader on either. Windows has no containment at all.
+
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a
 green `windows-latest` job is a *build* receipt for the Windows target and
@@ -835,10 +845,10 @@ To change the verdict, in the order that matters:
    (`tests/it/durable_crash_observation.rs`): the journal-ladder rows have a real
    store, a real kill, a restart and the designed answer. #109 closed with the
    other three repaired but not externally observed: #99 needs the poll path
-   under a real store, #108 a real frame, and #107's T21 a descendant the
-   supervisor actually stops (#263) rather than one it honestly reports as
-   escaped. The difference they measure — "the bot survives its own machine
-   dying" — is still open.
+   under a real store and #108 a real frame. #107's T21 now has its descendant
+   stopped and observed gone on Unix (#263, INV-BOT-112); it still has no
+   Windows or orphan-adoption half. The difference they measure — "the bot
+   survives its own machine dying" — is still open.
 2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, torn reads,
    clock skew, credential expiry, locale, concurrent editors, selector drift.
    This is the long pole and the reason RPA is hard.

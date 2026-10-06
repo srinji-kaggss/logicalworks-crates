@@ -366,13 +366,23 @@ mod tests {
         // The shift-and-compare form performs a fixed number of machine
         // operations whatever `attempt` is. An implementation that looped
         // `attempt` times, or that walked the doubling sequence, would take
-        // measurably longer at `u32::MAX` than at `0`.
+        // measurably longer at `u32::MAX` than at the smallest attempt here.
+        //
+        // Every attempt timed here puts the backoff past `2^64` nanoseconds
+        // (`2^70` at the first, the `Duration::MAX` cap after), so the jitter
+        // remainder and the seconds split are 128-bit divisions at every one of
+        // them. Attempt `0` is not compared: its backoff is one nanosecond, its
+        // divisions take the 64-bit fast path, and the ratio between the two
+        // arithmetic regimes is a property of the CPU — 6.8x on a GitHub runner
+        // (CI run 37468321247), past the bound below — not of how the work
+        // grows with `attempt`. Within one regime a loop over `attempt` would
+        // still be about `2^25` times slower at `u32::MAX` than at `70`.
         //
         // The oracle is a ratio, not an absolute: it holds on a loaded host as
-        // long as the constant factor is nowhere near `2^32`.
+        // long as the constant factor is nowhere near `2^25`.
         let repeats = 100_000_u64;
         let mut timings = [(0_u32, std::time::Duration::ZERO); 4];
-        for (index, attempt) in [0_u32, 31, 1_000, u32::MAX].into_iter().enumerate() {
+        for (index, attempt) in [70_u32, 128, 1_000, u32::MAX].into_iter().enumerate() {
             let start = std::time::Instant::now();
             let mut observed = Duration::ZERO;
             for step in 0..repeats {
@@ -391,7 +401,7 @@ mod tests {
         for (attempt, elapsed) in timings {
             assert!(
                 elapsed.as_nanos() <= baseline.saturating_mul(4).saturating_add(1_000_000),
-                "attempt {attempt} took {elapsed:?} against {baseline}ns at attempt 0; \
+                "attempt {attempt} took {elapsed:?} against {baseline}ns at attempt 70; \
                  the work must not scale with the numeric attempt value"
             );
         }

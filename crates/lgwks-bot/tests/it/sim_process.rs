@@ -168,7 +168,7 @@ fn deadline_case(sim: &mut sim::Sim, runtime: &Runtime) -> TestResult {
     );
     assert_eq!(run.status(), None, "the deadline stopped the child");
     assert_ne!(
-        run.cleanup(),
+        *run.cleanup(),
         CleanupReceipt::CleanupFailed,
         "the group kill must have been delivered"
     );

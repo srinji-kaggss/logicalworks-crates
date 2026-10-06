@@ -714,7 +714,7 @@ fn a_deadline_kill_is_reported_as_a_deadline_and_reaps_the_group() -> TestResult
         let run = supervisor.run_process(&spec).await?;
         let leader = read_pid(&pid_file)
             .ok_or_else(|| std::io::Error::other("the shell never recorded its pid"))?;
-        Ok::<_, Box<dyn std::error::Error>>((run.deadline_fired(), run.cleanup(), leader))
+        Ok::<_, Box<dyn std::error::Error>>((run.deadline_fired(), run.cleanup().clone(), leader))
     })?;
     assert!(
         deadline_fired,
@@ -752,7 +752,12 @@ fn a_zero_exit_reaps_a_living_descendant_before_claiming_cleanup() -> TestResult
             .ok_or_else(|| std::io::Error::other("the descendant pid was not recorded"))?;
         let leader = read_pid(&shell_file)
             .ok_or_else(|| std::io::Error::other("the shell pid was not recorded"))?;
-        Ok::<_, Box<dyn std::error::Error>>((run.exit_code(), run.cleanup(), leader, descendant))
+        Ok::<_, Box<dyn std::error::Error>>((
+            run.exit_code(),
+            run.cleanup().clone(),
+            leader,
+            descendant,
+        ))
     })?;
     assert_eq!(exit_code, Some(0), "the parent exited zero");
     assert_ne!(

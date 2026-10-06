@@ -14,29 +14,27 @@
 //!
 //! A group signal reaches the members that exist when it is sent. A descendant
 //! that called `setsid` before that signal is in a new session and a new group,
-//! and no amount of signalling the old group reaches it. That is not a defect in
-//! the supervisor — it is what the kernel means by a group — but it is exactly
-//! the situation where a supervisor could report a clean tree it does not own,
-//! so the receipt is the thing under test.
+//! and no amount of signalling the old group reaches it. That is what the kernel
+//! means by a group, so the supervisor does not rely on the group alone: while the
+//! leader is alive it captures every process descended from it
+//! (`lgwks_std::process::capture_descendants`) and signals each captured pid. The
+//! escapee is still a *descendant* after it leaves the *group*, so the capture
+//! names it and a pid signal stops it (#263). The receipt and its containment
+//! report are the thing under test, against a real escape.
 //!
 //! Every probe here is observation-only. `kill -0` sends no signal, so a test can
 //! watch a process without disturbing it, and nothing in this file signals a
 //! group it does not own.
 //!
-//! # A note on nextest's `leaky` verdict
+//! # Why the sibling `exec`s its sleep
 //!
-//! Both tests here are reported `leaky` by `cargo nextest run` (and pass
-//! normally under `--no-capture`). That is the harness noticing that this test
-//! binary deliberately leaves a **live** process behind: the escaped session
-//! leader is supposed to outlive the supervisor's group, and that is precisely
-//! the fact under test. Nextest installs a SIGTERM handler around each test and
-//! interprets a surviving descendant through it; the escape is exactly a
-//! descendant designed to ignore the group's signal.
-//!
-//! It is a harness heuristic meeting the row's subject, not a leaked thread,
-//! socket or file descriptor — `stop` kills both processes by pid on every exit
-//! path, including a failed assertion. Nothing here is `#[ignore]`d or retried to
-//! hide it.
+//! Both tests start a sibling *outside* the supervisor, whose survival is the T21
+//! claim. It runs `exec sleep 30`, so the pid it records is the process that holds
+//! the test's output pipe. A sibling that forked `sleep` instead left it orphaned
+//! when the shell was killed, still holding that pipe, and nextest rightly
+//! reported both tests `leaky`: that was a real leak, not a heuristic. `stop`
+//! kills every process a test started by pid on every exit path, including a
+//! failed assertion, and nothing here is `#[ignore]`d or retried.
 
 #![cfg(all(
     unix,
@@ -52,7 +50,7 @@ use std::time::Duration;
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::{CleanupReceipt, Supervisor, TaskOutcome};
+use lgwks_bot::rt::supervise::{CleanupReceipt, ContainmentMechanism, Supervisor, TaskOutcome};
 
 // The pid-file scratch directory, the signal-free liveness probes and the
 // session escape are shared with the other process tests, so there is one copy
@@ -84,15 +82,15 @@ fn shell(script: &str) -> ProcessSpec {
 /// A test that fails on its last assertion would otherwise leave two `sleep 30`
 /// processes behind, and the next run of the suite would inherit them. Best
 /// effort by name: the test's own children, by the pids it recorded.
-fn stop(pids: [i32; 2]) {
-    for pid in pids {
+fn stop(pids: &[i32]) {
+    for &pid in pids {
         process_probe::kill_pid(pid);
         let _ignored = wait_for_pid_gone(pid, Duration::from_secs(2));
     }
 }
 
-/// T21, escape half: a child that leaves the process group is never reported as
-/// a complete tree cleanup, and an unrelated sibling is never signalled.
+/// T21, escape half: a child that leaves the process group is captured while its
+/// leader lives and stopped by pid, and an unrelated sibling is never signalled.
 ///
 /// The escape is a real `setsid`, run by whichever interpreter this host has. The
 /// pid is recorded *after* `setsid` returns, so the pid this test holds is a
@@ -100,12 +98,12 @@ fn stop(pids: [i32; 2]) {
 /// descendant that recorded its pid first would still be a group member, and the
 /// test would be measuring the ordinary group kill rather than the escape.
 ///
-/// The claim under test is that the supervisor does not report clean tree
-/// cleanup while that process runs. `setsid` means the process survives its
-/// group's death, so a `CleanupConfirmed` receipt here would be claiming a tree
-/// the supervisor demonstrably does not own.
+/// The claim under test is #263's: a group signal cannot reach the escapee, so
+/// only the capture can, and a `CleanupConfirmed` receipt is earned only when the
+/// escapee is observed gone and the containment report names the mechanism that
+/// read the tree, counts the escapee as captured, and names no survivor.
 #[test]
-fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
+fn a_session_escape_is_captured_and_stopped_by_pid() -> TestResult {
     assert!(
         sources_are_apostrophe_free(),
         "an escape source containing an apostrophe truncates the single-quoted wrapper, so \
@@ -128,42 +126,62 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
     );
 
     let runtime = Runtime::new()?;
-    let (cleanup, escaped, leader_pid, sibling_pid, mut sibling) = runtime.block_on(async {
-        let mut supervisor = Supervisor::default();
-        supervisor.spawn_process(&shell(&escape_script)).await?;
-        let escaped = wait_for_pid(&escape_file, BUDGET)
-            .ok_or_else(|| std::io::Error::other("the escaping child never recorded its pid"))?;
-        let leader_pid = wait_for_pid(&leader_file, BUDGET)
-            .ok_or_else(|| std::io::Error::other("the supervised leader never recorded its pid"))?;
+    let (cleanup, containment, observed, escaped, leader_pid, sibling_pid, mut sibling) =
+        runtime.block_on(async {
+            let mut supervisor = Supervisor::default();
+            supervisor.spawn_process(&shell(&escape_script)).await?;
+            let escaped = wait_for_pid(&escape_file, BUDGET).ok_or_else(|| {
+                std::io::Error::other("the escaping child never recorded its pid")
+            })?;
+            let leader_pid = wait_for_pid(&leader_file, BUDGET).ok_or_else(|| {
+                std::io::Error::other("the supervised leader never recorded its pid")
+            })?;
 
-        // An unrelated process of this test's own, started outside the
-        // supervisor: same user, alive throughout, in neither the supervisor's
-        // group nor the escapee's.
-        let sibling = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("echo $$ > {}; sleep 30", sibling_file.display()))
-            .spawn()?;
-        let sibling_pid = wait_for_pid(&sibling_file, BUDGET)
-            .ok_or_else(|| std::io::Error::other("the sibling never recorded its pid"))?;
+            // An unrelated process of this test's own, started outside the
+            // supervisor: same user, alive throughout, in neither the supervisor's
+            // group nor the escapee's.
+            let sibling = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "echo $$ > {}; exec sleep 30",
+                    sibling_file.display()
+                ))
+                .spawn()?;
+            let sibling_pid = wait_for_pid(&sibling_file, BUDGET)
+                .ok_or_else(|| std::io::Error::other("the sibling never recorded its pid"))?;
 
-        // Shutdown rather than waiting for an exit: the escapee's whole purpose
-        // is to *not* exit, so a drain loop waiting for its outcome would run to
-        // its own budget and report "no terminal outcome" — a statement about the
-        // escapee, not about cleanup. Cancelling is what makes the supervisor
-        // signal the group, and that signal is the event under test.
-        let report = supervisor.shutdown().await;
-        let cleanup = report.outcomes().first().and_then(TaskOutcome::cleanup);
-        Ok::<_, std::io::Error>((cleanup, escaped, leader_pid, sibling_pid, sibling))
-    })?;
+            // The escape really happened, and is observed before the cleanup rather
+            // than assumed by it: an escapee that had already died would make "the
+            // cleanup stopped it" a claim about nothing.
+            if !pid_is_alive(escaped) {
+                return Err(std::io::Error::other(
+                    "the escapee died before the cleanup ran, so the row would prove nothing",
+                ));
+            }
 
-    // The escape really happened. Asserted before the claim rather than assumed
-    // by it: a test whose escaped process had died would prove nothing, because
-    // there would be no live process for the claim to be about.
-    assert!(
-        pid_is_alive(escaped),
-        "a process that called setsid must outlive its group's death; if it does not, the \
-         escape never happened and this row proved nothing"
-    );
+            // Shutdown rather than waiting for an exit: the escapee's whole purpose
+            // is to *not* exit, so a drain loop waiting for its outcome would run to
+            // its own budget and report "no terminal outcome" — a statement about the
+            // escapee, not about cleanup. Cancelling is what makes the supervisor
+            // capture the tree and signal it, and that is the event under test.
+            let report = supervisor.shutdown().await;
+            let outcome = report.outcomes().first();
+            let cleanup = outcome.and_then(TaskOutcome::cleanup).cloned();
+            let containment = outcome.and_then(TaskOutcome::containment).cloned();
+            // The whole report, for a failure message: which outcome arrived and
+            // what the shutdown still held is the diagnosis when a field is absent.
+            let observed = format!("{report:?}");
+            Ok::<_, std::io::Error>((
+                cleanup,
+                containment,
+                observed,
+                escaped,
+                leader_pid,
+                sibling_pid,
+                sibling,
+            ))
+        })?;
+
     assert_ne!(
         escaped, leader_pid,
         "the recorded pid must be the escaping child, not the supervised leader: a \
@@ -174,26 +192,50 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
         "a process outside the supervisor's group was signalled by its cleanup (T21)"
     );
 
-    // The receipt's claim, stated against the live escapee.
-    //
-    // `CleanupConfirmed` means "every process that was still *in the supervised
-    // group* is gone", and the observation behind it is `killpg(group, 0)`. A
-    // process that called `setsid` has left that group by construction, so its
-    // survival does not falsify the claim — the claim is about group membership,
-    // not about every process the supervisor ever started.
-    //
-    // What this test therefore pins is the *boundary*: the receipt may say
-    // `CleanupConfirmed` only because the escapee is not a member, and it says
-    // nothing about the escapee. A receipt that claimed "no process I started is
-    // running" would need a job object or a cgroup, which this crate does not
-    // have; asserting `CleanupPending` here instead would be false in the other
-    // direction, since the group really is gone.
+    // The escapee left the group, so no group signal reached it: only the pid
+    // signal the capture made possible did. `kill -0` is the observation #263's
+    // acceptance names.
+    let escapee_gone = wait_for_pid_gone(escaped, BUDGET).is_some();
+    if !escapee_gone {
+        let _reaped = sibling.kill().and_then(|()| sibling.wait()).map(|_| ());
+        stop(&[escaped, sibling_pid]);
+        return Err(std::io::Error::other(format!(
+            "the setsid escapee is still running after cleanup, so the capture did not reach \
+             it; ps for it: {}",
+            process_probe::describe_pid(escaped)
+        ))
+        .into());
+    }
+
+    // The report behind the receipt: which mechanism read the tree, that it named
+    // the escapee, and that nothing it named is still running.
+    let containment = containment.ok_or_else(|| {
+        std::io::Error::other(format!(
+            "a supervised process reported no containment report at all: {observed}"
+        ))
+    })?;
+    assert_ne!(
+        containment.mechanism(),
+        ContainmentMechanism::ProcessGroupOnly,
+        "the escapee could only have been reached by reading the process table: {containment:?}"
+    );
+    assert!(
+        containment.captured() >= 1,
+        "the capture must have named the escapee: {containment:?}"
+    );
+    assert!(
+        containment.is_complete(),
+        "every captured descendant stopped and the reading was whole: {containment:?}"
+    );
+
+    // With the group gone and every captured descendant stopped, the receipt is
+    // the confirmed one; anything weaker understates what was observed.
     match cleanup {
         Some(CleanupReceipt::CleanupConfirmed) => {}
         Some(other) => {
             return Err(std::io::Error::other(format!(
-                "the supervised group was fully reclaimed, so {other:?} would understate what \
-                 this supervisor actually observed"
+                "the group is gone and the escapee was stopped, so {other:?} would understate \
+                 what this supervisor actually observed"
             ))
             .into());
         }
@@ -207,7 +249,7 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
     }
 
     let _reaped = sibling.kill().and_then(|()| sibling.wait()).map(|_| ());
-    stop([escaped, sibling_pid]);
+    stop(&[escaped, sibling_pid]);
     Ok(())
 }
 
@@ -217,7 +259,7 @@ fn a_session_escape_is_not_reported_as_complete_tree_cleanup() -> TestResult {
 /// read together. This one isolates it, because it is the half that fails first:
 /// a supervisor that signalled more broadly than its own group would pass an
 /// escape test by killing the escapee and fail this one. A supervisor that never
-/// signsalled anything would fail the `leader is gone` assertion instead, so
+/// signalled anything would fail the `leader is gone` assertion instead, so
 /// neither failure mode is silent.
 #[test]
 fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult {
@@ -241,7 +283,10 @@ fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult
         // happens with an unrelated process of the same user alive throughout.
         let sibling = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("echo $$ > {}; sleep 30", sibling_file.display()))
+            .arg(format!(
+                "echo $$ > {}; exec sleep 30",
+                sibling_file.display()
+            ))
             .spawn()?;
         let sibling_pid = wait_for_pid(&sibling_file, BUDGET)
             .ok_or_else(|| std::io::Error::other("the sibling never recorded its pid"))?;
@@ -262,6 +307,82 @@ fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult
     );
 
     let _reaped = sibling.kill().and_then(|()| sibling.wait()).map(|_| ());
-    stop([sibling_pid, sibling_pid]);
+    stop(&[sibling_pid]);
+    Ok(())
+}
+
+/// Shutdown waits out a supervised process's bounded cleanup rather than
+/// aborting it part-way.
+///
+/// Answering the token *is* a process task's cleanup: captures of the process
+/// table, signals, the reap and a post-reap observation. Thirty-two trees shut
+/// down at once make thirty-two of those drains contend for one host, which takes
+/// far longer than the 50 ms a body that ignores its token is given. Before
+/// `PROCESS_CLEANUP_GRACE`, shutdown aborted the drains still running when that
+/// grace ran out and reported them `Aborted` with no receipt, although each had
+/// cooperated — the intermittent `process_escape` failure #263 asked to explain.
+#[test]
+fn shutdown_reports_every_draining_cleanup_rather_than_aborting_it() -> TestResult {
+    /// Trees shut down at once: enough concurrent drains to outlast 50 ms.
+    const TREES: usize = 32;
+    let dir = Scratch::new("drain")?;
+    let runtime = Runtime::new()?;
+    let (report, children) = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(TREES);
+        let mut files = Vec::with_capacity(TREES);
+        for index in 0..TREES {
+            let file = dir.path().join(format!("{index}.pid"));
+            supervisor
+                .spawn_process(&shell(&format!(
+                    "sleep 30 & echo $! > {}; wait",
+                    file.display()
+                )))
+                .await?;
+            files.push(file);
+        }
+        // Every tree has its child before the shutdown, so each drain has a
+        // descendant to capture and stop.
+        let mut children = Vec::with_capacity(TREES);
+        for file in &files {
+            children.push(wait_for_pid(file, BUDGET).ok_or_else(|| {
+                std::io::Error::other("a supervised tree never recorded its child")
+            })?);
+        }
+        Ok::<_, std::io::Error>((supervisor.shutdown().await, children))
+    })?;
+
+    let aborted = report
+        .outcomes()
+        .iter()
+        .filter(|outcome| matches!(outcome, TaskOutcome::Aborted { .. }))
+        .count();
+    let unreported = report
+        .outcomes()
+        .iter()
+        .filter(|outcome| outcome.cleanup().is_none() || outcome.containment().is_none())
+        .count();
+    let survivors: Vec<i32> = children
+        .iter()
+        .copied()
+        .filter(|child| wait_for_pid_gone(*child, BUDGET).is_none())
+        .collect();
+    stop(&survivors);
+    assert_eq!(
+        report.outcomes().len(),
+        TREES,
+        "every tree reports one outcome: {report:?}"
+    );
+    assert_eq!(
+        aborted, 0,
+        "a process task draining its cleanup cooperated and must not be reported aborted"
+    );
+    assert_eq!(
+        unreported, 0,
+        "every outcome carries its receipt and its containment report"
+    );
+    assert!(
+        survivors.is_empty(),
+        "every tree's child is stopped by its own cleanup: {survivors:?}"
+    );
     Ok(())
 }

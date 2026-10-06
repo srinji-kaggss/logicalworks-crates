@@ -558,17 +558,57 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
   `tests/it/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
   `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
-- **INV-BOT-112** `CleanupReceipt::CleanupConfirmed` claims that every process
-  still in the supervised group when the group was last observed is gone — an
-  observation of `killpg(group, 0)`. It does **not** claim that no process the
-  supervisor started is still running: a descendant that called `setsid` has left
-  the group by construction, so its survival is not a counterexample. A receipt
-  claiming the stronger thing would need a kernel job object or a cgroup, neither
-  of which this crate has, and the bound is stated on the receipt itself rather
-  than left to be inferred from a green test. · why: #87 acceptance row T21
-  (LC-10), observed against a real `setsid` escape · enforced by:
-  `tests/it/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
-  `cleanup_never_signals_a_process_outside_the_supervisors_group`)
+- **INV-BOT-112** A supervised cleanup stops the tree it can name, and its
+  receipt says how much it named. While the leader is alive the cleanup captures
+  every process descended from it (`lgwks_std::process::capture_descendants`:
+  per-process `/proc` child lists on Linux, one `ps` pid/ppid snapshot elsewhere)
+  and signals each captured pid as well as the group, over at most
+  `CONTAINMENT_ROUNDS` capture-and-signal rounds; a pid is signalled again only
+  while an observation proves it running. A descendant that called `setsid` has
+  left the group by construction but is still a descendant, so it is captured
+  and stopped by pid. `CleanupReceipt::CleanupConfirmed` claims the group was
+  observed gone **and** every captured descendant stopped running; a captured
+  pid still running is named in `CleanupSurvivors` and never absorbed into a
+  pending group or promoted by a later observation. After the leader is reaped the
+  cleanup observes the pids it captured, by pid, and never walks the tree from the
+  reaped leader again: the OS may have reissued that id, and a walk from it names
+  whoever holds it now. Every process outcome carries
+  a `Containment` report naming the mechanism, how many pids it captured and
+  signalled, and its residual risk (`TableUnreadable`, `CaptureTruncated`), so
+  "nothing survived" and "nothing was looked at" never read alike. **Not
+  claimed:** a descendant forked after the last capture that left the group in
+  the same window, or one orphaned to init before the cleanup ran; closing those
+  needs a kernel-level owner (a cgroup v2 `cgroup.kill`, a Windows job object),
+  which this crate does not have. · why: #87 acceptance row T21 (LC-10), #263 ·
+  enforced by: `tests/it/process_escape.rs`
+  (`a_session_escape_is_captured_and_stopped_by_pid`,
+  `cleanup_never_signals_a_process_outside_the_supervisors_group`),
+  `rt::supervise::tests` (`a_descendant_that_keeps_running_is_named_in_the_receipt`,
+  `a_captured_pid_that_had_ended_is_not_reported_as_a_survivor`,
+  `a_captured_pid_is_signalled_once_and_not_once_per_observation`,
+  `an_unreadable_process_table_leaves_the_group_as_the_only_mechanism`,
+  `a_truncated_capture_is_reported_as_a_prefix_and_not_as_the_tree`,
+  `sim_a_seeded_drain_reaches_the_models_receipt`,
+  `sim_every_receipt_arm_is_reachable_in_the_family`,
+  `sim_distinct_seeds_drive_distinct_drains`), and lgwks_std's
+  `tests/it/sim_descendants.rs`
+- **INV-BOT-156** Shutdown never reports a supervised process that answered its
+  token as aborted. A process task is cooperative by construction — its wait
+  races the token — and answering the token *is* its cleanup, which spends
+  capture rounds against the process table, so `Supervisor::shutdown` keeps
+  absorbing past `COOPERATIVE_DRAIN_GRACE` while a spawned process task is still
+  live (`LiveProcess`, counted on the supervisor's cleanup owners), bounded by
+  `PROCESS_CLEANUP_GRACE`. One `ps` snapshot measured p50 16 ms, p99 45 ms and
+  max 68 ms at load 9.6, so a whole drain is a few hundred milliseconds under
+  load, and the 50 ms grace aborted it part-way: the outcome was `Aborted` with
+  no receipt for a task that had already stopped its tree. That was
+  `process_escape`'s unexplained intermittent failure (10 of 1,000 iterations
+  at load 15); with the bound it passed 1,000 of 1,000 at load up to 16.6.
+  **Not claimed:** a drain longer than the bound is still aborted, and its
+  drop-time fallback signals the group but not the captured pids. · why: #263
+  item 5 · enforced by: `tests/it/process_escape.rs`
+  (`shutdown_reports_every_draining_cleanup_rather_than_aborting_it`, which
+  fails 20 of 20 runs with the bound set to zero)
 - **INV-BOT-113** A callback that never reaches an await point is observable only
   from outside the process that runs it, and the observation is **detection, not
   preemption**. A thread watchdog shares the fate of the executor it watches, so
@@ -1401,10 +1441,15 @@ Each of these was a shipped defect. Treat the list as the spec.
   `SupervisorQueueFull` the supervisor). A tenant's live count is exactly the
   owners still waiting, including when an owner leaves between the round's choice
   and the delivery: the shell withdraws that waiter and the owner's report counts
-  nothing. **Not claimed:** throughput isolation from a tenant whose bodies burn
-  the runtime's CPU; the round decides admission, not scheduling of admitted
-  work. · why: #268 · enforced by: `rt::tenancy::tests`,
+  nothing. A tenanted admission joins at most `REAP_PER_ADMISSION` (two) finished
+  tasks, after the round has decided, so a tenant whose bodies end at once cannot
+  put the joins of its whole flood on a neighbour's admission, and the retained
+  set still never exceeds the in-flight ceiling. **Not claimed:** throughput
+  isolation from a tenant whose bodies burn the runtime's CPU; the round decides
+  admission, not scheduling of admitted work. · why: #268 · enforced by:
+  `rt::tenancy::tests`,
   `rt::supervise::tenancy_support::tests::a_late_abandonment_leaves_the_live_count_exact`,
+  `rt::supervise::tests::a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling`,
   `tests/it/tenancy.rs` (`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
   `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
   `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and
@@ -2486,3 +2531,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `setsid` descendant escaping the group and the receipt not claiming it
   (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
   path and INV-BOT-10's real frame still have no named external test.
+- 2026-10-06 (#263): the `setsid` descendant is now captured while its leader
+  lives and stopped by pid, observed by `kill -0` against a real escape
+  (INV-BOT-112), and shutdown no longer aborts a cleanup mid-drain
+  (INV-BOT-156). Containment remains Unix-only, and a descendant orphaned before
+  the cleanup ran is still out of reach.
