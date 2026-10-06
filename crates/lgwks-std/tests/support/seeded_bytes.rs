@@ -32,6 +32,22 @@ pub fn next_bytes(state: &mut u64, len: usize) -> Vec<u8> {
     (0..len).map(|_| next_byte(state)).collect()
 }
 
+/// `LEN` bytes drawn from the sweep stream rooted at `state`, as an array.
+///
+/// Families that hand a fixed-width value to the crate under test — a UUID's
+/// sixteen bytes, a codec's input word — draw it here rather than converting a
+/// `Vec` whose length they already declared: the array is filled slot by slot,
+/// so there is no length conversion that can fail and no heap allocation for a
+/// width the caller wrote down.
+#[must_use]
+pub fn next_array<const LEN: usize>(state: &mut u64) -> [u8; LEN] {
+    let mut drawn = [0_u8; LEN];
+    for slot in drawn.iter_mut() {
+        *slot = next_byte(state);
+    }
+    drawn
+}
+
 /// `len` printable ASCII characters drawn from the sweep stream rooted at
 /// `state`.
 ///
@@ -131,8 +147,8 @@ mod tests {
     use crate::seeded_sweep::{SWEEP_SEEDS, initial_trace};
 
     use super::{
-        TEXT_ALPHABET, below, fold_bytes, fold_refusal, next_bytes, next_text, reference_escape,
-        reference_nibble, repeated,
+        TEXT_ALPHABET, below, fold_bytes, fold_refusal, next_array, next_bytes, next_text,
+        reference_escape, reference_nibble, repeated,
     };
 
     #[test]
@@ -222,6 +238,23 @@ mod tests {
             below(&mut state, 0),
             0,
             "an empty table has no index, so the draw must yield the only value it can"
+        );
+    }
+
+    #[test]
+    /// A fixed-width draw is the same stream as a vector draw of that width.
+    fn sim_a_fixed_width_draw_equals_the_vector_draw_of_that_width() {
+        let mut from_array = SWEEP_SEEDS[0];
+        let mut from_vector = SWEEP_SEEDS[0];
+        assert_eq!(
+            next_array::<16>(&mut from_array).as_slice(),
+            next_bytes(&mut from_vector, 16).as_slice(),
+            "an array draw and a vector draw of one width must consume the stream identically"
+        );
+        assert_eq!(
+            next_array::<0>(&mut from_array),
+            [0_u8; 0],
+            "a zero-width draw is the empty array and consumes no stream"
         );
     }
 
