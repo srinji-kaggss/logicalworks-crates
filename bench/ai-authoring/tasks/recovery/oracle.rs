@@ -194,12 +194,7 @@ fn a_resume_does_not_rerun_a_completed_unit() -> Result<(), Box<dyn std::error::
 
     // The run the interrupted attempt left behind, over the same directory.
     let completed = (0..WIDTH)
-        .filter(|index| {
-            world
-                .stats()
-                .runs(*index)
-                .is_some_and(|count| count > 0)
-        })
+        .filter(|index| world.stats().runs(*index).is_some_and(|count| count > 0))
         .collect::<Vec<u32>>();
 
     let total = finished(recover(world.clone(), dir.clone(), LONG))?;

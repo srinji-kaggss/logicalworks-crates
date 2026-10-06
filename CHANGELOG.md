@@ -253,6 +253,35 @@ the one public field-width change is stated below.
 
 Tests: 201 pass (`nextest -p lgwks_std --all-features`, the leb128, hex, hash,
 encoding, wire, retry and time families).
+### `bench/ai-authoring` — the reference solutions no longer blame a stage that succeeded
+
+Two of the three new-API reference solutions resolved a missing fact to a value
+that named the wrong thing. `new-aggregate` reported `SolveError::Fetch { id: 0 }`
+when no fetch had failed, and `new-pipeline` reported
+`PipelineError::Stage { name: FetchA }` when no stage had failed — both of which
+are false claims about a run, and both of which a model copying the reference
+would have learned to make.
+
+- **`new-aggregate`'s failure cell is `Option<u32>`**, `None` meaning no fetch
+  failed; the first failure is recorded and later ones cannot overwrite it, and
+  a fan-out error with no fetch failure is `Cancelled` with the cause on the
+  trace stream rather than a fabricated id.
+- **`new-pipeline` records `combine` and `publish` under their own names**, so a
+  stage that failed for its own sake names itself, and an error from the flow
+  itself is `Cancelled` with a diagnostic rather than a default of `FetchA` —
+  a stage that ran and succeeded.
+- Each file recovers from a poisoned lock through one documented `match`
+  instead of `unwrap_or_else(PoisonError::into_inner)`, saying why the guarded
+  value is still whole after a panic.
+
+Verified end to end through the benchmark runner, which copies each reference
+into a generated trial crate, builds it `--locked --offline` and runs the hidden
+oracle: `run.py --dry-run --apis new --tasks aggregate,pipeline,recovery
+--trials 1` gives aggregate 6/6, recovery 5/5, pipeline 5/5, all compiled, and
+`run.py --mutants` still fails exactly the clauses it is built to fail
+(aggregate 2/6, pipeline 1/5, recovery 1/5) — the harness's ability to detect a
+wrong solution is unchanged.
+
 ### `bench/ai-authoring` — the harness refuses a value no run produced
 
 Four fixtures in the AI-authoring benchmark resolved a missing value to a number

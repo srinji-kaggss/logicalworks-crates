@@ -27,7 +27,7 @@
 //! again.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ai_task_support::recovery::{Ledger, UnitError, World};
@@ -47,6 +47,21 @@ pub enum RecoveryError {
 fn no_store(cause: impl std::fmt::Debug) -> RecoveryError {
     ai_task_support::diagnostic(format_args!("the recovery store was refused: {cause:?}"));
     RecoveryError::NoStore
+}
+
+/// Locks `mutex`, recovering from poisoning.
+///
+/// The guarded value is an `Option<u32>` that is only ever written as a whole
+/// `Some(index)` or left alone, so a panic elsewhere cannot leave it
+/// half-written: poisoning records that some thread unwound while holding the
+/// guard, not that the recorded unit is unreadable. Taking the poisoned guard's
+/// value keeps the unit the run actually failed at, which is the index the
+/// caller is told.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// The tenant every recovered run is booked under.
@@ -105,7 +120,7 @@ fn recovery_task(
                     .unit(&scope, index)
                     .await
                     .map_err(|UnitError::Unit { index }| {
-                        *failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(index);
+                        *lock(&failed) = Some(index);
                         FlowError::failed(format!("unit {index} failed"))
                     })?;
                 total = total.saturating_add(value);
@@ -148,7 +163,7 @@ fn into_result(report: &lgwks_bot::task::Report<u64>, failed: &Failed) -> Result
             .ok_or(RecoveryError::NoLedger),
         Disposition::DeadlineExceeded => Err(RecoveryError::Deadline),
         _ => {
-            let index = failed.lock().unwrap_or_else(PoisonError::into_inner);
+            let index = lock(&failed);
             Err(match *index {
                 Some(index) => RecoveryError::Unit { index },
                 None => RecoveryError::NoStore,
