@@ -596,7 +596,11 @@ impl Stage {
         };
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&name) {
-            return Err(StageError::Stage { name });
+            // A scripted failure is the run's own design, not a fault, so it
+            // is recorded at debug rather than reported as a refusal.
+            let refusal = Err(StageError::Stage { name });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run: a scripted stage failure");
+            return refusal;
         }
         match name {
             StageName::FetchA => {

@@ -315,11 +315,12 @@ impl World {
         // set for a unit that cannot exist would report a body running that
         // never did.
         if index >= self.width {
-            crate::diagnostic(format_args!(
+            let refusal = Err(UnitError::Unit { index });
+            lgwks_std::trace::warn!(
                 "unit {index} was run in a world of width {}: no such unit",
                 self.width
-            ));
-            return Err(UnitError::Unit { index });
+            );
+            return refusal;
         }
         let _live = UnitLiveGuard::enter(Arc::clone(&self.units));
         // Two delay tiers, most specific first: a per-index override, then the
