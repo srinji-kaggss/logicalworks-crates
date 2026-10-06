@@ -33,6 +33,13 @@ const BOUNDARY_LENGTHS: [usize; 6] = [0, 1, 2, 3, 255, WIDE_PAYLOAD_BYTES];
 /// A character the hex alphabet never contains, used to corrupt an input.
 const ALIEN_DIGIT: u8 = b'g';
 
+/// How many payloads the case-drawing family redraws before it insists.
+///
+/// It is a bound and not a loop condition that never ends: six of a byte's
+/// sixteen low-nibble values are letters, so a payload of one byte or more
+/// carries one with probability at least three in eight per byte.
+const LETTER_DRAW_LIMIT: usize = 8;
+
 /// The lowercase hex alphabet, indexed by nibble: the table is the documented
 /// two-characters-per-byte rule rather than a call into the shipped encoder, so
 /// this reference cannot agree with it by construction.
@@ -413,13 +420,24 @@ fn uppercase_and_lowercase_spellings_decode_to_the_same_bytes() -> Result<(), De
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..32 {
-            let span = below(&mut state, 24);
-            let payload = next_bytes(&mut state, span);
+            let span = below(&mut state, 24).saturating_add(1);
+            // The case needs a payload that renders two spellings, which means a
+            // hex letter in it, and that is drawn rather than assumed: a byte's
+            // low nibble is a letter in six of its sixteen values, so a payload
+            // of a byte or more almost always has one. The redraw is bounded, and
+            // the assertion below says so if the bound is what ended it.
+            let mut payload = next_bytes(&mut state, span);
+            for _ in 0..LETTER_DRAW_LIMIT {
+                if payload.iter().any(|byte| byte & 0x0f >= 10) {
+                    break;
+                }
+                payload = next_bytes(&mut state, span);
+            }
             let lower = encode(&payload);
             let upper = lower.to_ascii_uppercase();
             assert_ne!(
                 lower, upper,
-                "seed {seed}: a payload with a letter must have two spellings"
+                "seed {seed}: {LETTER_DRAW_LIMIT} payloads of {span} bytes carried no hex letter"
             );
 
             let from_lower = decode(&lower)?;
