@@ -9,6 +9,36 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: http names its spans, and every fixture thread is owned (9-axis sweep)
+
+`http.rs` carried 19 findings: eight defaults, one suppression and ten repeated
+blocks. All are repaired, and no request, refusal, timeout stage or body ceiling
+changes.
+
+- **URL validation and target redaction name their spans.** An authority with no
+  `/`, `?` or `#` after it runs to the end of the remainder, which is what a URL
+  ending at its authority looks like; redaction takes the authority, the suffix
+  and the path as slices between delimiters it found, so userinfo, query and
+  fragment are removed from spans that exist rather than spans that defaulted to
+  empty.
+- **The tests carry no suppression.** The `#[expect(clippy::disallowed_methods)]`
+  over the test module is deleted: the three waits use
+  `std::thread::park_timeout`, and the twelve fixture threads start through one
+  `fixture_thread` helper that uses a *named* `thread::Builder` and hands back
+  the handle the test already joins — the bare `std::thread::spawn` this
+  workspace bans is gone from the crate.
+- **One fixture, one assertion, three families.** `serve_held` is the silent and
+  the replying server with the reply as the difference;
+  `assert_refused_before_dialing` asserts each refused URL with its own text;
+  `assert_refused_at_small_ceiling` asserts the ceiling's refusal once, so the
+  chunked, close-delimited and non-UTF-8 families state only what their own
+  framing adds. The fixture server parses `Content-Length` into an accumulator
+  rather than out of an `Option`.
+
+Tests: 47 pass, including `a_deadline_bounds_the_whole_redirect_chain`,
+`a_deadline_bounds_a_trickled_body`, `body_timeout_preserves_stage_and_class`,
+`eof_probe_timeout_preserves_stage_and_class` and the seeded `sim_http` families.
+
 ### lgwks_std — the nine-axis sweep: the hash suite hashes whole slices and whole frames (9-axis sweep)
 
 `sim_hash.rs` built its expectations out of nine defaults. Each is repaired, and
