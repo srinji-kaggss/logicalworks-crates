@@ -426,6 +426,38 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the metadata collection answers for what it could not read
+
+- **`poll_quantum` parks instead of sleeping.** The `#[expect(clippy::disallowed_methods)]`
+  on `std::thread::sleep` named a substitution where the ban already names a
+  replacement: `std::thread::park_timeout`, which is the bounded synchronous
+  wait in a crate with no reactor to block.
+- **A dependency the `--no-deps` read never resolved keeps no licence record.**
+  `direct_edges` wrote `DeclaredLicense { license: None, license_file: None }` for
+  a package that read did not see, which is indistinguishable from a package
+  that declares no licence — the one thing the licence audit (#208) exists to
+  tell apart. The fields stay `None` and the audit refuses an edge whose terms
+  are unknown.
+- **`Instant::checked_add` failing is not a deadline that expired.** The old
+  `unwrap_or_else(Instant::now)` refused every child immediately over a timeout
+  of a few centuries; an unrepresentable deadline is now `None`, which says the
+  clock's range ended and the byte budget is what bounds the child.
+- **`MAX_CAPTURE_BYTES` is one named bound** for the two `u64::try_from(stream_cap)`
+  sites, and `Resolve` names the two feature selections so the `cargo metadata`
+  argument list is written once. A copy of that list is where a flag goes
+  missing.
+- **A pre-epoch clock is refused on the wasm capture path** rather than floored to
+  the epoch, which named every capture of the process the same instant.
+- **The stdout and stderr flood families assert through one check**, so the two
+  cannot drift into testing different budgets.
+
+Verified end to end: `lgwks-deps check .` reports 33 approvals, 45 edges, 0
+refusals, exit 0, with the same contract and subject digests as before;
+`lgwks-deps invariants .` resolves 4 invariants; `lgwks-deps scan` reports 383
+files and zero findings. 176 lib tests pass, including the real-process deadline,
+descendant-capture and flood families.
+## [Unreleased]
+
 ### lgwks_deps — the invariant register answers for what it did not read
 
 `build` read `id` through `.map_or_else(|| "<unnamed>".to_owned(), …)`, so every
