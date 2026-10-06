@@ -367,8 +367,7 @@ pub mod spec;
 /// value a reader gets out of that is one nobody on the system ever held. This
 /// module is the discipline commercial automation applies to it with: two
 /// independent reads must agree, and a reading that cannot be confirmed is
-/// reported as [`BotError::UnstableObservation`](error::BotError::UnstableObservation)
-/// — pending, never a change.
+/// reported as [`BotError::UnstableObservation`] — pending, never a change.
 ///
 /// Wired rather than offered: [`domain::data::JsonStore`] reads through
 /// [`stability::read_stable_file`], so every poll of a JSON-backed store is

@@ -70,7 +70,10 @@
 //! module's guess.
 //!
 //! [`BotError::UnstableObservation`]: crate::error::BotError::UnstableObservation
-//! [`lgwks_std`]: https://docs.rs/lgwks_std
+//! [`read_stable`]: crate::stability::read_stable
+//! [`Drift`]: crate::stability::Drift
+//! [`MAX_STABILITY_READS`]: crate::stability::MAX_STABILITY_READS
+//! [`Reading`]: crate::stability::Reading
 
 use std::fmt;
 use std::io;

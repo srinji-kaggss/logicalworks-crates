@@ -1084,9 +1084,9 @@ pub enum Need {
     /// the one it presented.
     ///
     /// Not a [`Self::MissingCapability`] for the same reason
-    /// [`BotError::CredentialExpired`](crate::error::BotError::CredentialExpired)
-    /// is not a capability denial: the capability is still granted and now names
-    /// nothing, so the repair is a *re-grant* of capabilities that are already
+    /// [`BotError::CredentialExpired`] is not a capability denial: the
+    /// capability is still granted and now names nothing, so the repair is a
+    /// *re-grant* of capabilities that are already
     /// held. A need set that named them as missing would produce an admission
     /// that grants what it already has and refuses again.
     CredentialExpired {
