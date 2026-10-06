@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! lgwks_deps = { version = "1", default-features = false }
+//! lgwks_deps = { version = "3", default-features = false }
 //! ```
 //!
 //! Run from a checkout with `cargo run -p lgwks_deps --example check`.
