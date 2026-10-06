@@ -67,6 +67,36 @@ Measured over 10,000,000 attempts and 488 continuations (production-readiness
 live memory flat at about 20 MB, reopen p50 58–89 µs behind 1 K to 1 M attempts.
 `SIGKILL` at each of the four seal boundaries leaves exactly one authoritative
 journal. INV-BOT-152.
+### lgwks_bot — per-tenant capacity: one tenant cannot starve another (#268)
+
+- **New: `rt::tenancy`.** `TenancyPolicy` (per-tenant ceiling, per-tenant queue
+  bound, supervisor-wide waiting bound, per-tenant weights, each clamped to a
+  declared ceiling: `MAX_QUEUE_PER_TENANT`, `MAX_TOTAL_QUEUE`, `MAX_TENANT_WEIGHT`,
+  `MAX_WEIGHTED_TENANTS`), `TenancyError`, `SpawnRefused`, and the pure scheduler
+  `DeficitRoundRobin` with its `Arrival`, `TryArrival`, `Grant` and `GrantOutcome`.
+- **New on `Supervisor`:** `with_tenancy`, `spawn_for`, `run_process_for` (with
+  `RunForError`), `tenant_capacity` and `tenants_waiting`. Untenanted calls on a
+  tenanted supervisor are charged to one implicit tenant; a supervisor built
+  with `new` behaves exactly as before.
+- **Fixed before release: a late abandonment miscounted the tenant's queue.** An
+  owner that left between the round's liveness check and the delivery had its
+  abandonment corrected inside the pump *before* its own report added it, and the
+  count saturates at zero, so the report overcounted: `queued_of` read low and a
+  tenant could hold five live waiters past a queue bound of four. The shell now
+  marks that waiter withdrawn and the owner's report counts nothing;
+  `DeficitRoundRobin::note_grant_abandoned` is gone. Found by the new
+  `tests/it/sim_tenancy_model.rs` on its first run (seed 9); pinned by the
+  white-box `a_late_abandonment_leaves_the_live_count_exact`, which drives the
+  shell's own functions in the order the locks force and failed (2 of 3) before
+  the fix.
+- **Tests.** `tests/it/sim_tenancy_model.rs` model-checks the shipped scheduler
+  under an executor that follows the shell step for step — seventeen properties,
+  each over all 256 seeds twice. `tests/it/tenancy.rs` measures the live
+  supervisor: ten thousand loud submissions parked in the loud tenant's own queue
+  and released one controlled completion at a time, against the quiet tenant's
+  p99 alone; and a fail-at-once flood four times the neighbour's volume against
+  the neighbour's admission time alone (within 10%, best of nine interleaved
+  rounds, no sleep before either timed window). INV-BOT-151.
 
 ### lgwks_std tests — `fs::capability` is swept with hostile seeds
 

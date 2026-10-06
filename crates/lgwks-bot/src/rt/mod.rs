@@ -31,6 +31,12 @@
 //!   starters — the first two report later, the last hands back what the child
 //!   wrote — and nothing here returns a handle to a running task or process, so
 //!   nothing can be started and then forgotten.
+//! - [`tenancy`](crate::rt::tenancy) — per-tenant capacity: the
+//!   [`TenancyPolicy`](crate::rt::tenancy::TenancyPolicy) a supervisor admits
+//!   under, the [`SpawnRefused`](crate::rt::tenancy::SpawnRefused) a
+//!   tenant-scoped spawn answers with, and the pure
+//!   [`DeficitRoundRobin`](crate::rt::tenancy::DeficitRoundRobin) core that
+//!   shares freed permits fairly between tenants with queued work.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
 //! - [`clock`] — one declared logical clock that governs every deadline this
 //!   crate evaluates, plus the independent wall-clock watchdog that pausing it
@@ -120,5 +126,7 @@ pub mod signal;
 pub mod supervise;
 #[cfg(feature = "sync")]
 pub mod sync;
+#[cfg(all(feature = "sync", feature = "script"))]
+pub mod tenancy;
 #[cfg(feature = "time")]
 pub mod time;

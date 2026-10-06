@@ -1391,6 +1391,24 @@ Each of these was a shipped defect. Treat the list as the spec.
   `journal::frame::tests`, and `tests/it/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
   `cut_appends_band_04..07`, `damaged_cut_frames_band_08..11`,
   `tenants_beside_a_refusal_band_12..13`)
+- **INV-BOT-151** One tenant cannot starve another of a supervisor's capacity.
+  A `Supervisor::with_tenancy` admits every `spawn_for` and `run_process_for`
+  through `rt::tenancy::DeficitRoundRobin`: no tenant holds more permits than its
+  `TenancyPolicy` ceiling, waits past its own queue bound, or pushes the
+  supervisor past its total waiting bound, and a freed permit goes to the next
+  tenant in the weighted round rather than to whoever arrives next. Every refusal
+  names the bound it reached (`SpawnRefused::TenantAtCapacity` names the tenant,
+  `SupervisorQueueFull` the supervisor). A tenant's live count is exactly the
+  owners still waiting, including when an owner leaves between the round's choice
+  and the delivery: the shell withdraws that waiter and the owner's report counts
+  nothing. **Not claimed:** throughput isolation from a tenant whose bodies burn
+  the runtime's CPU; the round decides admission, not scheduling of admitted
+  work. · why: #268 · enforced by: `rt::tenancy::tests`,
+  `rt::supervise::tenancy_support::tests::a_late_abandonment_leaves_the_live_count_exact`,
+  `tests/it/tenancy.rs` (`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
+  `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
+  `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and
+  `tests/it/sim_tenancy_model.rs` (seventeen properties over the whole seed space)
 - **INV-BOT-152** A continued journal loses nothing, duplicates nothing and has
   one authority. A continuation is one sealed checkpoint frame written byte for
   byte into the predecessor and its successor; the checkpoint carries one folded

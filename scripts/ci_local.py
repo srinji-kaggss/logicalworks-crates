@@ -404,6 +404,13 @@ def collect_module_paths(root: Path) -> dict[str, set[str]]:
             modules.setdefault(f"{module_path}::tests" if module_path else "tests", set()).update(
                 items
             )
+        # Every other inline module, nested to any depth, is its own path holding
+        # exactly the items written inside its braces. Without this a test in
+        # `mod tenancy_support { mod tests { … } }` could only be cited by a path
+        # Rust would not accept, and the real one read as missing.
+        for nested, inner in inline_module_items(source).items():
+            path_text = "::".join((*prefix, *nested))
+            modules.setdefault(path_text, set()).update(inner)
     # A bench rig's invariant names the runner function that enforces it
     # (`bench/ai-authoring/run.py`), so the bench's own definitions resolve too:
     # unindexed, every such reference reads as missing, and the only way to pass
@@ -428,6 +435,74 @@ def normalise_path(path: str) -> str:
     before any comparison — the same rule `lib.rs` applies to package names.
     """
     return path.lower().replace("-", "_")
+
+
+def inline_module_items(source: str) -> dict[tuple[str, ...], set[str]]:
+    """The items each inline `mod name { … }` in `source` defines, by nesting path.
+
+    Braces are matched on the code alone: string literals (raw ones included),
+    character literals and comments are skipped, so a `{` in a format string or a
+    doc comment cannot close a module early. A lifetime (`'a`) is not a character
+    literal, and is told apart by its missing closing quote.
+    """
+    opens = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+([a-z0-9_]+)\s*\{")
+    item = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?(?:unsafe\s+)?(?:fn|mod)\s+([a-z0-9_]+)")
+    found: dict[tuple[str, ...], set[str]] = {}
+    stack: list[tuple[str, int]] = []
+    depth = 0
+    index = 0
+    length = len(source)
+    at_line_start = True
+    while index < length:
+        char = source[index]
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            index = length if end < 0 else end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        raw = re.match(r'b?r(#*)"', source[index : index + 260])
+        if raw and (index == 0 or not (source[index - 1].isalnum() or source[index - 1] == "_")):
+            closing = '"' + raw.group(1)
+            end = source.find(closing, index + raw.end())
+            index = length if end < 0 else end + len(closing)
+            continue
+        if char == '"':
+            cursor = index + 1
+            while cursor < length and source[cursor] != '"':
+                cursor += 2 if source[cursor] == "\\" else 1
+            index = cursor + 1
+            continue
+        if char == "'":
+            literal = re.match(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'])'", source[index : index + 12])
+            index += literal.end() if literal else 1
+            continue
+        if char == "\n":
+            at_line_start = True
+            index += 1
+            continue
+        if at_line_start and not char.isspace():
+            at_line_start = False
+            line = source[index : source.find("\n", index) if "\n" in source[index:] else length]
+            module = opens.match(line)
+            if module:
+                stack.append((module.group(1), depth))
+                found.setdefault(tuple(name for name, _ in stack), set())
+                index += module.end() - 1
+                continue
+            defined = item.match(line)
+            if defined and stack:
+                found[tuple(name for name, _ in stack)].add(defined.group(1))
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            while stack and stack[-1][1] == depth:
+                stack.pop()
+        index += 1
+    return found
 
 
 def resolution_candidates(modules: dict[str, set[str]], reference: str) -> list[str]:
@@ -1498,6 +1573,44 @@ class InvariantReferenceResolution(unittest.TestCase):
         unverifiable by construction, silently.
         """
         self.assertIn("decode_into", self.modules.get("lgwks-std::hex", set()))
+
+    def test_a_test_inside_a_nested_inline_module_resolves_by_its_own_path(self) -> None:
+        """`mod outer { mod tests { … } }` is the path `outer::tests`.
+
+        Braces inside strings, character literals and comments must not close a
+        module, and a lifetime is not a character literal. And the resolution
+        stays exact: a real test cited under the wrong inline module is refused.
+        """
+        found = inline_module_items(
+            "mod outer {\n"
+            '    const BRACE: &str = "}";\n'
+            "    // a stray } in a comment\n"
+            "    fn helper() -> char { '}' }\n"
+            "    #[cfg(test)]\n"
+            "    mod tests {\n"
+            "        fn inner_case<'a>(text: &'a str) -> &'a str { text }\n"
+            "    }\n"
+            "}\n"
+            "fn outside() {}\n"
+        )
+        self.assertEqual(found[("outer",)], {"helper"})
+        self.assertEqual(found[("outer", "tests")], {"inner_case"})
+        self.assertTrue(
+            resolution_candidates(
+                self.modules,
+                "rt::supervise::tenancy_support::tests::"
+                "a_late_abandonment_leaves_the_live_count_exact",
+            ),
+            "a test in a nested inline module resolves by the path Rust gives it",
+        )
+        self.assertEqual(
+            resolution_candidates(
+                self.modules,
+                "rt::supervise::tenancy_support::tests::a_budget_of_duration_expires",
+            ),
+            [],
+            "a real test cited under the wrong inline module is still refused",
+        )
 
     def test_crate_directory_and_rust_path_spellings_are_one_module(self) -> None:
         """`lgwks-std` on disk is `lgwks_std` in every Rust path.
