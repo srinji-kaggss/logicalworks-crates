@@ -1225,11 +1225,18 @@ mod tests {
     /// `std::thread::sleep`, so nothing here needs a suppression.
     ///
     /// What `sleep` promised and `park_timeout` does not is that it does not
-    /// return early — the API allows a spurious wake-up. Nothing unparks this
-    /// thread, so a premature return can only make the overlap shorter, never
-    /// absent, and the assertions downstream read the wall clock themselves.
+    /// return early: the API allows a spurious wake-up, and a pool thread can
+    /// carry an unpark token its executor left behind, which ends the next park
+    /// at once. So the park repeats until the deadline has actually passed, and
+    /// the thread is held for the whole of `duration` either way.
     fn hold_pool_thread_for(duration: std::time::Duration) {
-        std::thread::park_timeout(duration);
+        let started = std::time::Instant::now();
+        while let Some(left) = duration.checked_sub(started.elapsed()) {
+            if left.is_zero() {
+                break;
+            }
+            std::thread::park_timeout(left);
+        }
     }
 
     /// An observer that needs `bot.net` and resolves with a value the caller
@@ -1693,7 +1700,7 @@ mod tests {
 
         let auth = GrantSet::empty().grant(Cap::net()).issue(&[Cap::net()])?;
         assert_eq!(
-            lgwks_std::task::block_on(NetSource::net(1).poll((auth, ())))?,
+            lgwks_std::task::block_on(NetSource::net(7).poll((auth, ())))?,
             7
         );
         Ok(())
