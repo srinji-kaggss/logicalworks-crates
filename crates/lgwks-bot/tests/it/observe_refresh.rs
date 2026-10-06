@@ -952,21 +952,18 @@ fn stalled_tick(bot: &mut Bot) -> TestResult {
 /// needs a reactor this thread deliberately does not run — a watchdog sharing the
 /// tick's own driver cannot observe that tick failing to make progress.
 ///
-/// `#[expect]` rather than `#[allow]` so removing the call fails the build rather
-/// than leaving a silently-unenforced expectation behind.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the sampling thread has no async runtime and no reactor to stall, and \
-              `rt::time::sleep` cannot be awaited on it; the interval is the \
-              sampling resolution of the measurement"
-)]
+/// A park rather than a sleep: both wait without blocking anything, and the park
+/// is the one the workspace names for a synchronous wait. It returns early if
+/// this thread is unparked, and nothing unparks it, so the sampling resolution
+/// is the slice either way — and the loop condition, not the wait, is what bounds
+/// the tick.
 fn sample_a_tick(started: std::time::Instant, budget: Duration, released: Arc<AtomicBool>) {
     let slice = Duration::from_millis(2);
     while started.elapsed() < budget && !released.load(Ordering::Acquire) {
-        // Never sleeps past the deadline: `slice` is the polling resolution and
+        // Never parks past the deadline: `slice` is the polling resolution and
         // the loop condition is the budget, so the overshoot is bounded by a
         // slice rather than by the slice times a whole budget.
-        std::thread::sleep(slice);
+        std::thread::park_timeout(slice);
     }
 }
 

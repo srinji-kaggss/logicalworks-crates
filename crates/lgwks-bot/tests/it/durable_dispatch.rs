@@ -1077,8 +1077,10 @@ impl ScriptedJournal {
 
 impl EffectJournal for ScriptedJournal {
     fn durability(&self) -> DurabilityPromise {
-        self.advertised
-            .unwrap_or_else(|| self.store.borrow().durability())
+        match self.advertised {
+            Some(advertised) => advertised,
+            None => self.store.borrow().durability(),
+        }
     }
 
     fn tail(&self) -> JournalPosition {
@@ -2073,9 +2075,16 @@ fn a_readable_contradictory_outcome_is_still_contradicted() -> TestResult {
 }
 
 /// Whether the named kind was appended for any key.
-fn journal_has(store: &Rc<RefCell<MemoryJournal>>, kind: EventKind) -> bool {
-    let committed = EffectJournal::committed(&*store.borrow()).unwrap_or_default();
-    committed.iter().any(|event| event.kind() == kind)
+///
+/// The store's own error propagates: a read that failed is not a journal with no
+/// such entry, and answering "no" here would let a dispatch test pass on a store
+/// it could not read.
+fn journal_has(
+    store: &Rc<RefCell<MemoryJournal>>,
+    kind: EventKind,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let committed = EffectJournal::committed(&*store.borrow())?;
+    Ok(committed.iter().any(|event| event.kind() == kind))
 }
 
 /// A handoff refused before the action ran must not leave a false
@@ -2100,7 +2109,7 @@ fn a_refused_handoff_leaves_no_unrecorded_barrier() -> TestResult {
     // `MemoryJournal` advertises `Ephemeral`, so admission refuses before the
     // intent is written. Nothing may be prepared either way.
     assert!(
-        !journal_has(&store, EventKind::DispatchPrepared),
+        !journal_has(&store, EventKind::DispatchPrepared)?,
         "a handoff that cannot outlive the process must not be prepared"
     );
 
@@ -2149,11 +2158,11 @@ fn a_weak_ack_does_not_record_dispatch_prepared() -> TestResult {
     }
     assert!(!entered.get(), "the action did not run on a weak ack");
     assert!(
-        journal_has(&store, EventKind::IntentAdmitted),
+        journal_has(&store, EventKind::IntentAdmitted)?,
         "the intent is the write-ahead fact that was actually committed"
     );
     assert!(
-        !journal_has(&store, EventKind::DispatchPrepared),
+        !journal_has(&store, EventKind::DispatchPrepared)?,
         "no DispatchPrepared for a handoff refused on its acknowledgment"
     );
 

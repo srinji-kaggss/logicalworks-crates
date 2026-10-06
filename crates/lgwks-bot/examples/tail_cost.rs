@@ -39,6 +39,10 @@ use lgwks_bot::task::{Host, MAX_RECORD_BYTES, RunStore, StoreError, Task, task};
 mod effect_key;
 #[path = "support/measure.rs"]
 mod measure;
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::Scratch;
 
 /// Frames in the file every case starts from.
 const FRAMES: u32 = 64;
@@ -254,9 +258,15 @@ fn measure_subject(subject: &Subject, dir: &Path) -> Result<(), Box<dyn Error>> 
     report(subject, "lengthened", &mut lengthened);
 
     let mut cut = measure_case(subject, &path, Outcome::Opened, REPAIR_SAMPLES, |_| {
+        // The cut keeps one byte of the drawn offset through the end of the
+        // frame, so a frame of fewer than two bytes has no cut to draw and the
+        // case is refused rather than measured at an offset nobody chose.
+        let span = whole
+            .checked_sub(2)
+            .ok_or("the final frame has no interior byte to cut on")?;
         let keep = usize::try_from(next(&mut state))?
-            .checked_rem(whole.saturating_sub(1))
-            .unwrap_or(0)
+            .checked_rem(span.saturating_add(1))
+            .ok_or("a cut span of one byte admits no remainder to draw")?
             .saturating_add(1);
         let end = last.saturating_add(keep);
         Ok(subject
@@ -281,15 +291,13 @@ fn measure_subject(subject: &Subject, dir: &Path) -> Result<(), Box<dyn Error>> 
 
 /// Measure the journal and the run store on files of [`FRAMES`] frames.
 fn main() -> Result<(), Box<dyn Error>> {
-    let unique = lgwks_std::random::bytes::<8>()?;
-    let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
-    let scratch = std::env::temp_dir().join(format!("lgwks-tail-bench-{hex}"));
-    std::fs::create_dir_all(&scratch)?;
-    let journal = journal_subject(&scratch)?;
-    measure_subject(&journal, &scratch)?;
-    let store_dir = scratch.join("store");
+    // The scratch root is owned by a guard: a refusal half way through the sweep
+    // leaves no directory behind for the next run to inherit.
+    let scratch = Scratch::new("tail-bench")?;
+    let journal = journal_subject(scratch.path())?;
+    measure_subject(&journal, scratch.path())?;
+    let store_dir = scratch.path().join("store");
     let store = store_subject(&store_dir)?;
-    measure_subject(&store, &scratch)?;
-    drop(std::fs::remove_dir_all(&scratch));
+    measure_subject(&store, scratch.path())?;
     Ok(())
 }

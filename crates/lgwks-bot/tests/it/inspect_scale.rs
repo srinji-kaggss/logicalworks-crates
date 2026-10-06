@@ -23,14 +23,26 @@ use lgwks_bot::task::Host;
 const SUBJECT: &str = "fn f() { g().unwrap(); }\n";
 
 /// A subject of roughly `size` bytes with one violation per line.
-fn subject_of_size(size: usize) -> String {
-    let lines = size.checked_div(40).unwrap_or(1).saturating_add(1);
+///
+/// The line count is drawn from `size` rather than defaulted: a subject built
+/// from a stand-in line count would make the linear-growth assertions below
+/// measure a subject nobody asked for.
+///
+/// # Errors
+///
+/// When `size` cannot be divided into whole lines. A line is forty bytes, so
+/// this names the divisor the count was drawn from.
+fn subject_of_size(size: usize) -> Result<String, Box<dyn Error>> {
+    let lines = size
+        .checked_div(40)
+        .ok_or("a generated line is forty bytes")?
+        .saturating_add(1);
     let mut source = String::with_capacity(size);
     for index in 0..lines {
         let line = format!("fn f{index}() {{ let value = input.unwrap(); }}\n");
         source.push_str(&line);
     }
-    source
+    Ok(source)
 }
 
 #[test]
@@ -94,7 +106,7 @@ fn host_bounded_admission_holds_at_every_tier() -> Result<(), Box<dyn Error>> {
         assert!(peak >= 1, "tier {jobs}: runs must have been in flight");
         assert_eq!(
             host.admission().admitted(),
-            u64::try_from(jobs).unwrap_or(0),
+            u64::try_from(jobs)?,
             "tier {jobs}: the host admitted a different number of runs"
         );
     }
@@ -113,7 +125,7 @@ fn retained_counters_grow_with_the_input() -> Result<(), Box<dyn Error>> {
     let mut ratios: Vec<usize> = Vec::new();
 
     for size in [4_096_usize, 16_384, 65_536, 262_144] {
-        let source = subject_of_size(size);
+        let source = subject_of_size(size)?;
         let report = inspect(&InspectRequest::new("scale.rs", &source).budgets(budgets));
         let resources = report.resources();
         let lines = source.lines().count();
@@ -142,7 +154,7 @@ fn retained_counters_grow_with_the_input() -> Result<(), Box<dyn Error>> {
             .output_bytes
             .saturating_mul(1_000)
             .checked_div(source.len())
-            .unwrap_or(0);
+            .ok_or("a generated subject is never empty")?;
         ratios.push(per_mille);
         previous_findings = previous_findings.max(resources.findings);
         previous_bytes = resources.output_bytes;
@@ -150,11 +162,19 @@ fn retained_counters_grow_with_the_input() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(
         previous_findings,
-        subject_of_size(262_144).lines().count(),
+        subject_of_size(262_144)?.lines().count(),
         "the largest size must retain every finding"
     );
-    let smallest = ratios.iter().copied().min().unwrap_or(0);
-    let largest = ratios.iter().copied().max().unwrap_or(0);
+    // Both ends are read through the sweep's own measurements. A defaulted end
+    // would make the linearity assertion below true for every subject, which is
+    // the one thing this test exists to rule out.
+    let (Some(smallest), Some(largest)) =
+        (ratios.iter().copied().min(), ratios.iter().copied().max())
+    else {
+        let refusal = Err("the size sweep measured no retained-byte ratio at all".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retained_counters_grow_with_the_input: returning an error to the caller");
+        return refusal;
+    };
     assert!(
         largest <= smallest.saturating_mul(2),
         "retained finding bytes must be linear in the input: per-mille ratios {ratios:?}"

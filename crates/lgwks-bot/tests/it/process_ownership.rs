@@ -30,10 +30,19 @@ impl PidDir {
         // (both are reused by the OS) and not `lgwks_std::random` (that module
         // is behind the `random`/`ephemeral` features, and the feature matrix
         // builds this test without them).
+        //
+        // The clock is part of the *name*, because two runs of this test on one
+        // machine must not share a directory, and the sequence alone only
+        // separates runs inside one process. A host whose clock reads before
+        // 1970 has no elapsed time to put in a name, and a stand-in zero would
+        // fold its directories into the namespace of every epoch-aligned run, so
+        // that host is refused rather than named.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0);
+            .map_err(|before_epoch| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, before_epoch)
+            })?
+            .as_nanos();
         let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("lgwks-bot-ownership-{nanos}-{seq}-{name}"));
         std::fs::create_dir_all(&path)?;

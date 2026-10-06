@@ -66,7 +66,16 @@ fn assert_failed_at<O>(report: &Report<O>, path: &str, label: &str) {
         "{label}: the run must be Failed, got {:?}",
         report.error()
     );
-    let at = report.error().map(FlowError::at).unwrap_or("<none>");
+    let located = report.error().map(FlowError::at);
+    // A `Failed` report with no located error is not a located failure, and
+    // checking a stand-in path would pass for the wrong reason.
+    assert!(
+        located.is_some(),
+        "{label}: a Failed report must carry the error that failed it"
+    );
+    let Some(at) = located else {
+        return;
+    };
     assert!(
         at.ends_with(path),
         "{label}: the failure must be located at a path ending in {path:?}, got {at:?}"
@@ -192,7 +201,12 @@ fn a_failure_before_ready_reaches_the_dependant_and_the_report() -> TestResult {
         "use-db/await-ready",
         "a service that never came up",
     );
-    let error = report.error().map(ToString::to_string).unwrap_or_default();
+    let Some(reported) = report.error() else {
+        let refusal = Err("a failed report must carry the error that failed it".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_failure_before_ready_reaches_the_dependant_and_the_report: returning an error to the caller");
+        return refusal;
+    };
+    let error = reported.to_string();
     assert!(
         error.contains("could not bind port 5432"),
         "the report must carry the service's own reason, got {error:?}"
@@ -472,7 +486,7 @@ fn a_failure_after_ready_cancels_every_dependant_still_running() -> TestResult {
     // readiness knows exactly which dependants a later failure must reach.
     assert_eq!(
         readiness.admitted(),
-        u64::try_from(DEPENDANTS).unwrap_or(0),
+        u64::try_from(DEPENDANTS)?,
         "each dependant was admitted once, by the readiness's own wait"
     );
     assert_eq!(
@@ -652,11 +666,15 @@ async fn cancel_soon<T: Clone>(readiness: &Readiness<T>, scope: &Scope) -> FlowE
         scope.cancel();
     };
     let wait = async move {
-        readiness
-            .wait(scope, Duration::from_secs(30))
-            .await
-            .map(|_ready| FlowError::failed("the wait resolved instead of stopping"))
-            .unwrap_or_else(|error| error)
+        match readiness.wait(scope, Duration::from_secs(30)).await {
+            // The wait resolving is the failure this row rules out, and it is
+            // reported as the wait's own error rather than as a test assertion:
+            // the caller returns it, so a resolved wait cannot pass.
+            Ok(_ready) => FlowError::failed("the wait resolved instead of stopping"),
+            // A stop is not a failure, so the error travels unchanged: this is
+            // the arm that makes a routine restart read as `Cancelled`.
+            Err(error) => error,
+        }
     };
     let (outcome, ()) = lgwks_bot::join!(wait, stop);
     assert!(
@@ -687,7 +705,7 @@ fn dependants_are_capped_at_the_declared_bound() -> TestResult {
             "dependant {index} is served"
         );
     }
-    let served = u64::try_from(cap).unwrap_or(0);
+    let served = u64::try_from(cap)?;
     assert_eq!(
         readiness.admitted(),
         served,
@@ -1191,7 +1209,12 @@ mod real_process {
         // the state the row is about.
         let supervise = async move {
             let run = gate_on_child_output(spec, readiness).await?;
-            let code = run.exit_code().unwrap_or(-1);
+            // A child reaped without an exit status has not reported one, and
+            // `-1` is a real exit code a shell can produce.
+            let code = match run.exit_code() {
+                Some(code) => code.to_string(),
+                None => String::from("without reporting one"),
+            };
             readiness
                 .fail(Generation::FIRST, &format!("the child exited {code}"))
                 .map_err(|error| format!("the child's exit could not be raised: {error}"))?;

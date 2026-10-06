@@ -9,6 +9,10 @@ use lgwks_bot::{
     Action, Auth, BotError, Cap, DomainRegistry, EffectLifetime, Execute, Observe, Source, domains,
 };
 
+/// A test result that names its own failure: these tests cross `BotError` and the
+/// document parser, and neither converts into the other.
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
 /// A source whose identity is fixed, so a test can tell it was built.
 struct Repository;
 
@@ -184,19 +188,27 @@ fn an_unregistered_identifier_is_refused_by_name() {
 }
 
 #[test]
-fn an_unregistered_refusal_escapes_a_hostile_identifier() {
+fn an_unregistered_refusal_escapes_a_hostile_identifier() -> TestResult {
     // The identifier comes from the document. A newline in it would forge a
     // line in whatever log carries the refusal.
     let hostile = "github::a\nforged";
-    let rendered = NOTHING
-        .build_source(hostile, "")
-        .err()
-        .map(|error| error.to_string())
-        .unwrap_or_default();
+    let refusal = match NOTHING.build_source(hostile, "").err() {
+        Some(refusal) => refusal,
+        // Nothing was refused, so there is no refusal to inspect and the
+        // property this test exists for is vacuous. That is a failure, not an
+        // empty string that happens to contain no newline.
+        None => {
+            let refusal = Err(format!("an undeclared source was built from {hostile:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "an_unregistered_refusal_escapes_a_hostile_identifier: returning an error to the caller");
+            return refusal;
+        }
+    };
+    let rendered = refusal.to_string();
     assert!(
         !rendered.contains('\n'),
         "the refusal carried a raw newline: {rendered:?}"
     );
+    Ok(())
 }
 
 #[test]

@@ -29,12 +29,23 @@ const NUMBER: u64 = 7;
 /// The body every measured review publishes.
 const BODY: &str = "measured review body";
 
+/// Reviews published when the command line names no tier.
+const DEFAULT_TIER: &str = "32";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = std::io::stdout().lock();
-    let requested: usize = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| String::from("32"))
-        .parse()?;
+    let tier = std::env::args().nth(1);
+    let requested: usize = match tier {
+        Some(text) => text.parse()?,
+        None => DEFAULT_TIER.parse()?,
+    };
+    // A tier of zero publishes nothing, so every percentile below would be a
+    // reading of an empty sample. The measurement is refused instead.
+    if requested == 0 {
+        let refusal = Err("a tier of zero reviews measures nothing".into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+        return refusal;
+    }
 
     let program = std::env::var("LWCK_GH").or_else(|error| match error {
         std::env::VarError::NotPresent => Ok(String::from("gh")),
@@ -79,13 +90,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     writeln!(
         out,
-        "reviews={} wall={:?} p50={:?} p95={:?} p99={:?} peak_rss_kib={}",
+        "reviews={} wall={wall:?} p50={} p95={} p99={} peak_rss_kib={}",
         samples.len(),
-        wall,
-        percentile(&samples, 50),
-        percentile(&samples, 95),
-        percentile(&samples, 99),
-        peak_rss_kib()
+        field(percentile(&samples, 50)),
+        field(percentile(&samples, 95)),
+        field(percentile(&samples, 99)),
+        field(peak_rss_kib())
     )?;
     Ok(())
 }
@@ -122,46 +132,51 @@ async fn one(scope: Scope, gh: Gh) -> Result<ReviewOutcome, lgwks_bot::script::F
     .await
 }
 
-/// The `p`-th percentile of a sorted sample, nearest-rank.
-fn percentile(sorted: &[Duration], rank: usize) -> Duration {
-    if sorted.is_empty() {
-        return Duration::ZERO;
+/// A reading as a report field, or `null` where there is none.
+///
+/// `null` is the estate's spelling of *not measured* (INV-BOT-142) and never
+/// *measured as zero*: a printed `0` beside a peak-RSS field would read as a
+/// process that used no memory at all.
+fn field(reading: Option<impl std::fmt::Display>) -> String {
+    match reading {
+        Some(value) => value.to_string(),
+        None => String::from("null"),
     }
-    let chosen = rank.saturating_mul(sorted.len()).div_ceil(100);
-    let index = chosen.saturating_sub(1).min(sorted.len().saturating_sub(1));
-    sorted.get(index).copied().unwrap_or(Duration::ZERO)
 }
 
-/// This process's peak resident set size in KiB, or `0` where the platform
+/// The `p`-th percentile of a sorted sample in microseconds, nearest rank.
+///
+/// `None` when the sample is empty: an empty sample has no percentile, and the
+/// caller prints the absence rather than a duration nobody measured. The caller
+/// refuses a tier of zero before it gets here, so an empty sample would be a
+/// refusal and not a result.
+fn percentile(sorted: &[Duration], rank: usize) -> Option<u64> {
+    let last = sorted.len().checked_sub(1)?;
+    let chosen = rank.saturating_mul(sorted.len()).div_ceil(100);
+    let micros = sorted.get(chosen.saturating_sub(1).min(last))?.as_micros();
+    u64::try_from(micros).ok()
+}
+
+/// This process's peak resident set size in KiB, or `None` where the platform
 /// does not expose it.
 ///
-/// Zero is reported rather than guessed. `getrusage` would need an FFI edge this
-/// crate does not have, so on macOS and the BSDs this reads `0` and the real
-/// figure comes from the platform's own tool (`/usr/bin/time -l`) wrapping the
-/// run. A number printed next to a `0` would look like a measurement; a `0`
-/// that means "not available here" does not.
-fn peak_rss_kib() -> u64 {
+/// The absence is reported rather than guessed. `getrusage` would need an FFI
+/// edge this crate does not have, so on macOS and the BSDs there is no reading
+/// here and the real figure comes from the platform's own tool
+/// (`/usr/bin/time -l`) wrapping the run.
+fn peak_rss_kib() -> Option<u64> {
     #[cfg(unix)]
     {
         // `/proc` is Linux; on the BSDs and macOS the same number comes from
-        // `getrusage`, which this crate cannot reach without an FFI edge, so it
-        // reports 0 rather than a guess.
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find(|line| line.starts_with("VmHWM:"))
-                    .and_then(|line| {
-                        line.split_whitespace()
-                            .nth(1)
-                            .and_then(|value| value.parse().ok())
-                    })
-            })
-            .unwrap_or(0)
+        // `getrusage`, which this crate cannot reach without an FFI edge, so
+        // there is no reading rather than a guess.
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+        let value = line.split_whitespace().nth(1)?;
+        value.parse().ok()
     }
     #[cfg(not(unix))]
     {
-        0
+        None
     }
 }

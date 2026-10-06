@@ -55,16 +55,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ordinary `Err` rather than a panic in the middle of a report.
     let mut out = std::io::stdout().lock();
 
+    // Both streams are locked handles taken once: the report is a program's own
+    // product, so it goes through a writer whose errors are handled rather than
+    // through a print macro, and one lock per stream keeps two tasks reporting
+    // at once from interleaving a line.
+    let mut err = std::io::stderr().lock();
+
     let mut args = std::env::args().skip(1);
     let (Some(repo), Some(number), Some(event)) = (args.next(), args.next(), args.next()) else {
-        writeln!(std::io::stderr(), "{USAGE}")?;
+        usage(&mut err)?;
         let refusal = Err(USAGE.into());
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
         return refusal;
     };
     let body = args.collect::<Vec<_>>().join(" ");
     if body.is_empty() {
-        writeln!(std::io::stderr(), "{USAGE}")?;
+        usage(&mut err)?;
         let refusal = Err("the review body is empty".into());
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
         return refusal;
@@ -132,6 +138,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The usage line, on the stream it belongs to.
+///
+/// Its own writer rather than a print macro so a closed pipe is the ordinary
+/// `Err` the caller already returns, and so the usage text has exactly one
+/// spelling however many times a missing argument is discovered.
+fn usage(err: &mut impl Write) -> std::io::Result<()> {
+    writeln!(err, "{USAGE}")
+}
+
 /// The task body: analyse the pinned snapshot, then publish and verify.
 ///
 /// This is where a caller substitutes their own analysis. The example's is a
@@ -148,7 +163,7 @@ async fn run_review(scope: Scope, job: Job) -> Result<ReviewOutcome, lgwks_bot::
             .map_err(lgwks_bot::script::FlowError::from)?;
         let drafted = analyse(&snapshot, job.request.pull(), job.request.body())?;
         writeln!(
-            std::io::stdout(),
+            std::io::stdout().lock(),
             "draft only: reviewed {} at {}, not published",
             snapshot.head_sha(),
             drafted

@@ -284,13 +284,18 @@ fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
     let parked = Parked::new(store.storage_gate())?;
     let work = one_step_task()?;
     let host = Host::builder("acme")?.store(store).build()?;
-    let batch = 8u32;
+    // The batch is one number in two widths: the task's input is a `u32` and a
+    // capacity is a `usize`, so both are drawn from the same constant here rather
+    // than converted per use with a stand-in for a count this host cannot
+    // address.
+    const BATCH: u32 = 8;
+    let batch = BATCH;
+    let lanes = usize::try_from(BATCH)?;
 
     // Every lane's future is polled on one driver alongside the heartbeat, so the
     // turn count is what the runtime achieved while a whole batch was outstanding.
     let mut beat = Box::pin(heartbeat(parked.ticks()));
-    let mut runs: Vec<std::pin::Pin<Box<_>>> =
-        Vec::with_capacity(usize::try_from(batch).unwrap_or(0));
+    let mut runs: Vec<std::pin::Pin<Box<_>>> = Vec::with_capacity(lanes);
     for index in 0..batch {
         runs.push(Box::pin(host.run(&work, index)));
     }
@@ -298,7 +303,7 @@ fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
     // has resolved is not polled again, which is the rule a `Host::run` future
     // enforces — polling it after it completed is a use-after-completion, not a way
     // to read its answer twice.
-    let mut landed: Vec<RunId> = Vec::with_capacity(usize::try_from(batch).unwrap_or(0));
+    let mut landed: Vec<RunId> = Vec::with_capacity(lanes);
     let mut resolved: Vec<Option<lgwks_bot::task::Report<u32>>> =
         runs.iter_mut().map(|_| None).collect();
     runtime::block_on(poll_fn(|cx| {
@@ -326,7 +331,7 @@ fn a_grouped_batch_still_lets_the_runtime_turn() -> TestResult {
     drop(runs);
     assert_eq!(
         landed.len(),
-        usize::try_from(batch).unwrap_or(usize::MAX),
+        lanes,
         "a batch of {batch} runs acknowledged {} of them",
         landed.len()
     );
