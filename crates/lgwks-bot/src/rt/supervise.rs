@@ -471,9 +471,10 @@ pub enum TaskOutcome {
 /// group was last observed is gone, and every descendant this cleanup captured
 /// had stopped running by the time the bounded drain ended.** The group claim is
 /// `killpg(group, 0)` and the descendant claim is
-/// [`Containment::is_complete`] over the pids
-/// [`lgwks_std::process::capture_descendants`] returned while the leader was
-/// alive.
+/// `Containment::is_complete` over the pids
+/// `lgwks_std::process::capture_descendants` returned while the leader was
+/// alive (both behind the `process` feature, which every receipt that carries a
+/// capture was built with).
 ///
 /// It does **not** claim that no process this supervisor ever started is still
 /// running. Two cases survive that claim, and both are named on the receipt
@@ -509,7 +510,7 @@ pub enum CleanupReceipt {
     /// are different facts with different repairs, and folding them into one
     /// pending state would report a stopped tree as an unstopped one. The pids
     /// are named so an operator can act on them, and
-    /// [`Containment::residual_risk`] says which limit produced them.
+    /// `Containment::residual_risk` says which limit produced them.
     CleanupSurvivors {
         /// The captured pids that were still running when the drain ended,
         /// sorted. Never truncated: a survivor list a caller cannot read in full
@@ -563,12 +564,14 @@ pub enum ResidualRisk {
 /// What one cleanup attempt read, signalled, and could not account for.
 ///
 /// Carried by every supervised-process [`TaskOutcome`] and by every
-/// [`ProcessRun`](crate::rt::process::ProcessRun), because the question a caller
+/// [`ProcessRun`], because the question a caller
 /// actually has after "stop the process" is *which mechanism ran* and *which pids
 /// are still up* — and a single boolean cannot answer either.
 ///
 /// Behind the `process` feature with the rest of the containment vocabulary: a
 /// build without it starts no child process, so it has no tree to account for.
+///
+/// [`ProcessRun`]: crate::rt::process::ProcessRun
 #[cfg(feature = "process")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
