@@ -126,7 +126,7 @@ lgwks_std = { version = "2", default-features = false, features = ["core"] }
 
 | Feature | Modules | What it adds | External deps |
 |---------|---------|-------------|---------------|
-| `core` (default) | encoding, fs, glob, hex, leb128, retry, similarity, task, time | — | **0** |
+| `core` (default) | encoding, fs, glob, hex, leb128, retry, seeded, similarity, task, time | — | **0** |
 | `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
 | `random` | random, id | UUID v4, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
@@ -150,6 +150,7 @@ lgwks_std = { version = "2", default-features = false, features = ["core"] }
 | `hex` | Hex encode and decode | `hex` |
 | `leb128` | LEB128 variable-length integer encoding | — |
 | `retry` | Retry budgets: attempts, exponential backoff with caller jitter, deadlines | — |
+| `seeded` | A deterministic xoshiro256\*\* stream for simulations: one seed, one sequence on every target, unbiased bounded draws. Not a source of randomness | `rand_xoshiro` + `rand::Rng::gen_range`, hand-rolled splitmix64 |
 | `task` | Executor that drives futures on the current thread: `block_on`, interleaved `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom`, typed OS cause | `getrandom` |

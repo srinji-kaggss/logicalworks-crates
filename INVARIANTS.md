@@ -880,6 +880,31 @@ Each of these was a shipped defect. Treat the list as the spec.
   an effective floor of one at construction and use, while deadline equality
   refuses an attempt, including the initial one. · why: #164 · enforced by:
   `lgwks_std::retry::tests`
+- **INV-STD-SEEDED-1** A seed names one stream, on every target and in every
+  release. `seeded::Seeded` is xoshiro256\*\* filled by four splitmix64 words of
+  the seed — fixed integer algorithms with no platform step — and the reference
+  vectors pin it, so changing either is a breaking change, never a fix. It is
+  the estate's test-side substrate (`lgwks-bot/tests/sim/seed.rs`) word for word,
+  and a test holds the two together, so a seed recorded against any crate's
+  simulations draws the same words through the public API. `below(bound)` is
+  unbiased (Lemire's multiply-shift with the exact `(2^64 - bound) mod bound`
+  threshold), and a range with no value is refused as `DrawError::EmptyRange`
+  without moving the stream. **Not claimed:** unpredictability. The stream is
+  determined by its seed, so it is never a key, token or id source; that is
+  `random`'s, and INV-RANDOM-ONE-SOURCE is untouched because this module reads
+  no entropy at all. · why: #344 · enforced by: `seeded::tests`
+  (`the_stream_matches_the_reference_vectors`,
+  `splitmix_fills_the_state_with_its_published_first_word`,
+  `a_zero_bound_and_an_empty_collection_are_refused_without_drawing`,
+  `a_bound_of_one_always_yields_zero_and_draws_one_word`,
+  `the_rejection_threshold_removes_the_bias_a_remainder_would_have`),
+  `tests/it/sim_seeded.rs`
+  (`sim_every_bounded_draw_matches_the_model_and_its_range`,
+  `sim_an_index_lands_inside_every_collection_length`,
+  `sim_small_bounds_are_uniform_on_every_seed_swept`,
+  `sim_a_hundred_thousand_streams_on_a_thousand_threads_match_the_serial_run`),
+  and lgwks_bot's
+  `sim_substrate::the_substrate_and_lgwks_std_seeded_draw_one_stream`
 - **INV-HEX-1** `hex::decode_into` requires exact destination length and validates
   the entire input before writing, so every refusal leaves the destination
   unchanged. · enforced by: `hex::tests::decode_into_validates_exact_length_and_preserves_output_on_failure`
@@ -1444,7 +1469,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   by: the `doc-citations` lane, which runs
   python3 scripts/check-doc-citations.py (citation layer: a cited line must exist
   and still read as a person last checked it). The claim layer is
-  docs/std-ast-deps-closure-matrix.md: every one of the twenty lgwks_std
+  docs/std-ast-deps-closure-matrix.md: every one of the twenty-one lgwks_std
   modules, lgwks_ast and lgwks_deps carries a state from the fixed vocabulary
   exercised / present / unexercised-gap / assurance-gap /
   admitted-not-implemented, plus the test that exists

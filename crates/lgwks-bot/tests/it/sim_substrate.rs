@@ -219,6 +219,28 @@ fn a_run_that_recorded_nothing_is_refused(band: Band) -> TestResult {
     Ok(())
 }
 
+/// The substrate's generator and `lgwks_std::seeded::Seeded` are one stream.
+///
+/// The substrate stays a `std`-only file because `lgwks_ast` includes it and
+/// does not depend on `lgwks_std`; this is what keeps the two copies of the one
+/// algorithm from drifting, so a seed recorded against any crate's simulations
+/// draws the same words through the public API.
+#[test]
+fn the_substrate_and_lgwks_std_seeded_draw_one_stream() -> TestResult {
+    for seed in (0..10_000_u64).chain([1 << 63, u64::MAX - 1, u64::MAX]) {
+        let mut substrate = Rng::new(seed);
+        let mut seeded = lgwks_std::seeded::Seeded::from_seed(seed);
+        for step in 0..64_u32 {
+            assert_eq!(
+                substrate.next_u64(),
+                seeded.next_u64(),
+                "seed {seed} step {step}: the substrate left lgwks_std's stream"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Two generators on one seed draw the same sequence, and every bounded draw
 /// lands where it was asked to.
 fn the_generator_replays_and_stays_in_bounds(band: Band) -> TestResult {

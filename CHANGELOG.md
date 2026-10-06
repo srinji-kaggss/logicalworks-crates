@@ -9,6 +9,21 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — a seeded stream every estate simulation can share (#344)
+
+Every estate repository writing deterministic simulations carried its own
+generator: logical_ci a splitmix64 whose bounded draw was a biased remainder,
+this workspace a std-only copy included by path. `lgwks_std::random` is OS
+entropy only, by INV-RANDOM-ONE-SOURCE.
+
+- **lgwks_std** — `seeded::Seeded` (`core`, no dependency): `from_seed(u64)`,
+  `next_u64`, an unbiased `below(bound)` and `index(len)`, both refusing an empty
+  range with the typed `seeded::DrawError` without moving the stream. The stream
+  is xoshiro256\*\* filled by splitmix64, pinned by reference vectors, and is
+  word for word the stream `lgwks-bot/tests/sim/seed.rs` already drew, so every
+  seed recorded against this workspace's simulations keeps its meaning. It is not
+  randomness and must never feed a key, token or id. INV-STD-SEEDED-1.
+
 ### lgwks_bot — a supervisor killed with SIGKILL leaves a record its successor reaps by (#318)
 
 A supervisor's guards kill its children's process groups on drop, cancel and
