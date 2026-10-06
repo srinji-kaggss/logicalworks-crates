@@ -36,9 +36,10 @@ pub async fn unit(&self, scope: &lgwks_bot::script::Scope, index: u32)
 the step name `ai_task_support::recovery::unit_step(index)`. That is the whole
 point: a unit whose record is committed does not run its body again on a later
 attempt at the same step. The harness counts each unit body inside the record, so
-`world.stats().runs(index)` is *the number of times the body actually ran* —
-reading `1` for a unit that completed twice is the signal that the record was
-ignored.
+`world.stats().runs(index)` is `Some` of *the number of times the body actually
+ran* — reading `Some(1)` for a unit that completed twice is the signal that the
+record was ignored. It is `None` for an index this world does not have, which is
+not the same answer as `Some(0)`.
 
 `Ledger` is the effect. `world.ledger()` reaches it:
 
@@ -65,9 +66,9 @@ Also available, all on `ai_task_support::recovery`:
 
 2. **A second call finishes the work without redoing completed units.** Calling
    `recover` again with the same `store_dir` must resolve with the same `Ok(total)`
-   and must leave `world.stats().runs(index) == 1` for every unit that completed
-   on the first call. A resumed attempt replays the records; it does not re-run
-   the bodies behind them.
+   and must leave `world.stats().runs(index) == Some(1)` for every unit that
+   completed on the first call. A resumed attempt replays the records; it does
+   not re-run the bodies behind them.
 
 3. **No duplicate effect.** Across any number of calls, `world.ledger().applies()`
    must be exactly `1`. The effect is applied under the name `"recover"`.

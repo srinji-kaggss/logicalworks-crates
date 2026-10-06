@@ -253,6 +253,116 @@ the one public field-width change is stated below.
 
 Tests: 201 pass (`nextest -p lgwks_std --all-features`, the leb128, hex, hash,
 encoding, wire, retry and time families).
+### `bench/ai-authoring` — the reference solutions no longer blame a stage that succeeded
+
+Two of the three new-API reference solutions resolved a missing fact to a value
+that named the wrong thing. `new-aggregate` reported `SolveError::Fetch { id: 0 }`
+when no fetch had failed, and `new-pipeline` reported
+`PipelineError::Stage { name: FetchA }` when no stage had failed — both of which
+are false claims about a run, and both of which a model copying the reference
+would have learned to make.
+
+- **`new-aggregate`'s failure cell is `Option<u32>`**, `None` meaning no fetch
+  failed; the first failure is recorded and later ones cannot overwrite it, and
+  a fan-out error with no fetch failure is `Cancelled` with the cause on the
+  trace stream rather than a fabricated id.
+- **`new-pipeline` records `combine` and `publish` under their own names**, so a
+  stage that failed for its own sake names itself, and an error from the flow
+  itself is `Cancelled` with a diagnostic rather than a default of `FetchA` —
+  a stage that ran and succeeded.
+- Each file recovers from a poisoned lock through one documented `match`
+  instead of `unwrap_or_else(PoisonError::into_inner)`, saying why the guarded
+  value is still whole after a panic.
+
+Verified end to end through the benchmark runner, which copies each reference
+into a generated trial crate, builds it `--locked --offline` and runs the hidden
+oracle: `run.py --dry-run --apis new --tasks aggregate,pipeline,recovery
+--trials 1` gives aggregate 6/6, recovery 5/5, pipeline 5/5, all compiled, and
+`run.py --mutants` still fails exactly the clauses it is built to fail
+(aggregate 2/6, pipeline 1/5, recovery 1/5) — the harness's ability to detect a
+wrong solution is unchanged.
+
+### `bench/ai-authoring` — the harness refuses a value no run produced
+
+Four fixtures in the AI-authoring benchmark resolved a missing value to a number
+and three recovered from a poisoned lock four different ways. The first kind is
+the one that matters: `Stage::run` read `combine`'s inputs and `publish`'s input
+as `0` when no earlier stage had produced them, so a pipeline that ran `combine`
+first published `0` — a number no stage ever produced, and a number a reader of
+the oracle would read as a real result.
+
+- **`combine` refuses without both of `a` and `b`, and `publish` refuses without
+  a `combine`**, returning `StageError::Stage { name }` and naming the missing
+  input through `diagnostic`. The variant's doc now says what it means: a stage
+  produced no value, whether because it was configured to fail or because an
+  input it requires was never produced. Its shape is unchanged — the `pipeline`
+  prompt freezes `PipelineError`, and the reference solutions in other
+  partitions match on it exhaustively.
+- **`StageState` holds one `StageValues` under one lock** rather than three
+  `Mutex<Option<u64>>`, so `combine` reads a pair from one instant of the run
+  instead of two.
+- **`World::unit` refuses an index past the world's width** with a diagnostic,
+  rather than running a body for a unit that does not exist; the body's counter
+  is refused too, where the old code silently skipped the count and let the
+  recovery clauses read a body run that never happened.
+- **`UnitStats::runs(index) -> Option<u32>`**: `None` is *no such unit*, which is
+  not the same answer as `Some(0)` — a unit that exists and has not run. The
+  `recovery` prompt's two frozen call sites are updated to match; this is a
+  harness-contract change, and it is the one caller outside the partition that
+  had to change with it.
+- **One `crate::lock` decides what a poisoned lock means** for the crate, and
+  `recovery` draws its delay from the same `planned_delay` the rest of the
+  harness uses, which makes its "one plan governs every instrument" doc true.
+- **The recovery oracle stops allocating a counter vector per index per poll**:
+  `interrupt_after` reads one snapshot through `UnitStats::total_runs`, and its
+  scratch directory name propagates the `SystemTime` error instead of defaulting
+  the timestamp to `0`.
+- **Deleted `recovery::Signal`**, a `pub` type with no caller in any partition,
+  oracle or API sheet, whose `wait` was an unbounded 1 ms poll loop.
+
+Verified end to end through the benchmark runner itself: `run.py --dry-run
+--apis new --tasks aggregate,pipeline,recovery --trials 1` builds each reference
+solution into a generated trial crate and passes every oracle (aggregate 6/6,
+recovery 5/5, pipeline 5/5), and `run.py --mutants` still fails the clauses it is
+built to fail (aggregate 2/6, pipeline 1/5, recovery 1/5). `cargo clippy
+-p ai_task_support --all-targets --locked` is clean with `-D warnings` on the
+default and `--no-default-features` lanes.
+
+### `bench/std-measure` — a statistic that cannot be computed is absent, not zero
+
+The harness's percentile and mean reported `0` for two cases that are not zero:
+an empty sample set (no call was timed at all) and a rank the sample count could
+not express. A `0 ns` in the `p95` column is the one number a reader compares
+against, and both paths put a value there that no run observed.
+
+- **`Samples::percentile` and `Samples::mean` return `Option<u64>`**, where
+  `None` means *not measured*: an empty sample set, or a rank that does not
+  exist. An unmeasured cell renders as `-` in the same column a real number
+  occupies, so a row that collected nothing reads as absent rather than as the
+  fastest measurement in the table.
+- **`percent` is clamped to `0..=100`**, so p0 is the smallest observed sample
+  and p200 — or `u64::MAX` — is the largest, rather than either walking off the
+  end of the vector.
+- **`machine_description` records `cores=unknown`** when the OS will not report a
+  parallelism count, instead of fabricating `0`.
+- **The report goes through locked, flushed `stdout`/`stderr` handles** and
+  `main` returns `ExitCode`, so a report that cannot be printed is reported
+  rather than silently truncated; a failed output write still exits `2`.
+- **`as_nanos()` is narrowed by clamping**, not by a truncating cast.
+- **Seeded simulation tests** (`stats::sim`) check the ranking against an
+  independent order-statistic model at eight sample sizes × ten ranks, one seed
+  replaying the same trace hash and a neighbouring seed not, rank monotonicity
+  and observed bounds across all 101 ranks, a 64-seed batch asserting distinct
+  measurements hash distinctly, and the empty and one-sample cases simulated
+  rather than assumed.
+
+Verified: `cargo nextest run --locked` 15/15 pass; `cargo clippy --all-targets
+--locked` clean with `-D warnings` on the default and `--no-default-features`
+lanes. A full sweep on an Apple M5 Pro (15 cores, rustc 1.99.0, debug build)
+printed 23 scenarios and wrote its report; a write to a missing directory exits
+`2` with `could not write <path>: No such file or directory (os error 2)` on
+stderr. `bench/std-measure/results.txt` is untouched — it is committed
+measurement evidence, not regenerated by this change.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 
