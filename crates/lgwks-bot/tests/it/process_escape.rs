@@ -50,7 +50,9 @@ use std::time::Duration;
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::{CleanupReceipt, ContainmentMechanism, Supervisor, TaskOutcome};
+use lgwks_bot::rt::supervise::{
+    CleanupReceipt, ContainmentMechanism, ResidualRisk, Supervisor, TaskOutcome,
+};
 
 // The pid-file scratch directory, the signal-free liveness probes and the
 // session escape are shared with the other process tests, so there is one copy
@@ -250,6 +252,62 @@ fn a_session_escape_is_captured_and_stopped_by_pid() -> TestResult {
 
     let _reaped = sibling.kill().and_then(|()| sibling.wait()).map(|_| ());
     stop(&[escaped, sibling_pid]);
+    Ok(())
+}
+
+/// A leader that exits on its own does not claim the tree it left behind.
+///
+/// The leader starts a `setsid` escapee and exits 0 once the escapee has
+/// recorded its pid. Its children were re-parented at that exit, so no walk from
+/// the leader can name the escapee, and a report that said `is_complete()` would
+/// be claiming a tree it never saw (#347). The report must instead name the
+/// limit, read no table, and leave the escapee to whoever owns it — here, this
+/// test, which stops it by pid on every exit path.
+#[test]
+fn a_leader_that_exits_on_its_own_does_not_claim_the_tree_it_left() -> TestResult {
+    let escape = escape_command().ok_or_else(escape_unavailable_reason)?;
+    let dir = Scratch::new("exited")?;
+    let escape_file = dir.path().join("escaped.pid");
+
+    let runtime = Runtime::new()?;
+    let outcome = runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        crate::rt_process::run_shell(&mut supervisor, &escape.script_then_exit(&escape_file)).await
+    });
+    let escaped = wait_for_pid(&escape_file, BUDGET)
+        .ok_or_else(|| std::io::Error::other("the escaping child never recorded its pid"))?;
+    let alive_after_cleanup = pid_is_alive(escaped);
+    stop(&[escaped]);
+    let outcome = outcome?;
+
+    assert!(
+        matches!(outcome, TaskOutcome::Completed { .. }),
+        "the leader exited 0 on its own, so its task completed: {outcome:?}"
+    );
+    assert!(
+        alive_after_cleanup,
+        "the escapee left the group before the leader exited, so no group signal reached it \
+         and no capture could name it; it must still be running when the outcome arrives"
+    );
+    let containment = outcome.containment().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "a supervised process reported no containment: {outcome:?}"
+        ))
+    })?;
+    assert_eq!(
+        containment.residual_risk(),
+        Some(ResidualRisk::LeaderExited),
+        "the report must name why it cannot account for the tree: {containment:?}"
+    );
+    assert_eq!(
+        containment.mechanism(),
+        ContainmentMechanism::ProcessGroupOnly,
+        "a leader that had exited has no tree to read, so no table was read: {containment:?}"
+    );
+    assert!(
+        !containment.is_complete(),
+        "a report that never saw the tree must not claim it whole: {containment:?}"
+    );
     Ok(())
 }
 

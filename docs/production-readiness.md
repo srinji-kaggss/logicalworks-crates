@@ -668,7 +668,10 @@ observes it gone with `kill -0` (1,000 of 1,000 iterations on
 `aarch64-apple-darwin` through the `ps` snapshot; the `/proc` child-list reader is
 compiled for `x86_64-unknown-linux-gnu` and executed by the `ubuntu-latest` test
 lanes). A descendant orphaned to init before the cleanup ran is not reachable
-from the leader on either. Windows has no containment at all.
+from the leader on either: a cleanup that begins after the leader exited on its
+own reads no table and reports `ResidualRisk::LeaderExited`, so its containment
+is never `is_complete()` (INV-BOT-158, #347). Windows has no containment at
+all.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a

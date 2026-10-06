@@ -318,10 +318,30 @@ impl EscapeCommand {
     ///   [`sources_are_apostrophe_free`] keeps that true rather than leaving it to
     ///   a comment.
     pub fn script(&self, pid_file: &Path) -> String {
+        format!("{} & wait", self.command_line(pid_file))
+    }
+
+    /// The same escape, from a leader that then exits 0 on its own.
+    ///
+    /// The leader waits only until the escapee has recorded its pid, so the
+    /// recorded process has already left the group when the leader exits, and the
+    /// exit is the leader's own rather than one a cleanup caused. That is the
+    /// shape #347 names: a supervised process that finished by itself and left a
+    /// `setsid` descendant running behind it.
+    pub fn script_then_exit(&self, pid_file: &Path) -> String {
+        format!(
+            "{} & until [ -s {} ]; do sleep 0.01; done; exit 0",
+            self.command_line(pid_file),
+            pid_file.display()
+        )
+    }
+
+    /// The single-quoted escape command, before the leader decides how to wait.
+    fn command_line(&self, pid_file: &Path) -> String {
         let source = self
             .source
             .replace("{file}", &pid_file.display().to_string());
-        format!("{} {} '{source}' & wait", self.program, self.flag)
+        format!("{} {} '{source}'", self.program, self.flag)
     }
 }
 

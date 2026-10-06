@@ -78,7 +78,10 @@ async fn next_outcome(
 ///
 /// The spawn-then-drain every single-command test here performs, written once
 /// so each test states only the script and what it expects of the report.
-async fn run_shell(supervisor: &mut Supervisor, script: &str) -> std::io::Result<TaskOutcome> {
+pub(crate) async fn run_shell(
+    supervisor: &mut Supervisor,
+    script: &str,
+) -> std::io::Result<TaskOutcome> {
     let mut command = ProcessSpec::new("sh");
     command.arg("-c").arg(script);
     supervisor.spawn_process(&command).await?;

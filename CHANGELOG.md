@@ -31,6 +31,34 @@ outright: the groups keep running with nobody left who owns them.
   `rt::process` re-exports the record, its error, the reap and its answer.
   INV-BOT-157.
 
+### lgwks_bot — a process that exits on its own no longer claims a tree it never saw (#347, #345)
+
+When a supervised process exits on its own, the kernel re-parents its children
+at the exit, so a capture walked from it afterwards reaches nothing. The cleanup
+still read the process table — on macOS a whole-table `ps -A` spawn, about
+12.5 ms per supervised process — and reported `is_complete()` for a `setsid`
+descendant it could not have seen.
+
+- **lgwks_bot** — `ResidualRisk::LeaderExited` names that limit. A cleanup that
+  begins after the leader's own exit reads no table and still signals the group,
+  and its `Containment` reports `ProcessGroupOnly` with the new risk, so
+  `is_complete()` is `false` for it and `ShutdownReport::is_clean()` follows.
+  A deadline or cancel kill, where the leader is alive at the capture, keeps its
+  capture and its kill unchanged. **Behaviour change:** a caller that read
+  `is_complete()` as "this one-shot process left nothing behind" now gets the
+  honest `false`; the receipt (`CleanupConfirmed`) still says the group is gone.
+  INV-BOT-158.
+- **Measured** on macOS arm64, 2026-10-06, each side built and run alone from
+  `origin/main` (18e4e204) and from this change: `measure_overhead 2000` puts
+  `process_run` at p50 19.15 → 7.99 ms and p99 21.28 → 9.04 ms, peak RSS
+  4.49 → 3.90 MB. logical_ci's 10,000-lane journey
+  (`ten_thousand_lanes_run_once_each_and_one_failure_blocks_exactly_its_chain`)
+  went from 28.69 s to 12.12 s at 16 slots.
+- The drain simulation's seed draws now pass through the splitmix64 finalizer.
+  The former multiply-only combination made every field a fixed offset of every
+  other, so some pairs of choices were never drawn together; the named seed
+  family was re-picked so every receipt arm stays reachable.
+
 ## [lgwks_std 2.0.0 / lgwks_ast 1.1.0 / lgwks_deps 3.0.0 / lgwks_macros 1.1.1 / lgwks_bot 2.0.0] - 2026-10-06
 
 ### Upgrading
