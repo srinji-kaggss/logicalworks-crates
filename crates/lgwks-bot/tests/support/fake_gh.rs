@@ -14,11 +14,6 @@
 //! One copy, included by path from every target that needs a fake `gh`, so two
 //! targets cannot assert different things about the same fake.
 
-// A single test target owns the fake, so this module is only ever included once
-// and the unused-item tolerance is not needed.
-
-#![allow(dead_code, reason = "one including target may use a different subset")]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,7 +43,12 @@ impl FakeGh {
         // Random rather than a process id: the OS reuses process ids, and two
         // fixtures sharing a directory would read each other's argv log — which
         // is the one thing these tests measure.
-        let tag = lgwks_std::random::bytes::<8>().map_or(0, u64::from_le_bytes);
+        // An entropy source that cannot answer refuses the fixture rather than
+        // naming it zero: a zero every failed draw shares is the collision the
+        // random tag exists to rule out.
+        let tag = lgwks_std::random::bytes::<8>()
+            .map(u64::from_le_bytes)
+            .map_err(std::io::Error::other)?;
         let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("lgwks-fake-gh-{tag:016x}-{seq}-{name}"));
         std::fs::create_dir_all(&dir)?;
@@ -177,23 +177,6 @@ impl FakeGh {
             .filter(|line| !line.trim().is_empty())
             .map(str::to_owned)
             .collect())
-    }
-
-    /// The staged payload of the nth create, or `None` when there was none.
-    pub fn payload_of(&self, index: usize) -> std::io::Result<Option<String>> {
-        let calls = self.calls()?;
-        let creates = calls
-            .iter()
-            .filter(|argv| {
-                argv.windows(2)
-                    .any(|pair| pair[0] == "--method" && pair[1] == "POST")
-            })
-            .count();
-        if index >= creates {
-            return Ok(None);
-        }
-        let received = self.received()?;
-        Ok(received.get(index).cloned())
     }
 }
 
@@ -677,24 +660,6 @@ impl Scenario {
             deny_reads: false,
             build_script: false,
         }
-    }
-
-    /// The head this scenario's first read reports.
-    #[must_use]
-    pub fn head(&self) -> &str {
-        &self.head
-    }
-
-    /// The body a created review carries, read back by verification.
-    #[must_use]
-    pub fn body(&self) -> &str {
-        &self.created_body
-    }
-
-    /// The head this scenario's later reads report.
-    #[must_use]
-    pub fn head_after(&self) -> Option<&str> {
-        self.head_after_first.as_deref()
     }
 
     /// Make the fake accept a create request and then drop the response, which leaves the caller unsure whether the review exists.

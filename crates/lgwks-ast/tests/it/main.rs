@@ -20,7 +20,13 @@ mod sim_parse_deadline;
 /// the same file, and loading it twice makes the generator a second definition
 /// of `Rng` in one crate -- two types with one name, so a seed recorded against
 /// one module would not mean the same draw sequence in the other. Declared here
-/// so there is exactly one, and it is `std` only, so it compiles in a build with
-/// no grammar feature.
+/// so there is exactly one. It is `std` only, and compiled under `lang-rust`
+/// because every module that draws from it parses Rust: a build with no grammar
+/// has no family to drive it.
+#[cfg(feature = "lang-rust")]
 #[path = "../../../lgwks-bot/tests/sim/seed.rs"]
 mod seed;
+/// The weighted coin and the trace's emptiness query, over the same core.
+#[cfg(feature = "lang-rust")]
+#[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
+mod seed_helpers;

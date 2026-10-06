@@ -288,7 +288,7 @@ being idle, not a way to cancel a running closure.
 
 The tick still bounds its own fan-out on both adapters, because the wave loop
 lives in the `observe_fold` system rather than in either entry point.
-`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1805`), and
+`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1815`), and
 `observe_fold` polls sources in waves of that size. Chains beyond 32 are polled
 in additional waves, so the cap holds regardless of how many chains a spec
 declares.
@@ -306,7 +306,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:3262`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:3249`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 hands the closure to a pool thread and offers no abort, and its bound is a
@@ -339,7 +339,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:3371` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:3358` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,

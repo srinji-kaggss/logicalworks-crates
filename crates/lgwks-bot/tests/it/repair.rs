@@ -22,6 +22,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -33,8 +35,8 @@ use lgwks_bot::task::{Disposition, Host, RepairError, RepairTicket, Report};
 use crate::repair_fixtures as shared;
 
 use shared::{
-    Journey, Polls, Scratch, TestResult, input, input_needing, repairable_host, run_of, store_of,
-    ticket_of, unrepairable_host,
+    Journey, Polls, TestResult, input, input_needing, repairable_host, run_of, store_of, ticket_of,
+    unrepairable_host,
 };
 
 /// Run one attempt of the journey on `host`.
@@ -631,7 +633,7 @@ fn a_denied_repair_costs_nothing() -> TestResult {
     let before = ledger
         .control(case.run)
         .ok_or("the blocked attempt charged its run")?;
-    let bytes_before = case.scratch.join("acme.runledger").metadata()?.len();
+    let bytes_before = case.scratch.path().join("acme.runledger").metadata()?.len();
 
     for (grant, what) in [
         (GrantSet::empty(), "no authority at all"),
@@ -666,7 +668,7 @@ fn a_denied_repair_costs_nothing() -> TestResult {
             "{what} must charge nothing and mint no epoch"
         );
         assert_eq!(
-            case.scratch.join("acme.runledger").metadata()?.len(),
+            case.scratch.path().join("acme.runledger").metadata()?.len(),
             bytes_before,
             "{what} must leave the ledger byte-identical"
         );

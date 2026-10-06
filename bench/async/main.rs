@@ -1280,7 +1280,7 @@ async fn row_sustained_burst_reconnect() -> Result<Receipt, String> {
 /// id per record is what makes this a history of distinct facts.
 fn history_key(attempt: usize) -> Result<lgwks_bot::effect::EffectKey, String> {
     use lgwks_bot::effect::{
-        ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId,
+        ActionDigest, ActionId, AttemptId, EffectIdentity, EnvironmentEpoch, EnvironmentId,
         FlowRevision, RunId,
     };
 
@@ -1301,15 +1301,7 @@ fn history_key(attempt: usize) -> Result<lgwks_bot::effect::EffectKey, String> {
     let environment =
         EnvironmentId::from_hex(ENV).map_err(|error| format!("environment: {error}"))?;
     let epoch = EnvironmentEpoch::from_decimal("1").map_err(|error| format!("epoch: {error}"))?;
-    Ok(EffectKey::new(
-        run,
-        action,
-        attempt,
-        flow,
-        digest,
-        environment,
-        epoch,
-    ))
+    Ok(EffectIdentity::new(run, environment, flow).key(action, attempt, digest, epoch))
 }
 
 /// Row: durable history at 1k, 10k and 100k records through the real journal.

@@ -107,7 +107,7 @@
 //!
 //! The cross-process half of this — that the fence actually holds between two
 //! live processes and is reacquired when the holder dies — is exercised by
-//! `tests/journal_writer_fence.rs`, which re-executes this test binary as a
+//! `tests/it/journal_writer_fence.rs`, which re-executes this test binary as a
 //! second process rather than simulating one.
 
 use std::collections::HashMap;
@@ -1508,15 +1508,8 @@ pub(super) mod tests {
         let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
         let environment = EnvironmentId::from_hex(ENV)?;
         let epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(crate::effect::EffectKey::new(
-            run,
-            action,
-            attempt,
-            flow,
-            digest,
-            environment,
-            epoch,
-        ))
+        Ok(crate::effect::EffectIdentity::new(run, environment, flow)
+            .key(action, attempt, digest, epoch))
     }
 
     /// The first attempt of the run every test in this module writes.

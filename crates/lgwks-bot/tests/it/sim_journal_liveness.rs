@@ -81,8 +81,8 @@ fn streaming_replay(band: Band) -> TestResult {
 
         sim.record("streaming-replay-matches-history");
         sim.trace
-            .record_count("stream-attempts", usize::try_from(attempts)?);
-        sim.trace.record_count("stream-events", streamed.len());
+            .record_number("stream-attempts", usize::try_from(attempts)?);
+        sim.trace.record_number("stream-events", streamed.len());
         Ok(())
     })
 }
@@ -157,7 +157,7 @@ fn tenant_isolation_same_key(band: Band) -> TestResult {
 
         sim.record("same-key-tenants-isolated");
         sim.trace
-            .record_count("tenant-attempts", usize::try_from(attempts)?);
+            .record_number("tenant-attempts", usize::try_from(attempts)?);
         Ok(())
     })
 }
@@ -242,12 +242,13 @@ fn one_tier(sim: &mut sim::Sim, requested: usize) -> Result<(), Box<dyn Error>> 
 
     sim.record("tenant-tier-isolated");
     sim.trace
-        .record_u64("tier-requested", u64::try_from(requested)?);
-    sim.trace.record_u64("tier-reached", u64::try_from(level)?);
+        .record_number("tier-requested", u64::try_from(requested)?);
     sim.trace
-        .record_u64("tier-ceiling", u64::try_from(SIM_CEILING)?);
+        .record_number("tier-reached", u64::try_from(level)?);
     sim.trace
-        .record_count("tier-events", level.saturating_mul(SIM_EVENTS_PER_TENANT));
+        .record_number("tier-ceiling", u64::try_from(SIM_CEILING)?);
+    sim.trace
+        .record_number("tier-events", level.saturating_mul(SIM_EVENTS_PER_TENANT));
     Ok(())
 }
 

@@ -247,13 +247,13 @@ fn tick_as(bot: &mut Bot, expect: Expect) -> TestResult {
 
 /// One chain's committed values, recorded into `sim`'s trace.
 ///
-/// A helper rather than a `record_u64` per call site, because a trace that
+/// A helper rather than a `record_number` per call site, because a trace that
 /// recorded a labelled value at one site and a bare one at another would make two
 /// families' hashes incomparable, which is the one thing the receipt exists to
 /// prevent.
 fn record_values(sim: &mut sim::Sim, label: &str, values: impl Iterator<Item = u32>) {
     for value in values {
-        sim.trace.record_u64(label, u64::from(value));
+        sim.trace.record_number(label, u64::from(value));
     }
 }
 
@@ -510,7 +510,7 @@ fn a_held_mass_never_starves_an_independent_chain(band: Band) -> TestResult {
             usize::try_from(mass)?,
             "every held chain is reported as held rather than silently dropped"
         );
-        sim.trace.record_u64("mass", u64::from(mass));
+        sim.trace.record_number("mass", u64::from(mass));
         Ok(())
     })
 }
@@ -564,7 +564,7 @@ fn a_required_predecessor_holds_its_dependent(band: Band) -> TestResult {
             !committed(&store)?.is_empty(),
             "the attempt is on the record, so nothing resolves by omission"
         );
-        sim.trace.record_u64("cycles", u64::from(cycles));
+        sim.trace.record_number("cycles", u64::from(cycles));
         Ok(())
     })
 }
@@ -624,7 +624,7 @@ fn an_indeterminate_predecessor_is_never_resent(band: Band) -> TestResult {
                 "restart {restart}: the body was not re-entered, so nothing was sent twice"
             );
         }
-        sim.trace.record_u64("restarts", u64::from(restarts));
+        sim.trace.record_number("restarts", u64::from(restarts));
         Ok(())
     })
 }
@@ -673,7 +673,7 @@ fn identical_digests_never_cross_tenants(band: Band) -> TestResult {
             store.read("a-tenant-that-never-wrote", &digest).is_none(),
             "a tenant that never wrote reads nothing under a digest it does not own"
         );
-        sim.trace.record_u64("tenants", u64::from(tenants));
+        sim.trace.record_number("tenants", u64::from(tenants));
         Ok(())
     })
 }

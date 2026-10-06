@@ -58,21 +58,18 @@ const MIN_DEPTH: usize = 20_000;
 const DEPTH_STEP: usize = 5_000;
 
 /// The depth a seed selects, in `MIN_DEPTH .. MIN_DEPTH + 5 * DEPTH_STEP`.
-fn depth_for(seed: u64) -> usize {
-    let steps = usize::try_from(seed.checked_rem(5).unwrap_or(0)).unwrap_or(0);
+fn depth_for(seed: u64) -> Result<usize, Box<dyn std::error::Error>> {
+    let steps = usize::try_from(seed % 5)?;
     steps
         .checked_mul(DEPTH_STEP)
         .and_then(|added| MIN_DEPTH.checked_add(added))
-        .unwrap_or(MIN_DEPTH)
+        .ok_or_else(|| format!("seed {seed} selects a depth past usize").into())
 }
 
 /// Build a `depth`-link ancestry and return its root and leaf.
 fn chain_of(depth: usize) -> (CancellationToken, CancellationToken) {
     let root = CancellationToken::new();
-    let mut leaf = root.clone();
-    for _ in 0..depth {
-        leaf = leaf.child_token();
-    }
+    let leaf = (0..depth).fold(root.clone(), |parent, _| parent.child_token());
     (root, leaf)
 }
 
@@ -91,8 +88,7 @@ fn polls_ready<F: Future + ?Sized>(future: &mut Pin<Box<F>>) -> bool {
 ///
 /// Every branch records what it observed, so the trace is a fingerprint of the
 /// run rather than a stream of successes.
-fn journey(seed: u64) -> String {
-    let depth = depth_for(seed);
+fn journey(seed: u64, depth: usize) -> String {
     let mut trace = format!("seed={seed} depth={depth}");
 
     // A: a fresh wait is pending; the root cancel resolves it.
@@ -139,7 +135,8 @@ fn journey(seed: u64) -> String {
         let root = CancellationToken::new();
         let mut leaf = root.clone();
         let mut middle = root.clone();
-        let target = depth.checked_div(2).unwrap_or(0);
+        // Every depth is even, so the ceiling of a half is exactly the middle.
+        let target = depth.div_ceil(2);
         for index in 0..depth {
             leaf = leaf.child_token();
             if index == target {
@@ -179,10 +176,11 @@ fn journey(seed: u64) -> String {
 /// harness's stack. A stack overflow here aborts the whole child process, which
 /// is why the parent, not this thread, is the reporter.
 fn trace_on_small_stack(seed: u64) -> TestResult {
+    let depth = depth_for(seed)?;
     let started = std::thread::Builder::new()
         .name(String::from("sim-deep-cancel"))
         .stack_size(SMALL_STACK)
-        .spawn(move || journey(seed));
+        .spawn(move || journey(seed, depth));
     let handle = started?;
     let trace = handle
         .join()
@@ -202,10 +200,11 @@ fn run_child(seed: u64, run: u32) -> Result<String, Box<dyn std::error::Error>> 
     // The build's own scratch directory plus the start instant keep concurrent
     // runs (another worktree, another checkout of the same test) from reading
     // each other's trace; a pid would not, because the OS reuses it.
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or_default();
+    let started = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_nanos(),
+        // A clock set before the epoch still names an instant: how far before it.
+        Err(before) => before.duration().as_nanos(),
+    };
     let trace = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("sim-deep-cancel-{started}-{seed}-{run}.trace"));
     discard(&trace)?;
@@ -258,18 +257,11 @@ fn discard(path: &std::path::Path) -> std::io::Result<()> {
 /// Wait one poll interval without blocking an executor.
 ///
 /// The parent branch of the watchdog is a plain process with no runtime and no
-/// reactor, so the workspace's ban on `std::thread::sleep` — which exists
-/// because blocking an executor thread stalls every task on it — has nothing to
-/// protect here: there is no executor, and the wait is this watchdog's subject
-/// rather than its scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the watchdog's parent branch is a plain process with no async runtime and no \
-              reactor to stall; a poll interval is the wait's subject, and `rt::time::sleep` \
-              cannot be awaited here"
-)]
+/// reactor. A park is the synchronous wait the workspace names in place of
+/// `std::thread::sleep`; it returns early only if this thread is unparked, and
+/// nothing unparks it, so the interval is the poll interval either way.
 fn pause_between_polls() {
-    std::thread::sleep(GUARD_POLL_INTERVAL);
+    std::thread::park_timeout(GUARD_POLL_INTERVAL);
 }
 
 /// The seeded family: every journey finishes on a small stack, twice, and the

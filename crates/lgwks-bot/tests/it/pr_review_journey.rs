@@ -227,6 +227,23 @@ type ReviewFuture = std::pin::Pin<
 /// like with like.
 const REVIEW_BODY: &str = "two findings";
 
+/// The staged payload of the nth create, or `None` when there was none.
+fn payload_of(fake: &FakeGh, index: usize) -> std::io::Result<Option<String>> {
+    let calls = fake.calls()?;
+    let creates = calls
+        .iter()
+        .filter(|argv| {
+            argv.windows(2)
+                .any(|pair| pair[0] == "--method" && pair[1] == "POST")
+        })
+        .count();
+    if index >= creates {
+        return Ok(None);
+    }
+    let received = fake.received()?;
+    Ok(received.get(index).cloned())
+}
+
 // ── The publish path ────────────────────────────────────────────────────────
 
 #[test]
@@ -264,9 +281,8 @@ fn a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read() ->
         fake.reads_of("/pulls/7/reviews")? >= 1,
         "the publication is verified by a read-back, not by the create's exit code"
     );
-    let payload = fake
-        .payload_of(0)?
-        .ok_or("the create must name the payload file it was given")?;
+    let payload =
+        payload_of(&fake, 0)?.ok_or("the create must name the payload file it was given")?;
     assert!(
         payload.contains(HEAD),
         "the create payload must carry the reviewed commit id: {payload}"
@@ -492,8 +508,8 @@ fn two_identities_on_one_repository_stay_isolated() -> TestResult {
         2,
         "two identities on one repository are two reviews, not one and not three"
     );
-    let first_payload = fake.payload_of(0)?.ok_or("the first create's payload")?;
-    let second_payload = fake.payload_of(1)?.ok_or("the second create's payload")?;
+    let first_payload = payload_of(&fake, 0)?.ok_or("the first create's payload")?;
+    let second_payload = payload_of(&fake, 1)?.ok_or("the second create's payload")?;
     assert!(
         first_payload.contains("first identity"),
         "the first create carries only its own body: {first_payload}"

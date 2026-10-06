@@ -32,12 +32,11 @@
 // that compiled to nothing would read as a test that passed.
 #![cfg(all(unix, feature = "rt"))]
 
-/// The kill-harness fixtures this file shares with the journal crash and
-/// fence families: one scratch allocator, one cleanup guard, one probe guard
-/// and one key constructor, so this observation cannot drift into a different
-/// kill discipline from theirs.
-#[path = "support/journal.rs"]
-mod shared;
+// The kill-harness fixtures this file shares with the journal crash and
+// fence families: one scratch allocator, one cleanup guard, one probe guard
+// and one key constructor, so this observation cannot drift into a different
+// kill discipline from theirs.
+use crate::journal_fixtures as shared;
 
 use shared::{ProbeGuard, TempGuard, key_for as key, pause, scratch_dir};
 
@@ -152,8 +151,7 @@ fn spawn_probe(
     marker_path: &Path,
 ) -> Result<ProbeGuard, Box<dyn std::error::Error>> {
     Ok(ProbeGuard(Some(
-        std::process::Command::new(std::env::current_exe()?)
-            .args([test_name, "--exact", "--nocapture"])
+        crate::probe_command(test_name)?
             .env(PROBE_ENV, "1")
             .env(PROBE_ROW, row.to_string())
             .env(PROBE_JOURNAL, journal_path)
@@ -195,12 +193,10 @@ fn read_child_elapsed(journal_path: &Path) -> Result<Duration, Box<dyn std::erro
     let path = journal_path.with_extension("elapsed");
     let bytes = std::fs::read(&path)?;
     if bytes.len() != std::mem::size_of::<u64>() {
-        {
-            let refusal =
-                Err(format!("the child's elapsed record is {} bytes, not 8", bytes.len()).into());
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_child_elapsed: returning an error to the caller");
-            return refusal;
-        };
+        let refusal =
+            Err(format!("the child's elapsed record is {} bytes, not 8", bytes.len()).into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "read_child_elapsed: returning an error to the caller");
+        return refusal;
     }
     let mut raw = [0_u8; 8];
     raw.copy_from_slice(&bytes);

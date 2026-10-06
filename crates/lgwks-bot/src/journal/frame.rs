@@ -98,6 +98,18 @@ impl SaturatingFrom<usize> for u32 {
     }
 }
 
+impl SaturatingFrom<u64> for u32 {
+    fn saturating_from(value: u64) -> Self {
+        // An attempt ordinal rendered as the count a failure report carries: one
+        // past what the report can name is reported as the most it can, which
+        // overstates how far along the entry is — the side a retry budget absorbs.
+        match u32::try_from(value) {
+            Ok(narrowed) => narrowed,
+            Err(_wider_than_a_report_count) => Self::MAX,
+        }
+    }
+}
+
 impl SaturatingFrom<u128> for u64 {
     fn saturating_from(value: u128) -> Self {
         match u64::try_from(value) {

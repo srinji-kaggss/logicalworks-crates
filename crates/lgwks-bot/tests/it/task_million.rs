@@ -45,19 +45,6 @@ const TENANTS: usize = 16;
 /// its body resumed.
 type Outcome = (u64, Duration);
 
-/// Nearest-rank percentile, in per-mille, of an already sorted sample.
-fn percentile(sorted: &[Duration], per_mille: usize) -> Duration {
-    let rank = sorted
-        .len()
-        .saturating_mul(per_mille)
-        .checked_div(1000)
-        .unwrap_or_default();
-    sorted
-        .get(rank.min(sorted.len().saturating_sub(1)))
-        .copied()
-        .unwrap_or_default()
-}
-
 #[test]
 fn more_than_a_million_admitted_runs_are_in_flight_at_once() -> TestResult {
     if std::env::var_os("LGWKS_MILLION").is_none() {
@@ -92,7 +79,9 @@ fn more_than_a_million_admitted_runs_are_in_flight_at_once() -> TestResult {
                 let released = gate.wait_for(Option::is_some).await.map_err(|_| {
                     FlowError::failed("the release gate was dropped before the release")
                 })?;
-                let resumed = released.map(|at| at.elapsed()).unwrap_or_default();
+                let resumed = released
+                    .map(|at| at.elapsed())
+                    .ok_or_else(|| FlowError::failed("the release carried no instant"))?;
                 Ok::<Outcome, FlowError>((value.saturating_mul(2), resumed))
             }
         })?
@@ -170,10 +159,10 @@ fn more_than_a_million_admitted_runs_are_in_flight_at_once() -> TestResult {
         "million: subjects={total} tenants={TENANTS} per_host={MAX_ADMITTED_TASKS} \
          all_in_flight_after={admitted_at:?} total={finished:?} \
          release_to_resume p50={:?} p95={:?} p99={:?} max={:?}",
-        percentile(&outcomes, 500),
-        percentile(&outcomes, 950),
-        percentile(&outcomes, 990),
-        outcomes.last().copied().unwrap_or_default(),
+        shared::percentile(&outcomes, 500).ok_or("no subject resumed")?,
+        shared::percentile(&outcomes, 950).ok_or("no subject resumed")?,
+        shared::percentile(&outcomes, 990).ok_or("no subject resumed")?,
+        outcomes.last().copied().ok_or("no subject resumed")?,
     ))?;
     Ok(())
 }

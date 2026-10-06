@@ -162,7 +162,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
     // trace that carried nanoseconds of wall clock would differ on every run and
     // stop being a replay receipt. What is recorded is the boolean below, which
     // is false on any run that finished inside a microsecond of real work.
-    trace.record_u64("watchdog-fired", u64::from(receipt.watchdog_fired));
+    trace.record_number("watchdog-fired", u64::from(receipt.watchdog_fired));
     (trace, receipt)
 }
 
@@ -401,8 +401,8 @@ struct OriginReading {
 /// a value that stands in for one.
 fn record_duration(trace: &mut Trace, label: &str, value: Duration) {
     trace.record(label);
-    trace.record_u64("secs", value.as_secs());
-    trace.record_u64("subsec-nanos", u64::from(value.subsec_nanos()));
+    trace.record_number("secs", value.as_secs());
+    trace.record_number("subsec-nanos", u64::from(value.subsec_nanos()));
 }
 
 /// Run one origin scenario from `seed`, returning its trace and its readings.

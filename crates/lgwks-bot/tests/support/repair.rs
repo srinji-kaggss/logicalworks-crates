@@ -12,18 +12,10 @@
 //! here count their own polls, and the tests assert on the count rather than on
 //! the value: a replayed analysis returns the right number whether or not it ran,
 //! so only the counter distinguishes them.
-//!
-//! Each including test target uses a different subset of this harness, so a name
-//! unused in one is not dead. The lint is real per target and the allowance is
-//! inherent to sharing one harness across both of them.
-#![allow(
-    dead_code,
-    reason = "each including test target uses a different subset of the shared repair harness"
-)]
 
 use std::error::Error;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,50 +256,4 @@ pub fn run_of<O>(report: &lgwks_bot::task::Report<O>) -> Result<RunId, Box<dyn E
     report
         .run_id()
         .ok_or_else(|| missing("a run on a host with a store must name its run id"))
-}
-
-/// A scratch directory, removed when the guard ends.
-pub struct Scratch {
-    /// The directory itself.
-    path: PathBuf,
-}
-
-impl Scratch {
-    /// A scratch directory named by random bytes, so two runs never collide.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the entropy source or the filesystem reports.
-    pub fn new(tag: &'static str) -> Result<Self, Box<dyn Error>> {
-        let unique = lgwks_std::random::bytes::<8>()?;
-        let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("lgwks-{tag}-{hex}"));
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-        }
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    /// The directory, borrowed.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// A path inside the directory.
-    #[must_use]
-    pub fn join(&self, tail: &str) -> PathBuf {
-        self.path.join(tail)
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory.
-    ///
-    /// Best effort: every assertion has already been made, and a leaked temp
-    /// directory is a nuisance rather than a wrong answer.
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.path));
-    }
 }

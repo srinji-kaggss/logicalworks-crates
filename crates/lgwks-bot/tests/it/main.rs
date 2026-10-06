@@ -86,15 +86,48 @@ mod repair_fixtures;
 #[path = "../support/request.rs"]
 mod request_fixtures;
 
-#[cfg(any(all(feature = "script", feature = "ephemeral"), feature = "rt"))]
+#[cfg(all(feature = "script", feature = "ephemeral"))]
 #[path = "../support/resume.rs"]
 mod resume_fixtures;
+
+#[cfg(feature = "rt")]
+#[path = "../support/liveness.rs"]
+mod liveness_fixtures;
+
+#[cfg(feature = "rt")]
+#[path = "../support/scratch.rs"]
+mod scratch;
 
 #[path = "../sim/mod.rs"]
 mod sim;
 
+/// This test binary re-invoked to run the one test named `test` as a probe child.
+///
+/// One builder for every kill and crash probe, so the executable and the
+/// argument shape cannot drift between them. `test` is the libtest name: the
+/// test's path below the crate root, which is what a test's own thread is named
+/// and what [`probe_test`] builds from a `module_path!()`.
+fn probe_command(test: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.args([test, "--exact", "--nocapture"]);
+    Ok(command)
+}
+
+/// The libtest name of `test` declared in `module` (its `module_path!()`).
+///
+/// libtest names a test by its path below the crate root; the crate's own
+/// segment is what `module_path!()` adds and an `--exact` filter must not carry.
+fn probe_test(module: &str, test: &str) -> String {
+    match module.split_once("::") {
+        Some((_crate, path)) => format!("{path}::{test}"),
+        None => test.to_owned(),
+    }
+}
+
 mod ambiguous_commit;
 mod authority;
+mod durable_crash_group_commit;
+mod durable_crash_observation;
 mod durable_dispatch;
 mod effect_identity;
 mod effect_journal;
@@ -108,10 +141,13 @@ mod inspect_scale;
 mod inspect_wiring;
 mod journal_liveness;
 mod journal_scale;
+mod journal_writer_fence;
 mod locator_eligibility;
 mod no_default;
 mod observe_refresh;
+mod owner_epoch_takeover;
 mod pr_review_journey;
+mod process_escape;
 mod process_ownership;
 mod prop_each;
 mod prop_journal;
@@ -129,6 +165,7 @@ mod script_flow;
 mod script_refusals;
 mod session;
 mod sim_clock;
+mod sim_clock_kill;
 mod sim_clock_wiring;
 mod sim_dispatch;
 mod sim_epoch_identity;
@@ -170,4 +207,5 @@ mod t22_process_surface;
 mod t_rows;
 mod task_front_door;
 mod task_million;
+mod task_resume;
 mod wrong_identity_evidence;

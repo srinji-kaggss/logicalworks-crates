@@ -24,11 +24,17 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 use crate::band_family;
 
+use crate::liveness_fixtures as liveness;
+
 use crate::resume_fixtures as shared;
+
+use shared::store_file;
 
 use std::error::Error;
 use std::future::Future;
@@ -38,7 +44,7 @@ use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Host, RunStore, Task, task};
 
-use shared::{PROGRESS_TURNS, Parked, Scratch, heartbeat};
+use liveness::{PROGRESS_TURNS, Parked, heartbeat};
 
 use sim::Band;
 use sim::Rng;
@@ -86,7 +92,7 @@ struct Seeded {
 /// Open the [`Seeded`] fixture under the scratch name `name`.
 fn seeded(name: &'static str) -> Result<Seeded, Box<dyn Error>> {
     let scratch = Scratch::new(name)?;
-    let store = RunStore::open(scratch.store())?;
+    let store = RunStore::open(store_file(scratch.path()))?;
     Ok(Seeded {
         work: append_task()?,
         host: host("sim", store)?,
@@ -130,7 +136,7 @@ fn concurrent_appends_lose_nothing(band: Band) -> TestResult {
         drop(host);
 
         // Reopened, so every count below is answered from the disk.
-        let reopened = RunStore::open(scratch.store())?;
+        let reopened = RunStore::open(store_file(scratch.path()))?;
         for id in &ids {
             assert_eq!(
                 reopened.record_count(*id),
@@ -178,7 +184,7 @@ fn duplicate_submissions_are_idempotent(band: Band) -> TestResult {
         }
         drop(host);
 
-        let reopened = RunStore::open(scratch.store())?;
+        let reopened = RunStore::open(store_file(scratch.path()))?;
         assert_eq!(
             reopened.record_count(run),
             1,
@@ -216,7 +222,7 @@ fn an_interrupted_step_records_exactly_once(band: Band) -> TestResult {
             work,
             host,
         } = seeded("sim-once")?;
-        let path = scratch.store();
+        let path = store_file(scratch.path());
         let run = RunId::mint()?;
 
         // The first attempt records. Every resume after it replays, because the
@@ -265,7 +271,7 @@ fn isolation_seed(rng: &mut Rng) -> TestResult {
     let appends = tenant_runs(rng);
     let tag = rng.below(u32::MAX);
     let scratch = Scratch::new("sim-tenant")?;
-    let store = RunStore::open(scratch.store())?;
+    let store = RunStore::open(store_file(scratch.path()))?;
     let work = append_task()?;
 
     let mut runs: Vec<(String, RunId)> = Vec::new();
@@ -286,7 +292,7 @@ fn isolation_seed(rng: &mut Rng) -> TestResult {
     }
     drop(store);
 
-    let reopened = RunStore::open(scratch.store())?;
+    let reopened = RunStore::open(store_file(scratch.path()))?;
     for entry in &runs {
         let (owner, run) = (entry.0.as_str(), entry.1);
         for other in &runs {
@@ -347,16 +353,18 @@ fn same_seed_replays(band: Band) -> TestResult {
             let report = lgwks_bot::rt::runtime::block_on(host.run(&work, index));
             sim_run
                 .trace
-                .record_u64("append-ok", u64::from(report.disposition().is_success()));
-            sim_run.trace.record_u64("append-index", u64::from(index));
+                .record_number("append-ok", u64::from(report.disposition().is_success()));
+            sim_run
+                .trace
+                .record_number("append-index", u64::from(index));
         }
         drop(host);
         // The store's committed length is the digest of "nothing was lost", which is
         // what makes a divergence in ordering visible to a replay comparison.
-        let reopened = RunStore::open(scratch.store())?;
+        let reopened = RunStore::open(store_file(scratch.path()))?;
         sim_run
             .trace
-            .record_u64("committed", reopened.committed_bytes());
+            .record_number("committed", reopened.committed_bytes());
         Ok(())
     };
     sim::assert_replays(band, body)?;
@@ -367,7 +375,7 @@ fn same_seed_replays(band: Band) -> TestResult {
 fn parked_device_seed(rng: &mut Rng) -> TestResult {
     let tag = rng.below(u32::MAX);
     let scratch = Scratch::new("sim-parked")?;
-    let store = RunStore::open_with_stalled_device(scratch.store())?;
+    let store = RunStore::open_with_stalled_device(store_file(scratch.path()))?;
     let work = append_task()?;
     let host = host("sim", store)?;
 
@@ -381,7 +389,7 @@ fn parked_device_seed(rng: &mut Rng) -> TestResult {
     let installed = host
         .run_store()
         .ok_or("a host built with a store installed keeps one")?;
-    let parked = Parked::new(installed.storage_gate())?;
+    let parked = Parked::at(None, installed.storage_gate())?;
     // Both futures are driven by one poll_fn, the way a single-threaded
     // executor would. `host.run` builds its own driver, so polling the step
     // through `block_on` alone would leave the heartbeat unpolled and the
@@ -409,7 +417,7 @@ fn parked_device_seed(rng: &mut Rng) -> TestResult {
 
     // The record is on the disk, read back through a fresh handle: a wait that
     // released into nothing looks identical from the caller's side.
-    let reopened = RunStore::open(scratch.store())?;
+    let reopened = RunStore::open(store_file(scratch.path()))?;
     assert!(
         reopened.committed_bytes() > 0,
         "seed {tag}: a parked store committed no bytes at all"
@@ -443,7 +451,7 @@ fn torn_tail_seed(rng: &mut Rng) -> TestResult {
         work,
         host,
     } = seeded("sim-torn")?;
-    let path = scratch.store();
+    let path = store_file(scratch.path());
 
     let mut ids = Vec::new();
     for index in 0..appends {
@@ -510,7 +518,7 @@ fn foreign_run_seed(rng: &mut Rng) -> TestResult {
     let appends = rng.between(1, 4);
     let tag = rng.below(u32::MAX);
     let scratch = Scratch::new("sim-foreign")?;
-    let store = RunStore::open(scratch.store())?;
+    let store = RunStore::open(store_file(scratch.path()))?;
     let work = append_task()?;
 
     let mut handles: Vec<Host> = Vec::new();
@@ -584,7 +592,7 @@ fn reopen_under_load_seed(rng: &mut Rng) -> TestResult {
     let appends = tenant_runs(rng);
     let tag = rng.below(u32::MAX);
     let scratch = Scratch::new("sim-reopen")?;
-    let path = scratch.store();
+    let path = store_file(scratch.path());
     let store = RunStore::open(&path)?;
     let work = append_task()?;
     let host = host("sim", store)?;

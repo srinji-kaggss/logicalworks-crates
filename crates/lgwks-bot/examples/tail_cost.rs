@@ -39,7 +39,7 @@ use lgwks_bot::task::{Host, MAX_RECORD_BYTES, RunStore, StoreError, Task, task};
 mod effect_key;
 #[path = "support/measure.rs"]
 mod measure;
-#[path = "support/scratch.rs"]
+#[path = "../tests/support/scratch.rs"]
 mod scratch;
 
 use scratch::Scratch;

@@ -606,12 +606,10 @@ fn refusal_one_worker() -> TestResult {
             "the awaited tick must run the one effect the timer source selects"
         ),
         Ok(Err(error)) => {
-            {
-                let refusal =
-                    Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the awaited tick failed on a one-worker runtime: {error}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refusal_one_worker: returning an error to the caller");
+            return refusal;
         }
         Err(_elapsed) => {
             let refusal = Err(format!(
@@ -681,12 +679,10 @@ fn timer_effects_in_order() -> TestResult {
             return refusal;
         }
         Err(_elapsed) => {
-            {
-                let refusal =
-                    Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the awaited tick did not finish within {TICK_BUDGET:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "timer_effects_in_order: returning an error to the caller");
+            return refusal;
         }
     }
     assert_eq!(

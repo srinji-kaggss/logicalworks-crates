@@ -33,11 +33,11 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
-#[path = "support/journal.rs"]
-mod measure;
+use crate::scratch::Scratch;
 
-#[path = "support/resume.rs"]
-mod shared;
+use crate::journal_fixtures as measure;
+
+use crate::resume_fixtures as shared;
 
 use std::error::Error;
 use std::io::Write;
@@ -47,7 +47,7 @@ use lgwks_bot::effect::RunId;
 use lgwks_bot::task::{Host, RunStore};
 
 use measure::{ProbeGuard, TempGuard, pause, scratch_dir};
-use shared::{Scratch, one_step_task};
+use shared::one_step_task;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -163,14 +163,6 @@ fn probe_body() -> TestResult {
     Err("the probe child parked for its whole bound and was never killed".into())
 }
 
-/// This test binary re-invoked as a named test with the probe's environment.
-fn probe_command(test_name: &str) -> Result<std::process::Command, Box<dyn Error>> {
-    let executable = std::env::current_exe()?;
-    let mut command = std::process::Command::new(executable);
-    command.args([test_name, "--exact", "--nocapture"]);
-    Ok(command)
-}
-
 /// Spawn this test binary as a probe child ordered to commit `runs` durable runs.
 fn spawn_probe(
     test_name: &str,
@@ -179,7 +171,7 @@ fn spawn_probe(
     runs: u32,
     hold_ms: Option<u64>,
 ) -> Result<ProbeGuard, Box<dyn Error>> {
-    let mut command = probe_command(test_name)?;
+    let mut command = crate::probe_command(&crate::probe_test(module_path!(), test_name))?;
     command
         .env(PROBE_ENV, "1")
         .env(PROBE_STORE, store)
@@ -380,12 +372,10 @@ fn kill_when(
     reached: impl Fn() -> Result<bool, Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
     let Some(mut child) = guard.take() else {
-        {
-            let refusal =
-                Err(format!("the probe child for {test_name} was gone before the kill").into());
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_when: returning an error to the caller");
-            return refusal;
-        };
+        let refusal =
+            Err(format!("the probe child for {test_name} was gone before the kill").into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_when: returning an error to the caller");
+        return refusal;
     };
     for _ in 0..2_000 {
         if reached()? {

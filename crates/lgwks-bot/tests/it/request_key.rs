@@ -14,6 +14,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use std::cell::Cell;
 use std::error::Error;
 use std::rc::Rc;
@@ -27,7 +29,6 @@ use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, Host, RequestError, RequestKey, RunStore, Submission, task};
 
 // The scratch directory, shared with the resume targets.
-use crate::resume_fixtures as shared;
 // The request fixtures themselves.
 use crate::request_fixtures as request;
 
@@ -35,7 +36,6 @@ use request::{
     counting_task, drop_after_first_step, host_on, host_with_deadline, overrunning_task,
     parking_task, stop_mid_run, stored_host, two_step_task,
 };
-use shared::Scratch;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -189,7 +189,7 @@ fn distinct_request_keys_are_distinct_runs() -> TestResult {
 #[test]
 fn two_tenants_never_share_a_request_run() -> TestResult {
     let scratch = Scratch::new("req-tenants")?;
-    let shared = scratch.join("shared.runstore");
+    let shared = scratch.path().join("shared.runstore");
     // One store handle, cloned into both tenants: two handles over one file
     // would be two writers, which the store's own length fence refuses.
     let store = RunStore::open(&shared)?;
@@ -470,7 +470,7 @@ fn work_two_step(
 #[test]
 fn a_refusal_before_admission_is_not_recorded_as_the_outcome() -> TestResult {
     let scratch = Scratch::new("req-refused")?;
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     let stopping = host_on("acme", store.clone())?;
     let healthy = host_on("acme", store)?;
     let counter = Rc::new(Cell::new(0));
@@ -573,7 +573,7 @@ const OVER_CEILING_REASON: usize = lgwks_bot::task::MAX_RECORD_BYTES;
 #[test]
 fn a_store_that_refuses_the_terminal_write_reports_the_refusal() -> TestResult {
     let scratch = Scratch::new("req-ceiling")?;
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     let parking = host_on("acme", store.clone())?;
     let settling = host_on("acme", store.clone())?;
     let recorded = Arc::new(AtomicBool::new(false));

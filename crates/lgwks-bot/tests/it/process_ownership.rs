@@ -8,7 +8,9 @@
     feature = "process"
 ))]
 
-use std::path::{Path, PathBuf};
+use crate::scratch::Scratch;
+
+use std::path::Path;
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
@@ -17,48 +19,6 @@ use lgwks_bot::rt::supervise::{Supervisor, SupervisorCancelled, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
 const BUDGET: Duration = Duration::from_secs(10);
-
-struct PidDir(PathBuf);
-
-/// Monotone per-process sequence, so two `PidDir`s in one test binary never
-/// share a path even if the clock does not move between them.
-static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-impl PidDir {
-    fn new(name: &str) -> std::io::Result<Self> {
-        // Wall-clock nanos plus a monotone sequence. Not a process or thread id
-        // (both are reused by the OS) and not `lgwks_std::random` (that module
-        // is behind the `random`/`ephemeral` features, and the feature matrix
-        // builds this test without them).
-        //
-        // The clock is part of the *name*, because two runs of this test on one
-        // machine must not share a directory, and the sequence alone only
-        // separates runs inside one process. A host whose clock reads before
-        // 1970 has no elapsed time to put in a name, and a stand-in zero would
-        // fold its directories into the namespace of every epoch-aligned run, so
-        // that host is refused rather than named.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|before_epoch| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, before_epoch)
-            })?
-            .as_nanos();
-        let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lgwks-bot-ownership-{nanos}-{seq}-{name}"));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    fn file(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for PidDir {
-    fn drop(&mut self) {
-        let _ignored = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn is_alive(pid: &str) -> bool {
     std::process::Command::new("kill")
@@ -122,8 +82,8 @@ fn cancel_before_spawn_process_refuses_without_starting_the_command()
     // call failed. The refusal must come first: no process, no first
     // instruction, and the error names the cancellation rather than looking
     // like a platform failure.
-    let dir = PidDir::new("fenced")?;
-    let marker = dir.file("marker");
+    let dir = Scratch::new("fenced")?;
+    let marker = dir.path().join("marker");
     let script = format!("echo started > {}", marker.display());
     let runtime = Runtime::new()?;
     runtime.block_on(async {
@@ -179,8 +139,8 @@ async fn spawned_descendant(
 
 #[test]
 fn zero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = PidDir::new("zero")?;
-    let child_file = dir.file("child.pid");
+    let dir = Scratch::new("zero")?;
+    let child_file = dir.path().join("child.pid");
     let runtime = Runtime::new()?;
     let (outcome, child) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
@@ -195,8 +155,8 @@ fn zero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = PidDir::new("nonzero")?;
-    let child_file = dir.file("child.pid");
+    let dir = Scratch::new("nonzero")?;
+    let child_file = dir.path().join("child.pid");
     let runtime = Runtime::new()?;
     let (outcome, child) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
@@ -232,8 +192,8 @@ fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::err
 #[test]
 fn cancellation_before_manager_task_poll_keeps_descendant_owned()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = PidDir::new("pre-poll")?;
-    let child_file = dir.file("child.pid");
+    let dir = Scratch::new("pre-poll")?;
+    let child_file = dir.path().join("child.pid");
     let runtime = Runtime::new()?;
     let child = runtime.block_on(async {
         let mut supervisor = Supervisor::default();

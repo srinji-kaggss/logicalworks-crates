@@ -14,14 +14,13 @@
 //! is outside its reach, and writers on other hosts need a lease, not a lock.
 //! Both limits are stated on [`JournalError::Locked`] rather than hidden.
 
-/// The scratch-path and cleanup-guard fixtures this file shares with the
-/// journal liveness, scale and crash-observation families.
-///
-/// This file was the third copy of both, and the fence it observes is the same
-/// device the others write to: a fourth reader of the disk must not be able to
-/// assert a different cleanup discipline than the rest.
-#[path = "support/journal.rs"]
-mod shared;
+// The scratch-path and cleanup-guard fixtures this file shares with the
+// journal liveness, scale and crash-observation families.
+//
+// This file was the third copy of both, and the fence it observes is the same
+// device the others write to: a fourth reader of the disk must not be able to
+// assert a different cleanup discipline than the rest.
+use crate::journal_fixtures as shared;
 
 use shared::{DIGEST_HEX, ProbeGuard, TempGuard, key_for, pause, scratch};
 
@@ -102,15 +101,14 @@ fn a_writer_is_refused_while_the_fence_is_held_and_reacquired_after_the_holder_d
     let marker = scratch("fence-marker");
     let _marker_guard = TempGuard(marker.clone());
     let child = {
-        let exe = std::env::current_exe()?;
-        std::process::Command::new(exe)
-            .arg("journal_writer_fence")
-            .arg("--exact")
-            .arg("a_writer_is_refused_while_the_fence_is_held_and_reacquired_after_the_holder_dies")
-            .env(PROBE_ENV, "1")
-            .env(PROBE_JOURNAL, &path)
-            .env(PROBE_MARKER, &marker)
-            .spawn()?
+        crate::probe_command(&crate::probe_test(
+            module_path!(),
+            "a_writer_is_refused_while_the_fence_is_held_and_reacquired_after_the_holder_dies",
+        ))?
+        .env(PROBE_ENV, "1")
+        .env(PROBE_JOURNAL, &path)
+        .env(PROBE_MARKER, &marker)
+        .spawn()?
     };
     let mut probe = ProbeGuard(Some(child));
     for _ in 0..200 {

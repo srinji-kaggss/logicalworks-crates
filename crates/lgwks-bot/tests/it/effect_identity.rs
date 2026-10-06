@@ -73,15 +73,14 @@ fn key(
     let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
     let key_environment = EnvironmentId::from_hex(ENV)?;
     let key_epoch = EnvironmentEpoch::new(counter(epoch)?);
-    Ok(EffectKey::new(
-        key_run,
-        key_action,
-        key_attempt,
-        key_flow_revision,
-        key_digest,
-        key_environment,
-        key_epoch,
-    ))
+    Ok(
+        lgwks_bot::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+            key_action,
+            key_attempt,
+            key_digest,
+            key_epoch,
+        ),
+    )
 }
 
 fn ordinary(attempt: u64) -> Result<EffectKey, Box<dyn std::error::Error>> {

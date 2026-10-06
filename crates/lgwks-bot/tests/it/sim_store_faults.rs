@@ -31,6 +31,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 use crate::resume_fixtures as shared;
@@ -43,7 +45,7 @@ use std::pin::Pin;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{DefinitionIdentity, Disposition, Host, RunStore, StoreError, Task, task};
 
-use shared::{Scratch, format_version, ran, record_run, store_refusal};
+use shared::{format_version, ran, record_run, store_refusal};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -128,14 +130,10 @@ fn digest_of(input: u32) -> lgwks_std::hash::Digest {
 }
 
 /// The definition identity a run of `steps` steps records under.
-fn identity_for(host: &Host, steps: u32) -> DefinitionIdentity {
-    host.definition(
-        TASK,
-        1,
-        Some(digest_of(steps)),
-        usize::try_from(steps).unwrap_or(1),
-    )
-    .with_codec(CODEC)
+fn identity_for(host: &Host, steps: u32) -> Result<DefinitionIdentity, Box<dyn Error>> {
+    Ok(host
+        .definition(TASK, 1, Some(digest_of(steps)), usize::try_from(steps)?)
+        .with_codec(CODEC))
 }
 
 /// A host for `tenant` whose store is `<dir>/<tenant>.runstore`.
@@ -157,7 +155,7 @@ fn read_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     let steps = sim.rng().between(1, 4);
     let warm = sim.rng().below(steps.saturating_add(1));
     let scratch = Scratch::new("sim-read-fault")?;
-    let dir = scratch.join("store");
+    let dir = scratch.path().join("store");
     let plan = Staged {
         dir: dir.clone(),
         steps,
@@ -165,7 +163,7 @@ fn read_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     let expected = uninterrupted(steps);
 
     let host = host_for(tenant, &dir)?;
-    let identity = identity_for(&host, steps);
+    let identity = identity_for(&host, steps)?;
     let first = lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan.clone()));
     assert_eq!(
         first.disposition(),
@@ -182,7 +180,7 @@ fn read_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     drop(host);
     assert_eq!(
         markers(&dir, steps)?,
-        vec![1u32; usize::try_from(steps).unwrap_or(1)],
+        vec![1u32; usize::try_from(steps)?],
         "{tenant}: every step's body ran exactly once on the first attempt"
     );
 
@@ -260,12 +258,12 @@ fn read_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     );
 
     sim.record(tenant);
-    sim.trace.record_u64("steps", u64::from(steps));
-    sim.trace.record_u64("warm", u64::from(warm));
+    sim.trace.record_number("steps", u64::from(steps));
+    sim.trace.record_number("warm", u64::from(warm));
     sim.trace
-        .record_u64("refused", shared::disposition_code(Disposition::Failed));
+        .record_number("refused", shared::disposition_code(Disposition::Failed));
     sim.trace
-        .record_u64("recovered", shared::disposition_code(after.disposition()));
+        .record_number("recovered", shared::disposition_code(after.disposition()));
     Ok(())
 }
 
@@ -318,16 +316,16 @@ const VERSIONS: [u8; 6] = [1, 2, 3, 0, 7, 255];
 /// One tenant of the second store-fault sweep.
 fn second_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     let steps = sim.rng().between(1, 3);
-    let drawn = VERSIONS[usize::try_from(sim.rng().below(6)).unwrap_or(0)];
+    let drawn = VERSIONS[usize::try_from(sim.rng().below(6))?];
     let scratch = Scratch::new("sim-format")?;
-    let dir = scratch.join("store");
+    let dir = scratch.path().join("store");
     let plan = Staged {
         dir: dir.clone(),
         steps,
     };
 
     let host = host_for(tenant, &dir)?;
-    let identity = identity_for(&host, steps);
+    let identity = identity_for(&host, steps)?;
     let first = lgwks_bot::block_on(host.run_under(&identity, &staged_task()?, plan));
     assert_eq!(
         first.disposition(),
@@ -360,7 +358,7 @@ fn second_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
             );
             assert_eq!(
                 store.record_count(run),
-                usize::try_from(steps).unwrap_or(1),
+                usize::try_from(steps)?,
                 "{tenant}: the current version reads every record back"
             );
         }
@@ -390,10 +388,10 @@ fn second_fault_tenant(sim: &mut sim::Sim, tenant: &str) -> TestResult {
     }
 
     sim.record(tenant);
-    sim.trace.record_u64("drawn", u64::from(drawn));
+    sim.trace.record_number("drawn", u64::from(drawn));
     sim.trace
-        .record_u64("admitted", u64::from(drawn == CURRENT_FORMAT));
-    sim.trace.record_u64("steps", u64::from(steps));
+        .record_number("admitted", u64::from(drawn == CURRENT_FORMAT));
+    sim.trace.record_number("steps", u64::from(steps));
     Ok(())
 }
 
@@ -428,10 +426,10 @@ fn same_seed_same_trace_hash(band: sim::Band) -> TestResult {
     let one_run = |sim: &mut sim::Sim| -> TestResult {
         let steps = sim.rng().between(1, 4);
         let warm = sim.rng().below(steps.saturating_add(1));
-        let drawn = VERSIONS[usize::try_from(sim.rng().below(6)).unwrap_or(0)];
-        sim.trace.record_u64("steps", u64::from(steps));
-        sim.trace.record_u64("warm", u64::from(warm));
-        sim.trace.record_u64("drawn", u64::from(drawn));
+        let drawn = VERSIONS[usize::try_from(sim.rng().below(6))?];
+        sim.trace.record_number("steps", u64::from(steps));
+        sim.trace.record_number("warm", u64::from(warm));
+        sim.trace.record_number("drawn", u64::from(drawn));
         Ok(())
     };
     sim::assert_replays(band, one_run)?;

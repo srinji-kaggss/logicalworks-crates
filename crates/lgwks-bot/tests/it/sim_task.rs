@@ -700,9 +700,9 @@ fn ceiling_binds_the_peak(band: Band) -> TestResult {
             measured.fault = Fault::Permanent;
         }
         let tree = build(&host, &measured, Rc::clone(&observed))?;
-        let reports: Vec<Report<u32>> = (0..runs)
-            .map(|index| (tree.run)(&host, u32::try_from(index).unwrap_or_default()))
-            .collect();
+        let reports = (0..runs)
+            .map(|index| Ok((tree.run)(&host, u32::try_from(index)?)))
+            .collect::<Result<Vec<Report<u32>>, std::num::TryFromIntError>>()?;
         for report in &reports {
             assert!(
                 report.disposition().was_admitted(),

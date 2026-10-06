@@ -53,19 +53,19 @@ fn replay_seed(seed: u64) -> TestResult {
                 "seed {seed} delivered a payload the sender did not put on the wire"
             );
             sim.trace
-                .record_u64("delivered-to", u64::from(envelope.to()));
+                .record_number("delivered-to", u64::from(envelope.to()));
             sim.trace
-                .record_u64("delivery-attempts", u64::from(envelope.attempts()));
+                .record_number("delivery-attempts", u64::from(envelope.attempts()));
         }
         let (delivered_count, dropped_count, duplicate_count) = sim.net.counts();
         sim.record("source-visible-simulation-replayed");
-        sim.trace.record_count("journal-events", after);
+        sim.trace.record_number("journal-events", after);
         sim.trace
-            .record_u64("network-delivered", u64::from(delivered_count));
+            .record_number("network-delivered", u64::from(delivered_count));
         sim.trace
-            .record_u64("network-dropped", u64::from(dropped_count));
+            .record_number("network-dropped", u64::from(dropped_count));
         sim.trace
-            .record_u64("network-duplicated", u64::from(duplicate_count));
+            .record_number("network-duplicated", u64::from(duplicate_count));
         Ok(())
     })
 }

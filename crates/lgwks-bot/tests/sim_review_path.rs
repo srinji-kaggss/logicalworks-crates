@@ -69,7 +69,15 @@ use lgwks_bot::task::{Host, Report, Task, task};
 #[path = "support/fake_gh.rs"]
 mod fake_gh;
 
-mod sim;
+// The band arithmetic and the seeded generator, and nothing else: the rest of
+// the substrate drives journals and a network this family never opens.
+mod sim {
+    mod band;
+    mod seed;
+
+    pub use band::{Band, band_of};
+    pub use seed::{Rng, Trace};
+}
 
 // The band-declaration macro, defined once for the whole layer.
 #[path = "sim/bands.rs"]
@@ -233,7 +241,7 @@ struct Run {
 
 /// One run's observable conclusion.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Trace {
+struct Conclusion {
     /// The report's disposition.
     disposition: String,
     /// The outcome, with any identity it carries hashed to a short label.
@@ -252,8 +260,8 @@ impl Run {
     /// "published" from a *failed* run is a different fact from "published"
     /// from a succeeded one, and dropping it would make a trace that a broken
     /// disposition could still match.
-    fn trace(&self) -> Trace {
-        Trace {
+    fn trace(&self) -> Conclusion {
+        Conclusion {
             disposition: String::from(self.report.disposition().label()),
             outcome: self.report.output().map_or_else(
                 || String::from("none"),
@@ -289,15 +297,19 @@ impl Run {
     }
 }
 
-/// A stable hash of a trace, so a replay is checkable rather than asserted.
-fn trace_hash(trace: &Trace) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    trace.disposition.hash(&mut hasher);
-    trace.outcome.hash(&mut hasher);
-    trace.creates.hash(&mut hasher);
-    trace.argv.hash(&mut hasher);
-    hasher.finish()
+/// A stable hash of a run's conclusion, so a replay is checkable rather than
+/// asserted.
+///
+/// Through the substrate's FNV-1a receipt rather than `DefaultHasher`, whose
+/// algorithm std leaves free to change between releases: a hash recorded before
+/// a toolchain bump must still compare equal after it.
+fn trace_hash(conclusion: &Conclusion) -> u64 {
+    let mut trace = sim::Trace::new();
+    trace.record(&conclusion.disposition);
+    trace.record(&conclusion.outcome);
+    trace.record_number("creates", conclusion.creates);
+    trace.record(&conclusion.argv);
+    trace.hash()
 }
 
 /// The argv the receiver recorded, normalized for replay.
@@ -332,11 +344,14 @@ fn normalized_argv(calls: &[Vec<String>]) -> String {
 }
 
 /// A stable hash of plain text, for a label carrying an identity.
+///
+/// Through the substrate's FNV-1a receipt rather than `DefaultHasher`, whose
+/// algorithm std leaves free to change between releases: a hash recorded before
+/// a toolchain bump must still compare equal after it.
 fn text_hash(text: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+    let mut trace = sim::Trace::new();
+    trace.record(text);
+    trace.hash()
 }
 
 // ── The harness ─────────────────────────────────────────────────────────────
@@ -356,12 +371,7 @@ fn host() -> Result<Host, Box<dyn std::error::Error>> {
 /// ceiling it can exceed and every other family needs one it cannot; a single
 /// shared value would make one of them untestable.
 fn gh_for(fake: &FakeGh, capture: usize) -> Result<Gh, Box<dyn std::error::Error>> {
-    let path = fake.search_path()?;
-    Ok(Gh::new(Repository::new("acme/widgets")?)
-        .program(fake.program())
-        .capture_limit(NonZeroUsize::new(capture).ok_or("a non-zero limit")?)
-        .deadline(Some(Duration::from_secs(20)))
-        .env("PATH", path))
+    fake.binding("acme/widgets", capture)
 }
 
 /// The `Gh` binding the saturation tiers drive: the fake named by its absolute
@@ -486,11 +496,10 @@ fn why_unknown(report: &Report<ReviewOutcome>) -> String {
         // and this crate forbids the `&` pattern that would satisfy the pattern
         // lints. Matching on the variant and then reading the field through its
         // own accessor is the third way, and it is the one a consumer uses.
-        Some(outcome) => String::from(
-            outcome
-                .unknown_reason()
-                .unwrap_or("an unknown outcome with no reason"),
-        ),
+        Some(outcome) => match outcome.unknown_reason() {
+            Some(reason) => String::from(reason),
+            None => String::from("an unknown outcome with no reason"),
+        },
         None => report.error().map_or_else(
             || String::from("the run reported neither an outcome nor a failure"),
             ToString::to_string,
@@ -527,23 +536,21 @@ fn capture_for(fault: Fault) -> usize {
 }
 
 /// The scenario a fault describes, with `head` as the pull request's head.
-fn scenario_for(fault: Fault, head: &str) -> Scenario {
+fn scenario_for(fault: Fault, head: &str) -> Result<Scenario, Box<dyn std::error::Error>> {
     let scenario = Scenario::new(head);
-    match fault {
+    Ok(match fault {
         Fault::Clean | Fault::ClientAbsent => scenario,
         Fault::ResponseLost => scenario.accept_then_drop().created_body(BODY),
         Fault::CreateRefused => scenario.refuse_creates(),
         Fault::ReadsRefused => scenario.fail_reads(2),
         Fault::HeadMoved => scenario.head_moves_to(MOVED),
         Fault::ListOverCeiling => scenario.created_body(BODY).with_filler_reviews(
-            u32::try_from(lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL)
-                .unwrap_or(1)
-                .saturating_add(1),
+            u32::try_from(lgwks_bot::domain::gh::MAX_REVIEWS_PER_PULL)?.saturating_add(1),
         ),
         Fault::ListNotJson => scenario.answers_reviews_with("garbage"),
         Fault::ListTruncated => scenario.answers_reviews_with("truncated"),
         Fault::AnswerOversized => scenario.created_body(BODY).floods(400),
-    }
+    })
 }
 
 /// Whether `fault` runs no client at all.
@@ -580,7 +587,7 @@ fn run_seed(index: u64, offset: u64) -> Result<(Fault, Run), Box<dyn std::error:
     }
 
     let fake = FakeGh::install(fault.label(), HEAD)?;
-    fake.configure(scenario_for(fault, HEAD))?;
+    fake.configure(scenario_for(fault, HEAD)?)?;
     let report = host.block_on(&job, (gh_for(&fake, capture_for(fault))?, request(7)?))?;
     let argv = normalized_argv(&fake.calls()?);
     Ok((
@@ -922,7 +929,7 @@ fn malformed_and_oversized_answers_r32() -> TestResult {
         seen.insert(fault);
 
         let fake = FakeGh::install(fault.label(), HEAD)?;
-        fake.configure(scenario_for(fault, HEAD))?;
+        fake.configure(scenario_for(fault, HEAD)?)?;
         let host = host()?;
         let job = review_task()?;
         // The ceiling comes from the fault rather than from the test, so the
@@ -973,7 +980,7 @@ fn malformed_and_oversized_answers_r32() -> TestResult {
 fn a_publication_the_ceiling_cannot_verify_stays_unknown() -> TestResult {
     for index in 0..8u64 {
         let fake = FakeGh::install("ceiling-sim", HEAD)?;
-        fake.configure(scenario_for(Fault::ListOverCeiling, HEAD))?;
+        fake.configure(scenario_for(Fault::ListOverCeiling, HEAD)?)?;
         let host = host()?;
         let job = review_task()?;
         let report = host.block_on(
@@ -1296,12 +1303,15 @@ fn read_receiver(
 /// Taken from the run itself rather than reconstructed, because the whole
 /// question is what a caller would have been told.
 fn first_unknown_reason(reports: &[Report<ReviewOutcome>]) -> String {
-    reports
+    match reports
         .iter()
         .filter(|report| report.output().is_some_and(ReviewOutcome::is_unknown))
         .map(why_unknown)
         .next()
-        .unwrap_or_else(|| String::from("no run reported an unknown outcome"))
+    {
+        Some(reason) => reason,
+        None => String::from("no run reported an unknown outcome"),
+    }
 }
 
 /// Run one saturation tier, sharded across receivers, and assert each record.
@@ -1387,10 +1397,12 @@ fn run_saturation_tier(
     let reports = lgwks_bot::Runtime::new()?
         .block_on(lgwks_bot::rt::task::join_all_bounded(in_flight, futures));
     let elapsed = started.elapsed();
+    // A poisoned recorder means a run panicked while timing itself; that is a
+    // failed tier, not an empty sample set.
     let mut samples = latencies
         .lock()
-        .map(|held| held.clone())
-        .unwrap_or_default();
+        .map_err(|poisoned| format!("a run panicked while recording its latency: {poisoned}"))?
+        .clone();
     assert_eq!(
         samples.len(),
         concurrency,
@@ -1401,7 +1413,6 @@ fn run_saturation_tier(
         let rank = samples.len().saturating_mul(per_mille).div_ceil(1000);
         samples[rank.saturating_sub(1).min(samples.len().saturating_sub(1))]
     };
-    let ms = |span: Duration| u64::try_from(span.as_millis()).unwrap_or(u64::MAX);
     // `install_default` fails once a subscriber exists (the second tier in this
     // binary), which is the expected case, so the failure is a debug record.
     if let Err(error) = lgwks_std::trace::install_default("lgwks-saturation") {
@@ -1411,11 +1422,11 @@ fn run_saturation_tier(
         label = label,
         runs = concurrency,
         in_flight = in_flight,
-        wall_ms = ms(elapsed),
-        p50_ms = ms(at(500)),
-        p95_ms = ms(at(950)),
-        p99_ms = ms(at(990)),
-        max_ms = ms(at(1000)),
+        wall_ms = elapsed.as_millis(),
+        p50_ms = at(500).as_millis(),
+        p95_ms = at(950).as_millis(),
+        p99_ms = at(990).as_millis(),
+        max_ms = at(1000).as_millis(),
         "SATURATION latency per run, queueing included"
     );
 
@@ -1453,7 +1464,7 @@ fn run_saturation_tier(
     lgwks_std::trace::info!(
         concurrency = concurrency,
         receivers = receivers,
-        elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms = u64::try_from(elapsed.as_millis())?,
         "saturation: wall time for every run at this concurrency"
     );
     Ok(total)
@@ -1744,15 +1755,16 @@ fn duplicate_submission_r16() -> TestResult {
             "seed {index}: the receiver really did apply two reviews, so a run \
              reporting one id for both would be reporting one review twice"
         );
-        assert!(
-            first_id.is_some() && second_id.is_some(),
-            "seed {index}: both runs must name a review: {first_id:?} {second_id:?}"
-        );
-        // Both ids must lie in the range the receiver actually handed out
-        // (`next_review_id` and up), so a run that invented one — or reported
-        // the id from some other world — would fall outside it.
-        let first = first_id.unwrap_or_default();
-        let second = second_id.unwrap_or_default();
+        // Both runs must name a review, and both ids must lie in the range the
+        // receiver actually handed out (`next_review_id` and up), so a run that
+        // invented one — or reported the id from some other world — would fall
+        // outside it.
+        let first = first_id.ok_or_else(|| {
+            format!("seed {index}: the first run named no review (second: {second_id:?})")
+        })?;
+        let second = second_id.ok_or_else(|| {
+            format!("seed {index}: the second run named no review (first: {first})")
+        })?;
         assert!(
             (FIRST_REVIEW_ID..=LAST_REVIEW_ID).contains(&first)
                 && (FIRST_REVIEW_ID..=LAST_REVIEW_ID).contains(&second),
@@ -1990,26 +2002,27 @@ impl SubjectDraw {
 }
 
 /// The scenario a subject fault describes.
-fn subject_scenario(fault: SubjectFault, head: &str, draw: SubjectDraw) -> Scenario {
+fn subject_scenario(
+    fault: SubjectFault,
+    head: &str,
+    draw: SubjectDraw,
+) -> Result<Scenario, Box<dyn std::error::Error>> {
     let scenario = Scenario::new(head);
-    match fault {
+    Ok(match fault {
         SubjectFault::Clean => scenario,
         SubjectFault::Moved => scenario.repository_moved(),
         SubjectFault::DiffUnavailable => scenario.diff_unavailable(),
         SubjectFault::DiffOverFiles => scenario.with_filler_files(
-            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
-                .unwrap_or(0)
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)?
                 .saturating_add(draw.files_over),
         ),
         SubjectFault::DiffOverBytes => scenario.with_diff_bytes(
-            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)
-                .unwrap_or(0)
-                .saturating_add(draw.bytes_over),
+            u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)?.saturating_add(draw.bytes_over),
         ),
         SubjectFault::PendingDraft => scenario.records_pending_draft(),
         SubjectFault::PartialComments => scenario.records_partial_comments(draw.applied),
         SubjectFault::ReadDenied => scenario.deny_reads(),
-    }
+    })
 }
 
 /// Run one seed's subject fault through the real path.
@@ -2224,7 +2237,7 @@ fn run_subject_fault(
     let host = host()?;
     let job = review_task()?;
     let fake = FakeGh::install(fault.label(), HEAD)?;
-    fake.configure(subject_scenario(fault, HEAD, draw))?;
+    fake.configure(subject_scenario(fault, HEAD, draw)?)?;
 
     let mut request = request(7)?;
     if fault == SubjectFault::PartialComments {
@@ -2332,15 +2345,13 @@ fn a_diff_past_the_byte_ceiling_publishes_nothing() -> TestResult {
     let band = sim::Band::new(16, 16);
     for index in band.seeds() {
         let draw = over_ceiling_draw(index);
-        let ceiling = u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES).unwrap_or(u32::MAX);
+        let ceiling = u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_BYTES)?;
         assert!(
             draw.bytes_over > 0,
             "seed {index}: the byte arm needs a draw past the byte ceiling"
         );
         assert!(
-            draw.files_over
-                <= u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)
-                    .unwrap_or(u32::MAX),
+            draw.files_over <= u32::try_from(lgwks_bot::domain::gh::MAX_DIFF_FILES_PER_PULL)?,
             "seed {index}: the byte arm must stay under the *file* ceiling, or the \
              refusal would be the other bound's and this family would prove nothing \
              about the byte axis"
@@ -2786,7 +2797,7 @@ fn two_tenants_coverage_stays_isolated() -> TestResult {
             SubjectFault::DiffOverFiles,
             HEAD,
             over_ceiling_draw(index),
-        ))?;
+        )?)?;
 
         let host = host()?;
         let job = review_task()?;

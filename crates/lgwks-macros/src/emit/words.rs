@@ -423,17 +423,7 @@ mod tests {
 
     use lgwks_deps::proc_macro2::TokenStream;
 
-    use crate::emit;
-    use crate::lines;
-
-    /// Expand `source` the way the macro does, as text.
-    fn expand(source: &str) -> Result<String, String> {
-        let stream = TokenStream::from_str(source).map_err(|error| error.to_string())?;
-        lines::tree(lines::split(stream))
-            .and_then(emit::script)
-            .map(|tokens| tokens.to_string())
-            .map_err(|error| error.to_string())
-    }
+    use crate::tests::expand;
 
     /// An expansion carrying a `run` call is still Rust.
     ///

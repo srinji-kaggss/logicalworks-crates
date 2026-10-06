@@ -567,15 +567,14 @@ mod tests {
         let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
         let key_environment = EnvironmentId::from_hex(ENV)?;
         let key_epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(EffectKey::new(
-            key_run,
-            key_action,
-            key_attempt,
-            key_flow_revision,
-            key_digest,
-            key_environment,
-            key_epoch,
-        ))
+        Ok(
+            crate::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+                key_action,
+                key_attempt,
+                key_digest,
+                key_epoch,
+            ),
+        )
     }
 
     /// The payload binding of the shared attempt.

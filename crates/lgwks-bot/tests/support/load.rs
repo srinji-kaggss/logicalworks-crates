@@ -9,10 +9,6 @@
 //! Included by path so both targets share it:
 //! `#[path = "../support/load.rs"] mod load;` (or `"support/load.rs"` from a
 //! target at the crate's `tests/` root).
-#![allow(
-    dead_code,
-    reason = "each including test target uses the same instrument but a different yield count"
-)]
 
 /// Drive one future to completion on a fresh current-thread runtime.
 pub(crate) fn drive<T>(future: impl std::future::Future<Output = T>) -> T {

@@ -415,7 +415,7 @@ async fn run_repeating(
     );
     // The wall watchdog is a separate fact from the logical counter: it must
     // not have moved by however much logical time the advance spent.
-    trace.record_u64(
+    trace.record_number(
         "watchdog-under-a-second",
         u64::from(clock.wall_watchdog().elapsed() < Duration::from_secs(1)),
     );
