@@ -172,6 +172,26 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — the broker's dispatch tests build their subject once (nine-axis sweep)
+
+Four of `broker`'s tests each assembled the same five lines — a broker, a
+registered environment, the key carrying its generation, a journal, and an
+admitted attempt. Two of them were byte-identical, which is how one of them
+drifts: a test that assembles its own may admit one key and authorize another,
+and every assertion after that is about a situation the module cannot produce.
+
+- **`AdmittedEnvironment` is now the fixture** those four tests share, and all
+  four build from it. The generation the broker authorizes, the key that carries
+  it, and the admission already on the journal are one value now, so they cannot
+  disagree.
+- **`Broker::environments` declares its bound.** One entry per environment the
+  host created, added by `register` or `adopt`, never refilled on its own, and
+  `close` marks an entry closed rather than removing it — so a warrant for a
+  closed environment is refused as `Closed` rather than looking like one for an
+  environment the broker never heard of.
+
+No behaviour change.
+
 ### lgwks_bot — the logical clock saturates in its own arithmetic (nine-axis sweep)
 
 `Clock::virtual_at` narrows an origin `Duration` into the `u64` nanosecond
