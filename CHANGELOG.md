@@ -95,8 +95,9 @@ journal. INV-BOT-152.
   supervisor: ten thousand loud submissions parked in the loud tenant's own queue
   and released one controlled completion at a time, against the quiet tenant's
   p99 alone; and a fail-at-once flood four times the neighbour's volume against
-  the neighbour's admission time alone (within 10%, best of nine interleaved
-  rounds, no sleep before either timed window). INV-BOT-151.
+  the neighbour's admission time alone (the median of 41 interleaved rounds
+  within 10% of the median alone, no sleep before either timed window).
+  INV-BOT-151.
 
 ### lgwks_std tests — `fs::capability` is swept with hostile seeds
 
