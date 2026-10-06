@@ -186,12 +186,16 @@ jobs:
       # Writing the report costs the run nothing: the `ci` profile only adds a
       # serialiser. Each shard uploads into its own directory, because all four
       # reports are called junit.xml and four artifacts with one path collide on
-      # download.
+      # download. nextest keeps its store under the workspace's own `target/`
+      # whatever CARGO_TARGET_DIR says, so the report is read from there; a
+      # shard that wrote none fails here rather than leaving the receipt job to
+      # find an empty glob (run 37536766485).
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
           name: lgwks-bot-junit-${{ matrix.shard }}
-          path: ${{ env.CARGO_TARGET_DIR }}/nextest/ci/junit.xml
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
           retention-days: 7
 
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
