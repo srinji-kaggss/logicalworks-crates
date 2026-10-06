@@ -38,7 +38,10 @@ use crate::resume_fixtures as shared;
 use lgwks_bot::effect::RunId;
 use lgwks_bot::task::{Disposition, Host, RunStore};
 use std::error::Error;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use measure::record_measurement;
 use shared::{Scratch, one_step_task};
@@ -265,8 +268,7 @@ fn acknowledged_equals_replayed(band: Band) -> TestResult {
         let mut replayed = 0u32;
         for round in &rounds {
             for run in &round.runs {
-                replayed = replayed
-                    .saturating_add(u32::try_from(reopened.record_count(*run)).unwrap_or(u32::MAX));
+                replayed = replayed.saturating_add(u32::try_from(reopened.record_count(*run))?);
             }
         }
         assert_eq!(
@@ -413,9 +415,9 @@ fn a_torn_tail_at_a_batch_boundary_drops_only_the_incomplete_record(band: Band) 
         // Cut inside the last frame, never on a frame edge: a cut on an edge would
         // leave a complete shorter file and prove nothing about torn tails.
         let cut = tag
-            .checked_rem(u32::try_from(whole).unwrap_or(u32::MAX))
-            .unwrap_or(0);
-        let cut = usize::try_from(cut).unwrap_or(0).max(1);
+            .checked_rem(u32::try_from(whole)?)
+            .ok_or("a committed file has a nonzero length")?;
+        let cut = usize::try_from(cut)?.max(1);
         let mut bytes = std::fs::read(&path)?;
         bytes.truncate(cut);
         std::fs::write(&path, &bytes)?;
@@ -508,7 +510,7 @@ fn saturation_reaches_every_tier_and_records_the_ceiling(band: Band) -> TestResu
         let (seeded, _appends, tag, path) = scenario.parts();
         // The tier this seed sweeps: the three levels the row names, drawn from the
         // seed's own tag so a band's families still cover all three between them.
-        let requested = TIERS[usize::try_from(tag % 3).unwrap_or(0)];
+        let requested = TIERS[usize::try_from(tag % 3)?];
         let runs = stage_tier(&seeded.store, requested, tag)?;
         let (flushes, staged) = seeded.store.flush_counts();
 
@@ -520,12 +522,21 @@ fn saturation_reaches_every_tier_and_records_the_ceiling(band: Band) -> TestResu
             .iter()
             .filter(|run| reopened.record_count(**run) == 1)
             .count();
+        // The two facts that tell a lost record from a shared identity: how many
+        // distinct runs the appends minted, and how many records the disk holds
+        // across all of them.
+        let distinct = runs.iter().collect::<std::collections::BTreeSet<_>>().len();
+        let on_disk: usize = runs
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|run| reopened.record_count(*run))
+            .sum();
         assert_eq!(
             reached,
-            usize::try_from(requested)
-                .unwrap_or(usize::MAX)
-                .min(usize::try_from(CEILING).unwrap_or(usize::MAX)),
-            "seed {tag}: {requested} appends were staged and a reopened store replays {reached}"
+            usize::try_from(requested)?.min(usize::try_from(CEILING)?),
+            "seed {tag}: {requested} appends were staged and a reopened store replays {reached} \
+             ({distinct} distinct runs, {on_disk} records on disk, {staged} staged, {flushes} flushes)"
         );
         assert!(
             flushes <= staged.max(1),
@@ -540,6 +551,15 @@ fn saturation_reaches_every_tier_and_records_the_ceiling(band: Band) -> TestResu
     })
 }
 
+/// How many tier runs are in flight at once.
+///
+/// Saturation is a concurrent condition: the owner drains whatever its ring holds
+/// when it wakes, so only appends that are pending together can share a flush.
+/// Staged one at a time, every record waited on its own `sync_all` and the 10,000
+/// tier paid 10,000 flushes — 83-116 s alone and past the per-test bound under a
+/// full suite — while never exercising the batching this row exists to saturate.
+const TIER_WINDOW: usize = 64;
+
 /// Stage `tier` distinct durable records, and name every run it filed them under.
 ///
 /// One run per record, driven through the real front door: a `Host::run` whose body
@@ -548,13 +568,23 @@ fn saturation_reaches_every_tier_and_records_the_ceiling(band: Band) -> TestResu
 /// 10,000 tier would be reported as a timeout — a fact about the front door's
 /// budget rather than about the storage owner's ceiling. Each run mints its own
 /// run id and its own step key, so no record is a repeat of another's and this
-/// measures saturation rather than the duplicate path.
+/// measures saturation rather than the duplicate path. The runs are driven
+/// [`TIER_WINDOW`] at a time, so the owner sees batches.
 fn stage_tier(store: &RunStore, tier: u32, tag: u32) -> Result<Vec<RunId>, Box<dyn Error>> {
     let handle = host("sim", store.clone())?;
-    let mut runs = Vec::with_capacity(usize::try_from(tier).unwrap_or(0));
-    for index in 0..tier {
-        let work = one_step_task()?;
-        let report = lgwks_bot::rt::runtime::block_on(handle.run(&work, index));
+    let mut works = Vec::with_capacity(usize::try_from(tier)?);
+    for _ in 0..tier {
+        works.push(one_step_task()?);
+    }
+    let reports = lgwks_bot::rt::runtime::block_on(windowed(
+        TIER_WINDOW,
+        works
+            .iter()
+            .zip(0..tier)
+            .map(|(work, index)| handle.run(work, index)),
+    ));
+    let mut runs = Vec::with_capacity(reports.len());
+    for (index, report) in reports.iter().enumerate() {
         let run = report.run_id().ok_or("a stored run must name a run id")?;
         assert!(
             report.disposition().is_success(),
@@ -564,6 +594,58 @@ fn stage_tier(store: &RunStore, tier: u32, tag: u32) -> Result<Vec<RunId>, Box<d
         runs.push(run);
     }
     Ok(runs)
+}
+
+/// Drive `futures` on the current task with at most `window` in flight, and return
+/// their outputs in submission order.
+///
+/// On the current task rather than spawned, because each run borrows its task and
+/// its host; and polled as one set, so a run that finishes frees its slot for the
+/// next submission at once.
+async fn windowed<F: Future>(
+    window: usize,
+    futures: impl IntoIterator<Item = F>,
+) -> Vec<F::Output> {
+    let mut pending = futures.into_iter().enumerate();
+    let mut live: Vec<(usize, Pin<Box<F>>)> = Vec::with_capacity(window);
+    let mut done: Vec<(usize, F::Output)> = Vec::new();
+    std::future::poll_fn(|context: &mut Context<'_>| {
+        loop {
+            while live.len() < window.max(1) {
+                let Some((index, future)) = pending.next() else {
+                    break;
+                };
+                live.push((index, Box::pin(future)));
+            }
+            // Empty only after a refill found nothing more to submit: a pass that
+            // finished every live future has not finished the queue behind them.
+            if live.is_empty() {
+                return Poll::Ready(());
+            }
+            let mut progressed = false;
+            let mut slot = 0;
+            while slot < live.len() {
+                let ready = match live.get_mut(slot) {
+                    Some(entry) => entry.1.as_mut().poll(context),
+                    None => break,
+                };
+                match ready {
+                    Poll::Ready(output) => {
+                        let (index, _) = live.swap_remove(slot);
+                        done.push((index, output));
+                        progressed = true;
+                    }
+                    Poll::Pending => slot = slot.saturating_add(1),
+                }
+            }
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
+    })
+    .await;
+    done.sort_by_key(|entry| entry.0);
+    done.into_iter().map(|(_, output)| output).collect()
 }
 
 /// The bounds are what this design claims, and they are asserted here rather than
@@ -607,7 +689,7 @@ fn same_seed_replays(band: Band) -> TestResult {
     let body = |sim_run: &mut sim::Sim| -> TestResult {
         let appends = sim_run.rng().between(1, 8);
         let seeded = Seeded::open("sim-gc-replay2")?;
-        let tag = u32::try_from(sim_run.seed).unwrap_or(u32::MAX);
+        let tag = u32::try_from(sim_run.seed)?;
         let round = seeded.round("sim", appends, tag)?;
         round.record(&mut sim_run.trace);
         let reopened = RunStore::open(seeded.scratch_path())?;

@@ -152,6 +152,7 @@ mod sim_source_matrix;
 mod sim_spec_materialize;
 mod sim_store_faults;
 mod sim_store_scale;
+mod sim_supervise_wait;
 mod sim_t_rows;
 mod sim_task;
 mod sim_task_axes;

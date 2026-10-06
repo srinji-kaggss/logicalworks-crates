@@ -70,8 +70,7 @@ const PERMITS_PER_SECOND: u64 = 200_000;
 /// queues at any bound and every arrival completes.
 fn quiet(bound: usize, seed: u64) -> SimSpec {
     SimSpec {
-        offered_rate: u64::try_from(bound)
-            .unwrap_or(1)
+        offered_rate: crate::widen(bound)
             .saturating_mul(PERMITS_PER_SECOND / 10)
             .max(1),
         arrivals: 512,
@@ -92,10 +91,9 @@ fn quiet(bound: usize, seed: u64) -> SimSpec {
 /// about the others, which is exactly how a reader would take it.
 fn saturated(bound: usize, seed: u64) -> SimSpec {
     SimSpec {
-        offered_rate: u64::try_from(bound)
-            .unwrap_or(1)
+        offered_rate: crate::widen(bound)
             .saturating_mul(PERMITS_PER_SECOND * 5),
-        arrivals: u64::try_from(bound).unwrap_or(1).saturating_mul(4),
+        arrivals: crate::widen(bound).saturating_mul(4),
         bound,
         service_min_nanos: 2_000,
         service_max_nanos: 8_000,
@@ -169,8 +167,7 @@ fn constant_service(
     let service_nanos = body_micros.saturating_mul(1_000);
     SimSpec {
         offered_rate,
-        arrivals: u64::try_from(bound)
-            .unwrap_or(1)
+        arrivals: crate::widen(bound)
             .saturating_mul(bodies_per_bound),
         bound,
         service_min_nanos: service_nanos,
@@ -182,7 +179,7 @@ fn constant_service(
 }
 
 #[test]
-fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() {
+fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() -> Result<(), String> {
     // The knee table is read as "the highest rung that refused nothing and stayed inside
     // the budget", which is only a knee if the ladder actually reaches one. Two ways it
     // can fail, and both are defects rather than findings: a ladder whose rungs all clamp
@@ -214,10 +211,11 @@ fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() {
             );
 
             let capacity = crate::capacity_per_second(bound, body_micros);
-            let top = ladder.last().copied().unwrap_or(0);
+            let top = ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
             if crate::ladder_clamped(bound, body_micros) {
                 assert_eq!(
-                    top, crate::MAX_OFFERED_RATE,
+                    top,
+                    crate::MAX_OFFERED_RATE,
                     "bound {bound} at {body_micros}us declares itself clamped and yet its top \
                      rung is {top}, not the generator's own ceiling"
                 );
@@ -229,7 +227,7 @@ fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() {
                      knee, so the knee it declares is the end of the ladder"
                 );
                 assert!(
-                    ladder.first().copied().unwrap_or(0) < capacity,
+                    ladder.first().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))? < capacity,
                     "bound {bound} at {body_micros}us starts its ladder at {:?}, at or above its \
                      own declared capacity of {capacity}: there is no rung below the knee to \
                      read it from",
@@ -238,6 +236,7 @@ fn sim_the_live_ladder_brackets_the_knee_or_declares_itself_capped() {
             }
         }
     }
+    Ok(())
 }
 
 #[test]
@@ -292,7 +291,7 @@ fn sim_both_sides_are_offered_the_same_arrivals() {
 }
 
 #[test]
-fn sim_the_live_ladder_reads_the_knee_the_model_measures() {
+fn sim_the_live_ladder_reads_the_knee_the_model_measures() -> Result<(), String> {
     // The same ladder the live sweep walks, run through the model at the bounds the model
     // can sweep exhaustively: the bottom rung admits and completes every arrival, and the
     // top rung — four times the ceiling's declared capacity once it is past it — queues
@@ -301,8 +300,8 @@ fn sim_the_live_ladder_reads_the_knee_the_model_measures() {
     for bound in MODEL_BOUNDS {
         for body_micros in BODY_COSTS {
             let ladder = crate::sweep_ladder(bound, body_micros);
-            let bottom = ladder.first().copied().unwrap_or(0);
-            let top = ladder.last().copied().unwrap_or(0);
+            let bottom = ladder.first().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
+            let top = ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))?;
             assert!(
                 ladder.len() >= 2,
                 "bound {bound} at {body_micros}us produced a {}-rung ladder {ladder:?}: the knee \
@@ -322,8 +321,7 @@ fn sim_the_live_ladder_reads_the_knee_the_model_measures() {
                     quiet.completed, quiet.offered,
                     "seed {seed} at bound {bound} and {body_micros}us: the ladder's bottom rung \
                      completed {} of {} arrivals",
-                    quiet.completed,
-                    quiet.offered
+                    quiet.completed, quiet.offered
                 );
 
                 if top <= crate::capacity_per_second(bound, body_micros) {
@@ -348,10 +346,11 @@ fn sim_the_live_ladder_reads_the_knee_the_model_measures() {
             }
         }
     }
+    Ok(())
 }
 
 #[test]
-fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() {
+fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() -> Result<(), String> {
     // The scaling the whole sweep rests on: the body cost is derived per bound so every
     // ceiling's declared capacity lands on the same target, because a constant body cost
     // puts a wide ceiling's capacity above what an in-process generator can offer and every
@@ -385,12 +384,12 @@ fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() {
             // that rung at the generator's own ceiling and still leaves eight times the
             // capacity, which is why the assertion is four and not sixteen.
             assert!(
-                ladder.last().copied().unwrap_or(0) >= capacity.saturating_mul(4),
+                ladder.last().copied().ok_or_else(|| format!("bound {bound} produced an empty ladder"))? >= capacity.saturating_mul(4),
                 "bound {bound} at a {target}/s target produced {ladder:?} against a declared \
                  capacity of {capacity}/s: the ladder does not reach four times the capacity, \
                  so the knee it declares is the end of the ladder"
             );
-        // Every ceiling the family derives has to sit below what this generator can
+            // Every ceiling the family derives has to sit below what this generator can
             // actually offer, or the sweep's knee is the generator's. The measured floor on
             // the reference host over four sweep points was 449,482 arrivals a second for
             // the facade; the constant is a round number under it, and the run prints its own
@@ -405,6 +404,7 @@ fn sim_the_derived_body_puts_every_ceiling_at_the_declared_target() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
@@ -565,7 +565,7 @@ fn sim_a_ceiling_changes_the_trace_where_it_binds_and_not_where_it_does_not() {
 
         // The same offer against a ceiling it cannot sustain: the narrow world queues and
         // the wide one does not, and the trace must record the difference.
-        let bound_rate = u64::try_from(SEEDS.len() + 1).unwrap_or(1) * PERMITS_PER_SECOND * 10;
+        let bound_rate = crate::widen(SEEDS.len() + 1) * PERMITS_PER_SECOND * 10;
         let narrow = simulate(&world(1, bound_rate, ARRIVALS, false, false, seed));
         let wide = simulate(&world(64, bound_rate, ARRIVALS, false, false, seed));
         assert!(

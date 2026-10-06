@@ -62,14 +62,14 @@ crates/lgwks-bot/src/rt/runtime.rs:131	if self.worker_threads.is_some() && worke
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget`]. Every iteration races the
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:148	/// otherwise never make, which is why it is not larger.
-crates/lgwks-bot/src/rt/supervise.rs:164	/// longer than the budget overruns it by one iteration. Cancellation is not
-crates/lgwks-bot/src/rt/supervise.rs:849	/// long enough on one worker and far too short on several, and the failure is
-crates/lgwks-bot/src/rt/supervise.rs:902	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:1254	/// # Why the description is borrowed
-crates/lgwks-bot/src/rt/supervise.rs:1322	let end =
-crates/lgwks-bot/src/rt/supervise.rs:3021	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:3112	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:152	/// otherwise never make, which is why it is not larger.
+crates/lgwks-bot/src/rt/supervise.rs:168	/// longer than the budget overruns it by one iteration. Cancellation is not
+crates/lgwks-bot/src/rt/supervise.rs:870	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:934	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:1312	/// # Why the description is borrowed
+crates/lgwks-bot/src/rt/supervise.rs:1478	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+crates/lgwks-bot/src/rt/supervise.rs:3258	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:3367	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

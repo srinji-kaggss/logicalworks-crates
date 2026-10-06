@@ -9,6 +9,35 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
+
+`Supervisor` had no awaitable join, so a caller that wanted every task finished
+polled `reap()` in a sleep loop, and Tokio's 1 ms timer granularity charged each
+drain 1.3–1.6 ms that raw Tokio (awaiting `JoinSet::join_next`) never paid. That
+was the whole of the 3–5x p99 gap `bench/async` reported on its quiet rows.
+
+- **`Supervisor::wait_idle().await`** joins every task on the set's own wakeup,
+  cancels nothing, returns how many it joined, and leaves the supervisor usable.
+- **`spawn` at a full bound waits on the task set**, the semaphore or the
+  supervisor's token — whichever resolves first — instead of a timed retry. A
+  permit held by a process group still being cleaned up is rechecked every
+  100 ms, and a newly registered cleanup owner wakes the waiter.
+- `bench/async` drains through `wait_idle`; its output goes through
+  `lgwks_std::trace`.
+- **Supervised processes start through the std form of the engine's
+  `Command`** and are owned by a private `OwnedChild` that reaps with
+  `try_wait`, and kills and parks the child if dropped unreaped — so
+  `tokio::process::Command::spawn` stays banned with no exception in the crate.
+
+Measured on an Apple M5 Pro, `bench/async --rounds=15 --alloc-report`, load
+average 11.60, on the committed tree: facade/raw-Tokio p99 ratio 1.25x
+(quiet-async-bot), 1.00x (high-fanout), 1.14x (at-capacity), 1.07x
+(single-permit); p50 ratio 1.18x / 1.02x / 1.09x / 1.08x. Before, 4.87x on the
+quiet row. The `--tiers` ladder to 100,000 tasks ends at facade p99 104 ms
+against raw Tokio's 107 ms. Peak memory footprint 2.6 MB. The 10,000-tier group-commit saturation sim now drives its runs
+64 at a time, so it exercises batching and finishes in 10–12 s alone instead of
+83–116 s.
+
 ### lgwks_bot — the supervisor's per-task cost, measured and cut (#269)
 
 Measured on an Apple M5 Pro with `bench/async`'s allocation attribution, 1,024

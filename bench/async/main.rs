@@ -53,16 +53,8 @@
 // every `sim_*` target: a second copy of the quantile and bootstrap arithmetic
 // would drift from the one the synchronous rig reports with, and a reader
 // comparing the two rigs would be comparing two different statistics under the
-// same name.
-// `next_unit` and the resampler live in that module for the synchronous rig;
-// this binary uses the quantile and bootstrap only, so the two unused items are
-// declared rather than allowed -- a crate-level lint suppression in a measurement
-// instrument is exactly the kind of quiet widening this repository forbids.
+// same name. Both binaries call every item in it, so it needs no lint exception.
 #[path = "../src/stats.rs"]
-#[allow(
-    dead_code,
-    reason = "the shared statistics module also serves the synchronous rig; each binary uses a different subset of it"
-)]
 mod async_stats;
 
 use std::future::Future;
@@ -72,6 +64,7 @@ use std::time::{Duration, Instant};
 
 use lgwks_bot::rt::runtime::{Builder as RuntimeBuilder, Runtime};
 use lgwks_bot::rt::supervise::Supervisor;
+use lgwks_std::trace::info;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -94,6 +87,56 @@ mod alloc_count;
 // the measurement share the schedule arithmetic (`intended_arrival`) and a second
 // copy of that function is a second definition of what "the intended start" is.
 mod openloop;
+
+// Every count this rig converts between `usize` and `u64` is lossless on the 64-bit
+// hosts it is built for, and this assertion makes any other width a compile error
+// rather than a silent clamp hidden at a conversion site.
+const _: () = assert!(
+    usize::BITS == u64::BITS,
+    "the rig's count conversions assume a 64-bit usize"
+);
+
+/// A count as the `u64` every tally and receipt carries. Lossless: see the
+/// assertion above.
+const fn widen(count: usize) -> u64 {
+    count as u64
+}
+
+/// A `u64` count as a `usize` length. Lossless: see the assertion above.
+const fn narrow(count: u64) -> usize {
+    count as usize
+}
+
+/// A duration in whole nanoseconds, saturating at `u64::MAX` (584 years) rather
+/// than wrapping.
+fn nanos(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::from(duration.subsec_nanos()))
+}
+
+/// The bound `--overload` runs at when the caller names none.
+const OVERLOAD_DEFAULT_BOUND: usize = 1_024;
+
+/// How long the overload run's recovery phase lasts.
+#[derive(Clone, Copy, Debug)]
+enum RecoveryLength {
+    /// As long as the baseline phase, which keeps the short form short.
+    SameAsBaseline,
+    /// A length the caller named, for a run that must outlast a long queue.
+    Seconds(u64),
+}
+
+impl RecoveryLength {
+    /// The phase length in seconds, given the baseline phase's.
+    const fn seconds(self, baseline: u64) -> u64 {
+        match self {
+            Self::SameAsBaseline => baseline,
+            Self::Seconds(named) => named,
+        }
+    }
+}
 
 #[cfg(test)]
 mod sim_openloop;
@@ -312,7 +355,7 @@ async fn baseline_side(total: usize, bound: usize) -> (f64, Tally) {
     }
 
     let elapsed = started.elapsed().as_secs_f64();
-    tally.placed = u64::try_from(total).unwrap_or(0);
+    tally.placed = widen(total);
     tally.work_units = counter.load(Ordering::SeqCst);
     tally.retained = 0;
     (elapsed, tally)
@@ -554,8 +597,8 @@ async fn mutant_side(total: usize, bound: usize) -> (f64, Tally) {
 fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
     const TASKS: usize = 512;
     const BOUND: usize = 8;
-    println!("mutant baseline: a side that places every task and then stops draining");
-    println!("the gate must refuse it, naming the diverging field.\n");
+    info!("mutant baseline: a side that places every task and then stops draining");
+    info!("the gate must refuse it, naming the diverging field.\n");
 
     let (mutant_time, mutant) = runtime.block_on(mutant_side(TASKS, BOUND));
     let (_, honest) = runtime.block_on(facade_side(TASKS, BOUND));
@@ -573,7 +616,7 @@ fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
             return refusal;
         }
         Err(reason) => {
-            println!("refused, as required: {reason}");
+            info!("refused, as required: {reason}");
             let discriminates = reason.contains("work units")
                 || reason.contains("completed")
                 || reason.contains("cancelled")
@@ -588,8 +631,8 @@ fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "mutant_check: returning an error to the caller");
                 return refusal;
             }
-            println!("the refusal names a work-count field, so the gate discriminates on work");
-            println!(
+            info!("the refusal names a work-count field, so the gate discriminates on work");
+            info!(
                 "\nmutant tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
                 mutant.placed,
                 mutant.completed,
@@ -597,7 +640,7 @@ fn mutant_check(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
                 mutant.aborted,
                 mutant.work_units
             );
-            println!(
+            info!(
                 "honest tally:  placed {} completed {} cancelled {} aborted {} work_units {}",
                 honest.placed,
                 honest.completed,
@@ -708,9 +751,9 @@ async fn measure_tier(tasks: usize) -> Result<TierResult, String> {
 
 /// The whole ladder, reported per tier with both sides' distribution.
 fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("concurrency ladder: both sides at every tier the contract names");
-    println!("bound {TIER_BOUND} on every tier, {TIER_ROUNDS} paired rounds each");
-    println!("peak RSS is the process high-water mark, read once at the end\n");
+    info!("concurrency ladder: both sides at every tier the contract names");
+    info!("bound {TIER_BOUND} on every tier, {TIER_ROUNDS} paired rounds each");
+    info!("peak RSS is the process high-water mark, read once at the end\n");
 
     let mut rows = Vec::new();
     for tasks in TIERS {
@@ -719,7 +762,7 @@ fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std:
     }
     let peak = peak_rss_bytes();
 
-    println!(
+    info!(
         "{:>9} {:>11} {:>11} {:>11} {:>11} {:>11} {:>11}",
         "tasks", "f p50", "f p95", "f p99", "b p50", "b p95", "b p99"
     );
@@ -735,7 +778,7 @@ fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std:
             async_stats::quantile(&mut b, 0.95),
             async_stats::quantile(&mut b, 0.99),
         ];
-        println!(
+        info!(
             "{:>9} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>11.6}",
             row.tasks,
             percentiles[0],
@@ -765,13 +808,13 @@ fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std:
         ));
     }
     match peak {
-        Some(bytes) => println!("\npeak RSS for the whole process: {bytes} bytes"),
-        None => println!(
+        Some(bytes) => info!("\npeak RSS for the whole process: {bytes} bytes"),
+        None => info!(
             "\npeak RSS: NOT AVAILABLE on this host — the field below is `null`, and no \
              value is extrapolated from another platform"
         ),
     }
-    println!(
+    info!(
         "the ladder measures this host at this profile; the numbers are not a \
          cross-platform claim"
     );
@@ -786,7 +829,7 @@ fn tier_ladder(runtime: &Runtime, json: Option<&str>) -> Result<(), Box<dyn std:
               \"rounds\":{TIER_ROUNDS},{peak_field},\"tiers\":[\n{json_rows}\n]}}"
         );
         std::fs::write(path, body)?;
-        println!("\nwrote {path}");
+        info!("\nwrote {path}");
     }
     Ok(())
 }
@@ -854,23 +897,11 @@ async fn drain_to(supervisor: &mut Supervisor, total: usize) -> lgwks_bot::rt::s
 /// whose bodies are cancelled can reach its completion count and still hold
 /// permits for tasks nobody has reaped. A drain that stopped at the count would
 /// report a clean run over a supervisor that has leaked work.
-async fn drain_until_idle(
-    supervisor: &mut Supervisor,
-    expected: usize,
-) -> lgwks_bot::rt::supervise::Stats {
-    let target = u64::try_from(expected).unwrap_or(u64::MAX);
-    loop {
-        supervisor.reap();
-        let stats = supervisor.stats();
-        let ended = stats
-            .succeeded
-            .saturating_add(stats.cancelled)
-            .saturating_add(stats.aborted);
-        if ended >= target && stats.in_flight() == 0 {
-            return stats;
-        }
-        tokio::time::sleep(std::time::Duration::from_micros(50)).await;
-    }
+async fn drain_until_idle(supervisor: &mut Supervisor) -> lgwks_bot::rt::supervise::Stats {
+    // `wait_idle` returns only once the task set is empty; the caller's receipt checks the
+    // ended count.
+    supervisor.wait_idle().await;
+    supervisor.stats()
 }
 
 /// Row: sequential composition at concurrency one.
@@ -901,7 +932,7 @@ async fn row_sequential_composition() -> Result<Receipt, String> {
         &stats,
         counter.load(Ordering::SeqCst),
     );
-    if receipt.work_units != u64::try_from(BODIES).unwrap_or(u64::MAX) {
+    if receipt.work_units != widen(BODIES) {
         let refusal = Err(format!(
             "sequential composition ran {} work units, not {BODIES}",
             receipt.work_units
@@ -968,7 +999,7 @@ async fn row_high_fanout_slow_consumer() -> Result<Receipt, String> {
         &stats,
         counter.load(Ordering::SeqCst),
     );
-    let expected = u64::try_from(TASKS).unwrap_or(u64::MAX);
+    let expected = widen(TASKS);
     if seen != expected {
         let refusal = Err(format!(
             "the slow consumer received {seen} results, not {expected}: fan-out lost or \
@@ -977,16 +1008,10 @@ async fn row_high_fanout_slow_consumer() -> Result<Receipt, String> {
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_high_fanout_slow_consumer: returning an error to the caller");
         return refusal;
     }
-    if bytes
-        != usize::try_from(expected)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(4_096)
-    {
+    if bytes != narrow(expected).saturating_mul(4_096) {
         let refusal = Err(format!(
             "the consumer buffered {bytes} bytes, not {}: the payload was corrupted in flight",
-            usize::try_from(expected)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(4_096)
+            narrow(expected).saturating_mul(4_096)
         ));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "row_high_fanout_slow_consumer: returning an error to the caller");
         return refusal;
@@ -1031,15 +1056,15 @@ async fn row_cancel_at_saturation() -> Result<Receipt, String> {
             .await;
     }
     let mut entered_count = 0_u64;
-    while entered_count < u64::try_from(BOUND).unwrap_or(u64::MAX) {
+    while entered_count < widen(BOUND) {
         entered_count = entered.load(Ordering::SeqCst);
-        if entered_count < u64::try_from(BOUND).unwrap_or(u64::MAX) {
+        if entered_count < widen(BOUND) {
             tokio::time::sleep(std::time::Duration::from_micros(50)).await;
         }
     }
     // Every permit is now held by a body parked on its own token. The ceiling is
     // saturated by construction, not by timing.
-    if entered.load(Ordering::SeqCst) != u64::try_from(BOUND).unwrap_or(u64::MAX) {
+    if entered.load(Ordering::SeqCst) != widen(BOUND) {
         let refusal = Err(format!(
             "only {} of {BOUND} bodies entered before the cancel: the row did not reach \
          saturation, so a leaked task could not have been detected",
@@ -1051,7 +1076,7 @@ async fn row_cancel_at_saturation() -> Result<Receipt, String> {
     supervisor.cancel();
 
     // Drain: every parked body must end, and the accounting must return to zero.
-    let stats = drain_until_idle(&mut supervisor, BOUND).await;
+    let stats = drain_until_idle(&mut supervisor).await;
     let receipt = Receipt::of(
         "cancel-at-saturation",
         "64 bodies fill the ceiling, cancelled while full",
@@ -1236,7 +1261,7 @@ async fn row_sustained_burst_reconnect() -> Result<Receipt, String> {
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "place: returning an error to the caller");
         return refusal;
     }
-    if receipt.work_units != u64::try_from(total).unwrap_or(u64::MAX) {
+    if receipt.work_units != widen(total) {
         let refusal = Err(format!(
             "the three phases performed {} work units, not {total}",
             receipt.work_units
@@ -1345,11 +1370,11 @@ fn row_durable_history(
     Ok(Receipt {
         row: "durable-history",
         shape,
-        placed: u64::try_from(recovered).unwrap_or(u64::MAX),
-        completed: u64::try_from(recovered_attempts).unwrap_or(u64::MAX),
+        placed: widen(recovered),
+        completed: widen(recovered_attempts),
         cancelled: 0,
         aborted: 0,
-        work_units: u64::try_from(recovered).unwrap_or(u64::MAX),
+        work_units: widen(recovered),
     })
 }
 
@@ -1366,13 +1391,13 @@ fn workload_matrix(
     dir: &std::path::Path,
     json: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("§3 workload matrix — every row lgwks_bot can drive today\n");
+    info!("§3 workload matrix — every row lgwks_bot can drive today\n");
 
     let mut receipts = Vec::new();
     let mut failures = Vec::new();
     let mut run = |name: &str, outcome: Result<Receipt, String>| match outcome {
         Ok(receipt) => {
-            println!(
+            info!(
                 "  {:<28} placed {:>6}  completed {:>6}  cancelled {:>4}  aborted {:>4}  \
                      work {:>6}",
                 receipt.row,
@@ -1385,7 +1410,7 @@ fn workload_matrix(
             receipts.push(receipt);
         }
         Err(reason) => {
-            println!("  {name:<28} FAILED: {reason}");
+            info!("  {name:<28} FAILED: {reason}");
             failures.push(format!("{name}: {reason}"));
         }
     };
@@ -1420,7 +1445,7 @@ fn workload_matrix(
         );
     }
 
-    println!();
+    info!("");
     if let Some(path) = json {
         let rows: Vec<String> = receipts
             .iter()
@@ -1444,14 +1469,14 @@ fn workload_matrix(
             failures.len()
         );
         std::fs::write(path, body)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
     if !failures.is_empty() {
         let refusal = Err(refuse_failed("workload-matrix", "row(s) failed", &failures));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "workload_matrix: returning an error to the caller");
         return refusal;
     }
-    println!(
+    info!(
         "{} rows, every receipt above was produced by running the row",
         receipts.len()
     );
@@ -1468,12 +1493,8 @@ fn workload_matrix(
 /// from this one without anyone noticing, because a drift in a refusal path is invisible
 /// until the refusal is the thing a reader is relying on.
 fn refuse_failed(tool: &str, what: &str, failures: &[String]) -> Box<dyn std::error::Error> {
-    let refusal: Box<dyn std::error::Error> = format!(
-        "{tool}: {} {what}: {}",
-        failures.len(),
-        failures.join("; ")
-    )
-    .into();
+    let refusal: Box<dyn std::error::Error> =
+        format!("{tool}: {} {what}: {}", failures.len(), failures.join("; ")).into();
     // The message *is* the error and there is no cause beneath it, so the log carries the
     // rendered form rather than a `.err()` on a `Box<dyn Error>` that is already the answer.
     lgwks_std::trace::debug!(error = %refusal, "refuse_failed: refusing a mode that recorded failures");
@@ -1482,25 +1503,8 @@ fn refuse_failed(tool: &str, what: &str, failures: &[String]) -> Box<dyn std::er
 
 /// How many completed tasks a supervisor must reach before a drain returns.
 fn completed_target(total: usize) -> u64 {
-    u64::try_from(total).unwrap_or(u64::MAX)
+    widen(total)
 }
-
-/// How long a drain waits when a reap found nothing.
-///
-/// 50 us, and the choice is measured rather than assumed. This rig spent a day reading its
-/// own wait quantum as the facade's overhead: the estimate was that at bound 8 a 256-task
-/// wave runs 32 deep, so a 50 us timer per idle pass could be 1.6 ms of a measured 2.0 ms
-/// p50 — and a scheduler round-trip (`yield_now`) instead of the timer was the obvious
-/// repair. Built and run paired, three rounds each, the repair **lost**: on `quiet-async-bot`
-/// the timer drain measured 2.98x / 3.12x / 2.70x and the round-trip drain 3.49x / 5.09x /
-/// 3.50x, because a round-trip reschedules the draining task behind the workers it is
-/// waiting for and competes with them for a core, while the timer hands the core back. The
-/// timer stayed and the estimate was withdrawn.
-///
-/// Five call sites previously used two different waits — 50 us here, 200 us there — so
-/// `quiet-async-bot` and the open-loop drain were measured under different quanta. They now
-/// use one declared one, which is the part of that experiment worth keeping.
-const REAP_TIMER_INTERVAL: Duration = Duration::from_micros(50);
 
 /// Join every task until `target` of them have reached a terminal state.
 ///
@@ -1508,15 +1512,20 @@ const REAP_TIMER_INTERVAL: Duration = Duration::from_micros(50);
 /// is three places for the wait quantum to drift and the quantum is a number the published
 /// table is sensitive to.
 ///
-/// The facade's API has no blocking join — [`Supervisor::reap`] joins what has *already*
-/// finished and returns how many — so a drain through it must poll. The baseline reaches its
-/// drain through a blocking `join_next` and never polls at all. That asymmetry is documented
-/// here rather than removed: the facade offers no blocking join to compare against, and
-/// pretending otherwise would be the rig deciding the answer.
+/// The wait is [`Supervisor::wait_idle`], the facade's awaiting join, so both sides of every
+/// comparison now wait on a task-completion wakeup: the baseline through `join_next`, the
+/// facade through the same `JoinSet` wakeup inside `wait_idle`. Before that method existed
+/// the facade could only be drained by polling `reap` on a timer, and the runtime rounds a
+/// 50 us sleep up to its 1 ms tick — a fixed 1.3-1.6 ms added to every facade run, measured
+/// as 4.5x raw Tokio on `quiet-async-bot` (#269). That cost was the API's, not the rig's,
+/// and it is fixed in the API. The loop stays because a drain can be asked for a target the
+/// placed tasks have not yet reached; it waits again rather than spinning.
 async fn drain_supervisor(supervisor: &mut Supervisor, target: u64) {
     while supervisor.stats().completed < target {
-        if supervisor.reap() == 0 {
-            tokio::time::sleep(REAP_TIMER_INTERVAL).await;
+        if supervisor.wait_idle().await == 0 && supervisor.stats().completed < target {
+            // Nothing in flight and the target unmet: the target counts tasks that were
+            // never placed, so no wait can reach it. Stop rather than spin.
+            break;
         }
     }
 }
@@ -1528,11 +1537,11 @@ async fn drain_supervisor(supervisor: &mut Supervisor, target: u64) {
 /// one to completion before looking at the second would measure a serial run and call it two
 /// tenants.
 async fn drain_two_supervisors(first: &mut Supervisor, second: &mut Supervisor, target: u64) {
-    while first.stats().completed < target || second.stats().completed < target {
-        if first.reap() + second.reap() == 0 {
-            tokio::time::sleep(REAP_TIMER_INTERVAL).await;
-        }
-    }
+    // Joined concurrently, so neither tenant's drain waits behind the other's.
+    tokio::join!(
+        drain_supervisor(first, target),
+        drain_supervisor(second, target)
+    );
 }
 
 /// This host's one-minute load average, and where it was read from.
@@ -1710,7 +1719,7 @@ struct OpenLoopSpec {
 /// A bounded queue-depth trace, plus the two facts a reader needs from it.
 #[derive(Debug, Default)]
 struct DepthTrace {
-    samples: Vec<u32>,
+    samples: Vec<usize>,
     dropped: u64,
     peak: usize,
 }
@@ -1728,7 +1737,6 @@ impl DepthTrace {
     /// Record one queue depth, in arrivals.
     fn push(&mut self, depth: usize) {
         self.peak = self.peak.max(depth);
-        let depth = u32::try_from(depth).unwrap_or(u32::MAX);
         if self.samples.len() < DEPTH_SAMPLE_CAP {
             self.samples.push(depth);
         } else {
@@ -1741,7 +1749,7 @@ impl DepthTrace {
         if self.samples.is_empty() {
             return 0.0;
         }
-        let total: u64 = self.samples.iter().map(|depth| u64::from(*depth)).sum();
+        let total: u64 = self.samples.iter().map(|depth| widen(*depth)).sum();
         (total as f64) / (self.samples.len() as f64)
     }
 }
@@ -1806,7 +1814,9 @@ impl Engine for FacadeEngine {
         async move {
             match admission {
                 Admission::Backpressure => {
-                    supervisor.spawn(move |_token| recorded_body_unit(arrival)).await;
+                    supervisor
+                        .spawn(move |_token| recorded_body_unit(arrival))
+                        .await;
                     true
                 }
                 Admission::Refuse => {
@@ -1834,9 +1844,7 @@ impl Engine for FacadeEngine {
         // Naming the target before the block is what lets the loop read a plain local
         // instead of re-deriving the spawn count on every pass.
         let target = self.supervisor.stats().spawned;
-        async move {
-            drain_supervisor(&mut self.supervisor, target).await
-        }
+        async move { drain_supervisor(&mut self.supervisor, target).await }
     }
 
     fn terminals(&self) -> (u64, u64, u64) {
@@ -1924,21 +1932,12 @@ impl Engine for BaselineEngine {
         // `JoinSet::len` is the set's own count, which is the same fact as "tasks
         // placed and not yet joined" — read from the engine rather than from a
         // second counter this rig would then have to keep in step with it.
-        u64::try_from(self.set.len()).unwrap_or(u64::MAX)
+        widen(self.set.len())
     }
 
-    /// An explicit block rather than an `async fn`: the trait declares
-    /// `-> impl Future`, the only shape that keeps the `&mut self` borrow across the
-    /// await without boxing the future.
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "the trait's RPITIT signature keeps the `&mut self` borrow, which an                   `async fn` in the impl would have to box to match"
-    )]
-    fn drain(&mut self) -> impl Future<Output = ()> {
-        async move {
-            while let Some(joined) = self.set.join_next().await {
-                self.count(joined);
-            }
+    async fn drain(&mut self) {
+        while let Some(joined) = self.set.join_next().await {
+            self.count(joined);
         }
     }
 
@@ -1979,8 +1978,8 @@ fn sample_queue(
     depth: &mut DepthTrace,
 ) -> Duration {
     let lag = now.saturating_duration_since(next_intended);
-    let waiting = u64::try_from(lag.as_nanos() / u128::from(period.max(1))).unwrap_or(0);
-    depth.push(usize::try_from(waiting.saturating_add(in_flight)).unwrap_or(usize::MAX));
+    let waiting = nanos(lag) / period.max(1);
+    depth.push(narrow(waiting.saturating_add(in_flight)));
     lag
 }
 
@@ -1999,7 +1998,7 @@ fn count_arrival(placed: bool, admitted: &mut u64, refused: &mut u64) {
 /// of 584 years would — and the recorder clamps past its own ceiling, so the
 /// conversion is stated rather than assumed.
 fn latency_nanos(intended: Instant) -> u64 {
-    u64::try_from(intended.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    nanos(intended.elapsed())
 }
 
 /// The intended instant for arrival `index` of a schedule that began at `t0`.
@@ -2255,12 +2254,7 @@ async fn open_loop_run<E: Engine>(
         let place = spec.drop_every == 0 || !offered.is_multiple_of(spec.drop_every);
         let placed = if place {
             engine
-                .admit(Arrival::mint(
-                    &work,
-                    &recorders,
-                    intended,
-                    spec.body_micros,
-                ))
+                .admit(Arrival::mint(&work, &recorders, intended, spec.body_micros))
                 .await
         } else {
             // The control's defect in one line: the arrival is counted as offered and
@@ -2434,7 +2428,7 @@ fn open_loop_pair_fair(label: &str, facade: &SideRun, baseline: &SideRun) -> Res
 /// cannot drift apart, and a cell's padding decided in one place rather than by each
 /// table's own format string.
 fn print_row(cells: &[String]) {
-    println!("  {}", cells.join("  "));
+    info!("  {}", cells.join("  "));
 }
 
 /// Print a table's column names.
@@ -2522,12 +2516,15 @@ fn body_for_bound(bound: usize, capacity_target: u64, override_micros: u64) -> u
     if override_micros > 0 {
         return override_micros;
     }
-    let permits = u64::try_from(bound).unwrap_or(u64::MAX);
+    let permits = widen(bound);
     // Rounded up, so a ceiling is never declared to sustain more than the target by
     // truncation: `63 * 1e6 / 20_000` is 3,150 us exactly and `bound * 50` is 3,150 us,
     // while a bound the division rounds down would silently get a body cheaper than the
     // target asks for.
-    permits.saturating_mul(1_000_000).div_ceil(capacity_target.max(1)).max(1)
+    permits
+        .saturating_mul(1_000_000)
+        .div_ceil(capacity_target.max(1))
+        .max(1)
 }
 
 /// The highest offered rate this rig will generate, in arrivals per second.
@@ -2583,7 +2580,7 @@ fn sweep_arrivals(rate: u64, window: Duration) -> u64 {
 /// Saturating throughout: a body of zero microseconds would claim an unbounded capacity,
 /// and an unbounded figure is exactly the sort of number this rig exists not to publish.
 fn capacity_per_second(bound: usize, body_micros: u64) -> u64 {
-    let permits = u64::try_from(bound).unwrap_or(u64::MAX);
+    let permits = widen(bound);
     permits.saturating_mul(1_000_000) / body_micros.max(1)
 }
 
@@ -2719,21 +2716,21 @@ async fn saturation_sweep(
     workers: Option<usize>,
     json: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("saturation sweep — offered rate against p50/p95/p99 and the ceiling");
-    println!(
+    info!("saturation sweep — offered rate against p50/p95/p99 and the ceiling");
+    info!(
         "door: {}   window: {} s per point   SLO: p99 <= {} ms",
         admission.as_str(),
         window.as_secs(),
         SLO_P99_NANOS / 1_000_000
     );
     if body_override > 0 {
-        println!(
+        info!(
             "body cost pinned at {body_override} us at every bound, so each ceiling's declared \
              capacity is bound / body and the wide bounds are generator-capped by \
              construction; the capacity target {capacity_target}/s does not apply to this run"
         );
     } else {
-        println!(
+        info!(
             "body cost derived per bound so every ceiling's declared capacity is \
              {capacity_target}/s, which is inside this generator's placement ceiling \
              (declared {}); a constant body cost would make the wide bounds measure the \
@@ -2741,7 +2738,7 @@ async fn saturation_sweep(
             GENERATOR_PLACEMENT_CEILING
         );
     }
-    println!("latency is measured from each arrival's INTENDED start\n");
+    info!("latency is measured from each arrival's INTENDED start\n");
 
     let mut points: Vec<SweepPair> = Vec::new();
     let mut json_rows: Vec<String> = Vec::new();
@@ -2769,7 +2766,7 @@ async fn saturation_sweep(
                 .saturating_mul(1_000)
                 .saturating_mul(1 + BUDGET_EXTRA_BODIES),
         );
-        println!(
+        info!(
             "bound {bound}  (declared capacity {} arrivals/s at a {} us body; knee budget \
              {:.1} ms = the {SLO_P99_NANOS} ms floor or {BUDGET_EXTRA_BODIES} further service \
              time{}, whichever is larger)",
@@ -2800,7 +2797,7 @@ async fn saturation_sweep(
                 let run = measure_point(side, admission, &spec).await?;
                 print_sweep_row(&run);
                 if let Some(rss) = run.rss_bytes {
-                    println!(
+                    info!(
                         "           peak RSS {rss} bytes at the run's peak ({})",
                         run.rss_source
                     );
@@ -2810,7 +2807,7 @@ async fn saturation_sweep(
             }
             let label = format!("bound {bound} at {}/s", spec.offered_rate);
             if !open_loop_pair_fair(&label, &runs[0], &runs[1])? {
-                println!(
+                info!(
                     "           a saturation point: facade refused {}, baseline refused {} — \
                      each side's own conservation gate is what gates it",
                     runs[0].refused, runs[1].refused
@@ -2827,20 +2824,18 @@ async fn saturation_sweep(
             "{{\"bound\":{bound},\"body_micros\":{body_micros},\"declared_capacity_per_second\":{}}}",
             capacity_per_second(bound, body_micros)
         ));
-        println!();
+        info!("");
     }
 
     declare_knees(&points, capacity_target, body_override);
-    write_sweep_json(
-        json,
+    let sweep = SweepRun {
         admission,
         window,
         capacity_target,
         body_override,
         workers,
-        &json_bodies,
-        &json_rows,
-    );
+    };
+    write_sweep_json(json, &sweep, &json_bodies, &json_rows);
     Ok(())
 }
 
@@ -2851,7 +2846,7 @@ async fn saturation_sweep(
 /// own: the same table read against a 10 ms SLO has a different one, and the SLO is
 /// named on the same line so the two cannot be separated.
 fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64) {
-    println!(
+    info!(
         "knee — the highest offered rate with no refusal and p99 inside the bound's budget \
          ({SLO_P99_NANOS} ms or {BUDGET_EXTRA_BODIES} further service time, whichever is \
          larger)"
@@ -2859,7 +2854,12 @@ fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64)
     print_columns(&KNEE_COLUMNS);
     for bound in SWEEP_BOUNDS {
         let ladder = sweep_ladder(bound, body_for_bound(bound, capacity_target, body_override));
-        let top_rate = ladder.last().copied().unwrap_or(0);
+        // `sweep_ladder` maps every multiplier to a rate, so the ladder is never empty;
+        // a bound with no rungs has no knee to report and is skipped rather than given
+        // an invented top rate.
+        let Some(&top_rate) = ladder.last() else {
+            continue;
+        };
         for side in Side::ALL {
             let mut knee_rate = 0_u64;
             let mut knee_achieved = 0.0;
@@ -2876,13 +2876,14 @@ fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64)
                     refused_at_top = run.refused;
                 }
             }
-            let clamped = if ladder_clamped(bound, body_for_bound(bound, capacity_target, body_override))
-                && knee_rate == top_rate
-            {
-                " (generator-capped)"
-            } else {
-                ""
-            };
+            let clamped =
+                if ladder_clamped(bound, body_for_bound(bound, capacity_target, body_override))
+                    && knee_rate == top_rate
+                {
+                    " (generator-capped)"
+                } else {
+                    ""
+                };
             // A knee of zero is not a knee of nothing: it is a ladder on which every rung
             // was past the budget, and saying so is the fact a reader needs. A bare `0`
             // in this column reads as "not measured".
@@ -2905,7 +2906,22 @@ fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64)
             ]);
         }
     }
-    println!();
+    info!("");
+}
+
+/// The settings one saturation sweep ran under: the provenance its record carries.
+#[derive(Clone, Copy)]
+struct SweepRun {
+    /// How an arrival at a full bound was admitted.
+    admission: Admission,
+    /// How long each point offered load.
+    window: Duration,
+    /// The arrivals per second each bound's body cost was derived to reach.
+    capacity_target: u64,
+    /// A fixed body cost in microseconds, or `0` to derive it per bound.
+    body_override: u64,
+    /// The runtime's worker count, when one was set.
+    workers: Option<usize>,
 }
 
 /// Write the sweep's results rows, if a path was given.
@@ -2913,24 +2929,17 @@ fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64)
 /// A write failure is reported rather than propagated: the measurement has already
 /// been made and printed, and refusing the whole run because the record could not be
 /// filed would throw away the numbers in order to complain about the filing.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the record's provenance is one fact per parameter; a struct here would be a \
-              second place where a reader has to learn which field is which"
-)]
-fn write_sweep_json(
-    json: Option<&str>,
-    admission: Admission,
-    window: Duration,
-    capacity_target: u64,
-    body_override: u64,
-    workers: Option<usize>,
-    bounds: &[String],
-    rows: &[String],
-) {
+fn write_sweep_json(json: Option<&str>, sweep: &SweepRun, bounds: &[String], rows: &[String]) {
     let Some(path) = json else {
         return;
     };
+    let SweepRun {
+        admission,
+        window,
+        capacity_target,
+        body_override,
+        workers,
+    } = *sweep;
     let body = format!(
         "{{\"tool\":\"lgwks-bench-async-saturation\",\"door\":\"{}\",\
           \"window_seconds\":{},\"capacity_target_per_second\":{capacity_target},\
@@ -2950,8 +2959,8 @@ fn write_sweep_json(
         rows.join(",\n")
     );
     match std::fs::write(path, body) {
-        Ok(()) => println!("wrote {path}"),
-        Err(error) => println!("could not write {path}: {error}"),
+        Ok(()) => info!("wrote {path}"),
+        Err(error) => info!("could not write {path}: {error}"),
     }
 }
 
@@ -3106,9 +3115,7 @@ impl TierBody {
 /// instant, and a caller that reported them from two places could pair a peak from one with
 /// an admission count from another.
 async fn admit_tier(gate: &Arc<Gate>, tier: usize) -> (u64, Option<u64>, &'static str) {
-    let reached = gate
-        .await_tier(u64::try_from(tier).unwrap_or(u64::MAX))
-        .await;
+    let reached = gate.await_tier(widen(tier)).await;
     let (rss_bytes, rss_source) = resident_bytes();
     gate.release();
     (reached, rss_bytes, rss_source)
@@ -3202,7 +3209,7 @@ async fn inflight_tier_facade(tier: usize) -> Result<TierRun, String> {
         requested: tier,
         reached,
         ceiling: Semaphore::MAX_PERMITS,
-        placed: u64::try_from(tier).unwrap_or(u64::MAX),
+        placed: widen(tier),
         completed: stats.succeeded,
         aborted: stats.aborted,
         work_units: work.load(Ordering::SeqCst),
@@ -3295,7 +3302,7 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
     }
     .map_err(|reason| -> Box<dyn std::error::Error> { reason.into() })?;
     let label = format!("in-flight tier {tier} on the {}", side.as_str());
-    let requested = u64::try_from(tier).unwrap_or(u64::MAX);
+    let requested = widen(tier);
     if run.reached != requested {
         let refusal = Err(format!(
             "{label}: only {} of {tier} tasks were concurrently admitted within {} s — \
@@ -3373,9 +3380,9 @@ async fn in_flight_tiers(
     workers: Option<usize>,
     json: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("in-flight tiers — that many tasks CONCURRENTLY ADMITTED, each tier its own ceiling");
-    println!("every body parks on a gate until the whole tier is admitted, so the peak");
-    println!("in-flight count is what the bodies saw and not a counter's opinion\n");
+    info!("in-flight tiers — that many tasks CONCURRENTLY ADMITTED, each tier its own ceiling");
+    info!("every body parks on a gate until the whole tier is admitted, so the peak");
+    info!("in-flight count is what the bodies saw and not a counter's opinion\n");
     print_columns(&TIER_COLUMNS);
 
     let mut json_rows: Vec<String> = Vec::new();
@@ -3399,7 +3406,7 @@ async fn in_flight_tiers(
             ]);
             json_rows.push(tier_json(&run));
         }
-        println!();
+        info!("");
     }
 
     if let Some(path) = json {
@@ -3413,7 +3420,7 @@ async fn in_flight_tiers(
             json_rows.join(",\n")
         );
         std::fs::write(path, body)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
     Ok(())
 }
@@ -3574,7 +3581,7 @@ async fn overload_run(
         },
     ];
 
-    println!(
+    info!(
         "\n{} at bound {bound}: baseline {} s at {half}/s, overload {} s at {twice}/s, \
          recovery {} s at {half}/s",
         side.as_str(),
@@ -3682,7 +3689,7 @@ async fn overload_run(
         match phase.label {
             PhaseLabel::Baseline => {
                 baseline_p99 = p99;
-                println!(
+                info!(
                     "  baseline  {} offered  {} admitted  p99 {:.3} ms",
                     phase_offered,
                     admitted,
@@ -3690,7 +3697,7 @@ async fn overload_run(
                 );
             }
             PhaseLabel::Overload => {
-                println!(
+                info!(
                     "  overload  {} offered  {} admitted  {} refused  p99 {:.3} ms  peak \
                      queue {overload_peak_queue}",
                     phase_offered,
@@ -3706,7 +3713,7 @@ async fn overload_run(
             }
             PhaseLabel::Recovery => {
                 if recovered_p99 == 0 {
-                    println!(
+                    info!(
                         "  recovery  drained in {:.3} ms  p99 did NOT return to the baseline \
                          {:.3} ms within the {} s phase — reported as not recovered rather \
                          than as a number",
@@ -3715,7 +3722,7 @@ async fn overload_run(
                         phase.window.as_secs()
                     );
                 } else {
-                    println!(
+                    info!(
                         "  recovery  drained in {:.3} ms  p99 back to baseline after {:.3} ms \
                          ({} ms inside)",
                         drain.as_secs_f64() * 1_000.0,
@@ -3868,13 +3875,13 @@ async fn overload_and_recovery(
         overload_window,
         recovery_seconds: _,
     } = shape;
-    println!(
+    info!(
         "overload and recovery — {baseline_window:?} baseline, {overload_window:?} at 2x the knee, \
          then {:?} back down",
         recovery_window_of(shape)
     );
-    println!("drain time and time-to-baseline-p99 are both measured, and the conservation gate");
-    println!("checks that nothing was lost or duplicated on either side of the transition\n");
+    info!("drain time and time-to-baseline-p99 are both measured, and the conservation gate");
+    info!("checks that nothing was lost or duplicated on either side of the transition\n");
 
     let mut rows = Vec::new();
     for side in Side::ALL {
@@ -3909,7 +3916,7 @@ async fn overload_and_recovery(
                 .join(",\n")
         );
         std::fs::write(path, body)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
     Ok(())
 }
@@ -4064,23 +4071,35 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
     const UNCONTENDED: usize = 4_096;
     const CONTENDED: usize = 8;
 
-    println!("allocation attribution — every window counted separately from every timed round");
-    println!("one wave is {TASKS} tasks, so a wave row is read per task and a single-operation");
-    println!("row is read per operation; the units are named on every row\n");
+    info!("allocation attribution — every window counted separately from every timed round");
+    info!("one wave is {TASKS} tasks, so a wave row is read per task and a single-operation");
+    info!("row is read per operation; the units are named on every row\n");
 
     let mut windows = Vec::new();
 
     // ── The two ends: the whole facade wave, and the raw wave it is compared against ──
     windows.push(
-        count_allocations(TASKS, TASKS, "facade spawn wave, contended", "task", || async {
-            let _wave = facade_side(TASKS as usize, CONTENDED).await;
-        })
+        count_allocations(
+            TASKS,
+            TASKS,
+            "facade spawn wave, contended",
+            "task",
+            || async {
+                let _wave = facade_side(TASKS as usize, CONTENDED).await;
+            },
+        )
         .await,
     );
     windows.push(
-        count_allocations(TASKS, TASKS, "raw tokio wave, contended", "task", || async {
-            let _wave = baseline_side(TASKS as usize, CONTENDED).await;
-        })
+        count_allocations(
+            TASKS,
+            TASKS,
+            "raw tokio wave, contended",
+            "task",
+            || async {
+                let _wave = baseline_side(TASKS as usize, CONTENDED).await;
+            },
+        )
         .await,
     );
     // The same wave at a ceiling the wave never reaches: the same work with no waiting,
@@ -4103,33 +4122,57 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
     // A wave is not a black box: it is a tokio spawn plus this module's own per-task
     // work, and the only way to know which half the difference is is to price each half.
     windows.push(
-        count_allocations(TASKS, TASKS, "one raw tokio spawn (JoinSet::spawn, no body)", "task", || async {
-            let mut set: JoinSet<()> = JoinSet::new();
-            set.spawn(async {});
-            while set.join_next().await.is_some() {}
-        })
+        count_allocations(
+            TASKS,
+            TASKS,
+            "one raw tokio spawn (JoinSet::spawn, no body)",
+            "task",
+            || async {
+                let mut set: JoinSet<()> = JoinSet::new();
+                set.spawn(async {});
+                while set.join_next().await.is_some() {}
+            },
+        )
         .await,
     );
     windows.push(
-        count_allocations(TASKS, 1, "one Supervisor::new(4096)", "supervisor", || async {
-            let _supervisor = Supervisor::new(UNCONTENDED);
-        })
+        count_allocations(
+            TASKS,
+            1,
+            "one Supervisor::new(4096)",
+            "supervisor",
+            || async {
+                let _supervisor = Supervisor::new(UNCONTENDED);
+            },
+        )
         .await,
     );
     windows.push(
-        count_allocations(TASKS, 1, "one CancellationToken::new (a root token)", "token", || async {
-            let _token = lgwks_bot::rt::sync::CancellationToken::new();
-        })
+        count_allocations(
+            TASKS,
+            1,
+            "one CancellationToken::new (a root token)",
+            "token",
+            || async {
+                let _token = lgwks_bot::rt::sync::CancellationToken::new();
+            },
+        )
         .await,
     );
     // A child cannot exist without a parent, so this window *is* the spawn path's whole
     // token cost and the child's own share of it is the difference from the root window
     // above. Two windows for it would have measured the same operation twice.
     windows.push(
-        count_allocations(TASKS, 1, "a root token plus one child (the spawn path)", "child token", || async {
-            let root = lgwks_bot::rt::sync::CancellationToken::new();
-            let _child = root.child_token();
-        })
+        count_allocations(
+            TASKS,
+            1,
+            "a root token plus one child (the spawn path)",
+            "child token",
+            || async {
+                let root = lgwks_bot::rt::sync::CancellationToken::new();
+                let _child = root.child_token();
+            },
+        )
         .await,
     );
     windows.push(
@@ -4140,16 +4183,22 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
         .await,
     );
     windows.push(
-        count_allocations(TASKS, 1, "one cancellation race (run_until_cancelled)", "race", || async {
-            let root = lgwks_bot::rt::sync::CancellationToken::new();
-            let raced = root.run_until_cancelled(async {});
-            let _done = raced.await;
-        })
+        count_allocations(
+            TASKS,
+            1,
+            "one cancellation race (run_until_cancelled)",
+            "race",
+            || async {
+                let root = lgwks_bot::rt::sync::CancellationToken::new();
+                let raced = root.run_until_cancelled(async {});
+                let _done = raced.await;
+            },
+        )
         .await,
     );
 
     for window in &windows {
-        println!("  {}", window.line());
+        info!("  {}", window.line());
     }
 
     // Read by name rather than by index. An index is a second list to keep in step with
@@ -4167,20 +4216,21 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
     let raw_spawn = named("one raw tokio spawn");
     let root_plus_child = named("root token plus one child");
     let root_only = named("(a root token)");
-    println!(
-        "\ndecomposition, all per task, from the rows above rather than asserted:"
+    info!("\ndecomposition, all per task, from the rows above rather than asserted:");
+    info!("  the facade's whole wave                    {facade_wave:>8.2} allocs per task");
+    info!("  the raw wave doing the same work            {raw_wave:>8.2} allocs per task");
+    info!(
+        "  the facade's excess over raw               {:>8.2} allocs per task",
+        facade_wave - raw_wave
     );
-    println!("  the facade's whole wave                    {facade_wave:>8.2} allocs per task");
-    println!("  the raw wave doing the same work            {raw_wave:>8.2} allocs per task");
-    println!("  the facade's excess over raw               {:>8.2} allocs per task", facade_wave - raw_wave);
-    println!("  a raw tokio spawn on its own                {raw_spawn:>8.2} allocs per task");
-    println!("  a root token plus one child token           {root_plus_child:>8.2} allocs per token");
-    println!("  a root token on its own                     {root_only:>8.2} allocs per token");
-    println!(
+    info!("  a raw tokio spawn on its own                {raw_spawn:>8.2} allocs per task");
+    info!("  a root token plus one child token           {root_plus_child:>8.2} allocs per token");
+    info!("  a root token on its own                     {root_only:>8.2} allocs per token");
+    info!(
         "  so the child token the spawn path mints     {:>8.2} allocs per task",
         root_plus_child - root_only
     );
-    println!(
+    info!(
         "  and the facade's residual over a raw spawn  {:>8.2} allocs per task",
         facade_wave - raw_spawn
     );
@@ -4205,7 +4255,7 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
                 .join(",\n")
         );
         std::fs::write(path, body)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
     Ok(())
 }
@@ -4221,10 +4271,7 @@ async fn allocation_attribution(json: Option<&str>) -> Result<(), Box<dyn std::e
 /// `workers` pins the scheduler's thread count and `None` takes the discovered default.
 /// That is the closest this host comes to the estate's 1–2 vCPU profile, and the label
 /// is deliberately narrower than that profile: see [`build_runtime`].
-fn block_on_mode<F, Fut>(
-    workers: Option<usize>,
-    body: F,
-) -> Result<(), Box<dyn std::error::Error>>
+fn block_on_mode<F, Fut>(workers: Option<usize>, body: F) -> Result<(), Box<dyn std::error::Error>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
@@ -4258,9 +4305,7 @@ fn build_runtime(workers: Option<usize>) -> std::io::Result<Runtime> {
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_runtime: refusing a zero worker count");
                 return refusal;
             };
-            RuntimeBuilder::new()
-                .worker_threads(Some(count))
-                .build()
+            RuntimeBuilder::new().worker_threads(Some(count)).build()
         }
         None => Runtime::new(),
     }
@@ -4275,8 +4320,8 @@ fn build_runtime(workers: Option<usize>) -> std::io::Result<Runtime> {
 /// reader runs: a generator whose numbers cannot be reproduced from a seed are numbers
 /// with no provenance.
 fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
-    println!("seeded open-loop simulation — the model the live driver is checked against");
-    println!("one seed drives arrival jitter and body length; every world is replayed\n");
+    info!("seeded open-loop simulation — the model the live driver is checked against");
+    info!("one seed drives arrival jitter and body length; every world is replayed\n");
     print_columns(&[
         "seed",
         "bound",
@@ -4303,7 +4348,7 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
         0xDEAD_BEEF_0000_0001,
     ] {
         for bound in [1_usize, 4, 64] {
-            let permits = u64::try_from(bound).unwrap_or(1);
+            let permits = widen(bound);
             let ladder = [
                 (
                     "quiet",
@@ -4357,7 +4402,7 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!();
+    info!("");
 
     if !failures.is_empty() {
         let refusal = Err(refuse_failed(
@@ -4368,7 +4413,7 @@ fn open_loop_simulation() -> Result<(), Box<dyn std::error::Error>> {
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_loop_simulation: returning an error to the caller");
         return refusal;
     }
-    println!(
+    info!(
         "every seeded world replayed to the same trace hash; the p99-intended and \
          p99-actual columns are the coordinated-omission gap, measured on one world read \
          two ways"
@@ -4388,6 +4433,11 @@ where
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The report is this binary's output, and it goes through the estate's tracing
+    // like every other line the workspace emits: levelled, filterable through
+    // `LGWKS_LOG`, and written through a handle whose errors the subscriber owns
+    // rather than through `println!`, which panics on a closed pipe.
+    lgwks_std::trace::install_default("lgwks-bench-async")?;
     let mut rounds: usize = 15;
     let mut json: Option<String> = None;
     let mut alloc_report = false;
@@ -4405,8 +4455,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut knee: u64 = 32_768;
     let mut baseline_seconds: u64 = 4;
     let mut overload_seconds: u64 = 30;
-    let mut recovery_seconds: Option<u64> = None;
-    let mut bound: Option<usize> = None;
+    let mut recovery = RecoveryLength::SameAsBaseline;
+    let mut overload_bound = OVERLOAD_DEFAULT_BOUND;
     let mut body_micros: u64 = 0;
     let mut capacity_target: u64 = DEFAULT_CAPACITY_TARGET;
     let mut workers: Option<usize> = None;
@@ -4423,24 +4473,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             json = Some(value.to_string());
             Ok(())
         } else if let Some(value) = arg.strip_prefix("--window=") {
-            number(value, "window must be a number of seconds").map(|seconds| window_seconds = seconds)
+            number(value, "window must be a number of seconds")
+                .map(|seconds| window_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--tier=") {
             number(value, "tier must be a number").map(|count| tier = Some(count))
         } else if let Some(value) = arg.strip_prefix("--knee=") {
             number(value, "knee must be an offered rate").map(|rate| knee = rate)
         } else if let Some(value) = arg.strip_prefix("--baseline-seconds=") {
-            number(value, "baseline-seconds must be a number").map(|seconds| baseline_seconds = seconds)
+            number(value, "baseline-seconds must be a number")
+                .map(|seconds| baseline_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--overload-seconds=") {
-            number(value, "overload-seconds must be a number").map(|seconds| overload_seconds = seconds)
+            number(value, "overload-seconds must be a number")
+                .map(|seconds| overload_seconds = seconds)
         } else if let Some(value) = arg.strip_prefix("--recovery-seconds=") {
             number(value, "recovery-seconds must be a number")
-                .map(|seconds| recovery_seconds = Some(seconds))
+                .map(|seconds| recovery = RecoveryLength::Seconds(seconds))
         } else if let Some(value) = arg.strip_prefix("--body-micros=") {
             number(value, "body-micros must be a number").map(|micros| body_micros = micros)
         } else if let Some(value) = arg.strip_prefix("--capacity-target=") {
             number(value, "capacity-target must be a rate").map(|rate| capacity_target = rate)
         } else if let Some(value) = arg.strip_prefix("--bound=") {
-            number(value, "bound must be a number").map(|count| bound = Some(count))
+            number(value, "bound must be a number").map(|count| overload_bound = count)
         } else if let Some(value) = arg.strip_prefix("--workers=") {
             number(value, "workers must be a number").map(|count| workers = Some(count))
         } else if let Some(arg) = arg.strip_prefix("--") {
@@ -4476,15 +4529,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // otherwise discover for itself, so the discovered case is printed as the same
     // number the scheduler would have used rather than as the word "default".
     let (load, load_source) = host_load_average();
-    println!(
-        "host: {} logical cores visible, runtime workers: {}, 1-minute load average: {} ({})",
-        std::thread::available_parallelism().map_or(0, |cores| cores.get()),
-        workers.map_or_else(
-            || "discovered (available_parallelism)".to_string(),
-            |count| count.to_string()
-        ),
-        load.as_deref().unwrap_or("unavailable"),
-        load_source
+    // Structured fields rather than an interpolated line: a value the host would not
+    // report is absent from the record, not printed as a placeholder a reader could take
+    // for a measurement.
+    info!(
+        cores = std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZero::get),
+        workers,
+        workers_source = if workers.is_some() {
+            "named"
+        } else {
+            "discovered (available_parallelism)"
+        },
+        load = load.as_deref(),
+        load_source,
+        "host"
     );
 
     if simulation {
@@ -4526,7 +4586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if overload {
-        let at_bound = bound.unwrap_or(1_024);
+        let at_bound = overload_bound;
         // The overload run names its own bound, so the body cost is resolved here rather
         // than derived by the sweep: the same `body_for_bound` arithmetic, applied once.
         let at_body = body_for_bound(at_bound, capacity_target, body_micros);
@@ -4538,11 +4598,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     body_micros: at_body,
                     baseline_window: Duration::from_secs(baseline_seconds),
                     overload_window: Duration::from_secs(overload_seconds),
-                    // Defaulting to the baseline length keeps the short form short, and a
-                    // run that wants to observe a long recovery names its own length.
-                    recovery_seconds: Duration::from_secs(
-                        recovery_seconds.unwrap_or(baseline_seconds),
-                    ),
+                    recovery_seconds: Duration::from_secs(recovery.seconds(baseline_seconds)),
                 },
                 json.as_deref(),
             )
@@ -4577,8 +4633,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return tier_ladder(&build_runtime(workers)?, json.as_deref());
     }
 
-    println!("lgwks_bot async matched-semantics comparison (facade vs raw tokio)");
-    println!("Every round is paired and gated on identical work; a mismatch aborts the run.\n");
+    info!("lgwks_bot async matched-semantics comparison (facade vs raw tokio)");
+    info!("Every round is paired and gated on identical work; a mismatch aborts the run.\n");
 
     let scenarios: [(&str, usize, usize); 4] = [
         ("quiet-async-bot", 256, 8),
@@ -4618,17 +4674,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (facade_allocs, facade_bytes) = after_facade;
             let (baseline_allocs, baseline_bytes) = after_baseline;
 
-            println!("allocation report (1024 tasks at bound 8, counted separately from timing):");
-            println!("  facade   {facade_allocs:>8} allocations, {facade_bytes:>10} bytes");
-            println!("  baseline {baseline_allocs:>8} allocations, {baseline_bytes:>10} bytes");
+            info!("allocation report (1024 tasks at bound 8, counted separately from timing):");
+            info!("  facade   {facade_allocs:>8} allocations, {facade_bytes:>10} bytes");
+            info!("  baseline {baseline_allocs:>8} allocations, {baseline_bytes:>10} bytes");
             let per_task_facade = facade_allocs as f64 / 1_024.0;
             let per_task_base = baseline_allocs as f64 / 1_024.0;
-            println!(
+            info!(
                 "  per task: facade {per_task_facade:.2}, baseline {per_task_base:.2} \
                  (a ratio, and an absolute; both are reported)"
             );
         });
-        println!();
+        info!("");
     }
 
     let runtime = build_runtime(workers)?;
@@ -4638,7 +4694,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The report.
-    println!(
+    info!(
         "{:<16} {:>7} {:>7} {:>11} {:>11} {:>11} {:>11} {:>9}",
         "scenario", "tasks", "bound", "facade p50", "facade p99", "base p50", "base p99", "ratio"
     );
@@ -4661,7 +4717,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let (lo, hi) = async_stats::bootstrap_median_ci(&paired, 2_000, 0.95, 0x5EED);
         let distinguishes = async_stats::distinguishes_parity(lo, hi);
-        println!(
+        info!(
             "{:<16} {:>7} {:>7} {:>11.6} {:>11.6} {:>11.6} {:>11.6} {:>8.2}x",
             result.name, result.total, result.bound, f50, f99, b50, b99, ratio
         );
@@ -4670,7 +4726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "spans parity"
         };
-        println!("                 95% CI on the paired ratio: [{lo:.2}, {hi:.2}] ({parity})");
+        info!("                 95% CI on the paired ratio: [{lo:.2}, {hi:.2}] ({parity})");
         if !json_rows.is_empty() {
             json_rows.push('\n');
         }
@@ -4696,7 +4752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result.tally.work_units,
         ));
     }
-    println!(
+    info!(
         "\nbare synchronous floor (no scheduler): {floor_time:.6}s for {floor_units} units.\n\
          It is a reference line, never a multiplier on the ratio above."
     );
@@ -4717,7 +4773,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              \"floor_seconds\":{floor_time},\n\"scenarios\":[\n{joined}]\n}}\n"
         );
         std::fs::write(&path, body)?;
-        println!("wrote {path}");
+        info!("wrote {path}");
     }
     Ok(())
 }
