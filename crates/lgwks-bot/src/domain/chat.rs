@@ -28,6 +28,9 @@ use crate::verb::{self, Observe};
 /// let observed = ChatMessage::new("#deploys", "ci-bot", "rollout finished", "42");
 /// assert!(observed.contains("finished"));
 /// assert_eq!(observed.channel(), "#deploys");
+/// assert_eq!(observed.sender(), "ci-bot");
+/// assert_eq!(observed.text(), "rollout finished");
+/// assert_eq!(observed.ts(), "42");
 /// ```
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
