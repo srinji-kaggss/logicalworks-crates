@@ -1102,7 +1102,7 @@ fn license_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             };
             let declared = declared_value(first).to_owned();
             let drift = observed.iter().copied().any(|candidate| {
-                !declared_value(candidate)
+                !declared_expression(candidate)
                     .trim()
                     .eq_ignore_ascii_case(entry.license().trim())
             });
@@ -1110,7 +1110,7 @@ fn license_refusals(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
                 .iter()
                 .copied()
                 .flat_map(|candidate| {
-                    rejected_license_identifiers(declared_value(candidate), accepted)
+                    rejected_license_identifiers(&declared_expression(candidate), accepted)
                 })
                 .collect::<Vec<_>>();
             if !drift && rejected.is_empty() {
@@ -1131,6 +1131,31 @@ fn declared_value(observed: Option<&str>) -> &str {
     match observed {
         Some(expression) => expression,
         None => NO_LICENSE,
+    }
+}
+
+/// The declared licence as the SPDX expression both licence checks compare.
+///
+/// Cargo documents `/` in a package's `license` field as the deprecated
+/// spelling of `OR`, and crates.io still serves packages written that way
+/// (`foundationdb` 0.11 declares `MIT/Apache-2.0`). Read literally, that is
+/// one unknown identifier and a drift from an approval recorded as
+/// `MIT OR Apache-2.0`; read as Cargo defines it, it is the same choice of
+/// licences. Only the declared side is rewritten: a register must still be
+/// written in SPDX, and its parser refuses the slash. The refusal keeps
+/// rendering the declared text as the package wrote it.
+fn declared_expression(observed: Option<&str>) -> std::borrow::Cow<'_, str> {
+    let declared = declared_value(observed);
+    if declared.contains('/') {
+        std::borrow::Cow::Owned(
+            declared
+                .split('/')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" OR "),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(declared)
     }
 }
 
@@ -1884,6 +1909,45 @@ mod tests {
             vec!["MIT-0".to_owned()]
         );
         assert!(rejected_license_identifiers("MIT OR MIT", &accepted).is_empty());
+    }
+
+    /// Cargo's deprecated `MIT/Apache-2.0` is `MIT OR Apache-2.0`: an approval
+    /// recorded in SPDX over a package declaring the slash form is neither
+    /// drift nor an unknown identifier.
+    #[test]
+    fn a_slash_license_matches_its_spdx_or_approval() -> TestResult {
+        let register = Contract::parse(REGISTER)?;
+        let mut serde = edge("lgwks_std", "serde", "1.0");
+        serde.license = Some("MIT/Apache-2.0".into());
+        assert_eq!(license_refusals(&[serde], &register), Vec::new());
+        Ok(())
+    }
+
+    /// The slash only separates alternatives; it does not launder one. A
+    /// declared `GPL-3.0/MIT` with only `MIT` accepted still names `GPL-3.0`.
+    #[test]
+    fn a_slash_license_still_rejects_an_unaccepted_alternative() -> TestResult {
+        let accepted = vec!["MIT".to_owned()];
+        assert_eq!(
+            rejected_license_identifiers(&declared_expression(Some("GPL-3.0/MIT")), &accepted),
+            vec!["GPL-3.0".to_owned()]
+        );
+        let register = Contract::parse(&REGISTER.replace(
+            "accepted_licenses = \"0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib\"",
+            "accepted_licenses = \"MIT\"",
+        ))?;
+        let mut serde = edge("lgwks_std", "serde", "1.0");
+        serde.license = Some("GPL-3.0/MIT".into());
+        assert_eq!(
+            license_refusals(&[serde], &register),
+            vec![Refusal::LicenseNotAccepted {
+                krate: "serde".into(),
+                approved: "MIT OR Apache-2.0".into(),
+                declared: "GPL-3.0/MIT".into(),
+                rejected: vec!["GPL-3.0".into()],
+            }]
+        );
+        Ok(())
     }
 
     /// Issue #210: `tier` is read. A `vendor` approval over an edge that
