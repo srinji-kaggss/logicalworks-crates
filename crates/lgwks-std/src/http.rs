@@ -1500,24 +1500,23 @@ mod tests {
     /// bytes it carries; what the ceiling answers does not depend on either, so
     /// the refusal and its limit are asserted once here and each family states
     /// only what its own framing adds.
-    fn assert_refused_at_small_ceiling(
-        port: u16,
-        what: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let Err(error) = get_with(
+    fn assert_refused_at_small_ceiling(port: u16, what: &str) {
+        // Asserts rather than returns: the only way this can fail is that the
+        // answer was not the refusal, and the assertion is what carries that to
+        // the test that called this. A fallible signature here would hand the
+        // caller an error it has to propagate before the test could say what it
+        // saw.
+        let answer = get_with(
             &format!("http://127.0.0.1:{port}/"),
             &ceiling(SMALL_CEILING),
-        ) else {
-            return Err(format!("{what} must be refused").into());
-        };
-        assert_eq!(
-            error,
-            Error::BodyTooLarge {
-                limit: SMALL_CEILING
-            },
-            "{what} is refused for its size, not for its framing or its encoding"
         );
-        Ok(())
+        assert!(
+            matches!(
+                answer,
+                Err(Error::BodyTooLarge { limit }) if limit == SMALL_CEILING
+            ),
+            "{what} must be refused at the ceiling for its size, not its framing or its encoding; got {answer:?}"
+        );
     }
 
     /// Serve `replies` canned responses, then exit. Returns the bound port.
@@ -2876,7 +2875,7 @@ mod tests {
         // Two 64-byte chunks: 128 bytes of body under a 64-byte ceiling.
         const CHUNKED: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n40\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n40\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\r\n0\r\n\r\n";
         let (port, server) = serve_raw(CHUNKED.to_vec())?;
-        assert_refused_at_small_ceiling(port, "a chunked body past the ceiling")?;
+        assert_refused_at_small_ceiling(port, "a chunked body past the ceiling");
         join_server(server)?;
         Ok(())
     }
@@ -2889,7 +2888,7 @@ mod tests {
         let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
         reply.extend_from_slice(filler(SMALL_CEILING.saturating_mul(2)).as_bytes());
         let (port, server) = serve_raw(reply)?;
-        assert_refused_at_small_ceiling(port, "a close-delimited body past the ceiling")?;
+        assert_refused_at_small_ceiling(port, "a close-delimited body past the ceiling");
         join_server(server)?;
         Ok(())
     }
@@ -2951,7 +2950,7 @@ mod tests {
         let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
         reply.extend_from_slice(&vec![0xFF_u8; SMALL_CEILING.saturating_mul(2)]);
         let (port, server) = serve_raw(reply)?;
-        assert_refused_at_small_ceiling(port, "a multi-byte body past the ceiling")?;
+        assert_refused_at_small_ceiling(port, "a multi-byte body past the ceiling");
         join_server(server)?;
         Ok(())
     }

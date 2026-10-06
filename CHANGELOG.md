@@ -9,6 +9,27 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: the ceiling assertion asserts, so the scan gate sees no unlogged refusal (9-axis sweep)
+
+`INV-SCAN-ZERO` refused this branch on the first CI run: the new
+`assert_refused_at_small_ceiling` helper returned `Err`, and the repo's own
+`lgwks-deps scan` detector (`unlogged-err-return`) only exempts a function the
+harness calls through an attribute it recognises (`#[test]`, `#[test_case]`,
+`#[rstest]`, or a `cfg` that requires `test`). A helper inside `mod tests` is
+not exempt, and no real `#[test_*]` attribute exists to mark it.
+
+The helper now asserts instead of returning. The only way it can fail is that
+the answer was not `Error::BodyTooLarge { limit: SMALL_CEILING }`, and an
+assertion carries that to the calling test with the answer in the message; a
+`Result` here would have handed the caller an error to propagate before the test
+could say what it saw. The three ceiling families keep their own framing and
+their own wording.
+
+```
+$ cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
+OK  scan clean — 384 files, zero findings
+```
+
 ### lgwks_std — the nine-axis sweep: http names its spans, and every fixture thread is owned (9-axis sweep)
 
 `http.rs` carried 19 findings: eight defaults, one suppression and ten repeated
