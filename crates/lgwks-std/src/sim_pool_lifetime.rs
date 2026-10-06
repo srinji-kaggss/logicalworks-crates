@@ -134,10 +134,21 @@ fn journey(seed: u64) -> u64 {
     let mut rng = Rng::new(seed);
     let ceiling = rng.below(4).saturating_add(1);
     let jobs = rng.below(8);
-    let scenario = SCENARIOS
-        .get(rng.below(SCENARIOS.len()))
-        .copied()
-        .unwrap_or(Scenario::BurstDrain);
+    // The draw names one of the four scenarios, and the destructuring below
+    // binds the match arms to the table's own entries: a fifth scenario would
+    // not compile rather than silently fall through to the fourth arm.
+    let [
+        burst,
+        deadline_then_drain,
+        parked_then_shutdown,
+        configure_after_use,
+    ] = SCENARIOS;
+    let scenario = match rng.below(SCENARIOS.len()) {
+        0 => burst,
+        1 => deadline_then_drain,
+        2 => parked_then_shutdown,
+        _ => configure_after_use,
+    };
     // The threads a burst of this shape can start: the gate holds every job,
     // so each thread that starts stays started and the rest queue.
     let live = jobs.min(ceiling);
@@ -416,7 +427,7 @@ fn cycles(seed: u64) -> u64 {
             "seed {seed:#x}: cycle {cycle} started a thread holding {after_reap} handles; \
              the ones that had already left were not joined"
         );
-        fold(&mut trace, u64::try_from(after_reap).unwrap_or(u64::MAX));
+        fold_usize(&mut trace, after_reap);
         assert_handles_accounted(&pool, &format!("cycle {cycle} after the reap"), seed);
     }
     // The pool has nothing left to run: a shutdown still joins whatever the
@@ -631,7 +642,10 @@ fn sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_t
 
 #[test]
 fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
-    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    // `SWEEP_SEEDS` is a non-empty const array, so its first seed is a value
+    // the pattern binds rather than one an `Option` could withhold.
+    let [first_seed, ..] = SWEEP_SEEDS;
+    let mut state = first_seed;
     for _ in 0..SEEDS {
         journey(next_seed(&mut state));
     }
@@ -639,7 +653,8 @@ fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
 
 #[test]
 fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
-    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    let [first_seed, ..] = SWEEP_SEEDS;
+    let mut state = first_seed;
     for _ in 0..SEEDS {
         cycles(next_seed(&mut state));
     }

@@ -9,6 +9,31 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: a refusal is a fact, and a test may not silence a lint (9-axis sweep)
+
+- **`online` no longer carries four `#[expect]`s.** Each parked a thread with
+  `std::thread::sleep`, which this workspace bans; the tests now use
+  `std::thread::park_timeout`, the sanctioned synchronous wait, so the reason a
+  dial has to wait lives in the test's own doc instead of in a suppression. The
+  budget split answers its own two sentinels too: the remaining-candidate count
+  is a `NonZeroU32` the loop's own bound proves non-zero, and a count of zero
+  means the whole remainder stands for the one candidate left.
+- **`similarity`'s lossy `Similarity::score` states the loss once.** The three
+  infallible impls called `unwrap_or(0.0)` on a checked score; one `lossy_score`
+  helper now answers a refusal with `0.0` and emits it with the scorer's name, so
+  a caller reading a zero off the compatibility path can see that it was a
+  refusal. `CheckedSimilarity` remains the authority-facing path, and the values
+  it returns are unchanged.
+- **The seeded pool simulations draw what they name.** `SCENARIOS` is destructured
+  into the match arms, so a fifth scenario is a compile error rather than a
+  silent fall-through; the handle count is folded through the sweep's own
+  `fold_usize` instead of a local saturating cast; and both families bind their
+  first seed with a slice pattern on a non-empty const array instead of
+  `first().unwrap_or_default()`.
+
+Tests: 63 pass (the online budget family, the similarity evidence contract, and
+both seeded pool simulations including `sim_a_seed_replays_its_pool_lifetime_trace`).
+
 ### lgwks_std — the nine-axis sweep: the calendar divides where it is bounded (9-axis sweep)
 
 `time`'s conversions carried a `divide` helper whose `checked_div` refusal was

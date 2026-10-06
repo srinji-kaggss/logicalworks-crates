@@ -10,6 +10,7 @@
 //! [`probe`](crate::online::probe) instead.
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 /// Maximum resolved candidates considered by one probe.
@@ -57,6 +58,17 @@ fn probe_candidates(addrs: impl Iterator<Item = SocketAddr>, timeout: Duration) 
     })
 }
 
+/// A candidate count at `u32` width, for a list this probe has already capped.
+///
+/// `probe_candidates_with` collects at most [`MAX_PROBE_ADDRESSES`] entries, so
+/// the count is at most 64 and the low four bytes of its little-endian form are
+/// the count itself. Reading them is total where a checked conversion would
+/// carry a refusal arm for a bound the collector has already applied.
+fn capped_candidate_count(count: usize) -> u32 {
+    let bytes = count.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
 /// Run bounded candidates through one shared clock and connection operation.
 ///
 /// Each candidate is offered an equal share of what remains, not all of it:
@@ -80,10 +92,20 @@ fn probe_candidates_with(
         if remaining.is_zero() {
             return false;
         }
-        // `index < len`, so at least this candidate is left; the conversion
-        // cannot fail for a list capped at 64.
-        let left = u32::try_from(candidates.len().saturating_sub(index)).unwrap_or(u32::MAX);
-        let share = remaining.checked_div(left).unwrap_or(remaining);
+        // `enumerate` over a non-empty `Vec` keeps `index < len`, so at least
+        // this candidate is left. `NonZeroU32` carries that: the count of
+        // candidates still to try is a divisor a share exists for, and a count
+        // of zero has no share to take — the whole remainder then stands, which
+        // is what one candidate with no successors is owed.
+        let Some(left) = NonZeroU32::new(capped_candidate_count(
+            candidates.len().saturating_sub(index),
+        )) else {
+            return false;
+        };
+        let share = match remaining.checked_div(left.get()) {
+            Some(share) => share,
+            None => remaining,
+        };
         if connect(candidate, share) {
             return true;
         }
@@ -120,6 +142,11 @@ mod tests {
     // These tests return `Result` rather than unwrapping: a bind refusal
     // reports its own `Debug` on failure, which is the same report `.unwrap`
     // would have panicked with, without an `unwrap` in the tree.
+    //
+    // A dial that has to wait out its share parks rather than sleeps: this
+    // crate forbids `std::thread::sleep`, and `park_timeout` is the sanctioned
+    // synchronous wait. Each test only ever asserts that *at least* the share
+    // elapsed, so an unpark that returns early cannot make one pass.
     #[test]
     fn open_port_probes_true() -> Result<(), std::io::Error> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -153,10 +180,6 @@ mod tests {
 
     /// Every candidate receives only the remaining time from one monotonic budget.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the injected dial delay verifies that later candidates receive the shared remaining budget"
-    )]
     fn address_candidates_share_one_remaining_budget() {
         let candidates = [
             SocketAddr::from(([192, 0, 2, 1], 443)),
@@ -169,7 +192,7 @@ mod tests {
             |_, remaining| {
                 budgets.push(remaining);
                 if budgets.len() == 1 {
-                    std::thread::sleep(Duration::from_millis(60));
+                    std::thread::park_timeout(Duration::from_millis(60));
                 }
                 false
             },
@@ -189,10 +212,6 @@ mod tests {
     /// A blackholed first candidate spends only its share, so the second is
     /// still dialed and its answer is still heard.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the injected dial sleeps out its whole share, which is what a blackholed address does"
-    )]
     fn a_blackholed_candidate_does_not_starve_the_next() {
         let candidates = [
             SocketAddr::from(([192, 0, 2, 1], 443)),
@@ -204,7 +223,7 @@ mod tests {
             budgets.push(share);
             if budgets.len() == 1 {
                 // Blackholed: no answer, and the dial waits out all it was given.
-                std::thread::sleep(share);
+                std::thread::park_timeout(share);
                 return false;
             }
             true
@@ -224,10 +243,6 @@ mod tests {
     /// A deliberately slow resolver demonstrates the documented boundary:
     /// its synchronous work is outside the socket timeout.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "this controlled resolver delay proves DNS work is outside the socket connection budget"
-    )]
     fn resolver_delay_is_outside_the_connection_budget() {
         struct SlowResolver;
 
@@ -235,7 +250,7 @@ mod tests {
             type Iter = std::vec::IntoIter<SocketAddr>;
 
             fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-                std::thread::sleep(Duration::from_millis(80));
+                std::thread::park_timeout(Duration::from_millis(80));
                 Ok(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 9))].into_iter())
             }
         }
@@ -249,10 +264,6 @@ mod tests {
     /// from outside the injected dial: the budget is spent across candidates
     /// rather than restarting per address.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the injected dial sleeps out each share so the shared wall-clock bound can be observed"
-    )]
     fn a_whole_probe_fits_one_wall_clock_budget() {
         let candidates = [
             SocketAddr::from(([192, 0, 2, 1], 443)),
@@ -263,7 +274,7 @@ mod tests {
         let timeout = Duration::from_millis(120);
         let started = Instant::now();
         let result = probe_candidates_with(candidates.into_iter(), timeout, |_, share| {
-            std::thread::sleep(share);
+            std::thread::park_timeout(share);
             false
         });
         let elapsed = started.elapsed();
