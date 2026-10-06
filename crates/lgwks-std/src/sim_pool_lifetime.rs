@@ -134,10 +134,21 @@ fn journey(seed: u64) -> u64 {
     let mut rng = Rng::new(seed);
     let ceiling = rng.below(4).saturating_add(1);
     let jobs = rng.below(8);
-    let scenario = SCENARIOS
-        .get(rng.below(SCENARIOS.len()))
-        .copied()
-        .unwrap_or(Scenario::BurstDrain);
+    // The draw names one of the four scenarios, and the destructuring below
+    // binds the match arms to the table's own entries: a fifth scenario would
+    // not compile rather than silently fall through to the fourth arm.
+    let [
+        burst,
+        deadline_then_drain,
+        parked_then_shutdown,
+        configure_after_use,
+    ] = SCENARIOS;
+    let scenario = match rng.below(SCENARIOS.len()) {
+        0 => burst,
+        1 => deadline_then_drain,
+        2 => parked_then_shutdown,
+        _ => configure_after_use,
+    };
     // The threads a burst of this shape can start: the gate holds every job,
     // so each thread that starts stays started and the rest queue.
     let live = jobs.min(ceiling);
@@ -215,9 +226,10 @@ fn journey(seed: u64) -> u64 {
             assert_eq!(block_on(spawn_blocking_on(&pool, || 5u32)), 5);
             // The pause is load-bearing: it lets the thread reach its park, so
             // the broadcast is what releases it rather than a running job
-            // finishing. The module's `thread::sleep` exemption is exactly
-            // this line — releasing a parked thread is what is under test.
-            thread::sleep(Duration::from_millis(30));
+            // finishing. This is the sanctioned synchronous wait, in place of
+            // the banned `thread::sleep` — releasing a parked thread is what is
+            // under test, so the wait is the subject.
+            thread::park_timeout(Duration::from_millis(30));
             let began = Instant::now();
             let report = pool.shutdown(WAKE_BOUND.saturating_add(BLOCKING_KEEP_ALIVE));
             let waited = began.elapsed();
@@ -310,7 +322,7 @@ fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
         if lock(&pool.state).live == 0 {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let state = lock(&pool.state);
     assert!(
@@ -416,7 +428,7 @@ fn cycles(seed: u64) -> u64 {
             "seed {seed:#x}: cycle {cycle} started a thread holding {after_reap} handles; \
              the ones that had already left were not joined"
         );
-        fold(&mut trace, u64::try_from(after_reap).unwrap_or(u64::MAX));
+        fold_usize(&mut trace, after_reap);
         assert_handles_accounted(&pool, &format!("cycle {cycle} after the reap"), seed);
     }
     // The pool has nothing left to run: a shutdown still joins whatever the
@@ -472,7 +484,7 @@ fn wait_until_held(count: usize, seed: u64) {
         if HELD_IN_WINDOW.load(Ordering::SeqCst) == count {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let held = HELD_IN_WINDOW.load(Ordering::SeqCst);
     assert!(
@@ -514,7 +526,7 @@ fn wait_until_all_returned(pool: &Arc<Pool>, seed: u64) {
         if returned {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let held = lock(&pool.state).handles.len();
     assert!(
@@ -631,7 +643,10 @@ fn sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_t
 
 #[test]
 fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
-    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    // `SWEEP_SEEDS` is a non-empty const array, so its first seed is a value
+    // the pattern binds rather than one an `Option` could withhold.
+    let [first_seed, ..] = SWEEP_SEEDS;
+    let mut state = first_seed;
     for _ in 0..SEEDS {
         journey(next_seed(&mut state));
     }
@@ -639,7 +654,8 @@ fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
 
 #[test]
 fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
-    let mut state = SWEEP_SEEDS.first().copied().unwrap_or_default();
+    let [first_seed, ..] = SWEEP_SEEDS;
+    let mut state = first_seed;
     for _ in 0..SEEDS {
         cycles(next_seed(&mut state));
     }

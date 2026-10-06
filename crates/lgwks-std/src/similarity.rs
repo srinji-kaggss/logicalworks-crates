@@ -383,11 +383,33 @@ impl Evidence {
     }
 }
 
+/// The `Similarity` reading of one checked score, for the lossy infallible path.
+///
+/// `Similarity::score` returns an `f64` and so cannot report why a scorer
+/// refused: a missing edit-length budget, an input past a set's ceiling or a
+/// zero-norm cosine all read as `0.0` there. That loss is the compatibility
+/// contract INV-STD-SIM-2 keeps, and it is stated in one place rather than
+/// repeated per scorer: the refusal is emitted with the scorer's name, so a
+/// caller that reads a `0.0` off this path can see that it was one. The
+/// authority-facing path is [`CheckedSimilarity`], which returns the refusal.
+fn lossy_score<E: std::fmt::Debug>(scored: Result<f64, E>, scorer: &'static str) -> f64 {
+    match scored {
+        Ok(score) => score,
+        Err(refusal) => {
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal, scorer = scorer, "Similarity::score: a refusal reads as zero on the lossy path");
+            #[cfg(not(feature = "trace"))]
+            let _ = (scorer, refusal);
+            0.0
+        }
+    }
+}
+
 impl Similarity for EditDistance {
     type Value = str;
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
-        self.try_score(left, right).unwrap_or(0.0)
+        lossy_score(self.try_score(left, right), "EditDistance")
     }
 }
 
@@ -502,7 +524,10 @@ impl<T: PartialEq> Similarity for BoundedJaccard<T> {
     type Value = [T];
 
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
-        bounded_jaccard_score(self.maximum_length, left, right).unwrap_or(0.0)
+        lossy_score(
+            bounded_jaccard_score(self.maximum_length, left, right),
+            "BoundedJaccard",
+        )
     }
 }
 
@@ -864,7 +889,7 @@ impl Similarity for Cosine {
     /// `0.0` rather than escaping the trait's documented `[0.0, 1.0]` interval
     /// as `-1.0`. Use [`Cosine::try_score`] for the raw mathematical domain.
     fn score(&self, left: &Self::Value, right: &Self::Value) -> f64 {
-        self.normalized_score(left, right).unwrap_or(0.0)
+        lossy_score(self.normalized_score(left, right), "Cosine")
     }
 }
 

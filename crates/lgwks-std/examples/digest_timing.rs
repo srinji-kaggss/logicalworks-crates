@@ -103,10 +103,8 @@ fn early_exit_eq(left: &Digest, right: &Digest) -> bool {
 }
 
 /// The class of each sample, fixed by a seed so a run replays exactly.
-fn schedule(samples_per_class: u32) -> Vec<bool> {
-    let total = usize::try_from(samples_per_class)
-        .unwrap_or(usize::MAX)
-        .saturating_mul(2);
+fn schedule(samples_per_class: usize) -> Vec<bool> {
+    let total = samples_per_class.saturating_mul(2);
     let mut classes = Vec::with_capacity(total);
     let mut block: u64 = 0;
     while classes.len() < total {
@@ -165,7 +163,13 @@ fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured 
         for _ in 0..BATCH {
             black_box(compare(black_box(&base), black_box(&right)));
         }
-        let nanos = u32::try_from(started.elapsed().as_nanos()).unwrap_or(u32::MAX);
+        // A batch of 512 comparisons that took more than `u32`'s nanosecond
+        // range to complete was preempted rather than measured, and the crop
+        // below drops the slowest samples anyway: recording it as a maximum
+        // would let one stall set the crop and keep itself.
+        let Ok(nanos) = u32::try_from(started.elapsed().as_nanos()) else {
+            continue;
+        };
         if index >= WARM_UP {
             timed.push((is_differ, nanos));
         }
@@ -173,16 +177,16 @@ fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured 
 
     let mut sorted: Vec<u32> = timed.iter().map(|&(_, nanos)| nanos).collect();
     sorted.sort_unstable();
-    let cut = sorted
-        .get(
-            sorted
-                .len()
-                .saturating_mul(CROP_PERCENT)
-                .checked_div(100)
-                .unwrap_or(0),
-        )
-        .copied()
-        .unwrap_or(u32::MAX);
+    // `sorted.len()` is a count, so the euclid quotient of 100 is exact and
+    // needs no checked division to stay total.
+    let cut_index = sorted.len().saturating_mul(CROP_PERCENT).div_euclid(100);
+    let cut = match sorted.get(cut_index) {
+        Some(&cut) => cut,
+        // No sample at the crop position — a run shorter than the crop keeps
+        // every sample, which is what dropping the slowest few percent means
+        // when there are not that many.
+        None => u32::MAX,
+    };
 
     let (mut equal_moments, mut differ_moments) = (Moments::default(), Moments::default());
     for &(is_differ, nanos) in &timed {
@@ -205,8 +209,8 @@ fn measure(compare: fn(&Digest, &Digest) -> bool, classes: &[bool]) -> Measured 
 
 /// `--samples N` (per class) and `--json`, each refusal logged before it
 /// is returned.
-fn parse_args() -> Result<(u32, bool), Box<dyn Error>> {
-    let mut samples: u32 = 1_000_000;
+fn parse_args() -> Result<(usize, bool), Box<dyn Error>> {
+    let mut samples: usize = 1_000_000;
     let mut json = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -228,7 +232,7 @@ fn parse_args() -> Result<(u32, bool), Box<dyn Error>> {
     // The warm-up is discarded from both classes together, so fewer samples
     // per class than it would leave a class with nothing measured, and a
     // t of zero over no data would read as a pass.
-    if usize::try_from(samples).unwrap_or(usize::MAX) < WARM_UP {
+    if samples < WARM_UP {
         lgwks_std::trace::warn!(samples, "digest_timing: fewer samples than the warm-up");
         return Err(format!("--samples must be at least {WARM_UP} per class").into());
     }
@@ -236,7 +240,7 @@ fn parse_args() -> Result<(u32, bool), Box<dyn Error>> {
 }
 
 /// The report, as one JSON line or as four human lines.
-fn render(samples: u32, json: bool, results: [&Measured; 3]) -> String {
+fn render(samples: usize, json: bool, results: [&Measured; 3]) -> String {
     let [digest, control, fold] = results;
     let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     let digest_ok = digest.welch.abs() < THRESHOLD;

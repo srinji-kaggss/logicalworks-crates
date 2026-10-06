@@ -627,7 +627,12 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
         crate::trace::debug!(error = ?refusal.as_ref().err(), "validate_url: returning an error to the caller");
         return refusal;
     };
-    let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    // With no `/`, `?` or `#` after it, the authority is the whole remainder: a
+    // URL may end at its authority, and refusing that would refuse a valid one.
+    let host_end = match authority.find(['/', '?', '#']) {
+        Some(end) => end,
+        None => authority.len(),
+    };
     if authority[..host_end].is_empty() {
         let refusal = Err(Error::InvalidUrl);
         #[cfg(feature = "trace")]
@@ -690,17 +695,28 @@ fn sanitized_target(uri: &str) -> String {
     let Some((scheme, remainder)) = uri.split_once("://") else {
         return String::from("<invalid-target>");
     };
-    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let authority = remainder
-        .get(..authority_end)
-        .unwrap_or_default()
-        .rsplit_once('@')
-        .map_or_else(
-            || remainder.get(..authority_end).unwrap_or_default(),
-            |(_, host)| host,
-        );
-    let suffix = remainder.get(authority_end..).unwrap_or_default();
-    let path = suffix.split(['?', '#']).next().unwrap_or_default();
+    // Both spans below end at a delimiter this function found, or at the end of
+    // the remainder, so each is a slice of it rather than a lookup that could be
+    // absent.
+    let authority_end = match remainder.find(['/', '?', '#']) {
+        Some(end) => end,
+        None => remainder.len(),
+    };
+    let span = &remainder[..authority_end];
+    // Everything before the last `@` of the authority is userinfo and is dropped;
+    // an authority with no `@` is kept whole.
+    let authority = match span.rsplit_once('@') {
+        Some((_userinfo, host)) => host,
+        None => span,
+    };
+    let suffix = &remainder[authority_end..];
+    // The query and the fragment are dropped as well, so the path is the span
+    // before the first of either, or the whole suffix when it has neither.
+    let path_end = match suffix.find(['?', '#']) {
+        Some(end) => end,
+        None => suffix.len(),
+    };
+    let path = &suffix[..path_end];
     let path = if path.is_empty() { "/" } else { path };
     format!("{scheme}://{authority}{path}")
 }
@@ -1407,15 +1423,12 @@ fn next_hop<'body>(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-// Same exception as `task.rs`, for the same reason: these tests stand up a real
-// loopback server on a real thread and sleep to hold it open past the client's
-// read timeout. The ban targets production code that blocks or leaks a thread;
-// here the thread *is* the fixture, and this crate provides no surface that
-// serves a socket from a test.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "loopback test servers need a real thread, and holding one open past a read timeout needs a real sleep"
-)]
+// These tests stand up a real loopback server on a real thread and hold it open
+// past the client's read timeout. The thread is the fixture — this crate
+// provides no surface that serves a socket from a test — and every one of them
+// is named and joined by the test that started it. Their waits are
+// `thread::park_timeout`, the synchronous wait this workspace sanctions in
+// place of the banned `thread::sleep`.
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -1438,9 +1451,29 @@ mod tests {
         Ok(head)
     }
 
-    /// Send one response prefix and hold its socket open until the test releases it.
-    fn serve_held_response(
-        response: Vec<u8>,
+    /// Starts one fixture thread and hands back its handle.
+    ///
+    /// The named builder rather than a bare `thread::spawn`, which this
+    /// workspace bans because a dropped handle hides a thread whose work failed:
+    /// every fixture below is joined by the test that started it, and a refusal
+    /// to start one is reported to that test rather than ignored.
+    fn fixture_thread<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<thread::JoinHandle<T>> {
+        thread::Builder::new()
+            .name("lgwks-http-fixture".to_owned())
+            .spawn(body)
+    }
+
+    /// Accept one socket, optionally send `response`, and hold the socket open
+    /// until the test releases it.
+    ///
+    /// Returns the port, the sender that releases it, and the server thread's
+    /// handle: the thread is the fixture and the test that started it joins it.
+    /// A silent server and a server that answers a prefix are the same fixture
+    /// with and without the reply, so they are built once here.
+    fn serve_held(
+        response: Option<Vec<u8>>,
     ) -> std::io::Result<(
         u16,
         std::sync::mpsc::SyncSender<()>,
@@ -1449,31 +1482,41 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let (release, wait_release) = std::sync::mpsc::sync_channel(1);
-        let handle = thread::spawn(move || -> std::io::Result<()> {
+        let handle = fixture_thread(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
-            let _ = read_request_head(&mut stream)?;
-            stream.write_all(&response)?;
+            if let Some(response) = response {
+                let _ = read_request_head(&mut stream)?;
+                stream.write_all(&response)?;
+            }
             let _released = wait_release.recv();
             Ok(())
-        });
+        })?;
         Ok((port, release, handle))
     }
 
-    /// Accept one socket and keep it open without reading or replying.
-    fn serve_held_socket() -> std::io::Result<(
-        u16,
-        std::sync::mpsc::SyncSender<()>,
-        thread::JoinHandle<std::io::Result<()>>,
-    )> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        let (release, wait_release) = std::sync::mpsc::sync_channel(1);
-        let handle = thread::spawn(move || -> std::io::Result<()> {
-            let (_stream, _) = listener.accept()?;
-            let _released = wait_release.recv();
-            Ok(())
-        });
-        Ok((port, release, handle))
+    /// Asserts that the reply served at `port` is refused at the small ceiling.
+    ///
+    /// The families that use it differ in how the body is framed and in what
+    /// bytes it carries; what the ceiling answers does not depend on either, so
+    /// the refusal and its limit are asserted once here and each family states
+    /// only what its own framing adds.
+    fn assert_refused_at_small_ceiling(port: u16, what: &str) {
+        // Asserts rather than returns: the only way this can fail is that the
+        // answer was not the refusal, and the assertion is what carries that to
+        // the test that called this. A fallible signature here would hand the
+        // caller an error it has to propagate before the test could say what it
+        // saw.
+        let answer = get_with(
+            &format!("http://127.0.0.1:{port}/"),
+            &ceiling(SMALL_CEILING),
+        );
+        assert!(
+            matches!(
+                answer,
+                Err(Error::BodyTooLarge { limit }) if limit == SMALL_CEILING
+            ),
+            "{what} must be refused at the ceiling for its size, not its framing or its encoding; got {answer:?}"
+        );
     }
 
     /// Serve `replies` canned responses, then exit. Returns the bound port.
@@ -1487,13 +1530,13 @@ mod tests {
     ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let handle = thread::spawn(move || -> std::io::Result<()> {
+        let handle = fixture_thread(move || -> std::io::Result<()> {
             for (status, body) in replies {
                 let (mut stream, _) = listener.accept()?;
                 serve_one(&mut stream, status, body)?;
             }
             Ok(())
-        });
+        })?;
         Ok((port, handle))
     }
 
@@ -1519,20 +1562,27 @@ mod tests {
                 break;
             }
         }
-        let header_end = head
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
+        let header_end = match head.windows(4).position(|w| w == b"\r\n\r\n") {
             // `position` reports the delimiter's first byte, so the header end is
-            // four past it; in a 4096-byte buffer that cannot approach `usize::MAX`.
-            .map(|position| position.saturating_add(4))
-            .unwrap_or(head.len());
+            // four past it; in a 4096-byte buffer that cannot approach
+            // `usize::MAX`.
+            Some(position) => position.saturating_add(4),
+            // No delimiter in what has been read: the header is everything read.
+            None => head.len(),
+        };
         let text = String::from_utf8_lossy(&head[..header_end]);
-        let content_length = text
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .find(|entry| entry.0.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
+        // `Content-Length` is the only length this fixture honours. A request
+        // without a parsable one declares no body — which is what a GET carries
+        // — so the accumulator starts at zero and a header replaces it.
+        let mut content_length = 0_usize;
+        for (name, value) in text.lines().filter_map(|line| line.split_once(':')) {
+            if name.eq_ignore_ascii_case("content-length") {
+                match value.trim().parse::<usize>() {
+                    Ok(declared) => content_length = declared,
+                    Err(_) => content_length = 0,
+                }
+            }
+        }
         // `header_end` is either the delimiter's end or the whole buffer, so it
         // never exceeds `head.len()`.
         let mut received = head.len().saturating_sub(header_end);
@@ -1574,7 +1624,7 @@ mod tests {
     ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let handle = thread::spawn(move || -> std::io::Result<()> {
+        let handle = fixture_thread(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
             let mut request = vec![0u8; 4096];
             let mut head = Vec::new();
@@ -1586,7 +1636,7 @@ mod tests {
                 }
             }
             stream.write_all(&reply)
-        });
+        })?;
         Ok((port, handle))
     }
 
@@ -1744,24 +1794,24 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let destination = TcpListener::bind("127.0.0.1:0")?;
         let destination_port = destination.local_addr()?.port();
-        let destination_server = thread::spawn(move || -> std::io::Result<String> {
+        let destination_server = fixture_thread(move || -> std::io::Result<String> {
             let (mut stream, _) = destination.accept()?;
             let request = read_request_head(&mut stream)?;
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
             )?;
             Ok(String::from_utf8_lossy(&request).into_owned())
-        });
+        })?;
         let origin = TcpListener::bind("127.0.0.1:0")?;
         let origin_port = origin.local_addr()?.port();
-        let origin_server = thread::spawn(move || -> std::io::Result<()> {
+        let origin_server = fixture_thread(move || -> std::io::Result<()> {
             let (mut stream, _) = origin.accept()?;
             let _ = read_request_head(&mut stream)?;
             let reply = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination_port}/final?token=hidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
             stream.write_all(reply.as_bytes())
-        });
+        })?;
         let options = quiet()
             .header("Authorization", "Bearer secret")
             .redirect_policy(RedirectPolicy::FollowAtMost(1));
@@ -1800,7 +1850,7 @@ mod tests {
     fn redirect_loop_refuses_at_the_configured_limit() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let server = thread::spawn(move || -> std::io::Result<usize> {
+        let server = fixture_thread(move || -> std::io::Result<usize> {
             let mut count = 0;
             for _ in 0..=2 {
                 let (mut stream, _) = listener.accept()?;
@@ -1812,7 +1862,7 @@ mod tests {
                 count += 1;
             }
             Ok(count)
-        });
+        })?;
         let result = get_with(
             &format!("http://127.0.0.1:{port}/loop"),
             &quiet().redirect_policy(RedirectPolicy::FollowAtMost(2)),
@@ -1842,7 +1892,7 @@ mod tests {
     fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let server = thread::spawn(move || -> std::io::Result<usize> {
+        let server = fixture_thread(move || -> std::io::Result<usize> {
             let mut served = 0;
             // Nonblocking accept so the server stops once the client gives up,
             // rather than waiting for hops that will never come.
@@ -1852,14 +1902,14 @@ mod tests {
                 let mut stream = match listener.accept() {
                     Ok((stream, _)) => stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
+                        thread::park_timeout(Duration::from_millis(5));
                         continue;
                     }
                     Err(error) => return Err(error),
                 };
                 stream.set_nonblocking(false)?;
                 let _ = read_request_head(&mut stream)?;
-                thread::sleep(Duration::from_millis(200));
+                thread::park_timeout(Duration::from_millis(200));
                 let reply = format!(
                     "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/hop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 );
@@ -1872,7 +1922,7 @@ mod tests {
                 served += 1;
             }
             Ok(served)
-        });
+        })?;
         let started = std::time::Instant::now();
         let result = get_with(
             &format!("http://127.0.0.1:{port}/hop"),
@@ -1911,18 +1961,18 @@ mod tests {
     fn a_deadline_bounds_a_trickled_body() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let server = thread::spawn(move || -> std::io::Result<()> {
+        let server = fixture_thread(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
             let _ = read_request_head(&mut stream)?;
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n")?;
             for _ in 0..64 {
-                thread::sleep(Duration::from_millis(50));
+                thread::park_timeout(Duration::from_millis(50));
                 if stream.write_all(b"x").is_err() {
                     break;
                 }
             }
             Ok(())
-        });
+        })?;
         let started = std::time::Instant::now();
         let result = get_with(
             &format!("http://127.0.0.1:{port}/"),
@@ -2019,7 +2069,7 @@ mod tests {
     ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<Vec<String>>>)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let handle = thread::spawn(move || -> std::io::Result<Vec<String>> {
+        let handle = fixture_thread(move || -> std::io::Result<Vec<String>> {
             let mut heads = Vec::new();
             for reply in replies {
                 let (mut stream, _) = listener.accept()?;
@@ -2028,7 +2078,7 @@ mod tests {
                 stream.write_all(reply.as_bytes())?;
             }
             Ok(heads)
-        });
+        })?;
         Ok((port, handle))
     }
 
@@ -2243,31 +2293,24 @@ mod tests {
         Ok(())
     }
 
+    /// Asserts `url` is refused as an invalid URL, before any dial.
+    fn assert_refused_before_dialing(url: &str) {
+        assert!(
+            matches!(get_with(url, &quiet()), Err(Error::InvalidUrl)),
+            "{url:?} must be refused as an invalid URL before any dial"
+        );
+    }
+
     #[test]
     fn rejects_non_http_urls_before_dialing() {
-        assert!(matches!(
-            get_with("not a url", &quiet()),
-            Err(Error::InvalidUrl)
-        ));
-        assert!(matches!(
-            get_with("/relative/path", &quiet()),
-            Err(Error::InvalidUrl)
-        ));
-        assert!(matches!(
-            get_with("ftp://127.0.0.1/file", &quiet()),
-            Err(Error::InvalidUrl)
-        ));
+        assert_refused_before_dialing("not a url");
+        assert_refused_before_dialing("/relative/path");
+        assert_refused_before_dialing("ftp://127.0.0.1/file");
         // Authority-less absolute URIs pass the scheme check but are not valid
         // request targets; ureq refuses them with a message that embeds the
         // raw text, so they must be rejected here instead.
-        assert!(matches!(
-            get_with("http:user:SECRET@host", &quiet()),
-            Err(Error::InvalidUrl)
-        ));
-        assert!(matches!(
-            get_with("https://", &quiet()),
-            Err(Error::InvalidUrl)
-        ));
+        assert_refused_before_dialing("http:user:SECRET@host");
+        assert_refused_before_dialing("https://");
     }
 
     #[test]
@@ -2295,7 +2338,7 @@ mod tests {
         let port = listener.local_addr()?.port();
         // The recorder returns the request it saw, so a socket refusal in the
         // thread reaches the test through the join below instead of panicking.
-        let handle = thread::spawn(move || -> std::io::Result<String> {
+        let handle = fixture_thread(move || -> std::io::Result<String> {
             let (mut stream, _) = listener.accept()?;
             let mut request = vec![0u8; 4096];
             let mut head = Vec::new();
@@ -2310,7 +2353,7 @@ mod tests {
             let reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
             stream.write_all(reply.as_bytes())?;
             Ok(text)
-        });
+        })?;
         let options = quiet()
             .header("Authorization", "Bearer test-token")
             .idempotency_key("old-operation")
@@ -2352,11 +2395,11 @@ mod tests {
         // dial is not what fails) and the reply must never come, leaving the
         // client's read timeout as the only thing that can end the request.
         let (release, released) = std::sync::mpsc::sync_channel(1);
-        let handle = thread::spawn(move || -> std::io::Result<()> {
+        let handle = fixture_thread(move || -> std::io::Result<()> {
             let (_stream, _) = listener.accept()?;
             let _released = released.recv();
             Ok(())
-        });
+        })?;
         let options = quiet().timeout(Duration::from_millis(200));
         let Err(error) = get_with(&format!("http://127.0.0.1:{port}/"), &options) else {
             return Err("a silent server must hit the read timeout".into());
@@ -2392,7 +2435,7 @@ mod tests {
     /// A stalled TLS handshake is reported at the connect stage with timeout class.
     #[test]
     fn tls_handshake_timeout_preserves_connect_stage() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, release, server) = serve_held_socket()?;
+        let (port, release, server) = serve_held(None)?;
         let result = get_with(
             &format!("https://127.0.0.1:{port}/"),
             &quiet().timeout(Duration::from_millis(150)),
@@ -2415,7 +2458,7 @@ mod tests {
     fn malformed_tls_handshake_preserves_tls_stage() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let server = thread::spawn(move || -> std::io::Result<()> {
+        let server = fixture_thread(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
             // Read the ClientHello before answering and drain until the client
             // hangs up: closing a socket with unread bytes sends RST, and a
@@ -2427,7 +2470,7 @@ mod tests {
             // How the client hangs up (FIN or reset) is not under test.
             let _hung_up = std::io::copy(&mut stream, &mut std::io::sink());
             Ok(())
-        });
+        })?;
         let result = get_with(
             &format!("https://127.0.0.1:{port}/"),
             &quiet().timeout(Duration::from_secs(2)),
@@ -2449,7 +2492,7 @@ mod tests {
     /// A stalled request-body write reports the send stage and timeout class.
     #[test]
     fn request_body_timeout_preserves_send_stage() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, release, server) = serve_held_socket()?;
+        let (port, release, server) = serve_held(None)?;
         let body = vec![b'x'; 32 * 1024 * 1024];
         let result = post_with(
             &format!("http://127.0.0.1:{port}/"),
@@ -2477,9 +2520,9 @@ mod tests {
     /// A body timeout keeps its body phase and timeout class after headers land.
     #[test]
     fn body_timeout_preserves_stage_and_class() -> Result<(), Box<dyn std::error::Error>> {
-        let (port, release, server) = serve_held_response(
+        let (port, release, server) = serve_held(Some(
             b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\n\r\nx".to_vec(),
-        )?;
+        ))?;
         let result = get_with(
             &format!("http://127.0.0.1:{port}/"),
             &quiet().timeout(Duration::from_millis(150)),
@@ -2511,7 +2554,7 @@ mod tests {
         )
         .into_bytes();
         response.extend(std::iter::repeat_n(b'x', limit));
-        let (port, release, server) = serve_held_response(response)?;
+        let (port, release, server) = serve_held(Some(response))?;
         let result = get_with(
             &format!("http://127.0.0.1:{port}/"),
             &previewing(limit).timeout(Duration::from_millis(150)),
@@ -2832,19 +2875,7 @@ mod tests {
         // Two 64-byte chunks: 128 bytes of body under a 64-byte ceiling.
         const CHUNKED: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n40\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n40\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\r\n0\r\n\r\n";
         let (port, server) = serve_raw(CHUNKED.to_vec())?;
-        let Err(error) = get_with(
-            &format!("http://127.0.0.1:{port}/"),
-            &ceiling(SMALL_CEILING),
-        ) else {
-            return Err("a chunked body past the ceiling must be refused".into());
-        };
-        assert_eq!(
-            error,
-            Error::BodyTooLarge {
-                limit: SMALL_CEILING
-            },
-            "the ceiling is enforced against the decoded body, not the framing"
-        );
+        assert_refused_at_small_ceiling(port, "a chunked body past the ceiling");
         join_server(server)?;
         Ok(())
     }
@@ -2857,19 +2888,7 @@ mod tests {
         let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
         reply.extend_from_slice(filler(SMALL_CEILING.saturating_mul(2)).as_bytes());
         let (port, server) = serve_raw(reply)?;
-        let Err(error) = get_with(
-            &format!("http://127.0.0.1:{port}/"),
-            &ceiling(SMALL_CEILING),
-        ) else {
-            return Err("a close-delimited body past the ceiling must be refused".into());
-        };
-        assert_eq!(
-            error,
-            Error::BodyTooLarge {
-                limit: SMALL_CEILING
-            },
-            "a body with no declared length is bounded by the read, not by a header"
-        );
+        assert_refused_at_small_ceiling(port, "a close-delimited body past the ceiling");
         join_server(server)?;
         Ok(())
     }
@@ -2931,19 +2950,7 @@ mod tests {
         let mut reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
         reply.extend_from_slice(&vec![0xFF_u8; SMALL_CEILING.saturating_mul(2)]);
         let (port, server) = serve_raw(reply)?;
-        let Err(error) = get_with(
-            &format!("http://127.0.0.1:{port}/"),
-            &ceiling(SMALL_CEILING),
-        ) else {
-            return Err("a multi-byte body past the ceiling must be refused".into());
-        };
-        assert_eq!(
-            error,
-            Error::BodyTooLarge {
-                limit: SMALL_CEILING
-            },
-            "the ceiling counts bytes, whatever they encode"
-        );
+        assert_refused_at_small_ceiling(port, "a multi-byte body past the ceiling");
         join_server(server)?;
         Ok(())
     }

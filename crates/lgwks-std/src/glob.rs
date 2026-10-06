@@ -491,21 +491,26 @@ fn class_bounds(chars: &[char], next_close: &[usize], opening: usize) -> (bool, 
     if chars.get(closing_search) == Some(&']') {
         closing_search = closing_search.saturating_add(1);
     }
-    let close = next_close
-        .get(closing_search)
-        .copied()
-        .unwrap_or(chars.len());
+    // `next_close` holds one entry per scalar plus a terminal entry carrying the
+    // input's own length, so this offset names an entry even when no `]` is
+    // left; that entry is how an unclosed class says so. A table without it
+    // names the same end of input.
+    let close = match next_close.get(closing_search) {
+        Some(&close) => close,
+        None => chars.len(),
+    };
     (negated, content, close)
 }
 
 /// Converts a scalar offset to the public UTF-8 byte-offset convention.
+///
+/// An offset past the end of the input measures the end of the input, which is
+/// the nearest coordinate a past-the-end offset has: the byte offset of a
+/// scalar that is not there is the input's own length.
 fn byte_offset(chars: &[char], scalar_offset: usize) -> usize {
     chars
-        .get(..scalar_offset)
-        .unwrap_or(chars)
-        .iter()
-        .map(|ch| ch.len_utf8())
-        .sum()
+        .get(..scalar_offset.min(chars.len()))
+        .map_or(0, |prefix| prefix.iter().map(|ch| ch.len_utf8()).sum())
 }
 
 /// Compiles the members of one class into intervals sorted for binary lookup.
@@ -603,7 +608,11 @@ fn range_bucket(range: ScalarRange, shift: u32) -> usize {
     let start = u64::from(u32::from(range.start));
     let end = u64::from(u32::from(range.end));
     let key = (start << 21) | end;
-    usize::from(u8::try_from((key >> shift) & 0xff).unwrap_or(0))
+    // The bucket is one byte of the key, and reading that byte is total where a
+    // checked conversion would carry a refusal arm for a mask this function has
+    // already applied: the byte at offset zero of the shifted key *is* the
+    // masked byte.
+    usize::from((key >> shift).to_le_bytes()[0])
 }
 
 /// Advances one compiled token over one path using the rolling previous row.
@@ -833,31 +842,44 @@ mod tests {
         );
     }
 
+    /// Asserts that strict compilation refuses `pattern` with `kind` at
+    /// `byte_offset`.
+    ///
+    /// One helper rather than a copy per malformed pattern: the refusals below
+    /// differ only in the pattern, the kind and the message, and a copy per case
+    /// is how one of them drifts away from the others.
+    fn assert_compile_refusal(
+        pattern: &str,
+        kind: PatternErrorKind,
+        byte_offset: usize,
+        message: &str,
+    ) {
+        assert_eq!(
+            GlobPattern::compile(pattern).map(|_| ()),
+            Err(PatternError { kind, byte_offset }),
+            "{message}"
+        );
+    }
+
     #[test]
     fn checked_compilation_reports_each_malformed_pattern_class() {
-        assert_eq!(
-            GlobPattern::compile("[abc").map(|_| ()),
-            Err(PatternError {
-                kind: PatternErrorKind::UnclosedClass,
-                byte_offset: 0,
-            }),
-            "strict compilation reports an unclosed class offset"
+        assert_compile_refusal(
+            "[abc",
+            PatternErrorKind::UnclosedClass,
+            0,
+            "strict compilation reports an unclosed class offset",
         );
-        assert_eq!(
-            GlobPattern::compile("[]").map(|_| ()),
-            Err(PatternError {
-                kind: PatternErrorKind::UnclosedClass,
-                byte_offset: 0,
-            }),
-            "strict compilation reports the unclosed leading-bracket class"
+        assert_compile_refusal(
+            "[]",
+            PatternErrorKind::UnclosedClass,
+            0,
+            "strict compilation reports the unclosed leading-bracket class",
         );
-        assert_eq!(
-            GlobPattern::compile("[z-a]").map(|_| ()),
-            Err(PatternError {
-                kind: PatternErrorKind::DescendingRange,
-                byte_offset: 0,
-            }),
-            "strict compilation reports a descending range"
+        assert_compile_refusal(
+            "[z-a]",
+            PatternErrorKind::DescendingRange,
+            0,
+            "strict compilation reports a descending range",
         );
         assert!(
             !matches("[z-a]", "a"),
@@ -1028,7 +1050,14 @@ mod tests {
                         let path = format!("a/{}b7z", "x/".repeat(index));
                         shared.is_match_with(&path, &mut scratch)
                     }) {
-                    Ok(joined) => joined.join().unwrap_or(false),
+                    // A thread that panicked has not answered the question, so
+                    // its panic is re-raised here rather than read as a
+                    // non-match; the assertion below then fails with the
+                    // panicking thread's own message instead of a quiet false.
+                    Ok(joined) => match joined.join() {
+                        Ok(matched) => matched,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    },
                     Err(_) => false,
                 }
             })

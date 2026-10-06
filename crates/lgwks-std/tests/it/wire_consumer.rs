@@ -76,19 +76,14 @@ fn reports_effective_rkyv_primitive_format() -> Result<(), WireError> {
         "format identifies the compatibility series, not a patch pin"
     );
     let archived_usize_bytes = size_of::<lgwks_std::wire::rkyv::primitive::ArchivedUsize>();
-    let expected_pointer_width_bits = match archived_usize_bytes {
-        2 => 16,
-        4 => 32,
-        8 => 64,
-        _ => u8::MAX,
-    };
+    let expected_pointer_width_bits = archived_usize_bytes.saturating_mul(8);
     assert_eq!(
         format.pointer_width_bits, expected_pointer_width_bits,
         "reported pointer width matches the effective archived alias"
     );
     assert_eq!(
         format.archived_u32_alignment,
-        u8::try_from(align_of::<lgwks_std::wire::rkyv::primitive::ArchivedU32>()).unwrap_or(0),
+        align_of::<lgwks_std::wire::rkyv::primitive::ArchivedU32>(),
         "reported alignment matches the effective archived primitive"
     );
     Ok(())

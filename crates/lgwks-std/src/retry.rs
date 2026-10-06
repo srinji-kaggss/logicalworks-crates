@@ -34,6 +34,7 @@
 //! index. The one-word jitter mapping is deterministic and modulo-biased; it
 //! does not claim uniform sampling across the full delay range.
 
+use std::num::NonZeroU128;
 use std::time::Duration;
 
 /// How a caller spaces repeated attempts of one fallible operation.
@@ -105,11 +106,24 @@ impl RetryPolicy {
         if backoff_nanos == 0 {
             return Duration::ZERO;
         }
-        let jitter_range = backoff_nanos.saturating_add(1);
-        let jitter = u128::from(jitter_entropy)
-            .checked_rem(jitter_range)
-            .unwrap_or(0);
-        duration_from_nanos(backoff_nanos.saturating_sub(jitter))
+        // The jitter window is inclusive of zero, so it is the backoff plus one.
+        // `NonZeroU128` carries that: a window of zero would be a backoff of
+        // zero, which returned above, and the saturating add cannot wrap to
+        // zero, so the divisor a remainder is taken over exists by type rather
+        // than by a checked call whose refusal arm would have to be answered
+        // with a guess.
+        let Some(jitter_window) = NonZeroU128::new(backoff_nanos.saturating_add(1)) else {
+            return Duration::ZERO;
+        };
+        let jitter = match u128::from(jitter_entropy).checked_rem(jitter_window.get()) {
+            Some(remainder) => backoff_nanos.saturating_sub(remainder),
+            // A window that admits no remainder admits no entropy either, so
+            // none is placed and the full backoff stands. The window above is
+            // non-zero, which is what keeps this arm unreachable for every
+            // policy a caller can configure.
+            None => backoff_nanos,
+        };
+        duration_from_nanos(jitter)
     }
 
     /// Whether `elapsed` has consumed the total `deadline` budget.
@@ -150,10 +164,41 @@ fn capped_backoff_nanos(base_nanos: u128, cap_nanos: u128, attempt: u32) -> u128
     }
 }
 
-/// Converts nanoseconds within `Duration`'s representable range to a duration.
+/// Nanoseconds in one second, the split point of [`duration_from_nanos`].
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+/// The largest subsecond nanosecond count `Duration` can carry.
+const MAX_SUBSECOND_NANOS: u32 = 999_999_999;
+
+/// Converts nanoseconds to a `Duration`, clamped to `Duration`'s own range.
+///
+/// `Duration` names a `u64` of whole seconds and a `u32` of subsecond
+/// nanoseconds, so a nanosecond count splits into a whole-second part and a
+/// remainder. Each part is converted through its own bound: a whole-second
+/// count above `u64::MAX` clamps the whole duration to `Duration::MAX`, and a
+/// remainder above the subsecond field's range clamps to the largest
+/// subsecond value the field can carry. Neither clamp substitutes a plausible
+/// number for a missing one — each states the nearest duration the type can
+/// name — and every nanosecond count this module produces is at most
+/// `max_delay`, which is already a `Duration`, so a policy-configured caller
+/// never reaches either.
 fn duration_from_nanos(nanos: u128) -> Duration {
-    let seconds = u64::try_from(nanos.checked_div(1_000_000_000).unwrap_or(0)).unwrap_or(u64::MAX);
-    let subsecond_nanos = u32::try_from(nanos.checked_rem(1_000_000_000).unwrap_or(0)).unwrap_or(0);
+    let whole_seconds = match nanos.checked_div(NANOS_PER_SECOND) {
+        Some(whole_seconds) => whole_seconds,
+        None => return Duration::MAX,
+    };
+    let seconds = match u64::try_from(whole_seconds) {
+        Ok(seconds) => seconds,
+        Err(_) => return Duration::MAX,
+    };
+    let remainder = match nanos.checked_rem(NANOS_PER_SECOND) {
+        Some(remainder) => remainder,
+        None => return Duration::MAX,
+    };
+    let subsecond_nanos = match u32::try_from(remainder) {
+        Ok(subsecond_nanos) => subsecond_nanos,
+        Err(_) => MAX_SUBSECOND_NANOS,
+    };
     Duration::new(seconds, subsecond_nanos)
 }
 

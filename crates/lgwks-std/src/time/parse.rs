@@ -6,7 +6,7 @@
 
 use std::time::SystemTime;
 
-use super::calendar::{days_from_civil, days_in_month};
+use super::calendar::{days_from_civil, try_days_in_month};
 use super::error::{Field, ParseError};
 use super::format::from_unix_parts;
 
@@ -109,7 +109,18 @@ fn parse_month(bytes: &[u8]) -> Result<u32, ParseError> {
 /// Parses the 2-digit day of month for the given year and month.
 fn parse_day(bytes: &[u8], year: i64, month: u32) -> Result<u32, ParseError> {
     let day_val = parse_digit_field(bytes, 8, 2, Field::Day)?;
-    check_range(Field::Day, day_val, 1, days_in_month(year, month), 8)?;
+    // `parse_month` has already refused every month outside `1..=12`, so the
+    // calendar answers this one; the refusal below is what a caller sees if a
+    // future month ever falls outside it, and it names the month rather than
+    // reporting a zero-length month as a day bound.
+    let month_days = try_days_in_month(year, month).ok_or(ParseError::OutOfRange {
+        field: Field::Month,
+        value: month,
+        min: 1,
+        max: 12,
+        at: 5,
+    })?;
+    check_range(Field::Day, day_val, 1, month_days, 8)?;
     Ok(day_val)
 }
 
@@ -176,29 +187,31 @@ fn parse_time(bytes: &[u8]) -> Result<(u32, u32, u32), ParseError> {
     Ok((hour, minute, second))
 }
 
-/// Computes scaled nanoseconds from variable fractional digit slice.
+/// Computes scaled nanoseconds from a variable fractional digit slice.
 ///
-/// `digits` is `1..=9`. Position `digit_idx` is read only while
-/// `digit_idx < digits`, so every index is inside the fractional run the caller
-/// measured; a byte that is not there contributes `0`, which is exactly what
-/// left-aligning a short fraction means (`0.12` is `120_000_000` ns). Nine
-/// digits scale to at most `999_999_999`, so neither `saturating_*` below can
-/// saturate.
-fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> u32 {
+/// `digits` is `1..=9` and names a run the caller has already measured, so
+/// every position below `digits` is inside the input and a byte that is not
+/// there is refused rather than read as a zero. The positions from `digits`
+/// to nine are the fraction's right-aligned tail: a short fraction
+/// contributes zeros, which is exactly what left-aligning means (`0.12` is
+/// `120_000_000` ns). Nine digits scale to at most `999_999_999`, so neither
+/// `saturating_*` below can saturate.
+fn compute_fraction(bytes: &[u8], start: usize, digits: usize) -> Result<u32, ParseError> {
     let mut scaled = 0u32;
     for digit_idx in 0..9 {
         let digit = if digit_idx < digits {
-            let byte = bytes
-                .get(start.saturating_add(digit_idx))
-                .copied()
-                .unwrap_or(b'0');
+            let at = start.saturating_add(digit_idx);
+            let byte = *bytes.get(at).ok_or(ParseError::TooShort {
+                len: bytes.len(),
+                at,
+            })?;
             u32::from(byte.saturating_sub(b'0'))
         } else {
             0
         };
         scaled = scaled.saturating_mul(10).saturating_add(digit);
     }
-    scaled
+    Ok(scaled)
 }
 
 /// Collects and scales fractional digits after the decimal dot.
@@ -220,13 +233,15 @@ fn parse_fraction_digits(
     // `bytes.len()`.
     let digits = cursor.saturating_sub(start);
     if digits == 0 || digits > 9 {
-        Err(ParseError::FractionWidth {
+        let refusal = Err(ParseError::FractionWidth {
             digits,
             at: dot_pos,
-        })
-    } else {
-        Ok(compute_fraction(bytes, start, digits))
+        });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "parse_fraction_digits: refusing a fraction that is empty or over-wide");
+        return refusal;
     }
+    compute_fraction(bytes, start, digits)
 }
 
 /// Parses optional fractional nanoseconds if present.

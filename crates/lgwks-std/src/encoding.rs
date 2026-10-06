@@ -17,58 +17,60 @@ pub mod base64 {
     /// Emits the first two characters of a quantum.
     ///
     /// The first carries the top six bits of `b0`; the second carries the two
-    /// low bits of `b0` above the top four bits of `b1`. Both indices are six
-    /// bits wide by construction, so they always index inside `ALPHABET`.
-    fn encode_first_pair(b0: u8, b1: u8, out: &mut String) {
+    /// low bits of `b0` and, when the quantum holds a second byte, the top four
+    /// bits of `b1` above them. A short final quantum has no second byte, so
+    /// those four bits are zero and the sextet is the first byte's alone. Both
+    /// indices are six bits wide by construction, so they always index inside
+    /// `ALPHABET`.
+    fn encode_first_pair(b0: u8, b1: Option<u8>, out: &mut String) {
+        let second_sextet = match b1 {
+            Some(first) => ((b0 & 0x03) << 4) | (first >> 4),
+            None => (b0 & 0x03) << 4,
+        };
         out.push(char::from(ALPHABET[usize::from(b0 >> 2)]));
-        out.push(char::from(
-            ALPHABET[usize::from(((b0 & 0x03) << 4) | (b1 >> 4))],
-        ));
+        out.push(char::from(ALPHABET[usize::from(second_sextet)]));
     }
 
     /// Emits the third character of a quantum, or `=` when the quantum holds
     /// only one significant byte.
     ///
-    /// `has_b1` distinguishes a real second byte from the zero byte the caller
-    /// substituted for a short final chunk; the emitted sextet is four bits of
-    /// `b1` over the top two bits of `b2`.
-    fn encode_third_char(b1: u8, b2: u8, has_b1: bool, out: &mut String) {
-        if has_b1 {
-            out.push(char::from(
-                ALPHABET[usize::from(((b1 & 0x0f) << 2) | (b2 >> 6))],
-            ));
-        } else {
-            out.push('=');
-        }
+    /// The emitted sextet is the low four bits of `b1` above the top two bits
+    /// of `b2`; a quantum that ends after `b1` has no `b2`, so those two bits
+    /// are zero rather than read from a byte that is not there.
+    fn encode_third_char(b1: Option<u8>, b2: Option<u8>, out: &mut String) {
+        let sextet = match (b1, b2) {
+            (Some(first), Some(second)) => ((first & 0x0f) << 2) | (second >> 6),
+            (Some(first), None) => (first & 0x0f) << 2,
+            (None, _) => {
+                out.push('=');
+                return;
+            }
+        };
+        out.push(char::from(ALPHABET[usize::from(sextet)]));
     }
 
     /// Emits the fourth character of a quantum, or `=` when the quantum holds
     /// fewer than three significant bytes.
     ///
-    /// `has_b2` is the caller's statement that a real third byte existed; the
-    /// six bits emitted are the low bits of `b2` alone.
-    fn encode_fourth_char(b2: u8, has_b2: bool, out: &mut String) {
-        if has_b2 {
-            out.push(char::from(ALPHABET[usize::from(b2 & 0x3f)]));
-        } else {
-            out.push('=');
+    /// The six bits emitted are the low bits of `b2` alone. A `b2` with no `b1`
+    /// is not a shape the encoder produces, so it is reported as no third byte
+    /// rather than as data.
+    fn encode_fourth_char(b2: Option<u8>, out: &mut String) {
+        match b2 {
+            Some(second) => out.push(char::from(ALPHABET[usize::from(second & 0x3f)])),
+            None => out.push('='),
         }
     }
 
-    /// Encodes one chunk of at most three input bytes as its four-character
-    /// quantum.
+    /// Emits the four characters of one quantum from the bytes it carries.
     ///
-    /// Missing bytes are read as zero and then masked out by the `has_b1` and
-    /// `has_b2` flags, so a short final chunk produces `=` padding instead of
-    /// fabricated data. `chunk` must be non-empty; `encode` guarantees that by
-    /// iterating with `chunks(3)`.
-    fn encode_chunk_chars(chunk: &[u8], out: &mut String) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
+    /// `b1` and `b2` name the significant bytes: a short final quantum passes
+    /// `None` for the ones it does not have, so a missing byte is never read as
+    /// a zero that could reach the output.
+    fn encode_quantum(b0: u8, b1: Option<u8>, b2: Option<u8>, out: &mut String) {
         encode_first_pair(b0, b1, out);
-        encode_third_char(b1, b2, chunk.len() > 1, out);
-        encode_fourth_char(b2, chunk.len() > 2, out);
+        encode_third_char(b1, b2, out);
+        encode_fourth_char(b2, out);
     }
 
     /// Encodes bytes as padded standard base64.
@@ -80,8 +82,19 @@ pub mod base64 {
         // saturate; `saturating_mul` states that bound instead of wrapping.
         let capacity = bytes.len().div_ceil(3).saturating_mul(4);
         let mut out = String::with_capacity(capacity);
-        for chunk in bytes.chunks(3) {
-            encode_chunk_chars(chunk, &mut out);
+        // Whole quanta and the short tail are separate shapes, so a short final
+        // quantum is named rather than measured: an input that is a whole
+        // number of quanta has no tail, and the empty input is therefore the
+        // empty string rather than one padded quantum.
+        let (whole, tail) = bytes.as_chunks::<3>();
+        for &[b0, b1, b2] in whole {
+            encode_quantum(b0, Some(b1), Some(b2), &mut out);
+        }
+        // The tail's bytes past the first are optional rather than defaulted,
+        // so the one-, two- and three-byte shapes share this call and a missing
+        // byte becomes padding instead of a zero that could reach the output.
+        if let Some(&first) = tail.first() {
+            encode_quantum(first, tail.get(1).copied(), tail.get(2).copied(), &mut out);
         }
         out
     }
@@ -245,11 +258,11 @@ pub mod base64 {
         check_interior_padding(body)?;
 
         // Three bytes out per four characters in. `check_base64_quantum` has
-        // already proved the length is a multiple of four, so the quotient is
-        // exact; the divisor is the literal 4 and cannot be zero, and a slice
-        // length is bounded by `isize::MAX`, so the product cannot saturate.
-        // The zero fallback is unreachable and only ever costs the reservation.
-        let capacity = input.len().checked_div(4).unwrap_or(0).saturating_mul(3);
+        // already proved the length is a multiple of four, so the ceiling
+        // division is exact; the divisor is the literal 4 and cannot be zero,
+        // and a slice length is bounded by `isize::MAX`, so the product cannot
+        // saturate.
+        let capacity = input.len().div_ceil(4).saturating_mul(3);
         let mut out = Vec::with_capacity(capacity);
         decode_body_bytes(body, &mut out)?;
         Ok(out)
@@ -359,13 +372,17 @@ pub mod percent {
 
     /// Decodes the two hex characters of one `%` escape.
     ///
+    /// The characters are arguments rather than a slice because the caller
+    /// destructures the two-byte window it took from the input; naming them
+    /// keeps a short window unexpressible instead of indexed.
+    ///
     /// Invalid-digit offsets point to the offending original-input byte,
     /// including both bytes after the `%` in that same coordinate space.
-    fn decode_escape_pair(escape: &[u8], percent_at: usize) -> Result<u8, DecodeError> {
-        let high = crate::hex::decode_nibble(escape[0]).ok_or(DecodeError::NotHexDigit {
+    fn decode_escape_pair(high: u8, low: u8, percent_at: usize) -> Result<u8, DecodeError> {
+        let high = crate::hex::decode_nibble(high).ok_or(DecodeError::NotHexDigit {
             at: percent_at.saturating_add(1),
         })?;
-        let low = crate::hex::decode_nibble(escape[1]).ok_or(DecodeError::NotHexDigit {
+        let low = crate::hex::decode_nibble(low).ok_or(DecodeError::NotHexDigit {
             at: percent_at.saturating_add(2),
         })?;
         Ok((high << 4) | low)
@@ -384,10 +401,17 @@ pub mod percent {
             *i = i.saturating_add(1);
             Ok(())
         } else {
-            let escape = bytes
-                .get(i.saturating_add(1)..i.saturating_add(3))
-                .ok_or(DecodeError::TruncatedEscape { at: *i })?;
-            let byte_val = decode_escape_pair(escape, *i)?;
+            let escape = i.saturating_add(1)..i.saturating_add(3);
+            // One pattern, one refusal: a window that does not exist and a
+            // window holding fewer than two characters are the same defect —
+            // a `%` without two digits after it — so both fall to one arm.
+            let Some(&[high, low]) = bytes.get(escape) else {
+                let refusal = Err(DecodeError::TruncatedEscape { at: *i });
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "decode_step: refusing an escape without two characters");
+                return refusal;
+            };
+            let byte_val = decode_escape_pair(high, low, *i)?;
             out.push(byte_val);
             *i = i.saturating_add(3);
             Ok(())

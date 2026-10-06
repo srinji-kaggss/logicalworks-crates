@@ -20,6 +20,25 @@ use seeded_sweep::{
     next_seed,
 };
 
+/// A table position, as the `usize` these sweeps index their own tables with.
+///
+/// Every table here holds a handful of entries, so a position's low four bytes
+/// are the position; reading them is total where a checked conversion would carry
+/// a refusal arm for a bound the table's own length states.
+fn table_index(position: u64) -> usize {
+    let bytes = position.to_le_bytes();
+    usize::from(bytes[0]) | (usize::from(bytes[1]) << 8)
+}
+
+/// A table's length as the `u64` a seeded remainder is taken over.
+///
+/// The mirror of [`table_index`]: a length's low eight bytes are the length, so
+/// the remainder below a table's own length is the same draw either way.
+fn draw_bound(length: usize) -> u64 {
+    let bytes = length.to_le_bytes();
+    u64::from(bytes[0]) | (u64::from(bytes[1]) << 8)
+}
+
 /// The reference's token set, mirroring the documented dialect without sharing
 /// the shipped code.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,30 +214,23 @@ fn run_seeded_sweep(seed: u64) -> u64 {
     let path_fragments = ["a", "b", "x/y", "", "é", "😀", ".", "/", "a/b/c", "-"];
 
     for _ in 0..1_500 {
-        let alphabet: Vec<char> = alphabets
-            [usize::try_from(next_seed(&mut state).rem_euclid(5)).unwrap_or(0)]
-        .chars()
-        .collect();
+        let alphabet: Vec<char> = alphabets[table_index(next_seed(&mut state).rem_euclid(5))]
+            .chars()
+            .collect();
         // The pattern is a seeded run of alphabet scalars.
-        let pattern_length = usize::try_from(next_seed(&mut state).rem_euclid(8))
-            .unwrap_or(1)
-            .saturating_add(1);
+        let pattern_length = table_index(next_seed(&mut state).rem_euclid(8)).saturating_add(1);
         let mut pattern = String::new();
         for _ in 0..pattern_length {
-            let pick = alphabet[usize::try_from(
-                next_seed(&mut state).rem_euclid(u64::try_from(alphabet.len()).unwrap_or(1)),
-            )
-            .unwrap_or(0)];
+            let pick =
+                alphabet[table_index(next_seed(&mut state).rem_euclid(draw_bound(alphabet.len())))];
             pattern.push(pick);
         }
         // Inject the wildcard and class metacharacters at a seeded position.
         let meta = ['*', '?', '[', ']', '/'];
-        let inject_at = usize::try_from(
-            next_seed(&mut state)
-                .rem_euclid(u64::try_from(pattern.chars().count().saturating_add(1)).unwrap_or(1)),
-        )
-        .unwrap_or(0);
-        let inject = meta[usize::try_from(next_seed(&mut state).rem_euclid(5)).unwrap_or(0)];
+        let inject_at = table_index(
+            next_seed(&mut state).rem_euclid(draw_bound(pattern.chars().count().saturating_add(1))),
+        );
+        let inject = meta[table_index(next_seed(&mut state).rem_euclid(5))];
         let pattern: String = {
             let mut chars: Vec<char> = pattern.chars().collect();
             chars.insert(inject_at.min(chars.len()), inject);
@@ -231,10 +243,8 @@ fn run_seeded_sweep(seed: u64) -> u64 {
             GlobDialect::Legacy
         };
         let path: String = {
-            let first =
-                path_fragments[usize::try_from(next_seed(&mut state).rem_euclid(10)).unwrap_or(0)];
-            let second =
-                path_fragments[usize::try_from(next_seed(&mut state).rem_euclid(10)).unwrap_or(0)];
+            let first = path_fragments[table_index(next_seed(&mut state).rem_euclid(10))];
+            let second = path_fragments[table_index(next_seed(&mut state).rem_euclid(10))];
             format!("{first}{second}")
         };
 
