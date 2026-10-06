@@ -426,6 +426,46 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the policy refusals report what the register said
+
+- **`declared_scope` is published.** Cargo spells an unconditional dependency
+  with no `target` key; the register spells the same declaration `target = ""`
+  (INV-DEP-13). The gate compared the two vocabularies through an inline
+  `unwrap_or("")` in two places, and the simulation suites carried their own
+  copy of the same rule. It is one public function now, with the rule in one doc
+  and a doctest that states both spellings.
+- **A drift refusal carries the bit the entry authored.** `DefaultFeaturesDrift`
+  and `OptionalityDrift` reported `approved` as a plain `bool` the gate filled with
+  `unwrap_or(true)` / `unwrap_or(false)`. The refusal only exists for an *authored*
+  dimension, so the invented bit was never the answer — it is `Option<bool>` now,
+  and the message prints the bit the register carries.
+- **A target refusal names both sides in the register's vocabulary.** An authored
+  `target = ""` and an absent `target` key both print `<none>`, through one named
+  `scope_label`.
+- **An unconstrained feature dimension prints that it admits no set**, rather than
+  an empty set that reads as a set with no members.
+- **The two manifest checks share one reader.** `dependency_declarations` and
+  `declared_name` replace two copies of the same six-line walk, so a table header
+  cannot be read one way in one manifest and the other way in the other.
+- **The `vendor.rs` test fixture's root name drops the process id.** `check-std-first`
+  refused it (a pid is reused by the OS, so it names no run) and the exemption that
+  had covered it is deleted rather than re-anchored. The discriminator is
+  nanoseconds plus the `NEXT` atomic, which is what that comment had already
+  concluded: the atomic separates two tests on two threads, the nanoseconds
+  separate two runs. `check-std-first`'s exemption list is one entry shorter.
+
+New regression test: `seeded_scope_pairs_render_both_spellings_of_an_unconditional_edge`
+(`tests/it/sim_policy_properties.rs`) drives the public API over every scope pairing
+the register grammar admits, one seed for both draws, and asserts the rendered
+refusal text — a refusal printing `""` for an unconditional edge would pass every
+verdict assertion and be unreadable to the operator who has to act on it.
+
+`python3 scripts/check-std-first.py`: std-first holds, 357 source files.
+`python3 scripts/check-doc-citations.py`: 100 pinned lines across 13 pages, all
+unchanged. `cargo clippy -p lgwks_deps --all-targets` passes on both
+`--all-features` and `--no-default-features`. 303 crate tests pass.
+## [Unreleased]
+
 ### lgwks_deps — the metadata collection answers for what it could not read
 
 - **`poll_quantum` parks instead of sleeping.** The `#[expect(clippy::disallowed_methods)]`

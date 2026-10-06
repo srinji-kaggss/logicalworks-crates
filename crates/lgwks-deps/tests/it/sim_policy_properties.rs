@@ -8,7 +8,7 @@ use std::error::Error;
 
 use crate::deps_sim;
 
-use crate::sim::declared_scope;
+use lgwks_deps::declared_scope;
 
 use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 
@@ -263,6 +263,59 @@ fn the_target_scope_must_match() -> TestResult {
             format!("target {target:?}"),
         ))
     })
+}
+
+/// Every scope pairing the register grammar admits renders a refusal naming both
+/// sides, and Cargo's two spellings of an unconditional edge print the same
+/// label.
+///
+/// One seed drives both draws, so each pair is reached from a sequence the test
+/// records; a failure prints the seed and the pair it drew. The message is what
+/// an operator acts on, so it is asserted here rather than only the verdict code
+/// — a refusal that printed `""` for an unconditional edge would pass every
+/// verdict assertion and be unreadable.
+#[test]
+fn seeded_scope_pairs_render_both_spellings_of_an_unconditional_edge() -> TestResult {
+    let scopes = [None, Some(""), Some("cfg(unix)"), Some("cfg(windows)")];
+    for seed in 0..64_u64 {
+        let mut rng = Rng::new(seed);
+        for _ in 0..8 {
+            let approved = *rng.pick_named("approved scopes", &scopes)?;
+            let declared = *rng.pick_named("observed scopes", &scopes)?;
+            // The register speaks its own vocabulary, so an approved `None` is
+            // the unconditional declaration and an approved `Some("")` is the
+            // same declaration written explicitly.
+            let approval = register(
+                "engine",
+                "registry",
+                &format!("target = \"{}\"\n", declared_scope(approved)),
+            )?;
+            let observed = edge("engine", Some(REGISTRY), &[], true, false, declared, None)?;
+            let refusals = lgwks_deps::audit_direct(&[observed], &approval);
+            let expected_scope = |scope: Option<&str>| match scope {
+                Some(scope) if !scope.is_empty() => scope.to_owned(),
+                _ => "<none>".to_owned(),
+            };
+            let approved_label = expected_scope(approved);
+            let declared_label = expected_scope(declared);
+            match refusals.first() {
+                Some(refusal) => {
+                    assert_eq!(
+                        refusal.to_string(),
+                        format!(
+                            "app declares engine for target {declared_label}, contract admits {approved_label}"
+                        ),
+                        "seed {seed}: approved {approved:?} against declared {declared:?}"
+                    );
+                }
+                None => assert_eq!(
+                    approved_label, declared_label,
+                    "seed {seed}: no refusal for approved {approved:?} and declared {declared:?}"
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]

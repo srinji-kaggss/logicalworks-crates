@@ -183,12 +183,6 @@ EXEMPT: dict[str, tuple[str, str]] = {
         "is what keeps two tests apart, and the pid only namespaces the directory "
         "under the temp root (re-anchored after PidDir extraction moved the line)",
     ),
-    "crates/lgwks-deps/src/vendor.rs:442": (
-        "std::process::id(),",
-        "a test fixture's directory name whose real discriminator is the `NEXT` "
-        "atomic three lines above; the comment there records that the timestamp "
-        "alone was already tried and was not sufficient",
-    ),
 }
 
 

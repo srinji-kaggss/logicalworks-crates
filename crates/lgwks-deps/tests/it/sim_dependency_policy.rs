@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use crate::deps_sim;
-use crate::sim::declared_scope;
+use lgwks_deps::declared_scope;
 
 use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 

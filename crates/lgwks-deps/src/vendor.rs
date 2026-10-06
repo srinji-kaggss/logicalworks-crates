@@ -483,20 +483,24 @@ source = "git+https://example.com/org/git-crate#abc123"
         /// sufficient; it is not.
         fn create() -> Result<Fixture, Box<dyn std::error::Error>> {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            // The clock separates this run's roots from a *previous* run's under
-            // a recycled pid, so a clock that reads before the Unix epoch has no
-            // subsecond value to offer and is refused: a root named for 1970 is
-            // a name this process cannot tell from any other process reading the
-            // same broken clock.
+            // The clock is this root's identity across runs, so a clock that
+            // reads before the Unix epoch has no value to offer and is refused:
+            // a root named for 1970 is a name this process cannot tell from any
+            // other process reading the same broken clock.
             let clock = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|before_epoch| {
                     format!("the wall clock reads before the Unix epoch: {before_epoch}")
                 })?
-                .subsec_nanos();
+                .as_nanos();
+            // The discriminator is nanos plus the sequence, which is INV-DEP-6's
+            // prescription and what this comment already concluded: the atomic
+            // separates two tests on two threads of one binary (the clock's
+            // granularity is coarser than a nanosecond, so the timestamp alone
+            // does not), and the nanoseconds separate two runs. A process id is
+            // not in the name because the OS reuses it, so it names no run.
             let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-vendor-test-{}-{clock}-{}",
-                std::process::id(),
+                "lgwks-deps-vendor-test-{clock}-{}",
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("tree/covered-crate"))?;

@@ -89,19 +89,3 @@ impl std::fmt::Display for EmptyTable {
 }
 
 impl std::error::Error for EmptyTable {}
-
-/// The register's `target` spelling of a drawn Cargo scope.
-///
-/// The register has no "absent" spelling for a constrained target: `target = ""`
-/// is the declaration it makes for an edge that must be declared
-/// unconditionally (INV-DEP-13), so an absent Cargo target and an empty register
-/// target are two spellings of one declaration rather than a value this
-/// function had to invent for a missing one. Both vocabularies meet here
-/// because Cargo's scope and the register's scope are different vocabularies,
-/// and a conversion between two vocabularies belongs in exactly one place.
-pub const fn declared_scope(scope: Option<&str>) -> &str {
-    match scope {
-        Some(scope) => scope,
-        None => "",
-    }
-}
