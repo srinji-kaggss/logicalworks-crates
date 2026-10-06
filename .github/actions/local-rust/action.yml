@@ -77,6 +77,16 @@ runs:
           "rustc ${{ inputs.toolchain }} "*) ;;
           *) echo "::error::rust-toolchain.toml resolves to '${active}', the gate pins ${{ inputs.toolchain }}"; exit 1 ;;
         esac
+        # The version string is not enough: another installation (Homebrew's,
+        # say) can print the same version while ignoring rust-toolchain.toml and
+        # carrying no cross-target std. The rustc on PATH must be the one rustup
+        # resolves for this checkout.
+        pinned="$(dirname "$(dirname "$(rustup which rustc)")")"
+        sysroot="$(rustc --print sysroot)"
+        if [ "${sysroot}" != "${pinned}" ]; then
+          echo "::error::rustc on PATH ($(command -v rustc), sysroot ${sysroot}) is not rustup's ${pinned}"
+          exit 1
+        fi
     - name: nextest is installed
       if: inputs.nextest == 'true'
       shell: bash
