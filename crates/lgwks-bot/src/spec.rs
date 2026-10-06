@@ -608,6 +608,14 @@ pub(crate) trait ObserveAny {
     /// *statement* about the source's caching rather than a second call: a
     /// second call could not see a poll that has not finished.
     fn cache_state(&self) -> Option<RefreshReason>;
+    /// Forwards to [`Observe::revision`].
+    ///
+    /// Read by the substrate before the poll it may skip, on the calling thread
+    /// and never beside a pending poll of this source, so the revision it
+    /// compares against is the one the substrate committed with the value it
+    /// holds. A source that reports none answers `None` and the substrate
+    /// compares the value itself, which is the path every shipped source takes.
+    fn revision(&self) -> Option<u64>;
     /// Issue an [`Auth`] for the observer's own caps and poll it.
     ///
     /// Returns `Ok(None)` when the source produced a value **equal** to
@@ -662,6 +670,10 @@ where
 
     fn cache_state(&self) -> Option<RefreshReason> {
         super::verb::Observe::cache_state(self)
+    }
+
+    fn revision(&self) -> Option<u64> {
+        super::verb::Observe::revision(self)
     }
 
     fn poll_any<'a>(

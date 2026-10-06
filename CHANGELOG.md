@@ -9,6 +9,93 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a change tick, and the sources that can report one (#279)
+
+`Observe::revision` is a source's own answer to "has anything moved?", read on
+the calling thread **before** the poll it may skip. A source that reports the
+revision its committed value was read at is not polled at all: no future is
+built, no value is boxed, nothing is allocated, and the observation wave is
+narrower by however many sources are quiet. One vtable call and one `u64`
+comparison is the whole cost of an unchanged check.
+
+- The default is `None`, which is the value-comparison path every source took
+  before and every source this crate ships still takes: a revision only pays
+  when something *other than the poll* maintains it, and a source whose poll is
+  how it learns everything about the world has no revision to report.
+  `docs/bot-on-ecs.md` §4.1 carries the table of which shipped source takes
+  which path and the reason for each.
+- **A revision is committed together with its value, or not at all** — the
+  fingerprint-commit rule (#99 / INV-BOT-5) with a change tick in place of a
+  digest. The commit is the one arm of `observe_fold`'s second pass that put a
+  new value in the observation slot, so a poll that failed, was cancelled at its
+  deadline, or produced a value equal to the one already held leaves the
+  revision where it was and the next tick asks again.
+- **Comparison is equality only**, so a revision that wraps (`u64::MAX` → 0) or
+  regresses is a change rather than an ordering a wrap could invalidate. A
+  revision that moved while the value did is the one broken promise and is
+  deliberately the cheap direction: a spare poll, never a suppressed effect.
+- A source that declares its cached baseline unsound is polled regardless of its
+  revision: the substrate has been told its held value is not what the source
+  would report now, and a revision is a claim about a value rather than a repair
+  of one. `TickReport::forced` and INV-BOT-120 are unchanged.
+- Two defects the path exposed and this change repairs: a freshly spawned
+  `Revision` reads as changed with nothing committed behind it, and a transition
+  opened over no observation is never walked — so its entries stayed `NotStarted`
+  and every one of them was reported pending. A transition is now opened **over
+  an observation** or not at all.
+- INV-BOT-155 records the rule, enforced by `tests/it/sim_change_ticks.rs`
+  (seeded: both paths fire on the same ticks, wrap and regression are changes,
+  a forced refresh beats a quiet revision, one movement fires once, replay).
+
+
+### lgwks_bot — a tick is measured stage by stage, and the rig that measures it runs again (#279)
+
+`bench/` publishes a ratio between this crate's tick and a hand-rolled loop
+doing provably identical work, and the ratio used to be read as "the schedule is
+slow" without anyone knowing which half of it. It is now measured directly, and
+the answer is not what the ratio used to imply.
+
+- **A new default-off `profile` feature, and `Bot::tick_profiled`.** The same
+  four phases as `tick_async` with a per-stage instrument armed: `poll`,
+  `fingerprint`, `compare`, `schedule`, `decide`, `act`. The stages are a
+  partition of the tick and nest in one direction — the schedule step wraps the
+  stages inside it, so `TickStage::Schedule` is the *residual* — and each charge
+  reads the clock once rather than twice. Nothing in the crate's execution path
+  reads the instrument, and every charge site is behind the feature, so a build
+  without `profile` contains no clock read at all. `bench/` is its only caller.
+- **The decision pass is now two batched passes instead of one interleaved
+  walk.** Which chains moved, and whether each newest observation is admitted
+  over the payload a retained transition holds, are answered for every chain
+  before the walk starts; the admitted-input identity of every value a chain
+  will bind is derived in one batch after that. The admission comparison is
+  cached rather than recomputed inside the walk, the admitted-input stamps are
+  still consumed in declaration order, and the decisions are the same ones —
+  which is what makes change detection and identity derivation two separately
+  measurable stages rather than one interleaved loop.
+- **`bench/` runs again.** Its rig built a bot with no effect scope, which the
+  crate now refuses at assembly, so it had not produced a timing in months. It
+  dispatches through an in-memory journal with an `EffectLifetime::Local`
+  action, each round builds and warms its own bot so the retained journal stays
+  inside `MAX_JOURNAL_EVENTS` and admission sits outside the timed window, and
+  every row reports the events its busiest round retained beside the ceiling.
+  Two new doors: `--profile` for the stage breakdown and `--alloc-report` for
+  the allocation model.
+- **The published ratios went up, and the reason is stated rather than
+  explained away.** The previous table (72x–256x) was taken on a tree that
+  dispatched effects with no ledger, no warrant and no record, and whose
+  source-level digest let a chain skip its poll entirely. Both of those are gone.
+  On this tree (118x–2 665x) `act` — the ledger, warrant and record each
+  dispatched effect is written through — is the largest stage in every scenario,
+  41% of a quiet tick that fires nothing and 84–98% of the effect-heavy ones.
+  #279's targets (≤ 10x quiet, ≤ 30x churn) are missed on every row.
+  `bench/README.md` and `docs/production-readiness.md` §4.9 carry the numbers
+  and the decomposition.
+- **`TickProfile::per_tick` returns `Option<Duration>`**: `None` for a profile
+  with no ticks, where it used to return a zero that read as a free stage, and
+  the mean is divided over the whole `u64` count rather than a count saturated
+  at `u32::MAX`.
+
+
 ### lgwks_bot — row 3 of #278: a credential that expires mid-run
 
 The credential-expiry row of `docs/production-readiness.md` §4.4. A grant that

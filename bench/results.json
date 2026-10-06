@@ -1,11 +1,11 @@
 {
-  "poll-only-64x100": { "sources": 64, "entries": 0, "ticks_per_round": 2000, "rounds": 24, "effects": 0, "evaluations": 0, "bot_ticks_per_sec": 393702.4, "baseline_ticks_per_sec": 32356180.5, "ratio_median": 82.5703, "ratio_ci95": [81.2202, 83.3752], "build_ms": 0.4315 },
-  "steady-64x100": { "sources": 64, "entries": 1, "ticks_per_round": 2000, "rounds": 24, "effects": 17920, "evaluations": 35840, "bot_ticks_per_sec": 387287.3, "baseline_ticks_per_sec": 32520325.2, "ratio_median": 84.0334, "ratio_ci95": [83.7766, 84.4173], "build_ms": 0.0828 },
-  "churn-64x1": { "sources": 64, "entries": 1, "ticks_per_round": 1000, "rounds": 24, "effects": 896000, "evaluations": 1792000, "bot_ticks_per_sec": 91477.7, "baseline_ticks_per_sec": 23483274.0, "ratio_median": 256.4205, "ratio_ci95": [254.2630, 257.3936], "build_ms": 0.0692 },
-  "fanout-1x64": { "sources": 1, "entries": 64, "ticks_per_round": 1000, "rounds": 24, "effects": 896000, "evaluations": 1792000, "bot_ticks_per_sec": 429280.7, "baseline_ticks_per_sec": 31048186.8, "ratio_median": 72.3826, "ratio_ci95": [71.9910, 72.5103], "build_ms": 0.0655 },
-  "wide-256x10": { "sources": 256, "entries": 1, "ticks_per_round": 250, "rounds": 24, "effects": 89600, "evaluations": 179200, "bot_ticks_per_sec": 78576.2, "baseline_ticks_per_sec": 7551960.5, "ratio_median": 96.0085, "ratio_ci95": [95.4465, 96.3335], "build_ms": 0.1071 },
-  "cap_check_scaling": [{"caps": 1, "ns_per_call": 4.848}, {"caps": 2, "ns_per_call": 11.487}, {"caps": 4, "ns_per_call": 33.488}, {"caps": 8, "ns_per_call": 91.471}, {"caps": 16, "ns_per_call": 212.498}, {"caps": 32, "ns_per_call": 546.955}, {"caps": 64, "ns_per_call": 1499.823}, {"caps": 128, "ns_per_call": 3638.080}],
+  "poll-only-64x100": { "sources": 64, "entries": 0, "ticks_per_round": 2000, "rounds": 32, "effects": 0, "evaluations": 0, "bot_ticks_per_sec": 268750.2, "baseline_ticks_per_sec": 31861850.6, "ratio_median": 117.9888, "ratio_ci95": [117.3470, 119.0471], "journal_events": 0, "journal_ceiling": 100000, "build_ms": 0.1161 },
+  "steady-64x100": { "sources": 64, "entries": 1, "ticks_per_round": 2000, "rounds": 32, "effects": 22528, "evaluations": 45056, "bot_ticks_per_sec": 203697.7, "baseline_ticks_per_sec": 31393470.6, "ratio_median": 154.3733, "ratio_ci95": [151.5878, 156.1039], "journal_events": 2112, "journal_ceiling": 100000, "build_ms": 0.0477 },
+  "churn-64x1": { "sources": 64, "entries": 1, "ticks_per_round": 200, "rounds": 32, "effects": 256000, "evaluations": 512000, "bot_ticks_per_sec": 7244.4, "baseline_ticks_per_sec": 19199385.6, "ratio_median": 2664.5582, "ratio_ci95": [2630.8224, 2698.8041], "journal_events": 24000, "journal_ceiling": 100000, "build_ms": 0.0556 },
+  "fanout-1x64": { "sources": 1, "entries": 64, "ticks_per_round": 200, "rounds": 32, "effects": 256000, "evaluations": 512000, "bot_ticks_per_sec": 8570.4, "baseline_ticks_per_sec": 22119000.2, "ratio_median": 2578.1211, "ratio_ci95": [2555.7625, 2601.4460], "journal_events": 24000, "journal_ceiling": 100000, "build_ms": 0.0541 },
+  "wide-256x10": { "sources": 256, "entries": 1, "ticks_per_round": 250, "rounds": 32, "effects": 122880, "evaluations": 245760, "bot_ticks_per_sec": 15089.6, "baseline_ticks_per_sec": 7224601.0, "ratio_median": 477.5077, "ratio_ci95": [472.9990, 481.3748], "journal_events": 11520, "journal_ceiling": 100000, "build_ms": 0.1395 },
+  "cap_check_scaling": [{"caps": 1, "ns_per_call": 4.629}, {"caps": 2, "ns_per_call": 11.102}, {"caps": 4, "ns_per_call": 35.069}, {"caps": 8, "ns_per_call": 91.529}, {"caps": 16, "ns_per_call": 216.675}, {"caps": 32, "ns_per_call": 565.835}, {"caps": 64, "ns_per_call": 1502.175}, {"caps": 128, "ns_per_call": 3621.564}],
   "determinism": true,
-  "build_ms_1": 0.0651,
-  "build_ms_64": 0.0342
+  "build_ms_1": 0.0804,
+  "build_ms_64": 0.0433
 }

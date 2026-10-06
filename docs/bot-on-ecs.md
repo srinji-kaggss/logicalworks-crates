@@ -152,6 +152,52 @@ The alternative was rejected: tightening the erasure to `Box<dyn Any + Send +
 Sync>` would fit the substrate better and charge every observer a bound it does
 not otherwise need, to solve a problem the substrate introduced.
 
+### 4.1 Change ticks: the second change-detection path, and who uses it
+
+`Changed<Revision>` answers "did this source move?" for a chain the substrate
+already holds a value for. `Observe::revision` answers it *earlier* — before the
+poll, on the calling thread — so a source whose value has not moved costs one
+vtable call and one `u64` comparison instead of a future, a boxed value and a
+`PartialEq`:
+
+| source | reports a revision? | why |
+|---|---|---|
+| `net::endpoint` | **no** — value comparison | the poll is an HTTP `GET`; it is what would discover that anything moved, so there is nothing to ask first |
+| `fs::path` | **no** — value comparison | the poll is a `stat`; the metadata *is* the revision and reading it is the work being skipped |
+| `data::json_store` | **no** — value comparison | the poll reads the whole file |
+| `gh::pr_snapshot` | **no** — value comparison | the poll is a GraphQL snapshot |
+| `sys::process` | **no** — value comparison | polling a one-shot process *is* dispatching it; there is no cheaper question |
+| `chat::slack_message`, `chat::http_webhook` | **no** — value comparison | unbinding seams that refuse until a transport is bound |
+| `inspect::subject` | **no** — value comparison | the poll reads the artifact and walks it |
+
+**Every shipped source takes the comparison path, and that is the correct answer
+rather than an omission.** A revision only pays when something *other than the
+poll* maintains it: a subscription, a socket, a filesystem watcher, or a counter
+another component already holds. A source whose poll is how it learns everything
+about the world has no revision to report, because asking it first asks the
+question the poll answers. The seam is for the sources a caller writes — the ones
+whose world is pushed at them — and `bench/`'s source is the one in this
+repository that can take it honestly, because its value is `tick / period` and the
+counter is already in hand.
+
+Two rules make the path safe, and both are the fingerprint-commit rule (INV-BOT-5,
+#99) with a change tick in place of a digest:
+
+1. **A revision is committed together with its value, or not at all.** The commit
+   happens in the one arm of `observe_fold`'s second pass that put a new value in
+   the observation slot. A poll that failed, was cancelled at its deadline, or
+   produced a value equal to the one already held commits nothing — so the next
+   tick asks again instead of treating a failed read as "nothing changed".
+2. **A revision that moved is never a skip.** The comparison is equality only, so
+   a revision that wraps (`u64::MAX` → 0) or regresses is a *different* revision
+   and is therefore a change. There is no ordering for a wrap to invalidate.
+
+A revision that moves while the value does is the one broken promise, and it is
+deliberately the cheap direction: the source is polled, the value compares equal,
+nothing commits, and the substrate asks again next tick. Committing the revision
+anyway would be believing a source that has already lied once, which is how a
+later real change gets skipped.
+
 ## 5. Determinism on this substrate
 
 Bevy supplies the mechanism but not the guarantee, and it is worth being exact

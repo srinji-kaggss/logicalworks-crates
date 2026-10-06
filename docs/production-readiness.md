@@ -703,21 +703,29 @@ the same volume as the wins:
 
 | scenario | `lgwks_bot` ns/tick | hand-rolled loop ns/tick | ratio | 95% CI |
 |---|---:|---:|---:|---|
-| `poll-only-64x100` | 2 540.0 | 30.9 | 82.57x slower | [81.22, 83.38] |
-| `steady-64x100` | 2 582.1 | 30.8 | 84.03x slower | [83.78, 84.42] |
-| `churn-64x1` | 10 931.6 | 42.6 | 256.42x slower | [254.26, 257.39] |
-| `fanout-1x64` | 2 329.5 | 32.2 | 72.38x slower | [71.99, 72.51] |
-| `wide-256x10` | 12 726.5 | 132.4 | 96.01x slower | [95.45, 96.33] |
+| `poll-only-64x100` | 3 720.9 | 31.4 | 117.99x slower | [117.35, 119.05] |
+| `steady-64x100` | 4 909.2 | 31.9 | 154.37x slower | [151.59, 156.10] |
+| `churn-64x1` | 138 037.7 | 52.1 | 2 664.56x slower | [2 630.82, 2 698.80] |
+| `fanout-1x64` | 116 680.7 | 45.2 | 2 578.12x slower | [2 555.76, 2 601.45] |
+| `wide-256x10` | 66 270.8 | 138.4 | 477.51x slower | [473.00, 481.37] |
 
-A hand-rolled loop doing provably identical work is **72x to 256x faster**. If
-your workload is a hot path, use the loop. This document says so with a number
-rather than burying it.
+A hand-rolled loop doing provably identical work is **118x to 2 665x faster**.
+If your workload is a hot path, use the loop. This document says so with a
+number rather than burying it. #279's targets (≤ 10x quiet, ≤ 30x churn) are
+**missed** on every scenario.
 
-What the measurement also says: ~**390 000 ticks/s** on one M5 Pro core at 64
-chains, ~98% of a tick in poll and change detection, 42.1 ns/tick (1.6%) for the
-entire decision-and-effect layer, 36–131 ns per entry walked, admission of 64
-chains in 0.066–0.43 ms, and cost linear in source count with no superlinear
-term. `Auth::check` was quadratic in the capability count and is now
+These ratios are larger than the 72x–256x this section used to carry because
+that run's bots fired effects with no ledger, no warrant and no record, and
+skipped 99 of every 100 polls through a digest seam that has since been
+removed; neither configuration is one the crate builds today
+([`../bench/README.md`](../bench/README.md) states both). The per-stage profile
+(`--profile`, measured on the tick path itself) itemises the gap: the effect
+path (`act` — ledger, warrant and journal record) is the largest stage in every
+scenario, 41% of a quiet tick and 84–98% of the effect-heavy ones; poll is
+445 ns on a quiet tick, down from 7 064 ns before per-source change ticks. A
+quiet tick still makes 20 heap allocations (`--alloc-report`), flat in the
+number of chains. Admission and cost stay linear in source count with no
+superlinear term. `Auth::check` was quadratic in the capability count and is now
 `n·log2 n`: 12.9 µs → 3.6 µs at 128 capabilities.
 
 **Two exclusions that favour this crate and are named so they cannot be
@@ -764,7 +772,7 @@ here is a monomorphised Rust closure. JVM and .NET automation platforms pay GC
 pauses at exactly the wrong moments — during a UI wait — and Rust has no collector.
 Those are category-level differences and they compound.
 
-**Speed, relative to a for-loop.** Slower, by 72x to 256x. Stated above.
+**Speed, relative to a for-loop.** Slower, by 118x to 2 665x. Stated above.
 
 **Safety, mechanically rather than aspirationally.**
 
