@@ -733,15 +733,23 @@ fn rule_matches(rule_id: &str, node_kind: &str, node_text: &str) -> bool {
 /// formatters insert is absorbed. Anything with no head yields `""`, which
 /// matches no rule.
 fn macro_head(node_text: &str) -> &str {
+    // Two answers, both real: a terminator ends the head there, and text with no
+    // terminator *is* its own head. Nothing here is a value standing in for a
+    // piece that was missing.
     node_text
-        .split(['!', '(', ' ', '\t', '\n'])
-        .next()
-        .unwrap_or("")
+        .split_once(['!', '(', ' ', '\t', '\n'])
+        .map_or(node_text, |(head, _)| head)
 }
 
 /// A bounded, char-boundary-safe preview of `source[start..end]`.
 fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
-    let slice = source.get(start..end).unwrap_or("");
+    // A byte range that names nothing in this source — a stale node, a parser
+    // reporting past the end — has no text to preview. That is the empty preview
+    // *with* the truncated flag set, so a caller cannot read it as a node whose
+    // text was genuinely empty.
+    let Some(slice) = source.get(start..end) else {
+        return (String::new(), true);
+    };
     let cutoff = slice
         .char_indices()
         .nth(MAX_PREVIEW_BYTES)
@@ -995,7 +1003,7 @@ fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> 
             return base(
                 Verdict::Incomplete {
                     reason: IncompleteReason::ParseDeadlineExceeded {
-                        deadline_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
+                        deadline_ms: crate::clock::duration_to_millis(after),
                     },
                 },
                 Some(language_name),

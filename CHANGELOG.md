@@ -172,6 +172,25 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — inspect and frontier stop substituting values for answers (nine-axis sweep)
+
+- **`macro_head` splits once.** `split(..).next().unwrap_or("")` cannot fail —
+  `split` always yields a piece — and a headless invocation was reported as the
+  empty name, which matches no rule. It is now `split_once`, whose two answers
+  are both real: text with no terminator *is* its own head.
+- **`bounded_preview` refuses a range that names nothing.** A byte range outside
+  the source, or across a non-boundary, has no text to preview; that is the empty
+  preview *with* the truncated flag set, so a caller cannot read it as a node with
+  genuinely empty text.
+- **`duration_to_millis` is the ceiling's sibling.** `inspect`'s parse-timeout
+  receipt narrowed `Duration::as_millis` with `unwrap_or(u64::MAX)`; it now calls
+  the crate's saturating conversion beside `duration_to_nanos`, so one duration is
+  converted the same way everywhere.
+- **`Frontier::decide` names its two answers.** No saturated constraint is
+  `Admit`; a saturated one carries the fold's latest deferral.
+- **Two frontier tests refuse rather than default**: a selection round trip with
+  no host selected, and an origin index whose `checked_rem` cannot fail.
+
 ### lgwks_bot — the lexicon ranks a score it cannot order last, not as a tie (nine-axis sweep)
 
 `score_all` ranked candidates with `partial_cmp(..).unwrap_or(Ordering::Equal)`.
