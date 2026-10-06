@@ -250,7 +250,7 @@ fn tally(polls: impl IntoIterator<Item = Polled>) -> Result<(u32, u32), Box<dyn 
 #[test]
 fn a_store_being_rewritten_is_pending_until_it_settles() -> TestResult {
     let mut live = LiveStore::new("concurrent-write", Protocol::Rewrite)?;
-    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Until::PendingAndSettled)?;
     for polled in &readings {
         if let Polled::Settled(ref raw) = *polled {
             // Whatever settled is a state the file actually held. A value the
@@ -358,23 +358,33 @@ impl LiveStore {
         Ok(readings)
     }
 
-    /// Poll the store until it reports an unsettled reading, or give up after
-    /// `budget`.
+    /// Poll the store until the sweep has seen what `until` names, or give up
+    /// after `budget`.
     ///
-    /// The first refusal is what these scenarios are about, so the loop stops
-    /// there rather than sweeping a fixed count: a count is a rate the host
-    /// decides and a budget is a bound this file declares.
-    fn sweep_until_pending(
+    /// The refusal is what these scenarios are about, so the loop stops once it
+    /// has one rather than sweeping a fixed count: a count is a rate the host
+    /// decides and a budget is a bound this file declares. A scenario that
+    /// also claims the store produced a value asks for both arms, because the
+    /// first poll of a loaded host can land inside a write, and a sweep that
+    /// stopped on that refusal would hold no value for the claim to read.
+    fn sweep_until(
         &self,
         budget: std::time::Duration,
+        until: Until,
     ) -> Result<Vec<Polled>, Box<dyn Error>> {
         let started = std::time::Instant::now();
         let mut readings = Vec::new();
+        let (mut pending, mut settled) = (false, false);
         while started.elapsed() < budget {
             let polled = lgwks_std::task::block_on(poll_once(&self.store))?;
-            let unsettled = matches!(polled, Polled::Pending(_));
+            pending |= matches!(polled, Polled::Pending(_));
+            settled |= matches!(polled, Polled::Settled(_));
             readings.push(polled);
-            if unsettled {
+            let done = match until {
+                Until::Pending => pending,
+                Until::PendingAndSettled => pending && settled,
+            };
+            if done {
                 return Ok(readings);
             }
         }
@@ -411,6 +421,15 @@ impl LiveStore {
     fn writer_id(&self) -> u32 {
         self.writer.id()
     }
+}
+
+/// What a sweep has to have seen before it stops early.
+#[derive(Clone, Copy)]
+enum Until {
+    /// One unsettled reading: the refusal the scenario is about.
+    Pending,
+    /// An unsettled reading and a settled one, for a scenario that claims both.
+    PendingAndSettled,
 }
 
 /// The writer dies with the store, on every path out of a test.
@@ -479,7 +498,7 @@ fn a_dropped_store_takes_its_writer_with_it() -> TestResult {
 #[test]
 fn an_unsettled_reading_names_its_reads_and_its_axis() -> TestResult {
     let mut live = LiveStore::new("named-refusal", Protocol::Rewrite)?;
-    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Until::Pending)?;
     let mut named = 0u32;
     for polled in &readings {
         let Polled::Pending(ref failure) = *polled else {
@@ -567,7 +586,7 @@ fn an_unsettled_reading_is_pending_rather_than_a_committed_change() -> TestResul
     // refusal the bot would have been given. A second pass would be a second
     // chance at the same race, which is how a test that depends on a writer's
     // timing turns into a test that depends on how loaded the host is.
-    let readings = live.sweep_until_pending(PENDING_BUDGET)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Until::Pending)?;
     let recovered = live.settle(SETTLE_WINDOW)?;
     live.quiesce();
 
