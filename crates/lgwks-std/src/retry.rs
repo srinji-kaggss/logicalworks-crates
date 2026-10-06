@@ -379,30 +379,48 @@ mod tests {
         // still be about `2^25` times slower at `u32::MAX` than at `70`.
         //
         // The oracle is a ratio, not an absolute: it holds on a loaded host as
-        // long as the constant factor is nowhere near `2^25`.
-        let repeats = 100_000_u64;
-        let mut timings = [(0_u32, std::time::Duration::ZERO); 4];
-        for (index, attempt) in [70_u32, 128, 1_000, u32::MAX].into_iter().enumerate() {
-            let start = std::time::Instant::now();
-            let mut observed = Duration::ZERO;
-            for step in 0..repeats {
-                // A changing base keeps the optimizer from hoisting the call
-                // out of the loop; the value is consumed below.
-                observed = policy.delay(attempt, step);
+        // long as the constant factor is nowhere near `2^25`. Each attempt is
+        // timed in `ROUNDS` interleaved windows and compared at its median, so
+        // one window the scheduler descheduled — a CI run at load 116 timed
+        // 261 ms against 1.1 ms for the same arithmetic — moves no verdict
+        // unless it lands in most rounds of one attempt; a walk over `attempt`
+        // misses the bound in every round.
+        const ROUNDS: usize = 9;
+        const ATTEMPTS: [u32; 4] = [70, 128, 1_000, u32::MAX];
+        let repeats = 11_112_u64;
+        let mut windows = [[std::time::Duration::ZERO; ATTEMPTS.len()]; ROUNDS];
+        for round in &mut windows {
+            for (window, attempt) in round.iter_mut().zip(ATTEMPTS) {
+                let start = std::time::Instant::now();
+                let mut observed = Duration::ZERO;
+                for step in 0..repeats {
+                    // A changing base keeps the optimizer from hoisting the call
+                    // out of the loop; the value is consumed below.
+                    observed = policy.delay(attempt, step);
+                }
+                assert_eq!(
+                    observed,
+                    policy.delay(attempt, repeats.saturating_sub(1)),
+                    "the timed loop must finish on the last computed value"
+                );
+                *window = start.elapsed();
             }
-            assert_eq!(
-                observed,
-                policy.delay(attempt, repeats.saturating_sub(1)),
-                "the timed loop must finish on the last computed value"
-            );
-            timings[index] = (attempt, start.elapsed());
         }
-        let baseline = timings[0].1.as_nanos();
-        for (attempt, elapsed) in timings {
+        let per_attempt: [[std::time::Duration; ROUNDS]; ATTEMPTS.len()] =
+            std::array::from_fn(|index| windows.map(|round| round[index]));
+        let medians = per_attempt.map(|mut rounds| {
+            rounds.sort_unstable();
+            rounds[ROUNDS >> 1]
+        });
+        let baseline = medians[0].as_nanos();
+        for (attempt, (elapsed, rounds)) in
+            ATTEMPTS.into_iter().zip(medians.into_iter().zip(windows))
+        {
             assert!(
                 elapsed.as_nanos() <= baseline.saturating_mul(4).saturating_add(1_000_000),
-                "attempt {attempt} took {elapsed:?} against {baseline}ns at attempt 70; \
-                 the work must not scale with the numeric attempt value"
+                "attempt {attempt} took {elapsed:?} at its median against {baseline}ns at \
+                 attempt 70; the work must not scale with the numeric attempt value \
+                 (rounds {rounds:?})"
             );
         }
     }

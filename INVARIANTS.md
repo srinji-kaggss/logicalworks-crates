@@ -569,7 +569,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   and stopped by pid. `CleanupReceipt::CleanupConfirmed` claims the group was
   observed gone **and** every captured descendant stopped running; a captured
   pid still running is named in `CleanupSurvivors` and never absorbed into a
-  pending group or promoted by a later observation. After the leader is reaped the
+  pending group or promoted by a later observation. "Running" means able to
+  run user code again: a zombie is not, and on Linux neither is a process in
+  its exit (`PF_EXITING`) or one with `SIGKILL` pending, so a killed pid the
+  scheduler has not yet run is never reported as a survivor
+  (`process::tests::a_killed_process_is_not_running_even_before_it_is_scheduled`,
+  `a_stat_line_is_running_unless_it_is_a_zombie_or_exiting`,
+  `a_pending_kill_is_read_from_either_pending_mask`). After the leader is reaped the
   cleanup observes the pids it captured, by pid, and never walks the tree from the
   reaped leader again: the OS may have reissued that id, and a walk from it names
   whoever holds it now. Every process outcome carries
@@ -1085,8 +1091,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   remains a TCP heuristic, not application health. · why: #163 N4 · enforced
   by: `online::tests::address_candidates_share_one_remaining_budget`,
   `online::tests::a_blackholed_candidate_does_not_starve_the_next`,
+  `online::tests::a_spent_budget_dials_no_further_candidate`,
   `online::tests::resolver_delay_is_outside_the_connection_budget` and
-  `online::tests::a_whole_probe_fits_one_wall_clock_budget`
+  `online::tests::a_whole_probe_fits_one_budget` (shares asserted exactly on
+  a simulated clock, so the host's scheduler cannot move them)
 - **INV-GLOB-1** Glob matching is anchored and operates on Unicode scalar
   values without normalization: `?` and classes consume one scalar, `/` is
   excluded from `?`, `*`, and all classes (including negated classes), `*`
@@ -1577,8 +1585,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   `stability::read_stable_file` on every `Observe` and `Query`. **Not claimed:**
   that a settled reading is valid JSON, or that a writer that rewrites in place
   and pauses longer than one read pair is caught; that guarantee belongs to the
-  writer's rename-into-place discipline. · why: #278 row 1 · enforced by:
+  writer's rename-into-place discipline. The pending claim is tested against a
+  subject that moves on every read (a named pipe fed by a child writer), so it
+  holds whatever the scheduler does; an in-place writer only tests safety, since
+  whether eight reads in a row straddle its writes is the scheduler's decision.
+  · why: #278 row 1 · enforced by:
   `tests/it/stability.rs` (`a_store_being_rewritten_is_pending_until_it_settles`,
+  `a_store_rewritten_in_place_is_never_read_as_a_state_it_never_held`,
   `an_unsettled_reading_is_pending_rather_than_a_committed_change`,
   `an_unsettled_reading_names_its_reads_and_its_axis`,
   `a_store_written_by_rename_is_never_read_half_written`,

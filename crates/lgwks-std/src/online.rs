@@ -53,9 +53,13 @@ pub fn probe_resolved(addrs: &[SocketAddr], timeout: Duration) -> bool {
 
 /// Share one remaining timeout across the bounded address sequence.
 fn probe_candidates(addrs: impl Iterator<Item = SocketAddr>, timeout: Duration) -> bool {
-    probe_candidates_with(addrs, timeout, |candidate, remaining| {
-        TcpStream::connect_timeout(candidate, remaining).is_ok()
-    })
+    let started = Instant::now();
+    probe_candidates_with(
+        addrs,
+        timeout,
+        || started.elapsed(),
+        |candidate, remaining| TcpStream::connect_timeout(candidate, remaining).is_ok(),
+    )
 }
 
 /// A candidate count at `u32` width, for a list this probe has already capped.
@@ -71,6 +75,11 @@ fn capped_candidate_count(count: usize) -> u32 {
 
 /// Run bounded candidates through one shared clock and connection operation.
 ///
+/// `elapsed` is the clock: the time spent since the budget started. The probe
+/// passes the monotonic clock; the tests pass a simulated one, so the budget
+/// arithmetic is checked to the nanosecond rather than against however long a
+/// loaded host takes to wake a parked thread.
+///
 /// Each candidate is offered an equal share of what remains, not all of it:
 /// the budget is spent across the candidates rather than by the first. With
 /// the whole remainder, one blackholed address (a filtered IPv6 route, a
@@ -81,14 +90,14 @@ fn capped_candidate_count(count: usize) -> u32 {
 fn probe_candidates_with(
     addrs: impl Iterator<Item = SocketAddr>,
     timeout: Duration,
+    mut elapsed: impl FnMut() -> Duration,
     mut connect: impl FnMut(&SocketAddr, Duration) -> bool,
 ) -> bool {
     // Bounded by the callers' `take(MAX_PROBE_ADDRESSES)`; collected only to
     // know how many shares the remainder is split into.
     let candidates: Vec<SocketAddr> = addrs.take(MAX_PROBE_ADDRESSES).collect();
-    let started = Instant::now();
     for (index, candidate) in candidates.iter().enumerate() {
-        let remaining = timeout.saturating_sub(started.elapsed());
+        let remaining = timeout.saturating_sub(elapsed());
         if remaining.is_zero() {
             return false;
         }
@@ -178,34 +187,60 @@ mod tests {
         Ok(())
     }
 
-    /// Every candidate receives only the remaining time from one monotonic budget.
+    /// Two documentation-range addresses (RFC 5737): never routed, so no test
+    /// here can dial a real host even if a clock were wrong.
+    const CANDIDATES: [SocketAddr; 2] = [
+        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 443),
+        SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 443),
+    ];
+
+    /// Every candidate receives only the remaining time from one budget.
+    ///
+    /// The clock is simulated: the first dial spends 60 ms of a 100 ms budget,
+    /// so the second is offered exactly the 40 ms left, not a restarted 100 ms.
     #[test]
     fn address_candidates_share_one_remaining_budget() {
-        let candidates = [
-            SocketAddr::from(([192, 0, 2, 1], 443)),
-            SocketAddr::from(([198, 51, 100, 1], 443)),
-        ];
+        let clock = std::cell::Cell::new(Duration::ZERO);
         let mut budgets = Vec::new();
         let result = probe_candidates_with(
-            candidates.into_iter(),
+            CANDIDATES.into_iter(),
             Duration::from_millis(100),
+            || clock.get(),
             |_, remaining| {
                 budgets.push(remaining);
                 if budgets.len() == 1 {
-                    std::thread::park_timeout(Duration::from_millis(60));
+                    clock.set(clock.get().saturating_add(Duration::from_millis(60)));
                 }
                 false
             },
         );
         assert!(!result, "all candidate failures report unreachable");
         assert_eq!(
-            budgets.len(),
-            2,
-            "both addresses fit before the shared deadline"
+            budgets,
+            [Duration::from_millis(50), Duration::from_millis(40)],
+            "the first is offered half, the second what is left after the first spent 60 ms"
         );
-        assert!(
-            budgets[1] <= Duration::from_millis(50),
-            "the second candidate does not receive a restarted timeout"
+    }
+
+    /// A budget the candidates have already spent dials nothing more.
+    #[test]
+    fn a_spent_budget_dials_no_further_candidate() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut dialed = 0u32;
+        let result = probe_candidates_with(
+            CANDIDATES.into_iter(),
+            Duration::from_millis(100),
+            || clock.get(),
+            |_, _| {
+                dialed = dialed.saturating_add(1);
+                clock.set(Duration::from_millis(100));
+                false
+            },
+        );
+        assert!(!result);
+        assert_eq!(
+            dialed, 1,
+            "the second candidate has no time left, so it is not dialed"
         );
     }
 
@@ -213,30 +248,28 @@ mod tests {
     /// still dialed and its answer is still heard.
     #[test]
     fn a_blackholed_candidate_does_not_starve_the_next() {
-        let candidates = [
-            SocketAddr::from(([192, 0, 2, 1], 443)),
-            SocketAddr::from(([198, 51, 100, 1], 443)),
-        ];
+        let clock = std::cell::Cell::new(Duration::ZERO);
         let timeout = Duration::from_millis(100);
         let mut budgets = Vec::new();
-        let result = probe_candidates_with(candidates.into_iter(), timeout, |_, share| {
-            budgets.push(share);
-            if budgets.len() == 1 {
-                // Blackholed: no answer, and the dial waits out all it was given.
-                std::thread::park_timeout(share);
-                return false;
-            }
-            true
-        });
-        assert!(result, "the second candidate answers, so the probe is true");
-        assert_eq!(budgets.len(), 2, "the second candidate was dialed");
-        assert!(
-            budgets[0] <= timeout / 2,
-            "the first candidate is offered its share, not the whole budget"
+        let result = probe_candidates_with(
+            CANDIDATES.into_iter(),
+            timeout,
+            || clock.get(),
+            |_, share| {
+                budgets.push(share);
+                if budgets.len() == 1 {
+                    // Blackholed: no answer, and the dial waits out all it was given.
+                    clock.set(clock.get().saturating_add(share));
+                    return false;
+                }
+                true
+            },
         );
-        assert!(
-            !budgets[1].is_zero(),
-            "the second candidate still has time left to answer"
+        assert!(result, "the second candidate answers, so the probe is true");
+        assert_eq!(
+            budgets,
+            [timeout / 2, timeout / 2],
+            "the first is offered its share, not the whole budget, and the second the rest"
         );
     }
 
@@ -260,11 +293,12 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(80));
     }
 
-    /// A whole multi-candidate failure is bounded by one wall clock, observed
-    /// from outside the injected dial: the budget is spent across candidates
-    /// rather than restarting per address.
+    /// A whole multi-candidate failure is bounded by one budget: four
+    /// candidates that each wait out all they are offered spend the 120 ms
+    /// between them, not 120 ms each. The clock is simulated, so the total is
+    /// exact rather than "within some slack of" what a loaded host measured.
     #[test]
-    fn a_whole_probe_fits_one_wall_clock_budget() {
+    fn a_whole_probe_fits_one_budget() {
         let candidates = [
             SocketAddr::from(([192, 0, 2, 1], 443)),
             SocketAddr::from(([198, 51, 100, 1], 443)),
@@ -272,19 +306,31 @@ mod tests {
             SocketAddr::from(([192, 0, 2, 2], 443)),
         ];
         let timeout = Duration::from_millis(120);
-        let started = Instant::now();
-        let result = probe_candidates_with(candidates.into_iter(), timeout, |_, share| {
-            std::thread::park_timeout(share);
-            false
-        });
-        let elapsed = started.elapsed();
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut shares = Vec::new();
+        let result = probe_candidates_with(
+            candidates.into_iter(),
+            timeout,
+            || clock.get(),
+            |_, share| {
+                shares.push(share);
+                clock.set(clock.get().saturating_add(share));
+                false
+            },
+        );
         assert!(
             !result,
             "every candidate fails, so the probe reports unreachable"
         );
-        assert!(
-            elapsed <= timeout + Duration::from_millis(80),
-            "the four candidates share one budget of {timeout:?}, not four: {elapsed:?}"
+        assert_eq!(
+            shares,
+            [Duration::from_millis(30); 4],
+            "each candidate is offered an equal share of what is left"
+        );
+        assert_eq!(
+            clock.get(),
+            timeout,
+            "the four candidates share one budget of {timeout:?}, not four"
         );
     }
 }

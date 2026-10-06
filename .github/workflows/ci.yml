@@ -37,21 +37,14 @@ env:
 jobs:
   build:
     name: Build + gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy, rustfmt
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify lockfile is up-to-date
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
@@ -76,21 +69,14 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: rustfmt
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -101,7 +87,7 @@ jobs:
   # suite. Every command is unchanged; only where it runs moved.
   tests:
     name: Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     # Two shards of one nextest run: `--partition count:N/2` splits the suite by
     # test, so the shards cover it exactly once between them. The suite was 269 s
@@ -110,12 +96,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2]
-    # The simulation suites write a real file journal and `sync_all` it. On the
-    # runner's disk those syncs queue behind each other; on tmpfs they cost
-    # nothing and the syscalls, the code and every assertion are unchanged.
-    # Measured on sim_scale alone: 104 s on disk, 21.6 s on a RAM volume.
     env:
-      TMPDIR: /dev/shm
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating the
@@ -125,18 +106,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run all workspace tests
         env:
           PARTITION: count:${{ matrix.shard }}/2
@@ -155,32 +128,34 @@ jobs:
 
   tests_nodefault:
     name: Tests (lgwks-bot no default features, lgwks-std full)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
+    # Two shards of each suite. Whole, the two runs were 664 s of tests on one
+    # runner's share of the machine, and the job's build took it past its
+    # 15-minute bound with every test passing (run 37530668988).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     env:
-      TMPDIR: /dev/shm
+      # As in the lgwks-bot full job: lints run once, in the Clippy job.
+      RUSTC_WORKSPACE_WRAPPER: ""
+      PARTITION: count:${{ matrix.shard }}/2
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-bot no-default-feature tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
       - name: Run lgwks-std full-feature tests
-        run: cargo nextest run -p lgwks_std --all-targets --locked --features full
+        run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   tests_bot_full:
     name: Tests (lgwks-bot full)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     # Four shards of one nextest run (542 s of a 571 s job), covering the suite
     # exactly once between them.
@@ -189,7 +164,6 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     env:
-      TMPDIR: /dev/shm
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating the
@@ -199,17 +173,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-bot async runner tests
         env:
           PARTITION: count:${{ matrix.shard }}/4
@@ -219,13 +186,39 @@ jobs:
       # Writing the report costs the run nothing: the `ci` profile only adds a
       # serialiser. Each shard uploads into its own directory, because all four
       # reports are called junit.xml and four artifacts with one path collide on
-      # download.
+      # download. nextest keeps its store under the workspace's own `target/`
+      # whatever CARGO_TARGET_DIR says, so the report is read from there; a
+      # shard that wrote none fails here rather than leaving the receipt job to
+      # find an empty glob (run 37536766485).
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
           name: lgwks-bot-junit-${{ matrix.shard }}
           path: target/nextest/ci/junit.xml
+          if-no-files-found: error
           retention-days: 7
+
+  # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
+  # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
+  # backend execute here, in a container on the same machine, with the same
+  # cargo configuration. One job per suite, each with its own target volume.
+  tests_linux:
+    name: Tests (Linux container)
+    runs-on: [self-hosted, macOS, ARM64, lwc]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [workspace, bot-full, appcui]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          nextest: "true"
+      - name: Run the workspace and lgwks-bot full suites on Linux
+        run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
 
   acceptance_receipts:
     # The receipt, built from the four JUnit reports the shards already wrote.
@@ -234,22 +227,19 @@ jobs:
     # of the 215 tests the shards already ran between them.
     name: Acceptance receipts
     needs: tests_bot_full
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     env:
       REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Download lgwks-bot JUnit reports
         uses: actions/download-artifact@v4
         with:
           pattern: lgwks-bot-junit-*
           path: acceptance-artifact
       - name: Record acceptance receipts
-        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform linux-x86_64
+        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
       - name: Upload acceptance receipt
         uses: actions/upload-artifact@v4
         with:
@@ -262,10 +252,9 @@ jobs:
     # their own: in a shard they set the run's wall (481 s on run 37205854158,
     # test phase 229 s against 61-63 s for the other three shards).
     name: Tests (lgwks-bot saturation)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     env:
-      TMPDIR: /dev/shm
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating the
@@ -275,17 +264,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-bot saturation tiers
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
 
@@ -293,19 +275,14 @@ jobs:
     # Its own job: it builds a separate workspace root in release, and run after
     # the bot suite in one job it added that build to the slowest job's wall.
     name: Async fairness gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: bench/async
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Async fairness gate and concurrency ladder
         run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
 
@@ -313,18 +290,14 @@ jobs:
     # Its own job: a release build of lgwks_std alone, and a timing statistic is
     # only meaningful on a runner not also compiling the rest of the workspace.
     name: Digest timing
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Digest constant-time equality (dudect)
         run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
 
@@ -333,82 +306,55 @@ jobs:
     # Their own job so the Tests job is not held by nested builds that
     # serialize on one target-directory lock.
     name: Storefront consumers
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Build storefront consumers
         run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
 
   simulation_evidence:
     name: successful simulation result
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Check successful simulation result
         run: python3 scripts/ci_local.py --lane simulation-evidence
 
   debug_e2e:
     name: successful end-to-end journey result
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check successful end-to-end journey result
         run: python3 scripts/ci_local.py --lane debug-e2e
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
@@ -448,20 +394,14 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
         # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
@@ -521,20 +461,14 @@ jobs:
   # longest in the run once the test suites were split.
   feature-matrix-std-deps:
     name: lgwks-std and lgwks-deps feature matrix
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
@@ -567,22 +501,15 @@ jobs:
   # step took 228 s and put the feature-matrix job at 303 s. (#276)
   std-per-feature-a:
     name: lgwks-std per-feature tests (a)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-std per-feature tests, shard a (core trace random http)
         run: |
           set -eu
@@ -593,22 +520,15 @@ jobs:
 
   std-per-feature-b:
     name: lgwks-std per-feature tests (b)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
         run: |
           set -eu
@@ -619,22 +539,15 @@ jobs:
 
   std-per-feature-c:
     name: lgwks-std per-feature tests (c)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
         run: |
           set -eu
@@ -649,20 +562,14 @@ jobs:
   # path of the whole run.
   target-matrix:
     name: Target matrix
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check lgwks-std across the declared target matrix
         # `cargo check --target <t>` for every declared target and crate. The
         # script installs the target with rustup first, requires the Rust-only
@@ -672,22 +579,16 @@ jobs:
 
   feature-matrix:
     name: lgwks-bot and lgwks-ast feature matrix
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     # 30 minutes covered the check lanes only; the grammar matrix below builds
     # and runs 31 test configurations, so the budget matches the work.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -748,13 +649,18 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [[self-hosted, macOS, ARM64, lwc], windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
         with:
           toolchain: "1.99.0"
           components: clippy
+      - uses: ./.github/actions/local-rust
+        if: runner.environment == 'self-hosted'
+        with:
+          toolchain: "1.99.0"
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
@@ -793,20 +699,14 @@ jobs:
 
   gpui-macos:
     name: GPUI macOS renderer
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check normal GPUI renderer feature
         # The fixture is its own workspace, so by default it builds into its
         # own target directory and compiles the GPUI stack a second time.
@@ -821,26 +721,20 @@ jobs:
 
   candle-macos:
     name: Candle ML storefront (Metal)
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check Candle Metal storefront features
         run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
 
   contract-drift:
     name: lgwks-std contract drift checks
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -850,19 +744,13 @@ jobs:
         run: python3 scripts/check-requirements.py
   package-smoke:
     name: lgwks-std package smoke-test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Restore on every run, save only from `main`: a pull request reads the
-          # last merged build instead of writing a cache entry per branch.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run package smoke test
         run: ./scripts/lgwks-std-package-smoke.sh

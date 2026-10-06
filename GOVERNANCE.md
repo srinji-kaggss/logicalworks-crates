@@ -180,6 +180,29 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-06 — CI runs on the local self-hosted runner
+
+- **Director-ordered** ("U WILL USE LOCALRUNNER", 2026-10-04; "WHY IS GH ACTIONS
+  RUNNER NOT THE LOCAL MACOS ARM RUNNER??", 2026-10-06). Every Linux and macOS
+  job in `ci.yml` now runs on the repository's self-hosted macOS arm64 runners
+  (`MacBook-Pro-lwc-1..4`, label `lwc`). The runner home the
+  `logicalworks-crates.runner.watch` LaunchAgent pointed at had been deleted, so
+  the agent exited 127 every two minutes and no runner was registered here.
+- The machine's cargo configuration is the build (Director, 2026-10-06: "U WILL
+  USE ALL OPTIMIZATIONS FROM GLOBAL CARGO"). `.github/actions/local-rust`
+  checks the toolchain against the pin without changing the host's rustup
+  default, and keeps build output per runner across runs.
+- Linux still executes on every run: `scripts/linux-container-tests.sh` runs the
+  workspace suite, the lgwks-bot full suite and the AppCUI storefront in a
+  container (`--init`, so a killed orphan is reaped as on a Linux host), with
+  the same cargo configuration. Measured locally: workspace 4,507/4,507 in
+  148 s, lgwks-bot full 4,147/4,147 in 167 s, AppCUI 127 + 6 doc tests.
+- The two Windows jobs stay on GitHub's hosted Windows runners: this machine
+  has no Windows.
+
+**Does not claim:** an x86_64 test leg. #351's 11% reading was taken on GitHub's
+x86 runners and is not reproduced or resolved here.
+
 ### 2026-10-06 — Release cut: lgwks_std 2.1.0, lgwks_bot 2.1.0
 
 - **Director-ordered** (same order as the 2.0.0 cut below). The cut is

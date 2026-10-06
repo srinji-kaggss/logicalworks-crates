@@ -116,16 +116,14 @@ fn write_consumer(root: &Path) -> Result<std::path::PathBuf, Box<dyn Error>> {
     Ok(manifest_path)
 }
 
-/// Capture one Cargo invocation while reusing the workspace build directory.
+/// Capture one Cargo invocation while reusing the build directory every
+/// consumer probe shares (`consumer_probe::target_dir`).
 fn cargo_output(manifest_path: &Path, args: &[&str]) -> Result<Output, Box<dyn Error>> {
     let output = Command::new(env!("CARGO"))
         .args(args)
         .arg("--manifest-path")
         .arg(manifest_path)
-        .env(
-            "CARGO_TARGET_DIR",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-        )
+        .env("CARGO_TARGET_DIR", crate::consumer_probe::target_dir()?)
         .output()?;
     Ok(output)
 }

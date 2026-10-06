@@ -33,6 +33,14 @@ threads-required = 'num-test-threads'
 filter = 'package(lgwks_bot) & binary(it) & test(=tenancy::an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput)'
 threads-required = 'num-test-threads'
 
+# The storefront consumers (INV-DEP-9) are one test per family, and every one is
+# a `cargo check` into the same target directory. Run side by side, all but one
+# park on cargo's lock and that wait counts against their own slow-timeout, so
+# the binary runs one test at a time and each test's bound is its own compile.
+[[profile.default.overrides]]
+filter = 'package(lgwks_deps) & binary(storefront_consumers)'
+threads-required = 'num-test-threads'
+
 # #277: two lgwks_ast modules exist to catch a walk that stops making progress,
 # so they are the last place a missing bound would show up as a run that never
 # ends. nextest's default has no timeout at all, which means "the suite hung"

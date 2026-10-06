@@ -498,6 +498,13 @@ pub fn process_exists(pid: i32) -> io::Result<bool> {
 /// that waited for its absence would wait for a reaper this crate does not own.
 /// A zombie has run to its end: it occupies an id and does no work.
 ///
+/// On Linux two more states are not running, because neither returns to user
+/// code: a process part way through its exit (`PF_EXITING`), and one with a
+/// `SIGKILL` delivered that the scheduler has not yet run it to act on. On a
+/// loaded host a killed process can sit in the second state for longer than a
+/// cleanup's rounds take, and reporting it as a survivor would name a pid that
+/// ignored a signal nobody can ignore.
+///
 /// The conservative direction is the conservative one: a pid the table says
 /// exists and whose state cannot be read is reported **running**, because a
 /// receipt that claims less than it established is the honest one and a receipt
@@ -513,9 +520,9 @@ pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
     let mut running = BTreeSet::new();
     #[cfg(target_os = "linux")]
     for pid in pids {
-        match read_proc_state(*pid) {
-            Some(state) => {
-                if state != PROC_ZOMBIE {
+        match read_proc_stat(*pid) {
+            Some(stat) => {
+                if proc_stat_says_running(&stat) && !kill_is_pending(*pid) {
                     running.insert(*pid);
                 }
             }
@@ -563,17 +570,93 @@ pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
 #[cfg(all(target_os = "linux", feature = "process"))]
 const PROC_ZOMBIE: char = 'Z';
 
-/// The state letter `/proc/<pid>/stat` records, or `None` when it is unreadable.
+/// `PF_EXITING` in the task flags `/proc/<pid>/stat` records (field 9).
+///
+/// The kernel sets it as `do_exit` begins, before the process releases its
+/// memory and files and long before it becomes a zombie. A process carrying it
+/// never returns to user code: it has been stopped and is finishing its exit.
 #[cfg(all(target_os = "linux", feature = "process"))]
-fn read_proc_state(pid: i32) -> Option<char> {
+const PF_EXITING: u64 = 0x0000_0004;
+
+/// The task flags' position among the `stat` fields after the command name:
+/// field 9, counted from the state letter (field 3).
+#[cfg(all(target_os = "linux", feature = "process"))]
+const FLAGS_FIELD_AFTER_NAME: usize = 6;
+
+/// The `stat` line of `pid`, or `None` when it is unreadable.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn read_proc_stat(pid: i32) -> Option<String> {
     let path = std::path::Path::new("/proc")
         .join(pid.to_string())
         .join("stat");
-    let stat = std::fs::read_to_string(path).ok()?;
+    std::fs::read_to_string(path).ok()
+}
+
+/// Whether a `/proc/<pid>/stat` line describes a process still running user
+/// code: not a zombie, and not part way through its exit.
+///
+/// A line that cannot be parsed reports running, the answer that understates
+/// what a cleanup achieved.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn proc_stat_says_running(stat: &str) -> bool {
     // `pid (comm) state …`: `comm` may itself contain spaces and parentheses, so
-    // the state is the first field after the **last** `)`.
-    let after_name = stat.get(stat.rfind(')')?.saturating_add(1)..)?;
-    after_name.split_ascii_whitespace().next()?.chars().next()
+    // the fields start after the **last** `)`.
+    let Some(fields) = stat
+        .rfind(')')
+        .and_then(|end| stat.get(end.saturating_add(1)..))
+    else {
+        return true;
+    };
+    let mut fields = fields.split_ascii_whitespace();
+    let Some(state) = fields.next().and_then(|field| field.chars().next()) else {
+        return true;
+    };
+    if state == PROC_ZOMBIE {
+        return false;
+    }
+    let flags = fields
+        .nth(FLAGS_FIELD_AFTER_NAME.saturating_sub(1))
+        .and_then(|field| field.parse::<u64>().ok());
+    !matches!(flags, Some(flags) if flags & PF_EXITING != 0)
+}
+
+/// Whether `pid` has a `SIGKILL` delivered that it has not yet acted on.
+///
+/// A killed process stays in state `R` or `S` until the scheduler next runs it,
+/// and on a loaded host that is long enough for a cleanup to observe it
+/// "running" and report a survivor that ignored every signal — which a
+/// `SIGKILL` cannot be. The kernel records the pending kill in the thread's and
+/// the process's pending masks (`SigPnd`, `ShdPnd` in `/proc/<pid>/status`); a
+/// process with it set never returns to user code. An unreadable status claims
+/// nothing.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn kill_is_pending(pid: i32) -> bool {
+    let path = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("status");
+    std::fs::read_to_string(path).is_ok_and(|status| status_has_kill_pending(&status))
+}
+
+/// Whether a `/proc/<pid>/status` text carries `SIGKILL` in a pending mask.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn status_has_kill_pending(status: &str) -> bool {
+    // A signal's bit in the masks is its number less one.
+    let kill_bit = rustix::process::Signal::KILL
+        .as_raw()
+        .checked_sub(1)
+        .and_then(|bit| u32::try_from(bit).ok())
+        .and_then(|bit| 1u64.checked_shl(bit));
+    let Some(kill_bit) = kill_bit else {
+        return false;
+    };
+    status
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("SigPnd:")
+                .or_else(|| line.strip_prefix("ShdPnd:"))
+        })
+        .filter_map(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        .any(|mask| mask & kill_bit != 0)
 }
 
 /// The state `ps` records for every process, in one table read.
@@ -1761,6 +1844,77 @@ mod tests {
             first.is_truncated(),
             "a refused id must leave the set reported as a prefix, not as the whole tree"
         );
+        Ok(())
+    }
+
+    /// A `stat` line names its process running unless it is a zombie or is
+    /// exiting. The command name may hold spaces and parentheses.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stat_line_is_running_unless_it_is_a_zombie_or_exiting() {
+        let line = |state: char, flags: u64| {
+            format!(
+                "4242 (a (tricky) name) {state} 1 4242 4242 0 -1 {flags} 0 0 0 0 1 2 0 0 20 0 1 0 77"
+            )
+        };
+        assert!(proc_stat_says_running(&line('R', 0x0040_0000)));
+        assert!(proc_stat_says_running(&line('S', 0x0040_0040)));
+        assert!(
+            !proc_stat_says_running(&line('Z', 0x0040_0000)),
+            "a zombie has stopped"
+        );
+        assert!(
+            !proc_stat_says_running(&line('R', 0x0040_0004)),
+            "a process in do_exit never returns to user code"
+        );
+        assert!(
+            proc_stat_says_running("4242 (truncated"),
+            "an unparsable line understates the cleanup rather than overstating it"
+        );
+    }
+
+    /// `SIGKILL` (signal 9) is bit 8 of either pending mask.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_pending_kill_is_read_from_either_pending_mask() {
+        let status = |thread: &str, shared: &str| {
+            format!(
+                "Name:\tsh\nState:\tS (sleeping)\nSigPnd:\t{thread}\nShdPnd:\t{shared}\nSigBlk:\t0000000000000000\n"
+            )
+        };
+        assert!(status_has_kill_pending(&status(
+            "0000000000000100",
+            "0000000000000000"
+        )));
+        assert!(status_has_kill_pending(&status(
+            "0000000000000000",
+            "0000000000000100"
+        )));
+        assert!(
+            !status_has_kill_pending(&status("0000000000000000", "0000000000004000")),
+            "SIGTERM pending is not a kill"
+        );
+        assert!(
+            !status_has_kill_pending("Name:\tsh\n"),
+            "no mask claims nothing"
+        );
+    }
+
+    /// A process killed while stopped has the kill pending until it is resumed,
+    /// and is not running from the moment the kill is delivered.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_killed_process_is_not_running_even_before_it_is_scheduled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let pid = i32::try_from(child.id())?;
+        assert_eq!(running_processes(&[pid])?.len(), 1, "the premise: it runs");
+        kill_process(pid)?;
+        assert!(
+            running_processes(&[pid])?.is_empty(),
+            "pid {pid} was sent SIGKILL: pending, exiting or a zombie, it runs no more user code"
+        );
+        let _reaped = child.wait();
         Ok(())
     }
 

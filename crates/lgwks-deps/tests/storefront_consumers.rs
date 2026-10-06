@@ -1,4 +1,12 @@
 //! Compile isolated consumers through the selected storefront feature paths.
+//!
+//! One test per facade and per storefront family, each its own `cargo check` of
+//! an external consumer: a family is a separate compile of a separate feature
+//! set, so it is a separate test with its own nextest bound. One test that walked
+//! all seventeen families in a loop needed all of them to fit one 300 s bound,
+//! and on a runner whose dependency builds were partly cold it did not (run
+//! 37519838915). They share the target directory, so `.config/nextest.toml` runs
+//! this binary's tests one at a time rather than parking them on cargo's lock.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -42,113 +50,139 @@ fn output_text(output: &Output) -> String {
     )
 }
 
-#[test]
-fn minimal_external_consumers_use_selected_bevy_facades_only() -> TestResult {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    for (consumer, engine) in [
-        ("bevy-app", "bevy_app"),
-        ("bevy-time", "bevy_time"),
-        ("bevy-state", "bevy_state"),
-    ] {
-        let manifest = fixtures.join(consumer).join("Cargo.toml");
-        let enabled = cargo_check(&manifest, &["--features", "selected"])?;
-        assert!(
-            enabled.status.success(),
-            "{consumer} facade consumer failed:\n{}",
-            output_text(&enabled)
-        );
+/// The fixture directory every consumer manifest lives under.
+fn fixtures() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
 
-        let disabled = cargo_check(
-            &manifest,
-            &[
-                "--no-default-features",
-                "--features",
-                "probe",
-                "--example",
-                "feature_off",
-            ],
-        )?;
-        assert!(
-            !disabled.status.success(),
-            "{consumer} path compiled with its facade feature disabled"
-        );
-        let disabled_text = output_text(&disabled);
-        assert!(
-            (disabled_text.contains("unresolved import")
-                || disabled_text.contains("could not find")
-                || disabled_text.contains("cannot find"))
-                && disabled_text.contains(engine),
-            "{consumer} negative control failed for an unrelated reason:\n{}",
-            output_text(&disabled)
-        );
+/// A Bevy facade consumer compiles with its facade selected, fails to resolve
+/// `engine` with it deselected, and its default-off graph carries neither the
+/// engine nor the `scan` parser stack.
+fn bevy_facade_is_selected_only(consumer: &str, engine: &str) -> TestResult {
+    let manifest = fixtures().join(consumer).join("Cargo.toml");
+    let enabled = cargo_check(&manifest, &["--features", "selected"])?;
+    assert!(
+        enabled.status.success(),
+        "{consumer} facade consumer failed:\n{}",
+        output_text(&enabled)
+    );
 
-        let tree = cargo_tree_without_defaults(&manifest)?;
-        assert!(tree.status.success(), "{}", output_text(&tree));
-        assert!(
-            !output_text(&tree).contains(engine),
-            "{consumer} disabled graph still contains {engine}:\n{}",
-            output_text(&tree)
-        );
-        assert!(
-            !output_text(&tree).contains("lgwks_deps feature \"scan\""),
-            "{consumer} default-features=false graph acquired scan parser dependencies:\n{}",
-            output_text(&tree)
-        );
-    }
+    let disabled = cargo_check(
+        &manifest,
+        &[
+            "--no-default-features",
+            "--features",
+            "probe",
+            "--example",
+            "feature_off",
+        ],
+    )?;
+    assert!(
+        !disabled.status.success(),
+        "{consumer} path compiled with its facade feature disabled"
+    );
+    let disabled_text = output_text(&disabled);
+    assert!(
+        (disabled_text.contains("unresolved import")
+            || disabled_text.contains("could not find")
+            || disabled_text.contains("cannot find"))
+            && disabled_text.contains(engine),
+        "{consumer} negative control failed for an unrelated reason:\n{disabled_text}"
+    );
+
+    let tree = cargo_tree_without_defaults(&manifest)?;
+    let tree_text = output_text(&tree);
+    assert!(tree.status.success(), "{tree_text}");
+    assert!(
+        !tree_text.contains(engine),
+        "{consumer} disabled graph still contains {engine}:\n{tree_text}"
+    );
+    assert!(
+        !tree_text.contains("lgwks_deps feature \"scan\""),
+        "{consumer} default-features=false graph acquired scan parser dependencies:\n{tree_text}"
+    );
     Ok(())
 }
 
-#[test]
-fn minimal_external_consumers_exercise_each_storefront_family() -> TestResult {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let manifest = fixtures.join("storefront-matrix/Cargo.toml");
-    let mut selections = vec![
-        ("appcui", "appcui"),
-        ("bevy-ecs", "bevy_ecs"),
-        ("tokio-base", "tokio_base"),
-        ("tokio-time", "tokio_time"),
-        ("tokio-sync", "tokio_sync"),
-        ("tokio-macros", "tokio_macros"),
-        ("tokio-io", "tokio_io"),
-        ("tokio-net", "tokio_net"),
-        ("tokio-process", "tokio_process"),
-        ("tokio-fs", "tokio_fs"),
-        ("tokio-signal", "tokio_signal"),
-        ("tokio-full", "tokio_full"),
-        ("ml-candle", "ml_candle"),
-        ("ml-tokenizers", "ml_tokenizers"),
-        ("gpui", "gpui"),
-        ("ml-candle-metal", "ml_candle_metal"),
-        ("process-group-probe", "process_group_probe"),
-    ];
-    if !cfg!(target_os = "macos") {
-        selections.retain(|&(feature, _)| feature != "ml-candle-metal");
-    }
-
-    for (feature, example) in selections {
-        let output = cargo_check(
-            &manifest,
-            &[
-                "--no-default-features",
-                "--features",
-                feature,
-                "--example",
-                example,
-            ],
-        )?;
-        assert!(
-            output.status.success(),
-            "storefront-only {feature} consumer failed:\n{}",
-            output_text(&output)
-        );
-    }
-
-    let tree = cargo_tree_without_defaults(&manifest)?;
-    assert!(tree.status.success(), "{}", output_text(&tree));
+/// The storefront matrix consumer compiles `example` with only `feature` on.
+fn storefront_family_compiles_alone(feature: &str, example: &str) -> TestResult {
+    let manifest = fixtures().join("storefront-matrix/Cargo.toml");
+    let output = cargo_check(
+        &manifest,
+        &[
+            "--no-default-features",
+            "--features",
+            feature,
+            "--example",
+            example,
+        ],
+    )?;
     assert!(
-        !output_text(&tree).contains("lgwks_deps feature \"scan\""),
-        "default-features=false matrix consumer acquired the scan feature:\n{}",
-        output_text(&tree)
+        output.status.success(),
+        "storefront-only {feature} consumer failed:\n{}",
+        output_text(&output)
+    );
+    Ok(())
+}
+
+/// One `#[test]` per Bevy facade consumer.
+macro_rules! bevy_facades {
+    ($($name:ident => ($consumer:literal, $engine:literal),)+) => {$(
+        #[test]
+        fn $name() -> TestResult {
+            bevy_facade_is_selected_only($consumer, $engine)
+        }
+    )+};
+}
+
+bevy_facades! {
+    bevy_app_facade_is_selected_only => ("bevy-app", "bevy_app"),
+    bevy_time_facade_is_selected_only => ("bevy-time", "bevy_time"),
+    bevy_state_facade_is_selected_only => ("bevy-state", "bevy_state"),
+}
+
+/// One `#[test]` per storefront family, each with an optional `cfg` for a
+/// family that only builds on one target.
+macro_rules! storefront_families {
+    ($($(#[$cfg:meta])* $name:ident => ($feature:literal, $example:literal),)+) => {$(
+        #[test]
+        $(#[$cfg])*
+        fn $name() -> TestResult {
+            storefront_family_compiles_alone($feature, $example)
+        }
+    )+};
+}
+
+storefront_families! {
+    storefront_appcui_compiles_alone => ("appcui", "appcui"),
+    storefront_bevy_ecs_compiles_alone => ("bevy-ecs", "bevy_ecs"),
+    storefront_tokio_base_compiles_alone => ("tokio-base", "tokio_base"),
+    storefront_tokio_time_compiles_alone => ("tokio-time", "tokio_time"),
+    storefront_tokio_sync_compiles_alone => ("tokio-sync", "tokio_sync"),
+    storefront_tokio_macros_compiles_alone => ("tokio-macros", "tokio_macros"),
+    storefront_tokio_io_compiles_alone => ("tokio-io", "tokio_io"),
+    storefront_tokio_net_compiles_alone => ("tokio-net", "tokio_net"),
+    storefront_tokio_process_compiles_alone => ("tokio-process", "tokio_process"),
+    storefront_tokio_fs_compiles_alone => ("tokio-fs", "tokio_fs"),
+    storefront_tokio_signal_compiles_alone => ("tokio-signal", "tokio_signal"),
+    storefront_tokio_full_compiles_alone => ("tokio-full", "tokio_full"),
+    storefront_ml_candle_compiles_alone => ("ml-candle", "ml_candle"),
+    storefront_ml_tokenizers_compiles_alone => ("ml-tokenizers", "ml_tokenizers"),
+    storefront_gpui_compiles_alone => ("gpui", "gpui"),
+    #[cfg(target_os = "macos")]
+    storefront_ml_candle_metal_compiles_alone => ("ml-candle-metal", "ml_candle_metal"),
+    storefront_process_group_probe_compiles_alone => ("process-group-probe", "process_group_probe"),
+}
+
+#[test]
+fn the_storefront_matrix_default_graph_carries_no_optional_family() -> TestResult {
+    let manifest = fixtures().join("storefront-matrix/Cargo.toml");
+    let tree = cargo_tree_without_defaults(&manifest)?;
+    let tree_text = output_text(&tree);
+    assert!(tree.status.success(), "{tree_text}");
+    assert!(
+        !tree_text.contains("lgwks_deps feature \"scan\""),
+        "default-features=false matrix consumer acquired the scan feature:\n{tree_text}"
     );
     for optional_package in [
         "appcui v",
@@ -160,9 +194,8 @@ fn minimal_external_consumers_exercise_each_storefront_family() -> TestResult {
         "nix v",
     ] {
         assert!(
-            !output_text(&tree).contains(optional_package),
-            "default-features=false consumer acquired {optional_package}:\n{}",
-            output_text(&tree)
+            !tree_text.contains(optional_package),
+            "default-features=false consumer acquired {optional_package}:\n{tree_text}"
         );
     }
     Ok(())
