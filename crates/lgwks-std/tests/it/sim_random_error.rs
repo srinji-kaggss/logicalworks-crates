@@ -518,29 +518,32 @@ mod sim {
     }
 
     #[test]
-    fn no_seeded_generator_predicts_a_draw() {
+    fn no_seeded_generator_predicts_a_draw() -> Result<(), EntropyError> {
         // INV-RANDOM-ONE-SOURCE, observed from outside: a build whose entropy
         // had been replaced by a seeded userspace generator would let the
-        // test's own generator predict it. Two whole bytes per draw, so the
-        // chance of a hit across 100 draws is about 1.5e-4 and one hit names a
-        // substituted source immediately.
+        // test's own generator predict it, so the generator fills each
+        // sixteen-byte draw from two whole words, the way such a substitute
+        // would. A true source matches one draw by chance with probability
+        // 2^-128, so across 100 draws a hit is never noise and always names a
+        // substituted source. (Two-byte draws matched by chance once in about
+        // 650 runs, which a gate that runs every PR on several lanes reaches.)
+        // A refused draw fails the test rather than shrinking it.
         let mut generator = crate::rng::Rng::new(SWEEP_SEEDS[0]);
         let mut predicted = 0usize;
-        let mut drawn = 0usize;
         for _ in 0..100 {
-            let Ok(pair) = random::bytes::<2>() else {
-                continue;
-            };
-            drawn = drawn.saturating_add(1);
-            let first = generator.next().to_le_bytes()[0];
-            let second = generator.next().to_le_bytes()[0];
-            predicted = predicted.saturating_add(usize::from(pair == [first, second]));
+            let block = random::bytes::<16>()?;
+            let mut guess = [0u8; 16];
+            let (low, high) = guess.split_at_mut(8);
+            low.copy_from_slice(&generator.next().to_le_bytes());
+            high.copy_from_slice(&generator.next().to_le_bytes());
+            predicted = predicted.saturating_add(usize::from(block == guess));
         }
         assert_eq!(
             predicted, 0,
-            "a seeded generator predicted {predicted} of {drawn} two-byte draws; the entropy \
+            "a seeded generator predicted {predicted} of 100 sixteen-byte draws; the entropy \
              source is not the OS CSPRNG it claims to be"
         );
+        Ok(())
     }
 
     #[test]
