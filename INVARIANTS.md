@@ -592,6 +592,34 @@ Each of these was a shipped defect. Treat the list as the spec.
   `sim_every_receipt_arm_is_reachable_in_the_family`,
   `sim_distinct_seeds_drive_distinct_drains`), and lgwks_std's
   `tests/it/sim_descendants.rs`
+- **INV-BOT-157** A supervisor killed outright leaves a record its successor can
+  reap by, and the reap signals only the process the record names.
+  `Supervisor::spawn_process_identified` returns, beside the task id, the
+  `ProcessIdentity` of the child's group leader — its pid and the start instant
+  the OS records for it (the boot id and start tick from `/proc` on Linux; `ps -o
+  lstart` in UTC under the C locale elsewhere, one-second resolution) — read after
+  the child starts and before the supervisor can reap it, so the pid cannot yet
+  have been reissued; a spawn whose identity cannot be read is refused and its
+  group killed by the same guard an aborted task's group is. `reap_orphaned_group`
+  re-reads the recorded pid's start the same way: a match captures the leader's
+  descendants and kills the group, the leader and each captured pid (`Signalled`);
+  a pid nobody holds (`LeaderGone`) or one whose start differs (`LeaderReused`) is
+  never signalled. The stored form `<pid>/<start>` reads back as exactly the
+  identity that wrote it or is refused (`ProcessIdentityError`), so a damaged row
+  never becomes a guess. `spawn_process` does not read the identity, so it pays
+  nothing for it. **Not claimed:** atomicity between the read and the signal (a
+  pid reissued in that window, which needs the allocator to wrap its range), a
+  reissue within one second on a `ps` host, members of a group whose leader had
+  already exited, or storing the record, which is the caller's job. · why: #318,
+  logical_ci#16 · enforced by: `tests/it/orphan_reap.rs`
+  (`a_killed_coordinators_lane_is_stopped_by_its_successor`,
+  `an_identified_spawn_names_its_leader_and_stays_supervised`), lgwks_std's
+  `tests/it/sim_orphan_reap.rs`
+  (`sim_every_seed_reaps_only_the_records_that_still_name_their_leader`,
+  `sim_a_damaged_record_is_refused_or_read_back_exactly`) and `process::tests`
+  (`a_matching_leader_has_its_group_and_every_descendant_stopped`,
+  `a_forged_start_on_a_live_pid_is_never_signalled`,
+  `a_damaged_record_is_refused_by_the_arm_that_names_its_damage`)
 - **INV-BOT-156** Shutdown never reports a supervised process that answered its
   token as aborted. A process task is cooperative by construction — its wait
   races the token — and answering the token *is* its cleanup, which spends

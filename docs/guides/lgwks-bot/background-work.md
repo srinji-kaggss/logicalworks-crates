@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:1978`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:2021`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:2489`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise.rs:2532`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -131,22 +131,63 @@ Three differences from a raw `Child`:
   `ShutdownReport::into_outcomes` returns the report in `Err` rather than
   discarding pending ownership.
 
+## `Supervisor::spawn_process_identified`: when the supervisor itself is killed
+
+Every guarantee above runs inside the supervisor's process. A supervisor killed
+with `SIGKILL` runs no destructor, so its children's groups keep running with
+their leader re-parented to init and nobody left who owns them. The only way back
+to them is a record written before the kill.
+
+`Supervisor::spawn_process_identified(spec)` starts the child exactly as
+`spawn_process` does and also returns the identity of its group leader
+(`crates/lgwks-bot/src/rt/supervise.rs:2595`): the pid **and** the instant the OS
+records that pid's process started. Store `leader().to_string()` durably — a
+database row, written before the lane does work — and a successor parses it back
+and calls `reap_orphaned_group` (`crates/lgwks-std/src/process.rs:1158`):
+
+```rust
+use lgwks_bot::rt::process::{OrphanReap, ProcessIdentity, reap_orphaned_group};
+
+fn reap(stored: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let leader: ProcessIdentity = stored.parse()?;
+    match reap_orphaned_group(&leader)? {
+        OrphanReap::Signalled { .. } => {} // the dead supervisor's lane is stopped
+        _ => {} // the pid is gone or now names another process: nothing was sent
+    }
+    Ok(())
+}
+```
+
+The start instant is what makes the reap safe. A pid alone does not say which
+process it names: after the leader exits the OS may hand the number to a
+stranger. The reap re-reads the start of the recorded pid and signals only on an
+exact match; a pid nobody holds is `LeaderGone` and one whose start differs is
+`LeaderReused`, and neither is signalled. On Linux the start is the boot id and
+the kernel's start tick; elsewhere it is `ps -o lstart`, read in UTC under the C
+locale, with a resolution of one second. `spawn_process` does not pay for the read
+— on macOS it is one `ps` run — which is why it is a separate door.
+
+**Not covered:** the read and the signal are two calls, so a pid reissued between
+them would be signalled (the allocator has to wrap its whole range first); a group
+whose leader already exited is not reachable from the record; and storing the
+record is the caller's job.
+
 ## `Supervisor::run_process`: the same runner, with the result in hand
 
 `Supervisor::run_process(spec)` is `spawn_process` with the completion handed
 back: it awaits the child and returns a `ProcessRun`
-(`crates/lgwks-bot/src/rt/supervise.rs:2724`). It reuses the same process-group
+(`crates/lgwks-bot/src/rt/supervise.rs:2817`). It reuses the same process-group
 ownership, deadline and cleanup machinery, so a deadline stops the **group**,
 and the run reports the same `CleanupReceipt` a supervised task would.
 
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:476`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process.rs:489`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
-(`crates/lgwks-bot/src/rt/process.rs:51`) keeps its first `limit` bytes — the
+(`crates/lgwks-bot/src/rt/process.rs:64`) keeps its first `limit` bytes — the
 ceiling is a `NonZeroUsize`, so it cannot be unbounded — keeps draining the pipe
 so a child that writes past the ceiling never blocks, and reports the exact
 byte total with a `truncated` flag. The retained buffer is sized once to the
@@ -196,7 +237,7 @@ the payload bytes one pass keeps, and the capture's own
 can actually refuse. Prefer `frames()` when the bytes are already in hand.
 
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:1121`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:1134`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.
@@ -218,14 +259,14 @@ Two details that decide how tight your bound really is:
 
 - `Budget::For` checks its deadline between iterations, so a body that blocks for
   longer than the budget overruns it by one iteration
-  (`crates/lgwks-bot/src/rt/supervise.rs:184`). Cancellation is not subject to
+  (`crates/lgwks-bot/src/rt/supervise.rs:227`). Cancellation is not subject to
   that slack, because it interrupts the body itself.
 - Every iteration races the token rather than checking it between iterations.
   A cancel drops a body that is still awaiting, and the loop reports
   `Outcome::Cancelled` rather than `Outcome::Exhausted`, so a completed run is
   distinguishable from an interrupted one.
 - The loop also yields the executor every `YIELD_INTERVAL` iterations
-  (`crates/lgwks-bot/src/rt/supervise.rs:168`), which is what keeps a body whose
+  (`crates/lgwks-bot/src/rt/supervise.rs:211`), which is what keeps a body whose
   future is ready on its first poll from turning the whole loop into one
   uninterruptible poll. Without it a cancel ordered by another task could not be
   delivered until the budget ran out, and on a current-thread runtime the
@@ -306,7 +347,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:5058`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:5161`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 hands the closure to a pool thread and offers no abort, and its bound is a
@@ -329,7 +370,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:1821`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:1864`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -339,7 +380,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:5167` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:5270` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,

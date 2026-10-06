@@ -126,6 +126,49 @@ use lgwks_deps::tokio::process::{ChildStderr, ChildStdout, Command};
 #[cfg(feature = "process")]
 pub use lgwks_std::process::ContainmentMechanism;
 
+/// A process started by [`Supervisor::spawn_process_identified`]: the task that
+/// owns it and the identity of the process leading its group.
+#[cfg(feature = "process")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentifiedSpawn {
+    /// The task's id, as [`Supervisor::spawn_process`] would have returned it.
+    task: TaskId,
+    /// The group leader's identity, read before the child could be reaped.
+    leader: lgwks_std::process::ProcessIdentity,
+}
+
+#[cfg(feature = "process")]
+impl IdentifiedSpawn {
+    /// The id of the task that owns the process.
+    #[must_use]
+    pub const fn task(&self) -> TaskId {
+        self.task
+    }
+
+    /// The identity of the process leading the child's group — the record a
+    /// successor passes to
+    /// [`reap_orphaned_group`](crate::rt::process::reap_orphaned_group).
+    #[must_use]
+    pub const fn leader(&self) -> &lgwks_std::process::ProcessIdentity {
+        &self.leader
+    }
+}
+
+/// The identity of the just-started leader `pid`, which the supervisor has not
+/// reaped, so a process holding the pid is the leader itself.
+#[cfg(all(unix, feature = "process"))]
+fn identify_leader(pid: i32) -> io::Result<lgwks_std::process::ProcessIdentity> {
+    if let Some(leader) = lgwks_std::process::identify_process(pid)? {
+        return Ok(leader);
+    }
+    let refusal = Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("lgwks_bot: the unreaped leader {pid} was absent from the process table"),
+    ));
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "identify_leader: returning an error to the caller");
+    refusal
+}
+
 use super::cancel::CancellationToken;
 use super::clock::{Clock, TimeSource};
 #[cfg(all(unix, feature = "process"))]
@@ -2520,6 +2563,54 @@ impl Supervisor {
     /// permit is released when this function returns.
     #[cfg(all(unix, feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+        let (task, ()) = self.spawn_process_reading(spec, |_| Ok(())).await?;
+        Ok(task)
+    }
+
+    /// Start `spec` exactly as [`Supervisor::spawn_process`] does, and also
+    /// return the identity of the process that leads its group.
+    ///
+    /// The identity — the leader's pid and the instant the OS records it started
+    /// — is what a *successor* needs when this supervisor is killed with SIGKILL
+    /// and runs no cleanup: the child's group outlives it, and a later process
+    /// that stored the identity hands it to
+    /// [`reap_orphaned_group`](crate::rt::process::reap_orphaned_group), which
+    /// stops the group only while the pid still names this leader. Store it
+    /// durably (a database row) before relying on it; this method does not.
+    ///
+    /// The identity is read after the child starts and before the supervisor
+    /// can reap it, so the pid cannot have been reissued yet. On Linux the read
+    /// is two `/proc` files; elsewhere it runs `ps` once on the calling thread,
+    /// which is why it is a separate door: [`Supervisor::spawn_process`] does
+    /// not pay for it.
+    ///
+    /// # Errors
+    ///
+    /// Every error [`Supervisor::spawn_process`] returns, and the read's own
+    /// error when the leader's identity could not be read. A spawn whose
+    /// identity is unknown is refused rather than returned half-recorded: its
+    /// group is killed by the same guard that kills an aborted task's group, so
+    /// no unrecorded group is left running.
+    #[cfg(all(unix, feature = "process"))]
+    pub async fn spawn_process_identified(
+        &mut self,
+        spec: &ProcessSpec,
+    ) -> io::Result<IdentifiedSpawn> {
+        let (task, leader) = self.spawn_process_reading(spec, identify_leader).await?;
+        Ok(IdentifiedSpawn { task, leader })
+    }
+
+    /// The one admission, start and placement both process spawns share.
+    ///
+    /// `read` sees the leader's pid while the child is started, guarded and not
+    /// yet reaped, and what it returns travels back beside the task id. A
+    /// refusal from it drops the guards built so far, which kill the group.
+    #[cfg(all(unix, feature = "process"))]
+    async fn spawn_process_reading<T>(
+        &mut self,
+        spec: &ProcessSpec,
+        read: impl FnOnce(i32) -> io::Result<T>,
+    ) -> io::Result<(TaskId, T)> {
         let Some(permit) = self.claim().await else {
             // The fence inside `claim` answered for capacity and for
             // cancellation alike; name which world refused, so a cancelled
@@ -2554,11 +2645,13 @@ impl Supervisor {
         let task = self.allocate_task_id();
         let group = ProcessGroup::of(group_id, task, permit, Arc::clone(&self.cleanup_owners));
         let live = LiveProcess::enter(&self.cleanup_owners);
-        Ok(self.place_owned(task, async move {
+        let read = read(group_id)?;
+        let placed = self.place_owned(task, async move {
             let end = drive_process(&clock, child, &token, group, bounds).await;
             drop(live);
             task_end(end)
-        }))
+        });
+        Ok((placed, read))
     }
 
     /// Run `spec` to completion and return its captured report.
@@ -2807,6 +2900,16 @@ impl Supervisor {
     /// Process-group containment is unavailable on non-Unix targets.
     #[cfg(all(not(unix), feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+        let _ = spec;
+        Err(Self::no_process_group())
+    }
+
+    /// Process-group containment is unavailable on non-Unix targets.
+    #[cfg(all(not(unix), feature = "process"))]
+    pub async fn spawn_process_identified(
+        &mut self,
+        spec: &ProcessSpec,
+    ) -> io::Result<IdentifiedSpawn> {
         let _ = spec;
         Err(Self::no_process_group())
     }

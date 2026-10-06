@@ -146,6 +146,7 @@ mod journal_writer_fence;
 mod locator_eligibility;
 mod no_default;
 mod observe_refresh;
+mod orphan_reap;
 mod owner_epoch_takeover;
 mod pr_review_journey;
 mod process_escape;
