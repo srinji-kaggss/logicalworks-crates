@@ -16,7 +16,7 @@ use lgwks_deps::{Refusal, audit_direct};
 
 use crate::sim;
 
-use sim::Rng;
+use sim::{EmptyTable, Rng};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -60,6 +60,83 @@ fn verdict(refusals: &[Refusal]) -> u8 {
     }
 }
 
+/// The tables one case draws from, named so the draw sites below read as what
+/// they choose from rather than as index arithmetic.
+struct OriginTables<'a> {
+    /// Git repository sources.
+    repos: &'a [&'a str],
+    /// Revision policies admitted for a Git source.
+    revs: &'a [&'a str],
+    /// Registry sources.
+    registries: &'a [&'a str],
+    /// External path authorities.
+    paths: &'a [&'a str],
+}
+
+/// One drawn case: the approved origin, the observed origin, and the edge that
+/// carries the observed one.
+///
+/// Every draw for the case happens here so the run loop states one step rather
+/// than a chain, and so a refusal names the draw that refused.
+fn draw_case(rng: &mut Rng, tables: OriginTables<'_>) -> Result<OriginCase, Box<dyn Error>> {
+    let family = rng
+        .next_u64()
+        .checked_rem(FAMILIES)
+        .ok_or("the family count must divide the draw")?;
+    let (approved, observed, edges) = match family {
+        0 => {
+            let approved = git_origin(rng, tables.repos, tables.revs)?;
+            let observed = git_origin(rng, tables.repos, tables.revs)?;
+            let edges = vec![edge(Some(&observed), None)?];
+            (approved, observed, edges)
+        }
+        1 => {
+            let approved = (*rng.pick_named("registry sources", tables.registries)?).to_owned();
+            let observed = (*rng.pick_named("registry sources", tables.registries)?).to_owned();
+            let edges = vec![edge(Some(&observed), None)?];
+            (approved, observed, edges)
+        }
+        _ => {
+            let approved = (*rng.pick_named("path authorities", tables.paths)?).to_owned();
+            let observed = (*rng.pick_named("path authorities", tables.paths)?).to_owned();
+            let edges = vec![edge(None, Some(&observed))?];
+            (approved, observed, edges)
+        }
+    };
+    Ok(OriginCase {
+        approved,
+        observed,
+        edges,
+    })
+}
+
+/// The approved origin, the observed origin, and the edge carrying the observed
+/// one, as one draw produced them.
+struct OriginCase {
+    /// The origin the register approves.
+    approved: String,
+    /// The origin the edge declares.
+    observed: String,
+    /// The edge carrying `observed`.
+    edges: Vec<lgwks_deps::metadata::DirectEdge>,
+}
+
+/// One drawn Git origin: a repository and the revision policy admitted for it.
+///
+/// One draw per part, each bound before the next, so a refusal names the draw
+/// that failed instead of appearing inside a formatted string.
+fn git_origin(rng: &mut Rng, repos: &[&str], revs: &[&str]) -> Result<String, EmptyTable> {
+    let repo = rng.pick_named("git repositories", repos)?;
+    let revision = rng.pick_named("revision policies", revs)?;
+    Ok(format!("{repo}{revision}"))
+}
+
+/// How many origin families the run draws between: a Git repository plus its
+/// admitted revision policy, a registry source, and an external path authority.
+/// Named so the modulus the family draw reduces by is one fact about the suite
+/// rather than a literal beside the arm it selects.
+const FAMILIES: u64 = 3;
+
 /// Runs the whole family for `seed` and returns (trace hash, admitted, drift).
 fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let repos = [
@@ -79,27 +156,17 @@ fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let mut drifted = 0_usize;
 
     for _ in 0..256 {
-        let family = rng.next_u64().checked_rem(3).unwrap_or(0);
-        let (approved, observed, edges) = match family {
-            0 => {
-                let approved = format!("{}{}", rng.pick(&repos), rng.pick(&revs));
-                let observed = format!("{}{}", rng.pick(&repos), rng.pick(&revs));
-                let edges = vec![edge(Some(&observed), None)?];
-                (approved, observed, edges)
-            }
-            1 => {
-                let approved = (*rng.pick(&registries)).to_owned();
-                let observed = (*rng.pick(&registries)).to_owned();
-                let edges = vec![edge(Some(&observed), None)?];
-                (approved, observed, edges)
-            }
-            _ => {
-                let approved = (*rng.pick(&paths)).to_owned();
-                let observed = (*rng.pick(&paths)).to_owned();
-                let edges = vec![edge(None, Some(&observed))?];
-                (approved, observed, edges)
-            }
+        let case = OriginTables {
+            repos: &repos,
+            revs: &revs,
+            registries: &registries,
+            paths: &paths,
         };
+        let OriginCase {
+            approved,
+            observed,
+            edges,
+        } = draw_case(&mut rng, case)?;
         let class = if approved.starts_with("git+") {
             "git"
         } else if approved.starts_with("registry+") {

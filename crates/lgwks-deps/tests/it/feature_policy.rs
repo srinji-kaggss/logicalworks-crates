@@ -104,7 +104,7 @@ fn defaults_off_is_admitted_and_defaults_on_is_refused() -> TestResult {
         matches!(
             first(&audit_direct(&widened, &register))?,
             Refusal::DefaultFeaturesDrift {
-                approved: false,
+                approved: Some(false),
                 declared: true,
                 ..
             }
@@ -161,7 +161,7 @@ fn optionality_and_target_scope_are_policed() -> TestResult {
         matches!(
             first(&audit_direct(&optional, &mandatory))?,
             Refusal::OptionalityDrift {
-                approved: false,
+                approved: Some(false),
                 declared: true,
                 ..
             }

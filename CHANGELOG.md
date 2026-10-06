@@ -426,6 +426,215 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the policy refusals report what the register said
+
+- **`declared_scope` is published.** Cargo spells an unconditional dependency
+  with no `target` key; the register spells the same declaration `target = ""`
+  (INV-DEP-13). The gate compared the two vocabularies through an inline
+  `unwrap_or("")` in two places, and the simulation suites carried their own
+  copy of the same rule. It is one public function now, with the rule in one doc
+  and a doctest that states both spellings.
+- **A drift refusal carries the bit the entry authored.** `DefaultFeaturesDrift`
+  and `OptionalityDrift` reported `approved` as a plain `bool` the gate filled with
+  `unwrap_or(true)` / `unwrap_or(false)`. The refusal only exists for an *authored*
+  dimension, so the invented bit was never the answer — it is `Option<bool>` now,
+  and the message prints the bit the register carries.
+- **A target refusal names both sides in the register's vocabulary.** An authored
+  `target = ""` and an absent `target` key both print `<none>`, through one named
+  `scope_label`.
+- **An unconstrained feature dimension prints that it admits no set**, rather than
+  an empty set that reads as a set with no members.
+- **The two manifest checks share one reader.** `dependency_declarations` and
+  `declared_name` replace two copies of the same six-line walk, so a table header
+  cannot be read one way in one manifest and the other way in the other.
+- **The `vendor.rs` test fixture's root name drops the process id.** `check-std-first`
+  refused it (a pid is reused by the OS, so it names no run) and the exemption that
+  had covered it is deleted rather than re-anchored. The discriminator is
+  nanoseconds plus the `NEXT` atomic, which is what that comment had already
+  concluded: the atomic separates two tests on two threads, the nanoseconds
+  separate two runs. `check-std-first`'s exemption list is one entry shorter.
+
+New regression test: `seeded_scope_pairs_render_both_spellings_of_an_unconditional_edge`
+(`tests/it/sim_policy_properties.rs`) drives the public API over every scope pairing
+the register grammar admits, one seed for both draws, and asserts the rendered
+refusal text — a refusal printing `""` for an unconditional edge would pass every
+verdict assertion and be unreadable to the operator who has to act on it.
+
+`python3 scripts/check-std-first.py`: std-first holds, 357 source files.
+`python3 scripts/check-doc-citations.py`: 100 pinned lines across 13 pages, all
+unchanged. `cargo clippy -p lgwks_deps --all-targets` passes on both
+`--all-features` and `--no-default-features`. 303 crate tests pass.
+## [Unreleased]
+
+### lgwks_deps — the metadata collection answers for what it could not read
+
+- **`poll_quantum` parks instead of sleeping.** The `#[expect(clippy::disallowed_methods)]`
+  on `std::thread::sleep` named a substitution where the ban already names a
+  replacement: `std::thread::park_timeout`, which is the bounded synchronous
+  wait in a crate with no reactor to block.
+- **A dependency the `--no-deps` read never resolved keeps no licence record.**
+  `direct_edges` wrote `DeclaredLicense { license: None, license_file: None }` for
+  a package that read did not see, which is indistinguishable from a package
+  that declares no licence — the one thing the licence audit (#208) exists to
+  tell apart. The fields stay `None` and the audit refuses an edge whose terms
+  are unknown.
+- **`Instant::checked_add` failing is not a deadline that expired.** The old
+  `unwrap_or_else(Instant::now)` refused every child immediately over a timeout
+  of a few centuries; an unrepresentable deadline is now `None`, which says the
+  clock's range ended and the byte budget is what bounds the child.
+- **`MAX_CAPTURE_BYTES` is one named bound** for the two `u64::try_from(stream_cap)`
+  sites, and `Resolve` names the two feature selections so the `cargo metadata`
+  argument list is written once. A copy of that list is where a flag goes
+  missing.
+- **A pre-epoch clock is refused on the wasm capture path** rather than floored to
+  the epoch, which named every capture of the process the same instant.
+- **The stdout and stderr flood families assert through one check**, so the two
+  cannot drift into testing different budgets.
+
+Verified end to end: `lgwks-deps check .` reports 33 approvals, 45 edges, 0
+refusals, exit 0, with the same contract and subject digests as before;
+`lgwks-deps invariants .` resolves 4 invariants; `lgwks-deps scan` reports 383
+files and zero findings. 176 lib tests pass, including the real-process deadline,
+descendant-capture and flood families.
+## [Unreleased]
+
+### lgwks_deps — the invariant register answers for what it did not read
+
+`build` read `id` through `.map_or_else(|| "<unnamed>".to_owned(), …)`, so every
+refusal about a block that declared no identifier named an invariant no register
+ever wrote. `ErrorKind::MissingField` now carries the block's own line and an
+`Option<String>` id, and the message is `line N: invariant block is missing
+required field "id"`.
+
+Five more readers each resolved an absent value to a stand-in:
+
+- **`lint_table` names both spellings.** `[workspace.lints.clippy]` and
+  `[lints.clippy]` declare one namespace — the second inherited by every member —
+  and the equivalence is now written as two arms rather than as a default.
+- **`lint_level` states the terminator's two cases**: the level ends at the first
+  `,` or `}`, or runs to the end of the tail when the writer closed the table on
+  the same line.
+- **`check_scope` uses `split_once`**, so a scope with no `::` is a crate name
+  carrying no module path, by the type rather than by a substituted first
+  segment.
+- **`strip_item_prefix` names the two `extern` shapes**: `extern "C" fn f()` names
+  an ABI and `extern fn f()` does not, and both are stepped past deliberately.
+- **`split_attribute` splits instead of defaulting.** Both cuts were
+  `body.get(..).unwrap_or("")`; `char_indices` yields only boundary offsets and
+  `]` is one byte, so both cuts are on a boundary by construction.
+
+The required-field loop is what proves `approved_on` and `id` are present before
+the refusals that name them, and each is a refusal rather than a substitution if
+that ever stops holding.
+
+Verified end to end: `lgwks-deps invariants .` on this repository resolves 4
+invariants; a truncated register reports `line 1: invariant block is missing
+required field "id"`, and a named block reports its own line. 176 lib tests and
+44 register tests pass.
+## [Unreleased]
+
+### lgwks_deps — a `cfg` the scanner cannot evaluate is its own verdict
+
+The `test`-scope detectors decided "is this item test-only?" by evaluating its
+`cfg` expression under every assignment of its free atoms. An atom the
+assignment had not recorded was read as `true`, which made the expression easier
+to satisfy and so kept the item in scope — the safe direction, and a value the
+expression never had. `unwrap_or(true)` hid that from every caller above it.
+
+- **`Verdict` is three states** — `Satisfied`, `Unsatisfied`, `Unevaluated` —
+  and `all` / `any` / `not` fold between them. `may_hold` resolves `Unevaluated`
+  once, at the one place that decides whether an item is test-only, and it
+  resolves it towards keeping the item: an item in scope is a candidate for a
+  finding, and an item dropped is a clean report for source nobody read.
+- **`Hit`'s fields are private** with `rule()`, `line()` and `snippet()`. A
+  consumer now borrows the evidence it was shown instead of holding a `String`
+  it could edit into a different finding.
+- **An empty test-scope stack is no scope**, stated as `matches!` on the stack's
+  top rather than a `false` substituted for a missing entry.
+- **`enter_function` keeps "no enclosing function" as `Option<usize>`** instead
+  of flattening it to line `0` and re-expanding it on exit — a sentinel a walk
+  could mistake for a real line.
+
+Verified against planted controls on the shipped binary: a bare `.ok()` swallow
+in production is reported; the same line under `#[cfg(test)]` is clean; under
+`#[cfg(feature = "never")]`, `#[cfg(not(test))]` and `#[cfg(any(test, …))]` it
+is reported, which is the fail-open-for-findings direction. `lgwks-deps scan` on
+this repository: 383 files, zero findings. 176 lib tests and 51 scan tests pass.
+## [Unreleased]
+
+### lgwks_deps — the resolved graph, the vendor report and the CLI's target resolution
+
+The readers that build the gate's inputs each answered a value it did not have,
+and the CLI each resolved "no path given" on its own.
+
+- **A `[[package]]` block with no `version` is refused**
+  (`LockError::VersionlessPackage`) instead of being read with an empty version.
+  A resolved package is an identity of name *and* version, and an empty version
+  is a value no line declared — `freshness` compared it with the registry's
+  latest and the audit compared it with the approval's pin, so both decided on
+  it. This is the same refusal `NamelessPackage` already was, for the other half
+  of the identity. Cargo writes `version` for every locked package, so only a
+  hand-edited or truncated lockfile reaches it.
+- **`lock::Resolved`, `vendor::Missing` and `vendor::Report` are read through
+  accessors.** `#[non_exhaustive]` blocks construction outside the crate, not
+  mutation of a value a caller holds; these three are the readers' own output.
+  `Report::missing()` returns a slice and `Report::is_complete()` is the verdict,
+  so a caller can no longer empty the list that decides the exit code.
+- **One `subject_path` resolves every command's target.** Six call sites each
+  substituted `.` for an absent path; a command given no path audits the
+  repository the operator is standing in, and that is now one named fact.
+- **A verdict that arrives without a repository is refused.** `check` printed its
+  receipt against `.` when the collection reached a verdict without a root,
+  which is the exact defect `check_cli` pins — a receipt for a repository nobody
+  asked about.
+- **No command and an unknown command are distinct refusals**, each with its own
+  message and the usage block, instead of an empty command name.
+- **The debugger surface reads the `lgwks_std` manifest's own vocabulary**: an
+  absent `default`/`trace` assignment is `None` and answers "does this list
+  include that entry" for itself, rather than being read as an empty list.
+- **A registry that publishes no version is `None`**, not an empty string, so
+  `stale` is decided only between two versions crates.io and the lock both named.
+- **`serde_json_number` keeps counts; `schema_number` renders the register's
+  `u32` version.** The version went through a widening conversion whose failure
+  was reported as `usize::MAX` — a register version this binary could not name.
+- **`scan`'s excluded-directory test reads the directory's own name.** A name
+  that is not UTF-8 was read as empty, and an empty name matches no excluded
+  directory only by inventing a name the filesystem does not carry.
+
+### lgwks_deps — the seeded generators draw through one total generator
+
+The simulation suites substituted a value for every draw they could not make: a
+zero table length became `1`, a failed `u64`/`usize` conversion became index `0`,
+and a zero modulus became `0`. Each of those answered a case with a number the
+seed never chose, and one of them (`.max(1)` on an empty table) turned "no
+elements to draw" into an out-of-range read rather than a refusal.
+
+- **`Rng::pick` refuses an empty table** with `Option`, and **`Rng::pick_named`**
+  refuses it with a typed `EmptyTable` naming the table that was empty. The draw
+  is consumed before the table is inspected, so a seed's sequence no longer
+  depends on how long the table it drew from was.
+- **`sim_metadata_dimensions` uses the shared generator** instead of its own
+  splitmix64 copy: two index/draw implementations in one test binary is the
+  duplication the sweep exists to remove, and the suite's model — not the
+  generator — is what its assertions are about.
+- **Every generator in that suite is fallible** (`Outcome<T>`), so a draw the
+  fixture could not make reaches the test that owns the seed as that draw's own
+  refusal instead of as a value the generator invented.
+- **A truncation cut is a drawn eighth of the document**, not a drawn raw
+  offset: the family no longer has to convert a bound that a short document
+  could reduce to zero, and every cut is a strict prefix by construction.
+- **The register's `target` spelling is one named conversion** (`declared_scope`):
+  Cargo's absent target and the register's `target = ""` are two spellings of
+  one declaration, and the conversion between the two vocabularies was being
+  written out at five call sites.
+- Draws use `checked_rem`/`checked_div` rather than a masked modulus, which is
+  what `clippy::arithmetic_side_effects` and `clippy::integer_division` require;
+  the `max(1)` that made the old code read as total was the opposite.
+
+Behaviour is unchanged for every reachable case: every table the suites draw from
+is a non-empty constant or a slice whose emptiness the caller already tested.
+The new arms are what an emptied fixture table *means*, and each is reachable
+only by editing a fixture.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 

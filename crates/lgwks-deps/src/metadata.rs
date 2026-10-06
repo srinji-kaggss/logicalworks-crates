@@ -659,13 +659,18 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "direct_edges: returning an error to the caller");
                 return refusal;
             }
-            let declared = licence_targets
-                .get(dependency.name.as_str())
-                .copied()
-                .unwrap_or(DeclaredLicense {
-                    license: None,
-                    license_file: None,
-                });
+            // A dependency this `--no-deps` read did not resolve has no declared
+            // licence to read. The fields stay `None` rather than receiving an
+            // empty record, because "Cargo declares no licence" and "this read
+            // never saw the package" are different facts and only the licence
+            // audit can tell them apart — by refusing an edge whose terms are
+            // unknown. Writing the record unconditionally made the two read as
+            // one.
+            let declared = licence_targets.get(dependency.name.as_str()).copied();
+            let (license, license_file) = match declared {
+                Some(declared) => (declared.license, declared.license_file),
+                None => (None, None),
+            };
             edges.push(DirectEdge {
                 consumer: package.name.clone(),
                 package: dependency.name.clone(),
@@ -681,8 +686,8 @@ fn direct_edges(metadata: CargoMetadata) -> Result<Vec<DirectEdge>, MetadataErro
                 uses_default_features: dependency.uses_default_features,
                 target: dependency.target.clone(),
                 rename: dependency.rename.clone(),
-                license: declared.license.map(str::to_owned),
-                license_file: declared.license_file.map(str::to_owned),
+                license: license.map(str::to_owned),
+                license_file: license_file.map(str::to_owned),
             });
         }
     }
@@ -1125,18 +1130,31 @@ impl Drop for CleanupObligation {
     }
 }
 
+/// The largest capture `Take` can be asked to count, and the ceiling a declared
+/// cap above it becomes.
+///
+/// `Take` counts in `u64` and a cap is a `usize`; a cap past `u64::MAX` is one no
+/// platform can measure, so the ceiling is the only bound that is true of it.
+/// The bound is named because two call sites needed it, and a ceiling written
+/// twice is two ceilings.
+const MAX_CAPTURE_BYTES: u64 = u64::MAX;
+
+/// The byte ceiling `read_capped` enforces, in the width `Take` counts in.
+fn capture_limit(cap: usize) -> u64 {
+    match u64::try_from(cap) {
+        Ok(limit) => limit,
+        Err(_) => MAX_CAPTURE_BYTES,
+    }
+}
+
 /// One deadline-poll quantum.
 ///
-/// The suppression is the narrow exception for the `deny` API ban: no
-/// replacement exists for parking a synchronous gate-library thread between
-/// child polls, the 5ms quantum bounds deadline overshoot, and the poll loop
-/// is the only waiter so it always stops.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "no async runtime exists in this sync library; the bounded poll quantum is the deadline mechanism, not reactor blocking"
-)]
+/// `park_timeout` rather than `sleep`: this crate is synchronous, so there is no
+/// reactor to block, and parking is the bounded wait the API ban names as the
+/// replacement. The 5 ms quantum bounds deadline overshoot and the poll loop is
+/// the only waiter, so it always stops.
 fn poll_quantum() {
-    std::thread::sleep(Duration::from_millis(5));
+    std::thread::park_timeout(Duration::from_millis(5));
 }
 
 /// Runs one subprocess to completion under a deadline and output budgets.
@@ -1231,10 +1249,19 @@ fn run_bounded(
     #[cfg(target_family = "wasm")]
     fn distinguisher() -> Result<String, MetadataError> {
         static CAPTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // A clock that reads before the Unix epoch has no nanos to offer, and
+        // flooring it to the epoch would name every capture of this process the
+        // same instant. The sequence alone cannot separate two runs, so the
+        // refusal is the honest answer: a name this process cannot distinguish is
+        // not a distinguishable name.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0);
+            .map_err(|before_epoch| {
+                MetadataError::Spawn(std::io::Error::other(format!(
+                    "the wall clock reads before the Unix epoch: {before_epoch}"
+                )))
+            })?
+            .as_nanos();
         let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(format!("{nanos}-{seq}"))
     }
@@ -1259,7 +1286,7 @@ fn run_bounded(
                 return refusal;
             }
         }
-        let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+        let limit = capture_limit(stream_cap);
         let file = File::open(path).map_err(MetadataError::Spawn)?;
         let mut kept = Vec::new();
         file.take(limit.saturating_add(1))
@@ -1340,9 +1367,11 @@ fn run_bounded(
             return refusal;
         }
     };
-    let deadline = std::time::Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(std::time::Instant::now);
+    // A deadline the monotonic clock cannot represent is not a deadline: the
+    // clock's range is finite and a `timeout` past its end never arrives, so the
+    // byte budget is what bounds the child. Collapsing it to `now` instead would
+    // refuse every child immediately over a timeout of a few centuries.
+    let deadline = std::time::Instant::now().checked_add(timeout);
     // The only waiter, and it always stops: each quantum either observes
     // the exit, fires the deadline, or finds a capture file past budget.
     // File sizes only grow while the child lives, so a stat past budget
@@ -1351,11 +1380,11 @@ fn run_bounded(
         match observe_child(&mut child) {
             Err(error) => break Err(MetadataError::Spawn(error)),
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() >= deadline => {
+            Ok(None) if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) => {
                 break Err(MetadataError::Timeout { after: timeout });
             }
             Ok(None) => {
-                let limit = u64::try_from(stream_cap).unwrap_or(u64::MAX);
+                let limit = capture_limit(stream_cap);
                 #[cfg(test)]
                 let stdout_stat_fault = tests::take_fault(tests::FaultPoint::StatStdout);
                 #[cfg(not(test))]
@@ -1492,15 +1521,7 @@ fn read_metadata(root: &Path) -> Result<Collected<CargoMetadata>, MetadataError>
     let manifest = manifest_path(root)?;
     let output = run_bounded(
         "cargo",
-        &[
-            OsString::from("metadata"),
-            OsString::from("--locked"),
-            OsString::from("--no-deps"),
-            OsString::from("--format-version"),
-            OsString::from("1"),
-            OsString::from("--manifest-path"),
-            manifest.into_os_string(),
-        ],
+        &metadata_args(manifest.into_os_string(), Resolve::DeclaredOnly),
         root,
         METADATA_TIMEOUT,
         METADATA_STREAM_CAP,
@@ -1663,19 +1684,11 @@ pub fn read_with_members(root: &Path) -> Result<Collected<EdgesAndMembers>, Meta
 /// and the licences stay absent, which the audit reports rather than hides.
 fn read_resolved_packages(root: &Path) -> Option<Vec<CargoPackage>> {
     let manifest = manifest_path(root).ok()?;
+    // Every feature: an inactive optional edge is absent from the default
+    // resolve, and an absent package has no licence to audit.
     let output = run_bounded(
         "cargo",
-        &[
-            OsString::from("metadata"),
-            OsString::from("--locked"),
-            // Every feature: an inactive optional edge is absent from the
-            // default resolve, and an absent package has no licence to audit.
-            OsString::from("--all-features"),
-            OsString::from("--format-version"),
-            OsString::from("1"),
-            OsString::from("--manifest-path"),
-            manifest.into_os_string(),
-        ],
+        &metadata_args(manifest.into_os_string(), Resolve::EveryFeature),
         root,
         METADATA_TIMEOUT,
         METADATA_STREAM_CAP,
@@ -1686,6 +1699,36 @@ fn read_resolved_packages(root: &Path) -> Option<Vec<CargoPackage>> {
     }
     let metadata: CargoMetadata = lgwks_std::json::from_slice(&output.stdout).ok()?;
     Some(metadata.packages)
+}
+
+/// Which edges a `cargo metadata` read resolves.
+#[derive(Clone, Copy)]
+enum Resolve {
+    /// Only the edges a workspace member declares.
+    DeclaredOnly,
+    /// Every edge, including the optional ones no default build activates.
+    EveryFeature,
+}
+
+/// The `cargo metadata` argument list this gate reads.
+///
+/// Both reads are one command against one manifest; only the feature selection
+/// differs. Written once because a third read would otherwise be a third copy,
+/// and a copy is where a flag goes missing.
+fn metadata_args(manifest: OsString, resolve: Resolve) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("metadata"),
+        OsString::from("--locked"),
+        OsString::from("--format-version"),
+        OsString::from("1"),
+        OsString::from("--manifest-path"),
+        manifest,
+    ];
+    args.push(match resolve {
+        Resolve::DeclaredOnly => OsString::from("--no-deps"),
+        Resolve::EveryFeature => OsString::from("--all-features"),
+    });
+    args
 }
 
 /// One workspace member, with the directory holding its manifest.
@@ -2340,17 +2383,7 @@ mod tests {
             Duration::from_secs(30),
             32 * 1024,
         );
-        match refused {
-            Err(MetadataError::OutputTooLarge { stream, limit }) => {
-                assert_eq!(stream, "stdout");
-                assert_eq!(limit, 32 * 1024);
-            }
-            Err(other) => {
-                return Err(format!("expected an output-budget refusal, got {other}").into());
-            }
-            Ok(_) => return Err("a 2MB flood must not report success".into()),
-        }
-        Ok(())
+        assert_output_budget_refusal(refused, "stdout")
     }
 
     /// A flooding stderr is refused past its budget instead of retained.
@@ -2364,17 +2397,32 @@ mod tests {
             Duration::from_secs(30),
             32 * 1024,
         );
+        assert_output_budget_refusal(refused, "stderr")
+    }
+
+    /// A flood on either stream is refused at its budget, naming the stream.
+    ///
+    /// One assertion for both families: the stdout and stderr cases differ only
+    /// in which capture floods, and two copies of the check are two things that
+    /// can drift into testing different budgets.
+    fn assert_output_budget_refusal(
+        refused: Result<BoundedOutput, MetadataError>,
+        stream: &str,
+    ) -> TestResult {
         match refused {
-            Err(MetadataError::OutputTooLarge { stream, limit }) => {
-                assert_eq!(stream, "stderr");
+            Err(MetadataError::OutputTooLarge {
+                stream: refused_stream,
+                limit,
+            }) => {
+                assert_eq!(refused_stream, stream);
                 assert_eq!(limit, 32 * 1024);
+                Ok(())
             }
             Err(other) => {
-                return Err(format!("expected an output-budget refusal, got {other}").into());
+                Err(format!("expected an output-budget refusal on {stream}, got {other}").into())
             }
-            Ok(_) => return Err("a 2MB flood must not report success".into()),
+            Ok(_) => Err(format!("a flood on {stream} must not report success").into()),
         }
-        Ok(())
     }
 
     /// The control: a small healthy answer passes through unchanged.

@@ -266,14 +266,7 @@ fn lock_property(read: ReadLock, packages: &[Package]) -> Result<(), TestCaseErr
     let resolved = read(&text).map_err(|error| TestCaseError::fail(format!("{error}\n{text}")))?;
     let read_back: Vec<Row<'_>> = resolved
         .iter()
-        .map(|row| {
-            (
-                row.name.as_str(),
-                row.version.as_str(),
-                row.local,
-                row.checksum.as_deref(),
-            )
-        })
+        .map(|row| (row.name(), row.version(), row.is_local(), row.checksum()))
         .collect();
     let written: Vec<Row<'_>> = packages
         .iter()
@@ -381,22 +374,29 @@ fn the_lock_property_catches_a_reader_that_keeps_the_last_assignment() -> Outcom
     fn last_wins(text: &str) -> Result<Vec<lock::Resolved>, LockError> {
         let mut kept: Vec<&str> = Vec::new();
         for line in text.lines() {
-            let key = line.split(" = ").next().unwrap_or_default();
-            if line.contains(" = ") {
-                let block_start = kept
-                    .iter()
-                    .rposition(|earlier| earlier.starts_with('['))
-                    .unwrap_or_default();
-                let mut index = kept.len();
-                while index > block_start {
-                    index = index.saturating_sub(1);
-                    if kept
-                        .get(index)
-                        .and_then(|earlier| earlier.split(" = ").next())
-                        == Some(key)
-                    {
-                        drop(kept.splice(index..=index, []));
+            // A line with no assignment is a header or a blank line: it carries no
+            // key to repeat, so it is retained without a walk. Reading its key as
+            // an empty string would make every header match every other header.
+            if let Some((key, _)) = line.split_once(" = ") {
+                // Walk the retained lines backwards and stop at the block
+                // header: an assignment of the same key in another block is not
+                // this one's assignment, and a file that opens with an
+                // assignment rather than a header has no boundary to stop at, so
+                // every retained line belongs to the block being read.
+                let mut repeated: Vec<usize> = Vec::new();
+                for (index, earlier) in kept.iter().enumerate().rev() {
+                    if earlier.starts_with('[') {
+                        break;
                     }
+                    if earlier
+                        .split_once(" = ")
+                        .is_some_and(|(name, _)| name == key)
+                    {
+                        repeated.push(index);
+                    }
+                }
+                for index in repeated.into_iter().rev() {
+                    drop(kept.splice(index..=index, []));
                 }
             }
             kept.push(line);

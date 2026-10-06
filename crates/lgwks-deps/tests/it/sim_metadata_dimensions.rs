@@ -24,11 +24,31 @@ use std::hash::{Hash, Hasher};
 
 use lgwks_deps::metadata::{self, DirectEdge, MetadataError};
 
+use crate::sim::Rng;
+
+/// What every generator and every test in this suite returns.
+///
+/// One alias for both, so a draw a generator could not make reaches the test
+/// that owns the seed as that draw's own refusal rather than as a fixture value
+/// the generator invented.
+type Outcome<T> = Result<T, Box<dyn Error>>;
+
 /// What every test in this suite returns.
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Outcome<()>;
 
 /// The one registry origin the generated documents name.
 const REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+/// Documents Cargo would never emit, each wrong in one field, so a decoder
+/// that folds any of them into a graph has a case to fail on.
+const MALFORMED: [&str; 6] = [
+    r#"{"packages":123,"workspace_members":[]}"#,
+    r#"{"packages":"nope","workspace_members":[]}"#,
+    r#"{"packages":[],"workspace_members":{}}"#,
+    r#"{"packages":[],"workspace_members":"later"}"#,
+    r#"{"packages":[{"id":"a","name":"a","manifest_path":"/repo/Cargo.toml","dependencies":123}],"workspace_members":["a"]}"#,
+    r#"{"packages":[{"id":"a","name":"a","manifest_path":"/repo/Cargo.toml","dependencies":[{"name":"dep","source":"registry+https://example.invalid/index","req":"1.0","optional":"yes"}]}],"workspace_members":["a"]}"#,
+];
 
 /// Every authored dependency dimension the general generator can vary.
 const ALL_DIMS: &[Dim] = &[
@@ -43,46 +63,54 @@ const ALL_DIMS: &[Dim] = &[
 
 // ── Deterministic generator ─────────────────────────────────────────────────
 
-/// A splitmix64 generator: one seed fixes the whole sequence.
+/// The member counts a scenario draws: one through six.
 ///
-/// Written here rather than pulled in, so the suite adds no dependency and uses
-/// no wall clock or OS entropy that a replay could not reproduce.
-struct Rng(u64);
+/// A table rather than a modulus, so the draw needs no converted length and no
+/// substituted lower bound: every count is one of the values a workspace can
+/// actually have.
+const MEMBER_COUNTS: [usize; 6] = [1, 2, 3, 4, 5, 6];
 
-impl Rng {
-    /// A generator whose entire sequence is determined by `seed`.
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
+/// The dependency kinds the generator draws, every one of them a Cargo kind.
+const KINDS: [&str; 3] = ["normal", "build", "dev"];
 
-    /// The next 64-bit value in the sequence.
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^ (mixed >> 31)
-    }
+/// The names a member path edge may carry while its member record says
+/// something else.
+const MISMATCHED_NAMES: [&str; 2] = ["renamed", "helper_copy"];
 
-    /// A value in `0..bound`, or `0` when `bound` is zero.
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next_u64().checked_rem(bound.max(1)).unwrap_or(0)
-    }
+/// The manifest directories two members may claim together.
+const SHARED_DIRS: [&str; 3] = ["/repo/shared", "/repo/common", "/repo/dup"];
 
-    /// An index in `0..bound`.
-    fn index(&mut self, bound: usize) -> usize {
-        usize::try_from(self.below(u64::try_from(bound).unwrap_or(1))).unwrap_or(0)
-    }
+/// The shares of a document the truncation family cuts at, as eighths.
+///
+/// Eighths rather than raw offsets: every share is strictly inside the document
+/// however long it is, so there is no offset table to materialise and no bound
+/// that a short document could reduce to zero.
+const CUT_SHARES: [usize; 7] = [1, 2, 3, 4, 5, 6, 7];
 
-    /// A boolean drawn from the generator's high bit.
-    fn coin(&mut self) -> bool {
-        self.next_u64() >> 63 == 1
-    }
+/// A coin from a high bit, drawn from the shared generator.
+///
+/// A high bit rather than the low one: the shared LCG's low bit alternates every
+/// step, so a low-bit coin would phase-lock every set derived from it.
+fn coin(rng: &mut Rng) -> bool {
+    (rng.next_u64() >> 40) & 1 == 1
+}
 
-    /// A reference into `values`, drawn from the generator.
-    fn pick<'a, T>(&mut self, values: &'a [T]) -> &'a T {
-        &values[self.index(values.len())]
-    }
+/// How many bytes an eighth of a document is, as the divisor the cut shares
+/// are measured against.
+const EIGHTH: usize = 8;
+
+/// The cut offset a drawn share names in a document of `length` bytes.
+///
+/// `share * (length / EIGHTH)` is strictly inside the document for any document
+/// of `EIGHTH` bytes or more, which every generated document is — each carries a
+/// whole Cargo package record. A shorter document has no eighth to cut at, which
+/// is `None` rather than a cut at offset zero: the empty prefix is a JSON
+/// refusal this family asserts, and a prefix that is not strict is not the case
+/// this family is about.
+fn cut_offset(rng: &mut Rng, length: usize) -> Option<usize> {
+    let share = *rng.pick(&CUT_SHARES)?;
+    let eighth = length.checked_div(EIGHTH)?;
+    Some(share.saturating_mul(eighth))
 }
 
 // ── The model ───────────────────────────────────────────────────────────────
@@ -403,7 +431,7 @@ fn build_member(
     names: &[String],
     repositories: &[Option<String>],
     rng: &mut Rng,
-) -> (MemberPlan, DepPlan, ModeledEdge) {
+) -> Outcome<(MemberPlan, DepPlan, ModeledEdge)> {
     let consumer = names[index].clone();
     let member = MemberPlan {
         id: format!("path+file:///repo/{consumer}#{consumer}@0.1.0"),
@@ -413,33 +441,34 @@ fn build_member(
     };
     let mut dep = DepPlan::registry(format!("dep{index}"));
     match dim {
-        Dim::Kind => dep.kind = Some(*rng.pick(&["normal", "build", "dev"])),
+        Dim::Kind => dep.kind = Some(*rng.pick_named("dependency kinds", &KINDS)?),
         Dim::Target => {
-            if rng.coin() {
+            if coin(rng) {
                 dep.selection.scope = Some("cfg(unix)".to_owned());
             }
         }
-        Dim::Optional => dep.optional = rng.coin(),
-        Dim::DefaultFeatures => dep.selection.defaults = rng.coin(),
+        Dim::Optional => dep.optional = coin(rng),
+        Dim::DefaultFeatures => dep.selection.defaults = coin(rng),
         Dim::Features => {
             dep.selection.enabled = ["a", "b", "c"]
                 .iter()
                 .copied()
-                .filter(|_| rng.coin())
+                .filter(|_| coin(rng))
                 .map(str::to_owned)
                 .collect();
         }
         Dim::Rename => {
-            if rng.coin() {
+            if coin(rng) {
                 dep.selection.alias = Some(format!("alias{index}"));
             }
         }
         Dim::Path => {
             dep.source = None;
-            if rng.coin() {
-                let target = rng.index(names.len());
-                dep.name.clone_from(&names[target]);
-                dep.path = Some(format!("../{}", names[target]));
+            if coin(rng) {
+                let target = rng.pick_named("member names", names)?;
+                let path = format!("../{target}");
+                dep.name.clone_from(target);
+                dep.path = Some(path);
             } else {
                 dep.path = Some(format!("../outside/dep{index}"));
             }
@@ -479,18 +508,18 @@ fn build_member(
         edge.workspace = true;
         edge.target_repository.clone_from(&repositories[position]);
     }
-    (member, dep, edge)
+    Ok((member, dep, edge))
 }
 
 /// Builds a valid workspace varying `allowed` dimensions, one per member.
-fn workspace(seed: u64, allowed: &[Dim]) -> Workspace {
+fn workspace(seed: u64, allowed: &[Dim]) -> Outcome<Workspace> {
     let mut rng = Rng::new(seed);
-    let count = usize::try_from(rng.below(6).saturating_add(1)).unwrap_or(1);
+    let count = *rng.pick_named("member counts", &MEMBER_COUNTS)?;
     let mut names = Vec::new();
     let mut repositories = Vec::new();
     for slot in 0..count {
         let name = format!("m{slot}");
-        let repository = if rng.coin() {
+        let repository = if coin(&mut rng) {
             Some(format!("https://example.invalid/{name}"))
         } else {
             None
@@ -506,86 +535,86 @@ fn workspace(seed: u64, allowed: &[Dim]) -> Workspace {
         let dim = if allowed.is_empty() {
             Dim::Kind
         } else {
-            *rng.pick(allowed)
+            *rng.pick_named("varying dimensions", allowed)?
         };
-        let (member, dep, edge) = build_member(index, dim, &names, &repositories, &mut rng);
+        let (member, dep, edge) = build_member(index, dim, &names, &repositories, &mut rng)?;
         ids.push(member.id.clone());
         records.push(member_json(&member, std::slice::from_ref(&dep)));
         plans.push((member, dep));
         edges.push(edge);
     }
-    Workspace {
+    Ok(Workspace {
         records,
         plans,
         ids,
         edges,
-    }
+    })
 }
 
 /// A valid scenario varying `allowed` dimensions.
-fn valid_scenario(seed: u64, allowed: &[Dim]) -> Scenario {
-    let built = workspace(seed, allowed);
+fn valid_scenario(seed: u64, allowed: &[Dim]) -> Outcome<Scenario> {
+    let built = workspace(seed, allowed)?;
     let document = built.document();
-    Scenario {
+    Ok(Scenario {
         document,
         model: Model::Edges(built.edges),
-    }
+    })
 }
 
 /// A duplicate package record for the first member is a schema refusal.
-fn duplicate_package_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn duplicate_package_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     if let Some(first) = built.records.first().cloned() {
         built.records.push(first);
     }
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("duplicate Cargo package id"),
-    }
+    })
 }
 
 /// A workspace member id with no package record is a schema refusal.
-fn missing_package_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn missing_package_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     built
         .ids
         .push("path+file:///repo/ghost#ghost@0.1.0".to_owned());
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("has no package record"),
-    }
+    })
 }
 
 /// A repeated workspace member id is a schema refusal.
-fn duplicate_member_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn duplicate_member_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     if let Some(first) = built.ids.first().cloned() {
         built.ids.push(first);
     }
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("duplicate Cargo workspace member id"),
-    }
+    })
 }
 
 /// A workspace member with no `manifest_path` is a schema refusal.
-fn missing_manifest_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn missing_manifest_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     if let Some(pair) = built.plans.first_mut() {
         pair.0.manifest_path = None;
     }
     built.reserialize();
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("has no manifest_path"),
-    }
+    })
 }
 
 /// A blank package id or name is a schema refusal.
-fn blank_identity_scenario(seed: u64) -> Scenario {
+fn blank_identity_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
-    let mut built = workspace(seed, ALL_DIMS);
-    let blank_id = rng.coin();
+    let mut built = workspace(seed, ALL_DIMS)?;
+    let blank_id = coin(&mut rng);
     if let Some(pair) = built.plans.first_mut() {
         if blank_id {
             pair.0.id.clear();
@@ -594,45 +623,45 @@ fn blank_identity_scenario(seed: u64) -> Scenario {
         }
     }
     built.reserialize();
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("blank id or name"),
-    }
+    })
 }
 
 /// An unknown Cargo dependency kind is a schema refusal, never a default.
-fn unknown_kind_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn unknown_kind_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     if let Some(pair) = built.plans.first_mut() {
         pair.1.source = Some(REGISTRY.to_owned());
         pair.1.path = None;
         pair.1.kind = Some("proc-macro");
     }
     built.reserialize();
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("unknown Cargo dependency kind"),
-    }
+    })
 }
 
 /// A declaration with neither source nor path is a schema refusal.
-fn unsourced_scenario(seed: u64) -> Scenario {
-    let mut built = workspace(seed, ALL_DIMS);
+fn unsourced_scenario(seed: u64) -> Outcome<Scenario> {
+    let mut built = workspace(seed, ALL_DIMS)?;
     if let Some(pair) = built.plans.first_mut() {
         pair.1.source = None;
         pair.1.path = None;
         pair.1.kind = None;
     }
     built.reserialize();
-    Scenario {
+    Ok(Scenario {
         document: built.document(),
         model: Model::Schema("has neither source nor path"),
-    }
+    })
 }
 
 /// A path edge that resolves into a member directory under another name is a
 /// schema refusal, never a quiet misattribution.
-fn mismatch_scenario(seed: u64) -> Scenario {
+fn mismatch_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
     let first = MemberPlan {
         id: "app".to_owned(),
@@ -646,7 +675,7 @@ fn mismatch_scenario(seed: u64) -> Scenario {
         repository: None,
         manifest_path: Some("/repo/helper/Cargo.toml".to_owned()),
     };
-    let wrong_name = *rng.pick(&["renamed", "helper_copy"]);
+    let wrong_name = *rng.pick_named("member-path name mismatches", &MISMATCHED_NAMES)?;
     let dep = DepPlan {
         name: wrong_name.to_owned(),
         source: None,
@@ -661,16 +690,16 @@ fn mismatch_scenario(seed: u64) -> Scenario {
         member_json(&second, &[]),
     ];
     let ids = vec![first.id, second.id];
-    Scenario {
+    Ok(Scenario {
         document: document(&records, &ids),
         model: Model::Schema("resolves to workspace package"),
-    }
+    })
 }
 
 /// Two members claiming one manifest directory are refused, not merged.
-fn shared_dir_scenario(seed: u64) -> Scenario {
+fn shared_dir_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
-    let shared = *rng.pick(&["/repo/shared", "/repo/common", "/repo/dup"]);
+    let shared = *rng.pick_named("shared manifest directories", &SHARED_DIRS)?;
     let first = MemberPlan {
         id: "first".to_owned(),
         name: "first".to_owned(),
@@ -685,52 +714,51 @@ fn shared_dir_scenario(seed: u64) -> Scenario {
     };
     let records = vec![member_json(&first, &[]), member_json(&second, &[])];
     let ids = vec![first.id, second.id];
-    Scenario {
+    Ok(Scenario {
         document: document(&records, &ids),
         model: Model::Schema("multiple workspace packages claim manifest directory"),
-    }
+    })
 }
 
 /// A strict prefix of a valid document is invalid JSON, never a partial graph.
-fn truncated_scenario(seed: u64) -> Scenario {
+fn truncated_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
-    let full = workspace(seed, ALL_DIMS).document();
-    let length = full.len();
-    let span = u64::try_from(length.saturating_sub(1)).unwrap_or(1);
-    let offset = usize::try_from(rng.below(span))
-        .unwrap_or(0)
-        .saturating_add(1);
-    let cut = full.get(..offset).unwrap_or("").to_owned();
-    Scenario {
-        document: cut,
+    let full = workspace(seed, ALL_DIMS)?.document();
+    // The cut is a strict prefix by construction: every share is inside the
+    // document, so the slice is bounded by the draw rather than by a clamped
+    // index that a short document could push past the end.
+    let Some(offset) = cut_offset(&mut rng, full.len()) else {
+        let message = "a document shorter than one eighth has no strict prefix to cut";
+        lgwks_std::trace::debug!(error = ?message, length = full.len(), "truncated_scenario: the document has no eighth to cut at");
+        return Err(message.into());
+    };
+    let Some(cut) = full.get(..offset) else {
+        let message = "a cut share must name a byte boundary inside the document";
+        lgwks_std::trace::debug!(error = ?message, offset, "truncated_scenario: the drawn cut is not a byte boundary");
+        return Err(message.into());
+    };
+    Ok(Scenario {
+        document: cut.to_owned(),
         model: Model::Json,
-    }
+    })
 }
 
 /// A document with a wrongly typed field is a JSON refusal.
-fn wrong_type_scenario(seed: u64) -> Scenario {
+fn wrong_type_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
-    let malformed = [
-        r#"{"packages":123,"workspace_members":[]}"#,
-        r#"{"packages":"nope","workspace_members":[]}"#,
-        r#"{"packages":[],"workspace_members":{}}"#,
-        r#"{"packages":[],"workspace_members":"later"}"#,
-        r#"{"packages":[{"id":"a","name":"a","manifest_path":"/repo/Cargo.toml","dependencies":123}],"workspace_members":["a"]}"#,
-        r#"{"packages":[{"id":"a","name":"a","manifest_path":"/repo/Cargo.toml","dependencies":[{"name":"dep","source":"registry+https://example.invalid/index","req":"1.0","optional":"yes"}]}],"workspace_members":["a"]}"#,
-    ];
-    let document = (*rng.pick(&malformed)).to_owned();
-    Scenario {
+    let document = (*rng.pick_named("wrongly typed documents", &MALFORMED)?).to_owned();
+    Ok(Scenario {
         document,
         model: Model::Json,
-    }
+    })
 }
 
 /// A virtual workspace with no members is still valid, and has no edges.
-fn empty_scenario(_seed: u64) -> Scenario {
-    Scenario {
+fn empty_scenario(_seed: u64) -> Outcome<Scenario> {
+    Ok(Scenario {
         document: r#"{"packages":[],"workspace_members":[]}"#.to_owned(),
         model: Model::Edges(Vec::new()),
-    }
+    })
 }
 
 // ── Assertion and sweeps ────────────────────────────────────────────────────
@@ -770,25 +798,25 @@ fn assert_model(seed: u64, scenario: &Scenario) {
 }
 
 /// Runs one scenario family over `0..count`, asserting the model each time.
-fn sweep(count: u64, mut scenario: impl FnMut(u64) -> Scenario) -> TestResult {
+fn sweep(count: u64, mut scenario: impl FnMut(u64) -> Outcome<Scenario>) -> TestResult {
     for seed in 0..count {
-        assert_model(seed, &scenario(seed));
+        assert_model(seed, &scenario(seed)?);
     }
     Ok(())
 }
 
 /// Folds eight generated documents for a derived seed into one trace hash.
-fn trace(seed: u64) -> u64 {
+fn trace(seed: u64) -> Outcome<u64> {
     let mut hasher = DefaultHasher::new();
     for step in 0..8_u64 {
         let derived = seed.wrapping_mul(8).wrapping_add(step);
-        let scenario = valid_scenario(derived, ALL_DIMS);
+        let scenario = valid_scenario(derived, ALL_DIMS)?;
         scenario.document.hash(&mut hasher);
         let observed = observe(metadata::parse(&scenario.document));
         format!("{observed:?}").hash(&mut hasher);
         assert_model(derived, &scenario);
     }
-    hasher.finish()
+    Ok(hasher.finish())
 }
 
 // ── Valid-workspace families ────────────────────────────────────────────────
@@ -855,7 +883,7 @@ fn the_sweep_covers_members_external_paths_and_kinds() -> TestResult {
     let mut saw_external = false;
     let mut saw_kind = [false; 3];
     for seed in 0..128_u64 {
-        let scenario = valid_scenario(seed, ALL_DIMS);
+        let scenario = valid_scenario(seed, ALL_DIMS)?;
         if let Model::Edges(ref edges) = scenario.model {
             for edge in edges {
                 if edge.workspace {
@@ -956,8 +984,8 @@ fn wrongly_typed_fields_are_json_refusals() -> TestResult {
 #[test]
 fn same_seed_same_trace() -> TestResult {
     for seed in 0..32_u64 {
-        let first = trace(seed);
-        let second = trace(seed);
+        let first = trace(seed)?;
+        let second = trace(seed)?;
         assert_eq!(
             first, second,
             "seed {seed} produced two different trace hashes"

@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use crate::deps_sim;
+use lgwks_deps::declared_scope;
 
 use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 
@@ -40,6 +41,21 @@ impl Tally {
     }
 }
 
+/// The verdict for one identity draw, through the public API the audit uses.
+///
+/// The approval and the observed edge are built here so the family loop states
+/// one fallible step: a loop that built both itself was a chain of four `?`
+/// where a reader could not see which draw had refused.
+fn identity_verdict(
+    approved: &str,
+    observed: &str,
+    alias: Option<&str>,
+) -> Result<u8, Box<dyn Error>> {
+    let approval = register(approved, "registry", &alias_line(alias))?;
+    let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
+    Ok(code_for(&approval, observed_edge))
+}
+
 /// Runs one identity family for `seed`: approved spelling vs observed spelling.
 fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     // The observed name is one of two fold-alikes; the approved name is one of
@@ -49,16 +65,16 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let mut hasher = DefaultHasher::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        let approved = *rng.pick(&names);
-        let observed = *rng.pick(&names);
+        let approved = rng.pick_named("identity names", &names)?;
+        let observed = rng.pick_named("identity names", &names)?;
+        let approved = *approved;
+        let observed = *observed;
         let alias: Option<&str> = if coin(&mut rng) {
             names.iter().copied().find(|name| *name != approved)
         } else {
             None
         };
-        let approval = register(approved, "registry", &alias_line(alias))?;
-        let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
-        let code = code_for(&approval, observed_edge);
+        let code = identity_verdict(approved, observed, alias)?;
         let admits = approved == observed || alias == Some(observed);
         tally.record(
             code,
@@ -124,8 +140,8 @@ fn dimension_draw(
     let opt_edge = coin(rng);
     let opt_policy = coin(rng);
     let opt_value = coin(rng);
-    let target_edge = *rng.pick(&targets);
-    let target_value = *rng.pick(&targets);
+    let target_edge = *rng.pick_named("target scopes", &targets)?;
+    let target_value = *rng.pick_named("target scopes", &targets)?;
     let target_policy = coin(rng);
     let mut policy = String::new();
     if def_policy {
@@ -135,7 +151,7 @@ fn dimension_draw(
         writeln!(policy, "optional = \"{opt_value}\"")?;
     }
     if target_policy {
-        writeln!(policy, "target = \"{}\"", target_value.unwrap_or(""))?;
+        writeln!(policy, "target = \"{}\"", declared_scope(target_value))?;
     }
     let approval = register("engine", "registry", &policy)?;
     let observed = edge(
@@ -150,7 +166,7 @@ fn dimension_draw(
     let code = code_for(&approval, observed);
     let expected = (!def_policy || def_edge == def_value)
         && (!opt_policy || opt_edge == opt_value)
-        && (!target_policy || target_edge.unwrap_or("") == target_value.unwrap_or(""));
+        && (!target_policy || declared_scope(target_edge) == declared_scope(target_value));
     tally.record(
         code,
         expected,

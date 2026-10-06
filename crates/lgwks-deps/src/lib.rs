@@ -306,8 +306,9 @@ pub enum Refusal {
         consumer: String,
         /// External package name.
         krate: String,
-        /// Admitted value of `default-features`.
-        approved: bool,
+        /// Admitted value of `default-features`, which the entry authored: this
+        /// refusal only exists for an authored dimension.
+        approved: Option<bool>,
         /// Authored value of `default-features`.
         declared: bool,
     },
@@ -317,8 +318,9 @@ pub enum Refusal {
         consumer: String,
         /// External package name.
         krate: String,
-        /// Admitted optionality.
-        approved: bool,
+        /// Admitted optionality, which the entry authored: this refusal only
+        /// exists for an authored dimension.
+        approved: Option<bool>,
         /// Authored optionality.
         declared: bool,
     },
@@ -521,7 +523,8 @@ impl fmt::Display for Refusal {
                 declared,
             } => write!(
                 formatter,
-                "{consumer} declares {krate} with default-features = {declared}, contract admits {approved}"
+                "{consumer} declares {krate} with default-features = {declared}, contract admits {}",
+                bit_label(approved)
             ),
             Self::OptionalityDrift {
                 ref consumer,
@@ -530,7 +533,8 @@ impl fmt::Display for Refusal {
                 declared,
             } => write!(
                 formatter,
-                "{consumer} declares {krate} optional = {declared}, contract admits {approved}"
+                "{consumer} declares {krate} optional = {declared}, contract admits {}",
+                bit_label(approved)
             ),
             Self::TargetDrift {
                 ref consumer,
@@ -871,28 +875,74 @@ fn optionality_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
 
 /// Whether `entry`'s admitted target scope admits the edge.
 ///
+/// How a refusal prints a bit the entry authored.
+///
+/// This refusal exists only for an authored dimension, so the printed bit is
+/// always one the register carries; the absent arm names that rather than
+/// printing a `true` or `false` the register never wrote.
+fn bit_label(bit: Option<bool>) -> &'static str {
+    match bit {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "no admitted bit",
+    }
+}
+
+/// How a scope is named in a refusal when there is none.
+///
+/// `<none>` is the label a refusal prints for an edge the manifest declares
+/// unconditionally, which is a fact about the *text* a reader sees rather than a
+/// value substituted for a missing scope: an authored `target = ""` says the
+/// same thing as no `target` key, and both print `<none>`.
+fn scope_label(scope: Option<&str>) -> &str {
+    match scope {
+        Some(scope) if !scope.is_empty() => scope,
+        _ => "<none>",
+    }
+}
+
 /// An unauthored policy admits any scope; an authored `""` requires an
 /// unconditional declaration, and any other string must equal the edge's target
 /// `cfg(…)` exactly.
 fn target_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
     match entry.target.as_deref() {
         None => true,
-        Some(approved) => approved == edge.target.as_deref().unwrap_or(""),
+        Some(approved) => approved == declared_scope(edge.target.as_deref()),
     }
+}
+
+/// The register's `target` spelling of a scope Cargo reported.
+///
+/// Cargo spells an unconditional dependency with no `target` key; the register
+/// spells the same declaration `target = ""` (INV-DEP-13). This is the
+/// conversion between those two vocabularies, named because the gate compares
+/// them in more than one place and an entry that authors no `target` at all is a
+/// *third* fact — an unconstrained dimension — which this function is not for
+/// and which callers inside this crate read from an entry's `target` field directly.
+///
+/// ```
+/// use lgwks_deps::declared_scope;
+///
+/// assert_eq!(declared_scope(None), "");
+/// assert_eq!(declared_scope(Some("cfg(unix)")), "cfg(unix)");
+/// ```
+#[must_use]
+pub fn declared_scope(scope: Option<&str>) -> &str {
+    let Some(scope) = scope else {
+        return "";
+    };
+    scope
 }
 
 /// The feature policy as it is named in a refusal.
 fn approved_features(entry: &contract::Entry) -> String {
-    let allowed = entry
-        .features
-        .as_ref()
-        .map(|list| list.join(","))
-        .unwrap_or_default();
-    match entry.required_features.as_ref() {
-        Some(required) if !required.is_empty() => {
+    let allowed = entry.features.as_ref().map(|list| list.join(","));
+    match (allowed, entry.required_features.as_ref()) {
+        (None, _) => "no admitted feature set".to_owned(),
+        (Some(allowed), Some(required)) if !required.is_empty() => {
             format!("{allowed} (required: {})", required.join(","))
         }
-        _ => allowed,
+        (Some(allowed), _) => allowed,
     }
 }
 
@@ -1315,7 +1365,7 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             refusals.push(Refusal::DefaultFeaturesDrift {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
-                approved: entry.uses_default_features.unwrap_or(true),
+                approved: entry.uses_default_features,
                 declared: edge.uses_default_features,
             });
         } else if let Some(entry) = class_matching
@@ -1326,7 +1376,7 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             refusals.push(Refusal::OptionalityDrift {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
-                approved: entry.optional.unwrap_or(false),
+                approved: entry.optional,
                 declared: edge.optional,
             });
         } else if let Some(entry) = class_matching
@@ -1337,12 +1387,8 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             refusals.push(Refusal::TargetDrift {
                 consumer: edge.consumer.clone(),
                 krate: edge.package.clone(),
-                approved: entry
-                    .target
-                    .clone()
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| "<none>".to_owned()),
-                declared: edge.target.clone().unwrap_or_else(|| "<none>".to_owned()),
+                approved: scope_label(entry.target.as_deref()).to_owned(),
+                declared: scope_label(edge.target.as_deref()).to_owned(),
             });
         } else {
             refusals.push(Refusal::KindNotAllowed {
@@ -1500,7 +1546,7 @@ fn subject_fingerprint(edges: &[DirectEdge]) -> String {
             edge.features.join(","),
             edge.uses_default_features,
             edge.optional,
-            edge.target.as_deref().unwrap_or(""),
+            declared_scope(edge.target.as_deref()),
         );
         for byte in line.as_bytes() {
             hash ^= u128::from(*byte);
@@ -1668,9 +1714,13 @@ mod tests {
         source: &str,
         origin: Option<&str>,
     ) -> Result<Contract, contract::ContractError> {
-        let origin_line = origin
-            .map(|value| format!("origin = \"{value}\"\n"))
-            .unwrap_or_default();
+        // An entry with no `origin` key is a legacy class-only approval, and the
+        // register text says so by not carrying the line: an empty line would be
+        // `origin = ""`, which `is_supported_origin` refuses as an unknown shape.
+        let origin_lines = match origin {
+            Some(origin) => format!("origin = \"{origin}\"\n"),
+            None => String::new(),
+        };
         Contract::parse(&format!(
             concat!(
                 "[policy]\nenforce = true\naccepted_licenses = \"0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Zlib\"\n\n",
@@ -1692,8 +1742,34 @@ mod tests {
             ),
             tier = tier,
             source = source,
-            origin = origin_line,
+            origin = origin_lines,
         ))
+    }
+
+    /// Every line of a manifest's `[dependencies]` table, up to the next table.
+    ///
+    /// One reader for both manifest checks: they differ in which manifest they
+    /// read and what they assert, and two copies of the same six-line walk are
+    /// two places for a table header to be read wrongly.
+    fn dependency_declarations<'a>(
+        manifest: &'a str,
+        crate_label: &str,
+    ) -> Result<Vec<&'a str>, Box<dyn std::error::Error>> {
+        let after = manifest
+            .split("[dependencies]")
+            .nth(1)
+            .ok_or_else(|| format!("{crate_label} declares no [dependencies]"))?;
+        Ok(after
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('['))
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect())
+    }
+
+    /// The package name a `key = "value"` dependency line declares.
+    fn declared_name(line: &str) -> &str {
+        line.split_once('=').map_or(line, |(name, _)| name).trim()
     }
 
     /// The `app` → `engine` edge with a chosen source.
@@ -2242,20 +2318,8 @@ mod tests {
         // so `cargo build`/`cargo install` with no features pulls nothing.
         {
             let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-deps/Cargo.toml"))?;
-            let after = manifest
-                .split("[dependencies]")
-                .nth(1)
-                .ok_or("gate declares [dependencies]")?;
-            let declared: Vec<&str> = after
-                .lines()
-                .map(str::trim)
-                .take_while(|line| !line.starts_with('['))
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .collect();
-            let names: Vec<&str> = declared
-                .iter()
-                .map(|line| line.split('=').next().unwrap_or("").trim())
-                .collect();
+            let declared = dependency_declarations(&manifest, "gate")?;
+            let names: Vec<&str> = declared.iter().copied().map(declared_name).collect();
             assert_eq!(
                 names,
                 [
@@ -2307,18 +2371,9 @@ mod tests {
             ];
 
             let manifest = std::fs::read_to_string(workspace.join("crates/lgwks-std/Cargo.toml"))?;
-            let after = manifest
-                .split("[dependencies]")
-                .nth(1)
-                .ok_or("std declares [dependencies]")?;
-            let declared: Vec<&str> = after
-                .lines()
-                .map(str::trim)
-                .take_while(|line| !line.starts_with('['))
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .collect();
+            let declared = dependency_declarations(&manifest, "std")?;
             for line in &declared {
-                let name = line.split('=').next().unwrap_or("").trim();
+                let name = declared_name(line);
                 assert!(
                     APPROVED.contains(&name),
                     "lgwks-std declares unapproved dependency `{name}` — \

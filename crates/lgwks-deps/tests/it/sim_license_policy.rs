@@ -106,7 +106,12 @@ fn draw_expression(rng: &mut Rng) -> (String, Vec<&'static str>) {
     };
     let mut ids: Vec<&'static str> = Vec::new();
     while ids.len() < count {
-        let id = *rng.pick(&UNIVERSE);
+        // `UNIVERSE` is a non-empty constant; the arm is what an emptied one
+        // means — no identifier is available, so the expression holds only the
+        // identifiers already drawn rather than spinning on a table with none.
+        let Some(&id) = rng.pick(&UNIVERSE) else {
+            break;
+        };
         if !ids.contains(&id) {
             ids.push(id);
         }
