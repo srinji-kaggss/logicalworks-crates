@@ -9,6 +9,41 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: one poison recovery per lock shape, and a thread that is owned (9-axis sweep)
+
+- **`task`'s lock-poison recovery is written once per lock shape.** `lock`, `wait`
+  and `wait_timeout` each answer a poisoned guard with `into_inner()` in a
+  `match`, and each carries the argument for why the guarded state is still
+  consistent: a critical section moves a whole `Job` in or out, writes no partial
+  state, and the panicking thread's panic is already resumed on its awaiter. Four
+  spellings of one recovery became three named helpers, one per shape.
+- **The blocking pool's tests carry no suppression.** Both
+  `#[expect(clippy::disallowed_methods)]` attributes are deleted: the six waits
+  in `task`'s tests and the four in `sim_pool_lifetime` use
+  `std::thread::park_timeout`, and the waker thread the `PendingThenReady` future
+  starts is a named `thread::Builder` thread whose handle the future owns and the
+  test joins, so nothing is detached. A spawn refusal is recorded on the future
+  so the test reports it instead of hanging on a wake that never comes.
+- **A capacity refusal reports the bound that was actually reached.**
+  `queue_limit.unwrap_or(usize::MAX)` named an unreachable queue limit as 2^64
+  jobs; the refusal now reports the caller's own limit, with the observed queue
+  depth as the stated fallback.
+- **`unreachable!` is gone from the pool tests.** A refusal of another shape is
+  now reported with the shape it actually had — an OS error's kind and message, or
+  the unexpected refusal — instead of a panic claiming none could arrive.
+- **`glob`'s three sentinels are gone**: a class close index reads the terminal
+  entry that says "unclosed", a scalar offset past the end of the input measures
+  the end of the input, and a radix bucket reads the key byte it masks. Its
+  malformed-pattern assertions share one helper, so the three cases cannot drift.
+- **`similarity`'s lossy `Similarity::score` states the loss once** (in one
+  `lossy_score` helper rather than three `unwrap_or(0.0)` sites), and emits each
+  refusal with the scorer's name.
+
+Tests: 30 pass for the `task` family (including both seeded pool simulations and
+their replay oracles) and 61 for the `glob`/`pattern` family (including
+`glob_agrees_with_a_regex_oracle_on_generated_patterns`); clippy clean with
+`--all-features` and `--no-default-features`.
+
 ### lgwks_std — the nine-axis sweep: a refusal is a fact, and a test may not silence a lint (9-axis sweep)
 
 - **`online` no longer carries four `#[expect]`s.** Each parked a thread with

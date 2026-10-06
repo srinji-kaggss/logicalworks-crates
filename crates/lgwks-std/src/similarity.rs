@@ -398,6 +398,8 @@ fn lossy_score<E: std::fmt::Debug>(scored: Result<f64, E>, scorer: &'static str)
         Err(refusal) => {
             #[cfg(feature = "trace")]
             crate::trace::debug!(error = ?refusal, scorer = scorer, "Similarity::score: a refusal reads as zero on the lossy path");
+            #[cfg(not(feature = "trace"))]
+            let _ = (scorer, refusal);
             0.0
         }
     }

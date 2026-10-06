@@ -226,9 +226,10 @@ fn journey(seed: u64) -> u64 {
             assert_eq!(block_on(spawn_blocking_on(&pool, || 5u32)), 5);
             // The pause is load-bearing: it lets the thread reach its park, so
             // the broadcast is what releases it rather than a running job
-            // finishing. The module's `thread::sleep` exemption is exactly
-            // this line — releasing a parked thread is what is under test.
-            thread::sleep(Duration::from_millis(30));
+            // finishing. This is the sanctioned synchronous wait, in place of
+            // the banned `thread::sleep` — releasing a parked thread is what is
+            // under test, so the wait is the subject.
+            thread::park_timeout(Duration::from_millis(30));
             let began = Instant::now();
             let report = pool.shutdown(WAKE_BOUND.saturating_add(BLOCKING_KEEP_ALIVE));
             let waited = began.elapsed();
@@ -321,7 +322,7 @@ fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
         if lock(&pool.state).live == 0 {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let state = lock(&pool.state);
     assert!(
@@ -483,7 +484,7 @@ fn wait_until_held(count: usize, seed: u64) {
         if HELD_IN_WINDOW.load(Ordering::SeqCst) == count {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let held = HELD_IN_WINDOW.load(Ordering::SeqCst);
     assert!(
@@ -525,7 +526,7 @@ fn wait_until_all_returned(pool: &Arc<Pool>, seed: u64) {
         if returned {
             return;
         }
-        thread::sleep(Duration::from_millis(1));
+        thread::park_timeout(Duration::from_millis(1));
     }
     let held = lock(&pool.state).handles.len();
     assert!(

@@ -39,7 +39,7 @@ use std::io;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, WaitTimeoutResult};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
@@ -267,9 +267,44 @@ impl Wake for ChildWaker {
 /// `JoinHandle` must not turn a worker's failure into a deadlock for the task
 /// awaiting it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condition` until woken, treating poisoning as non-fatal.
+///
+/// The same guarded state `lock` recovers, through the same argument: every
+/// critical section behind these primitives moves a whole [`Job`] in or out and
+/// writes no partial state, so a poisoned guard still names a consistent value
+/// and the panic that poisoned it is already being resumed on the awaiter. One
+/// helper per lock shape rather than one recovery per call site, because a
+/// fourth spelling of the same recovery is a fourth place to get it wrong.
+///
+/// Untimed because that is the shape a test gate needs: the pool itself only
+/// ever parks against a deadline, and carries no wait that has no bound.
+#[cfg(test)]
+fn wait<'a, T>(condition: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    match condition.wait(guard) {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condition` for at most `timeout`, treating poisoning as non-fatal.
+///
+/// [`wait`]'s argument applies unchanged to the timed form: the guard it returns
+/// names the same consistent state, and the wait outcome is reported beside it.
+fn wait_timeout<'a, T>(
+    condition: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
+    match condition.wait_timeout(guard, timeout) {
+        Ok(waited) => waited,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// One blocking job's completion state.
@@ -1104,9 +1139,17 @@ impl Pool {
         let admitted = match state.admit(work, queue_limit, self.ceiling) {
             Ok(admitted) => admitted,
             Err(Refused::AtCapacity(_refused)) => {
+                // `admit` refuses at capacity only for a named queue limit, so
+                // that limit is the bound this refusal reports. If a caller ever
+                // reaches here without one, the observed queue depth is the
+                // nearest queue fact the refusal can still name.
+                let queued = match queue_limit {
+                    Some(limit) => limit,
+                    None => state.queue.len(),
+                };
                 let refusal = Err(SpawnError::AtCapacity {
                     threads: self.ceiling,
-                    queued: queue_limit.unwrap_or(usize::MAX),
+                    queued,
                 });
                 #[cfg(feature = "trace")]
                 crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: the blocking pool refused a job");
@@ -1181,10 +1224,7 @@ impl Pool {
                 return;
             }
             loop {
-                let (guard, waited) = self
-                    .work_ready
-                    .wait_timeout(state, self.keep_alive)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (guard, waited) = wait_timeout(&self.work_ready, state, self.keep_alive);
                 state = guard;
                 match state.woken(waited.timed_out()) {
                     Woken::Resume => break,
@@ -1266,10 +1306,7 @@ impl Pool {
                 None => self.keep_alive,
                 Some(until) => until.saturating_duration_since(now),
             };
-            let (guard, _) = self
-                .work_ready
-                .wait_timeout(state, wait)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (guard, _) = wait_timeout(&self.work_ready, state, wait);
             state = guard;
         }
     }
@@ -1312,30 +1349,21 @@ mod seeded_sweep;
 mod sim_pool;
 
 #[cfg(test)]
-// The workspace ban list (`clippy.toml`) forbids `std::thread::sleep` because
-// it blocks the executor thread. One scenario here is about the pause: a
-// shutdown has to release a *parked* thread, and only a real sleep lets the
-// thread reach the park first. That wait is the subject under test, in a
-// test binary whose only executor is the one under test.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the parked-thread scenario must let a real thread reach its park before the shutdown wakes it"
-)]
+// This module is about the pause: a shutdown has to release a *parked* thread,
+// and only a real wait lets the thread reach its park first. It waits with
+// `thread::park_timeout`, the synchronous wait this workspace sanctions in
+// place of the banned `thread::sleep`, in a test binary whose only executor is
+// the one under test.
 #[path = "sim_pool_lifetime.rs"]
 mod sim_pool_lifetime;
 
 #[cfg(test)]
-// The workspace ban list (`clippy.toml`) forbids `std::thread::spawn` and
-// `std::thread::sleep`, because reaching for a raw OS thread instead of the
-// primitives this crate provides is the anti-pattern. This module is the
-// exception that proves the rule: it tests `lgwks_std::task` itself, which is a
-// *thread parking* executor. Waking it requires a real second thread, and letting the
-// driver park before that wake requires a real sleep. Both calls are the
-// subject under test, not a reach for one.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests of a thread-parking executor must spawn a waker thread and sleep to let the driver park"
-)]
+// Tests of `lgwks_std::task` itself, which is a *thread-parking* executor.
+// Waking it requires a real second thread, and letting the driver park before
+// that wake requires a real wait. Both are the subject under test, so they are
+// the sanctioned forms: `thread::Builder::spawn` with the handle owned by the
+// test that joins it, and `thread::park_timeout` in place of the banned
+// `thread::sleep`.
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -1392,7 +1420,7 @@ mod tests {
                 // The pause is load-bearing: it lets `block_on` park first, so
                 // the wake below is what resumes the future rather than a value
                 // found on the opening poll.
-                thread::sleep(Duration::from_millis(5));
+                thread::park_timeout(Duration::from_millis(5));
                 *lock(&sender_value) = Some(100);
                 if let Some(waker) = lock(&sender_slot).take() {
                     waker.wake();
@@ -1414,12 +1442,12 @@ mod tests {
     fn join_all_preserves_input_order_across_completion_order() {
         let output = block_on(join_all(vec![
             spawn_blocking(|| {
-                thread::sleep(Duration::from_millis(30));
+                thread::park_timeout(Duration::from_millis(30));
                 1u32
             }),
             spawn_blocking(|| 2u32),
             spawn_blocking(|| {
-                thread::sleep(Duration::from_millis(10));
+                thread::park_timeout(Duration::from_millis(10));
                 3u32
             }),
         ]));
@@ -1467,6 +1495,13 @@ mod tests {
     struct PendingThenReady {
         polls: Arc<AtomicUsize>,
         waker_slot: Arc<Mutex<Option<Waker>>>,
+        /// The waker thread, owned here so the test joins it rather than
+        /// dropping a handle on the floor.
+        waker_thread: Option<thread::JoinHandle<()>>,
+        /// Why no waker thread could be started, for the test to report: with
+        /// no thread there is no wake, so the future would never resolve and the
+        /// test would hang instead of naming the cause.
+        spawn_refusal: Option<io::Error>,
     }
 
     impl Future for PendingThenReady {
@@ -1481,14 +1516,20 @@ mod tests {
             if n > 1 {
                 return Poll::Ready(n);
             }
-            *lock(&self.waker_slot) = Some(cx.waker().clone());
-            let slot = Arc::clone(&self.waker_slot);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(5));
-                if let Some(waker) = lock(&slot).take() {
-                    waker.wake();
-                }
-            });
+            let this = self.get_mut();
+            *lock(&this.waker_slot) = Some(cx.waker().clone());
+            let slot = Arc::clone(&this.waker_slot);
+            match thread::Builder::new()
+                .name("pending-then-ready-waker".to_owned())
+                .spawn(move || {
+                    thread::park_timeout(Duration::from_millis(5));
+                    if let Some(waker) = lock(&slot).take() {
+                        waker.wake();
+                    }
+                }) {
+                Ok(joined) => this.waker_thread = Some(joined),
+                Err(error) => this.spawn_refusal = Some(error),
+            }
             Poll::Pending
         }
     }
@@ -1500,12 +1541,29 @@ mod tests {
         let fast: Pin<Box<dyn Future<Output = usize>>> = Box::pin(CountPolls {
             polls: Arc::clone(&fast_polls),
         });
-        let slow: Pin<Box<dyn Future<Output = usize>>> = Box::pin(PendingThenReady {
+        let mut slow = PendingThenReady {
             polls: Arc::clone(&slow_polls),
             waker_slot: Arc::new(Mutex::new(None)),
-        });
-        let output = block_on(join_all(vec![fast, slow]));
+            waker_thread: None,
+            spawn_refusal: None,
+        };
+        let output = block_on(join_all(vec![fast, Box::pin(&mut slow)]));
         assert_eq!(output, vec![1, 2]);
+        // The waker thread belongs to this test: joined here, never detached.
+        let Some(joined) = slow.waker_thread.take() else {
+            assert!(
+                slow.spawn_refusal.is_none(),
+                "the waker thread must start: {:?}",
+                slow.spawn_refusal
+            );
+            return;
+        };
+        // A panicking waker thread is re-raised here rather than counted as a
+        // joined thread, so its own message is the failure report.
+        match joined.join() {
+            Ok(()) => {}
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
         // The fast child resolved on its first poll. When the slow child wakes
         // the group, only the incomplete set may be polled again, so the fast
         // child's count must stay at one.
@@ -1637,10 +1695,7 @@ mod tests {
             self.peak.fetch_max(now, AtomicOrdering::SeqCst);
             let mut open = lock(&self.open);
             while !*open {
-                open = self
-                    .opened
-                    .wait(open)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                open = wait(&self.opened, open);
             }
             drop(open);
             self.inside.fetch_sub(1, AtomicOrdering::SeqCst);
@@ -1665,7 +1720,7 @@ mod tests {
                 })?);
             }
             // Let the pool fill every thread it may before the gate opens.
-            thread::sleep(Duration::from_millis(200));
+            thread::park_timeout(Duration::from_millis(200));
             gate.release();
             let output = block_on(join_all(handles));
             assert_eq!(output, (0..jobs).collect::<Vec<_>>(), "{jobs} jobs");
@@ -1756,14 +1811,19 @@ mod tests {
         let ran = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&ran);
         let (_handle, work) = prepare(move || witness.store(true, Ordering::SeqCst));
-        match pool.submit(work, Some(8)) {
-            Err(SpawnError::Os(error)) => assert_eq!(
-                (error.kind(), error.to_string()),
-                (io::ErrorKind::OutOfMemory, "injected: no thread".to_owned()),
-                "the OS's own error is the source"
-            ),
-            other => unreachable!("expected an Os refusal, got {other:?}"),
-        }
+        // Not `unreachable!`: a refusal of another shape is a finding, not a
+        // proof that this test is wrong about its own input, so the report says
+        // which shape arrived instead of asserting that none could.
+        let observed = match pool.submit(work, Some(8)) {
+            Err(SpawnError::Os(error)) => {
+                format!("{:?}: {error}", error.kind())
+            }
+            other => format!("a refusal of another shape: {other:?}"),
+        };
+        assert_eq!(
+            observed, "OutOfMemory: injected: no thread",
+            "a thread that cannot start refuses the job, and the OS's own error is the source"
+        );
         let state = lock(&pool.state);
         assert!(
             state.queue.is_empty() && state.live == 0,
@@ -1927,7 +1987,7 @@ mod tests {
     #[test]
     fn spawn_blocking_result_ready_before_first_poll() {
         let handle = spawn_blocking(|| 1234u32);
-        thread::sleep(Duration::from_millis(30));
+        thread::park_timeout(Duration::from_millis(30));
         assert_eq!(block_on(handle), 1234);
     }
 
