@@ -172,6 +172,23 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — `retry`'s contract tests start from one fixture (nine-axis sweep)
+
+Eight of `retry`'s tests wrote out the same `RetryFacts::new(...)` preamble by
+hand, and two of them were byte-identical. They differ from each other in
+exactly one clause — the contract, its retention window, or its late-arrival
+behaviour — and that is the property the assertions rest on: a refusal is only
+attributable if nothing else moved.
+
+- **`unresolved()` is that fixture**: a live authority over an attempt that may
+  have landed, zero attempts used, zero elapsed, the shared payload. Every
+  contract test now changes one clause on top of it, so a second difference
+  cannot creep in unnoticed.
+- `permissive(class)` is unchanged and still the fixture for the tests that move
+  the class.
+
+No behaviour change.
+
 ### lgwks_bot — the broker's dispatch tests build their subject once (nine-axis sweep)
 
 Four of `broker`'s tests each assembled the same five lines — a broker, a
