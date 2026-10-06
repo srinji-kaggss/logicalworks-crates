@@ -8,6 +8,8 @@ use std::error::Error;
 
 use crate::deps_sim;
 
+use crate::sim::declared_scope;
+
 use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 
 /// The seeded case a property asserts: `(expected admission, observed verdict,
@@ -138,7 +140,7 @@ fn an_enabled_subset_of_the_allowed_features() -> TestResult {
 #[test]
 fn an_enabled_feature_outside_the_allowed_set_is_refused() -> TestResult {
     property("feature-outside", |rng| {
-        let extra = *rng.pick(&["x", "y", "z"]);
+        let extra = *rng.pick_named("out-of-set features", &["x", "y", "z"])?;
         let enabled = ["a", extra];
         let approval = register("engine", "registry", "features = \"a,b\"\n")?;
         let observed = edge("engine", Some(REGISTRY), &enabled, true, false, None, None)?;
@@ -245,11 +247,14 @@ fn a_mismatched_optionality_bit_is_refused() -> TestResult {
 #[test]
 fn the_target_scope_must_match() -> TestResult {
     property("target-match", |rng| {
-        let target = *rng.pick(&[None, Some("cfg(unix)"), Some("cfg(windows)")]);
+        let target = *rng.pick_named(
+            "target scopes",
+            &[None, Some("cfg(unix)"), Some("cfg(windows)")],
+        )?;
         let approval = register(
             "engine",
             "registry",
-            &format!("target = \"{}\"\n", target.unwrap_or("")),
+            &format!("target = \"{}\"\n", declared_scope(target)),
         )?;
         let observed = edge("engine", Some(REGISTRY), &[], true, false, target, None)?;
         Ok((
@@ -263,7 +268,7 @@ fn the_target_scope_must_match() -> TestResult {
 #[test]
 fn a_mismatched_target_scope_is_refused() -> TestResult {
     property("target-mismatch", |rng| {
-        let target = *rng.pick(&[None, Some("cfg(unix)")]);
+        let target = *rng.pick_named("target scopes", &[None, Some("cfg(unix)")])?;
         let other = if target.is_none() { "cfg(unix)" } else { "" };
         let approval = register("engine", "registry", &format!("target = \"{other}\"\n"))?;
         let observed = edge("engine", Some(REGISTRY), &[], true, false, target, None)?;
@@ -285,7 +290,7 @@ fn an_unconstrained_dimension_never_refuses() -> TestResult {
             &["any", "feature"],
             coin(rng),
             coin(rng),
-            *rng.pick(&[None, Some("cfg(unix)")]),
+            *rng.pick_named("target scopes", &[None, Some("cfg(unix)")])?,
             None,
         )?;
         Ok((
@@ -301,8 +306,9 @@ fn an_unconstrained_dimension_never_refuses() -> TestResult {
 #[test]
 fn an_approved_git_origin_is_admitted_and_a_substitution_refused() -> TestResult {
     property("git-origin", |rng| {
-        let repo = *rng.pick(&["https://a.example/engine", "https://b.example/engine"]);
-        let observed_repo = *rng.pick(&["https://a.example/engine", "https://b.example/engine"]);
+        const REPOS: [&str; 2] = ["https://a.example/engine", "https://b.example/engine"];
+        let repo = *rng.pick_named("git repositories", &REPOS)?;
+        let observed_repo = *rng.pick_named("git repositories", &REPOS)?;
         let approval = register(
             "engine",
             "git",
@@ -332,8 +338,8 @@ fn an_approved_registry_origin_refuses_another_registry() -> TestResult {
             "registry+https://a.example/index",
             "registry+https://b.example/index",
         ];
-        let approved = *rng.pick(&registries);
-        let observed = *rng.pick(&registries);
+        let approved = *rng.pick_named("registry sources", &registries)?;
+        let observed = *rng.pick_named("registry sources", &registries)?;
         let approval = register("engine", "registry", &format!("origin = \"{approved}\"\n"))?;
         let observed_edge = edge("engine", Some(observed), &[], true, false, None, None)?;
         Ok((
@@ -347,7 +353,7 @@ fn an_approved_registry_origin_refuses_another_registry() -> TestResult {
 #[test]
 fn a_class_only_git_entry_never_admits_a_git_edge() -> TestResult {
     property("class-only-git", |rng| {
-        let rev = *rng.pick(&["?rev=abc", "?branch=main", ""]);
+        let rev = *rng.pick_named("revision policies", &["?rev=abc", "?branch=main", ""])?;
         // A git approval with no `origin` is insufficient for any git edge.
         let approval = register("engine", "git", "")?;
         let observed = edge(

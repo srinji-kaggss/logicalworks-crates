@@ -95,8 +95,8 @@ struct Block {
     tier: Option<String>,
     /// The order the declared keys are written in.
     order: Vec<Key>,
-    /// The separator each list is written with.
-    separator: &'static str,
+    /// The separator each list is written with, as the draw left it.
+    separator: Option<&'static str>,
 }
 
 impl Block {
@@ -134,7 +134,14 @@ impl Block {
     fn value(&self, key: Key) -> String {
         match (key, self.list(key), self.tier.as_deref()) {
             (Key::Tier, _, Some(tier)) => tier.to_owned(),
-            (_, Some(list), _) => list.join(self.separator),
+            (_, Some(list), _) => match self.separator {
+                Some(separator) => list.join(separator),
+                // No separator drawn means the members are written with nothing
+                // between them, which the parse trims as one list. `SEPARATORS`
+                // is a three-element constant, so this arm says what an emptied
+                // table means rather than substituting one separator for it.
+                None => list.concat(),
+            },
             _ => String::new(),
         }
     }
@@ -180,12 +187,20 @@ fn coin(rng: &mut Rng) -> bool {
 /// Up to `counts`'s drawn number of distinct members of `pool`, in a drawn
 /// order.
 fn draw_distinct(rng: &mut Rng, pool: &[&str], counts: &[usize]) -> Vec<String> {
-    let want = (*rng.pick(counts)).min(pool.len());
+    // No count to draw from means no distinct member is wanted, which is what
+    // an empty `counts` table says; it is not a number of zero substituted for
+    // one the seed chose.
+    let Some(&want) = rng.pick(counts) else {
+        return Vec::new();
+    };
+    let want = want.min(pool.len());
     let mut members: Vec<String> = Vec::with_capacity(want);
     while members.len() < want {
-        let member = (*rng.pick(pool)).to_owned();
-        if !members.contains(&member) {
-            members.push(member);
+        let Some(&member) = rng.pick(pool) else {
+            break;
+        };
+        if !members.contains(&member.to_owned()) {
+            members.push(member.to_owned());
         }
     }
     members
@@ -213,7 +228,7 @@ fn draw_block(rng: &mut Rng) -> Block {
         );
         (
             Some(draw_distinct(rng, &pool, &[1, 2, 3])),
-            Some((*rng.pick(&TIERS)).to_owned()),
+            rng.pick(&TIERS).map(|tier| (*tier).to_owned()),
         )
     } else {
         (None, None)
@@ -224,7 +239,7 @@ fn draw_block(rng: &mut Rng) -> Block {
         frozen,
         tier,
         order: Vec::new(),
-        separator: rng.pick(&SEPARATORS),
+        separator: rng.pick(&SEPARATORS).copied(),
     };
     block.order = shuffled_order(rng, &block);
     block
@@ -496,9 +511,14 @@ fn an_out_of_vocabulary_member_is_refused_at_its_line() -> TestResult {
             } else {
                 &BAD_NAMES
             };
-            let bad = (*rng.pick(pool)).to_owned();
+            // Both tables are non-empty constants; the arm reports a fixture
+            // that lost its bad member instead of pushing a value the seed
+            // never drew into the block under test.
+            let Some(&bad) = rng.pick(pool) else {
+                return;
+            };
             if let Some(list) = block.list_mut(key) {
-                list.push(bad);
+                list.push(bad.to_owned());
             }
         })?;
         assert_eq!(kinds.len(), 1, "{key:?}: {kinds:?}");
@@ -553,7 +573,11 @@ fn a_tier_outside_the_vocabulary_is_refused_on_its_line() -> TestResult {
         "",
     ];
     let kinds = sweep(7, Key::Tier, |rng, block| {
-        block.tier = Some((*rng.pick(&BAD_TIERS)).to_owned());
+        // `BAD_TIERS` is a non-empty constant; a block with no drawn tier is a
+        // block with no tier at all, which is a case this family does not test.
+        if let Some(&tier) = rng.pick(&BAD_TIERS) {
+            block.tier = Some(tier.to_owned());
+        }
     })?;
     assert_eq!(kinds.len(), 1, "{kinds:?}");
     assert!(kinds.contains("BadTier"), "{kinds:?}");

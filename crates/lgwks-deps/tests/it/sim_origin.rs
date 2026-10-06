@@ -60,6 +60,12 @@ fn verdict(refusals: &[Refusal]) -> u8 {
     }
 }
 
+/// How many origin families the run draws between: a Git repository plus its
+/// admitted revision policy, a registry source, and an external path authority.
+/// Named so the modulus the family draw reduces by is one fact about the suite
+/// rather than a literal beside the arm it selects.
+const FAMILIES: u64 = 3;
+
 /// Runs the whole family for `seed` and returns (trace hash, admitted, drift).
 fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let repos = [
@@ -79,23 +85,34 @@ fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let mut drifted = 0_usize;
 
     for _ in 0..256 {
-        let family = rng.next_u64().checked_rem(3).unwrap_or(0);
+        let family = rng
+            .next_u64()
+            .checked_rem(FAMILIES)
+            .ok_or("the family count must divide the draw")?;
         let (approved, observed, edges) = match family {
             0 => {
-                let approved = format!("{}{}", rng.pick(&repos), rng.pick(&revs));
-                let observed = format!("{}{}", rng.pick(&repos), rng.pick(&revs));
+                let approved = format!(
+                    "{}{}",
+                    rng.pick_named("git repositories", &repos)?,
+                    rng.pick_named("revision policies", &revs)?
+                );
+                let observed = format!(
+                    "{}{}",
+                    rng.pick_named("git repositories", &repos)?,
+                    rng.pick_named("revision policies", &revs)?
+                );
                 let edges = vec![edge(Some(&observed), None)?];
                 (approved, observed, edges)
             }
             1 => {
-                let approved = (*rng.pick(&registries)).to_owned();
-                let observed = (*rng.pick(&registries)).to_owned();
+                let approved = (*rng.pick_named("registry sources", &registries)?).to_owned();
+                let observed = (*rng.pick_named("registry sources", &registries)?).to_owned();
                 let edges = vec![edge(Some(&observed), None)?];
                 (approved, observed, edges)
             }
             _ => {
-                let approved = (*rng.pick(&paths)).to_owned();
-                let observed = (*rng.pick(&paths)).to_owned();
+                let approved = (*rng.pick_named("path authorities", &paths)?).to_owned();
+                let observed = (*rng.pick_named("path authorities", &paths)?).to_owned();
                 let edges = vec![edge(None, Some(&observed))?];
                 (approved, observed, edges)
             }

@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
 use crate::deps_sim;
+use crate::sim::declared_scope;
 
 use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
 
@@ -49,8 +50,8 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let mut hasher = DefaultHasher::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        let approved = *rng.pick(&names);
-        let observed = *rng.pick(&names);
+        let approved = *rng.pick_named("identity names", &names)?;
+        let observed = *rng.pick_named("identity names", &names)?;
         let alias: Option<&str> = if coin(&mut rng) {
             names.iter().copied().find(|name| *name != approved)
         } else {
@@ -124,8 +125,8 @@ fn dimension_draw(
     let opt_edge = coin(rng);
     let opt_policy = coin(rng);
     let opt_value = coin(rng);
-    let target_edge = *rng.pick(&targets);
-    let target_value = *rng.pick(&targets);
+    let target_edge = *rng.pick_named("target scopes", &targets)?;
+    let target_value = *rng.pick_named("target scopes", &targets)?;
     let target_policy = coin(rng);
     let mut policy = String::new();
     if def_policy {
@@ -135,7 +136,7 @@ fn dimension_draw(
         writeln!(policy, "optional = \"{opt_value}\"")?;
     }
     if target_policy {
-        writeln!(policy, "target = \"{}\"", target_value.unwrap_or(""))?;
+        writeln!(policy, "target = \"{}\"", declared_scope(target_value))?;
     }
     let approval = register("engine", "registry", &policy)?;
     let observed = edge(
@@ -150,7 +151,7 @@ fn dimension_draw(
     let code = code_for(&approval, observed);
     let expected = (!def_policy || def_edge == def_value)
         && (!opt_policy || opt_edge == opt_value)
-        && (!target_policy || target_edge.unwrap_or("") == target_value.unwrap_or(""));
+        && (!target_policy || declared_scope(target_edge) == declared_scope(target_value));
     tally.record(
         code,
         expected,

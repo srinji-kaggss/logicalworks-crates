@@ -426,6 +426,40 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the seeded generators draw through one total generator
+
+The simulation suites substituted a value for every draw they could not make: a
+zero table length became `1`, a failed `u64`/`usize` conversion became index `0`,
+and a zero modulus became `0`. Each of those answered a case with a number the
+seed never chose, and one of them (`.max(1)` on an empty table) turned "no
+elements to draw" into an out-of-range read rather than a refusal.
+
+- **`Rng::pick` refuses an empty table** with `Option`, and **`Rng::pick_named`**
+  refuses it with a typed `EmptyTable` naming the table that was empty. The draw
+  is consumed before the table is inspected, so a seed's sequence no longer
+  depends on how long the table it drew from was.
+- **`sim_metadata_dimensions` uses the shared generator** instead of its own
+  splitmix64 copy: two index/draw implementations in one test binary is the
+  duplication the sweep exists to remove, and the suite's model — not the
+  generator — is what its assertions are about.
+- **Every generator in that suite is fallible** (`Outcome<T>`), so a draw the
+  fixture could not make reaches the test that owns the seed as that draw's own
+  refusal instead of as a value the generator invented.
+- **A truncation cut is a drawn eighth of the document**, not a drawn raw
+  offset: the family no longer has to convert a bound that a short document
+  could reduce to zero, and every cut is a strict prefix by construction.
+- **The register's `target` spelling is one named conversion** (`declared_scope`):
+  Cargo's absent target and the register's `target = ""` are two spellings of
+  one declaration, and the conversion between the two vocabularies was being
+  written out at five call sites.
+- Draws use `checked_rem`/`checked_div` rather than a masked modulus, which is
+  what `clippy::arithmetic_side_effects` and `clippy::integer_division` require;
+  the `max(1)` that made the old code read as total was the opposite.
+
+Behaviour is unchanged for every reachable case: every table the suites draw from
+is a non-empty constant or a slice whose emptiness the caller already tested.
+The new arms are what an emptied fixture table *means*, and each is reachable
+only by editing a fixture.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 
