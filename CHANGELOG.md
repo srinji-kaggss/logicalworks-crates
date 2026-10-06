@@ -9,6 +9,25 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: the hash suite hashes whole slices and whole frames (9-axis sweep)
+
+`sim_hash.rs` built its expectations out of nine defaults. Each is repaired, and
+every trace hash is unchanged: `the_same_seed_replays_to_the_same_hash_trace`
+and the other 22 tests pass.
+
+- A chunk of the message being walked is a slice, not a lookup that defaulted to
+  empty — a zero-length chunk would have hashed fewer bytes than the reference.
+- The three parts that must tile a message are compared as lengths, with no
+  narrowing between them and the sum.
+- The framed expectation builds the documented eight-byte length prefix from the
+  length's own bytes, in a `frame_prefix` written here from the contract rather
+  than taken from the crate, so the oracle stays independent.
+- A 63-character prefix of a 64-character digest hex is a slice of that hex.
+- Replacing one ASCII byte of ASCII hex keeps text, and the arm that says so
+  names that invariant instead of substituting an empty string.
+- The flipped bit is the draw itself, already below eight, so the mask is a
+  shift of a byte by at most seven.
+
 ### lgwks_std — the nine-axis sweep: INV-CODEC-1 is one property with two facades (9-axis sweep)
 
 `json` and `ron` are two codecs over one `serde` surface, so the invariant
