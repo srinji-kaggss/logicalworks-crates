@@ -10,9 +10,8 @@
 //! different sets judge the same edge each by its own set. The same seed
 //! replays to the same trace hash.
 
-use std::collections::hash_map::DefaultHasher;
+use crate::sim::{Trace, receipt};
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 
 use lgwks_deps::contract::Contract;
 use lgwks_deps::metadata::{self, DirectEdge};
@@ -82,12 +81,8 @@ fn register(license: &str, accepted: Option<&[&str]>) -> Result<Contract, Box<dy
 
 /// A non-empty accepted set drawn from [`UNIVERSE`], in universe order.
 fn draw_accepted(rng: &mut Rng) -> Vec<&'static str> {
-    let mask = loop {
-        let mask = (rng.next_u64() >> 20) & 0x3ff;
-        if mask != 0 {
-            break mask;
-        }
-    };
+    // A mask over the ten identifiers, never zero: one through 1023.
+    let mask = rng.between(1, 0x3ff);
     UNIVERSE
         .iter()
         .enumerate()
@@ -99,7 +94,7 @@ fn draw_accepted(rng: &mut Rng) -> Vec<&'static str> {
 /// An SPDX expression of one to three distinct identifiers joined by `OR` or
 /// `AND`, and the identifiers in the order written.
 fn draw_expression(rng: &mut Rng) -> (String, Vec<&'static str>) {
-    let count = match (rng.next_u64() >> 33) % 3 {
+    let count = match rng.below(3) {
         0 => 1,
         1 => 2,
         _ => 3,
@@ -116,11 +111,7 @@ fn draw_expression(rng: &mut Rng) -> (String, Vec<&'static str>) {
             ids.push(id);
         }
     }
-    let joiner = if (rng.next_u64() >> 41) & 1 == 1 {
-        " OR "
-    } else {
-        " AND "
-    };
+    let joiner = if rng.coin() { " OR " } else { " AND " };
     (ids.join(joiner), ids)
 }
 
@@ -165,9 +156,11 @@ fn scenario(seed: u64) -> Result<u64, Box<dyn Error>> {
         .into())
     };
     verdict?;
-    let mut hasher = DefaultHasher::new();
-    (accepted, expression, expected).hash(&mut hasher);
-    Ok(hasher.finish())
+    let mut trace = Trace::new();
+    trace.record(&format!("{accepted:?}"));
+    trace.record(&expression);
+    trace.record(&format!("{expected:?}"));
+    Ok(receipt(&trace)?)
 }
 
 #[test]

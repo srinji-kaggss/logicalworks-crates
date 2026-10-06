@@ -1,31 +1,17 @@
-//! Shared scaffolding for the deterministic simulation suites.
+//! `lgwks_deps`' draws over the estate's one seed substrate.
 //!
-//! One seed fully determines a family's sequence: no wall clock, no OS entropy,
-//! no dependency. `sim_origin.rs` and `sim_dependency_policy.rs` include this
-//! module (via `#[path]`) so the generator is written once.
+//! The generator and the trace are `lgwks_bot`'s `sim/seed.rs`, included by
+//! path beside its `seed_helpers.rs`, as `lgwks_ast` and `lgwks_std` include
+//! them: one xoshiro stream and one FNV-1a receipt for every simulation in the
+//! workspace, so a seed and a hash mean the same thing in every crate. This
+//! file adds only what the policy families need on top: a draw from a named
+//! table, and a receipt that refuses a run that recorded nothing.
 
 use std::num::NonZeroU64;
 
-/// A tiny LCG so the seed fully determines the sequence. `wrapping_*` keeps the
-/// arithmetic total.
-pub struct Rng(u64);
+pub use crate::seed::{Rng, Trace};
 
 impl Rng {
-    /// A generator whose whole sequence is fixed by `seed`.
-    #[must_use]
-    pub fn new(seed: u64) -> Self {
-        Self(seed ^ 0x9E37_79B9_7F4A_7C15)
-    }
-
-    /// The next 64-bit value in the sequence.
-    pub fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0
-    }
-
     /// An element of `values`, drawn from the sequence, or `None` when
     /// `values` is empty.
     ///
@@ -65,6 +51,32 @@ impl Rng {
     ) -> Result<&'a T, EmptyTable> {
         self.pick(values).ok_or(EmptyTable { table })
     }
+
+    /// A fair coin, from the substrate's weighted one.
+    ///
+    /// One spelling for every family, so every coin in the suite is the same
+    /// draw from the same stream rather than a bit each family chose to read.
+    pub fn coin(&mut self) -> bool {
+        self.chance(500)
+    }
+}
+
+/// The replay receipt of one run: its trace's hash, or a refusal when the run
+/// recorded nothing.
+///
+/// An empty trace hashes to the same value whatever the run did, so two runs
+/// that both recorded nothing would "replay" without having compared anything.
+///
+/// # Errors
+///
+/// [`EmptyTrace`] when nothing was recorded.
+pub fn receipt(trace: &Trace) -> Result<u64, EmptyTrace> {
+    if trace.is_empty() {
+        let refusal = Err(EmptyTrace);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "receipt: refusing an empty trace");
+        return refusal;
+    }
+    Ok(trace.hash())
 }
 
 /// A draw asked a table that holds no elements.
@@ -89,3 +101,15 @@ impl std::fmt::Display for EmptyTable {
 }
 
 impl std::error::Error for EmptyTable {}
+
+/// A run asked for its receipt having recorded nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyTrace;
+
+impl std::fmt::Display for EmptyTrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the run recorded nothing, so its replay hash proves nothing")
+    }
+}
+
+impl std::error::Error for EmptyTrace {}

@@ -10,7 +10,7 @@ use crate::deps_sim;
 
 use lgwks_deps::declared_scope;
 
-use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
+use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, edge, register};
 
 /// The seeded case a property asserts: `(expected admission, observed verdict,
 /// description for a failure)`.
@@ -71,7 +71,7 @@ fn a_case_difference_is_refused() -> TestResult {
 #[test]
 fn an_authored_alias_admits_exactly_its_spelling() -> TestResult {
     property("alias", |rng| {
-        let homed = coin(rng);
+        let homed = rng.coin();
         let observed = if homed { "engine_core" } else { "engine-c0re" };
         let approval = register("engine-core", "registry", &alias_line(Some("engine_core")))?;
         let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
@@ -86,7 +86,7 @@ fn an_authored_alias_admits_exactly_its_spelling() -> TestResult {
 #[test]
 fn a_rename_keeps_the_upstream_identity() -> TestResult {
     property("rename", |rng| {
-        let rename = if coin(rng) {
+        let rename = if rng.coin() {
             Some("local_engine")
         } else {
             None
@@ -129,7 +129,7 @@ fn a_rename_does_not_create_a_second_identity() -> TestResult {
 fn an_enabled_subset_of_the_allowed_features() -> TestResult {
     property("feature-subset", |rng| {
         let allowed = ["a", "b", "c"];
-        let enabled: Vec<&str> = allowed.iter().copied().filter(|_| coin(rng)).collect();
+        let enabled: Vec<&str> = allowed.iter().copied().filter(|_| rng.coin()).collect();
         let policy = format!("features = \"{}\"\n", allowed.join(","));
         let approval = register("engine", "registry", &policy)?;
         let observed = edge("engine", Some(REGISTRY), &enabled, true, false, None, None)?;
@@ -191,7 +191,7 @@ fn a_required_feature_that_is_present_is_admitted() -> TestResult {
 #[test]
 fn the_default_features_bit_must_match() -> TestResult {
     property("default-bit", |rng| {
-        let bit = coin(rng);
+        let bit = rng.coin();
         let approval = register(
             "engine",
             "registry",
@@ -205,7 +205,7 @@ fn the_default_features_bit_must_match() -> TestResult {
 #[test]
 fn a_mismatched_default_features_bit_is_refused() -> TestResult {
     property("default-mismatch", |rng| {
-        let bit = coin(rng);
+        let bit = rng.coin();
         let approval = register(
             "engine",
             "registry",
@@ -219,7 +219,7 @@ fn a_mismatched_default_features_bit_is_refused() -> TestResult {
 #[test]
 fn the_optionality_bit_must_match() -> TestResult {
     property("optional-bit", |rng| {
-        let bit = coin(rng);
+        let bit = rng.coin();
         let approval = register("engine", "registry", &format!("optional = \"{bit}\"\n"))?;
         let observed = edge("engine", Some(REGISTRY), &[], true, bit, None, None)?;
         Ok((
@@ -233,7 +233,7 @@ fn the_optionality_bit_must_match() -> TestResult {
 #[test]
 fn a_mismatched_optionality_bit_is_refused() -> TestResult {
     property("optional-mismatch", |rng| {
-        let bit = coin(rng);
+        let bit = rng.coin();
         let approval = register("engine", "registry", &format!("optional = \"{}\"\n", !bit))?;
         let observed = edge("engine", Some(REGISTRY), &[], true, bit, None, None)?;
         Ok((
@@ -341,8 +341,8 @@ fn an_unconstrained_dimension_never_refuses() -> TestResult {
             "engine",
             Some(REGISTRY),
             &["any", "feature"],
-            coin(rng),
-            coin(rng),
+            rng.coin(),
+            rng.coin(),
             *rng.pick_named("target scopes", &[None, Some("cfg(unix)")])?,
             None,
         )?;

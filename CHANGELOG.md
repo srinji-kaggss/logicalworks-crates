@@ -9,6 +9,31 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_deps tests — one seed substrate for every workspace simulation
+
+The six `sim_*` policy families drew from their own LCG and hashed their replay
+receipts through `std`'s `DefaultHasher`, whose algorithm std leaves free to
+change between releases, so a receipt was not stable across toolchains and a
+seed meant a different stream here than in `lgwks_bot`, `lgwks_ast` and
+`lgwks_std`. They now include `lgwks_bot`'s `sim/seed.rs` and
+`sim/seed_helpers.rs` like every other crate:
+
+- `tests/support/sim.rs` is the crate's extension of the shared `Rng`: `pick`,
+  `pick_named`, one `coin` (the substrate's `chance(500)`, replacing three
+  copies that each read a different bit), and `receipt`, which refuses a run
+  whose trace is empty rather than hashing nothing.
+- Every receipt is an FNV-1a `Trace` of labelled records.
+- Bit-twiddled draws (`>> 20 & 0x3ff` in a retry loop, `>> 33 % 3`, `>> 41 & 1`,
+  `next_u64().checked_rem(3)`) are `between`, `below` and `coin`.
+
+```
+$ cargo nextest run -p lgwks_deps --locked -E 'not binary(storefront_consumers)'
+307 tests run: 307 passed, 0 skipped
+$ lgwks-deps scan
+OK  scan clean — 390 files, zero findings
+```
+
+
 ### lgwks_bot — BREAKING: one way to build an `EffectKey`; every line of the crate and its tests through the guard (9-axis sweep)
 
 **Breaking.** `EffectKey::new(run, action, attempt, flow, digest, environment,

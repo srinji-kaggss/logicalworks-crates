@@ -16,6 +16,14 @@ mod deps_sim;
 #[path = "../support/sim.rs"]
 mod sim;
 
+/// The estate's one seed substrate: the generator and the replay trace every
+/// workspace simulation draws from, so a seed means one stream in every crate.
+#[path = "../../../lgwks-bot/tests/sim/seed.rs"]
+mod seed;
+/// The weighted coin and the trace's emptiness query, over the same core.
+#[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
+mod seed_helpers;
+
 mod check_cli;
 mod contract_schema_compat;
 mod feature_policy;
