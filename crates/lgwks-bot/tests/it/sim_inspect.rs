@@ -29,29 +29,37 @@ fn next(seed: &mut u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-/// A value in `0..bound` from `seed`, with no modulo operator.
-fn pick(seed: &mut u64, bound: usize) -> usize {
-    usize::try_from(next(seed) & 0xFFFF)
-        .unwrap_or(0)
-        .checked_rem(bound)
-        .unwrap_or(0)
+/// A value in `0..bound` from `seed`, or `None` when the bound admits none.
+///
+/// `None` is a bound of zero: a table with no rows has no position to draw, and
+/// index zero is a row these tables do declare, so folding onto it would hide the
+/// fault instead of reporting it.
+fn pick(seed: &mut u64, bound: usize) -> Option<usize> {
+    let draw = usize::try_from(next(seed) & 0xFFFF).ok()?;
+    draw.checked_rem(bound)
 }
 
 /// One generated subject and the violation count a faithful rule set reports.
-fn generate(seed: u64) -> (String, usize) {
+///
+/// # Errors
+///
+/// When a draw names no table entry, which a non-zero bound in this file rules out.
+fn generate(seed: u64) -> Result<(String, usize), Box<dyn std::error::Error>> {
     let mut state = seed;
-    let line_count = 2_usize.saturating_add(pick(&mut state, 6));
+    let line_count = 2_usize.saturating_add(pick(&mut state, 6).ok_or("a six-entry draw")?);
     let mut expected = 0_usize;
     let mut body = String::new();
     for index in 0..line_count {
-        let method = METHODS[pick(&mut state, METHODS.len())];
+        let method = *METHODS
+            .get(pick(&mut state, METHODS.len()).ok_or("a draw over the method table")?)
+            .ok_or("the method table has no entry at the drawn position")?;
         if model_matches(method) {
             expected = expected.saturating_add(1);
         }
         let line = format!("    let value{index} = input.{method}();\n");
         body.push_str(&line);
     }
-    (format!("fn generated() {{\n{body}}}\n"), expected)
+    Ok((format!("fn generated() {{\n{body}}}\n"), expected))
 }
 
 /// A subject with `count` functions, each carrying one violation.
@@ -71,9 +79,9 @@ fn deep_subject(depth: usize) -> String {
 }
 
 #[test]
-fn sim_seeded_fragments_match_the_rule_model() {
+fn sim_seeded_fragments_match_the_rule_model() -> Result<(), Box<dyn std::error::Error>> {
     for seed in 0..128_u64 {
-        let (source, expected) = generate(seed);
+        let (source, expected) = generate(seed)?;
         let report = inspect(&InspectRequest::new("gen.rs", &source));
         let observed = report
             .findings()
@@ -86,19 +94,25 @@ fn sim_seeded_fragments_match_the_rule_model() {
         );
         for found in report.findings() {
             let (start, end) = found.byte_range();
-            let text = source.get(start..end).unwrap_or("");
+            let text = source.get(start..end).ok_or_else(|| {
+                format!(
+                    "seed {seed}: the rule reported bytes {start}..{end} of a {}-byte subject",
+                    source.len()
+                )
+            })?;
             assert!(
                 model_matches(text),
                 "seed {seed}: span {text:?} is not a modelled match"
             );
         }
     }
+    Ok(())
 }
 
 #[test]
 fn sim_same_seed_same_trace() -> Result<(), Box<dyn std::error::Error>> {
     for seed in 0..64_u64 {
-        let (source, _) = generate(seed);
+        let (source, _) = generate(seed)?;
         let first = inspect(&InspectRequest::new("gen.rs", &source));
         let second = inspect(&InspectRequest::new("gen.rs", &source));
         assert_eq!(first, second, "seed {seed}: identical input diverged");
@@ -112,9 +126,9 @@ fn sim_same_seed_same_trace() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn sim_clean_and_violating_seeds_are_distinguishable() {
+fn sim_clean_and_violating_seeds_are_distinguishable() -> Result<(), Box<dyn std::error::Error>> {
     for seed in 0..128_u64 {
-        let (source, expected) = generate(seed);
+        let (source, expected) = generate(seed)?;
         let report = inspect(&InspectRequest::new("gen.rs", &source));
         if expected == 0 {
             assert!(
@@ -130,13 +144,14 @@ fn sim_clean_and_violating_seeds_are_distinguishable() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
-fn sim_permuting_statements_preserves_the_finding_set() {
+fn sim_permuting_statements_preserves_the_finding_set() -> Result<(), Box<dyn std::error::Error>> {
     for seed in 0..32_u64 {
         let mut state = seed;
-        let count = 1_usize.saturating_add(pick(&mut state, 8));
+        let count = 1_usize.saturating_add(pick(&mut state, 8).ok_or("an eight-entry draw")?);
         let forwards = dense_subject(count);
         let mut lines: Vec<&str> = forwards.lines().collect();
         lines.reverse();
@@ -160,10 +175,11 @@ fn sim_permuting_statements_preserves_the_finding_set() {
             "seed {seed}: statement order changed the finding set"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn sim_node_budget_tiers_refuse_deterministically() {
+fn sim_node_budget_tiers_refuse_deterministically() -> Result<(), Box<dyn std::error::Error>> {
     let wide = dense_subject(32);
     for budget in 1..9_usize {
         let request =
@@ -187,10 +203,11 @@ fn sim_node_budget_tiers_refuse_deterministically() {
             first.resources().nodes
         );
     }
+    Ok(())
 }
 
 #[test]
-fn sim_depth_budget_refuses_a_deep_tree() {
+fn sim_depth_budget_refuses_a_deep_tree() -> Result<(), Box<dyn std::error::Error>> {
     for depth in 1..24_usize {
         let source = deep_subject(depth);
         let request = InspectRequest::new("deep.rs", &source).budgets(Budgets::new().with_depth(3));
@@ -211,10 +228,11 @@ fn sim_depth_budget_refuses_a_deep_tree() {
             report.resources().max_depth
         );
     }
+    Ok(())
 }
 
 #[test]
-fn sim_finding_density_is_capped_deterministically() {
+fn sim_finding_density_is_capped_deterministically() -> Result<(), Box<dyn std::error::Error>> {
     let source = dense_subject(64);
     for cap in 1..6_usize {
         let request =
@@ -238,6 +256,7 @@ fn sim_finding_density_is_capped_deterministically() {
             first.verdict()
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -311,9 +330,9 @@ fn sim_wide_subjects_stay_within_the_node_budget() {
 }
 
 #[test]
-fn sim_exhausted_budgets_never_read_as_clean() {
+fn sim_exhausted_budgets_never_read_as_clean() -> Result<(), Box<dyn std::error::Error>> {
     for seed in 0..64_u64 {
-        let (source, _) = generate(seed);
+        let (source, _) = generate(seed)?;
         let request = InspectRequest::new("gen.rs", &source).budgets(Budgets::new().with_nodes(1));
         let report = inspect(&request);
         assert!(
@@ -322,6 +341,7 @@ fn sim_exhausted_budgets_never_read_as_clean() {
             report.verdict()
         );
     }
+    Ok(())
 }
 
 #[test]
