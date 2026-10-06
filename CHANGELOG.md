@@ -426,6 +426,35 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — a `cfg` the scanner cannot evaluate is its own verdict
+
+The `test`-scope detectors decided "is this item test-only?" by evaluating its
+`cfg` expression under every assignment of its free atoms. An atom the
+assignment had not recorded was read as `true`, which made the expression easier
+to satisfy and so kept the item in scope — the safe direction, and a value the
+expression never had. `unwrap_or(true)` hid that from every caller above it.
+
+- **`Verdict` is three states** — `Satisfied`, `Unsatisfied`, `Unevaluated` —
+  and `all` / `any` / `not` fold between them. `may_hold` resolves `Unevaluated`
+  once, at the one place that decides whether an item is test-only, and it
+  resolves it towards keeping the item: an item in scope is a candidate for a
+  finding, and an item dropped is a clean report for source nobody read.
+- **`Hit`'s fields are private** with `rule()`, `line()` and `snippet()`. A
+  consumer now borrows the evidence it was shown instead of holding a `String`
+  it could edit into a different finding.
+- **An empty test-scope stack is no scope**, stated as `matches!` on the stack's
+  top rather than a `false` substituted for a missing entry.
+- **`enter_function` keeps "no enclosing function" as `Option<usize>`** instead
+  of flattening it to line `0` and re-expanding it on exit — a sentinel a walk
+  could mistake for a real line.
+
+Verified against planted controls on the shipped binary: a bare `.ok()` swallow
+in production is reported; the same line under `#[cfg(test)]` is clean; under
+`#[cfg(feature = "never")]`, `#[cfg(not(test))]` and `#[cfg(any(test, …))]` it
+is reported, which is the fail-open-for-findings direction. `lgwks-deps scan` on
+this repository: 383 files, zero findings. 176 lib tests and 51 scan tests pass.
+## [Unreleased]
+
 ### lgwks_deps — the resolved graph, the vendor report and the CLI's target resolution
 
 The readers that build the gate's inputs each answered a value it did not have,

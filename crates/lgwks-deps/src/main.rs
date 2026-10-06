@@ -2207,9 +2207,9 @@ fn handle_scan(
                         out,
                         "{}:{}: [{}] {}",
                         file.display(),
-                        hit.line,
-                        hit.rule,
-                        hit.snippet
+                        hit.line(),
+                        hit.rule(),
+                        hit.snippet()
                     )?;
                 }
                 // Both operands are lengths of an in-memory vector and a
