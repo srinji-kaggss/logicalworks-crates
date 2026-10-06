@@ -426,6 +426,41 @@ Measured: `cargo clippy -p lgwks_bot --all-targets --all-features` and
 `--no-default-features` both clean under `-D warnings`; `cargo nextest run -p
 lgwks_bot --all-features` over every touched module — 291 + 95 + 80 tests, 0
 failures; `check-std-first.py` and `check-doc-citations.py` clean.
+### lgwks_deps — the invariant register answers for what it did not read
+
+`build` read `id` through `.map_or_else(|| "<unnamed>".to_owned(), …)`, so every
+refusal about a block that declared no identifier named an invariant no register
+ever wrote. `ErrorKind::MissingField` now carries the block's own line and an
+`Option<String>` id, and the message is `line N: invariant block is missing
+required field "id"`.
+
+Five more readers each resolved an absent value to a stand-in:
+
+- **`lint_table` names both spellings.** `[workspace.lints.clippy]` and
+  `[lints.clippy]` declare one namespace — the second inherited by every member —
+  and the equivalence is now written as two arms rather than as a default.
+- **`lint_level` states the terminator's two cases**: the level ends at the first
+  `,` or `}`, or runs to the end of the tail when the writer closed the table on
+  the same line.
+- **`check_scope` uses `split_once`**, so a scope with no `::` is a crate name
+  carrying no module path, by the type rather than by a substituted first
+  segment.
+- **`strip_item_prefix` names the two `extern` shapes**: `extern "C" fn f()` names
+  an ABI and `extern fn f()` does not, and both are stepped past deliberately.
+- **`split_attribute` splits instead of defaulting.** Both cuts were
+  `body.get(..).unwrap_or("")`; `char_indices` yields only boundary offsets and
+  `]` is one byte, so both cuts are on a boundary by construction.
+
+The required-field loop is what proves `approved_on` and `id` are present before
+the refusals that name them, and each is a refusal rather than a substitution if
+that ever stops holding.
+
+Verified end to end: `lgwks-deps invariants .` on this repository resolves 4
+invariants; a truncated register reports `line 1: invariant block is missing
+required field "id"`, and a named block reports its own line. 176 lib tests and
+44 register tests pass.
+## [Unreleased]
+
 ### lgwks_deps — a `cfg` the scanner cannot evaluate is its own verdict
 
 The `test`-scope detectors decided "is this item test-only?" by evaluating its
