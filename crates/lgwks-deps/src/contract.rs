@@ -278,10 +278,17 @@ pub enum ContractError {
     },
     /// A required field was absent from an entry.
     MissingField {
-        /// The entry's crate name, or `<unnamed>`.
-        krate: String,
+        /// The entry's crate name, absent when the block named no crate.
+        ///
+        /// An `Option` because a block that declares no `crate` has no name to
+        /// report: a placeholder would be a name no register ever wrote, and a
+        /// reader chasing it would look for a crate the file does not mention.
+        /// The block's line identifies it instead.
+        krate: Option<String>,
         /// The absent field.
         field: &'static str,
+        /// One-based line where the block that lacks the field opened.
+        line: usize,
     },
     /// `tier` held a value outside `boundary` / `vendor`.
     BadTier {
@@ -430,13 +437,27 @@ fn fmt_orphan_key(formatter: &mut fmt::Formatter<'_>, line: usize, key: &str) ->
     )
 }
 
-/// Renders `ContractError::MissingField`. The entry is named by crate because
-/// the field's line is not known once the draft has been closed.
-fn fmt_missing_field(formatter: &mut fmt::Formatter<'_>, krate: &str, field: &str) -> fmt::Result {
-    write!(
-        formatter,
-        "approval for {krate:?} is missing required field {field:?}"
-    )
+/// Renders `ContractError::MissingField`, always at the line the block opened.
+///
+/// The block's own line is the position a reader can act from even when the block
+/// never named itself, so a nameless block is reported by where it is rather than
+/// under a name no register wrote.
+fn fmt_missing_field(
+    formatter: &mut fmt::Formatter<'_>,
+    krate: Option<&str>,
+    field: &str,
+    line: usize,
+) -> fmt::Result {
+    match krate {
+        Some(krate) => write!(
+            formatter,
+            "line {line}: approval for {krate:?} is missing required field {field:?}"
+        ),
+        None => write!(
+            formatter,
+            "line {line}: approval block is missing required field {field:?}"
+        ),
+    }
 }
 
 /// Renders `ContractError::BadTier`, restating the only two admissible values
@@ -596,7 +617,11 @@ impl fmt::Display for ContractError {
             Self::Malformed { line, ref text } => fmt_malformed(formatter, line, text),
             Self::UnknownKey { line, ref key } => fmt_unknown_key(formatter, line, key),
             Self::OrphanKey { line, ref key } => fmt_orphan_key(formatter, line, key),
-            Self::MissingField { ref krate, field } => fmt_missing_field(formatter, krate, field),
+            Self::MissingField {
+                ref krate,
+                field,
+                line,
+            } => fmt_missing_field(formatter, krate.as_deref(), field, line),
             Self::BadTier { line, ref value } => fmt_bad_tier(formatter, line, value),
             Self::BadPolicyValue {
                 line,
@@ -765,10 +790,15 @@ impl RawEntry {
     /// The absent branch is unreachable from `build`, which validates first;
     /// the method exists so the invariant is carried by the return type rather
     /// than by an `expect` that would abort the process on a parser bug.
-    pub(crate) fn require(&self, key: &'static str, krate: &str) -> Result<&str, ContractError> {
+    pub(crate) fn require(
+        &self,
+        key: &'static str,
+        krate: Option<&str>,
+    ) -> Result<&str, ContractError> {
         self.get(key).ok_or_else(|| ContractError::MissingField {
-            krate: krate.to_owned(),
+            krate: krate.map(str::to_owned),
             field: key,
+            line: self.line(),
         })
     }
 
@@ -1421,13 +1451,27 @@ fn fingerprint(text: &str) -> String {
     format!("fnv1a128:{hash:032x}")
 }
 
+/// The line a diagnostic about `field` names.
+///
+/// A field the block wrote has its own line. A field it never wrote has none,
+/// and the diagnostic is then about the *block* — the repair is to add the key
+/// there — so the block's opening line is the position that tells the reader
+/// what to do. Both cases are stated once here rather than resolved by a
+/// substituted line at each of the three sites that need one.
+fn field_position(draft: &RawEntry, field: &str) -> usize {
+    match draft.field_line(field) {
+        Some(line) => line,
+        None => draft.line(),
+    }
+}
+
 /// Requires a field to be present and non-blank.
 ///
 /// Whitespace only counts as blank, so `owner = "   "` is refused exactly as a
 /// missing `owner` would be: a placeholder is not evidence.
 pub(crate) fn check_field_present(
     draft: &RawEntry,
-    krate: &str,
+    krate: Option<&str>,
     field: &'static str,
 ) -> Result<(), ContractError> {
     if draft
@@ -1437,15 +1481,16 @@ pub(crate) fn check_field_present(
         Ok(())
     } else {
         Err(ContractError::MissingField {
-            krate: krate.to_owned(),
+            krate: krate.map(str::to_owned),
             field,
+            line: draft.line(),
         })
     }
 }
 
 /// Rejects the first required field that is absent or blank, in `REQUIRED`
 /// order. `krate` is only used to name the offending block in the message.
-fn validate_required_fields(draft: &RawEntry, krate: &str) -> Result<(), ContractError> {
+fn validate_required_fields(draft: &RawEntry, krate: Option<&str>) -> Result<(), ContractError> {
     for field in REQUIRED {
         check_field_present(draft, krate, field)?;
     }
@@ -1459,7 +1504,7 @@ fn validate_required_fields(draft: &RawEntry, krate: &str) -> Result<(), Contrac
 /// branch here is typed rather than asserted so a reordering bug surfaces as a
 /// refusal instead of a panic.
 fn validate_tier(draft: &RawEntry, krate: &str) -> Result<Tier, ContractError> {
-    let tier_text = draft.require("tier", krate)?;
+    let tier_text = draft.require("tier", Some(krate))?;
     Tier::parse(tier_text).ok_or_else(|| ContractError::BadTier {
         line: draft.line,
         value: tier_text.to_owned(),
@@ -1610,7 +1655,7 @@ fn validate_closed_value(
         Err(ContractError::InvalidField {
             krate: krate.to_owned(),
             field,
-            line: draft.field_line(field).unwrap_or(draft.line),
+            line: field_position(draft, field),
             value: value.to_owned(),
             expected,
         })
@@ -1633,7 +1678,7 @@ fn optional_bool(
         Some(value) => Err(ContractError::InvalidField {
             krate: krate.to_owned(),
             field: key,
-            line: draft.field_line(key).unwrap_or(draft.line),
+            line: field_position(draft, key),
             value: value.to_owned(),
             expected: "expected true or false",
         }),
@@ -1683,34 +1728,52 @@ fn is_feature_name(value: &str) -> bool {
 /// one. `crate` falls back to `<unnamed>` for diagnostics only; a block whose
 /// `crate` is absent still fails `validate_required_fields` immediately after.
 fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
-    let krate = draft.get("crate").unwrap_or("<unnamed>").to_owned();
-    validate_required_fields(draft, &krate)?;
+    // A block that names no crate is refused here, at its own line, naming the
+    // field it lacks — before any other field is read, so nothing else in the
+    // block is interpreted under a name the register did not write.
+    let Some(krate) = draft.get("crate").map(str::to_owned) else {
+        let refusal = Err(ContractError::MissingField {
+            krate: None,
+            field: "crate",
+            line: draft.line(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), line = draft.line(), "build: an approval block names no crate");
+        return refusal;
+    };
+    validate_required_fields(draft, Some(&krate))?;
     let tier = validate_tier(draft, &krate)?;
-    let approved_on = draft.require("approved_on", &krate)?.to_owned();
-    validate_date(
-        &approved_on,
-        &krate,
-        draft.field_line("approved_on").unwrap_or(draft.line),
-    )?;
-    let reason = draft.require("reason", &krate)?.to_owned();
+    let approved_on = draft.require("approved_on", Some(&krate))?.to_owned();
+    validate_date(&approved_on, &krate, field_position(draft, "approved_on"))?;
+    let reason = draft.require("reason", Some(&krate))?.to_owned();
     validate_reason(&reason, &krate)?;
 
     // Every remaining field is read while `krate` is still borrowable; the
     // struct literal below moves `krate`, so nothing may borrow it afterwards.
-    let version = draft.require("version", &krate)?.to_owned();
-    let owner = draft.require("owner", &krate)?.to_owned();
-    let capability = draft.require("capability", &krate)?.to_owned();
-    let license = draft.require("license", &krate)?.to_owned();
-    let source = draft.require("source", &krate)?.to_owned();
+    let version = draft.require("version", Some(&krate))?.to_owned();
+    let owner = draft.require("owner", Some(&krate))?.to_owned();
+    let capability = draft.require("capability", Some(&krate))?.to_owned();
+    let license = draft.require("license", Some(&krate))?.to_owned();
+    let source = draft.require("source", Some(&krate))?.to_owned();
     let origin = draft.get("origin").map(str::to_owned);
     let features = optional_feature_list(draft, "features", &krate)?;
     let required_features = optional_feature_list(draft, "required_features", &krate)?;
     let uses_default_features = optional_bool(draft, "uses_default_features", &krate)?;
     let optional = optional_bool(draft, "optional", &krate)?;
     let target = draft.get("target").map(str::to_owned);
-    let aliases = draft.get("aliases").map(split_csv).unwrap_or_default();
-    let allowed_consumers = split_csv(draft.require("allowed_consumers", &krate)?);
-    let allowed_kinds = split_csv(draft.require("allowed_kinds", &krate)?);
+    // An entry that authors no `aliases` line admits exactly the spelling it
+    // names as `crate`, which is what an empty list admits too: INV-DEP-13
+    // grandfathers a dimension an entry does not author, and for this dimension
+    // "not authored" and "no aliases beyond `crate`" are one admission. The two
+    // are not the same *repair*, and `field_position` is what tells them apart
+    // in a diagnostic. Refusing the absent key instead would refuse every
+    // register that predates it — this repository's own 33 entries author no
+    // alias list — so absence is read here rather than refused.
+    let aliases = match draft.get("aliases") {
+        Some(list) => split_csv(list),
+        None => Vec::new(),
+    };
+    let allowed_consumers = split_csv(draft.require("allowed_consumers", Some(&krate))?);
+    let allowed_kinds = split_csv(draft.require("allowed_kinds", Some(&krate))?);
     validate_closed_value(
         draft,
         &krate,
@@ -1805,8 +1868,8 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
             "expected a subset of the allowed features",
         )?;
     }
-    let approved_by = draft.require("approved_by", &krate)?.to_owned();
-    let review = draft.require("review", &krate)?.to_owned();
+    let approved_by = draft.require("approved_by", Some(&krate))?.to_owned();
+    let review = draft.require("review", Some(&krate))?.to_owned();
 
     Ok(Entry {
         krate,
@@ -2565,8 +2628,9 @@ mod tests {
         assert_eq!(
             Contract::parse(&complete(input)),
             Err(ContractError::MissingField {
-                krate: "serde".into(),
-                field: "reason"
+                krate: Some("serde".into()),
+                field: "reason",
+                line: 1
             })
         );
     }
@@ -2858,8 +2922,9 @@ mod tests {
         assert_eq!(
             Contract::parse(&without),
             Err(ContractError::MissingField {
-                krate: "serde".into(),
+                krate: Some("serde".into()),
                 field: "license",
+                line: 1,
             })
         );
     }
