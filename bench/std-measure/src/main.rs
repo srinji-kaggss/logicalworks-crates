@@ -54,12 +54,12 @@ const COUNTEREXAMPLE_PATTERN: &str = "*a*";
 /// The six-token pattern #154's path-work oracle runs over.
 const SIX_TOKEN_PATTERN: &str = "*a**/b[0-9]?";
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let rows = sweep();
     let mut text = String::new();
     text.push_str("# lgwks_std measurement harness results\n\n");
     text.push_str("machine: ");
-    text.push_str(&machine());
+    text.push_str(&stats::machine_description());
     text.push('\n');
     text.push_str("scenarios: ");
     text.push_str(&rows.len().to_string());
@@ -92,20 +92,48 @@ fn main() {
          `bench/std-measure/README.md`.\n",
     );
 
-    print!("{text}");
+    if let Err(error) = write_report(&text) {
+        report_failure(&format_args!("could not print the report: {error}"));
+    }
 
     let Some(output) = std::env::args().nth(1) else {
-        return;
+        return std::process::ExitCode::SUCCESS;
     };
-    if let Err(error) = std::fs::write(&output, &text) {
-        eprintln!("could not write {output}: {error}");
-        std::process::exit(2);
+    match std::fs::write(&output, &text) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            report_failure(&format_args!("could not write {output}: {error}"));
+            std::process::ExitCode::from(2)
+        }
     }
 }
 
-/// Returns the machine description recorded beside every number.
-fn machine() -> String {
-    stats::machine_description()
+/// Prints the report to the harness's standard output.
+///
+/// The write goes through a locked, explicitly flushed handle rather than the
+/// `print!` family so a failure to emit the report is a return value the caller
+/// reports instead of a silent truncation of the numbers a reader is about to
+/// compare.
+fn write_report(text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    out.write_all(text.as_bytes())?;
+    out.flush()
+}
+
+/// Reports one harness failure on standard error, and returns whether it landed.
+///
+/// The reason a report could not be delivered is the one message a user acts
+/// on, so it is written through a locked handle with the result bound rather
+/// than discarded: if standard error is also unwritable there is nowhere left
+/// to say so, and the caller's exit code already carries the failure.
+fn report_failure(reason: &std::fmt::Arguments<'_>) -> bool {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    match writeln!(err, "{reason}") {
+        Ok(()) => err.flush().is_ok(),
+        Err(_unwritable) => false,
+    }
 }
 
 /// Runs every scenario and returns its rows in print order.
@@ -125,22 +153,27 @@ fn sweep() -> Vec<Samples> {
 /// The four attempt indices #164's acceptance names, at the 1ns base and 30s cap.
 fn retry_rows() -> Vec<Samples> {
     let policy = RetryPolicy::new(u32::MAX, Duration::from_nanos(1), Duration::MAX);
-    [("retry attempt 0", 0_u32), ("retry attempt 31", 31), ("retry attempt 1000", 1000), ("retry attempt u32::MAX", u32::MAX)]
-        .into_iter()
-        .map(|(label, attempt)| {
-            let mut total = Duration::ZERO;
-            let samples = Samples::timed(label, RETRY_ITERATIONS, |index| {
-                // The entropy changes every iteration so the call cannot be
-                // hoisted, and the result is accumulated so it is not dropped.
-                total += policy.delay(attempt, index as u64);
-            });
-            assert!(
-                total > Duration::ZERO,
-                "{label}: every timed call must produce a real delay, got {total:?}"
-            );
-            samples
-        })
-        .collect()
+    [
+        ("retry attempt 0", 0_u32),
+        ("retry attempt 31", 31),
+        ("retry attempt 1000", 1000),
+        ("retry attempt u32::MAX", u32::MAX),
+    ]
+    .into_iter()
+    .map(|(label, attempt)| {
+        let mut total = Duration::ZERO;
+        let samples = Samples::timed(label, RETRY_ITERATIONS, |index| {
+            // The entropy changes every iteration so the call cannot be
+            // hoisted, and the result is accumulated so it is not dropped.
+            total += policy.delay(attempt, index as u64);
+        });
+        assert!(
+            total > Duration::ZERO,
+            "{label}: every timed call must produce a real delay, got {total:?}"
+        );
+        samples
+    })
+    .collect()
 }
 
 /// The plain-JoinSet comparison the flat-latency claim is made against.
@@ -152,19 +185,22 @@ fn retry_rows() -> Vec<Samples> {
 /// flat rows above are the reason the shipped form does not pay it.
 fn retry_walk_reference_rows() -> Vec<Samples> {
     let cap = Duration::from_secs(30).as_nanos();
-    [("retry walk reference attempt 0", 0_u32), ("retry walk reference attempt u32::MAX", u32::MAX)]
-        .into_iter()
-        .map(|(label, attempt)| {
-            let mut total: u128 = 0;
-            let samples = Samples::timed(label, 1_000, |index| {
-                // `walk_backoff` is the O(attempt) alternative: it starts from
-                // the base and doubles until the cap or the requested index.
-                total += walk_backoff(1, cap, attempt, index as u64);
-            });
-            assert!(total > 0, "{label}: the reference must compute a backoff");
-            samples
-        })
-        .collect()
+    [
+        ("retry walk reference attempt 0", 0_u32),
+        ("retry walk reference attempt u32::MAX", u32::MAX),
+    ]
+    .into_iter()
+    .map(|(label, attempt)| {
+        let mut total: u128 = 0;
+        let samples = Samples::timed(label, 1_000, |index| {
+            // `walk_backoff` is the O(attempt) alternative: it starts from
+            // the base and doubles until the cap or the requested index.
+            total += walk_backoff(1, cap, attempt, index as u64);
+        });
+        assert!(total > 0, "{label}: the reference must compute a backoff");
+        samples
+    })
+    .collect()
 }
 
 /// Doubles from `base` toward `cap` until `attempt` doublings have happened.
@@ -222,10 +258,17 @@ fn glob_counterexample_rows() -> Vec<Samples> {
         // rejection rather than a match, which measures the wrong thing.
         let tail = format!("{}a/x/b7z", "a".repeat(size));
         let mut six_hits = 0_usize;
-        let six = Samples::timed(&format!("glob *a**/b[0-9]? n={size}"), GLOB_ITERATIONS, |_| {
-            six_hits += usize::from(pattern.is_match_with(&tail, &mut scratch));
-        });
-        assert_eq!(six_hits, GLOB_ITERATIONS, "every timed six-token match must be observed");
+        let six = Samples::timed(
+            &format!("glob *a**/b[0-9]? n={size}"),
+            GLOB_ITERATIONS,
+            |_| {
+                six_hits += usize::from(pattern.is_match_with(&tail, &mut scratch));
+            },
+        );
+        assert_eq!(
+            six_hits, GLOB_ITERATIONS,
+            "every timed six-token match must be observed"
+        );
         rows.push(six);
     }
     rows
@@ -278,11 +321,17 @@ fn similarity_rows() -> Vec<Samples> {
     let bounded = BoundedJaccard::<u32>::new(64);
     let left: Vec<f32> = (0_u16..128).map(f32::from).collect();
     let mut verdicts = 0_usize;
-    let row = Samples::timed("similarity checked composition", SIMILARITY_ITERATIONS, |index| {
-        verdicts += usize::from(cosine.verdict(&left, &left).is_ok());
-        verdicts += usize::from(text.verdict("kitten", "sitting").is_ok());
-        verdicts += usize::from(CheckedSimilarity::try_score(&bounded, &[(index % 8) as u32, 1], &[1]).is_ok());
-    });
+    let row = Samples::timed(
+        "similarity checked composition",
+        SIMILARITY_ITERATIONS,
+        |index| {
+            verdicts += usize::from(cosine.verdict(&left, &left).is_ok());
+            verdicts += usize::from(text.verdict("kitten", "sitting").is_ok());
+            verdicts += usize::from(
+                CheckedSimilarity::try_score(&bounded, &[(index % 8) as u32, 1], &[1]).is_ok(),
+            );
+        },
+    );
     assert_eq!(
         verdicts,
         SIMILARITY_ITERATIONS * 3,
@@ -364,12 +413,17 @@ impl Skipped {
     ///
     /// Poisoning means some thread panicked while holding the guard. The guard
     /// only ever guards a `Vec<String>` push, and this harness is
-    /// single-threaded, so a poisoned lock still guards a consistent value.
+    /// single-threaded, so a poisoned lock still guards a consistent value: no
+    /// path here leaves the vector half-written, because `Vec::push` either
+    /// appends one whole element or leaves the length untouched. The guard
+    /// therefore takes the poisoned guard's inner value rather than discarding
+    /// the reasons recorded before the panic.
     fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
-        self.cell
-            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let cell = self.cell.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        match cell.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -385,7 +439,11 @@ mod tests {
         let small = walk_backoff(1, cap, 0, 0);
         let large = walk_backoff(1, cap, 40, 0);
         assert!(small < large, "a longer walk reaches a larger delay");
-        assert_eq!(walk_backoff(1, cap, 40, 0), cap, "the walk stops at the cap");
+        assert_eq!(
+            walk_backoff(1, cap, 40, 0),
+            cap,
+            "the walk stops at the cap"
+        );
     }
 
     #[test]
