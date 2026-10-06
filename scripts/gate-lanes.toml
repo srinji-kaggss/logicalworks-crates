@@ -178,8 +178,18 @@ required = true
 # wrote. It reads XML and records into SQLite, so the job needs no Rust
 # toolchain and no build -- it costs seconds, and it does not run the suite a
 # second time.
-command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform linux-x86_64"
+command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\""
 ci_step = "Record acceptance receipts"
+
+[[lane]]
+id = "tests-linux"
+surfaces = "ci"
+required = true
+# CI runs on the self-hosted macOS runner; this lane runs the workspace and
+# lgwks-bot full suites in a Linux container on it, so the Linux-only paths
+# execute on every run. A local macOS run covers the same suites natively.
+command = "./scripts/linux-container-tests.sh"
+ci_step = "Run the workspace and lgwks-bot full suites on Linux"
 
 [[lane]]
 id = "tests-bot-saturation"

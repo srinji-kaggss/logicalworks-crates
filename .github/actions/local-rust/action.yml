@@ -1,0 +1,55 @@
+name: Local Rust toolchain
+description: >
+  Prepares a job on the self-hosted macOS runner (Director, 2026-10-04: CI runs
+  on the local runner). The toolchain comes from rust-toolchain.toml and is
+  checked against the pin, without touching the host's rustup default, which
+  other projects on this machine rely on. The machine's own cargo
+  configuration ($CARGO_HOME/config.toml) is deliberately left in force: the
+  Director ruled on 2026-10-06 that CI builds with every optimisation it
+  declares. Build output persists per runner, outside the checkout that
+  actions/checkout cleans, so a run rebuilds only what changed.
+inputs:
+  toolchain:
+    description: The toolchain the gate pins; the step fails when rust-toolchain.toml resolves to another.
+    required: true
+  nextest:
+    description: Whether the job runs cargo-nextest, which must then be on PATH.
+    required: false
+    default: "false"
+  min-free-gib:
+    description: >
+      Free space the volume must keep. Below it, this runner's build output is
+      cleaned before the job builds, so a full disk fails no job. The default
+      is two cold workspace builds with the machine's profiles.
+    required: false
+    default: "40"
+runs:
+  using: composite
+  steps:
+    - name: Persistent target directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        target="${RUNNER_WORKSPACE}/target"
+        mkdir -p "${target}"
+        echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
+        free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
+        if [ "${free_kib}" -lt "$(( ${{ inputs.min-free-gib }} * 1024 * 1024 ))" ]; then
+          echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
+          cargo clean --target-dir "${target}"
+        fi
+    - name: Toolchain matches the pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install
+        active="$(rustc --version)"
+        echo "${active}"
+        case "${active}" in
+          "rustc ${{ inputs.toolchain }} "*) ;;
+          *) echo "::error::rust-toolchain.toml resolves to '${active}', the gate pins ${{ inputs.toolchain }}"; exit 1 ;;
+        esac
+    - name: nextest is installed
+      if: inputs.nextest == 'true'
+      shell: bash
+      run: cargo nextest --version
