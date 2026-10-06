@@ -40,15 +40,12 @@ const SWEEP_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
 /// How long a store nobody is writing is given to settle.
 const SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long a sweep keeps polling a rewriting writer waiting for the protocol to
-/// fire.
+/// How long a sweep polls a subject that moves on every read before it gives
+/// up waiting for a pending poll.
 ///
-/// A budget rather than a fixed window because the property is a *rate*: the
-/// writer is a real child process on a host that may be running six other tests
-/// beside it, and a starved writer writes rarely enough that a short window can
-/// end before any read of the bot's straddles a write. The budget bounds the
-/// wait; it does not decide the answer, because the loop still returns what it
-/// saw when the budget runs out and the assertion still reads *that*.
+/// The first poll of such a subject is pending, so the budget never decides a
+/// passing run; it bounds a regression in which the protocol stopped refusing,
+/// so that run fails on its assertion instead of polling for ever.
 const PENDING_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Return a typed test failure, emitting it first.
@@ -111,6 +108,19 @@ enum Protocol {
     /// Write [`AFTER`] to a temporary file and rename it over the subject: the
     /// writer whose discipline makes every open see whole bytes.
     Rename,
+    /// Feed a named pipe a new revision on every open: the subject that never
+    /// settles, *whatever the scheduler does*.
+    ///
+    /// A poll is pending only when the subject moved between every one of
+    /// [`lgwks_bot::stability::MAX_STABILITY_READS`] consecutive reads. Against
+    /// a file rewritten in place that is a race the reader wins whenever the
+    /// writer is descheduled for a moment, which on a loaded host is most of
+    /// the time: at load 68 on 15 cores the in-place writer let eight reads in
+    /// a row agree, and the pending assertion measured the scheduler. A pipe's
+    /// open waits for its writer, and each open is handed a later revision, so
+    /// no two reads can agree and every poll is pending — a fact about the
+    /// protocol, reached through the shipped verb with a real child writer.
+    Fifo,
 }
 
 /// A real child process that rewrites `path` under `protocol`.
@@ -132,6 +142,16 @@ fn start_writer(path: &Path, protocol: Protocol) -> Result<Child, Box<dyn Error>
             format!(
                 "printf '%s' '{AFTER}' > {partial}; mv {partial} {target}",
                 partial = path.with_extension("partial").display(),
+                target = path.display()
+            ),
+            "sleep 0.001; ",
+        ),
+        // The open blocks until a reader opens, and the pause is a real gap with
+        // the pipe closed, so a read reaches its end of file instead of being
+        // fed revision after revision into one unbounded read.
+        Protocol::Fifo => (
+            format!(
+                "printf '{{\"revision\":%s}}' \"$i\" > {target}",
                 target = path.display()
             ),
             "sleep 0.001; ",
@@ -240,67 +260,80 @@ fn tally(polls: impl IntoIterator<Item = Polled>) -> Result<(u32, u32), Box<dyn 
     Ok((settled, pending))
 }
 
-/// The whole point of the row: while a child process rewrites a store, every
-/// reading the bot is given either was confirmed by two independent reads or
-/// was reported as pending. Nothing torn is ever reported as a value.
-///
-/// The recovery case is in the same test: once the writer has finished, the
-/// next poll settles on the complete document. A protocol that simply failed
-/// would pass the first half and fail the second.
+/// The whole point of the row, on a subject that never settles: every poll the
+/// bot makes while it is being written is pending, never a value, and once the
+/// writer has finished — by renaming its final document into place — the next
+/// poll settles on that document. A protocol that simply failed would pass the
+/// first half and fail the second.
 #[test]
 fn a_store_being_rewritten_is_pending_until_it_settles() -> TestResult {
-    let mut live = LiveStore::new("concurrent-write", Protocol::Rewrite)?;
-    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::PendingAndSettled)?;
+    let mut live = LiveStore::new("concurrent-write", Protocol::Fifo)?;
+    let readings = live.sweep_until_pending(PENDING_BUDGET, Verb::Observe)?;
+    live.quiesce();
+    let (settled, pending) = tally(readings)?;
+    assert_eq!(
+        settled, 0,
+        "no two reads of a subject that moves on every read can agree, so nothing may settle"
+    );
+    assert!(
+        pending > 0,
+        "a poll of a subject that moves on every read must be pending"
+    );
+
+    live.finish_with(AFTER)?;
+    let Some(raw) = live.settle(SETTLE_WINDOW)? else {
+        return refuse("a store nobody is writing must settle once the writer has finished");
+    };
+    assert_eq!(
+        raw, AFTER,
+        "recovery must read the document the writer finished with"
+    );
+    Ok(())
+}
+
+/// The safety half, against the torn read in its purest form: a file rewritten
+/// in place, truncate and all. Whatever the bot is given as a value is a state
+/// the file actually held, and nothing is reported unreadable.
+///
+/// Nothing here counts pending polls. Whether any eight reads in a row straddle
+/// a write of an in-place writer is the scheduler's decision, not the
+/// protocol's; the pending claim is made above, on a subject that moves on
+/// every read.
+#[test]
+fn a_store_rewritten_in_place_is_never_read_as_a_state_it_never_held() -> TestResult {
+    let mut live = LiveStore::new("in-place-write", Protocol::Rewrite)?;
+    let readings = live.sweep(SWEEP_WINDOW)?;
+    live.quiesce();
+    assert!(!readings.is_empty(), "the sweep polled nothing");
     for polled in &readings {
         if let Polled::Settled(ref raw) = *polled {
-            // Whatever settled is a state the file actually held. A value the
-            // protocol admitted cannot be a fourth thing: that is the claim
-            // under test, stated as data. `TRUNCATED` is one of the three, and
-            // its presence is the caveat above rather than a defect.
+            // `TRUNCATED` is one of the three, and its presence is the caveat
+            // above rather than a defect.
             assert!(
                 settled_states().contains(&raw.as_str()),
                 "a settled reading must be a state the file actually held: {raw:?}"
             );
         }
     }
-    live.quiesce();
-    let (settled, pending) = tally(readings)?;
-
-    assert!(
-        settled > 0,
-        "a live store must produce readings as well as refusals"
-    );
-    assert!(
-        pending > 0,
-        "a sweep against a file being rewritten must observe at least one unsettled \
-         reading, or the protocol is not being exercised (settled={settled})"
-    );
-
-    let Some(raw) = live.settle(SETTLE_WINDOW)? else {
-        return refuse("a store nobody is writing must settle once the writer has finished");
-    };
-    assert!(
-        settled_states().contains(&raw.as_str()),
-        "recovery must read a state the file actually held, not a prefix of a document: {raw:?}"
-    );
+    tally(readings)?;
     Ok(())
 }
 
 /// The other verb over the same subject: a pending reading is pending whoever
-/// asked for it, and a refusal names the reads it took and the axis that moved.
+/// asked for it.
 #[test]
 fn a_query_over_a_moving_store_is_pending_too() -> TestResult {
-    let mut live = LiveStore::new("concurrent-query", Protocol::Rewrite)?;
-    // A budget, like every other sweep here: a fixed 300 queries is a rate the
-    // host decides, and on a loaded host 300 queries can all land between two
-    // writes of a starved writer.
-    let readings = live.sweep_until(PENDING_BUDGET, Verb::Query, Until::Pending)?;
+    let mut live = LiveStore::new("concurrent-query", Protocol::Fifo)?;
+    let readings = live.sweep_until_pending(PENDING_BUDGET, Verb::Query)?;
     live.quiesce();
-    let (_, pending) = tally(readings)?;
+    let (settled, pending) = tally(readings)?;
+    assert_eq!(
+        settled, 0,
+        "a query of a subject that moves on every read settled"
+    );
     assert!(
         pending > 0,
-        "a sweep of queries against a file being rewritten must observe at least one \
-         unsettled reading (or the protocol is not being exercised)"
+        "a query of a subject that moves on every read must be pending"
     );
     Ok(())
 }
@@ -317,6 +350,8 @@ struct LiveStore {
     /// directory is the guard, and the file inside it is only interesting while
     /// a scenario is writing or reading it.
     _scratch: Scratch,
+    /// The subject's path, for a writer that finishes by renaming into it.
+    path: std::path::PathBuf,
     /// The domain the shipped verb path polls.
     store: JsonStore,
     /// The child process rewriting the subject.
@@ -328,10 +363,29 @@ impl LiveStore {
     fn new(tag: &str, protocol: Protocol) -> Result<Self, Box<dyn Error>> {
         let scratch = Scratch::new(tag)?;
         let path = scratch.path().join("store.json");
-        std::fs::write(&path, BEFORE)?;
+        if let Protocol::Fifo = protocol {
+            let made = Command::new("mkfifo")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !made.success() {
+                let refusal: Result<Self, Box<dyn Error>> =
+                    Err(format!("mkfifo {} exited {made}", path.display()).into());
+                lgwks_std::trace::debug!(
+                    error = ?refusal.as_ref().err(),
+                    "live store: returning an error to the caller"
+                );
+                return refusal;
+            }
+        } else {
+            std::fs::write(&path, BEFORE)?;
+        }
         let writer = start_writer(&path, protocol)?;
         Ok(Self {
             store: JsonStore::new(&path),
+            path,
             _scratch: scratch,
             writer,
         })
@@ -358,41 +412,45 @@ impl LiveStore {
         Ok(readings)
     }
 
-    /// Poll the store until the sweep has seen what `until` names, or give up
-    /// after `budget`.
+    /// Poll the store through `verb` until a poll is pending, or give up after
+    /// `budget`.
     ///
     /// The refusal is what these scenarios are about, so the loop stops once it
-    /// has one rather than sweeping a fixed count: a count is a rate the host
-    /// decides and a budget is a bound this file declares. A scenario that
-    /// also claims the store produced a value asks for both arms, because the
-    /// first poll of a loaded host can land inside a write, and a sweep that
-    /// stopped on that refusal would hold no value for the claim to read.
-    fn sweep_until(
+    /// has one rather than sweeping a fixed count. Against a subject that moves
+    /// on every read the first poll is pending; the budget bounds a regression
+    /// in which it never is, and the assertion still reads what the sweep saw.
+    fn sweep_until_pending(
         &self,
         budget: std::time::Duration,
         verb: Verb,
-        until: Until,
     ) -> Result<Vec<Polled>, Box<dyn Error>> {
         let started = std::time::Instant::now();
         let mut readings = Vec::new();
-        let (mut pending, mut settled) = (false, false);
         while started.elapsed() < budget {
             let polled = match verb {
                 Verb::Observe => lgwks_std::task::block_on(poll_once(&self.store))?,
                 Verb::Query => lgwks_std::task::block_on(query_once(&self.store))?,
             };
-            pending |= matches!(polled, Polled::Pending(_));
-            settled |= matches!(polled, Polled::Settled(_));
+            let pending = matches!(polled, Polled::Pending(_));
             readings.push(polled);
-            let done = match until {
-                Until::Pending => pending,
-                Until::PendingAndSettled => pending && settled,
-            };
-            if done {
+            if pending {
                 return Ok(readings);
             }
         }
         Ok(readings)
+    }
+
+    /// The writer's last act: write `document` beside the subject and rename it
+    /// over the subject, so the next open sees it whole.
+    ///
+    /// Called after [`Self::quiesce`]. For a pipe this replaces the pipe with a
+    /// file, which is what lets a reader that would otherwise wait for a writer
+    /// that is gone read a document instead.
+    fn finish_with(&self, document: &str) -> Result<(), Box<dyn Error>> {
+        let partial = self.path.with_extension("partial");
+        std::fs::write(&partial, document)?;
+        std::fs::rename(&partial, &self.path)?;
+        Ok(())
     }
 
     /// Poll the store until it settles, or give up after `window`.
@@ -434,15 +492,6 @@ enum Verb {
     Observe,
     /// `Query::query`, the same reader asked for a value.
     Query,
-}
-
-/// What a sweep has to have seen before it stops early.
-#[derive(Clone, Copy)]
-enum Until {
-    /// One unsettled reading: the refusal the scenario is about.
-    Pending,
-    /// An unsettled reading and a settled one, for a scenario that claims both.
-    PendingAndSettled,
 }
 
 /// The writer dies with the store, on every path out of a test.
@@ -510,8 +559,8 @@ fn a_dropped_store_takes_its_writer_with_it() -> TestResult {
 /// Every refusal names at least two reads and an axis the caller can triage on.
 #[test]
 fn an_unsettled_reading_names_its_reads_and_its_axis() -> TestResult {
-    let mut live = LiveStore::new("named-refusal", Protocol::Rewrite)?;
-    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::Pending)?;
+    let mut live = LiveStore::new("named-refusal", Protocol::Fifo)?;
+    let readings = live.sweep_until_pending(PENDING_BUDGET, Verb::Observe)?;
     let mut named = 0u32;
     for polled in &readings {
         let Polled::Pending(ref failure) = *polled else {
@@ -534,7 +583,7 @@ fn an_unsettled_reading_names_its_reads_and_its_axis() -> TestResult {
     live.quiesce();
     assert!(
         named > 0,
-        "the writer was rewriting the subject for the whole sweep"
+        "a poll of a subject that moves on every read must be pending"
     );
     Ok(())
 }
@@ -594,14 +643,13 @@ fn an_absent_store_is_unreadable_rather_than_unsettled() -> TestResult {
 /// to the code that decides whether a chain fires.
 #[test]
 fn an_unsettled_reading_is_pending_rather_than_a_committed_change() -> TestResult {
-    let mut live = LiveStore::new("pending-semantics", Protocol::Rewrite)?;
+    let mut live = LiveStore::new("pending-semantics", Protocol::Fifo)?;
     // One pass: the sweep polls until the protocol fires and hands back the
-    // refusal the bot would have been given. A second pass would be a second
-    // chance at the same race, which is how a test that depends on a writer's
-    // timing turns into a test that depends on how loaded the host is.
-    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::Pending)?;
-    let recovered = live.settle(SETTLE_WINDOW)?;
+    // refusal the bot would have been given.
+    let readings = live.sweep_until_pending(PENDING_BUDGET, Verb::Observe)?;
     live.quiesce();
+    live.finish_with(AFTER)?;
+    let recovered = live.settle(SETTLE_WINDOW)?;
 
     let mut asserted = 0u32;
     for polled in &readings {
@@ -631,8 +679,8 @@ fn an_unsettled_reading_is_pending_rather_than_a_committed_change() -> TestResul
     }
     assert!(
         asserted > 0,
-        "the writer was rewriting the subject for the whole sweep, so a poll must have been \
-         refused (the store did settle afterwards, on {recovered:?})"
+        "a poll of a subject that moves on every read must have been refused (the store did \
+         settle afterwards, on {recovered:?})"
     );
     assert!(
         recovered.is_some(),

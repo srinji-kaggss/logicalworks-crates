@@ -1585,8 +1585,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   `stability::read_stable_file` on every `Observe` and `Query`. **Not claimed:**
   that a settled reading is valid JSON, or that a writer that rewrites in place
   and pauses longer than one read pair is caught; that guarantee belongs to the
-  writer's rename-into-place discipline. · why: #278 row 1 · enforced by:
+  writer's rename-into-place discipline. The pending claim is tested against a
+  subject that moves on every read (a named pipe fed by a child writer), so it
+  holds whatever the scheduler does; an in-place writer only tests safety, since
+  whether eight reads in a row straddle its writes is the scheduler's decision.
+  · why: #278 row 1 · enforced by:
   `tests/it/stability.rs` (`a_store_being_rewritten_is_pending_until_it_settles`,
+  `a_store_rewritten_in_place_is_never_read_as_a_state_it_never_held`,
   `an_unsettled_reading_is_pending_rather_than_a_committed_change`,
   `an_unsettled_reading_names_its_reads_and_its_axis`,
   `a_store_written_by_rename_is_never_read_half_written`,
