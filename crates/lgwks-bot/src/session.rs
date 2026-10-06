@@ -38,6 +38,7 @@
 //! than a silently applied bound. The two requests combine by taking the
 //! smaller value on each axis.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::IntErrorKind;
@@ -269,6 +270,15 @@ impl Default for ResourceLimits {
     }
 }
 
+/// The operator's shipped byte ceilings, as one named value.
+///
+/// The case a flow document that declares no ceilings is held to. A constant
+/// rather than a call so the case is a *name* at the two places that take it,
+/// beside the field whose absence selects it — `unwrap_or_default()` would hide
+/// which of the two resource-limit sets a document without a request is held to,
+/// and a bare `Default::default()` would say nothing at all.
+const SHIPPED_LIMITS: ResourceLimits = ResourceLimits::shipped();
+
 /// The smaller of two byte counts, named because `Ord::min` is not `const`.
 const fn smaller(left: usize, right: usize) -> usize {
     if left < right { left } else { right }
@@ -327,27 +337,34 @@ impl Value {
 
 /// The number of bytes [`fmt::Display`] writes for one integer.
 ///
-/// Division-free: the digit count is the base-ten logarithm rounded down plus
-/// one, and the sign is one more byte when the value is negative. Zero has one
-/// digit and no logarithm, which is the `None` arm.
+/// Division-free and conversion-free: the digit count is the number of
+/// base-ten thresholds the magnitude reaches, and the sign is one more byte when
+/// the value is negative. Zero has one digit and reaches no threshold.
+///
+/// The thresholds are walked in `u64` and counted in `usize`, so no value is
+/// ever narrowed between the magnitude and the width. A logarithm would have
+/// been one instruction, but it returns a `u32` and turning that into the width
+/// the caller compares needs a conversion whose failure arm would have to put a
+/// number in a byte count; twenty comparisons against a multiply is not a cost
+/// anyone measures next to the formatting this exists to avoid.
 fn integer_bytes(value: i64) -> usize {
     // `unsigned_abs` rather than `abs`, because `i64::MIN` has no positive
     // counterpart: negating it in `i64` overflows, and the digit count does not
     // care which side of zero the magnitude came from.
-    let digits = value
-        .unsigned_abs()
-        .checked_ilog10()
-        .map_or(1, |exponent| exponent.saturating_add(1));
-    let total = if value < 0 {
+    let magnitude = value.unsigned_abs();
+    let mut digits = 1_usize;
+    let mut threshold = 10_u64;
+    // Bounded by construction: `u64::MAX` has twenty digits, so the loop runs at
+    // most nineteen times and `threshold` saturates rather than wrapping.
+    while magnitude >= threshold {
+        digits = digits.saturating_add(1);
+        threshold = threshold.saturating_mul(10);
+    }
+    if value < 0 {
         digits.saturating_add(1)
     } else {
         digits
-    };
-    // At most twenty digits, so this cannot fail on any target this crate
-    // builds for. The fallback is `usize::MAX` rather than a panic because the
-    // only caller compares the result against a ceiling: an impossible width
-    // reported as enormous is refused, which is the failing-closed direction.
-    usize::try_from(total).unwrap_or(usize::MAX)
+    }
 }
 
 /// Declared type of one variable in a flow.
@@ -1193,6 +1210,23 @@ impl FlowBounds {
         self.resources
     }
 
+    /// The byte ceilings in force for this document.
+    ///
+    /// Two cases, both declared by the type: a document that asked for ceilings
+    /// gets the ones it asked for, and one that asked for none gets
+    /// [`ResourceLimits::shipped`] — which is what "whatever the operator
+    /// enforces" means, and is not a value standing in for a missing request.
+    /// Either way the result goes through `within_ceiling` before anything runs,
+    /// because an author's request above the operator's is refused rather than
+    /// honoured.
+    #[must_use]
+    pub fn effective_resources(self) -> ResourceLimits {
+        match self.resources {
+            Some(requested) => requested,
+            None => SHIPPED_LIMITS,
+        }
+    }
+
     /// Return these bounds with a declared byte-ceiling request attached.
     #[must_use]
     pub const fn with_resources(mut self, resources: ResourceLimits) -> Self {
@@ -1465,7 +1499,7 @@ fn validate_flow_within(spec: &FlowSpec, limits: ResourceLimits) -> Result<(), B
     // First, and before any structural work: a document that asks for a
     // ceiling above the operator's gets a diagnostic naming the axis it asked
     // about, not a run under a bound it did not choose.
-    let requested = spec.bounds.resources.unwrap_or_default().within_ceiling()?;
+    let requested = spec.bounds.effective_resources().within_ceiling()?;
     let effective = requested.narrowed(limits);
     if spec.nodes.is_empty() {
         let refusal = Err(BotError::MalformedFlow {
@@ -1703,25 +1737,50 @@ fn declared_template_reads(
     Ok(names)
 }
 
-/// Collect the variable references of a predicate expression.
-fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String>) {
+/// The two operands of a comparison predicate, or `None` for anything else.
+///
+/// Every comparison — `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge` — binds the same two
+/// operands and nothing else, and two walks over a predicate (the one that
+/// collects its variables and the one that validates them) have to agree on
+/// which variants those are. They read the list from here instead of each
+/// restating six variants, which is how a new comparison would be collected by
+/// one and skipped by the other.
+fn comparison_operands(predicate: &Predicate) -> Option<(&ValueExpr, &ValueExpr)> {
     match *predicate {
-        Predicate::Const(_) => {}
         Predicate::Eq(ref left, ref right)
         | Predicate::Ne(ref left, ref right)
         | Predicate::Lt(ref left, ref right)
         | Predicate::Le(ref left, ref right)
         | Predicate::Gt(ref left, ref right)
-        | Predicate::Ge(ref left, ref right) => {
-            collect_expr_variables(left, into);
-            collect_expr_variables(right, into);
-        }
-        Predicate::And(ref items) | Predicate::Or(ref items) => {
-            for item in items {
-                collect_predicate_variables(item, into);
+        | Predicate::Ge(ref left, ref right) => Some((left, right)),
+        Predicate::Const(_) | Predicate::And(_) | Predicate::Or(_) | Predicate::Not(_) => None,
+    }
+}
+
+/// Collect the variable references of a predicate expression.
+fn collect_predicate_variables(predicate: &Predicate, into: &mut BTreeSet<String>) {
+    if let Some((left, right)) = comparison_operands(predicate) {
+        collect_expr_variables(left, into);
+        collect_expr_variables(right, into);
+    } else {
+        match *predicate {
+            Predicate::Const(_) => {}
+            Predicate::And(ref items) | Predicate::Or(ref items) => {
+                for item in items {
+                    collect_predicate_variables(item, into);
+                }
             }
+            Predicate::Not(ref inner) => collect_predicate_variables(inner, into),
+            // Every comparison was taken above, and `comparison_operands` names
+            // all six, so this arm can only be reached if that list and this
+            // match have drifted apart — which is the point of naming it there.
+            Predicate::Eq(..)
+            | Predicate::Ne(..)
+            | Predicate::Lt(..)
+            | Predicate::Le(..)
+            | Predicate::Gt(..)
+            | Predicate::Ge(..) => {}
         }
-        Predicate::Not(ref inner) => collect_predicate_variables(inner, into),
     }
 }
 
@@ -1925,17 +1984,12 @@ fn validate_predicate(
     node_id: &str,
     predicate: &Predicate,
 ) -> Result<(), BotError> {
+    if let Some((left, right)) = comparison_operands(predicate) {
+        validate_expr(spec, node_id, left)?;
+        return validate_expr(spec, node_id, right);
+    }
     match *predicate {
         Predicate::Const(_) => Ok(()),
-        Predicate::Eq(ref left, ref right)
-        | Predicate::Ne(ref left, ref right)
-        | Predicate::Lt(ref left, ref right)
-        | Predicate::Le(ref left, ref right)
-        | Predicate::Gt(ref left, ref right)
-        | Predicate::Ge(ref left, ref right) => {
-            validate_expr(spec, node_id, left)?;
-            validate_expr(spec, node_id, right)
-        }
         Predicate::And(ref items) | Predicate::Or(ref items) => {
             if items.is_empty() {
                 let refusal = Err(BotError::MalformedFlow {
@@ -1950,6 +2004,13 @@ fn validate_predicate(
             Ok(())
         }
         Predicate::Not(ref inner) => validate_predicate(spec, node_id, inner),
+        // Every comparison returned above, through the one list of them.
+        Predicate::Eq(..)
+        | Predicate::Ne(..)
+        | Predicate::Lt(..)
+        | Predicate::Le(..)
+        | Predicate::Gt(..)
+        | Predicate::Ge(..) => Ok(()),
     }
 }
 
@@ -2933,6 +2994,33 @@ impl Verdict {
     }
 }
 
+/// Order two scored candidates best-first, lowest index first on a tie.
+///
+/// The one comparator for the crate's two rankers — `language`'s lexicon and
+/// `semantic`'s embedder — because they have to agree. A candidate the lexicon
+/// placed above a tie must not be placed below one by the embedder, or the tier
+/// decides the order rather than the score. Both callers feed it ascending
+/// indices into a *stable* sort, so an equal score keeps lowest-index-first with
+/// no tiebreak of its own.
+///
+/// A score with no order — a NaN on either side, the one pair `f64` cannot
+/// compare — sorts **last**. `total_cmp` alone would rank it above every number,
+/// handing the win to the one candidate that measured nothing, and treating it
+/// as a tie would leave an unorderable entry in the list the caller then computes
+/// its lead over. Neither ranker can produce a NaN today: both score through a
+/// checked metric that refuses a degenerate vector, so this arm is a property of
+/// the comparator rather than a branch anyone has taken.
+pub(crate) fn by_score_descending(
+    left: &(usize, MatchTier, f64),
+    right: &(usize, MatchTier, f64),
+) -> Ordering {
+    match (left.2.is_nan(), right.2.is_nan()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => right.2.total_cmp(&left.2),
+    }
+}
+
 /// Which match tier produced a resolution.
 ///
 /// Reported rather than inferred, because it is what makes a wrong resolution
@@ -3600,7 +3688,7 @@ impl Session {
         // the smaller. Doing it the other way round would let a document's
         // in-range tightening hide an operator's out-of-range one.
         let operator = limits.within_ceiling()?;
-        let requested = flow.bounds.resources.unwrap_or_default().within_ceiling()?;
+        let requested = flow.bounds.effective_resources().within_ceiling()?;
         let effective = operator.narrowed(requested);
         // Re-validated here rather than trusted from construction, because the
         // public `json` façade parses a `FlowSpec` without calling
@@ -4264,7 +4352,7 @@ impl Session {
     ///
     /// Returns [`BotError::RecordTooLarge`] for a prompt over the ceiling.
     fn record_prompt(&mut self, node_id: &str, options: &[String]) -> Result<(), BotError> {
-        let bytes = prompt_bytes(options).unwrap_or(usize::MAX);
+        let bytes = prompt_bytes(options);
         let record_bytes = self.limits.get(ResourceAxis::Record);
         if bytes > record_bytes {
             let refusal = Err(BotError::RecordTooLarge {
@@ -4311,28 +4399,32 @@ impl Session {
 /// The byte cost of the standard ask prompt for `options`.
 ///
 /// Computed rather than measured, so the caller can refuse an oversized prompt
-/// without building it. `None` means the arithmetic overflowed, which is the
-/// same refusal at a larger size: the caller maps it to the ceiling with
-/// [`usize::MAX`] bytes, and `usize::MAX` exceeds every ceiling.
+/// without building it. A width that saturates is the same refusal at a larger
+/// size: [`usize::MAX`] bytes exceeds every record ceiling, so the caller's
+/// ceiling check answers it without being told which of the two it was.
 ///
 /// The prefix and separator are the literals [`Session::record_prompt`]
 /// formats, and they are named here rather than repeated so the estimate and
 /// the string cannot disagree.
-fn prompt_bytes(options: &[String]) -> Option<usize> {
+fn prompt_bytes(options: &[String]) -> usize {
     /// Literal prefix in the recorded prompt.
     const PREFIX: &str = "Choose one: ";
     /// Literal separator between candidates.
     const SEPARATOR: &str = ", ";
+    // Saturating rather than checked: the caller refuses a prompt whose width
+    // exceeds the record ceiling, and a width that has saturated exceeds every
+    // ceiling a `usize` can hold, so the same refusal answers both without the
+    // caller having to tell which of the two it was looking at. `checked_sub(1)`
+    // becomes a `saturating_sub`, which is the same value for the empty list —
+    // no separator follows no candidate — and the right one past it.
     let separators = options
         .len()
-        .checked_sub(1)
-        .and_then(|count| count.checked_mul(SEPARATOR.len()))?;
-    options
-        .iter()
-        .try_fold(PREFIX.len(), |total, option| {
-            total.checked_add(option.len())
-        })?
-        .checked_add(separators)
+        .saturating_sub(1)
+        .saturating_mul(SEPARATOR.len());
+    let candidates = options.iter().fold(PREFIX.len(), |total, option| {
+        total.saturating_add(option.len())
+    });
+    candidates.saturating_add(separators)
 }
 
 /// Digest a flow document so a receipt names the revision it was decided under.

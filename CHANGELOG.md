@@ -172,6 +172,35 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — one score comparator, one predicate walk, one field under test (nine-axis sweep)
+
+- **`session::by_score_descending` is the crate's one ranker.** The lexicon and
+  the semantic tier each sorted with `partial_cmp(..).unwrap_or(Ordering::Equal)`;
+  they now share one comparator, because two rankers that disagree put the order
+  in the tier rather than the score, and a NaN on either side sorts *last* rather
+  than winning or tying.
+- **`comparison_operands` is the one list of comparisons.** `collect_predicate_
+  variables` and `validate_predicate` each restated the six `Eq`/`Ne`/`Lt`/`Le`/
+  `Gt`/`Ge` variants; a new comparison would have been collected by one and
+  skipped by the other.
+- **`semantic`'s tests share the field they ask about** (`the_field`,
+  `resolve_with`, `near_tie_vectors`). The option *texts* are part of each
+  premise — a misspelled one is measuring a field the lexicon resolves
+  differently, and that is invisible in a diff full of vectors — and two tests
+  built the identical `0.73`/`0.71` vectors by hand.
+- **`integer_bytes` counts digits in `usize`, never narrowing.** It walked
+  `checked_ilog10`'s `u32` into a `usize` width through a fallback that put a
+  number in a byte count; it now walks the magnitude's base-ten thresholds in
+  `u64` and counts in `usize`, so nothing is converted.
+- **`prompt_bytes` saturates.** It returned `None` on overflow and the caller read
+  that through `unwrap_or(usize::MAX)`; it now saturates in its own arithmetic and
+  the caller's ceiling check answers a saturated width without being told which it
+  was.
+- **`FlowBounds::effective_resources` names the absent case.** A document that
+  declares no byte ceilings is held to `SHIPPED_LIMITS` — the case the field's own
+  documentation describes — instead of `unwrap_or_default()`, which said nothing
+  about which of the two limit sets a request-less document is held to.
+
 ### lgwks_bot — inspect and frontier stop substituting values for answers (nine-axis sweep)
 
 - **`macro_head` splits once.** `split(..).next().unwrap_or("")` cannot fail —

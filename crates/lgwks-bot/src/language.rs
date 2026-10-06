@@ -63,7 +63,7 @@
 //! deleting a row. A learned scorer would be as adaptive and would not be
 //! auditable, and `docs/security-posture.md` rests on the run being declarable.
 
-use std::cmp::Ordering;
+use crate::session::by_score_descending;
 use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
@@ -358,22 +358,11 @@ fn score_all(
     }
 
     let mut scored = winning_tier(scored);
-    // Stable sort by descending score. `sort_by` is stable, and the input is in
-    // ascending index order, so equal scores keep lowest-index-first for free.
-    //
-    // A score with no order sorts *last*. `partial_cmp` returns `None` for
-    // exactly one pair of `f64` values — a NaN on either side — and the blend
-    // above cannot produce one from two clamped unit scores and non-negative
-    // weights, so this arm is unreachable today. It is written to be correct if
-    // a future metric ever can: `total_cmp` alone would rank a NaN above every
-    // number, which hands the win to the one candidate that measured nothing,
-    // and treating it as a tie would leave an unorderable entry in the ranking
-    // that `decide` then computes its lead over.
-    scored.sort_by(|left, right| match (left.2.is_nan(), right.2.is_nan()) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => right.2.total_cmp(&left.2),
-    });
+    // Best-first through the crate's one comparator, so the lexicon and the
+    // semantic tier cannot order the same two candidates differently. `sort_by`
+    // is stable and the input is in ascending index order, so a tie keeps
+    // lowest-index-first.
+    scored.sort_by(by_score_descending);
     scored
 }
 
