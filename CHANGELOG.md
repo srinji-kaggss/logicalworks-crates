@@ -81,11 +81,16 @@ the answer is not what the ratio used to imply.
   explained away.** The previous table (72x–256x) was taken on a tree that
   dispatched effects with no ledger, no warrant and no record, and whose
   source-level digest let a chain skip its poll entirely. Both of those are gone.
-  On this tree the two effect-heavy scenarios are dominated by `act` — the
-  durable record each dispatched effect is written through — and only the three
-  quiet scenarios are poll-dominated. `bench/README.md` and
-  `docs/production-readiness.md` §4.9 carry the new numbers and the
-  decomposition.
+  On this tree (118x–2 665x) `act` — the ledger, warrant and record each
+  dispatched effect is written through — is the largest stage in every scenario,
+  41% of a quiet tick that fires nothing and 84–98% of the effect-heavy ones.
+  #279's targets (≤ 10x quiet, ≤ 30x churn) are missed on every row.
+  `bench/README.md` and `docs/production-readiness.md` §4.9 carry the numbers
+  and the decomposition.
+- **`TickProfile::per_tick` returns `Option<Duration>`**: `None` for a profile
+  with no ticks, where it used to return a zero that read as a free stage, and
+  the mean is divided over the whole `u64` count rather than a count saturated
+  at `u32::MAX`.
 
 
 ### lgwks_deps — `long-try-chain` charges each `?` to its own statement

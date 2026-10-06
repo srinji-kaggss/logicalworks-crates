@@ -804,8 +804,14 @@ fn clock_read_ns() -> f64 {
 }
 
 /// One stage's ns/tick for one row, read through the profile's own accessor.
+///
+/// `NAN` for a row that measured no ticks, which prints as `NaN` in the table
+/// rather than a zero nobody measured.
 fn ns_of(row: &StageRow, stage: TickStage) -> f64 {
-    row.profile.per_tick(stage).as_secs_f64() * 1e9
+    match row.profile.per_tick(stage) {
+        Some(mean) => mean.as_secs_f64() * 1e9,
+        None => f64::NAN,
+    }
 }
 
 // ── The allocation model ─────────────────────────────────────────────────────

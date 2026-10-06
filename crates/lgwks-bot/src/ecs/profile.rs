@@ -115,7 +115,7 @@ impl core::fmt::Display for TickStage {
 /// to divide: a caller that divides by zero, or by a count it read at a
 /// different moment, produces a number this type exists to make impossible.
 ///
-/// Every field is private behind an accessor, for the reason [`TickReport`]
+/// Every field is private behind an accessor, for the reason [`TickReport`](super::TickReport)
 /// keeps its own private: a reader that could edit the record of what a tick
 /// measured could make an instrumented run disagree with a timed one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -173,22 +173,22 @@ impl TickProfile {
         }
     }
 
-    /// The mean time one stage spent on one tick.
+    /// The mean time one stage spent on one tick, or `None` for a profile that
+    /// has measured no ticks.
     ///
-    /// Zero for a profile with no ticks, because the mean of nothing is not a
-    /// number and dividing by the count would say it was.
+    /// `None` rather than zero: the mean of nothing is not a number, and a zero
+    /// would read as a stage that cost nothing. The division is in nanoseconds
+    /// over the whole `u64` count, so a count past `u32::MAX` divides exactly
+    /// instead of by a narrowed or saturated stand-in.
     #[must_use]
-    pub fn per_tick(&self, stage: TickStage) -> Duration {
-        if self.ticks == 0 {
-            return Duration::ZERO;
-        }
-        // Saturating, not wrapping: a count past `u32::MAX` takes the maximum
-        // rather than a small divisor, which would report a stage as costing
-        // more per tick than the profile can hold.
-        let ticks = u32::try_from(self.ticks).unwrap_or(u32::MAX);
-        self.stage(stage)
-            .checked_div(ticks)
-            .unwrap_or(Duration::ZERO)
+    pub fn per_tick(&self, stage: TickStage) -> Option<Duration> {
+        let mean = self
+            .stage(stage)
+            .as_nanos()
+            .checked_div(u128::from(self.ticks))?;
+        // The mean is at most the stage's own total, which is a `Duration`, so it
+        // is always within the range `from_nanos_u128` accepts.
+        Some(Duration::from_nanos_u128(mean))
     }
 
     /// Every stage's total, which is the whole of the measured ticks.
@@ -347,13 +347,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_profile_with_no_ticks_divides_to_zero_rather_than_panicking() {
+    fn a_profile_with_no_ticks_has_no_mean() {
         let empty = TickProfile::new();
         assert_eq!(empty.ticks(), 0, "a fresh profile has measured nothing");
         for stage in TickStage::ALL {
             assert_eq!(
                 empty.per_tick(stage),
-                Duration::ZERO,
+                None,
                 "the mean of no ticks is not a number: {}",
                 stage
             );
@@ -400,8 +400,23 @@ mod tests {
         );
         assert_eq!(
             profile.per_tick(TickStage::Poll),
-            Duration::from_nanos(5),
+            Some(Duration::from_nanos(5)),
             "20 ns over two ticks is 5 ns per tick"
+        );
+    }
+
+    #[test]
+    fn a_count_past_a_u32_divides_exactly() {
+        let ticks = u64::from(u32::MAX).saturating_add(1);
+        let profile = TickProfile {
+            poll: Duration::from_nanos(ticks.saturating_mul(3)),
+            ticks,
+            ..TickProfile::new()
+        };
+        assert_eq!(
+            profile.per_tick(TickStage::Poll),
+            Some(Duration::from_nanos(3)),
+            "a narrowed divisor would report 3 ns/tick as more than 3"
         );
     }
 
@@ -424,7 +439,7 @@ mod tests {
         );
         assert_eq!(
             first.per_tick(TickStage::Poll),
-            Duration::from_nanos(10),
+            Some(Duration::from_nanos(10)),
             "40 ns over four ticks is 10 ns per tick, not 40"
         );
     }

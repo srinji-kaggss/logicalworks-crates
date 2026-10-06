@@ -93,17 +93,17 @@ consequences, both of them visible in the output:
 ## The headline, stated before the method
 
 **`lgwks_bot` is not state of the art on throughput, and this rig does not claim
-it is.** On this machine the bot is between **320x and 3 633x slower** than a
+it is.** On this machine the bot is between **118x and 2 665x slower** than a
 hand-rolled loop doing provably identical work. That is the honest result, and
 the rest of this document is about what that multiplier buys and where it goes.
 
 | scenario | bot ns/tick | baseline ns/tick | ratio (bot/baseline) | 95% CI |
 |---|---:|---:|---:|---|
-| `poll-only-64x100` | 14 365.1 | 44.7 | 319.56x | [312.50, 339.84] |
-| `steady-64x100` | 20 261.2 | 45.0 | 431.17x | [388.87, 464.24] |
-| `churn-64x1` | 223 385.7 | 93.2 | 2 483.09x | [2 336.41, 2 691.76] |
-| `fanout-1x64` | 183 596.5 | 50.2 | 3 632.88x | [3 420.35, 3 811.49] |
-| `wide-256x10` | 137 361.9 | 201.2 | 680.80x | [654.08, 720.08] |
+| `poll-only-64x100` | 3 720.9 | 31.4 | 117.99x | [117.35, 119.05] |
+| `steady-64x100` | 4 909.2 | 31.9 | 154.37x | [151.59, 156.10] |
+| `churn-64x1` | 138 037.7 | 52.1 | 2 664.56x | [2 630.82, 2 698.80] |
+| `fanout-1x64` | 116 680.7 | 45.2 | 2 578.12x | [2 555.76, 2 601.45] |
+| `wide-256x10` | 66 270.8 | 138.4 | 477.51x | [473.00, 481.37] |
 
 Every interval excludes parity, so each of these is a distinguishable difference
 rather than noise. The `churn-64x1` and `fanout-1x64` intervals are the widest,
@@ -146,19 +146,19 @@ instrument armed; nothing here is a reimplementation of the tick):
 
 ```
   scenario                     poll fingerprint   compare  schedule   decide      act      plain instrument
-  poll-only-64x100        7064.0     171.0    1238.0      43.0     548.0    1733.0    10741.7     +251.2
-  steady-64x100           7084.0     171.0    1270.0      44.0     589.0    3058.0    12111.3     +423.1
-  churn-64x1             10164.0   10401.0    5830.0      91.0    7130.0  164017.0   167184.6   +9852.4
-  fanout-1x64              856.0     204.0     967.0      55.0     690.0  145157.0   138333.9   +9450.6
-  wide-256x10           29532.0    3948.0    4392.0      68.0    5130.0   63324.0   107960.3    -691.5
+  poll-only-64x100         445.0     148.0    1066.0      35.0     459.0    1482.0     3737.6      +74.6
+  steady-64x100            452.0     147.0    1060.0      35.0     487.0    2574.0     4930.9      +63.0
+  churn-64x1              6895.0    7828.0    4094.0      48.0    4551.0  121367.0   136773.1    +7853.5
+  fanout-1x64              526.0     158.0     702.0      36.0     498.0  119047.0   113516.7    +7732.9
+  wide-256x10             3780.0    3319.0    3724.0      53.0    3792.0   50307.0    67686.1    -2206.1
 
   shares of the measured tick
   scenario                     poll fingerprint   compare  schedule   decide      act
-  poll-only-64x100         65.4%      1.6%     11.5%      0.4%      5.1%     16.0%
-  steady-64x100            58.0%      1.4%     10.4%      0.4%      4.8%     25.0%
-  churn-64x1                5.1%      5.3%      3.0%      0.0%      3.6%     83.0%
-  fanout-1x64               0.6%      0.1%      0.7%      0.0%      0.5%     98.1%
-  wide-256x10              27.8%      3.7%      4.1%      0.1%      4.8%     59.5%
+  poll-only-64x100         12.2%      4.1%     29.3%      1.0%     12.6%     40.7%
+  steady-64x100             9.5%      3.1%     22.3%      0.8%     10.2%     54.1%
+  churn-64x1                4.8%      5.4%      2.8%      0.0%      3.6%     83.8%
+  fanout-1x64               0.4%      0.1%      0.6%      0.0%      0.4%     98.4%
+  wide-256x10               5.8%      5.1%      5.7%      0.1%      5.8%     77.4%
 ```
 
 **What each column is.** `poll` is the observation phase, and it carries each
@@ -174,8 +174,8 @@ the ledger write, the warrant, the durable record and the action.
 
 **The stage columns carry the instrument, and `plain` is what the same workload
 costs with it off.** A tick reads the clock once per charge plus once to open the
-window — seven reads — and one read costs **36 ns** on this host, so the
-instrument adds about 250 ns/tick on a short tick. On the two long scenarios the
+window — seven reads — and one read costs **31 ns** on this host, so the
+instrument adds about 217 ns/tick on a short tick. On the two long scenarios the
 difference is larger than seven reads because the second window runs on a bot
 whose journal has already grown: that is the instrument's cost reported honestly
 rather than subtracted to taste, and it is why the **shares**, not the absolutes,
@@ -185,16 +185,19 @@ are what this table supports.
 
 | scenario | poll + change detection | decision and effects | the old claim |
 |---|---:|---:|---|
-| `poll-only-64x100` | 78.5% | 21.5% | 98% |
-| `steady-64x100` | 69.8% | 30.2% | 98% |
-| `churn-64x1` | 13.4% | 86.6% | 98% |
-| `fanout-1x64` | 1.4% | 98.6% | — |
-| `wide-256x10` | 35.6% | 64.4% | 98% |
+| `poll-only-64x100` | 45.6% | 54.4% | 98% |
+| `steady-64x100` | 34.9% | 65.1% | 98% |
+| `churn-64x1` | 13.0% | 87.0% | 98% |
+| `fanout-1x64` | 1.1% | 98.9% | — |
+| `wide-256x10` | 16.6% | 83.4% | 98% |
 
 The old "98%" was true of a tree in which a source with a digest skipped its
-poll and an effect wrote no record. On this tree the two effects-heavy scenarios
-are dominated by `act` — the durable record each dispatched effect is written
-through — and only the three quiet scenarios are poll-dominated. Naming that is
+poll and an effect wrote no record. On this tree `act` — the ledger, warrant and
+record each dispatched effect is written through — is the largest stage in every
+scenario, and even `poll-only-64x100`, which fires nothing, spends 1 482 ns of its
+3 738 ns there: that residual is the act stage's own walk with nothing selected,
+and it is the next thing #279 has to remove. Poll is 445 ns on the quiet
+scenarios, down from 7 064 ns before the change ticks and `PollScratch`. Naming that is
 the point of measuring it rather than extrapolating from two scenarios.
 
 **Zero heap allocations is still not true of this tick, and the part that is
@@ -226,8 +229,8 @@ every source was skipped builds no future and arms no watchdog, and the wave's
 `Vec` built per wave. One of the twenty is `block_on`'s `Arc<ThreadWaker>`, which
 the rig measures directly at 1.0 for an immediately-ready future; the rest is a
 fixed per-tick cost outside the six profiled stages. It is **not** the schedule:
-`sched` measures 63 ns, and nineteen allocator round trips cannot happen in
-63 ns. Attributing the rest needs an allocation-site profiler, which this
+`schedule` measures 35 ns, and nineteen allocator round trips cannot happen in
+35 ns. Attributing the rest needs an allocation-site profiler, which this
 repository cannot host — `unsafe` is denied by the crate's lint contract and a
 `bevy_ecs` edge in `bench/` is a dependency the register does not carry — so it
 is reported as measured rather than guessed.
