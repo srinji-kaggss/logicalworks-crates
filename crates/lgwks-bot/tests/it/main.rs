@@ -208,6 +208,7 @@ mod sim_task_axes;
 mod sim_task_resume;
 mod sim_tenancy;
 mod sim_tenancy_model;
+mod sim_tenant_journal_kill;
 mod spec_materialize;
 mod stability;
 mod store_read_failure;
