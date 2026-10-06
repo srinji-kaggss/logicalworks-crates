@@ -172,6 +172,24 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — `spec`'s test doubles are declared once, and the sleep is no longer suppressed (nine-axis sweep)
+
+- **`hold_pool_thread_for` parks instead of sleeping.** It carried an
+  `#[expect(clippy::disallowed_methods)]` because `rt::time::sleep` has no
+  timer driver on `lgwks_std::task::block_on` and `std::thread::sleep` is banned.
+  `std::thread::park_timeout` is the substitution the codebook names for the
+  banned call, so the suppression is gone. The one thing `sleep` promised and
+  `park_timeout` does not is that it does not return early; nothing unparks that
+  thread, so a premature return can only shorten the overlap, never remove it.
+- **One action double instead of four.** `Noop`, `Counting`, `CountAction` and
+  `FakeAction` were four `Execute` impls differing only in whether they owned a
+  counter — and, between the two counters, in a memory ordering no test reads.
+  `Action { counter: Option<Arc<AtomicUsize>> }` is one impl; `Action::new()` is
+  the no-op and `Action::counting(..)` the counter.
+- **One `NetSource` instead of three**, carrying the value it resolves with, and
+  one `FakeSource` instead of two. A double that appears twice can differ in its
+  cap as well as its value, and the cap is what those tests are about.
+
 ### docs — citations re-anchored after the ranker and predicate walks moved lines
 
 `check-doc-citations.py` pins the *text* of every line a guide cites, so code
