@@ -25,8 +25,7 @@
 
 use std::error::Error;
 use std::io::ErrorKind;
-use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use lgwks_std::process::{
@@ -34,6 +33,7 @@ use lgwks_std::process::{
     process_exists, running_processes,
 };
 
+use crate::group_leader::spawn_group_leader;
 use crate::rng::Rng;
 use crate::seeded_sweep::{SWEEP_SEEDS, fold, fold_usize, initial_trace};
 
@@ -141,16 +141,7 @@ impl Tree {
             }
         }
         script.push_str("exec sleep 30");
-        let leader = Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            // Its own group, or the drop-time group kill would name a group this
-            // tree does not lead and every sleeper would outlive the test.
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let leader = spawn_group_leader(&script)?;
         let root = i32::try_from(leader.id())?;
         let mut pids = Vec::with_capacity(shape.forks());
         for (level, breadth) in shape.breadths.iter().enumerate() {

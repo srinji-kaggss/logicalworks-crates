@@ -22,6 +22,19 @@ use lgwks_deps::tokio::process::Command;
 
 use super::supervise::{CleanupReceipt, Containment};
 
+/// The successor's half of
+/// [`Supervisor::spawn_process_identified`](crate::rt::supervise::Supervisor::spawn_process_identified).
+///
+/// A supervisor killed with SIGKILL runs no cleanup, so its children's groups
+/// outlive it. The identity each leader had, stored when it was spawned, is what
+/// a later process hands to [`reap_orphaned_group`]: it stops the group only
+/// while the pid still names that leader, and touches nothing when the pid is
+/// gone or reissued. Named here so a consumer imports the record, its parse
+/// error, the reap and its answer from the module that describes the process.
+pub use lgwks_std::process::{
+    OrphanReap, ProcessIdentity, ProcessIdentityError, reap_orphaned_group,
+};
+
 // The one frame grammar this crate already has (INV-BOT-51): a `u32`
 // big-endian length prefix and the payload it names. Its reading half is reused
 // rather than restated, so "what a torn tail is" has one answer here too rather

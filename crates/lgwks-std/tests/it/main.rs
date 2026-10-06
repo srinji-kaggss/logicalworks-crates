@@ -14,6 +14,10 @@
 #[path = "../support/consumer_probe.rs"]
 mod consumer_probe;
 
+#[cfg(all(unix, feature = "process"))]
+#[path = "../support/group_leader.rs"]
+mod group_leader;
+
 #[path = "../support/rng.rs"]
 mod rng;
 
@@ -42,6 +46,7 @@ mod sim_http;
 mod sim_id;
 mod sim_leb128;
 mod sim_measured_paths;
+mod sim_orphan_reap;
 mod sim_pattern;
 mod sim_process_group;
 mod sim_random_error;

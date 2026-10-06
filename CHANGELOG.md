@@ -9,6 +9,28 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a supervisor killed with SIGKILL leaves a record its successor reaps by (#318)
+
+A supervisor's guards kill its children's process groups on drop, cancel and
+shutdown, and none of them runs when the supervisor's own process is killed
+outright: the groups keep running with nobody left who owns them.
+
+- **lgwks_std** — `process::ProcessIdentity` is a pid and the instant the OS
+  records its process started (the boot id and start tick from `/proc` on Linux,
+  `ps -o lstart` in UTC under the C locale elsewhere). It is stored as
+  `<pid>/<start>` and parses back exactly or is refused with
+  `ProcessIdentityError`. `process::identify_process` reads one, and
+  `process::reap_orphaned_group` stops a recorded leader's group, the leader and
+  its captured descendants only while the pid still names that leader, answering
+  `OrphanReap::{Signalled, LeaderGone, LeaderReused}`. A pid that is gone or was
+  reissued is never signalled.
+- **lgwks_bot** — `Supervisor::spawn_process_identified` returns an
+  `IdentifiedSpawn` (the task id and the group leader's identity, read before the
+  child can be reaped); a spawn whose identity cannot be read is refused and its
+  group killed. `spawn_process` does not read it and pays nothing.
+  `rt::process` re-exports the record, its error, the reap and its answer.
+  INV-BOT-157.
+
 ## [lgwks_std 2.0.0 / lgwks_ast 1.1.0 / lgwks_deps 3.0.0 / lgwks_macros 1.1.1 / lgwks_bot 2.0.0] - 2026-10-06
 
 ### Upgrading
