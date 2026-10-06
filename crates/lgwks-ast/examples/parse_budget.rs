@@ -57,6 +57,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+
 use std::time::Instant;
 
 use lgwks_ast::{AstGrep, Language, MAX_AST_NODES, MAX_SOURCE_BYTES, inspect_ast, try_parse};
@@ -158,9 +159,24 @@ const TIER_HEADER: &str = concat!(
     "throughput_mb_s_milli\trefused\tgrammar"
 );
 
-/// `numerator / denominator`, or 0 when the denominator is zero.
-fn ratio(numerator: u128, denominator: u128) -> u128 {
-    numerator.checked_div(denominator).unwrap_or(0)
+/// `numerator / denominator`, or `None` when there is no rate to report.
+///
+/// `integer_division` is forbidden workspace-wide, so a division here is the
+/// checked one — and its `None` *is* the answer rather than a failure to paper
+/// over: a zero denominator is a shape the crate refused before the parser ran,
+/// which has no elapsed time behind it. The row prints `-` for such a column and
+/// names the refusal in `outcome`, so an absent rate is never read as a rate of
+/// zero.
+fn ratio(numerator: u128, denominator: u128) -> Option<u128> {
+    numerator.checked_div(denominator)
+}
+
+/// One report column: the measurement, or `-` for the one this row does not have.
+fn column(measurement: Option<u128>) -> String {
+    match measurement {
+        Some(measurement) => measurement.to_string(),
+        None => String::from("-"),
+    }
 }
 
 /// Megabytes per second, in thousandths, from a byte count and a duration.
@@ -170,30 +186,58 @@ fn ratio(numerator: u128, denominator: u128) -> u128 {
 /// as a float is a measurement a reader has to trust. A megabyte is 10^6 bytes
 /// and a nanosecond is 10^-9 of a second, so `bytes * 10^6 / nanos` is MB/s
 /// scaled by a thousand.
-fn megabytes_per_second_milli(bytes: usize, nanos: u128) -> u128 {
-    ratio(
-        u128::try_from(bytes).unwrap_or(0).saturating_mul(1_000_000),
-        nanos,
-    )
+fn megabytes_per_second_milli(bytes: u128, nanos: u128) -> Option<u128> {
+    ratio(bytes.saturating_mul(1_000_000), nanos)
+}
+
+/// A byte count in the width every column's arithmetic uses.
+///
+/// A `usize` is at most sixty-four bits on every target Rust supports, so this
+/// cannot fail there; the refusal names the case rather than measuring a source
+/// of no bytes over a nanosecond count.
+fn width_of(bytes: usize) -> Result<u128, String> {
+    u128::try_from(bytes)
+        .map_err(|error| format!("{bytes} bytes do not fit the report's arithmetic: {error}"))
 }
 
 /// `part / whole`, in thousandths, for a share of a total.
-fn share_milli(part: u128, whole: u128) -> u128 {
+fn share_milli(part: u128, whole: u128) -> Option<u128> {
     ratio(part.saturating_mul(1_000), whole)
 }
 
 /// The `percent`-th percentile of `samples`, by nearest rank over sorted input.
-fn percentile(samples: &[u128], percent: u128) -> u128 {
-    let Some(last) = samples.len().checked_sub(1) else {
-        return 0;
-    };
-    let length = u128::try_from(samples.len()).unwrap_or(0);
-    let rank = length.saturating_mul(percent).checked_div(100).unwrap_or(0);
-    let index = usize::try_from(rank)
-        .unwrap_or(0)
-        .saturating_sub(1)
-        .min(last);
-    samples.get(index).copied().unwrap_or(0)
+///
+/// A percentile over no samples is a refusal rather than a zero: every caller
+/// builds its samples by running at least one round, so an empty list means a
+/// caller measured nothing, and a column of zero would read as a measurement
+/// that came out at zero.
+fn percentile(samples: &[u128], percent: u128) -> Result<u128, String> {
+    if samples.is_empty() {
+        return Err(format!(
+            "a percentile over no samples is not a measurement; {percent}th asked for one"
+        ));
+    }
+    let last = samples.len().saturating_sub(1);
+    // The rank is computed in the arithmetic's width and clamped into the list,
+    // so the answer is one of the samples rather than an interpolation between
+    // two. The sample count is a `usize` and the arithmetic a `u128`, because a
+    // nanosecond count is one.
+    let length = u128::try_from(samples.len()).map_err(|error| {
+        format!(
+            "{} samples do not fit the arithmetic: {error}",
+            samples.len()
+        )
+    })?;
+    let rank = length.saturating_mul(percent).saturating_div(100);
+    let rank =
+        usize::try_from(rank).map_err(|error| format!("rank {rank} is not an index: {error}"))?;
+    let index = rank.saturating_sub(1).min(last);
+    samples.get(index).copied().ok_or_else(|| {
+        format!(
+            "rank {rank} of {} samples names none of them",
+            samples.len()
+        )
+    })
 }
 
 /// This grammar's row in the shape table.
@@ -212,10 +256,23 @@ fn shape_of(language: Language) -> Result<&'static Shape, String> {
 /// How many whole nesting levels of `shape` fit in `bytes`.
 ///
 /// Both halves of a level are charged, so a closed level is never counted as
-/// half a level and the source stays inside the byte budget it was asked for.
-fn levels_for(shape: &Shape, bytes: usize) -> usize {
+/// half a level and the source stays inside the byte budget it was asked for. A
+/// shape with no nesting fragment is a table defect rather than zero levels, so
+/// it is refused where it is read.
+fn levels_for(shape: &Shape, bytes: usize) -> Result<usize, String> {
     let level = shape.nest_open.len().saturating_add(shape.nest_close.len());
-    bytes.checked_div(level).unwrap_or(0)
+    if level == 0 {
+        return Err(format!(
+            "the shape for `{}` has no nesting fragment, so it nests nothing",
+            shape.name
+        ));
+    }
+    // `integer_division` is forbidden, so this is the checked division. The
+    // divisor is a nesting fragment's length and cannot be zero — the empty
+    // fragment is refused above — so the refusal is the invariant restated.
+    bytes.checked_div(level).ok_or(format!(
+        "{level} levels do not divide {bytes} bytes; the fragment is empty"
+    ))
 }
 
 /// `fragment` repeated to at most `bytes`, in whole copies and never past it.
@@ -245,11 +302,11 @@ fn repeat(fragment: &str, levels: usize) -> String {
 /// The openers run first so the source is a run of nested opens, which is where
 /// a GLR parser does its super-linear work; the closers follow rather than
 /// interleave, because interleaving halves the depth for the same byte budget.
-fn nested(shape: &Shape, bytes: usize) -> String {
-    let levels = levels_for(shape, bytes);
+fn nested(shape: &Shape, bytes: usize) -> Result<String, String> {
+    let levels = levels_for(shape, bytes)?;
     let mut source = repeat(shape.nest_open, levels);
     source.push_str(&repeat(shape.nest_close, levels));
-    source
+    Ok(source)
 }
 
 /// The named form of a checked parse's answer, so a refusal is legible in the
@@ -279,9 +336,9 @@ fn source_for(
 ) -> Result<String, String> {
     match kind {
         "representative" => Ok(representative.to_owned()),
-        "nested" => Ok(nested(shape, bytes)),
+        "nested" => nested(shape, bytes),
         "longline" => Ok(representative.replace('\n', "")),
-        "unbalanced" => Ok(repeat(shape.nest_open, levels_for(shape, bytes))),
+        "unbalanced" => Ok(repeat(shape.nest_open, levels_for(shape, bytes)?)),
         other => Err(format!("unknown shape `{other}`")),
     }
 }
@@ -293,7 +350,11 @@ struct Measured {
     /// Which of [`KINDS`] this row measured.
     kind: String,
     /// Bytes handed to the parser.
-    bytes: usize,
+    ///
+    /// A `u128` because every rate this table prints divides by a nanosecond
+    /// count, which is a `u128`; converting once here keeps the arithmetic below
+    /// single-width instead of widening a `usize` at every rate.
+    bytes: u128,
     /// Nanoseconds for the bare parse, p50 and p99 over `rounds`.
     parse_p50: u128,
     /// 99th percentile of the bare parse.
@@ -316,12 +377,12 @@ struct Measured {
 
 impl Measured {
     /// The bare parse's median rate, MB/s scaled by a thousand.
-    fn parse_mb_s_milli(&self) -> u128 {
+    fn parse_mb_s_milli(&self) -> Option<u128> {
         megabytes_per_second_milli(self.bytes, self.parse_p50)
     }
 
     /// The checked parse's median rate, MB/s scaled by a thousand.
-    fn checked_mb_s_milli(&self) -> u128 {
+    fn checked_mb_s_milli(&self) -> Option<u128> {
         megabytes_per_second_milli(self.bytes, self.checked_p50)
     }
 
@@ -330,12 +391,12 @@ impl Measured {
     /// Not `walk / checked`: the checked parse's walk carries the depth cap the
     /// pre-issue walk does not, so the two walks are not the same work and a
     /// ratio between them would price a bound rather than measure one.
-    fn walk_share_milli(&self) -> u128 {
+    fn walk_share_milli(&self) -> Option<u128> {
         share_milli(self.walk_p50, self.parse_p50.saturating_add(self.walk_p50))
     }
 
     /// What the checked parse costs per unit of bare parse, in thousandths.
-    fn checked_over_parse_milli(&self) -> u128 {
+    fn checked_over_parse_milli(&self) -> Option<u128> {
         ratio(self.checked_p50.saturating_mul(1_000), self.parse_p50)
     }
 }
@@ -380,17 +441,19 @@ fn measure(
         // grammar saw it, so there is no parser cost and no tree to walk. The
         // row's `outcome` says so, and the zeros are the absence of a
         // measurement rather than a measurement of zero.
+        let outcome = outcome
+            .ok_or_else(|| format!("{kind}: no round of `{}` was measured", language.name()))?;
         return Ok(Measured {
             grammar: language.name(),
             kind: kind.to_owned(),
-            bytes: source.len(),
+            bytes: width_of(source.len())?,
             parse_p50: 0,
             parse_p99: 0,
             walk_p50: 0,
             walk_p99: 0,
-            checked_p50: percentile(&checked_samples, 50),
-            checked_p99: percentile(&checked_samples, 99),
-            outcome: outcome.unwrap_or_else(|| "unmeasured".to_owned()),
+            checked_p50: percentile(&checked_samples, 50)?,
+            checked_p99: percentile(&checked_samples, 99)?,
+            outcome,
             nodes: 0,
             depth: 0,
         });
@@ -421,17 +484,19 @@ fn measure(
     walk_samples.sort_unstable();
     checked_samples.sort_unstable();
 
+    let outcome =
+        outcome.ok_or_else(|| format!("{kind}: no round of `{}` was measured", language.name()))?;
     Ok(Measured {
         grammar: language.name(),
         kind: kind.to_owned(),
-        bytes: source.len(),
-        parse_p50: percentile(&parse_samples, 50),
-        parse_p99: percentile(&parse_samples, 99),
-        walk_p50: percentile(&walk_samples, 50),
-        walk_p99: percentile(&walk_samples, 99),
-        checked_p50: percentile(&checked_samples, 50),
-        checked_p99: percentile(&checked_samples, 99),
-        outcome: outcome.unwrap_or_else(|| "unmeasured".to_owned()),
+        bytes: width_of(source.len())?,
+        parse_p50: percentile(&parse_samples, 50)?,
+        parse_p99: percentile(&parse_samples, 99)?,
+        walk_p50: percentile(&walk_samples, 50)?,
+        walk_p99: percentile(&walk_samples, 99)?,
+        checked_p50: percentile(&checked_samples, 50)?,
+        checked_p99: percentile(&checked_samples, 99)?,
+        outcome,
         nodes: observed.nodes,
         depth: observed.max_depth,
     })
@@ -450,12 +515,12 @@ fn measured_line(row: &Measured) -> String {
         row.walk_p99,
         row.checked_p50,
         row.checked_p99,
-        row.parse_mb_s_milli(),
-        megabytes_per_second_milli(row.bytes, row.parse_p99),
-        row.checked_mb_s_milli(),
-        megabytes_per_second_milli(row.bytes, row.checked_p99),
-        row.walk_share_milli(),
-        row.checked_over_parse_milli(),
+        column(row.parse_mb_s_milli()),
+        column(megabytes_per_second_milli(row.bytes, row.parse_p99)),
+        column(row.checked_mb_s_milli()),
+        column(megabytes_per_second_milli(row.bytes, row.checked_p99)),
+        column(row.walk_share_milli()),
+        column(row.checked_over_parse_milli()),
         row.nodes,
         row.depth,
         row.outcome,
@@ -492,7 +557,11 @@ struct TierRow {
     /// Parses admitted.
     level: u64,
     /// Bytes per parse.
-    bytes: usize,
+    ///
+    /// A `u128` for the same reason as [`Measured::bytes`]: the throughput
+    /// column divides bytes by a nanosecond count, and widening here keeps the
+    /// arithmetic below single-width.
+    bytes: u128,
     /// Workers admitted.
     workers: usize,
     /// Median parse latency.
@@ -522,8 +591,16 @@ fn measure_tier(
     threads: usize,
 ) -> Result<TierRow, String> {
     let workers = threads.max(1);
-    let workers_u64 = u64::try_from(workers).unwrap_or(1);
-    let share = level.checked_div(workers_u64).unwrap_or(0);
+    // The work count is at most sixty-four bits wide on every target, so this
+    // conversion refuses rather than assuming a worker count it cannot hold.
+    let workers_u64 = u64::try_from(workers)
+        .map_err(|error| format!("{workers} workers do not fit the tier's arithmetic: {error}"))?;
+    // `integer_division` is forbidden, so the split of the level across the
+    // workers is the checked one. `workers` is at least one by construction, so
+    // the refusal below is unreachable and states the invariant it rests on.
+    let share = level
+        .checked_div(workers_u64)
+        .ok_or("a tier with no workers cannot be split")?;
     let tiled = tile(representative, bytes);
     let sized = non_empty_tier(&tiled, bytes);
     sized?;
@@ -534,7 +611,9 @@ fn measure_tier(
         let mut handles = Vec::with_capacity(workers);
         for worker in 0..workers {
             let owned = std::sync::Arc::clone(&source);
-            let first = share.saturating_mul(u64::try_from(worker).unwrap_or(0));
+            let at = u64::try_from(worker)
+                .map_err(|error| format!("worker {worker} does not fit its own index: {error}"))?;
+            let first = share.saturating_mul(at);
             let count = if worker.saturating_add(1) == workers {
                 level.saturating_sub(first)
             } else {
@@ -542,8 +621,11 @@ fn measure_tier(
             };
             let handle = std::thread::Builder::new()
                 .name(format!("ast-tier-{worker}"))
-                .spawn_scoped(scope, move || {
-                    let mut samples = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+                .spawn_scoped(scope, move || -> Result<TierWorker, String> {
+                    let room = usize::try_from(count).map_err(|error| {
+                        format!("{count} parses do not fit this target's address space: {error}")
+                    })?;
+                    let mut samples = Vec::with_capacity(room);
                     let mut refused = 0_u64;
                     for _ in 0..count {
                         let at = Instant::now();
@@ -553,18 +635,21 @@ fn measure_tier(
                             refused = refused.saturating_add(1);
                         }
                     }
-                    TierWorker {
+                    Ok(TierWorker {
                         assigned: count,
                         samples,
                         refused,
-                    }
+                    })
                 })
                 .map_err(|error| format!("a tier worker did not start: {error}"))?;
             handles.push(handle);
         }
         for handle in handles {
             match handle.join() {
-                Ok(report) => reports.push(report),
+                Ok(Ok(report)) => reports.push(report),
+                // A worker's own refusal names the shortfall it hit rather than
+                // reporting a tier row over fewer parses than it admitted.
+                Ok(Err(refusal)) => return Err(refusal),
                 // A panicking worker reports zero, and the count check below
                 // turns that into a refusal naming the shortfall rather than a
                 // tier that silently measured fewer parses than it admitted.
@@ -590,13 +675,20 @@ fn measure_tier(
         .fold(0_u64, |total, row| total.saturating_add(row.refused));
     let mut samples: Vec<u128> = reports.iter().flat_map(|row| row.samples.clone()).collect();
     samples.sort_unstable();
+    // The slowest parse observed is read off the sorted list rather than
+    // defaulted: a tier whose workers admitted nothing is already refused by
+    // `all_admitted`, so the list is never empty here.
+    let max = samples
+        .last()
+        .copied()
+        .ok_or("every admitted parse reported no elapsed time")?;
     Ok(TierRow {
         level: assigned,
-        bytes: source.len(),
+        bytes: width_of(source.len())?,
         workers,
-        p50: percentile(&samples, 50),
-        p99: percentile(&samples, 99),
-        max: samples.last().copied().unwrap_or(0),
+        p50: percentile(&samples, 50)?,
+        p99: percentile(&samples, 99)?,
+        max,
         refused,
         wall_ns,
         grammar: language.name(),
@@ -633,6 +725,10 @@ fn all_admitted(assigned: u64, level: u64) -> Result<(), String> {
 
 /// The line one tier row prints.
 fn tier_line(row: &TierRow) -> String {
+    // The tier's throughput is the bytes it parsed over the wall time: the level
+    // is a `u64` and the bytes a `u128`, so the widening is total and needs no
+    // stand-in for a conversion.
+    let parsed = u128::from(row.level).saturating_mul(row.bytes);
     format!(
         "tier\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         row.level,
@@ -642,12 +738,7 @@ fn tier_line(row: &TierRow) -> String {
         row.p99,
         row.max,
         row.wall_ns,
-        megabytes_per_second_milli(
-            usize::try_from(row.level)
-                .unwrap_or(0)
-                .saturating_mul(row.bytes),
-            row.wall_ns
-        ),
+        column(megabytes_per_second_milli(parsed, row.wall_ns)),
         row.refused,
         row.grammar,
     )
@@ -745,13 +836,18 @@ where
     raw.parse().map_err(|error| format!("{flag}: {error}"))
 }
 
-/// Refuse a byte budget of zero: a zero-byte source measures nothing and would
-/// print a row of throughput over no input.
+/// Refuse a byte budget of zero, and a concurrency level of zero.
+///
+/// A zero-byte source measures nothing and a tier of zero parses admits no
+/// worker, so both would print a row of throughput over no input; the tier row's
+/// percentiles are then percentiles of nothing.
 fn validated(options: Options) -> Result<Options, String> {
     if options.bytes == 0 {
         Err("--bytes must be at least one".to_owned())
     } else if options.shape_bytes == 0 {
         Err("--shape-bytes must be at least one".to_owned())
+    } else if options.tiers.contains(&0) {
+        Err("--tier must be at least one".to_owned())
     } else {
         Ok(options)
     }

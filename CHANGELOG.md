@@ -9,6 +9,36 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_ast — `parse_budget`: a column with no measurement prints `-`
+
+The measurement rig converted its own numbers with `unwrap_or` defaults, so a row
+that never reached the parser printed a rate of zero. A rate over nothing is not
+a rate.
+
+- **`ratio` returns `Option<u128>`** and `integer_division` is forbidden
+  workspace-wide, so the checked division's `None` *is* the answer: a zero
+  denominator is a shape the crate refused before the parser ran. A rate column
+  with no measurement prints `-`, and the row's `outcome` column names the
+  refusal beside it. The refused markdown rows now read
+  `… 0 0 0 0 172375 172375 - - 380194 380194 - - 0 0 container-nesting-too-deep`
+  where they used to read four zeros that could be mistaken for measurements.
+- **`Measured::bytes` and `TierRow::bytes` are `u128`**, so a rate divides without
+  widening a `usize` at every column, and `tier_line`'s throughput is
+  `u128::from(level) * bytes` rather than a narrowing conversion of the level.
+- **`percentile` refuses an empty sample list**, which is what a row with no
+  timed round is; `measure` and `measure_tier` refuse a run whose rounds measured
+  nothing rather than reporting `unmeasured` in the outcome column.
+- **`levels_for` refuses a shape with no nesting fragment** rather than measuring
+  zero levels, and `--tier 0` is refused with the byte budgets, because a tier of
+  zero parses admits no worker and prints a percentile of nothing.
+- **A tier worker returns its own `Result`**, so a refusal inside a worker names
+  the shortfall instead of reporting a row over fewer parses than its level.
+
+Verified by running the shipped example: `--grammar rust --shape nested --tier 100
+--threads 4` prints a tier row (p50 6.03 ms, p99 10.22 ms, max 10.79 ms, 100/100
+admitted), `--grammar markdown --shape nested` prints the `-` columns above, and
+`--tier 0`, `--bytes 0` and `--grammar cobol` each refuse by name.
+
 ### lgwks_macros — the nine-axis sweep: no stand-in for a value that is not there
 
 Every `unwrap_or`/`unwrap_or_else`/`unwrap_or_default` in `lgwks_macros` read a
