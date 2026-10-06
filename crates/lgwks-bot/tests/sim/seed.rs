@@ -13,6 +13,11 @@
 
 /// A xoshiro256** generator, seeded through splitmix64.
 ///
+/// The same stream as the public `lgwks_std::seeded::Seeded`, kept here as a
+/// `std`-only copy because `lgwks_ast` includes this file and does not depend on
+/// `lgwks_std`. `sim_substrate::the_substrate_and_lgwks_std_seeded_draw_one_stream`
+/// holds the two to one stream.
+///
 /// Chosen for two reasons that matter here rather than in the abstract: the
 /// state is four `u64`s, so a scenario's entire random history is a `u64` and
 /// a seed, and the generator is a fixed, fully specified algorithm, so a hash

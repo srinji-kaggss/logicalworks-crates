@@ -92,6 +92,8 @@ struct Group {
     members: Vec<i32>,
     /// The file the leader records its members in.
     roster: std::path::PathBuf,
+    /// The file whose existence says the roster is whole.
+    ready: std::path::PathBuf,
 }
 
 impl Group {
@@ -103,17 +105,17 @@ impl Group {
             std::process::id()
         ));
         let _cleared = std::fs::remove_file(&roster);
-        let partial = roster.with_extension("partial");
-        let _cleared = std::fs::remove_file(&partial);
-        let fork = format!("sleep 30 & echo $! >> {}; ", partial.display());
+        let ready = roster.with_extension("ready");
+        let _cleared = std::fs::remove_file(&ready);
+        let fork = format!("sleep 30 & echo $! >> {}; ", roster.display());
         let mut script = vec![fork; count];
-        // The roster appears whole or not at all, so a reader never sees a
-        // member list the leader has not finished writing.
-        script.push(format!(
-            "mv {} {}; exec sleep 30",
-            partial.display(),
-            roster.display()
-        ));
+        // Everything after the forks is a shell builtin, so the group never
+        // holds a process besides the leader and its members: an external `mv`
+        // publishing the roster was a child of the leader, still running when the
+        // roster appeared, and a capture taken then named it as a fourth member.
+        // The marker is written after every `echo` returned, so a reader that
+        // sees it reads a whole roster.
+        script.push(format!(": > {}; exec sleep 30", ready.display()));
         let leader = spawn_group_leader(&script.concat())?;
         let root = i32::try_from(leader.id())?;
         let mut group = Self {
@@ -121,6 +123,7 @@ impl Group {
             root,
             members: Vec::new(),
             roster,
+            ready,
         };
         group.members = group.read_roster(count)?;
         Ok(group)
@@ -132,7 +135,8 @@ impl Group {
             .checked_add(SETTLE)
             .ok_or("the roster deadline overflows the clock")?;
         while Instant::now() < deadline {
-            if let Ok(text) = std::fs::read_to_string(&self.roster) {
+            if self.ready.exists() {
+                let text = std::fs::read_to_string(&self.roster)?;
                 let mut pids = text
                     .lines()
                     .map(|line| line.trim().parse::<i32>())
@@ -166,6 +170,7 @@ impl Drop for Group {
         let _killed = kill_process_group(self.root);
         let _reaped = self.leader.wait();
         let _removed = std::fs::remove_file(&self.roster);
+        let _removed = std::fs::remove_file(&self.ready);
     }
 }
 

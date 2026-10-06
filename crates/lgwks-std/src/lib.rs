@@ -15,8 +15,8 @@
 //!
 //! ## Feature map
 //!
-//! - `core` (default) — encoding, fs, glob, hex, leb128, retry, similarity,
-//!   task, time. Zero deps.
+//! - `core` (default) — encoding, fs, glob, hex, leb128, retry, seeded,
+//!   similarity, task, time. Zero deps.
 //! - `trace` (default) — trace. Adds `tracing` plus the default subscriber
 //!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
@@ -79,6 +79,9 @@ pub mod retry;
 /// RON encoding and decoding via serde (feature `ron`).
 #[cfg(feature = "ron")]
 pub mod ron;
+/// The estate's one deterministic stream for simulations: a seed names one
+/// sequence on every target. Zero-dep; not a source of randomness.
+pub mod seeded;
 /// The borrowing contract the serde-backed codec facades share, asserted once
 /// for `json` and `ron` (test builds only).
 #[cfg(all(test, any(feature = "json", feature = "ron")))]

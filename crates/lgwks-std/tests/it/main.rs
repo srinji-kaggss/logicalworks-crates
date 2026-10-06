@@ -51,6 +51,7 @@ mod sim_pattern;
 mod sim_process_group;
 mod sim_random_error;
 mod sim_retry_arithmetic;
+mod sim_seeded;
 mod sim_shared_policy_tiers;
 mod sim_similarity_sweep;
 mod sim_task_public;
