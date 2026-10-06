@@ -43,9 +43,10 @@ use std::sync::Barrier;
 
 use lgwks_bot::spec::EffectScope;
 use lgwks_bot::verb::{Execute, Observe};
-use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
+use lgwks_bot::{Auth, Bot, BotError, Cap, DispatchCertainty, EffectLifetime, GrantSet};
 
 use crate::effects;
+use crate::poll::admit_poll;
 
 /// What a test here reports when its precondition did not hold.
 ///
@@ -66,10 +67,12 @@ type ScopeResult<T> = Result<T, Box<dyn Error>>;
 /// requires `bot.net`, so a chain on it is subject to build-time admission and
 /// to the narrowing these tests are about.
 struct Script {
-    /// The values to yield, in poll order. A run past the end answers `0`.
+    /// The values to yield, in poll order.
     values: Vec<u16>,
     /// How many polls have happened.
     cursor: Cell<usize>,
+    /// How many polls got past the capability check.
+    polls: Cell<u32>,
     /// The one capability this source requires. A field rather than a
     /// constructor-time `vec!` because [`Observe::required_caps`] borrows from
     /// the observer.
@@ -82,6 +85,7 @@ impl Script {
         Self {
             values,
             cursor: Cell::new(0),
+            polls: Cell::new(0),
             caps: vec![Cap::net()],
         }
     }
@@ -95,10 +99,20 @@ impl Observe for Script {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
-        call.0.check(&self.caps)?;
+        admit_poll(&call.0, Observe::required_caps(self), &self.polls)?;
         let index = self.cursor.get();
         self.cursor.set(index.saturating_add(1));
-        Ok(self.values.get(index).copied().unwrap_or(0))
+        // A source that runs past its own script has nothing to report. It
+        // refuses, because answering a value the test never scripted would let a
+        // chain fire on movement nobody wrote.
+        let Some(value) = self.values.get(index) else {
+            return Err(BotError::DomainError {
+                domain: "test::script".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
+                cause: format!("the script ran out at poll {index}"),
+            });
+        };
+        Ok(*value)
     }
 
     fn domain_id(&self) -> &str {
@@ -108,9 +122,9 @@ impl Observe for Script {
 
 /// An action that counts its invocations: the observable effect a revocation
 /// claim would have to stop, and the only evidence a test can read back.
-struct Count(Rc<Cell<usize>>);
+struct Counted(Rc<Cell<usize>>);
 
-impl Execute for Count {
+impl Execute for Counted {
     type Input = u16;
     type Output = ();
 
@@ -123,7 +137,7 @@ impl Execute for Count {
     }
 
     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
-        call.0.check(&[])?;
+        call.0.check(Execute::required_caps(self))?;
         self.0.set(self.0.get().saturating_add(1));
         Ok(())
     }
@@ -190,7 +204,7 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
 
     let mut bot = Bot::builder("snapshot")
         .observe(Script::new(vec![100, 200, 503]))
-        .on(|value: &u16| *value >= 500, Count(Rc::clone(&counter)))
+        .on(|value: &u16| *value >= 500, Counted(Rc::clone(&counter)))
         .with_effects(test_effects()?)
         .build(&authority)?;
 
@@ -218,7 +232,7 @@ fn withdrawing_authority_after_build_means_building_again() -> TestResult {
     // than described.
     match Bot::builder("narrowed")
         .observe(Script::new(vec![503]))
-        .on(|value: &u16| *value >= 500, Count(Rc::new(Cell::new(0))))
+        .on(|value: &u16| *value >= 500, Counted(Rc::new(Cell::new(0))))
         .with_effects(test_effects()?)
         .build(&authority)
     {
@@ -248,7 +262,7 @@ fn round(grants: &GrantSet) -> ScopeResult<Result<usize, BotError>> {
     let fired = Rc::new(Cell::new(0));
     let built = Bot::builder("tenant-round")
         .observe(Script::new(vec![503]))
-        .on(|value: &u16| *value >= 500, Count(Rc::clone(&fired)))
+        .on(|value: &u16| *value >= 500, Counted(Rc::clone(&fired)))
         .with_effects(test_effects()?)
         .build(grants);
     let mut bot = match built {
@@ -535,9 +549,23 @@ fn unqualified_mentions(file: &str, text: &str) -> Vec<String> {
         .and_then(|rest| rest.find(REVOCATION_STEM))
     {
         let at = cursor.saturating_add(found);
-        let start = at.saturating_sub(WINDOW);
-        let end = at.saturating_add(WINDOW).min(flat.len());
-        let window = flat.get(start..end).unwrap_or("");
+        // The context is taken in whole characters from boundaries `char_indices`
+        // reports, and both ends are clamped to the text, so the slice is total:
+        // a mention at either edge still gets its window rather than a
+        // substitute for one.
+        let start = flat[..at]
+            .char_indices()
+            .nth_back(WINDOW)
+            .map_or(0, |(offset, _)| offset);
+        let end =
+            flat[at..]
+                .char_indices()
+                .nth(WINDOW)
+                .map_or(flat.len(), |(offset, character)| {
+                    at.saturating_add(offset)
+                        .saturating_add(character.len_utf8())
+                });
+        let window = &flat[start..end];
         let qualified = DENIALS
             .iter()
             .chain(OTHER_SUBJECTS.iter())

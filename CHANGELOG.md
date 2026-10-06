@@ -81,6 +81,38 @@ Behaviour is unchanged. All 10 `lgwks_macros` tests pass, including the property
 suite that renders trees, reads them back and asserts a line moved off its column
 is refused at that line, and `lgwks_bot`'s 192 `script!` tests pass against the
 rewritten emitter.
+### lgwks_bot — the journal and inspection test fixtures are read, not re-spelled
+
+Four test files each carried their own copy of an identity the shared fixture
+already owns, and three carried a bounded wait whose "no deadline" arm turned
+the bound off.
+
+- **The run identity and the ladder are read, not re-spelled.**
+  `effect_journal.rs` built its own `EffectKey` from its own copies of the run,
+  action, environment, flow and digest constants and walked the ladder in its own
+  loop; `effect_identity.rs` copied the same five constants. Both now read
+  `tests/support/journal.rs`, and the admit-and-prepare walk takes its rungs from
+  the shared `ladder`, so a second spelling cannot fence a different world under
+  what looks like the same key (INV-BOT-58).
+- **`authority.rs`'s doubles open through `tests/support/poll.rs`.** A scripted
+  source now admits through the shared `admit_poll` helper and counts there, and
+  a source that runs past its own script refuses with a typed error instead of
+  answering a value the test never scripted.
+- **`inspect_contract.rs` bounds its waits by elapsed time.** Three waits
+  compared against `now + PATIENCE`, and the arm where that addition is
+  unrepresentable returned `now` — which is an unbounded wait, the opposite of
+  what the helper is for. The budget is now an elapsed comparison, which cannot
+  fail to represent "longer than this".
+- **`registry.rs` fails when there is no refusal to inspect.** A hostile
+  identifier that *was* accepted rendered as the empty string and passed an
+  assertion about newlines for free; it is now the failure the test means.
+- `process_ownership.rs` refuses a host whose clock reads before 1970 rather
+  than naming its scratch directory with a stand-in zero, which would have
+  folded that host into the namespace of every epoch-aligned run; `rt_runtime_stack.rs`'s
+  frame padding comes from a conversion that cannot fail; and
+  `inspect_support/mod.rs`'s `allow(dead_code)` is gone, because every fixture in
+  it is reachable from the one integration binary (#272).
+
 ### lgwks_bot — the measurement examples: no sentinel stands in for a reading
 
 Every `unwrap_or` family call across the ten example harnesses was a fabricated

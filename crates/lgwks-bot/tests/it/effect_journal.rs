@@ -15,44 +15,23 @@
 //! Everything below goes through the public API: no `crate::` path reaches
 //! inside, so a change that breaks a consumer breaks these first.
 
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectKey, EnvironmentEpoch, EnvironmentId, FlowRevision,
-    Id128, RunId,
-};
+use lgwks_bot::effect::{EffectKey, Id128};
 use lgwks_bot::journal::{
     AttemptStatus, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal, JournalEntry,
     JournalError, MemoryJournal, Verification, VerificationResult,
 };
 
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
+use crate::journal_fixtures::{DIGEST_HEX, key_for, ladder};
+
+/// The predicate the verified rung under test names.
 const PREDICATE: &str = "4142434445464748494a4b4c4d4e4f50";
 
 /// The suite refuses a panicking path, so every test propagates instead.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// A key for one attempt at the shared intent.
-fn key(attempt: &str, epoch: &str) -> Result<EffectKey, Box<dyn std::error::Error>> {
-    let key_run = RunId::from_hex(RUN)?;
-    let key_action = ActionId::from_hex(ACTION)?;
-    let key_attempt = AttemptId::from_decimal(attempt)?;
-    let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
-    let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
-    let key_environment = EnvironmentId::from_hex(ENV)?;
-    let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
-    Ok(EffectKey::new(
-        key_run,
-        key_action,
-        key_attempt,
-        key_flow_revision,
-        key_digest,
-        key_environment,
-        key_epoch,
-    ))
-}
+/// How many rungs admit-and-prepare walks: everything up to the point where the
+/// bytes are about to leave.
+const TO_PREPARED: usize = 2;
 
 /// Append at the journal's own tail, which is what a correct caller does.
 fn append(
@@ -65,12 +44,15 @@ fn append(
 }
 
 /// Walk one attempt up to the point where the bytes are about to leave.
-fn admit_and_prepare(
-    journal: &mut MemoryJournal,
-    key: EffectKey,
-) -> Result<(), Box<dyn std::error::Error>> {
-    append(journal, EffectEvent::IntentAdmitted { key })?;
-    append(journal, EffectEvent::DispatchPrepared { key })?;
+///
+/// The rungs come from the shared [`ladder`] rather than from two appends spelled
+/// here, so this file cannot walk a different pair of rungs than the crash
+/// harnesses do.
+fn admit_and_prepare(journal: &mut MemoryJournal, key: EffectKey) -> TestResult {
+    let events = ladder(key, PREDICATE, 1)?;
+    for event in events.into_iter().take(TO_PREPARED) {
+        append(journal, event)?;
+    }
     Ok(())
 }
 
@@ -81,7 +63,7 @@ fn after_restart(journal: &MemoryJournal) -> Vec<JournalEntry> {
 
 #[test]
 fn e10_a_lost_reply_leaves_the_attempt_unknown_rather_than_not_applied() -> TestResult {
-    let key = key("1", "1")?;
+    let key = key_for("1", DIGEST_HEX)?;
     let mut journal = MemoryJournal::new();
     admit_and_prepare(&mut journal, key)?;
 
@@ -102,7 +84,7 @@ fn e10_a_lost_reply_leaves_the_attempt_unknown_rather_than_not_applied() -> Test
 
 #[test]
 fn e10_evidence_settles_the_unknown_without_a_second_dispatch() -> TestResult {
-    let key = key("1", "1")?;
+    let key = key_for("1", DIGEST_HEX)?;
     let mut journal = MemoryJournal::new();
     admit_and_prepare(&mut journal, key)?;
 
@@ -129,12 +111,21 @@ fn e10_evidence_settles_the_unknown_without_a_second_dispatch() -> TestResult {
 #[test]
 fn e10_an_ephemeral_journal_cannot_be_the_record_behind_a_handoff() -> TestResult {
     let journal = MemoryJournal::new();
-    assert_eq!(journal.durability(), DurabilityPromise::Ephemeral);
-
+    // The in-memory store promises `Ephemeral`; a handoff needs its record to
+    // survive the process, so the refusal has to name both promises or a reader
+    // cannot tell which half was short.
     match journal.admit_external_handoff() {
         Err(JournalError::PromiseUnmet { required, offered }) => {
-            assert_eq!(required, DurabilityPromise::ProcessCrash);
-            assert_eq!(offered, DurabilityPromise::Ephemeral);
+            assert_eq!(
+                required,
+                DurabilityPromise::ProcessCrash,
+                "the refusal names the promise an external handoff requires"
+            );
+            assert_eq!(
+                offered,
+                DurabilityPromise::Ephemeral,
+                "the refusal names the promise this store actually offers"
+            );
         }
         Err(other) => return Err(format!("expected a promise refusal, got {other}").into()),
         Ok(granted) => {
@@ -151,8 +142,8 @@ fn e10_an_ephemeral_journal_cannot_be_the_record_behind_a_handoff() -> TestResul
 fn e11_a_competing_controller_cannot_dispatch_from_a_stale_tail() -> TestResult {
     // Named `first` and `second` rather than `key`, so neither binding shadows
     // the `key` constructor the second one still has to call.
-    let first = key("1", "1")?;
-    let second = key("2", "1")?;
+    let first = key_for("1", DIGEST_HEX)?;
+    let second = key_for("2", DIGEST_HEX)?;
     let mut journal = MemoryJournal::new();
 
     // Two controllers read the same tail before either writes.
@@ -187,7 +178,7 @@ fn e11_a_competing_controller_cannot_dispatch_from_a_stale_tail() -> TestResult 
 
 #[test]
 fn e11_a_blind_resend_is_not_representable() -> TestResult {
-    let key = key("1", "1")?;
+    let key = key_for("1", DIGEST_HEX)?;
     let mut journal = MemoryJournal::new();
     admit_and_prepare(&mut journal, key)?;
 
@@ -214,8 +205,8 @@ fn e11_a_real_retry_is_a_new_attempt_and_still_expressible() -> TestResult {
     // The companion to the test above: refusing a blind resend must not make a
     // legitimate retry impossible. A retry is a new attempt, so it is a new key
     // with its own fresh ladder.
-    let first = key("1", "1")?;
-    let retry = key("2", "1")?;
+    let first = key_for("1", DIGEST_HEX)?;
+    let retry = key_for("2", DIGEST_HEX)?;
     assert_ne!(first, retry);
 
     let mut journal = MemoryJournal::new();
@@ -238,8 +229,8 @@ fn e11_a_real_retry_is_a_new_attempt_and_still_expressible() -> TestResult {
 
 #[test]
 fn e11_replay_recovers_every_committed_identity_after_a_restart() -> TestResult {
-    let settled = key("1", "1")?;
-    let in_flight = key("2", "1")?;
+    let settled = key_for("1", DIGEST_HEX)?;
+    let in_flight = key_for("2", DIGEST_HEX)?;
 
     let mut journal = MemoryJournal::new();
     admit_and_prepare(&mut journal, settled)?;
