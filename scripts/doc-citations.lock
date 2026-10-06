@@ -57,8 +57,8 @@ crates/lgwks-bot/src/rt/mod.rs:111	#[cfg(feature = "io")]
 crates/lgwks-bot/src/rt/process.rs:51	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:476	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:1116	pub enum ProcessRunError {
-crates/lgwks-bot/src/rt/runtime.rs:128	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
-crates/lgwks-bot/src/rt/runtime.rs:131	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
+crates/lgwks-bot/src/rt/runtime.rs:157	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
+crates/lgwks-bot/src/rt/runtime.rs:160	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget`]. Every iteration races the
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The

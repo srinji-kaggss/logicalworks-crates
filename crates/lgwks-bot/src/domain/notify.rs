@@ -2,19 +2,32 @@
 //! `bot.net` (delivery dials out).
 
 use crate::cap::{Auth, Cap};
-use crate::error::{BotError, DispatchCertainty};
+use crate::error::{BotError, unbound_domain};
 use crate::verb;
 
 /// A message payload for notification delivery.
 ///
 /// `#[non_exhaustive]`: a transport grows payload fields (thread, blocks,
 /// attachments), and a consumer that destructured this literally would break on
-/// each addition. Build one with [`Message::new`].
+/// each addition. Build one with [`Message::new`] and read it with
+/// [`Message::text`].
+///
+/// The text is private because it is the whole of what a delivery is asked to
+/// send: a caller that could edit it after handing the message to a transport
+/// would be editing the body the transport is about to put on the wire, which is
+/// a different act from composing it.
+///
+/// ```
+/// use lgwks_bot::domain::notify::Message;
+///
+/// let outgoing = Message::new("rollout 42 finished");
+/// assert_eq!(outgoing.text(), "rollout 42 finished");
+/// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Message {
     /// The message text.
-    pub text: String,
+    text: String,
 }
 
 impl Message {
@@ -22,6 +35,12 @@ impl Message {
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
+    }
+
+    /// The message text this delivery will send.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -55,12 +74,13 @@ impl verb::Execute for Slack {
     }
 
     async fn execute_action(&self, call: (Auth, &Message)) -> Result<(), BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("notifying {:?} — binding required", self.channel),
-        })
+        unbound_domain(
+            &call.0,
+            self.required_caps(),
+            self.domain_id(),
+            "notifying",
+            &self.channel,
+        )
     }
 
     fn domain_id(&self) -> &str {

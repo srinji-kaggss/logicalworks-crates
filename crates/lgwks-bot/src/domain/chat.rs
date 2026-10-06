@@ -4,28 +4,90 @@
 //! history). It is NOT a separate verb; it is where triggers come from.
 
 use crate::cap::{Auth, Cap};
-use crate::error::{BotError, DispatchCertainty};
-use crate::verb;
+use crate::error::{BotError, unbound_domain};
+// `Observe` is in scope for the two inherent `unbound` helpers, which read the
+// same two trait methods the verb bodies do; naming the trait is what lets each
+// helper be one line instead of a second copy of the refusal.
+use crate::verb::{self, Observe};
 
 /// An incoming chat message.
 ///
 /// `#[non_exhaustive]`: a chat provider's payload grows (threads, edits,
 /// attachments), and a consumer that destructured this literally would break on
-/// each addition. Read the fields; build one through the domain that produced it.
+/// each addition. Read the fields through their accessors; build one through the
+/// domain that produced it.
+///
+/// Every field is private behind an accessor because the four of them are one
+/// observed message: a caller that could edit `text` while leaving `ts` alone
+/// would hold a message no provider ever sent, and the condition that reads it
+/// (`eval::contains`) would answer on a body nobody received.
+///
+/// ```
+/// use lgwks_bot::domain::chat::ChatMessage;
+///
+/// let observed = ChatMessage::new("#deploys", "ci-bot", "rollout finished", "42");
+/// assert!(observed.contains("finished"));
+/// assert_eq!(observed.channel(), "#deploys");
+/// ```
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct ChatMessage {
     /// The channel or conversation the message arrived in.
-    pub channel: String,
+    channel: String,
     /// The sender's identifier.
-    pub sender: String,
+    sender: String,
     /// The message text.
-    pub text: String,
+    text: String,
     /// Timestamp or message identifier.
-    pub ts: String,
+    ts: String,
 }
 
 impl ChatMessage {
+    /// Build the message a provider's payload decodes to.
+    ///
+    /// The one constructor, because the fields are private: a `ChatMessage` is
+    /// assembled whole or not at all, so a caller cannot hold half an observed
+    /// message. A provider that grows a field adds it here, not as a public
+    /// slot every consumer can leave unset.
+    #[must_use]
+    pub fn new(
+        channel: impl Into<String>,
+        sender: impl Into<String>,
+        text: impl Into<String>,
+        ts: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel: channel.into(),
+            sender: sender.into(),
+            text: text.into(),
+            ts: ts.into(),
+        }
+    }
+
+    /// The channel or conversation the message arrived in.
+    #[must_use]
+    pub fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    /// The sender's identifier.
+    #[must_use]
+    pub fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    /// The message text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Timestamp or message identifier.
+    #[must_use]
+    pub fn ts(&self) -> &str {
+        &self.ts
+    }
+
     /// Whether the message text contains a substring.
     #[must_use]
     pub fn contains(&self, pattern: &str) -> bool {
@@ -52,6 +114,17 @@ impl SlackChannel {
             caps: vec![Cap::net()],
         }
     }
+
+    /// The refusal an unbound read gives, naming the channel it was asked for.
+    fn unbound<T>(&self, auth: &Auth, verb: &str) -> Result<T, BotError> {
+        unbound_domain(
+            auth,
+            self.required_caps(),
+            self.domain_id(),
+            verb,
+            &self.channel,
+        )
+    }
 }
 
 impl verb::Observe for SlackChannel {
@@ -62,12 +135,7 @@ impl verb::Observe for SlackChannel {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("polling {:?} — binding required", self.channel),
-        })
+        self.unbound(&call.0, "polling")
     }
 
     fn domain_id(&self) -> &str {
@@ -84,12 +152,7 @@ impl verb::Query for SlackChannel {
     }
 
     async fn query(&self, call: (Auth, &())) -> Result<Vec<ChatMessage>, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("querying {:?} — binding required", self.channel),
-        })
+        self.unbound(&call.0, "querying")
     }
 
     fn domain_id(&self) -> &str {
@@ -120,6 +183,18 @@ impl HttpWebhook {
             caps: vec![Cap::net()],
         }
     }
+
+    /// The refusal an unbound read gives, naming the webhook path it was asked
+    /// for.
+    fn unbound<T>(&self, auth: &Auth, verb: &str) -> Result<T, BotError> {
+        unbound_domain(
+            auth,
+            self.required_caps(),
+            self.domain_id(),
+            verb,
+            &self.path,
+        )
+    }
 }
 
 impl verb::Observe for HttpWebhook {
@@ -130,12 +205,7 @@ impl verb::Observe for HttpWebhook {
     }
 
     async fn poll(&self, call: (Auth, ())) -> Result<ChatMessage, BotError> {
-        call.0.check(self.required_caps())?;
-        Err(BotError::DomainError {
-            domain: self.domain_id().into(),
-            certainty: DispatchCertainty::Refused,
-            cause: format!("polling {:?} — binding required", self.path),
-        })
+        self.unbound(&call.0, "polling")
     }
 
     fn domain_id(&self) -> &str {

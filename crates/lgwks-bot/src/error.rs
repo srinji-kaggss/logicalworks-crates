@@ -926,6 +926,56 @@ impl From<Deficit> for BotError {
     }
 }
 
+/// The one answer a domain with no bound transport gives, in two parts.
+///
+/// Authority first: a caller that was never granted the capability is refused by
+/// [`Auth::check`] as [`BotError::CapabilityDenied`], which carries the whole
+/// shortfall rather than one word of it, and only a caller that *was* granted it
+/// reaches the second part. The order matters — a missing capability is the
+/// repairable fault, and reporting "binding required" to a caller whose grant
+/// was short would send them looking for a transport that was never the problem.
+///
+/// Then the `binding required` refusal, which is [`BotError::DomainError`] at
+/// [`DispatchCertainty::Refused`]: the domain is constructed with a channel, a
+/// path or a destination and no client behind it, so nothing was dispatched and
+/// nothing ever will be. `Refused` rather than `NotDelivered` because a retry of
+/// this call produces the same refusal at the cost of an attempt.
+///
+/// One function rather than one construction per domain, for two reasons that
+/// point the same way. A sixth site that spelled it again would drift — a site
+/// that forgot [`DispatchCertainty`] would compile, because the field is a
+/// variant of a `#[non_exhaustive]` enum the caller may match loosely, and the
+/// drift would only be visible in a retry policy that then re-dispatches a
+/// permanent refusal. And the trace emission has to be here rather than at the
+/// call sites: `scan` refuses an unlogged `return Err(..)`, so a site that built
+/// the value itself would either be a finding or would need its own copy of the
+/// emission, and the second is the first defect wearing a hat.
+///
+/// `verb` is the operation the caller asked for in its own words — `polling`,
+/// `querying`, `notifying` — and `target` is the untrusted channel, path or
+/// destination it asked about, rendered through [`Escaped`] by `Display` for the
+/// same reason every other untrusted field is.
+pub(crate) fn unbound_domain<T>(
+    auth: &super::cap::Auth,
+    required: &[super::cap::Cap],
+    domain: &str,
+    verb: &str,
+    target: &str,
+) -> Result<T, BotError> {
+    auth.check(required)?;
+    let refusal = Err(BotError::DomainError {
+        domain: domain.to_owned(),
+        certainty: DispatchCertainty::Refused,
+        cause: format!("{verb} {target:?} — binding required"),
+    });
+    lgwks_std::trace::debug!(
+        error = ?refusal.as_ref().err(),
+        %domain,
+        "unbound domain: refusing a call with no bound transport",
+    );
+    refusal
+}
+
 /// Render untrusted text so it cannot forge a log record.
 ///
 /// Control characters are the whole of the problem: a newline ends the record,

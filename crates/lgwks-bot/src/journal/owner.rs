@@ -123,10 +123,73 @@ pub(crate) const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// arm is a `Result` that propagates — so a poison is a bug in an unrelated thread,
 /// and refusing every later append because of it would turn one failure into a
 /// bricked store.
+///
+/// The crate's one lock site, not this module's: a mutex in `script`, in `task` or
+/// in a domain's own fixture guards the same kind of plain data under the same
+/// "no arm panics" argument, and a second copy of the recovery is a second place
+/// for that argument to go stale.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condvar`, recovering the guard when a previous holder panicked.
+///
+/// The same recovery [`lock`] makes, for the waits that follow it. A poisoned wait
+/// still hands back the guard: the panic belonged to a *previous* holder, and every
+/// caller here re-reads the state it waits on inside its own loop, so a value left
+/// by a panic is read and judged rather than assumed.
+pub(crate) fn wait<'a, T>(condvar: &Condvar, held: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    match condvar.wait(held) {
+        Ok(woke) => woke,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condvar` for at most `bound`, recovering the guard from a panic.
+///
+/// The timed form of [`wait`], saying the same thing for the same reason. The
+/// timeout verdict is the caller's to read and this hands back the one the call
+/// itself produced, so a poisoned wait does not also invent a verdict it never
+/// observed.
+pub(crate) fn wait_timeout<'a, T>(
+    condvar: &Condvar,
+    held: MutexGuard<'a, T>,
+    bound: Duration,
+) -> (MutexGuard<'a, T>, std::sync::WaitTimeoutResult) {
+    match condvar.wait_timeout(held, bound) {
+        Ok((woke, verdict)) => (woke, verdict),
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condvar` until `satisfied` holds or `bound` elapses, recovering the
+/// guard from a panic.
+///
+/// The predicate form of [`wait_timeout`], and the recovery is the same for the
+/// same reason: the guard comes back either way, and the caller's own predicate
+/// is what decides when it stops waiting.
+///
+/// Test-only, because that is the only shape that needs it: the shipped owner
+/// waits with [`wait`] and [`wait_timeout`], neither of which takes a closure.
+/// A fixture's doorbell does open on a bounded predicate, and this keeps its
+/// recovery the same one rather than a second copy beside the other three.
+#[cfg(test)]
+pub(crate) fn wait_timeout_while<'a, T, F>(
+    condvar: &Condvar,
+    held: MutexGuard<'a, T>,
+    bound: Duration,
+    satisfied: F,
+) -> (MutexGuard<'a, T>, std::sync::WaitTimeoutResult)
+where
+    F: FnMut(&mut T) -> bool,
+{
+    match condvar.wait_timeout_while(held, bound, satisfied) {
+        Ok((woke, verdict)) => (woke, verdict),
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// One durable request's ordered step, as the storage owner runs it.
@@ -288,10 +351,7 @@ impl<S, A> Request<S, A> {
             if let Some(answer) = held.take() {
                 return Some(answer);
             }
-            held = self
-                .arrived
-                .wait(held)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            held = wait(&self.arrived, held);
         }
     }
 }
@@ -798,10 +858,7 @@ where
         // in-flight append ends, which is the same append whose bytes are on the
         // disk under the acknowledgment the caller may never see.
         while !slot.released {
-            slot = self
-                .signal
-                .wait(slot)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot = wait(&self.signal, slot);
         }
     }
 }
@@ -1028,9 +1085,7 @@ fn await_work<S, A>(slot: &Mutex<Slot<S, A>>, gate: &Mutex<Gate>, signal: &Condv
         // during a stall still ends the loop, and so a release arriving between
         // batches is not missed.
         while lock(gate).stalled && !held.closed {
-            let (guard, _timed_out) = signal
-                .wait_timeout(held, Duration::from_millis(1))
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (guard, _timed_out) = wait_timeout(signal, held, Duration::from_millis(1));
             held = guard;
         }
         promote(&mut held);
@@ -1043,9 +1098,7 @@ fn await_work<S, A>(slot: &Mutex<Slot<S, A>>, gate: &Mutex<Gate>, signal: &Condv
             // the way out.
             return false;
         }
-        let (guard, _timed_out) = signal
-            .wait_timeout(held, Duration::from_millis(1))
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (guard, _timed_out) = wait_timeout(signal, held, Duration::from_millis(1));
         held = guard;
     }
 }
@@ -1064,7 +1117,7 @@ mod tests {
     //! Beside it, the awaited answer's lost-wakeup probe (INV-BOT-140), which needs
     //! no task feature: it drives the owner directly.
 
-    use super::{Stage, StorageOwner, lock};
+    use super::{Stage, StorageOwner, lock, wait_timeout_while};
     use std::fs::File;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -1194,14 +1247,15 @@ mod tests {
         // refused with the same message rather than written, and the index still
         // holds nothing.
         for run in runs.iter().take(2) {
-            let message =
+            let refusal =
                 RunRecords::append(&store, tenant, *run, key, "late", &late_definition, vec![9])
                     .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_default();
+                    .map(|error| error.to_string());
             assert!(
-                message.contains("previous append"),
-                "a later append must be refused as poisoned, not accepted: {message}"
+                refusal
+                    .as_deref()
+                    .is_some_and(|message| message.contains("previous append")),
+                "a later append must be refused as poisoned, not accepted: {refusal:?}"
             );
         }
 
@@ -1284,9 +1338,8 @@ mod tests {
         });
 
         let (ref state, ref changed) = *progress;
-        let (held, waited) = changed
-            .wait_timeout_while(lock(state), PATIENCE, |progress| !progress.1)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (held, waited) =
+            wait_timeout_while(changed, lock(state), PATIENCE, |progress| !progress.1);
         let (completed, done) = *held;
         drop(held);
         if waited.timed_out() && !done {

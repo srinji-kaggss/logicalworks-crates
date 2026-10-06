@@ -544,7 +544,13 @@ mod tests {
     /// and if it were ever hit the `reached_middle` assertion in each caller fails
     /// rather than passing silently.
     fn middle_link(depth: usize) -> usize {
-        depth.checked_div(2).unwrap_or(0)
+        // The whole chain less its ceiling half, which is floor division without
+        // the `/` this crate forbids and without a `checked_div` whose `None` arm
+        // would have to invent an answer: a division by a constant cannot fail,
+        // so there is no failure to handle. The fixture only ever builds chains of
+        // two or more, and a caller that asked for one is told by the
+        // `reached_middle` assertion in each test rather than by a panic here.
+        depth.saturating_sub(depth.div_ceil(2))
     }
 
     /// Poll `future` exactly once and report whether it completed.
@@ -588,24 +594,16 @@ mod tests {
         /// only if a previous holder panicked while holding it, which this never
         /// does, and a panic in a destructor during an unwind aborts the process.
         fn ring(&self) {
-            let mut rung = self
-                .rung
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let mut rung = crate::journal::owner::lock(&self.rung);
             *rung = true;
             self.bell.notify_all();
         }
 
         /// Wait at most `timeout` for the ring, returning whether it rang.
         fn wait(&self, timeout: Duration) -> bool {
-            let rung = self
-                .rung
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let (rung, _timeout) = self
-                .bell
-                .wait_timeout_while(rung, timeout, |rung| !*rung)
-                .unwrap_or_else(|poison| poison.into_inner());
+            let rung = crate::journal::owner::lock(&self.rung);
+            let (rung, _timeout) =
+                crate::journal::owner::wait_timeout_while(&self.bell, rung, timeout, |rung| !*rung);
             *rung
         }
     }
