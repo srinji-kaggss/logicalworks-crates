@@ -1755,11 +1755,21 @@ Each of these was a shipped defect. Treat the list as the spec.
   completes at an admission ceiling of one, while sibling top-level runs each
   take their own permit and stay bounded. Waiting for a permit is cancellable by
   the host's stop and charged to the run's deadline; a run the host refuses
-  before admission is `Refused`, never `Cancelled` or `Failed`. The step trail
+  before admission is `Refused`, never `Cancelled` or `Failed`. A permit a
+  queued run acquires after the stop is handed back and the run is `Refused`:
+  the stop's wakes reach the queued runs in an order the channel under the
+  token does not fix, so admitting whichever was polled after a release would
+  count a run that never ran as admitted, charge its root budget, and decide
+  `Cancelled` versus `Refused` by that order. The step trail
   is a bounded ring whose overflow is counted and never changes the
   disposition, output or located error, and every report says no external
-  effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
-  `tests/it/task_front_door.rs` and `tests/it/sim_task.rs`
+  effect is known. · why: #87 step 1 (T01–T04, T36), #278 row 7 · enforced by:
+  `tests/it/task_front_door.rs`, `tests/it/sim_task.rs` and
+  `tests/it/sim_cancel_under_load.rs` (`cancel_band_00..07`: 1,000 flows per
+  seed over 1,000 seeds, cancelled at a seeded driver poll; every flow reports,
+  the host's counters agree with the reports, no body outlives the call or
+  starts after the stop, and each band replays to one trace hash — all eight
+  fail on the replay with the post-stop refusal removed)
 - **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
   so no executor thread ever waits inside a flush. The whole ordered step — the
   in-memory checks, the length fence, the write, the `sync_all` and the fold into
