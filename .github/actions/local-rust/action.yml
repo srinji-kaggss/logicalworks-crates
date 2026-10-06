@@ -1,13 +1,12 @@
 name: Local Rust toolchain
 description: >
-  Prepares a job on the self-hosted macOS runner (Director, 2026-10-04: CI runs
+  Prepares a job on the self-hosted macOS runners (Director, 2026-10-04: CI runs
   on the local runner). The toolchain comes from rust-toolchain.toml and is
   checked against the pin, without touching the host's rustup default, which
   other projects on this machine rely on. The machine's own cargo
   configuration ($CARGO_HOME/config.toml) is deliberately left in force: the
   Director ruled on 2026-10-06 that CI builds with every optimisation it
-  declares. Build output persists per runner, outside the checkout that
-  actions/checkout cleans, so a run rebuilds only what changed.
+  declares.
 inputs:
   toolchain:
     description: The toolchain the gate pins; the step fails when rust-toolchain.toml resolves to another.
@@ -18,7 +17,7 @@ inputs:
     default: "false"
   min-free-gib:
     description: >
-      Free space the volume must keep. Below it, this runner's build output is
+      Free space the volume must keep. Below it, this job's build output is
       cleaned before the job builds, so a full disk fails no job. The default
       is two cold workspace builds with the machine's profiles.
     required: false
@@ -26,11 +25,18 @@ inputs:
 runs:
   using: composite
   steps:
+    # One target directory per job, shared by every runner instance on this
+    # machine and kept across runs, outside the checkout that actions/checkout
+    # cleans. A job lands on whichever runner is free, so a per-runner directory
+    # was cold for most jobs; a per-job one is warm whichever runner takes it.
+    # The shards of one job build the same thing, so they share a directory and
+    # every shard after the first finds the build fresh. Two runs of one job at
+    # once wait on cargo's lock rather than racing.
     - name: Persistent target directory
       shell: bash
       run: |
         set -euo pipefail
-        target="${RUNNER_WORKSPACE}/target"
+        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${GITHUB_JOB}"
         mkdir -p "${target}"
         echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
@@ -38,12 +44,34 @@ runs:
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
           cargo clean --target-dir "${target}"
         fi
+    # The runner instances share this machine's cores. A test job that took
+    # every core, beside three others doing the same, put the load average at
+    # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
+    # Each job gets its share: the cores divided by the runner instances, which
+    # is the per-job budget the suites were written against.
+    - name: Test threads for this runner's share of the machine
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+        threads=$(( cores / (runners > 0 ? runners : 1) ))
+        threads=$(( threads > 1 ? threads : 2 ))
+        echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
+        echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
+    # rustup has no lock, and parallel jobs that each ran `rustup toolchain
+    # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
+    # toolchain is only installed when the pinned one is not already active.
     - name: Toolchain matches the pin
       shell: bash
       run: |
         set -euo pipefail
-        rustup toolchain install
-        active="$(rustc --version)"
+        active="$(rustc --version 2>/dev/null || true)"
+        case "${active}" in
+          "rustc ${{ inputs.toolchain }} "*) ;;
+          *) rustup toolchain install; active="$(rustc --version)" ;;
+        esac
         echo "${active}"
         case "${active}" in
           "rustc ${{ inputs.toolchain }} "*) ;;

@@ -87,6 +87,7 @@ exec docker run --rm --init \
     ${config_mount[@]+"${config_mount[@]}"} \
     --env "${rustflags_var}=${container_rustflags}" \
     --env CARGO_TARGET_DIR=/target \
+    --env NEXTEST_TEST_THREADS \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
