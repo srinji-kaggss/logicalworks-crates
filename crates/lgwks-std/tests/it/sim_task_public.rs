@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use lgwks_std::task::{block_on, join_all, spawn_blocking, try_spawn_blocking};
 
 use crate::rng::Rng;
+use crate::seeded_sweep::seeded_stream;
 use crate::seeded_sweep::{SWEEP_SEEDS, fold_usize, initial_trace, next_index};
 
 /// The pool's documented thread ceiling.
@@ -38,7 +39,7 @@ const MAX_WORK: usize = 64;
 /// can never share a value and no conversion between the 64-bit seed and the
 /// index width can truncate one.
 fn expected(seed: u64, index: usize) -> usize {
-    let mut stream = seed;
+    let mut stream = seeded_stream(seed);
     next_index(&mut stream).wrapping_add(index)
 }
 

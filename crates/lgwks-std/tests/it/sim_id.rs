@@ -24,7 +24,9 @@ use crate::seeded_sweep;
 
 use lgwks_std::id::{ParseError, Uuid};
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{below, fold_bytes, fold_refusal, next_array, reference_nibble};
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
     initial_trace,
@@ -211,13 +213,13 @@ enum Reference {
 }
 
 /// The canonical form for arbitrary drawn bytes.
-fn draw_canonical(state: &mut u64) -> String {
+fn draw_canonical(state: &mut Seeded) -> String {
     reference_render(&next_array::<16>(state))
 }
 
 /// Runs the seeded parse/render sweep and returns its trace.
 fn id_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..64 {
@@ -261,7 +263,7 @@ fn id_trace(seed: u64) -> u64 {
 /// on the way in is masked.
 fn arbitrary_bytes_round_trip_through_parse_and_display() -> Result<(), ParseError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..64 {
             let raw = next_array::<16>(&mut state);
             let rendered = reference_render(&raw);
@@ -297,7 +299,7 @@ fn arbitrary_bytes_round_trip_through_parse_and_display() -> Result<(), ParseErr
 /// at offsets 8, 13, 18 and 23, and hex digits everywhere else.
 fn the_rendered_form_has_the_documented_hyphen_layout() -> Result<(), ParseError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let rendered = draw_canonical(&mut state);
             assert_eq!(
@@ -365,7 +367,7 @@ fn generated_identifiers_carry_the_v4_masks() -> Result<(), Box<dyn std::error::
 /// ever looked at versions would miss a parser that stamped one in.
 fn parsing_preserves_version_and_variant_bits_a_generator_would_have_stamped() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             // The masks are stamped on the drawn array itself, so there is no
             // length conversion between the draw and the bytes that carry them.
@@ -397,7 +399,7 @@ fn parsing_preserves_version_and_variant_bits_a_generator_would_have_stamped() {
 /// the value generation would have forced.
 fn the_reported_version_follows_the_variant_rule_of_the_drawn_bits() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let raw = next_array::<16>(&mut state);
             let Ok(parsed) = Uuid::parse(&reference_render(&raw)) else {
@@ -426,7 +428,7 @@ fn the_reported_version_follows_the_variant_rule_of_the_drawn_bits() {
 fn malformed_hex_reports_both_the_group_start_and_the_character_offset()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let rendered = draw_canonical(&mut state);
             // The alien is drawn from characters outside the hex alphabet and outside the
@@ -475,7 +477,7 @@ fn malformed_hex_reports_both_the_group_start_and_the_character_offset()
 const ALIEN_CHARACTERS: &[u8; 11] = b"gzGZ !/:@[]";
 
 /// An alien drawn from [`ALIEN_CHARACTERS`], as one byte of the corrupted text.
-fn draw_alien(state: &mut u64) -> u8 {
+fn draw_alien(state: &mut Seeded) -> u8 {
     let index = below(state, ALIEN_CHARACTERS.len());
     ALIEN_CHARACTERS[index]
 }
@@ -498,7 +500,7 @@ fn corrupt_position(text: &mut [u8], position: usize, alien: u8) -> bool {
 /// an extension produce.
 fn a_wrong_length_is_refused_before_anything_is_parsed() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let rendered = draw_canonical(&mut state);
             for len in [
@@ -533,7 +535,7 @@ fn a_wrong_length_is_refused_before_anything_is_parsed() {
 /// refuse with the separator's offset.
 fn every_separator_position_is_required() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for hyphen_at in [8, 13, 18, 23] {
             let rendered = draw_canonical(&mut state);
             let mut moved = rendered.clone().into_bytes();
@@ -557,7 +559,7 @@ fn every_separator_position_is_required() -> Result<(), Box<dyn std::error::Erro
 /// accepts both cases and the display always renders lowercase.
 fn an_upper_case_spelling_parses_to_the_same_identifier() -> Result<(), ParseError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let rendered = draw_canonical(&mut state);
             let upper = rendered.to_ascii_uppercase();
@@ -586,7 +588,7 @@ fn an_upper_case_spelling_parses_to_the_same_identifier() -> Result<(), ParseErr
 /// admits exactly the 36-character layout and never a prefix of one.
 fn every_truncation_of_a_canonical_form_is_refused() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..8 {
             let rendered = draw_canonical(&mut state);
             for cut in 0..CANONICAL_LEN {
@@ -657,7 +659,7 @@ fn a_multi_byte_character_in_a_group_is_refused_at_its_own_offset()
 -> Result<(), Box<dyn std::error::Error>> {
     let multibyte = ['é', '☃', 'ü'];
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let rendered = draw_canonical(&mut state);
             let group_index = below(&mut state, GROUPS.len());
@@ -724,7 +726,7 @@ fn refusals_fold_their_arm_and_both_of_their_coordinates() -> Result<(), Box<dyn
 {
     let mut trace = initial_trace();
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let rendered = draw_canonical(&mut state);
             let position = below(&mut state, CANONICAL_LEN);
@@ -776,8 +778,8 @@ fn distinct_id_seeds_diverge_in_their_trace() {
 /// Two seeds draw two different identifiers, so the parse family is not one
 /// value checked over and over.
 fn two_seeds_draw_two_different_identifiers() {
-    let mut first = SWEEP_SEEDS[0];
-    let mut second = SWEEP_SEEDS[1];
+    let mut first = seeded_stream(SWEEP_SEEDS[0]);
+    let mut second = seeded_stream(SWEEP_SEEDS[1]);
     let left = draw_canonical(&mut first);
     let right = draw_canonical(&mut second);
     assert_ne!(

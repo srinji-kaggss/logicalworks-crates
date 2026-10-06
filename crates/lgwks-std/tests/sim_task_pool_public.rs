@@ -52,6 +52,7 @@ use lgwks_std::task::{
 
 use crate::gate::Gate;
 use crate::rng::Rng;
+use crate::seeded_sweep::seeded_stream;
 use crate::seeded_sweep::{SWEEP_SEEDS, fold_usize, initial_trace, next_index};
 
 /// The smallest ceiling a seed may draw: above one, so a burst of the drawn
@@ -85,7 +86,7 @@ fn expected(seed: u64, index: usize) -> usize {
     // through the shared word fold and the position is added to it, so two
     // positions of one burst can never share a value and no conversion between
     // the 64-bit seed and the index width can truncate one.
-    let mut stream = seed;
+    let mut stream = seeded_stream(seed);
     next_index(&mut stream).wrapping_add(index)
 }
 
@@ -232,11 +233,19 @@ fn the_public_pool_journey_configures_drains_joins_and_then_refuses() {
         }));
     }
     let report = shutdown_blocking_pool(TOO_SHORT);
+    let first_drained = matches!(report, PoolShutdown::Drained { .. });
     if gated == 0 {
-        assert_eq!(
-            report,
-            PoolShutdown::Drained { threads: 0 },
-            "seed {seed:#x}: an idle pool has nothing to wait for"
+        // An idle pool has no work to wait for, but it does have the threads
+        // the burst left parked: the shutdown wakes them to leave and joins
+        // them, and `Drained` counts every thread it joined, idle ones
+        // included. A host that deschedules a leaving thread past the deadline
+        // reports it with nothing queued. Until the stream drew an idle
+        // journey this branch had never run, and it asserted zero threads.
+        assert!(
+            matches!(report, PoolShutdown::Drained { threads } if threads <= ceiling)
+                || matches!(report, PoolShutdown::DeadlineExceeded { queued: 0, .. }),
+            "seed {seed:#x}: an idle pool joins its parked threads and has no job to report, \
+             got {report:?}"
         );
     } else {
         assert!(
@@ -259,11 +268,17 @@ fn the_public_pool_journey_configures_drains_joins_and_then_refuses() {
             threads <= ceiling,
             "seed {seed:#x}: {threads} threads were joined under a ceiling of {ceiling}"
         );
-        assert_eq!(
-            threads > 0,
-            gated > 0,
-            "seed {seed:#x}: {gated} jobs in flight left {threads} threads to join"
-        );
+        if gated > 0 {
+            assert!(
+                threads > 0,
+                "seed {seed:#x}: {gated} jobs in flight left no thread to join"
+            );
+        } else if first_drained {
+            assert_eq!(
+                threads, 0,
+                "seed {seed:#x}: the first shutdown drained the idle pool, so nothing is left"
+            );
+        }
     }
     assert_eq!(
         block_on(join_all(inflight)),

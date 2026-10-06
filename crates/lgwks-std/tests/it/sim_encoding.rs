@@ -23,10 +23,12 @@ use lgwks_std::encoding::{
     percent::{self, DecodeError as PercentError},
 };
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{
     below, fold_bytes, fold_refusal, next_byte, next_bytes, next_text, reference_escape,
     reference_nibble,
 };
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
@@ -129,7 +131,7 @@ fn reference_decode(input: &str) -> Reference {
 /// The escape is drawn from the whole byte range, so about one payload in
 /// sixteen escapes a non-UTF-8 byte and the `NotUtf8` arm is genuinely reached
 /// rather than merely declared reachable.
-fn next_escaped_text(state: &mut u64) -> String {
+fn next_escaped_text(state: &mut Seeded) -> String {
     let length = below(state, 24);
     let mut rendered = String::new();
     for _ in 0..length {
@@ -145,7 +147,7 @@ fn next_escaped_text(state: &mut u64) -> String {
 /// Runs the seeded sweep over the transcoders, the refusal coordinates and the
 /// boundary lengths, and returns its trace.
 fn encoding_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..64 {
@@ -193,7 +195,7 @@ fn encoding_trace(seed: u64) -> u64 {
 /// unreserved set and uppercase hex digits.
 fn a_seeded_component_round_trips_through_percent_encoding() -> Result<(), PercentError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..64 {
             let span = below(&mut state, 40);
             let text = next_text(&mut state, span);
@@ -254,7 +256,7 @@ fn multi_byte_scalars_are_escaped_one_byte_at_a_time() {
 fn a_malformed_escape_is_reported_at_its_original_input_offset()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in MULTIBYTE_SAMPLES {
             for alien in [b'g', b'G', b'z', b' ', b'/', 0x80, 0xff] {
                 let prefix_span = below(&mut state, 6);
@@ -349,7 +351,7 @@ fn a_utf8_failure_is_reported_in_decoded_bytes_not_source_bytes()
 /// itself, in source bytes, whether zero or one character follows.
 fn a_truncated_escape_names_the_percent_in_source_bytes() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in MULTIBYTE_SAMPLES {
             for tail in ["", "2"] {
                 let prefix_span = below(&mut state, 6);
@@ -382,7 +384,7 @@ fn a_truncated_escape_names_the_percent_in_source_bytes() {
 fn lower_and_upper_case_escape_digits_decode_to_the_same_byte()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let span = below(&mut state, 8);
             let body = next_text(&mut state, span);
@@ -493,7 +495,7 @@ fn every_truncated_prefix_is_refused_or_is_shorter() -> Result<(), PercentError>
 /// in the decoded bytes.
 fn every_reported_coordinate_is_a_real_position_in_its_own_space() -> Result<(), PercentError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let payload = next_escaped_text(&mut state);
             match reference_decode(&payload) {
@@ -585,7 +587,7 @@ fn decoded_len_of(payload: &str) -> usize {
 /// from the standard alphabet.
 fn a_seeded_payload_round_trips_through_base64() -> Result<(), base64::DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for length in BOUNDARY_LENGTHS {
             let payload = next_bytes(&mut state, length);
             let encoded = base64::encode(&payload);
@@ -619,7 +621,7 @@ fn a_seeded_payload_round_trips_through_base64() -> Result<(), base64::DecodeErr
 /// length, never padded back out into the payload.
 fn every_truncated_base64_prefix_is_refused_on_its_length() -> Result<(), base64::DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let payload = next_bytes(&mut state, 16);
             let encoded = base64::encode(&payload);
@@ -710,7 +712,7 @@ fn distinct_encoding_seeds_diverge_in_their_trace() {
 /// characters per byte and decodes back into the drawn bytes.
 fn the_wide_boundary_renders_and_decodes_at_its_declared_length()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = SWEEP_SEEDS[0];
+    let mut state = seeded_stream(SWEEP_SEEDS[0]);
     let payload = next_bytes(&mut state, WIDE_PAYLOAD_BYTES);
     let lossy = String::from_utf8_lossy(&payload);
     let encoded = percent::encode_component(&lossy);
@@ -738,7 +740,7 @@ fn the_wide_boundary_renders_and_decodes_at_its_declared_length()
 fn refusals_fold_their_arm_and_both_of_their_coordinates() {
     let mut trace = initial_trace();
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let payload = next_escaped_text(&mut state);
             match percent::decode(&payload) {

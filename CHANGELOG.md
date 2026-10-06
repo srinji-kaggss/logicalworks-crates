@@ -9,6 +9,18 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### Tests
+
+- **lgwks_std's simulation fixtures draw `seeded::Seeded`.** `tests/support/rng.rs`
+  and `tests/support/seeded_sweep.rs` carried a private xorshift64* generator, a
+  second meaning for every seed; both now draw the crate's own `Seeded`
+  (INV-STD-SEEDED-1), the stream every other crate's simulations draw, so one
+  seed names one stream across the estate. `Rng::below` is now unbiased and
+  answers a zero bound without moving the stream. The new draws reached an idle
+  pool journey in `sim_task_pool_public` that the old stream never drew, whose
+  assertion contradicted `PoolShutdown::Drained`'s contract (it counts the idle
+  threads a shutdown joins); the assertion now states the contract.
+
 ## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
 
 ### Upgrading
