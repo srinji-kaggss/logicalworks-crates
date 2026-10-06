@@ -1168,7 +1168,7 @@ mod tests {
     #[cfg(feature = "script")]
     #[test]
     fn a_failed_batch_flush_acknowledges_nobody_and_folds_nothing() -> Result<(), Box<dyn Error>> {
-        let dir = crate::journal::file::tests::scratch("owner-flush");
+        let dir = crate::journal::file::tests::scratch("owner-flush")?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("store");
 
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn an_answer_published_during_registration_still_wakes_the_poll()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = crate::journal::file::tests::scratch("owner-wake");
+        let path = crate::journal::file::tests::scratch("owner-wake")?;
         let owner = StorageOwner::<(), u64>::spawn(File::create(&path)?, (), false)?;
         let progress = Arc::new((Mutex::new((0_u64, false)), Condvar::new()));
         let reported = Arc::clone(&progress);

@@ -43,6 +43,8 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use crate::journal::frame::SaturatingFrom;
 use std::sync::{Arc, Mutex};
 
 use lgwks_std::hash::{Digest, Hasher};
@@ -412,15 +414,9 @@ impl RunLedger {
     /// Perform one ordered step on `run`: decide the ticket against the current
     /// state and, if it is admissible, charge the budget and apply it.
     ///
-    /// `ticket` is `Some` for a repair and `None` for a plain resume. A repair
-    /// must carry the epoch it was minted at the run's *current* epoch and an
-    /// identity this run has not seen; an accepted repair advances the epoch and
-    /// records its identity, which is what makes the same ticket a second time
-    /// both stale and a duplicate.
-    ///
-    /// `spend` is charged against the root budget whether or not a ticket was
-    /// carried: a repair is an attempt, and an authorized repair does not refund
-    /// the run for the attempts that led to it.
+    /// What a ticket means for this charge — `Some` authorizes a repair, `None`
+    /// is a plain resume — is [`Charge`]'s, and the two ceilings are
+    /// [`Ceilings`]'.
     ///
     /// # Errors
     ///
@@ -441,22 +437,22 @@ impl RunLedger {
         max_attempts: u64,
         max_spend: u64,
     ) -> Result<Control, CommitError> {
-        let tenant = tenant.to_owned();
-        let stamp = ticket.cloned();
+        // The two named values, built here so every caller reaches the ordered step
+        // through them: the tenant and the ticket are borrowed for the length of a
+        // call, and the ordered step owns them.
+        let charge = Charge {
+            tenant: tenant.to_owned(),
+            run,
+            ticket: ticket.cloned(),
+            cost: spend,
+        };
+        let ceilings = Ceilings {
+            attempts: max_attempts,
+            spend: max_spend,
+        };
         self.inner
             .owner
-            .enqueue_awaiting(move |file, shared| {
-                charge_on_owner(
-                    file,
-                    shared,
-                    &tenant,
-                    run,
-                    stamp.as_ref(),
-                    spend,
-                    max_attempts,
-                    max_spend,
-                )
-            })
+            .enqueue_awaiting(move |file, shared| charge_on_owner(file, shared, &charge, ceilings))
             .await
             .map_err(classify)
     }
@@ -520,28 +516,53 @@ fn classify(cause: SubmitError) -> CommitError {
 /// the same step that flushed it. A later member of a shared batch must decide
 /// against the fold this charge left, which is why the fold cannot be deferred to
 /// a batch settle the way a step record's can.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the ledger's state is the file and the index, and the charge is the tenant, \
-              the run, the optional ticket, the spend and the two ceilings — each is a \
-              distinct fact the ordered step needs and none of them is derivable from another"
-)]
 fn charge_on_owner(
     file: &mut File,
     shared: &Arc<Mutex<Index>>,
-    tenant: &str,
-    run: RunId,
-    ticket: Option<&TicketStamp>,
-    spend: u64,
-    max_attempts: u64,
-    max_spend: u64,
+    charge: &Charge,
+    ceilings: Ceilings,
 ) -> std::io::Result<Stage<Control, Arc<Mutex<Index>>>> {
     let mut index = owner::lock(shared);
-    let (entry, next) = decide_under(&index, tenant, run, ticket, spend, max_attempts, max_spend)
-        .map_err(std::io::Error::other)?;
+    let (entry, next) = decide_under(&index, charge, ceilings).map_err(std::io::Error::other)?;
     write_entry(file, &mut index, &entry)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(Stage::Committed(next))
+}
+
+/// One attempt's charge against a run's root budget.
+///
+/// A named value rather than four parameters, because these are one request: the
+/// tenant that owns the run, which run, the repair authorizing this attempt, and
+/// what it costs. Passed positionally, a call site could hand the cost as the
+/// ticket and nothing in the types would notice.
+#[derive(Clone, Debug)]
+pub(crate) struct Charge {
+    /// The tenant that owns the run. Checked before any counter moves, because
+    /// charging another tenant's run is how a shared ledger becomes a cross-tenant
+    /// write.
+    pub(crate) tenant: String,
+    /// The run this attempt charges.
+    pub(crate) run: RunId,
+    /// The repair authorizing this attempt, or `None` for a plain resume.
+    pub(crate) ticket: Option<TicketStamp>,
+    /// What this attempt costs against the root budget.
+    ///
+    /// Charged whether or not a ticket was carried: a repair is an attempt, and an
+    /// authorized repair does not refund the run for the attempts that led to it.
+    pub(crate) cost: u64,
+}
+
+/// The two ceilings a charge is refused against.
+///
+/// One value rather than two parameters, so the attempt ceiling and the spend
+/// ceiling travel together: a caller that set one and left the other at some
+/// default would be admitting a budget nobody declared.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ceilings {
+    /// The most attempts one run may charge.
+    pub(crate) attempts: u64,
+    /// The most root-budget spend one run may charge.
+    pub(crate) spend: u64,
 }
 
 /// The decision, over the ledger's own state: what charging `run` would leave, and
@@ -551,18 +572,22 @@ fn charge_on_owner(
 /// write cannot be skipped by a caller that already knows the answer.
 fn decide_under(
     index: &Index,
-    tenant: &str,
-    run: RunId,
-    ticket: Option<&TicketStamp>,
-    spend: u64,
-    max_attempts: u64,
-    max_spend: u64,
+    charge: &Charge,
+    ceilings: Ceilings,
 ) -> Result<(Entry, Control), LeaseRefusal> {
-    let mut next = index
-        .runs
-        .get(&run)
-        .cloned()
-        .unwrap_or_else(|| Control::fresh(tenant));
+    let tenant = charge.tenant.as_str();
+    let run = &charge.run;
+    let ticket = charge.ticket.as_ref();
+    let cost = charge.cost;
+    let max_attempts = ceilings.attempts;
+    let max_spend = ceilings.spend;
+    // A run this ledger has never charged starts from `Control::fresh`, which is
+    // the run's own starting state rather than a stand-in for a failed lookup: the
+    // ceilings below then judge a first attempt exactly as they judge a later one.
+    let mut next = Control::fresh(tenant);
+    if let Some(control) = index.runs.get(run) {
+        next = control.clone();
+    }
 
     // A run that already belongs to someone else is refused before any counter
     // moves. This is the same cross-tenant rule the step store enforces, and for
@@ -578,7 +603,7 @@ fn decide_under(
     }
 
     let next_attempts = next.attempts.saturating_add(1);
-    let next_spend = next.spend.saturating_add(spend);
+    let next_spend = next.spend.saturating_add(cost);
     if next_attempts > max_attempts || next_spend > max_spend {
         let refusal = Err(LeaseRefusal::BudgetSpent {
             attempts: next_attempts,
@@ -622,7 +647,7 @@ fn decide_under(
     next.spend = next_spend;
 
     let entry = Entry {
-        run,
+        run: *run,
         tenant: tenant.to_owned(),
         attempts: next.attempts,
         spend: next.spend,
@@ -636,7 +661,7 @@ fn decide_under(
 fn write_entry(file: &mut File, index: &mut Index, entry: &Entry) -> Result<(), StoreError> {
     let previous = index.tail;
     let (framed, head) = frame(entry, &previous)?;
-    let staged = u64::try_from(framed.len()).unwrap_or(u64::MAX);
+    let staged = u64::saturating_from(framed.len());
     let next = index
         .committed
         .checked_add(staged)
@@ -706,8 +731,8 @@ fn frame(entry: &Entry, previous: &Digest) -> Result<(Vec<u8>, Digest), StoreErr
         |entry, previous, _| entry.head_from(previous),
         |len| StoreError::Limit {
             kind: StoreLimitKind::RecordBytes,
-            requested: u64::try_from(len).unwrap_or(u64::MAX),
-            limit: u64::try_from(MAX_LEDGER_RECORD_BYTES).unwrap_or(u64::MAX),
+            requested: u64::saturating_from(len),
+            limit: u64::saturating_from(MAX_LEDGER_RECORD_BYTES),
         },
     )
 }
@@ -736,8 +761,8 @@ fn next_frame(file: &mut File, cursor: &Cursor<'_>) -> Result<Option<Framed>, St
     let corrupt = || StoreError::Corrupt { at };
     let ceiling = MAX_LEDGER_RECORD_BYTES;
     let entry_head = |previous: &Digest, payload: &[u8]| {
-        let copy = frame::misaligned_copy(payload);
-        from_bytes::<Entry, WireError>(copy.as_deref().unwrap_or(payload))
+        let aligned = frame::decodable(payload);
+        from_bytes::<Entry, WireError>(aligned.as_slice())
             .ok()
             .map(|entry| entry.head_from(previous))
     };
@@ -775,7 +800,7 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     }
     let mut index = Index {
         runs: HashMap::new(),
-        committed: u64::try_from(LEDGER_MAGIC.len()).unwrap_or(u64::MAX),
+        committed: u64::saturating_from(LEDGER_MAGIC.len()),
         tail: genesis_head(),
     };
     let mut previous = genesis_head();
@@ -914,7 +939,7 @@ mod tests {
     /// its index, and the file is byte-identical afterwards.
     #[test]
     fn a_lengthened_acknowledged_final_entry_is_refused_not_trimmed() -> TestResult {
-        let scratch = Scratch::new("ledger-lengthened");
+        let scratch = Scratch::new("ledger-lengthened")?;
         let bytes = written(scratch.path(), 3)?;
         let last = frame_starts(&bytes, LEDGER_MAGIC.len())?[2];
         let declared = declared_at(&bytes, last);
@@ -942,7 +967,7 @@ mod tests {
     /// the archive was not written at.
     #[test]
     fn a_damaged_lengthened_entry_with_an_acknowledged_one_behind_it_is_refused() -> TestResult {
-        let scratch = Scratch::new("ledger-damaged");
+        let scratch = Scratch::new("ledger-damaged")?;
         let bytes = written(scratch.path(), 3)?;
         let middle = frame_starts(&bytes, LEDGER_MAGIC.len())?[1];
         let mut lied = with_prefix(&bytes, middle, u32::try_from(bytes.len() - middle)? + 9);
@@ -962,7 +987,7 @@ mod tests {
     /// acknowledged prefix.
     #[test]
     fn an_append_cut_inside_the_final_entry_is_repaired() -> TestResult {
-        let scratch = Scratch::new("ledger-cut");
+        let scratch = Scratch::new("ledger-cut")?;
         let bytes = written(scratch.path(), 3)?;
         let last = frame_starts(&bytes, LEDGER_MAGIC.len())?[2];
         let whole = bytes.len() - last;
