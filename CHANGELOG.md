@@ -172,6 +172,30 @@ nobody made.
   refusal nobody produced, and `examples/probes/invariant_probe.rs` propagates
   the two `unwrap()`s it used to carry so the audit record demonstrates one
   claim rather than two.
+### lgwks_bot — the lexicon ranks a score it cannot order last, not as a tie (nine-axis sweep)
+
+`score_all` ranked candidates with `partial_cmp(..).unwrap_or(Ordering::Equal)`.
+
+- **An unorderable score now sorts last.** `partial_cmp` returns `None` for
+  exactly one pair of `f64` values — a NaN on either side — and the blend above
+  cannot produce one from two clamped unit scores and non-negative weights, so
+  the arm is unreachable today. `total_cmp` alone would have ranked a NaN
+  *first*, handing the win to the one candidate that measured nothing; treating
+  it as a tie left an unorderable entry in the list `decide` then computed its
+  lead over.
+- **`INPUT_BOUND_CHARS`** is the input bound at the width the policy digest
+  carries, replacing `u32::try_from(MAX_UTTERANCE_CHARS).unwrap_or(u32::MAX)` —
+  a narrowing conversion whose failure arm would have put a bound in the digest
+  that the resolver does not apply. `the_digest_input_bound_is_the_shipped_bound`
+  asserts the two spellings are one number; run as a mutant (512 → 256) it fails.
+
+### lgwks_bot — a lost publication response and a contradicted one are one match (nine-axis sweep)
+
+`review.rs` selected between `Reconcile::None` twice — once through a guard that
+proved `created_id` was `Some` and then read it through
+`created_id.unwrap_or_default()`. The two arms are now one match on the id
+itself, so the value that decides the outcome is the value the arms read.
+
 ### lgwks_bot — `retry`'s contract tests start from one fixture (nine-axis sweep)
 
 Eight of `retry`'s tests wrote out the same `RetryFacts::new(...)` preamble by

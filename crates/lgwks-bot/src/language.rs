@@ -63,6 +63,7 @@
 //! deleting a row. A learned scorer would be as adaptive and would not be
 //! auditable, and `docs/security-posture.md` rests on the run being declarable.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use lgwks_std::similarity::{EditDistance, Jaccard, Similarity};
@@ -74,6 +75,16 @@ use crate::session::{
 
 /// The longest normalized input the shipped resolver will compare.
 pub const MAX_UTTERANCE_CHARS: usize = 512;
+
+/// The same bound as [`MAX_UTTERANCE_CHARS`], in the width the policy digest
+/// carries.
+///
+/// A second spelling, because `usize` has no infallible `f64` conversion and the
+/// narrowing one leaves a failure arm that has to put *something* in the digest —
+/// and a receipt that names a bound the resolver is not using is worse than no
+/// receipt. `the_digest_input_bound_is_the_shipped_bound` asserts the two agree,
+/// so the second spelling cannot drift without a test failing.
+const INPUT_BOUND_CHARS: u32 = 512;
 
 /// The token-overlap weight inside the fuzzy tier.
 const TOKEN_WEIGHT: f64 = 0.5;
@@ -349,11 +360,19 @@ fn score_all(
     let mut scored = winning_tier(scored);
     // Stable sort by descending score. `sort_by` is stable, and the input is in
     // ascending index order, so equal scores keep lowest-index-first for free.
-    scored.sort_by(|left, right| {
-        right
-            .2
-            .partial_cmp(&left.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    //
+    // A score with no order sorts *last*. `partial_cmp` returns `None` for
+    // exactly one pair of `f64` values — a NaN on either side — and the blend
+    // above cannot produce one from two clamped unit scores and non-negative
+    // weights, so this arm is unreachable today. It is written to be correct if
+    // a future metric ever can: `total_cmp` alone would rank a NaN above every
+    // number, which hands the win to the one candidate that measured nothing,
+    // and treating it as a tie would leave an unorderable entry in the ranking
+    // that `decide` then computes its lead over.
+    scored.sort_by(|left, right| match (left.2.is_nan(), right.2.is_nan()) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => right.2.total_cmp(&left.2),
     });
     scored
 }
@@ -703,7 +722,7 @@ impl LanguageResolver {
         }
     }
 
-    /// Returns the version of the lexicon policy in force.
+    /// The version of the lexicon policy in force.
     ///
     /// Everything that can change which candidate wins is in the digest: the
     /// two tier weights, the acceptance threshold, the required lead, and the
@@ -713,11 +732,6 @@ impl LanguageResolver {
     /// remove.
     #[must_use]
     pub fn policy_version(&self) -> PolicyVersion {
-        // The input bound is a `usize`, converted with `try_from` rather than a
-        // truncating `as` because this workspace forbids the cast; the length
-        // is a compile-time 512, so the fallback is unreachable and exists only
-        // so the conversion has no panic path.
-        let input_bound = f64::from(u32::try_from(MAX_UTTERANCE_CHARS).unwrap_or(u32::MAX));
         PolicyVersion::new(
             POLICY_LABEL,
             &[
@@ -725,7 +739,7 @@ impl LanguageResolver {
                 MATCH_MARGIN,
                 TOKEN_WEIGHT,
                 DISTANCE_WEIGHT,
-                input_bound,
+                f64::from(INPUT_BOUND_CHARS),
             ],
         )
     }
@@ -748,6 +762,24 @@ impl crate::session::Resolver for LanguageResolver {
 
 #[cfg(test)]
 mod tests {
+    /// The two spellings of the input bound are one number.
+    ///
+    /// The policy digest records the bound at `u32` and the resolver bounds its
+    /// input at `usize`, and nothing in the type system ties them together. If
+    /// they ever disagree, a receipt names a bound the resolver is not using —
+    /// which is the failure a policy version exists to make visible, produced by
+    /// the very mechanism meant to make it visible.
+    #[test]
+    fn the_digest_input_bound_is_the_shipped_bound() {
+        assert_eq!(
+            usize::try_from(u64::from(INPUT_BOUND_CHARS)).ok(),
+            Some(MAX_UTTERANCE_CHARS),
+            "INPUT_BOUND_CHARS and MAX_UTTERANCE_CHARS are one bound under two \
+             spellings; if they differ, the policy digest names a bound the \
+             resolver does not apply"
+        );
+    }
+
     use super::*;
     use crate::session::Resolver;
 
