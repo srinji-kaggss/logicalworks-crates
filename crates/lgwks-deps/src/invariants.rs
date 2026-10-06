@@ -863,10 +863,17 @@ pub enum ErrorKind {
     },
     /// A required authored field is absent or blank.
     MissingField {
-        /// Invariant identifier, or `<unnamed>` when `id` is absent.
-        id: String,
+        /// Invariant identifier, absent when the block declared no `id`.
+        ///
+        /// An `Option` because a block that names no invariant has no name to
+        /// report: a placeholder would be a name no register ever wrote. The
+        /// block's line identifies it instead, as it does every other refusal in
+        /// this enum.
+        id: Option<String>,
         /// The absent field.
         field: &'static str,
+        /// One-based line where the block that lacks the field opened.
+        line: usize,
     },
     /// The review date is not shaped as `YYYY-MM-DD`.
     BadDate {
@@ -971,12 +978,20 @@ impl fmt::Display for ErrorKind {
                 formatter,
                 "line {line}: invariant key {key:?} appears before any section header"
             ),
-            Self::MissingField { ref id, field } => {
-                write!(
+            Self::MissingField {
+                ref id,
+                field,
+                line,
+            } => match id.as_deref() {
+                Some(id) => write!(
                     formatter,
-                    "invariant {id:?} is missing required field {field:?}"
-                )
-            }
+                    "line {line}: invariant {id:?} is missing required field {field:?}"
+                ),
+                None => write!(
+                    formatter,
+                    "line {line}: invariant block is missing required field {field:?}"
+                ),
+            },
             Self::BadDate {
                 ref id,
                 line,
@@ -1068,6 +1083,16 @@ impl Register {
     pub fn parse(text: &str) -> Result<Self, ErrorKind> {
         let raw = contract::parse_register(text, "[[invariant]]", &ENTRY_FIELDS)
             .map_err(map_contract_error)?;
+        // The repository-policy keys are the dependency register's; the shared
+        // line reader collects them, and this register has no meaning for them.
+        if let Some(field) = raw.policy_fields.first() {
+            let refusal = Err(ErrorKind::UnknownKey {
+                line: field.line,
+                key: field.key.to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "parse: returning an error to the caller");
+            return refusal;
+        }
         let mut entries = Vec::with_capacity(raw.entries.len());
         for raw_entry in &raw.entries {
             entries.push(build(raw_entry)?);
@@ -1086,13 +1111,20 @@ impl Register {
 /// enforcement kind and an unrelated evidence block is told about the
 /// enforcement kind.
 fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
-    let id = raw
-        .get("id")
-        .map_or_else(|| "<unnamed>".to_owned(), str::to_owned);
+    // A block that names no invariant is reported at its own line. The name is
+    // kept as an `Option` rather than a placeholder so the refusal can say which
+    // field is missing and where the block is, instead of naming an identifier
+    // no register wrote.
+    let id = raw.get("id").map(str::to_owned);
+    let id_for_error = id.clone();
     for field in REQUIRED_FIELDS {
         match raw.get(field) {
             None => {
-                let refusal = Err(ErrorKind::MissingField { id, field });
+                let refusal = Err(ErrorKind::MissingField {
+                    id: id_for_error,
+                    field,
+                    line: raw.line(),
+                });
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
                 return refusal;
             }
@@ -1100,20 +1132,47 @@ fn build(raw: &RawEntry) -> Result<Entry, ErrorKind> {
             // for `enforcement` it is a value outside the closed grammar — the
             // repair is different, so the diagnostic has to be.
             Some(value) if value.trim().is_empty() && field != ENFORCEMENT_FIELD => {
-                let refusal = Err(ErrorKind::MissingField { id, field });
+                let refusal = Err(ErrorKind::MissingField {
+                    id: id_for_error,
+                    field,
+                    line: raw.line(),
+                });
+                // Each refusal moves the borrow; the next iteration takes it
+                // again from the name the block wrote.
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
                 return refusal;
             }
             Some(_) => {}
         }
     }
+    // The loop above proved `id` is present and non-blank, so every refusal from
+    // here on can name the invariant. The arm below is the reordering guard: a
+    // block that reached it without an `id` could not have passed the loop, and
+    // reporting that is the direction a parser bug must surface in rather than
+    // the direction it must be assumed away in.
+    let Some(id) = id else {
+        let refusal = Err(ErrorKind::MissingField {
+            id: None,
+            field: "id",
+            line: raw.line(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), line = raw.line(), "build: a block passed the required-field loop without an id");
+        return refusal;
+    };
     let approved_on = raw
         .get("approved_on")
         .map_or_else(String::new, str::to_owned);
     if !contract::is_iso_date(&approved_on) {
+        // The required-field loop proved `approved_on` is present, so this is
+        // its own line; the block's line is where the repair is if the loop is
+        // ever reordered to let a blank value through.
+        let line = match raw.field_line("approved_on") {
+            Some(line) => line,
+            None => raw.line(),
+        };
         let refusal = Err(ErrorKind::BadDate {
             id,
-            line: raw.field_line("approved_on").unwrap_or(raw.line()),
+            line,
             value: approved_on,
         });
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
@@ -1274,9 +1333,17 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
         contract::ContractError::Malformed { line, text } => ErrorKind::Malformed { line, text },
         contract::ContractError::UnknownKey { line, key } => ErrorKind::UnknownKey { line, key },
         contract::ContractError::OrphanKey { line, key } => ErrorKind::OrphanKey { line, key },
-        contract::ContractError::MissingField { krate, field } => {
-            ErrorKind::MissingField { id: krate, field }
-        }
+        // A register block that named no crate keeps its own line: the
+        // invariant register reports the dependency register's refusal, and a
+        // nameless block is identified by where it is rather than by a name it
+        // never wrote.
+        contract::ContractError::MissingField { krate, field, line } => ErrorKind::Malformed {
+            line,
+            text: match krate {
+                Some(krate) => format!("{krate:?} is missing required field {field:?}"),
+                None => format!("approval block is missing required field {field:?}"),
+            },
+        },
         contract::ContractError::BadTier { line, value } => ErrorKind::Malformed {
             line,
             text: format!("tier = {value:?}"),
@@ -1324,6 +1391,12 @@ fn map_contract_error(error: contract::ContractError) -> ErrorKind {
         error @ (contract::ContractError::UnsupportedSchema { line, .. }
         | contract::ContractError::AliasCollision { line, .. }) => ErrorKind::Malformed {
             line,
+            text: error.to_string(),
+        },
+        // Only `Contract::parse` decodes the repository-policy keys, and this
+        // register refuses them before that point; mapped for the same reason.
+        error @ contract::ContractError::IncompletePolicy { .. } => ErrorKind::Malformed {
+            line: 0,
             text: error.to_string(),
         },
     }
@@ -1428,7 +1501,14 @@ fn collect_lints(text: &str, out: &mut Vec<DeclaredLint>) {
 
 /// Maps a table header onto the lint namespace it declares.
 fn lint_table(header: &str) -> Option<LintNamespace> {
-    let rest = header.strip_prefix("workspace.").unwrap_or(header);
+    // `[workspace.lints.clippy]` and `[lints.clippy]` declare one namespace, the
+    // second inherited by every member: reading the table name off either
+    // spelling is the equivalence, and both arms are written because a manifest
+    // may use either.
+    let rest = match header.strip_prefix("workspace.") {
+        Some(rest) => rest,
+        None => header,
+    };
     LintNamespace::parse_table(rest.strip_prefix("lints.")?)
 }
 
@@ -1450,7 +1530,12 @@ fn lint_level(value: &str) -> String {
         return String::new();
     };
     let tail = tail.trim();
-    let end = tail.find([',', '}']).unwrap_or(tail.len());
+    // The level ends at the first delimiter, or runs to the end of the tail when
+    // the writer closed the table on the same line: both are values Cargo wrote.
+    let end = match tail.find([',', '}']) {
+        Some(at) => at,
+        None => tail.len(),
+    };
     tail[..end].trim().trim_matches('"').to_owned()
 }
 
@@ -1526,8 +1611,12 @@ pub fn audit(register: &Register, root: &Path, members: &[crate::metadata::Membe
 /// Refuses a scope that is not a workspace package, or names a module no `mod`
 /// item in that package reaches.
 fn check_scope(entry: &Entry, members: &[crate::metadata::Member], refusals: &mut Vec<Refusal>) {
-    let mut segments = entry.scope.split("::");
-    let crate_name = segments.next().unwrap_or(entry.scope.as_str());
+    // `split_once` states both shapes: a scope with no `::` is a crate name and
+    // carries no module path, and one with `::` names the crate before it.
+    let (crate_name, modules) = match entry.scope.split_once("::") {
+        Some((crate_name, modules)) => (crate_name, modules),
+        None => (entry.scope.as_str(), ""),
+    };
     let Some(member) = members
         .iter()
         .find(|member| normalise(&member.name) == normalise(crate_name))
@@ -1539,7 +1628,10 @@ fn check_scope(entry: &Entry, members: &[crate::metadata::Member], refusals: &mu
         });
         return;
     };
-    let modules: Vec<&str> = segments.filter(|segment| !segment.is_empty()).collect();
+    let modules: Vec<&str> = modules
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .collect();
     if modules.is_empty() {
         return;
     }
@@ -1712,9 +1804,15 @@ fn strip_item_prefix(line: &str) -> &str {
             rest = after;
             continue;
         }
-        if let Some((after, width)) = skip_keyword(rest, "extern") {
-            rest = skip_literal(after).unwrap_or(after).trim_start();
-            let _ = width;
+        if let Some((after, _width)) = skip_keyword(rest, "extern") {
+            // `extern "C" fn f()` names an ABI and `extern fn f()` does not; both
+            // are steppable, and an ABI this scanner cannot read is stepped past
+            // as one word rather than left in the prefix.
+            rest = match skip_literal(after) {
+                Some(after_literal) => after_literal,
+                None => after,
+            }
+            .trim_start();
             continue;
         }
         let mut advanced = false;
@@ -1810,6 +1908,10 @@ fn attribute_group(line: &str) -> Option<String> {
     split_attribute(line).map(|(inner, _)| inner.trim().to_owned())
 }
 
+/// The character that closes an attribute group. One byte, so the byte after the
+/// `]` `split_attribute` finds is the start of the text that follows it.
+const CLOSE_BRACKET: char = ']';
+
 /// Splits a leading `#[...]` attribute group off `line`.
 ///
 /// Returns the group's body and the text after the closing bracket, so a caller
@@ -1824,9 +1926,11 @@ fn split_attribute(line: &str) -> Option<(&str, &str)> {
             ']' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    let inner = body.get(..offset).unwrap_or("");
-                    let rest = body.get(offset.saturating_add(1)..).unwrap_or("");
-                    return Some((inner, rest));
+                    // `char_indices` yields only boundary offsets and `]` is one
+                    // byte, so both cuts are on a boundary by construction: the
+                    // split is total and needs no substituted empty slice.
+                    let (inner, after) = body.split_at(offset);
+                    return Some((inner, &after[CLOSE_BRACKET.len_utf8()..]));
                 }
             }
             _ => {}

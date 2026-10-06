@@ -100,24 +100,24 @@ fn check_even_length(len: usize) -> Result<(), DecodeError> {
     }
 }
 
-/// Decodes one two-character hex pair into the byte it represents.
+/// Decodes the two characters of one hex pair into the byte they represent.
 ///
-/// # Panics
-///
-/// Panics if `pair` has fewer than two bytes. Every caller passes a
-/// `chunks(2)` slice of an even-length input, so both elements exist.
+/// The two characters are arguments rather than a slice because a caller
+/// iterating `as_chunks::<2>()` holds a `[u8; 2]` it can destructure; naming
+/// them keeps the missing-character case unexpressible instead of an index that
+/// would have to be defended.
 ///
 /// Returns [`DecodeError::NotHexDigit`] naming the first of the two characters
 /// that is not a hex digit; the offset is absolute, not pair-relative, so a
 /// caller can point at the offending character in the original input.
-fn decode_pair(pair: &[u8], offset: usize) -> Result<u8, DecodeError> {
-    let hi = decode_nibble(pair[0]).ok_or(DecodeError::NotHexDigit {
+fn decode_pair(high: u8, low: u8, offset: usize) -> Result<u8, DecodeError> {
+    let hi = decode_nibble(high).ok_or(DecodeError::NotHexDigit {
         at: offset,
-        byte: pair[0],
+        byte: high,
     })?;
-    let lo = decode_nibble(pair[1]).ok_or(DecodeError::NotHexDigit {
+    let lo = decode_nibble(low).ok_or(DecodeError::NotHexDigit {
         at: offset.saturating_add(1),
-        byte: pair[1],
+        byte: low,
     })?;
     Ok((hi << 4) | lo)
 }
@@ -127,15 +127,15 @@ fn decode_pair(pair: &[u8], offset: usize) -> Result<u8, DecodeError> {
 pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
     let input = input.as_ref();
     check_even_length(input.len())?;
-    // `check_even_length` proved the length even, so the halving is exact.
-    // `checked_div` is used only because this crate forbids the `/` operator on
-    // integers; the `None` arm (a zero divisor) is unreachable for a constant 2.
-    let pair_count = input.len().checked_div(2).unwrap_or(0);
+    // `check_even_length` proved the length is even, so the ceiling division is
+    // exact: for an even length it is the halving, and this crate forbids the
+    // `/` operator on integers.
+    let pair_count = input.len().div_ceil(2);
     let mut out = Vec::with_capacity(pair_count);
     let (pairs, _) = input.as_chunks::<2>();
-    for (pair_index, pair) in pairs.iter().enumerate() {
+    for (pair_index, &[high, low]) in pairs.iter().enumerate() {
         let offset = pair_index.saturating_mul(2);
-        out.push(decode_pair(pair, offset)?);
+        out.push(decode_pair(high, low, offset)?);
     }
     Ok(out)
 }
@@ -156,7 +156,8 @@ pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
 pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), DecodeError> {
     let input = input.as_ref();
     check_even_length(input.len())?;
-    let expected = input.len().checked_div(2).unwrap_or(0);
+    // As in `decode`: the even length makes the ceiling division exact.
+    let expected = input.len().div_ceil(2);
     if output.len() != expected {
         let refusal = Err(DecodeError::OutputLength {
             expected,
@@ -167,13 +168,20 @@ pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), Dec
         return refusal;
     }
     let (pairs, _) = input.as_chunks::<2>();
-    for (pair_index, pair) in pairs.iter().enumerate() {
+    // Two passes over the pairs, not one: the first refuses a bad digit while
+    // the destination is still untouched, which is the property this entry
+    // point exists for, and only the second writes. The cost is a second pass
+    // of nibble arithmetic over digits already proved valid; the alternative,
+    // a rollback copy of the destination, would cost an allocation per call
+    // and would still have to restore on every refusal.
+    for (pair_index, &[high, low]) in pairs.iter().enumerate() {
         let offset = pair_index.saturating_mul(2);
-        decode_pair(pair, offset)?;
+        decode_pair(high, low, offset)?;
     }
-    for (pair_index, (pair, destination)) in pairs.iter().zip(output.iter_mut()).enumerate() {
+    for (pair_index, (&[high, low], destination)) in pairs.iter().zip(output.iter_mut()).enumerate()
+    {
         let offset = pair_index.saturating_mul(2);
-        *destination = decode_pair(pair, offset)?;
+        *destination = decode_pair(high, low, offset)?;
     }
     Ok(())
 }

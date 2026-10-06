@@ -65,6 +65,8 @@ use std::fmt;
 
 use lgwks_std::hash::{Digest, Hasher};
 
+use crate::journal::frame::SaturatingFrom;
+
 /// What part of a replay's identity does not match the recorded one.
 ///
 /// One typed arm per axis, because each names a different repair: a changed
@@ -258,7 +260,7 @@ impl DefinitionIdentity {
         hasher.write_framed(self.name.as_bytes());
         hasher.write_framed(&self.revision.to_le_bytes());
         hasher.write_framed(self.input.as_bytes());
-        hasher.write_framed(&u64::try_from(self.steps).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.write_framed(&u64::saturating_from(self.steps).to_le_bytes());
         hasher.write_framed(self.codec.as_bytes());
         hasher.finalize()
     }

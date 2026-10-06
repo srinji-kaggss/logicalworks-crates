@@ -29,6 +29,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 // The band-declaration macro, defined once for the whole layer.
@@ -58,7 +60,7 @@ use request::{
     host_with_deadline, hosts_over, overrunning_task, parking_task, stop_mid_run, stored_host,
     two_step_task,
 };
-use shared::{Scratch, Summary, peak_rss_mib};
+use shared::{Summary, peak_rss_mib};
 
 use sim::Band;
 
@@ -177,7 +179,7 @@ fn collision_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let scratch = Scratch::new("sim-req")?;
     // One store handle, cloned into both tenants: two handles over one file
     // would be two writers, which the store's own length fence refuses.
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     let counter = Rc::new(Cell::new(0));
     let work = counting_task(Rc::clone(&counter))?;
 
@@ -193,7 +195,9 @@ fn collision_scenario(sim_run: &mut sim::Sim) -> TestResult {
         u32::try_from(TENANTS.len())?.saturating_mul(keys),
         "only the first submission of each key ran the body"
     );
-    sim_run.trace.record_u64("bodies", u64::from(counter.get()));
+    sim_run
+        .trace
+        .record_number("bodies", u64::from(counter.get()));
     Ok(())
 }
 
@@ -220,7 +224,7 @@ fn drop_scenario(sim_run: &mut sim::Sim) -> TestResult {
                 .record(&format!("inflight {}", in_flight.run().id().to_hex()));
             sim_run
                 .trace
-                .record_u64("records", u64::try_from(in_flight.records()).unwrap_or(0));
+                .record_number("records", u64::try_from(in_flight.records())?);
         }
         other => {
             let refusal = Err(format!("expected an in-flight report, got {other:?}").into());
@@ -235,7 +239,7 @@ fn drop_scenario(sim_run: &mut sim::Sim) -> TestResult {
 fn tier_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let requested = sim_run.rng().between(8, MAX_TIER);
     let scratch = Scratch::new("sim-req-tier")?;
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     let counter = Rc::new(Cell::new(0));
     let work = counting_task(Rc::clone(&counter))?;
     let hosts = hosts_over(&TENANTS, &store)?;
@@ -271,13 +275,13 @@ fn tier_scenario(sim_run: &mut sim::Sim) -> TestResult {
     // nobody ran (INV-BOT-16).
     sim_run
         .trace
-        .record_u64("tier-requested", u64::from(requested));
+        .record_number("tier-requested", u64::from(requested));
     sim_run
         .trace
-        .record_u64("tier-reached", u64::from(requested));
+        .record_number("tier-reached", u64::from(requested));
     sim_run
         .trace
-        .record_u64("tier-ceiling", DECLARED_TIER_CEILING);
+        .record_number("tier-ceiling", DECLARED_TIER_CEILING);
     Ok(())
 }
 
@@ -401,7 +405,7 @@ fn stop_request(
         Submission::InFlight(ref in_flight) => {
             sim_run
                 .trace
-                .record_u64("in-flight-records", u64::try_from(in_flight.records())?);
+                .record_number("in-flight-records", u64::try_from(in_flight.records())?);
             None
         }
         Submission::Executed(ref report) => Some(report.disposition()),
@@ -456,7 +460,9 @@ fn stop_request(
         "the first durable step's effect ran once across the stop, the settle and the reattach"
     );
     *reaches_terminal = reaches_terminal.saturating_add(1);
-    sim_run.trace.record_u64("effects", u64::from(runs.count()));
+    sim_run
+        .trace
+        .record_number("effects", u64::from(runs.count()));
     Ok(())
 }
 
@@ -481,7 +487,7 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
     let scratch = Scratch::new("sim-req-stop")?;
     // One store handle, cloned into both tenants: two handles over one file
     // would be two writers, which the store's own length fence refuses.
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     // How many requests reached a recorded terminal, so the trace can show the
     // sweep was not vacuous at a tier that drew no requests.
     let mut reaches_terminal = 0_u32;
@@ -489,10 +495,10 @@ fn stop_scenario(sim_run: &mut sim::Sim) -> TestResult {
     for index in 0..requests {
         stop_request(sim_run, &store, index, &mut reaches_terminal)?;
     }
-    sim_run.trace.record_u64("requests", u64::from(requests));
+    sim_run.trace.record_number("requests", u64::from(requests));
     sim_run
         .trace
-        .record_u64("settled", u64::from(reaches_terminal));
+        .record_number("settled", u64::from(reaches_terminal));
     Ok(())
 }
 
@@ -565,7 +571,9 @@ fn deadline_request(
         "a body waiting on something that never arrives outruns its declared budget \
          ({millis}ms for {tenant}/{index}); got {disposition}"
     );
-    sim_run.trace.record_u64("budget-millis", u64::from(millis));
+    sim_run
+        .trace
+        .record_number("budget-millis", u64::from(millis));
     sim_run.trace.record(&format!("overran {disposition}"));
 
     // A fresh host over the same store file — a new *host*, which is what a
@@ -647,11 +655,13 @@ fn deadline_scenario(sim_run: &mut sim::Sim) -> TestResult {
         reached_terminal, requests,
         "every drawn request recorded its deadline, so none is left in flight forever"
     );
-    sim_run.trace.record_u64("requests", u64::from(requests));
+    sim_run.trace.record_number("requests", u64::from(requests));
     sim_run
         .trace
-        .record_u64("recorded", u64::from(reached_terminal));
-    sim_run.trace.record_u64("effects", u64::from(runs.count()));
+        .record_number("recorded", u64::from(reached_terminal));
+    sim_run
+        .trace
+        .record_number("effects", u64::from(runs.count()));
     Ok(())
 }
 
@@ -811,8 +821,8 @@ fn settle_refusal_scenario(sim_run: &mut sim::Sim) -> TestResult {
     );
     sim_run
         .trace
-        .record_u64("settle-refused", u64::from(refused));
-    sim_run.trace.record_u64("requests", u64::from(requests));
+        .record_number("settle-refused", u64::from(refused));
+    sim_run.trace.record_number("requests", u64::from(requests));
     Ok(())
 }
 
@@ -830,7 +840,7 @@ const MAX_SETTLE_REQUESTS: u32 = 2;
 ///
 /// Whatever opening the store reports.
 fn reopen(scratch: &Scratch) -> Result<RunStore, Box<dyn Error>> {
-    RunStore::open(scratch.join("shared.runstore")).map_err(Into::into)
+    RunStore::open(scratch.path().join("shared.runstore")).map_err(Into::into)
 }
 
 /// One seeded settlement sweep, over the seeds this test's band declares.
@@ -1062,7 +1072,7 @@ fn concurrent_submissions_across_tiers() -> TestResult {
 /// One tier: `tier` distinct keys, two tenants interleaved, over one store.
 fn measure_tier(tier: usize) -> TestResult {
     let scratch = Scratch::new("req-scale")?;
-    let store = RunStore::open(scratch.join("shared.runstore"))?;
+    let store = RunStore::open(scratch.path().join("shared.runstore"))?;
     let counter = Rc::new(Cell::new(0));
     let work = counting_task(Rc::clone(&counter))?;
     let hosts = hosts_over(&TENANTS, &store)?;
@@ -1071,14 +1081,11 @@ fn measure_tier(tier: usize) -> TestResult {
     let mut samples: Vec<u128> = Vec::with_capacity(tier);
     let mut runs: Vec<String> = Vec::with_capacity(tier);
     let mut parity = false;
-    for index in 0..tier {
+    let submissions = u32::try_from(tier)?;
+    for index in 0..submissions {
         let (host, key) = alternating_target(&hosts, parity, &format!("scale-{index}"))?;
         let at = Instant::now();
-        let submission = lgwks_bot::block_on(host.submit(
-            &key,
-            &work,
-            u32::try_from(index).unwrap_or(u32::MAX),
-        ))?;
+        let submission = lgwks_bot::block_on(host.submit(&key, &work, index))?;
         samples.push(at.elapsed().as_micros());
         let run = submission.run_id().ok_or("a submission names a run")?;
         runs.push(run.id().to_hex());
@@ -1093,11 +1100,11 @@ fn measure_tier(tier: usize) -> TestResult {
     );
     assert_eq!(
         counter.get(),
-        u32::try_from(tier)?,
+        submissions,
         "every key at tier {tier} ran its body once"
     );
 
-    let summary = Summary::of(&mut samples);
+    let summary = Summary::of(&mut samples).ok_or("the tier measured no samples")?;
     let rss = peak_rss_mib();
     let mut line = std::io::stdout().lock();
     let _written = writeln!(

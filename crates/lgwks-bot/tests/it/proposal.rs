@@ -336,23 +336,11 @@ fn a_refusal_is_attributable_to_its_exact_bytes() -> TestResult {
 #[cfg(feature = "ephemeral")]
 #[test]
 fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() -> TestResult {
-    // Random bytes name the directory, never the process id: the OS reuses a pid,
-    // so two runs in two processes would share a scratch directory and one would
-    // delete the other's store mid-run. `lgwks_std::random` is the estate's one
-    // distinguishable source. The randomness names the *directory* and never
-    // enters an assertion, so the test's observations are unchanged.
-    let unique = lgwks_std::random::bytes::<8>()?;
-    let suffix = unique
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let scratch = std::env::temp_dir().join(format!("lgwks-proposal-t27-{suffix}"));
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch)?;
-    }
-    std::fs::create_dir_all(&scratch)?;
+    // The one scratch directory the durable families share: named by random
+    // bytes rather than a reused pid, and removed when the guard drops.
+    let scratch = crate::scratch::Scratch::new("proposal-t27-reset")?;
 
-    let report = drive(first_instance(&scratch))?;
+    let report = drive(first_instance(scratch.path()))?;
     assert_eq!(
         report.disposition(),
         lgwks_bot::task::Disposition::Succeeded,
@@ -365,7 +353,7 @@ fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() 
 
     // The reset: a fresh Host, a fresh task, the same run id. Nothing of the
     // first instance survives except what the run store kept.
-    let host = Host::builder(TENANT)?.run_store(&scratch)?.build()?;
+    let host = Host::builder(TENANT)?.run_store(scratch.path())?.build()?;
     let work = checkpoint_task()?;
     let resumed = drive(host.resume(run, &work, ()));
     assert_eq!(
@@ -424,7 +412,6 @@ fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() 
     // first instance wrote is gone with it, which is why the evidence references
     // are the durable part.
     drop(host);
-    drop(std::fs::remove_dir_all(&scratch));
     Ok(())
 }
 
@@ -1550,11 +1537,11 @@ fn a_plan_budget_bounds_repair_across_runs() -> TestResult {
 #[cfg(feature = "ephemeral")]
 #[test]
 fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
-    let scratch = support::scratch("t27-admit")?;
+    let scratch = crate::scratch::Scratch::new("proposal-t27-admit")?;
     let payload = installs();
 
     // First instance: a host with a store, a real run, a real refusal.
-    let first = Host::builder(TENANT)?.run_store(&scratch)?.build()?;
+    let first = Host::builder(TENANT)?.run_store(scratch.path())?.build()?;
     let work = support::admitting_task()?;
     let gate = support::gate(TENANT)?;
     let report = drive(first.run(&work, (gate, payload.clone())));
@@ -1581,7 +1568,7 @@ fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
 
     // Second instance: a fresh `Host`, a fresh gate, the *same* run id. Nothing of
     // the first instance survives except what the run store kept.
-    let second = Host::builder(TENANT)?.run_store(&scratch)?.build()?;
+    let second = Host::builder(TENANT)?.run_store(scratch.path())?.build()?;
     let resumed = drive(second.resume(run, &work, (support::gate(TENANT)?, well_formed())));
     assert_eq!(
         resumed.disposition(),
@@ -1594,7 +1581,8 @@ fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
     // public read door. This is the T27 observation: the new instance can say what
     // the first one refused, and for which bytes.
     drop(second);
-    let reopened = lgwks_bot::task::RunStore::open(scratch.join(format!("{TENANT}.runstore")))?;
+    let reopened =
+        lgwks_bot::task::RunStore::open(scratch.path().join(format!("{TENANT}.runstore")))?;
     let recorded = read_one_refusal(&reopened, TENANT, run)?;
     assert_eq!(
         recorded.arm(),
@@ -1613,8 +1601,6 @@ fn a_resumed_run_reads_back_the_refusal_the_first_run_recorded() -> TestResult {
         Source::Model.label(),
         "and the untrusted producer they came from"
     );
-
-    drop(std::fs::remove_dir_all(&scratch));
     Ok(())
 }
 

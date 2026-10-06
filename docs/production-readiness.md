@@ -27,14 +27,14 @@ numbers.
 eight invariants. Every repair landed by 2026-09-22 (#99 as #110, #107 as #117,
 #108 as #116, and the five ladder rows), and #109 was closed on 2026-09-23 by
 commit `7d9ad29f` (#142). That commit ran **five of the eight external
-observations** in `tests/durable_crash_observation.rs`: the journal-ladder rows
+observations** in `tests/it/durable_crash_observation.rs`: the journal-ladder rows
 (#100, #101, #102, #104, #106) were driven against a real file-backed journal,
 killed mid-ladder with a real `SIGKILL`, restarted, and the recovered answer
 asserted against the one the design names. The other three closed on their
 repair and its in-process regression tests, not on an external observation:
 #99 (the ECS poll path) has no real-store run and #108 (`locator_eligibility`)
 has no real frame. Of #107's rows, T21 is now observed by
-`tests/process_escape.rs`, which drives a real descendant that calls `setsid`
+`tests/it/process_escape.rs`, which drives a real descendant that calls `setsid`
 out of the group and asserts the receipt does not claim the tree was cleaned
 (INV-BOT-112) — an honest report of a containment gap, open as
 [#263](https://github.com/srinji-kaggss/logicalworks-crates/issues/263) — and
@@ -73,9 +73,27 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   be one commit in the history of `HEAD` and the enforcer must be unchanged since,
   or the entry is refused; where Git cannot answer, it is refused. Five scratch-repo
   tests in `lgwks_deps::invariants`.
-- **Acceptance rows T07, T10, T28 and T36** each gained the test the spec text asks
-  for. By the coverage map taken earlier in this work, that moves four rows from
-  partial to covered; eight stay partial.
+- **All 36 acceptance rows now name the tests that address them**, in
+  `docs/acceptance/t-rows.toml`, and `scripts/acceptance-receipts.py` ran exactly
+  those tests against the checked-out head into a SQLite database under the
+  state directory (`$XDG_STATE_HOME/lgwks-acceptance/receipts.sqlite`, or
+  `~/.local/state/...`), one row per revision, row, test, platform and feature
+  set, so a re-run is idempotent and two revisions coexist.
+  The run at `740d3c68` passed 215 of 215 named tests in 44.4s: 30 rows observed
+  `exercised`, and six still `present` with the gap written down rather than
+  rounded up — T10, T11, T14, T17, T21 and T31. Fifteen of the named tests are
+  row-addressed, so `cargo nextest list --workspace -E 'test(/_t07$/)'` answers
+  which tests address a row without reading the map. The receipt can lower a
+  row's claim and never raise one, and `scripts/acceptance-receipts.py --check`
+  fails when the spec's generated table disagrees with the map and the receipt
+  for one exact revision. In CI that receipt is built from the JUnit reports the
+  four lgwks-bot shards already wrote, by a job that needs no Rust toolchain and
+  no build and takes about 0.2 s, so the named tests execute once per run rather
+  than twice. A row reads `accepted` only when that revision is the
+  head being rendered. No row is `accepted`; the externally bounded subprocess
+  and per-backend OS campaign has not run. `--check` reads the local database, so
+  it is a local gate rather than a CI step: a CI checkout has no receipt for its
+  own head until the run records one.
 - **The authoring contract (#87, §7 item 6) was measured four ways**, not argued:
   160 fixed-model trials across the old surface, the facade, the facade plus
   `FanOut`, and the `futures` crate. See `bench/ai-authoring/README.md`. The finding
@@ -92,10 +110,19 @@ unchanged. The next regression is still where `INVARIANTS.md` says it is.
   concurrency**: sixteen threads, two grant sets, 256 rounds, and the proof-cover
   checks in both directions.
 
-What did not move: hyperscale (§4.2) is still not measured at any level, CI is
-still over five minutes, process containment is still Unix-only, the seeded sweeps
-still have no shrinking, and `process_escape`'s intermittent failure is still
-unexplained. The verdict above is unchanged.
+- **Hyperscale moved off ❌** (#269). An open-loop saturation curve at six
+  in-flight bounds from 64 to 131,072 with the knee declared on both the facade
+  and a raw Tokio baseline; 1,048,576 tasks concurrently admitted with peak RSS
+  per in-flight task reported; a 30-second overload at twice the knee that
+  recovered with nothing lost; and the facade's per-task allocations cut from
+  15.33 to 3.61 against the issue's ≤ 6 target. §4.2 is ⚠️, not ✅: the
+  1–2 vCPU / 1–2 GB VPS profile the estate asks for is **not measured** and
+  cannot be on this host, and the async path's per-task overhead is still
+  1.4x–4.5x raw Tokio on a short body.
+
+What did not move: CI is still over five minutes, process containment is still
+Unix-only, the seeded sweeps still have no shrinking, and `process_escape`'s
+intermittent failure is still unexplained. The verdict above is unchanged.
 
 **Update, 2026-10-05.** The hold the journal module documentation named, an
 acknowledged final frame whose length field was changed being truncated on open,
@@ -214,20 +241,100 @@ position, and no one has looked for one since the survey ran.
 
 ### 4.2 Hyperscale — more than a million concurrent, correct
 
-**❌ — measured closed-loop at one bound; no saturation curve.**
+**⚠️ — measured at a million concurrent and through a saturation curve on this
+host; the estate's VPS profile is still not measured, and the async path's
+per-task overhead against raw Tokio is still 1.4x–4.5x on short bodies.**
 
-What exists: `bench/async --tiers` drives `Supervisor` and pinned raw Tokio
-through 100, 1,000, 10,000 and 100,000 tasks, all at an in-flight bound of 64,
-with p50/p95/p99 per tier (100,000 tasks: facade p50 0.232 s against raw 0.134 s;
-peak RSS 3.6 MB for the ladder), and `tests/it/task_million.rs`
-(`LGWKS_MILLION=1`) holds 1,048,576 admitted `Host::run` executions suspended at
-once across sixteen tenant hosts (peak RSS 6.45 GB). What does not: nothing
-above 64 in flight, no open-loop driver (so coordinated omission is not
-excluded), no burst, no queue-depth series, and no knee.
+Every number is from `bench/async`, is this host, this toolchain and this run,
+and is read with its condition beside it. Host: **Apple M5 Pro, 15 cores, 24 GB,
+macOS 27.0, rustc 1.99.0.** That host is **shared** and its one-minute load
+average ran from 2 to 97 across the work, so the rig now reads and prints the
+load with every run: a scenario table taken with three other builds running on
+it reported the *baseline* at 1.08 ms where an idle host reported 0.35 ms, a 3x
+shift in the control leg of a paired comparison. Each table below carries its
+load, and the paired facade-versus-baseline columns are not contaminated by it
+because both sides of a point see the same load.
 
-*To close it:* a stated concurrency target, then a saturation curve with the
-declared bound where it starts dropping work. Until that exists, "runs for
-weeks" is a design intent and not a measurement.
+**The knee, at six in-flight bounds** (backpressure door, load 79.13, 6:48.56
+wall, peak RSS 250,953,728 bytes). Offered rate against a derived per-bound body
+cost so every ceiling's declared capacity is 20,000 arrivals/s; knee read against
+`max(50 ms, one further service time)`:
+
+| bound | facade knee offered/s | achieved/s | p99 at knee | baseline knee | baseline achieved/s |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 5,000 | 4,987 | 6.5 ms | 5,000 | 4,979 |
+| 1,024 | 5,000 | 4,763 | 59.7 ms | 5,000 | 4,754 |
+| 10,000 | 20,000 | 13,340 | 504.9 ms | 20,000 | 13,329 |
+| 16,384 | 20,000 | 10,968 | 831.5 ms | 20,000 | 11,009 |
+| 100,000 | 80,000 | 13,331 | 5,008.0 ms | 80,000 | 13,339 |
+| 131,072 | 80,000 | 10,589 | 6,551.5 ms | 80,000 | 10,593 |
+
+**The facade and the raw baseline declare the same knee at every bound**, to
+within 0.5% on achieved rate at five of the six. At a service time of 3.2 ms or
+more the ceiling is the binding constraint, not the accounting.
+
+**Past the knee it refuses, and it refuses at exactly the declared bound.**
+`try_spawn` at 320,000 arrivals/s: bound 16,384 admitted **exactly 16,384**,
+bound 100,000 admitted **exactly 100,000**, bound 131,072 admitted **exactly
+131,072**, both sides, to the same number; 59% of arrivals refused and counted in
+`Stats::refused`; peak RSS unchanged at the bound's worth of state; the p99 of
+what *was* admitted still one service time.
+
+**A million concurrent, reached.** 1,048,576 tasks **concurrently admitted** —
+the tier is the bound and every body parks until the whole tier is admitted, so
+the peak is observed rather than inferred — all completed, on both sides:
+
+| tier | facade peak RSS | facade RSS per in-flight task | baseline RSS/task | facade p50 | baseline p50 |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 27,115,520 B | 2,712 B | 3,267 B | 16.3 ms | 12.2 ms |
+| 100,000 | 210,501,632 B | 2,105 B | 2,672 B | 100.8 ms | 72.0 ms |
+| 1,048,576 | 2,137,751,552 B | **2,039 B** | 2,595 B | 1,007.7 ms | 726.7 ms |
+
+**Peak RSS per in-flight task at the million tier: 2,039 bytes**, against the raw
+baseline's 2,595 — memory favours the facade, by 21%. Admission latency does not:
+1.39x the baseline's at both wide tiers.
+
+**Overload and recovery** (load 19.88): a 30-second overload at twice the knee
+built a 229,554-arrival queue and took the served p99 from 6.7 ms to 11.4 s, with
+**nothing refused and nothing lost** — offered = admitted = completed on both
+sides, checked by the rig's conservation gate. The facade drained in 0.023 ms
+against the baseline's 4.801 ms; both sides' served p99 was back inside its own
+baseline at the first recovery window, 500.7 ms and 505.1 ms after the overload
+stopped. The recovery figure is a **bound at one 500 ms window's resolution**, not
+a point estimate.
+
+**Allocations, per supervised task**, 1,024 tasks at bound 8, one harness:
+**15.33 before, 3.61 after**, against a raw baseline's 2.02 — the issue's ≤ 6
+target met, by cutting an eagerly-built `watch` channel per cancellation token
+and a 100 ms timer armed on every uncontended spawn. The remaining 3.61 is
+itemised in `bench/async/README.md` with the guarantee each allocation pays for.
+
+**The latency target was not met, and that is the finding.** The issue asks for
+≤ 2x the baseline at p99 on every scenario; `quiet-async-bot` is **4.49x**. The
+same 76% cut in allocations moved the paired ratios not at all — the remaining
+gap is work (the per-spawn reap, the identity map, the `TaskOutcome` the wrapper
+builds), not allocation, and closing it is a different change.
+
+*Not covered, and named:*
+
+- **The 1–2 vCPU / 1–2 GB VPS profile is NOT measured.** macOS exposes no
+  cgroup, no `taskset`, no `taskpolicy` CPU set and no `cpulimit` — all four
+  checked on the reference host, all four absent — so no run here can be
+  presented as that profile's. The closest runnable thing, `--workers=2`,
+  produced **identical knees at every bound**, because every body in the sweep is
+  a timer: a thread count is not a vCPU count, and this workload would not
+  separate them. A CPU-bound profile needs a CPU-bound body and a machine whose
+  cores are 1–2, and neither exists here.
+- The synchronous rig still reports only `ns/tick` for a schedule of up to 256
+  sources, and `Bot::tick` beyond 256 sources is still unmeasured.
+- The per-task overhead against raw Tokio is still 1.4x–4.5x on a ~1 µs body,
+  with the 4.49x worst case named above rather than averaged away.
+- Every figure is one host. Nothing here is a cross-platform claim.
+
+*To close the axis:* the VPS profile on a real 1–2 vCPU box with a CPU-bound
+body, and the per-task overhead reduced on the short-body path. "Runs for weeks"
+is now a measured knee and a measured recovery rather than a design intent, and
+it is still not a measured week.
 
 ### 4.3 Idiomatic — ownership, errors, lifetimes sound
 
@@ -355,7 +462,7 @@ Now five of them have been proved on one that does not. `FileJournal`
 written and `sync_all`-ed before the acknowledgment is minted, whose stored
 chain heads make a tampered frame a refusal rather than a trim, and whose torn
 tail — an append a killed writer never finished — is truncated on open
-because it was never acknowledged. `tests/durable_crash_observation.rs` runs
+because it was never acknowledged. `tests/it/durable_crash_observation.rs` runs
 the register's observations against it:
 
 - **#106**: a child process walked a key to `OutcomeObserved(Applied)`, was
@@ -453,29 +560,66 @@ service can run indefinitely on a single store".
 
 ### 4.7 Portable — same semantics on all declared targets
 
-**⚠️ — three operating systems are built in CI; one of them runs the tests that
-carry the containment claim.**
+**⚠️ — one operating system is executed, and eight targets are built. A build
+receipt is not an execution receipt, and this section says which is which.**
 
-Twenty-one hosted job definitions in `.github/workflows/ci.yml` at `977c79d4`.
-Their `runs-on` distribution is **17 `ubuntu-latest`, 2 `macos-14`
-(`gpui-macos`, `candle-macos`), 1 `windows-latest` (`gpui-windows`), 1
-`matrix.os`**, and that single `matrix.os` job is `appcui-native` — so "three
-operating systems" is true of those storefront features and not of the estate. The `lgwks_std` /
+Twenty-two hosted job definitions in `.github/workflows/ci.yml`, the
+twenty-one at `977c79d4` plus #276's `target-matrix`. Their `runs-on`
+distribution is **18 `ubuntu-latest`, 2 `macos-14` (`gpui-macos`,
+`candle-macos`), 1 `windows-latest` (`gpui-windows`), 1 `matrix.os`**, and that
+single `matrix.os` job is `appcui-native` — so "three operating systems" is
+true of those storefront features and not of the estate. The `lgwks_std` /
 `lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only. A
 `wasm32-wasip1` boundary lane checks that the default feature set compiles for
 WASI — a build check, not an executed containment test. `os.uname` and other
 host-only calls are behind `platform` dispatch.
+
+**The executed target matrix (#276).** `scripts/check-target-matrix.sh` is a
+required lane that runs `cargo check --locked --target <t>` per declared target
+and per crate. On `aarch64-apple-darwin` (rustc 1.99.0), 42 checks in 69 s from
+an empty target directory:
+
+| Target | `lgwks_std` | `lgwks_std` `--no-default-features` | `lgwks_std` `--features random` | `lgwks_deps` | `lgwks_std` `--features full` | `lgwks_ast` |
+|---|---|---|---|---|---|---|
+| `aarch64-apple-darwin` (host) | builds | builds | builds | builds | builds | builds |
+| `aarch64-unknown-linux-gnu` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `x86_64-unknown-linux-musl` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `wasm32-wasip1` | builds | builds | builds | builds | builds | **not exercised** |
+| `x86_64-unknown-freebsd` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-linux-android` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-apple-ios` | builds | builds | builds | builds | builds | builds |
+
+**"Builds" is a build receipt and "not exercised" is a named gap, not a pass.**
+The nine not-exercised cells each fail with the exact error
+`failed to find tool "aarch64-linux-gnu-gcc"` (or the musl, Android, FreeBSD or
+`clang` equivalent): `ring`, reached through `http`'s rustls, and the
+tree-sitter grammars under `lgwks_ast` compile C per target, and this runner has
+no cross C toolchain for them. The lane accepts that one failure reason by name
+and fails on any other, so the exemption cannot become a lid. **Support is
+therefore claimed for `lgwks_std` on seven targets with the `full` feature set
+only where the row says `builds`, and for `lgwks_ast` and `lgwks_deps` on the
+targets where their row says `builds` — never for a target that was not
+exercised.**
+
+`random` was the module that made the gap load-bearing: it carried a
+three-target `compile_error!` while the backend it wraps supported dozens more,
+so `lgwks_std` with `random` or `http` could not be built for iOS, Android, a
+BSD or WASI at all. It now holds no target list of its own, and its typed
+`EntropyError` is what a caller on any of these targets gets when the source
+fails.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a
 green `windows-latest` job is a *build* receipt for the Windows target and
 never a *containment* receipt: no Windows run in CI can have killed a process
 group. A build check and an executed containment test are different facts, and
-only the second one is a portability claim about the runtime.
+only the second one is a portability claim about the runtime. The eight-target
+matrix above is itself a build receipt: every row was executed by `cargo check`
+and none of them ran a test.
 
-*Not covered:* ARM Linux, musl, 32-bit, and any target outside the hosted
-runners. The performance numbers in §4.9 are from one machine and are explicitly
-not a cross-platform claim.
+*Not covered:* 32-bit, any target outside the eight rows, and any executed test
+on a non-hosted-runner target. The performance numbers in §4.9 are from one
+machine and are explicitly not a cross-platform claim.
 
 ### 4.8 Multi-tenant — isolated under concurrent use
 
@@ -628,7 +772,7 @@ world mess is one of the seven covered rows in §4.4.
 To change the verdict, in the order that matters:
 
 1. **Finish #109's eight external observations.** Five are run
-   (`tests/durable_crash_observation.rs`): the journal-ladder rows have a real
+   (`tests/it/durable_crash_observation.rs`): the journal-ladder rows have a real
    store, a real kill, a restart and the designed answer. #109 closed with the
    other three repaired but not externally observed: #99 needs the poll path
    under a real store, #108 a real frame, and #107's T21 a descendant the
@@ -641,7 +785,13 @@ To change the verdict, in the order that matters:
 3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
    and 7.6x the allocations per task (#269).
 4. **Multi-tenant negative tests.** §4.8.
-5. **Hyperscale.** §4.2. A stated concurrency target and a saturation curve.
+5. **Hyperscale, on the profile the estate names.** §4.2 has the saturation
+   curve, the declared knees, a million concurrent tasks and the recovery
+   measurement. What it does not have is the **1–2 vCPU / 1–2 GB VPS** figure
+   the axis asks for, which needs a machine whose cores are one or two and a
+   CPU-bound body — macOS offers no cgroup, no `taskset` and no `taskpolicy` CPU
+   set, and the two-thread run this host *can* do produces identical knees to a
+   fifteen-thread one because the workload is timer-bound.
 6. **Measure the authoring case on tasks that ask for it.** #87's contract is
    built and the fixed-model run says `futures` is the better surface on the
    tasks it asked (§4.1); the tasks that exercise what this crate adds are

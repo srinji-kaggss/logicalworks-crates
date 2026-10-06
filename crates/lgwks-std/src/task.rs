@@ -3,8 +3,13 @@
 //! INV-TASK-ZERO-RUNTIME: futures are driven to completion on the current
 //! thread using `std::task::Wake` and OS thread parking, with zero background
 //! reactors and zero external dependencies. The one pool is for blocking work:
-//! it is bounded (512 threads), created on first use, and its threads exit
-//! after ten idle seconds, so a process with no blocking work holds no thread.
+//! it is bounded (512 threads, or the one ceiling
+//! [`configure_blocking_pool`](crate::task::configure_blocking_pool) fixes
+//! once before first use), created on first use, and its threads exit after
+//! ten idle seconds, so a process with no blocking work holds no thread.
+//! [`shutdown_blocking_pool`](crate::task::shutdown_blocking_pool) closes
+//! admission, lets the admitted jobs finish, and joins every pool thread
+//! within a caller-given deadline.
 //!
 //! Three primitives compose:
 //!
@@ -34,10 +39,10 @@ use std::io;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, WaitTimeoutResult};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ── block_on ───────────────────────────────────────────────────────────────
 
@@ -262,9 +267,44 @@ impl Wake for ChildWaker {
 /// `JoinHandle` must not turn a worker's failure into a deadlock for the task
 /// awaiting it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condition` until woken, treating poisoning as non-fatal.
+///
+/// The same guarded state `lock` recovers, through the same argument: every
+/// critical section behind these primitives moves a whole [`Job`] in or out and
+/// writes no partial state, so a poisoned guard still names a consistent value
+/// and the panic that poisoned it is already being resumed on the awaiter. One
+/// helper per lock shape rather than one recovery per call site, because a
+/// fourth spelling of the same recovery is a fourth place to get it wrong.
+///
+/// Untimed because that is the shape a test gate needs: the pool itself only
+/// ever parks against a deadline, and carries no wait that has no bound.
+#[cfg(test)]
+fn wait<'a, T>(condition: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    match condition.wait(guard) {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Wait on `condition` for at most `timeout`, treating poisoning as non-fatal.
+///
+/// [`wait`]'s argument applies unchanged to the timed form: the guard it returns
+/// names the same consistent state, and the wait outcome is reported beside it.
+fn wait_timeout<'a, T>(
+    condition: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
+    match condition.wait_timeout(guard, timeout) {
+        Ok(waited) => waited,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// One blocking job's completion state.
@@ -360,9 +400,10 @@ impl<T> Future for JoinHandle<T> {
 /// of serializing them.
 ///
 /// Bound: at most 512 threads run jobs at once,
-/// process-wide. A job submitted while all of them are busy waits in a queue
-/// and runs when one frees up, in submission order. A thread that has had no
-/// work for 10 seconds exits, so an idle process holds no pool
+/// process-wide — the one ceiling [`configure_blocking_pool`] can fix once,
+/// before first use. A job submitted while all of them are busy waits in a
+/// queue and runs when one frees up, in submission order. A thread that has
+/// had no work for 10 seconds exits, so an idle process holds no pool
 /// thread. Jobs that wait on *each other* must therefore number fewer than
 /// the ceiling, or the waiters hold every thread the awaited job needs.
 ///
@@ -370,9 +411,11 @@ impl<T> Future for JoinHandle<T> {
 /// never refuses. [`try_spawn_blocking`] is the bounded form, and the one to
 /// use where callers are not already bounding their own fan-out.
 ///
-/// Failure: a panicking closure, or an OS refusal to start the first pool
-/// thread, is resumed as a panic on the task that awaits the handle. Success,
-/// panic, and refusal all wake the task exactly once.
+/// Failure: a panicking closure, an OS refusal to start the first pool
+/// thread, or a pool already closed by [`shutdown_blocking_pool`], is resumed
+/// as a panic on the task that awaits the handle, the refusal carrying the
+/// [`SpawnError`] as its payload. Success, panic, and refusal all wake the
+/// task exactly once.
 pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -388,7 +431,7 @@ where
 
 /// [`spawn_blocking`] on `pool`: a refusal reaches the awaiter as the job's
 /// failure, carrying the [`SpawnError`] as the unwind payload.
-fn spawn_blocking_on<F, T>(pool: &'static Pool, job: F) -> JoinHandle<T>
+fn spawn_blocking_on<F, T>(pool: &Arc<Pool>, job: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -406,12 +449,15 @@ where
 /// bounded queue: when 16,384 jobs are already waiting,
 /// the job is refused as [`SpawnError::AtCapacity`] and never runs. An OS
 /// refusal to start a thread, when no pool thread is alive to run the job
-/// later, is [`SpawnError::Os`]. A refused job is dropped without running.
+/// later, is [`SpawnError::Os`]. Once [`shutdown_blocking_pool`] has been
+/// called, every job is refused as [`SpawnError::Shutdown`]. A refused job is
+/// dropped without running.
 ///
 /// # Errors
 ///
-/// [`SpawnError::AtCapacity`] when the queue is full, and [`SpawnError::Os`]
-/// when no thread could be started to run the job.
+/// [`SpawnError::AtCapacity`] when the queue is full, [`SpawnError::Os`]
+/// when no thread could be started to run the job, and
+/// [`SpawnError::Shutdown`] when the pool no longer admits work.
 pub fn try_spawn_blocking<F, T>(job: F) -> Result<JoinHandle<T>, SpawnError>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -450,12 +496,18 @@ where
 
 // ── the blocking pool ──────────────────────────────────────────────────────
 
-/// Most pool threads running jobs at once, process-wide.
+/// Most pool threads running jobs at once, process-wide, before any
+/// [`configure_blocking_pool`] call fixes another ceiling.
 ///
 /// Tokio's blocking pool uses the same default ceiling. It bounds what a burst
 /// of blocking work can take from the OS: without it, ten thousand concurrent
 /// calls were ten thousand threads, each reserving its own stack.
 const MAX_BLOCKING_THREADS: usize = 512;
+
+/// The smallest ceiling [`configure_blocking_pool`] accepts.
+///
+/// A pool without a thread can run nothing: every job would wait forever.
+const MIN_BLOCKING_THREADS: usize = 1;
 
 /// Most jobs [`try_spawn_blocking`] lets wait for a thread before it refuses.
 const MAX_QUEUED_BLOCKING_JOBS: usize = 16_384;
@@ -477,6 +529,9 @@ pub enum SpawnError {
     /// The OS refused to start a thread, and no pool thread was alive to run
     /// the job later.
     Os(io::Error),
+    /// The pool no longer admits work: [`shutdown_blocking_pool`] has been
+    /// called. The job did not run.
+    Shutdown,
 }
 
 impl fmt::Display for SpawnError {
@@ -487,6 +542,12 @@ impl fmt::Display for SpawnError {
                 "the blocking pool is at capacity: {threads} threads busy and {queued} jobs waiting"
             ),
             Self::Os(ref error) => write!(formatter, "could not start a blocking thread: {error}"),
+            Self::Shutdown => {
+                write!(
+                    formatter,
+                    "the blocking pool is shut down and admits no jobs"
+                )
+            }
         }
     }
 }
@@ -495,26 +556,249 @@ impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Os(ref error) => Some(error),
-            Self::AtCapacity { .. } => None,
+            Self::AtCapacity { .. } | Self::Shutdown => None,
         }
     }
+}
+
+/// Why [`configure_blocking_pool`] did not fix the pool's ceiling.
+///
+/// The ceiling is decided once, by whatever builds the pool: a `configure`
+/// call before first use, or the first job. Every later attempt is refused
+/// with the pool's own numbers rather than silently ignored, so a caller
+/// never believes a ceiling moved that did not.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PoolConfigError {
+    /// The pool has already run work, so it was built at the default ceiling
+    /// and cannot be rebuilt under another.
+    InUse {
+        /// The ceiling asked for.
+        requested: usize,
+        /// The ceiling the running pool already has.
+        running: usize,
+    },
+    /// A `configure` call already fixed the ceiling at another value.
+    AlreadyConfigured {
+        /// The ceiling asked for now.
+        requested: usize,
+        /// The ceiling the earlier `configure` fixed.
+        configured: usize,
+    },
+    /// A ceiling below one can never run a job.
+    InvalidCeiling {
+        /// The ceiling asked for.
+        requested: usize,
+        /// The smallest ceiling accepted.
+        minimum: usize,
+    },
+}
+
+impl fmt::Display for PoolConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InUse { requested, running } => write!(
+                formatter,
+                "the blocking pool has already run work at {running} threads; \
+                 configure_blocking_pool({requested}) must run before first use"
+            ),
+            Self::AlreadyConfigured {
+                requested,
+                configured,
+            } => write!(
+                formatter,
+                "the blocking pool ceiling was already configured at {configured} threads, \
+                 not {requested}"
+            ),
+            Self::InvalidCeiling { requested, minimum } => write!(
+                formatter,
+                "a blocking pool of {requested} threads can run nothing; \
+                 the smallest ceiling is {minimum}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PoolConfigError {}
+
+/// What [`shutdown_blocking_pool`] found when its wait ended.
+///
+/// The wait is bounded by the deadline the caller passes. When every pool
+/// thread finished inside it, each one was joined and none outlives the call
+/// ([`PoolShutdown::Drained`]). When the deadline expired first, the threads
+/// still working are reported by count ([`PoolShutdown::DeadlineExceeded`]);
+/// they keep draining on their own — shutdown closes admission, it never
+/// cancels work in flight — and their join handles stay registered, so a
+/// later `shutdown_blocking_pool` can wait for and join what is left of them.
+#[must_use = "the report is the only record of threads still running"]
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PoolShutdown {
+    /// Every pool thread finished and was joined within the deadline.
+    Drained {
+        /// Threads joined, including any that had already exited on their
+        /// idle keep-alive.
+        threads: usize,
+    },
+    /// The deadline expired with work still in the pool.
+    DeadlineExceeded {
+        /// Threads that had finished and were joined by the deadline.
+        joined: usize,
+        /// Threads still executing jobs at the deadline.
+        running: usize,
+        /// Admitted jobs still waiting for a thread at the deadline.
+        queued: usize,
+    },
+}
+
+/// Fix the blocking pool's thread ceiling, once, before the pool first runs.
+///
+/// The pool is built on its first use at its default ceiling of 512
+/// threads. This is the startup door on that choice: called before any
+/// [`spawn_blocking`] or [`try_spawn_blocking`], it builds the pool at
+/// `threads` instead. The arbitration is the pool's own creation — whichever
+/// of a `configure` or a first use builds the pool fixes the ceiling — so a
+/// ceiling is never silently ignored, whatever races the call.
+///
+/// The one retry that succeeds is asking again for the ceiling already in
+/// force: the pool is at that ceiling, so the caller's belief matches the
+/// pool. Every other later attempt is refused typed: [`PoolConfigError::InUse`]
+/// once the pool has run work, [`PoolConfigError::AlreadyConfigured`] when an
+/// earlier `configure` fixed a different ceiling, and
+/// [`PoolConfigError::InvalidCeiling`] for a ceiling below one.
+///
+/// # Errors
+///
+/// Refuses with [`PoolConfigError::InvalidCeiling`] when `threads` is below
+/// one, [`PoolConfigError::InUse`] when the pool has already run work, and
+/// [`PoolConfigError::AlreadyConfigured`] when an earlier call configured a
+/// different ceiling. A refusal leaves the pool exactly as it was.
+///
+/// # Examples
+///
+/// ```
+/// use lgwks_std::task::configure_blocking_pool;
+///
+/// # fn main() -> Result<(), lgwks_std::task::PoolConfigError> {
+/// configure_blocking_pool(8)?;
+/// // The pool this process runs is bounded at eight threads from here on.
+/// # Ok(())
+/// # }
+/// ```
+pub fn configure_blocking_pool(threads: usize) -> Result<(), PoolConfigError> {
+    if threads < MIN_BLOCKING_THREADS {
+        let refusal = Err(PoolConfigError::InvalidCeiling {
+            requested: threads,
+            minimum: MIN_BLOCKING_THREADS,
+        });
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(
+            requested = threads,
+            minimum = MIN_BLOCKING_THREADS,
+            "configure_blocking_pool: a ceiling below one can run nothing"
+        );
+        return refusal;
+    }
+    // Building the pool here is the arbitration: the OnceLock decides between
+    // a configure and a first use, and neither can miss the other's write.
+    let pool = POOL.get_or_init(|| Arc::new(Pool::at_configured(threads, start_os_thread)));
+    let decision = configure_decision(pool, threads);
+    // The whole `if` is behind the feature, so a build without `trace` never
+    // binds the error at all.
+    #[cfg(feature = "trace")]
+    if let Err(ref error) = decision {
+        crate::trace::debug!(
+            error = ?error,
+            "configure_blocking_pool: the ceiling stands as it was"
+        );
+    }
+    decision
+}
+
+/// The configure decision for a pool that already exists, shared by
+/// [`configure_blocking_pool`] and the tests. The ceiling is whatever built
+/// the pool; this only reports which of the two builders won.
+fn configure_decision(pool: &Pool, threads: usize) -> Result<(), PoolConfigError> {
+    match pool.configured {
+        Some(configured) if configured == threads => Ok(()),
+        Some(configured) => Err(PoolConfigError::AlreadyConfigured {
+            requested: threads,
+            configured,
+        }),
+        None => Err(PoolConfigError::InUse {
+            requested: threads,
+            running: pool.ceiling,
+        }),
+    }
+}
+
+/// Close the pool's admission, let its admitted jobs finish, and join every
+/// pool thread — or report, inside `within`, the threads still running.
+///
+/// Queued and running jobs are never cancelled: the threads drain the queue
+/// and exit instead of parking, so the pool empties by finishing its work.
+/// Parked threads are woken to take their share or leave, and a thread that
+/// has already exited on its idle keep-alive is still joined. The call waits
+/// for the last thread to leave; when the deadline expires first it returns
+/// [`PoolShutdown::DeadlineExceeded`] naming what is left, and those threads
+/// finish and leave on their own — a second call waits for and joins them.
+///
+/// From the first call on, admission is closed: [`try_spawn_blocking`]
+/// refuses every job as [`SpawnError::Shutdown`], and [`spawn_blocking`]
+/// fails its awaiter with that refusal as the payload. The closure is never
+/// run.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use lgwks_std::task::{
+///     PoolShutdown, SpawnError, block_on, shutdown_blocking_pool, spawn_blocking,
+///     try_spawn_blocking,
+/// };
+///
+/// let job = spawn_blocking(|| 40 + 2);
+/// let report = shutdown_blocking_pool(Duration::from_secs(30));
+/// // The job was still in the pool: shutdown let it finish before returning.
+/// assert_eq!(block_on(job), 42);
+/// assert_eq!(report, PoolShutdown::Drained { threads: 1 });
+/// // Admission is closed from here on.
+/// assert!(matches!(try_spawn_blocking(|| 0u32), Err(SpawnError::Shutdown)));
+/// ```
+pub fn shutdown_blocking_pool(within: Duration) -> PoolShutdown {
+    pool().shutdown(within)
 }
 
 /// One job, with its result already wired to its handle.
 type Work = Box<dyn FnOnce() + Send>;
 
+/// A pool thread's own OS handle, as distinct from the awaitable
+/// [`JoinHandle`] a caller holds: one is joined by a shutdown, the other is
+/// awaited by the task the job's result belongs to.
+type ThreadHandle = thread::JoinHandle<()>;
+
 /// The process-wide pool.
 struct Pool {
     /// Queue and thread accounting, under one lock.
     state: Mutex<PoolState>,
-    /// Signalled once per job handed to an idle thread.
+    /// Signalled once per job handed to an idle thread, and by every thread
+    /// that leaves the pool.
     work_ready: Condvar,
     /// The most threads alive at once.
     ceiling: usize,
+    /// `Some(threads)` when [`configure_blocking_pool`] built this pool at
+    /// that ceiling; `None` when first use built it at the default.
+    configured: Option<usize>,
+    /// How long a thread with no work waits before it leaves. The process pool
+    /// always uses [`BLOCKING_KEEP_ALIVE`]; the seeded lifetime family builds
+    /// pools with a short one, so many burst/idle cycles cost milliseconds
+    /// rather than the ten seconds each would really take.
+    keep_alive: Duration,
     /// Starts one thread running [`Pool::run`]. The process pool starts an OS
-    /// thread; a test pool can refuse, which is how a refusal is exercised
-    /// without exhausting the machine's threads.
-    start: fn(&'static Pool, Handoff) -> io::Result<()>,
+    /// thread and hands back its join handle; a test pool can refuse, which is
+    /// how a refusal is exercised without exhausting the machine's threads.
+    start: fn(Arc<Pool>, Handoff) -> io::Result<ThreadHandle>,
 }
 
 /// What the pool's lock guards.
@@ -533,6 +817,32 @@ struct PoolState<W = Work> {
     /// Wakeups claimed by submitters and not yet taken by a thread. Counted
     /// rather than inferred from the condvar, which may wake spuriously.
     wakeups: usize,
+    /// Set by [`Pool::shutdown`]: admission is closed, and a thread with no
+    /// job leaves instead of parking.
+    draining: bool,
+    /// The join handle of every thread this pool started and has not joined.
+    ///
+    /// Registered under the same lock that counted the start, so a shutdown
+    /// can never observe a thread it cannot join. What the list holds is
+    /// exactly:
+    ///
+    /// ```text
+    /// handles.len() == live + (threads that have left the accounting and not
+    ///                          yet returned)
+    /// ```
+    ///
+    /// A thread decrements `live` under the lock and only then returns, so
+    /// every entry beyond `live` is a real OS thread still executing its last
+    /// instructions. **There is no constant bound on that second group.** Each
+    /// departure frees a slot immediately while the thread keeps running, so
+    /// a scheduler that deschedules every departing thread in turn admits the
+    /// next one; at a ceiling of one the list can hold several handles with a
+    /// single thread live. What is true is the identity above and what the
+    /// reap does with it: every thread that *has* returned is joined at the
+    /// next start or at a shutdown, so the list never holds a
+    /// finished-but-unjoined thread past one of those, and it does not grow
+    /// across idle cycles.
+    handles: Vec<ThreadHandle>,
 }
 
 /// What admitting a job asks of the submitter.
@@ -547,6 +857,15 @@ enum Admitted<W> {
     Start(W),
     /// Every thread is busy at the ceiling: the job waits its turn.
     Queued,
+}
+
+/// Why admitting a job was refused. The job is handed back: it did not run.
+#[derive(Debug, PartialEq, Eq)]
+enum Refused<W> {
+    /// The wait queue is at its declared bound.
+    AtCapacity(W),
+    /// The pool no longer admits work.
+    Draining(W),
 }
 
 /// What a parked thread does once it holds the lock again.
@@ -568,20 +887,31 @@ impl<W> PoolState<W> {
             live: 0,
             idle: 0,
             wakeups: 0,
+            draining: false,
+            handles: Vec::new(),
         }
     }
 
-    /// Admit `work`, or hand it back when `queue_limit` is reached.
+    /// Admit `work`, or hand it back when the pool takes no more.
     fn admit(
         &mut self,
         work: W,
         queue_limit: Option<usize>,
         ceiling: usize,
-    ) -> Result<Admitted<W>, W> {
+    ) -> Result<Admitted<W>, Refused<W>> {
+        if self.draining {
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(
+                live = self.live,
+                queued = self.queue.len(),
+                "admit: the pool is shutting down and admits nothing"
+            );
+            return Err(Refused::Draining(work));
+        }
         if queue_limit.is_some_and(|limit| self.queue.len() >= limit) {
             #[cfg(feature = "trace")]
             crate::trace::debug!(queued = self.queue.len(), limit = ?queue_limit, "admit: the wait queue is at its bound");
-            return Err(work);
+            return Err(Refused::AtCapacity(work));
         }
         if self.idle == 0 && self.live < ceiling {
             return Ok(Admitted::Start(work));
@@ -618,12 +948,19 @@ impl<W> PoolState<W> {
         self.queue.pop_front()
     }
 
-    /// A free thread found no job and is about to wait.
-    const fn park(&mut self) {
+    /// A free thread found no job: park it, or — while the pool drains —
+    /// retire it instead. Returns `true` when the thread leaves the pool.
+    const fn park_or_retire(&mut self) -> bool {
+        if self.draining {
+            self.live = self.live.saturating_sub(1);
+            return true;
+        }
         self.idle = self.idle.saturating_add(1);
+        false
     }
 
-    /// A parked thread holds the lock again, its wait having `timed_out` or not.
+    /// A parked thread holds the lock again, its wait having `timed_out` or
+    /// not.
     const fn woken(&mut self, timed_out: bool) -> Woken {
         if self.wakeups > 0 {
             // The submitter already moved this thread out of `idle`.
@@ -637,30 +974,101 @@ impl<W> PoolState<W> {
         }
         Woken::Wait
     }
+
+    /// A parked thread woken without a claimed wakeup: while the pool drains
+    /// it takes a waiting job if there is one, and otherwise leaves. Its
+    /// `idle` was never claimed by a submitter, so it retires that itself.
+    fn drain_wake(&mut self) -> Woken {
+        if !self.draining {
+            return Woken::Wait;
+        }
+        self.idle = self.idle.saturating_sub(1);
+        if self.queue.is_empty() {
+            self.live = self.live.saturating_sub(1);
+            return Woken::Exit;
+        }
+        Woken::Resume
+    }
+
+    /// Close admission: every later submit is refused, and a thread with no
+    /// job leaves instead of parking.
+    const fn begin_drain(&mut self) {
+        self.draining = true;
+    }
+
+    /// Join every thread that has already returned.
+    ///
+    /// A thread that exits on its keep-alive is still held by its handle until
+    /// something joins it, so a start is where the exits of earlier bursts are
+    /// released — the property the list's doc rests on. `is_finished` never
+    /// blocks and a returned thread's `join` returns at once, so this is a reap
+    /// and not a wait: a thread still in its last instructions keeps its handle
+    /// and is reaped by a later start or by a shutdown.
+    fn reap_finished_threads(&mut self) {
+        let mut kept = Vec::with_capacity(self.handles.len());
+        let mut reaped = 0usize;
+        for handle in std::mem::take(&mut self.handles) {
+            if handle.is_finished() {
+                join_pool_thread(handle);
+                reaped = reaped.saturating_add(1);
+            } else {
+                kept.push(handle);
+            }
+        }
+        self.handles = kept;
+        #[cfg(feature = "trace")]
+        if reaped > 0 {
+            crate::trace::debug!(
+                reaped,
+                live = self.live,
+                "submit: joined the pool threads that had already left"
+            );
+        }
+        #[cfg(not(feature = "trace"))]
+        let _ = reaped;
+    }
 }
 
-/// The pool, created on first use.
-fn pool() -> &'static Pool {
-    static POOL: OnceLock<Pool> = OnceLock::new();
-    POOL.get_or_init(|| Pool::new(MAX_BLOCKING_THREADS, start_os_thread))
-}
+/// The process-wide pool. [`configure_blocking_pool`] and first use race to
+/// initialize it; whoever wins fixes the ceiling, and the `OnceLock` is the
+/// whole of that arbitration.
+static POOL: OnceLock<Arc<Pool>> = OnceLock::new();
 
-/// Start one named OS thread serving `pool`. Detached: a pool thread is never
-/// joined, it exits after [`BLOCKING_KEEP_ALIVE`] without work.
+/// The pool, built on first use at the default ceiling.
 ///
-/// The thread runs the job in `first` before it ever takes the lock.
-fn start_os_thread(pool: &'static Pool, first: Handoff) -> io::Result<()> {
+/// A reference, not a clone: the pool outlives every caller by construction,
+/// and the one place a thread needs its own reference — the `start` call
+/// inside [`Pool::submit`] — clones from the `&Arc` it already holds.
+fn pool() -> &'static Arc<Pool> {
+    POOL.get_or_init(|| Arc::new(Pool::new(MAX_BLOCKING_THREADS, start_os_thread)))
+}
+
+/// The body every pool thread runs: its handed-off first job, then the pool
+/// loop until the thread is told to leave.
+///
+/// Shared so a starter that adds an epilogue — the seeded lifetime family's,
+/// which holds a thread in the window between leaving the accounting and
+/// being marked finished — composes this instead of repeating the sequence and
+/// drifting from it.
+fn serve_pool(pool: &Pool, first: Handoff) {
+    let work = lock(&first).take();
+    drop(first);
+    if let Some(work) = work {
+        work();
+    }
+    pool.run();
+}
+
+/// Start one named OS thread serving `pool`, and hand back its join handle.
+///
+/// The thread owns its reference to the pool and runs the job in `first`
+/// before it ever takes the lock. The handle is registered in the pool's state
+/// under the same lock that counted the start, so a shutdown can never observe
+/// a thread it cannot join.
+fn start_os_thread(pool: Arc<Pool>, first: Handoff) -> io::Result<ThreadHandle> {
     thread::Builder::new()
         .name("lgwks-blocking".into())
-        .spawn(move || {
-            let work = lock(&first).take();
-            drop(first);
-            if let Some(work) = work {
-                work();
-            }
-            pool.run();
-        })
-        .map(drop)
+        .spawn(move || serve_pool(&pool, first))
 }
 
 /// A new thread's first job. Shared rather than moved into the thread's
@@ -668,15 +1076,57 @@ fn start_os_thread(pool: &'static Pool, first: Handoff) -> io::Result<()> {
 /// job must come back to be queued or refused rather than vanish with it.
 type Handoff = Arc<Mutex<Option<Work>>>;
 
+/// Join one pool thread, reporting a panic rather than resuming it.
+///
+/// A pool thread cannot panic through its jobs — `prepare` catches each job's
+/// panic — so an unwind here is a defect outside any job. It is reported as a
+/// trace event; the thread still counts as finished, because `join`
+/// returning is the fact a shutdown waits on.
+fn join_pool_thread(handle: ThreadHandle) {
+    if let Err(_payload) = handle.join() {
+        #[cfg(feature = "trace")]
+        crate::trace::debug!("shutdown: a pool thread exited on a panic outside any job");
+    }
+}
+
 impl Pool {
-    /// An empty pool of at most `ceiling` threads, started by `start`.
-    const fn new(ceiling: usize, start: fn(&'static Self, Handoff) -> io::Result<()>) -> Self {
+    /// An empty pool of at most `ceiling` threads, started by `start`, built
+    /// by first use rather than by [`configure_blocking_pool`]. Its threads
+    /// leave after [`BLOCKING_KEEP_ALIVE`].
+    const fn new(
+        ceiling: usize,
+        start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
+    ) -> Self {
+        Self::tuned(ceiling, start, BLOCKING_KEEP_ALIVE)
+    }
+
+    /// [`Pool::new`] with the keep-alive the caller asks for. Private because
+    /// the production pool's keep-alive is [`BLOCKING_KEEP_ALIVE`] and a
+    /// ceiling is the only thing a caller may choose; the seeded lifetime
+    /// family uses this to reach the idle-exit path in milliseconds.
+    const fn tuned(
+        ceiling: usize,
+        start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
+        keep_alive: Duration,
+    ) -> Self {
         Self {
             state: Mutex::new(PoolState::new()),
             work_ready: Condvar::new(),
             ceiling,
+            configured: None,
+            keep_alive,
             start,
         }
+    }
+
+    /// An empty pool whose ceiling a [`configure_blocking_pool`] call fixed.
+    const fn at_configured(
+        ceiling: usize,
+        start: fn(Arc<Self>, Handoff) -> io::Result<ThreadHandle>,
+    ) -> Self {
+        let mut pool = Self::tuned(ceiling, start, BLOCKING_KEEP_ALIVE);
+        pool.configured = Some(ceiling);
+        pool
     }
 
     /// Queue `work` and make sure a thread will run it.
@@ -684,17 +1134,31 @@ impl Pool {
     /// An idle thread is woken if there is one; otherwise a thread is started
     /// while the pool is under its ceiling; otherwise the job waits for the
     /// next thread to finish. `queue_limit` bounds the wait queue.
-    fn submit(&'static self, work: Work, queue_limit: Option<usize>) -> Result<(), SpawnError> {
+    fn submit(self: &Arc<Self>, work: Work, queue_limit: Option<usize>) -> Result<(), SpawnError> {
         let mut state = lock(&self.state);
         let admitted = match state.admit(work, queue_limit, self.ceiling) {
             Ok(admitted) => admitted,
-            Err(_refused) => {
+            Err(Refused::AtCapacity(_refused)) => {
+                // `admit` refuses at capacity only for a named queue limit, so
+                // that limit is the bound this refusal reports. If a caller ever
+                // reaches here without one, the observed queue depth is the
+                // nearest queue fact the refusal can still name.
+                let queued = match queue_limit {
+                    Some(limit) => limit,
+                    None => state.queue.len(),
+                };
                 let refusal = Err(SpawnError::AtCapacity {
                     threads: self.ceiling,
-                    queued: queue_limit.unwrap_or(usize::MAX),
+                    queued,
                 });
                 #[cfg(feature = "trace")]
                 crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: the blocking pool refused a job");
+                return refusal;
+            }
+            Err(Refused::Draining(_refused)) => {
+                let refusal = Err(SpawnError::Shutdown);
+                #[cfg(feature = "trace")]
+                crate::trace::debug!(error = ?refusal.as_ref().err(), "submit: the blocking pool is shut down");
                 return refusal;
             }
         };
@@ -706,9 +1170,15 @@ impl Pool {
             Admitted::Queued => Ok(()),
             Admitted::Start(work) => {
                 let first = Arc::new(Mutex::new(Some(work)));
-                match (self.start)(self, Arc::clone(&first)) {
-                    Ok(()) => {
+                match (self.start)(Arc::clone(self), Arc::clone(&first)) {
+                    Ok(handle) => {
+                        // The reap comes before the count, not after it: the
+                        // exited threads of earlier bursts are released here,
+                        // while the new one is still unheld, which is what
+                        // keeps the list within the ceiling.
+                        state.reap_finished_threads();
                         state.started();
+                        state.handles.push(handle);
                         Ok(())
                     }
                     Err(error) => {
@@ -735,7 +1205,7 @@ impl Pool {
     }
 
     /// One pool thread: run queued jobs, wait for more, exit when idle for
-    /// [`BLOCKING_KEEP_ALIVE`].
+    /// [`BLOCKING_KEEP_ALIVE`] — or at once once the pool drains.
     fn run(&self) {
         let mut state = lock(&self.state);
         loop {
@@ -747,19 +1217,97 @@ impl Pool {
                 state = lock(&self.state);
                 continue;
             }
-            state.park();
+            if state.park_or_retire() {
+                // A thread leaving can be the last one a shutdown waits for,
+                // and this exit can race one: say so under its lock.
+                self.work_ready.notify_all();
+                return;
+            }
             loop {
-                let (guard, waited) = self
-                    .work_ready
-                    .wait_timeout(state, BLOCKING_KEEP_ALIVE)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (guard, waited) = wait_timeout(&self.work_ready, state, self.keep_alive);
                 state = guard;
                 match state.woken(waited.timed_out()) {
                     Woken::Resume => break,
-                    Woken::Exit => return,
-                    Woken::Wait => {}
+                    Woken::Exit => {
+                        self.work_ready.notify_all();
+                        return;
+                    }
+                    // Spurious, or the broadcast a draining pool makes when
+                    // admission closes: the drain rules decide whether this
+                    // thread works or leaves.
+                    Woken::Wait => match state.drain_wake() {
+                        Woken::Resume => break,
+                        Woken::Exit => {
+                            self.work_ready.notify_all();
+                            return;
+                        }
+                        Woken::Wait => {}
+                    },
                 }
             }
+        }
+    }
+
+    /// Close admission, wait for the drain, and join what the deadline let
+    /// finish.
+    ///
+    /// Admission closes first, under the pool's lock, so a submit that races
+    /// the shutdown is either admitted before the flag or refused as
+    /// [`SpawnError::Shutdown`]; there is no third outcome. The wait that
+    /// follows is bounded by `within`: the last thread to leave wakes this
+    /// waiter, and a deadline that expires first reports, by count, the
+    /// threads still running and the jobs still waiting for one. Handles of
+    /// threads that had not finished stay registered, so a later shutdown
+    /// joins them; a thread never outlives a `Drained` report.
+    fn shutdown(self: &Arc<Self>, within: Duration) -> PoolShutdown {
+        let deadline = Instant::now().checked_add(within);
+        let mut state = lock(&self.state);
+        state.begin_drain();
+        // Every parked thread re-checks under this lock: it takes a waiting
+        // job or leaves, so the drain needs nobody to submit again.
+        self.work_ready.notify_all();
+        loop {
+            if state.live == 0 {
+                let threads = state.handles.len();
+                let handles = std::mem::take(&mut state.handles);
+                drop(state);
+                for handle in handles {
+                    join_pool_thread(handle);
+                }
+                return PoolShutdown::Drained { threads };
+            }
+            let now = Instant::now();
+            if deadline.is_some_and(|until| now >= until) {
+                let running = state.live;
+                let queued = state.queue.len();
+                let mut joined = 0usize;
+                let mut outstanding = Vec::new();
+                for handle in std::mem::take(&mut state.handles) {
+                    // `is_finished` never blocks: the deadline has passed, so
+                    // this joins only what already ended and keeps the rest.
+                    if !handle.is_finished() {
+                        outstanding.push(handle);
+                        continue;
+                    }
+                    join_pool_thread(handle);
+                    joined = joined.saturating_add(1);
+                }
+                state.handles = outstanding;
+                drop(state);
+                return PoolShutdown::DeadlineExceeded {
+                    joined,
+                    running,
+                    queued,
+                };
+            }
+            let wait = match deadline {
+                // No finite deadline: wait in keep-alive chunks, woken by
+                // each thread that leaves.
+                None => self.keep_alive,
+                Some(until) => until.saturating_duration_since(now),
+            };
+            let (guard, _) = wait_timeout(&self.work_ready, state, wait);
+            state = guard;
         }
     }
 }
@@ -785,22 +1333,37 @@ impl<T> core::fmt::Debug for JoinHandle<T> {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+// The seeded generator and replay harness the simulation families share,
+// declared here once: a file loaded as a module twice is two copies of every
+// type in it, which clippy refuses. Each family uses them under the names they
+// already had, so a new family cannot diverge in how it seeds or replays.
+#[cfg(test)]
+#[path = "../tests/support/rng.rs"]
+mod rng;
+#[cfg(test)]
+#[path = "../tests/support/seeded_sweep.rs"]
+mod seeded_sweep;
+
 #[cfg(test)]
 #[path = "sim_task_pool.rs"]
 mod sim_pool;
 
 #[cfg(test)]
-// The workspace ban list (`clippy.toml`) forbids `std::thread::spawn` and
-// `std::thread::sleep`, because reaching for a raw OS thread instead of the
-// primitives this crate provides is the anti-pattern. This module is the
-// exception that proves the rule: it tests `lgwks_std::task` itself, which is a
-// *thread parking* executor. Waking it requires a real second thread, and letting the
-// driver park before that wake requires a real sleep. Both calls are the
-// subject under test, not a reach for one.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "tests of a thread-parking executor must spawn a waker thread and sleep to let the driver park"
-)]
+// This module is about the pause: a shutdown has to release a *parked* thread,
+// and only a real wait lets the thread reach its park first. It waits with
+// `thread::park_timeout`, the synchronous wait this workspace sanctions in
+// place of the banned `thread::sleep`, in a test binary whose only executor is
+// the one under test.
+#[path = "sim_pool_lifetime.rs"]
+mod sim_pool_lifetime;
+
+#[cfg(test)]
+// Tests of `lgwks_std::task` itself, which is a *thread-parking* executor.
+// Waking it requires a real second thread, and letting the driver park before
+// that wake requires a real wait. Both are the subject under test, so they are
+// the sanctioned forms: `thread::Builder::spawn` with the handle owned by the
+// test that joins it, and `thread::park_timeout` in place of the banned
+// `thread::sleep`.
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -857,7 +1420,7 @@ mod tests {
                 // The pause is load-bearing: it lets `block_on` park first, so
                 // the wake below is what resumes the future rather than a value
                 // found on the opening poll.
-                thread::sleep(Duration::from_millis(5));
+                thread::park_timeout(Duration::from_millis(5));
                 *lock(&sender_value) = Some(100);
                 if let Some(waker) = lock(&sender_slot).take() {
                     waker.wake();
@@ -879,12 +1442,12 @@ mod tests {
     fn join_all_preserves_input_order_across_completion_order() {
         let output = block_on(join_all(vec![
             spawn_blocking(|| {
-                thread::sleep(Duration::from_millis(30));
+                thread::park_timeout(Duration::from_millis(30));
                 1u32
             }),
             spawn_blocking(|| 2u32),
             spawn_blocking(|| {
-                thread::sleep(Duration::from_millis(10));
+                thread::park_timeout(Duration::from_millis(10));
                 3u32
             }),
         ]));
@@ -932,6 +1495,13 @@ mod tests {
     struct PendingThenReady {
         polls: Arc<AtomicUsize>,
         waker_slot: Arc<Mutex<Option<Waker>>>,
+        /// The waker thread, owned here so the test joins it rather than
+        /// dropping a handle on the floor.
+        waker_thread: Option<thread::JoinHandle<()>>,
+        /// Why no waker thread could be started, for the test to report: with
+        /// no thread there is no wake, so the future would never resolve and the
+        /// test would hang instead of naming the cause.
+        spawn_refusal: Option<io::Error>,
     }
 
     impl Future for PendingThenReady {
@@ -946,14 +1516,20 @@ mod tests {
             if n > 1 {
                 return Poll::Ready(n);
             }
-            *lock(&self.waker_slot) = Some(cx.waker().clone());
-            let slot = Arc::clone(&self.waker_slot);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(5));
-                if let Some(waker) = lock(&slot).take() {
-                    waker.wake();
-                }
-            });
+            let this = self.get_mut();
+            *lock(&this.waker_slot) = Some(cx.waker().clone());
+            let slot = Arc::clone(&this.waker_slot);
+            match thread::Builder::new()
+                .name("pending-then-ready-waker".to_owned())
+                .spawn(move || {
+                    thread::park_timeout(Duration::from_millis(5));
+                    if let Some(waker) = lock(&slot).take() {
+                        waker.wake();
+                    }
+                }) {
+                Ok(joined) => this.waker_thread = Some(joined),
+                Err(error) => this.spawn_refusal = Some(error),
+            }
             Poll::Pending
         }
     }
@@ -965,12 +1541,29 @@ mod tests {
         let fast: Pin<Box<dyn Future<Output = usize>>> = Box::pin(CountPolls {
             polls: Arc::clone(&fast_polls),
         });
-        let slow: Pin<Box<dyn Future<Output = usize>>> = Box::pin(PendingThenReady {
+        let mut slow = PendingThenReady {
             polls: Arc::clone(&slow_polls),
             waker_slot: Arc::new(Mutex::new(None)),
-        });
-        let output = block_on(join_all(vec![fast, slow]));
+            waker_thread: None,
+            spawn_refusal: None,
+        };
+        let output = block_on(join_all(vec![fast, Box::pin(&mut slow)]));
         assert_eq!(output, vec![1, 2]);
+        // The waker thread belongs to this test: joined here, never detached.
+        let Some(joined) = slow.waker_thread.take() else {
+            assert!(
+                slow.spawn_refusal.is_none(),
+                "the waker thread must start: {:?}",
+                slow.spawn_refusal
+            );
+            return;
+        };
+        // A panicking waker thread is re-raised here rather than counted as a
+        // joined thread, so its own message is the failure report.
+        match joined.join() {
+            Ok(()) => {}
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
         // The fast child resolved on its first poll. When the slow child wakes
         // the group, only the incomplete set may be polled again, so the fast
         // child's count must stay at one.
@@ -1102,10 +1695,7 @@ mod tests {
             self.peak.fetch_max(now, AtomicOrdering::SeqCst);
             let mut open = lock(&self.open);
             while !*open {
-                open = self
-                    .opened
-                    .wait(open)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                open = wait(&self.opened, open);
             }
             drop(open);
             self.inside.fetch_sub(1, AtomicOrdering::SeqCst);
@@ -1130,7 +1720,7 @@ mod tests {
                 })?);
             }
             // Let the pool fill every thread it may before the gate opens.
-            thread::sleep(Duration::from_millis(200));
+            thread::park_timeout(Duration::from_millis(200));
             gate.release();
             let output = block_on(join_all(handles));
             assert_eq!(output, (0..jobs).collect::<Vec<_>>(), "{jobs} jobs");
@@ -1204,36 +1794,37 @@ mod tests {
     }
 
     /// A starter that never starts a thread, as when the OS is out of them.
-    fn refuse_to_start(_pool: &'static Pool, _first: Handoff) -> io::Result<()> {
+    fn refuse_to_start(_pool: Arc<Pool>, _first: Handoff) -> io::Result<ThreadHandle> {
         Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
             "injected: no thread",
         ))
     }
 
-    /// A pool of its own, so a test's refusals never touch the process pool.
-    fn test_pool(
-        ceiling: usize,
-        start: fn(&'static Pool, Handoff) -> io::Result<()>,
-    ) -> &'static Pool {
-        Box::leak(Box::new(Pool::new(ceiling, start)))
-    }
-
     #[test]
     fn a_thread_that_cannot_start_refuses_the_job_and_it_never_runs() {
-        let refusing = test_pool(4, refuse_to_start);
+        fn refusing() -> &'static Arc<Pool> {
+            static OWN: OnceLock<Arc<Pool>> = OnceLock::new();
+            OWN.get_or_init(|| Arc::new(Pool::new(4, refuse_to_start)))
+        }
+        let pool = refusing();
         let ran = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&ran);
         let (_handle, work) = prepare(move || witness.store(true, Ordering::SeqCst));
-        match refusing.submit(work, Some(8)) {
-            Err(SpawnError::Os(error)) => assert_eq!(
-                (error.kind(), error.to_string()),
-                (io::ErrorKind::OutOfMemory, "injected: no thread".to_owned()),
-                "the OS's own error is the source"
-            ),
-            other => unreachable!("expected an Os refusal, got {other:?}"),
-        }
-        let state = lock(&refusing.state);
+        // Not `unreachable!`: a refusal of another shape is a finding, not a
+        // proof that this test is wrong about its own input, so the report says
+        // which shape arrived instead of asserting that none could.
+        let observed = match pool.submit(work, Some(8)) {
+            Err(SpawnError::Os(error)) => {
+                format!("{:?}: {error}", error.kind())
+            }
+            other => format!("a refusal of another shape: {other:?}"),
+        };
+        assert_eq!(
+            observed, "OutOfMemory: injected: no thread",
+            "a thread that cannot start refuses the job, and the OS's own error is the source"
+        );
+        let state = lock(&pool.state);
         assert!(
             state.queue.is_empty() && state.live == 0,
             "a refused job leaves nothing queued and no thread counted"
@@ -1244,8 +1835,12 @@ mod tests {
 
     #[test]
     fn spawn_blocking_reports_a_refusal_to_its_awaiter_as_the_job_failing() {
-        let refusing = test_pool(4, refuse_to_start);
-        let handle = spawn_blocking_on(refusing, || 7u32);
+        fn refusing() -> &'static Arc<Pool> {
+            static OWN: OnceLock<Arc<Pool>> = OnceLock::new();
+            OWN.get_or_init(|| Arc::new(Pool::new(4, refuse_to_start)))
+        }
+        let pool = refusing();
+        let handle = spawn_blocking_on(pool, || 7u32);
         let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| block_on(handle)));
         let payload = unwound
             .err()
@@ -1259,7 +1854,7 @@ mod tests {
     #[test]
     fn a_failed_start_beside_a_live_thread_leaves_the_job_to_that_thread() {
         /// Starts the first thread, then refuses every later one.
-        fn first_only(pool: &'static Pool, first: Handoff) -> io::Result<()> {
+        fn first_only(pool: Arc<Pool>, first: Handoff) -> io::Result<ThreadHandle> {
             static STARTS: AtomicUsize = AtomicUsize::new(0);
             if STARTS.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
                 start_os_thread(pool, first)
@@ -1267,15 +1862,19 @@ mod tests {
                 refuse_to_start(pool, first)
             }
         }
-        let single = test_pool(4, first_only);
+        fn single() -> &'static Arc<Pool> {
+            static OWN: OnceLock<Arc<Pool>> = OnceLock::new();
+            OWN.get_or_init(|| Arc::new(Pool::new(4, first_only)))
+        }
+        let pool = single();
         let gate = Arc::new(Gate::default());
         let held = Arc::clone(&gate);
-        let first = spawn_blocking_on(single, move || {
+        let first = spawn_blocking_on(pool, move || {
             held.pass();
             thread::current().id()
         });
-        let second = spawn_blocking_on(single, || thread::current().id());
-        assert_eq!(lock(&single.state).live, 1, "the second start was refused");
+        let second = spawn_blocking_on(pool, || thread::current().id());
+        assert_eq!(lock(&pool.state).live, 1, "the second start was refused");
         gate.release();
         let (first, second) = (block_on(first), block_on(second));
         assert_eq!(
@@ -1289,10 +1888,106 @@ mod tests {
         assert_eq!(block_on(spawn_blocking(|| 99u32)), 99);
     }
 
+    /// A configure after the pool has run work names the ceiling that stands.
+    #[test]
+    fn a_configure_after_the_pool_has_run_is_refused_with_the_running_ceiling() {
+        let pool = Arc::new(Pool::new(4, start_os_thread));
+        assert_eq!(block_on(spawn_blocking_on(&pool, || 1u32)), 1);
+        assert_eq!(
+            configure_decision(&pool, 8),
+            Err(PoolConfigError::InUse {
+                requested: 8,
+                running: 4
+            }),
+            "a configure after first use is refused, never silently ignored"
+        );
+        // Even the same number is `InUse`: this pool ran before it was asked
+        // about, and the answer reports how its ceiling really came about.
+        assert_eq!(
+            configure_decision(&pool, 4),
+            Err(PoolConfigError::InUse {
+                requested: 4,
+                running: 4
+            })
+        );
+    }
+
+    /// A configured pool answers a second configure by name: the same ceiling
+    /// is the one in force, a different one is refused with both numbers.
+    #[test]
+    fn a_second_configure_is_refused_named_or_is_the_ceiling_already_in_force() {
+        let pool = Arc::new(Pool::at_configured(6, refuse_to_start));
+        assert_eq!(
+            configure_decision(&pool, 6),
+            Ok(()),
+            "asking again for the ceiling already in force describes the pool as it is"
+        );
+        assert_eq!(
+            configure_decision(&pool, 9),
+            Err(PoolConfigError::AlreadyConfigured {
+                requested: 9,
+                configured: 6
+            })
+        );
+    }
+
+    /// A ceiling below one is refused before the pool is touched, so the arm
+    /// is decided by the argument alone.
+    #[test]
+    fn a_ceiling_below_one_is_refused_before_the_pool_is_touched() {
+        assert_eq!(
+            configure_blocking_pool(0),
+            Err(PoolConfigError::InvalidCeiling {
+                requested: 0,
+                minimum: 1
+            })
+        );
+    }
+
+    /// After a shutdown both entry points refuse, the job never runs, and the
+    /// never-refusing one fails its awaiter with the typed refusal as the
+    /// payload. The drain, deadline and parked-thread arms are the seeded
+    /// journeys in `sim_pool_lifetime`.
+    #[test]
+    fn after_a_shutdown_admission_is_refused_and_the_job_never_runs() {
+        let pool = Arc::new(Pool::new(2, start_os_thread));
+        let warm = spawn_blocking_on(&pool, || 3u32);
+        assert_eq!(block_on(warm), 3);
+        assert_eq!(
+            pool.shutdown(Duration::from_secs(10)),
+            PoolShutdown::Drained { threads: 1 }
+        );
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&ran);
+        // The bounded arm, through the pool's own submit: a refusal it hands
+        // back leaves the caller no handle, so the refused one is dropped
+        // rather than awaited.
+        let (refused, work) = prepare(move || witness.store(true, AtomicOrdering::SeqCst));
+        assert!(
+            matches!(pool.submit(work, Some(8)), Err(SpawnError::Shutdown)),
+            "the bounded entry point refuses with the typed reason"
+        );
+        drop(refused);
+
+        // The never-refusing arm, through the entry point that hands a handle
+        // back whatever happened: the refusal is the job's failure.
+        let handle = spawn_blocking_on(&pool, || 11u32);
+        let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| block_on(handle)));
+        let payload = unwound
+            .err()
+            .map(|payload| payload.downcast::<SpawnError>());
+        assert!(
+            matches!(payload, Some(Ok(ref error)) if matches!(**error, SpawnError::Shutdown)),
+            "the never-refusing entry point fails its awaiter with the refusal"
+        );
+        assert!(!ran.load(AtomicOrdering::SeqCst), "a refused job never ran");
+    }
+
     #[test]
     fn spawn_blocking_result_ready_before_first_poll() {
         let handle = spawn_blocking(|| 1234u32);
-        thread::sleep(Duration::from_millis(30));
+        thread::park_timeout(Duration::from_millis(30));
         assert_eq!(block_on(handle), 1234);
     }
 

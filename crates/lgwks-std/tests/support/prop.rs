@@ -12,10 +12,10 @@
 //! - **Mutants must fail.** [`shrunk`] runs a property against a deliberately
 //!   broken implementation and hands back the minimal input it fails on; a
 //!   property that cannot catch its mutant proves nothing.
-#![allow(
-    dead_code,
-    reason = "each property target that includes this module uses a different subset of it"
-)]
+//!
+//! It carries its own tests rather than an `allow`: each property target that
+//! includes this module exercises a different subset of it, and a harness whose
+//! unused half is silenced is a harness nobody has read.
 
 use std::error::Error;
 use std::fmt::Debug;
@@ -87,4 +87,105 @@ const SETUP_FAILED: &str = "setup failed: ";
 /// Lift a setup error into a case failure that names it.
 pub fn setup<T, E: Debug>(result: Result<T, E>) -> Result<T, TestCaseError> {
     result.map_err(|error| TestCaseError::fail(format!("{SETUP_FAILED}{error:?}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::{Strategy, any};
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestCaseError;
+
+    use super::{check, runner, setup, shrunk};
+
+    /// A property that holds for every input it is given: a `u32` is four
+    /// bytes wide on every target Rust supports.
+    fn is_four_bytes(value: u32) -> Result<(), TestCaseError> {
+        check(value.to_le_bytes().len() == 4, || {
+            format!("a u32 occupied {} bytes", value.to_le_bytes().len())
+        })
+    }
+
+    /// A property that holds for no input, which is the shape a mutation of a
+    /// real property takes.
+    fn always_fails(value: u32) -> Result<(), TestCaseError> {
+        check(value.to_le_bytes().len() > 8, || {
+            format!(
+                "a u32 occupied {} bytes and was reported wider than a u64",
+                value.to_le_bytes().len()
+            )
+        })
+    }
+
+    #[test]
+    fn a_holding_property_passes_under_the_fixed_seed() -> Result<(), Box<dyn std::error::Error>> {
+        let outcome = runner(7, 32, file!()).run(&any::<u32>(), is_four_bytes);
+        assert!(
+            outcome.is_ok(),
+            "a property that holds must pass under a fixed seed, got {outcome:?}"
+        );
+        Ok(())
+    }
+
+    /// The seed rule the harness exists for: one seed, one corpus. Neither run
+    /// below holds or fails, so neither writes a regression file into the source
+    /// tree — a draw is read, not recorded.
+    /// The first case `runner` draws under `seed`, or the reason it drew none.
+    fn first_case(seed: u64) -> Result<u32, String> {
+        let mut runner = runner(seed, 64, file!());
+        match any::<u32>().new_tree(&mut runner) {
+            Ok(tree) => Ok(tree.current()),
+            Err(reason) => Err(format!("seed {seed} drew no case at all: {reason}")),
+        }
+    }
+
+    #[test]
+    fn sim_the_same_seed_draws_the_same_first_case() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            first_case(11)?,
+            first_case(11)?,
+            "seed 11 must draw one case, not two"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sim_distinct_seeds_draw_different_first_cases() -> Result<(), Box<dyn std::error::Error>> {
+        assert_ne!(
+            first_case(11)?,
+            first_case(12)?,
+            "two seeds drew one case, so the seed is not reaching the draw"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_mutant_that_always_fails_is_caught_and_shrunk() -> Result<(), Box<dyn std::error::Error>> {
+        let minimal = shrunk(3, &any::<u32>(), always_fails)?;
+        assert_eq!(
+            minimal, 0,
+            "the minimal input that always fails a property about a u32 is zero"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_property_that_catches_nothing_is_refused() {
+        let outcome = shrunk(3, &any::<u32>(), is_four_bytes);
+        assert!(
+            outcome.is_err(),
+            "a mutant run that passes proves nothing and must be reported as such"
+        );
+    }
+
+    #[test]
+    fn a_setup_failure_is_told_apart_from_a_property_failure() {
+        assert!(
+            setup(Err::<(), _>("no case source")).is_err(),
+            "a setup error must become a case failure, not a value"
+        );
+        assert!(
+            setup(Ok::<_, &str>(7)).is_ok(),
+            "a setup that succeeded must pass its value through"
+        );
+    }
 }

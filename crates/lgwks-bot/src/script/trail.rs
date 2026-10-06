@@ -46,9 +46,7 @@ impl Trail {
     /// critical section is a push and a pop with no user code between them, so
     /// an unwind elsewhere is not a reason to lose the trail.
     fn lock(&self) -> MutexGuard<'_, VecDeque<Arc<str>>> {
-        self.paths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::journal::owner::lock(&self.paths)
     }
 
     /// Record that the run entered `path`, dropping the oldest retained path if

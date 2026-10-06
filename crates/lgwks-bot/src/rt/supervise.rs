@@ -97,12 +97,14 @@
 use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::pin::pin;
 use std::process::ExitStatus;
 use std::sync::Arc;
 #[cfg(all(unix, feature = "process"))]
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 // Only the supervised process reports an `io::Error`; a build without the
@@ -110,11 +112,13 @@ use std::time::Duration;
 #[cfg(feature = "process")]
 use std::io;
 
+#[cfg(all(unix, feature = "process"))]
+use lgwks_deps::tokio::sync::Notify;
 use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
 #[cfg(all(unix, feature = "process"))]
-use lgwks_deps::tokio::process::{Child, Command};
+use lgwks_deps::tokio::process::{ChildStderr, ChildStdout, Command};
 
 use super::cancel::CancellationToken;
 use super::clock::{Clock, TimeSource};
@@ -273,11 +277,11 @@ impl std::error::Error for SupervisorCancelled {}
 /// Two arms because the caller has two different repairs: [`Self::Refused`] is
 /// the tenant's own load to fix — the bounded queue was full, or the supervisor
 /// had stopped admitting — and [`Self::Run`] is everything
-/// [`ProcessRunError`](super::process::ProcessRunError) already says about the
+/// [`ProcessRunError`] already says about the
 /// process itself, carried unchanged rather than flattened. A single arm would
 /// make "your tenant is loud" and "the platform could not start the program"
 /// the same value, and they are not.
-#[cfg(feature = "process")]
+#[cfg(all(feature = "process", feature = "script"))]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RunForError {
@@ -287,7 +291,7 @@ pub enum RunForError {
     Run(ProcessRunError),
 }
 
-#[cfg(feature = "process")]
+#[cfg(all(feature = "process", feature = "script"))]
 impl fmt::Display for RunForError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -297,7 +301,7 @@ impl fmt::Display for RunForError {
     }
 }
 
-#[cfg(feature = "process")]
+#[cfg(all(feature = "process", feature = "script"))]
 impl std::error::Error for RunForError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
@@ -454,7 +458,7 @@ pub enum TaskOutcome {
 /// It does **not** claim that no process this supervisor started is still
 /// running. That is the honest limit of a process group, and a caller that needs
 /// it needs a kernel job object or a cgroup, neither of which this module has.
-/// `tests/process_escape.rs` exercises a real `setsid` escape and states this
+/// `tests/it/process_escape.rs` exercises a real `setsid` escape and states this
 /// boundary against a live process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -764,13 +768,22 @@ impl Stats {
 /// pool, and the round needs to know which tenant just freed a slot. A
 /// supervisor without a policy never charges a tenant, so its leases carry no
 /// charge and their drop is exactly the bare permit's drop.
+#[cfg(feature = "script")]
 struct Lease {
-    /// The pool permit, taken out of the pool when the admission was granted.
+    /// The pool permit, taken out of the pool when the admission was granted,
+    /// and taken out of the lease only by its own drop.
     permit: Option<OwnedSemaphorePermit>,
     /// The tenant this admission is charged to, when the supervisor installed a
     /// policy. `None` for every untenanted supervisor.
-    #[cfg(feature = "script")]
     charge: Option<TenantCharge>,
+}
+
+/// A build without tenancy has no round, so its lease is the permit alone: held
+/// for the task's life and returned to the pool by its own drop.
+#[cfg(not(feature = "script"))]
+struct Lease {
+    /// The pool permit, held only so that dropping the lease releases it.
+    _permit: OwnedSemaphorePermit,
 }
 
 /// The tenant half of a [`Lease`], handed to the round when the lease drops.
@@ -813,21 +826,22 @@ impl Lease {
     /// A lease for a supervisor with no policy.
     #[cfg(not(feature = "script"))]
     fn plain(permit: OwnedSemaphorePermit) -> Self {
-        Self {
-            permit: Some(permit),
-        }
+        Self { _permit: permit }
     }
 }
 
+/// Only a build with tenancy has a round to hand a permit to. Without `script`
+/// there is no `Drop` at all: the lease is its `permit` field, and that field's
+/// own drop returns the permit to the pool.
+#[cfg(feature = "script")]
 impl Drop for Lease {
-    /// Hand the permit back — to the round when the lease is tenanted, to the
-    /// pool when it is not.
+    /// Hand a tenanted lease's permit to the round, which decides whose waiter
+    /// it serves next. An untenanted lease does nothing here: its `permit` field
+    /// drops with it and the permit returns to the pool.
     fn drop(&mut self) {
-        let Some(permit) = self.permit.take() else {
-            return;
-        };
-        #[cfg(feature = "script")]
-        if let Some(charge) = self.charge.take() {
+        if let Some(charge) = self.charge.take()
+            && let Some(permit) = self.permit.take()
+        {
             charge.shell.release(&charge.tenant, permit);
         }
     }
@@ -870,7 +884,7 @@ mod tenancy_support {
     use lgwks_deps::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
     use super::Lease;
-    use crate::rt::tenancy::{Arrival, DeficitRoundRobin, GrantOutcome, TryArrival};
+    use crate::rt::tenancy::{Arrival, DeficitRoundRobin, Grant, GrantOutcome, TryArrival};
     use crate::script::Tenant;
 
     /// The permit pool and the round scheduler, with the two directions a
@@ -904,6 +918,10 @@ mod tenancy_support {
         abandoned: bool,
         /// A permit was handed over, so this slot is spent.
         handed: bool,
+        /// The round took this waiter off its queue to deliver to it and found
+        /// the owner gone. The waiter is no longer in any queue, so the owner's
+        /// own report must not count it as an abandoned waiter there.
+        withdrawn: bool,
         /// The task waiting for the handover.
         waker: Option<Waker>,
     }
@@ -916,6 +934,7 @@ mod tenancy_support {
                     permit: None,
                     abandoned: false,
                     handed: false,
+                    withdrawn: false,
                     waker: None,
                 }),
             })
@@ -925,9 +944,7 @@ mod tenancy_support {
         /// critical section is a few plain writes that cannot be left half done,
         /// so a panic elsewhere is not a reason to strand a waiter.
         fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            crate::journal::owner::lock(&self.state)
         }
 
         /// Whether a grant may still be handed to this slot.
@@ -945,10 +962,17 @@ mod tenancy_support {
         /// `Some(permit)` means the owner left between the round's liveness
         /// check and this handoff; the caller recycles the permit rather than
         /// dropping it, because a permit is capacity and capacity is what the
-        /// next eligible tenant is waiting for.
+        /// next eligible tenant is waiting for. The slot is marked withdrawn in
+        /// the same critical section, so the owner's report, which reaches the
+        /// round only after the caller's pump releases it, knows the round
+        /// already took this waiter off its queue.
         fn deliver(&self, permit: OwnedSemaphorePermit) -> Option<OwnedSemaphorePermit> {
             let mut state = self.lock();
-            if state.abandoned || state.handed {
+            if state.abandoned {
+                state.withdrawn = true;
+                return Some(permit);
+            }
+            if state.handed {
                 return Some(permit);
             }
             state.permit = Some(permit);
@@ -967,6 +991,23 @@ mod tenancy_support {
             self.lock().permit.take()
         }
 
+        /// The slot half of an owner's departure: collect a handed permit, or
+        /// mark the slot abandoned so no grant can deliver to it.
+        ///
+        /// Taken under the slot lock alone. The round half,
+        /// [`TenancyShell::report_abandoned`], runs after this lock is released,
+        /// so the two critical sections nest only in the order the shell uses —
+        /// and a pump that holds the round lock can find this slot abandoned
+        /// between its liveness check and its delivery.
+        fn leave(&self) -> Departure {
+            let mut state = self.lock();
+            if state.handed {
+                return Departure::Handed(state.permit.take());
+            }
+            state.abandoned = true;
+            Departure::Abandoned
+        }
+
         /// Record the waiting task, keeping the one already registered.
         fn register(&self, waker: &Waker) {
             let mut state = self.lock();
@@ -978,6 +1019,16 @@ mod tenancy_support {
                 state.waker = Some(waker.clone());
             }
         }
+    }
+
+    /// What an owner leaving its slot found there.
+    enum Departure {
+        /// A permit had been handed over; it is returned here unless the owner
+        /// already collected it.
+        Handed(Option<OwnedSemaphorePermit>),
+        /// No permit had arrived. The slot is now abandoned, and the round has
+        /// still to hear about it.
+        Abandoned,
     }
 
     /// The future a parked admission awaits: the permit the round will hand it.
@@ -1040,26 +1091,10 @@ mod tenancy_support {
         /// The slot lock is released before the scheduler lock is taken, so the
         /// two critical sections nest only in the order the shell uses.
         fn drop(&mut self) {
-            let (collected, abandoned) = {
-                let mut state = self.slot.lock();
-                if state.handed {
-                    (state.permit.take(), false)
-                } else {
-                    state.abandoned = true;
-                    (None, true)
-                }
-            };
-            if let Some(permit) = collected {
-                self.shell.release(&self.tenant, permit);
-            }
-            if abandoned {
-                // The compaction inside `note_abandoned` needs to know which
-                // waiters are still owned, and the answer lives on each slot.
-                // The slot lock is released before this one is taken, so the two
-                // critical sections nest only in the order the shell uses.
-                let mut round = self.shell.lock();
-                let mut is_live = |slot: &Arc<WaitSlot>| slot.is_live();
-                round.note_abandoned(&self.tenant, &mut is_live);
+            match self.slot.leave() {
+                Departure::Handed(Some(permit)) => self.shell.release(&self.tenant, permit),
+                Departure::Handed(None) => {}
+                Departure::Abandoned => self.shell.report_abandoned(&self.slot, &self.tenant),
             }
         }
     }
@@ -1099,9 +1134,7 @@ mod tenancy_support {
         /// critical section is a handful of plain writes over queues and
         /// counters, so a panic elsewhere is not a reason to strand permits.
         fn lock(&self) -> std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>> {
-            self.round
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            crate::journal::owner::lock(&self.round)
         }
 
         /// One permit from the pool, if the pool has one free.
@@ -1205,19 +1238,51 @@ mod tenancy_support {
                         drop(permit);
                         return;
                     }
-                    GrantOutcome::Granted(grant) => {
-                        if let Some(returned) = grant.waiter.deliver(grant.permit) {
-                            // The owner left between the liveness check and the
-                            // handoff. The admission is charged back and the
-                            // permit recycles into the same round, so a grant
-                            // that lost its waiter still reaches a live one.
-                            round.note_grant_abandoned(&grant.tenant);
-                            round.note_release(&grant.tenant);
-                            spare = Some(returned);
-                        }
-                    }
+                    GrantOutcome::Granted(grant) => spare = Self::settle(round, grant),
                 }
             }
+        }
+
+        /// Deliver one grant, or recycle its permit when the owner has left.
+        ///
+        /// Returns the permit when the delivery failed: the owner left between
+        /// the round's liveness check and this handoff. The admission the grant
+        /// charged is charged back, and the permit recycles into the same pump,
+        /// so a grant that lost its waiter still reaches a live one.
+        ///
+        /// The round's abandoned count is not touched here. The owner has not
+        /// reported yet — its report needs the round lock this pump holds — and
+        /// when it does, it finds its slot withdrawn and reports nothing,
+        /// because the waiter it would count is no longer in the queue.
+        /// Correcting the count here instead would subtract before the owner
+        /// added, and a count that saturates at zero loses the subtraction.
+        fn settle(
+            round: &mut std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>>,
+            grant: Grant<Arc<WaitSlot>, OwnedSemaphorePermit>,
+        ) -> Option<OwnedSemaphorePermit> {
+            let returned = grant.waiter.deliver(grant.permit)?;
+            round.note_release(&grant.tenant);
+            Some(returned)
+        }
+
+        /// The round half of an owner's departure without a permit.
+        ///
+        /// The compaction inside `note_abandoned` needs to know which waiters are
+        /// still owned, and the answer lives on each slot. Called after the slot
+        /// lock is released, so the round lock is taken first and the slot locks
+        /// inside it, in the order the pump uses.
+        ///
+        /// A withdrawn slot reports nothing: a pump already took its waiter off
+        /// the queue and found it gone, and `note_abandoned` counts waiters that
+        /// are still in a queue. The flag is read under the round lock, after
+        /// any pump that could withdraw the slot has finished.
+        fn report_abandoned(&self, slot: &WaitSlot, tenant: &Tenant) {
+            let mut round = self.lock();
+            if slot.lock().withdrawn {
+                return;
+            }
+            let mut is_live = |waiter: &Arc<WaitSlot>| waiter.is_live();
+            round.note_abandoned(tenant, &mut is_live);
         }
 
         /// How many admissions `tenant` holds, and how many it is waiting for.
@@ -1245,6 +1310,87 @@ mod tenancy_support {
         /// How many tenants hold at least one waiter.
         pub(super) fn tenants_waiting(&self) -> usize {
             self.lock().tenants_with_queues()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::error::Error;
+        use std::sync::Arc;
+
+        use lgwks_deps::tokio::sync::Semaphore;
+
+        use super::{Departure, TenancyShell, WaitSlot};
+        use crate::rt::tenancy::{Arrival, GrantOutcome, TenancyPolicy};
+        use crate::script::Tenant;
+
+        /// An owner that walks away between the round's choice and the delivery
+        /// leaves its tenant's live count exact.
+        ///
+        /// The interleaving is the one the locks force, driven step by step
+        /// through the shell's own functions: the pump holds the round lock from
+        /// its grant to its delivery, so an owner leaving in that window runs
+        /// its slot half first, the pump's delivery fails, and the owner's round
+        /// half runs only once the pump lets go. The tenant still has three
+        /// owners waiting behind the one that left, and its live count must say
+        /// so. Three, because with fewer the miscount is large enough to trigger
+        /// the round's compaction, which recounts the queue and hides it.
+        #[test]
+        fn a_late_abandonment_leaves_the_live_count_exact() -> Result<(), Box<dyn Error>> {
+            let shell = TenancyShell::new(Arc::new(Semaphore::new(0)), TenancyPolicy::new(4, 4));
+            let tenant = Tenant::new("late")?;
+            let leaving = WaitSlot::fresh();
+            let staying = [WaitSlot::fresh(), WaitSlot::fresh(), WaitSlot::fresh()];
+            {
+                let mut round = shell.lock();
+                for slot in std::iter::once(&leaving).chain(&staying) {
+                    let arrival = round.arrive(&tenant, Arc::clone(slot), || None::<()>);
+                    assert!(
+                        matches!(arrival, Arrival::Queued),
+                        "a spent pool queues every arrival"
+                    );
+                }
+            }
+            let spare = Arc::new(Semaphore::new(1)).try_acquire_owned()?;
+            let mut round = shell.lock();
+            let mut is_live = |slot: &Arc<WaitSlot>| slot.is_live();
+            let grant = match round.grant(spare, &mut is_live) {
+                GrantOutcome::Granted(grant) => Some(grant),
+                GrantOutcome::Idle(_) => None,
+            }
+            .ok_or("a queued waiter takes the permit")?;
+            assert!(
+                Arc::ptr_eq(&grant.waiter, &leaving),
+                "the round chose the oldest waiter"
+            );
+            assert!(
+                matches!(leaving.leave(), Departure::Abandoned),
+                "the owner leaves before any permit reached it"
+            );
+            let recycled = TenancyShell::settle(&mut round, grant);
+            drop(round);
+            shell.report_abandoned(&leaving, &tenant);
+
+            assert!(
+                recycled.is_some(),
+                "the failed delivery recycled its permit"
+            );
+            let (in_flight, queued) = shell.counts_of(&tenant);
+            assert_eq!(
+                in_flight, 0,
+                "the failed delivery charged its admission back"
+            );
+            assert_eq!(
+                queued,
+                staying.len(),
+                "three owners are still waiting, and the live count must say so"
+            );
+            assert_eq!(
+                shell.retained_waiters(&tenant),
+                staying.len(),
+                "the round retains exactly the waiter still owned"
+            );
+            Ok(())
         }
     }
 }
@@ -1368,6 +1514,23 @@ enum TaskEnd {
     },
 }
 
+/// What ended one wait at the bound in [`Supervisor::claim`].
+#[derive(Debug)]
+enum Wait {
+    /// A task ended, so its permit is back in the pool; its outcome is carried
+    /// here so it is counted, not dropped.
+    Joined(Result<(Id, TaskEnd), super::task::JoinError>),
+    /// A permit was taken; cancellation is still read on it before admission.
+    Permit(OwnedSemaphorePermit),
+    /// The pool was closed. This supervisor never closes it, so this is counted
+    /// as a refusal rather than assumed away.
+    Closed,
+    /// The supervisor was cancelled while waiting.
+    Cancelled,
+    /// A permit may be held by a cleanup owner that only a reap releases.
+    Recheck,
+}
+
 /// Whether a terminal outcome is subject to the retention cap.
 ///
 /// [`Supervisor::reap`] runs on the caller's schedule with the caller free to
@@ -1414,6 +1577,17 @@ const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 /// Number of bounded group probes used after a leader exits.
 #[cfg(all(unix, feature = "process"))]
 const PROCESS_CLEANUP_ATTEMPTS: usize = 64;
+
+/// How often a spawn waiting at the bound re-drives the cleanup owners while one
+/// of them holds a permit.
+///
+/// A cleanup owner keeps its task's permit until it observes the group gone, and
+/// nothing wakes a waiter when that happens: the observation is a probe that
+/// [`Supervisor::reap`] makes. So a waiter re-reaps on this interval, and only
+/// while an owner is pending — with none, every permit is released by a task
+/// ending, which wakes the waiter itself, and the wait arms no timer.
+#[cfg(all(unix, feature = "process"))]
+const CLEANUP_RECHECK: Duration = Duration::from_millis(100);
 
 /// The in-flight ceiling [`Supervisor::default`] falls back to when the OS will
 /// not report a usable processor count.
@@ -1485,8 +1659,8 @@ impl Supervisor {
     ///
     /// - **The untenanted calls are one implicit tenant.**
     ///   [`Supervisor::spawn`], [`Supervisor::try_spawn`],
-    ///   [`Supervisor::spawn_repeating`], [`Supervisor::spawn_process`] and
-    ///   [`Supervisor::run_process`] are charged to one reserved tenant, so a
+    ///   [`Supervisor::spawn_repeating`], `Supervisor::spawn_process` and
+    ///   `Supervisor::run_process` are charged to one reserved tenant, so a
     ///   caller that predates tenancy shares that tenant's ceiling with every
     ///   other untenanted caller instead of reaching every tenant's permit. No
     ///   signature changes, and the one behavioural difference is a *visible*
@@ -1494,7 +1668,7 @@ impl Supervisor {
     ///   refuses the call and counts it in [`Stats::refused`], where an
     ///   untenanted supervisor without tenancy still waits.
     /// - **The tenant-scoped calls answer with a typed refusal.**
-    ///   [`Supervisor::spawn_for`] and [`Supervisor::run_process_for`] name the
+    ///   [`Supervisor::spawn_for`] and `Supervisor::run_process_for` name the
     ///   tenant that is at capacity and the bound it reached, so a caller can
     ///   tell one loud tenant from a stopped supervisor.
     ///
@@ -1583,23 +1757,17 @@ impl Supervisor {
 
     /// The child token and the run bounds a spec declares, resolved once.
     ///
-    /// Both process runners start from these four values, and a second copy is
-    /// a second place for the ceiling, the deadline or the token to drift.
+    /// Both process runners start from these values, and a second copy is a
+    /// second place for the ceiling, the deadline or the token to drift.
     #[cfg(all(unix, feature = "process"))]
-    fn prepare_process(
-        &self,
-        spec: &ProcessSpec,
-    ) -> (
-        CancellationToken,
-        Option<Duration>,
-        Option<NonZeroUsize>,
-        Option<NonZeroUsize>,
-    ) {
+    fn prepare_process(&self, spec: &ProcessSpec) -> (CancellationToken, RunBounds) {
         (
             self.child_token(),
-            spec.deadline_duration(),
-            spec.stdout_capture(),
-            spec.stderr_capture(),
+            RunBounds {
+                deadline: spec.deadline_duration(),
+                out_limit: spec.stdout_capture(),
+                err_limit: spec.stderr_capture(),
+            },
         )
     }
 
@@ -1731,6 +1899,34 @@ impl Supervisor {
         #[cfg(all(unix, feature = "process"))]
         self.refresh_cleanup_owners();
         reaped
+    }
+
+    /// Wait until every task this supervisor has placed has ended, cancelling
+    /// none of them, and return how many were joined.
+    ///
+    /// The awaiting counterpart of [`Supervisor::reap`]: `reap` joins what has
+    /// already finished, so a caller that wanted to wait through it had to poll
+    /// it on a timer, and the runtime's timer rounds a short sleep up to its
+    /// one-millisecond tick — a fixed cost on every wait that the task set's own
+    /// completion wakeup does not have (#269). Each task is joined the moment it
+    /// ends and absorbed exactly as `reap` absorbs it, so every one produces one
+    /// [`TaskOutcome`] under the same retention cap.
+    ///
+    /// Unlike [`Supervisor::shutdown`] nothing is cancelled and the supervisor
+    /// stays usable: this is the wait for "everything I started has finished",
+    /// not for "stop". A body that never returns keeps this waiting; bound it
+    /// with the runtime's `timeout`, or cancel, when that is possible. The wait
+    /// is bounded by the in-flight ceiling, because nothing is spawned while it
+    /// runs.
+    pub async fn wait_idle(&mut self) -> usize {
+        let mut joined: usize = 0;
+        while let Some(next) = self.set.join_next_with_id().await {
+            self.absorb(next, Retention::Capped);
+            joined = joined.saturating_add(1);
+        }
+        #[cfg(all(unix, feature = "process"))]
+        self.refresh_cleanup_owners();
+        joined
     }
 
     /// Place `body` on this supervisor, waiting for a free slot if the bound is
@@ -1988,17 +2184,16 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
             return refusal;
         }
-        let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
-        let child = start(spec)?;
+        let (child, group_id) = start(spec)?;
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
         // cleanup fallback for a process that native spawning already started.
         let task = self.allocate_task_id();
-        let group = ProcessGroup::of(&child, task, permit, Arc::clone(&self.cleanup_owners));
+        let group = ProcessGroup::of(group_id, task, permit, Arc::clone(&self.cleanup_owners));
         Ok(self.place_owned(task, async move {
-            let end =
-                drive_process(&clock, child, deadline, &token, group, out_limit, err_limit).await;
+            let end = drive_process(&clock, child, &token, group, bounds).await;
             task_end(end)
         }))
     }
@@ -2150,10 +2345,10 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive_run: returning an error to the caller");
             return refusal;
         }
-        let (token, deadline, out_limit, err_limit) = self.prepare_process(spec);
+        let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
-        let child = match start(spec) {
-            Ok(child) => child,
+        let (child, group_id) = match start(spec) {
+            Ok(started) => started,
             Err(source) => {
                 let refusal = Err(ProcessRunError::NotStarted { source });
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drive_run: returning an error to the caller");
@@ -2161,12 +2356,9 @@ impl Supervisor {
             }
         };
         let task = self.allocate_task_id();
-        let group = ProcessGroup::of(&child, task, lease, Arc::clone(&self.cleanup_owners));
+        let group = ProcessGroup::of(group_id, task, lease, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
-        let end = drive_process_observed(
-            &clock, child, deadline, &token, group, out_limit, err_limit, on_line,
-        )
-        .await;
+        let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
         self.completed = self.completed.saturating_add(1);
         let deadline_fired = matches!(end.observation, ProcessObservation::Deadline);
         let settled = match end.observation {
@@ -2358,8 +2550,7 @@ impl Supervisor {
         // The gate before the wait: a cancelled supervisor never parks on a
         // full pool, because there is nothing it would do with a slot.
         if self.token.is_cancelled() {
-            self.refused = self.refused.saturating_add(1);
-            return None;
+            return self.refuse();
         }
         // With a policy installed, the untenanted calls are one implicit tenant
         // and the round — not the pool — decides who a freed permit belongs to.
@@ -2377,28 +2568,31 @@ impl Supervisor {
             };
         }
         self.reap();
-        let mut acquire = std::pin::pin!(Arc::clone(&self.permits).acquire_owned());
-        let token = self.token.clone();
-        match token.run_until_cancelled(acquire.as_mut()).await {
-            None => {
-                self.refused = self.refused.saturating_add(1);
-                None
+
+        // The fast path, and it is the common one: an uncontended spawn takes a
+        // permit that is already free, with no future built and no timer armed.
+        //
+        // The slow path, and for a bounded pipeline the steady state: the pool
+        // is full and every spawn waits. A permit held by a task is released
+        // when that task's future finishes, which is before the task set can
+        // yield it, so a full pool frees exactly when a task can be joined. The
+        // wait is therefore on the task set — the same wait a raw `JoinSet` +
+        // `Semaphore` pipeline makes — and the outcome is absorbed as it arrives
+        // rather than on a later reap. Waiting on the semaphore instead cost an
+        // extra cross-thread wake per spawn, because the permit is released from
+        // inside the finishing task, before the task set has anything to give
+        // (#269).
+        loop {
+            if let Some(permit) = self.try_take() {
+                return self.admit(permit);
             }
-            Some(Ok(permit)) if !self.token.is_cancelled() => Some(Lease::plain(permit)),
-            // A permit that landed in the same instant as a cancellation. The
-            // bare permit drops back to the pool, which is where it came from:
-            // the untenanted path charges no tenant, so there is no round to
-            // hand it to.
-            Some(Ok(_)) => {
-                self.refused = self.refused.saturating_add(1);
-                None
-            }
-            // The semaphore is closed, which this module never does; a refusal
-            // says so rather than waiting on a pool that will never hand out
-            // another permit.
-            Some(Err(_)) => {
-                self.refused = self.refused.saturating_add(1);
-                None
+            match self.wait_at_bound().await {
+                Wait::Joined(joined) => self.absorb(joined, Retention::Capped),
+                Wait::Recheck => {
+                    self.reap();
+                }
+                Wait::Permit(permit) => return self.admit(permit),
+                Wait::Closed | Wait::Cancelled => return self.refuse(),
             }
         }
     }
@@ -2422,7 +2616,9 @@ impl Supervisor {
         tenant: &Tenant,
     ) -> Result<Lease, SpawnRefused> {
         if self.token.is_cancelled() {
-            return Err(SpawnRefused::Cancelled);
+            let refusal = Err(SpawnRefused::Cancelled);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "claim_tenanted: returning an error to the caller");
+            return refusal;
         }
         self.reap();
         match shell.admit(tenant) {
@@ -2473,6 +2669,70 @@ impl Supervisor {
         }
     }
 
+    /// Turn a permit into an admission, unless cancellation landed first.
+    ///
+    /// Cancellation is read again on the permit itself, so a slot that frees
+    /// after cancellation is not an admission offer: the permit drops here and
+    /// the refusal is counted. Every path that obtains a permit decides through
+    /// this one rule.
+    fn admit(&mut self, permit: OwnedSemaphorePermit) -> Option<Lease> {
+        if self.token.is_cancelled() {
+            drop(permit);
+            return self.refuse();
+        }
+        Some(Lease::plain(permit))
+    }
+
+    /// Count one refused admission.
+    const fn refuse(&mut self) -> Option<Lease> {
+        self.refused = self.refused.saturating_add(1);
+        None
+    }
+
+    /// Wait at the bound for the next thing that can change the admission
+    /// decision: a task ending, cancellation, or a cleanup owner to re-drive.
+    ///
+    /// With tasks in flight the wait is on the task set, because ending is how a
+    /// task gives its permit back. With none in flight every permit is held
+    /// elsewhere — by a cleanup owner — and the wait is on the pool itself.
+    /// The futures are pinned on this frame, not boxed, and polled in the order
+    /// the decision needs: the slot first, then the token, then the recheck.
+    async fn wait_at_bound(&mut self) -> Wait {
+        let permits = &self.permits;
+        let set = &mut self.set;
+        let mut cancelled = pin!(self.token.cancelled());
+        #[cfg(all(unix, feature = "process"))]
+        let mut recheck = pin!(recheck(&self.cleanup_owners));
+        #[cfg(not(all(unix, feature = "process")))]
+        let mut recheck = pin!(std::future::pending::<()>());
+        if set.is_empty() {
+            let mut acquire = pin!(Arc::clone(permits).acquire_owned());
+            return poll_fn(|context: &mut Context<'_>| {
+                if let Poll::Ready(acquired) = acquire.as_mut().poll(context) {
+                    return Poll::Ready(acquired.map_or(Wait::Closed, Wait::Permit));
+                }
+                if cancelled.as_mut().poll(context).is_ready() {
+                    return Poll::Ready(Wait::Cancelled);
+                }
+                recheck.as_mut().poll(context).map(|()| Wait::Recheck)
+            })
+            .await;
+        }
+        let mut joined = pin!(set.join_next_with_id());
+        poll_fn(|context: &mut Context<'_>| {
+            if let Poll::Ready(next) = joined.as_mut().poll(context) {
+                // `None` is an empty set, which was ruled out above; reading it
+                // as a recheck re-enters the loop rather than inventing a state.
+                return Poll::Ready(next.map_or(Wait::Recheck, Wait::Joined));
+            }
+            if cancelled.as_mut().poll(context).is_ready() {
+                return Poll::Ready(Wait::Cancelled);
+            }
+            recheck.as_mut().poll(context).map(|()| Wait::Recheck)
+        })
+        .await
+    }
+
     /// The non-blocking counterpart of [`Supervisor::claim`].
     ///
     /// Cancellation is checked before the pool and again on the permit, so a
@@ -2508,15 +2768,15 @@ impl Supervisor {
                 }
             };
         }
-        let acquired = Arc::clone(&self.permits).try_acquire_owned();
         if self.token.is_cancelled() {
-            // The permit, if it landed, drops here: refusal wins the race.
+            // Cancellation can land inside `reap`, which awaits. The permit, if one
+            // landed below, would drop here: refusal wins the race.
             self.refused = self.refused.saturating_add(1);
             return None;
         }
-        match acquired {
-            Ok(permit) => Some(Lease::plain(permit)),
-            Err(_) => {
+        match self.try_take() {
+            Some(permit) => Some(Lease::plain(permit)),
+            None => {
                 self.refused = self.refused.saturating_add(1);
                 None
             }
@@ -2549,6 +2809,16 @@ impl Supervisor {
                 TaskEnd::Completed
             }
         })
+    }
+
+    /// Take a permit if one is free, without counting anything.
+    ///
+    /// The non-counting half of [`Self::claim_now`], split out because
+    /// [`Self::claim`]'s fast path must *not* count a full pool as a refusal: a
+    /// supervisor at its bound is healthy and waiting, which is backpressure, and
+    /// counting it as a refusal is the mistake this split exists to prevent.
+    fn try_take(&mut self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.permits).try_acquire_owned().ok()
     }
 
     /// Give the future a [`TaskId`], place it, and register the identity.
@@ -2940,28 +3210,152 @@ impl Drop for Supervisor {
 /// Build the private engine command for `spec` and start the child.
 ///
 /// The one constructor both [`Supervisor::spawn_process`] and
-/// [`Supervisor::run_process`] call, so the group, the drop-time kill fallback
-/// and the configured streams cannot drift between them. [`Command::spawn`] is
-/// banned workspace-wide by `clippy.toml`, with `spawn_process` as its named
-/// replacement; here the child is owned by the supervisor's driver, and there
-/// is no other constructor for a running child. The expectation is the crate's
-/// form for a reasoned, checked exception — if the entry is ever retargeted or
-/// lifted, this `expect` becomes unfulfilled and this line is revisited rather
-/// than silently continuing to be exempt.
+/// [`Supervisor::run_process`] call, so the group, the reaping and the
+/// configured streams cannot drift between them.
+///
+/// The engine's `Command` describes the child — program, arguments,
+/// environment, streams and the new process group — and the standard library
+/// starts it. `tokio::process::Command::spawn` is banned workspace-wide by
+/// `clippy.toml`, with [`Supervisor::spawn_process`] as its replacement; this
+/// is that replacement's own start, so it goes through the std command the
+/// engine already built rather than through the banned call. What the engine's
+/// child added beyond the std one — async pipes, a kill when the handle is
+/// dropped, and reaping an orphan — [`OwnedChild`] provides.
 #[cfg(all(unix, feature = "process"))]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the engine's Command has no other way to start a child; this is the single call the supervisor's drivers wrap, and it is not reachable from outside this module"
-)]
-fn start(spec: &ProcessSpec) -> io::Result<Child> {
+fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     let mut command = Command::new(spec.program());
     spec.configure(&mut command)?;
-    // Two guarantees rather than one, because the group kill is a syscall the
-    // platform may not have: `kill_on_drop` reaches the direct child
-    // everywhere, and the group kill reaches what that child spawned.
-    command.kill_on_drop(true);
+    // The group kill reaches what the child spawned; `OwnedChild`'s drop-time
+    // kill reaches the direct child on the paths where no group kill ran.
     command.process_group(0);
-    command.spawn()
+    let child = OwnedChild::own(command.into_std().spawn()?)?;
+    // Read before the child is awaited: an unreaped child still has its id,
+    // and a group leader's group id is its own pid, which `process_group(0)`
+    // arranged above. A refusal here drops — and so kills — the child.
+    let group = child.group()?;
+    Ok((child, group))
+}
+
+/// How often a child that has been signalled is checked for its exit while it
+/// is being reaped. The same cadence [`observe_pid_without_reaping`] observes
+/// a running child at, so reaping adds no finer timer than observing already
+/// uses.
+#[cfg(all(unix, feature = "process"))]
+const REAP_POLL: Duration = Duration::from_millis(5);
+
+/// Children killed when their owner was dropped but not yet exited.
+///
+/// A dropped handle cannot await its child, and a killed child that nobody
+/// waits on stays a zombie and keeps its pid allocated. Each one is parked here
+/// and reaped by the next [`OwnedChild`] that starts or drops — the same
+/// contract as the engine's own orphan queue, which this replaces. Its length
+/// is bounded by the children that were SIGKILLed and have not yet been torn
+/// down by the kernel, which is momentary for every process not stuck in an
+/// uninterruptible wait.
+#[cfg(all(unix, feature = "process"))]
+static ORPHANS: std::sync::Mutex<Vec<std::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+/// Reap every parked orphan that has exited, keeping the rest parked.
+#[cfg(all(unix, feature = "process"))]
+fn reap_orphans() {
+    crate::journal::owner::lock(&ORPHANS)
+        .retain_mut(|orphan| matches!(orphan.try_wait(), Ok(None)));
+}
+
+/// A started child this module owns: the std handle, its two captured pipes as
+/// async readers, and whether it has been reaped.
+///
+/// Dropping an unreaped one kills the direct child and parks it in [`ORPHANS`],
+/// so an aborted driver never leaves a running child or an unreaped zombie
+/// behind it. The process-group guard covers the child's own descendants.
+#[cfg(all(unix, feature = "process"))]
+struct OwnedChild {
+    /// The started child; `None` only once it has been reaped or parked.
+    inner: Option<std::process::Child>,
+    /// Its pid, which is also its process group's id.
+    pid: u32,
+    /// Its stdout, when the spec captured it.
+    stdout: Option<ChildStdout>,
+    /// Its stderr, when the spec captured it.
+    stderr: Option<ChildStderr>,
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl OwnedChild {
+    /// Own a just-started child, converting its captured pipes to async
+    /// readers on this runtime's reactor.
+    ///
+    /// The child is owned before the conversion, so a conversion that fails
+    /// drops an `OwnedChild` — killing and parking the child — rather than
+    /// leaking a running process behind an error.
+    fn own(mut inner: std::process::Child) -> io::Result<Self> {
+        // A start is one of the two moments [`ORPHANS`] is collected, so a
+        // supervisor that only ever starts children still releases the ones
+        // its earlier drivers parked.
+        reap_orphans();
+        let stdout = inner.stdout.take();
+        let stderr = inner.stderr.take();
+        let mut child = Self {
+            pid: inner.id(),
+            inner: Some(inner),
+            stdout: None,
+            stderr: None,
+        };
+        child.stdout = stdout.map(ChildStdout::from_std).transpose()?;
+        child.stderr = stderr.map(ChildStderr::from_std).transpose()?;
+        Ok(child)
+    }
+
+    /// The child's pid as the `pid_t` its process group is signalled by.
+    ///
+    /// # Errors
+    ///
+    /// A pid that does not fit `pid_t` is not one this module can signal, so
+    /// it is refused rather than mapped to an id that would name another group.
+    fn group(&self) -> io::Result<i32> {
+        i32::try_from(self.pid).map_err(io::Error::other)
+    }
+
+    /// Collect the child's exit status, releasing its pid.
+    ///
+    /// Not cancellable by the run's token on purpose: by the time this runs the
+    /// child has exited or its group has been signalled, and a reap abandoned
+    /// half way would leave the zombie this exists to collect. A dropped reap
+    /// is still safe — the drop parks the child in [`ORPHANS`].
+    async fn reap(&mut self) -> io::Result<std::process::ExitStatus> {
+        loop {
+            let Some(inner) = self.inner.as_mut() else {
+                let refusal = Err(io::Error::other("the child was already reaped"));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), pid = self.pid, "owned child: reap after reap");
+                return refusal;
+            };
+            if let Some(status) = inner.try_wait()? {
+                self.inner = None;
+                reap_orphans();
+                return Ok(status);
+            }
+            crate::rt::time::sleep(REAP_POLL).await;
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
+        // A child that already exited is a zombie that still holds its pid, so
+        // the kill cannot reach another process; the reap below is what
+        // releases it either way.
+        if let Err(error) = inner.kill() {
+            lgwks_std::trace::debug!(%error, pid = self.pid, "owned child: direct kill on drop refused");
+        }
+        if !matches!(inner.try_wait(), Ok(Some(_))) {
+            crate::journal::owner::lock(&ORPHANS).push(inner);
+        }
+        reap_orphans();
+    }
 }
 
 /// A child's process group, killed as a unit unless it is disarmed.
@@ -3040,29 +3434,27 @@ struct PendingCleanup {
 struct CleanupOwners {
     /// Owners retained under the in-flight semaphore ceiling.
     pending: Mutex<Vec<PendingCleanup>>,
+    /// Signalled on every registration, so a spawn waiting at the bound learns
+    /// that a permit has moved to an owner that only a reap will release.
+    registered: Notify,
 }
 
 #[cfg(all(unix, feature = "process"))]
 impl CleanupOwners {
     /// Transfer a live task's lease and cleanup obligation to this registry.
     fn register(&self, task: TaskId, group: i32, lease: Lease) {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(PendingCleanup {
-                task,
-                group,
-                _lease: lease,
-                absence_observed: false,
-            });
+        crate::journal::owner::lock(&self.pending).push(PendingCleanup {
+            task,
+            group,
+            _lease: lease,
+            absence_observed: false,
+        });
+        self.registered.notify_one();
     }
 
     /// Count currently retained obligations.
     fn pending_count(&self) -> usize {
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        crate::journal::owner::lock(&self.pending).len()
     }
 
     /// Probe each owner once; present or unobservable groups keep their lease.
@@ -3071,10 +3463,7 @@ impl CleanupOwners {
         observer: &dyn GroupObserver,
         task_is_live: impl Fn(TaskId) -> bool,
     ) -> Vec<TaskId> {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = crate::journal::owner::lock(&self.pending);
         let mut retained = Vec::with_capacity(pending.len());
         let mut settled = Vec::new();
         for mut owner in pending.drain(..) {
@@ -3093,6 +3482,23 @@ impl CleanupOwners {
         }
         *pending = retained;
         settled
+    }
+}
+
+/// Resolve when a spawn waiting at the bound must stop and reap: after
+/// [`CLEANUP_RECHECK`] while a cleanup owner holds a permit, or the moment one is
+/// registered while none was.
+///
+/// A registration is a permit that no task ending will release, so a waiter
+/// that armed no timer must hear about it. `notify_one` stores the wakeup when
+/// nobody is waiting yet, so a registration between the count and the first
+/// poll of `notified` is not lost.
+#[cfg(all(unix, feature = "process"))]
+async fn recheck(owners: &CleanupOwners) {
+    if owners.pending_count() > 0 {
+        crate::rt::time::sleep(CLEANUP_RECHECK).await;
+    } else {
+        owners.registered.notified().await;
     }
 }
 
@@ -3280,17 +3686,28 @@ fn task_end(end: ProcessEnd) -> TaskEnd {
 #[cfg(all(unix, feature = "process"))]
 async fn drive_process(
     clock: &Clock,
-    child: Child,
-    deadline: Option<Duration>,
+    child: OwnedChild,
     token: &CancellationToken,
     group: ProcessGroup<'static>,
-    out_limit: Option<NonZeroUsize>,
-    err_limit: Option<NonZeroUsize>,
+    bounds: RunBounds,
 ) -> ProcessEnd {
-    drive_process_observed(
-        clock, child, deadline, token, group, out_limit, err_limit, None,
-    )
-    .await
+    drive_process_observed(clock, child, token, group, bounds, None).await
+}
+
+/// The bounds one process run is held to, as its spec declares them.
+///
+/// One value rather than three parameters: [`Supervisor::prepare_process`]
+/// resolves all three from the same spec, so a deadline can never travel with
+/// another run's capture ceilings.
+#[cfg(all(unix, feature = "process"))]
+#[derive(Debug, Clone, Copy)]
+struct RunBounds {
+    /// How long the child may run before it is stopped.
+    deadline: Option<Duration>,
+    /// The most stdout bytes retained.
+    out_limit: Option<NonZeroUsize>,
+    /// The most stderr bytes retained.
+    err_limit: Option<NonZeroUsize>,
 }
 
 /// Drive one started child to a terminal observation: drain its captured
@@ -3308,31 +3725,23 @@ async fn drive_process(
 /// output, on the bytes that read just observed, so an observation and a
 /// capture can never disagree about what the child wrote.
 ///
-/// Eight parameters is one over the usual bound, and the eighth is the observer.
-/// The other seven are the child's *owned* run facts — the clock it is observed
-/// on, the child, its deadline, its stop, its cleanup obligation and the two
-/// capture ceilings — which `prepare_process` already assembles once for both
-/// runners. Bundling them into a struct would be a second shape for the same
-/// seven facts, and a caller that built one by hand could pair a deadline with
-/// the wrong child's capture ceiling; passing them together is what keeps that
-/// pairing a property of the supervisor rather than of a call site.
+/// The deadline and the two capture ceilings arrive as one [`RunBounds`],
+/// resolved from a single spec by [`Supervisor::prepare_process`].
 #[cfg(all(unix, feature = "process"))]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the seven run facts are the child's owned bounds and the eighth is the \
-              observer; see the driver's doc comment"
-)]
 async fn drive_process_observed(
     clock: &Clock,
-    mut child: Child,
-    deadline: Option<Duration>,
+    mut child: OwnedChild,
     token: &CancellationToken,
     mut group: ProcessGroup<'static>,
-    out_limit: Option<NonZeroUsize>,
-    err_limit: Option<NonZeroUsize>,
+    bounds: RunBounds,
     on_line: Option<LineObserver<'_>>,
 ) -> ProcessEnd {
-    let pid = child.id().and_then(|raw| i32::try_from(raw).ok());
+    let RunBounds {
+        deadline,
+        out_limit,
+        err_limit,
+    } = bounds;
+    let pid = child.group().ok();
     let capture_out = capture(child.stdout.take(), out_limit, on_line);
     let capture_err = capture(child.stderr.take(), err_limit, None);
     // Reading the pipes and waiting for the child are independent futures over
@@ -3369,9 +3778,9 @@ async fn drive_process_observed(
         // dropping the child then relinquishes it to the platform's orphan
         // reaper rather than signalling a stale numeric group id.
         drop(group);
-        child.wait().await.ok()
+        child.reap().await.ok()
     } else {
-        let status = child.wait().await.ok();
+        let status = child.reap().await.ok();
         group.mark_reaped();
         if matches!(cleanup, CleanupReceipt::CleanupPending) {
             cleanup = group.confirm_absence().await;
@@ -3420,6 +3829,8 @@ where
     let cap = limit.get();
     let mut bytes: Vec<u8> = Vec::with_capacity(cap);
     let mut total: u64 = 0;
+    // Whether any read carried more than the retained buffer had room for.
+    let mut truncated = false;
     let mut buffer = [0_u8; 8192];
     // Bytes of the current line not yet terminated. Bounded by
     // `MAX_OBSERVED_LINE_BYTES`, so a child that writes an unterminated
@@ -3431,7 +3842,12 @@ where
         match reader.read(&mut buffer).await {
             Ok(0) => break,
             Ok(read) => {
-                total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                // A `usize` wider than 64 bits saturates the counter, the same
+                // contract `saturating_add` keeps for a long-lived stream.
+                total = match u64::try_from(read) {
+                    Ok(count) => total.saturating_add(count),
+                    Err(_) => u64::MAX,
+                };
                 let Some(chunk) = buffer.get(..read) else {
                     continue;
                 };
@@ -3440,8 +3856,9 @@ where
                         observe(line);
                     }
                 }
-                if bytes.len() < cap {
-                    let room = cap.saturating_sub(bytes.len());
+                let room = cap.saturating_sub(bytes.len());
+                truncated |= read > room;
+                if room > 0 {
                     let take = room.min(read);
                     if let Some(head) = buffer.get(..take) {
                         bytes.extend_from_slice(head);
@@ -3452,7 +3869,6 @@ where
             Err(_) => break,
         }
     }
-    let truncated = total > u64::try_from(cap).unwrap_or(u64::MAX);
     CapturedStream::from_parts(bytes, total, truncated)
 }
 
@@ -3566,24 +3982,15 @@ where
 
 #[cfg(all(unix, feature = "process"))]
 impl<'ops> ProcessGroup<'ops> {
-    /// The process group of `child`, armed.
+    /// The guard over process group `group`, armed.
     ///
-    /// The id is read before the child is awaited: an unreaped child still has
-    /// its id, and a group leader's group id is its own pid, which is what
-    /// `process_group(0)` arranged when the command was built.
+    /// `group` is the id [`start`] validated for the child it just started.
     fn of(
-        child: &Child,
+        group: i32,
         task: TaskId,
         lease: Lease,
         owners: Arc<CleanupOwners>,
     ) -> ProcessGroup<'static> {
-        let group = match child.id() {
-            // `try_from` rather than `as`: the workspace forbids a truncating
-            // cast, and an id that does not fit an `i32` is not a group this
-            // module can signal, so it becomes the refused `0` instead.
-            Some(id) => i32::try_from(id).unwrap_or(0),
-            None => 0,
-        };
         ProcessGroup {
             group,
             task,
@@ -3972,13 +4379,31 @@ where
     }
 }
 
+/// Reports the supervisor's counters, its remaining capacity, and how much it
+/// is still tracking.
+///
+/// Manual rather than derived: the supervisor owns a `JoinSet`, a permit pool
+/// and a report buffer, and a derived rendering would descend into each of them
+/// without answering the question a reader of a supervisor's `Debug` actually
+/// has — what is still running, and what is left to run it. Every field printed
+/// here is one of those answers, and each is read through the accessor or
+/// length the type already exposes rather than through its interior.
+impl core::fmt::Debug for Supervisor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Supervisor")
+            .field("stats", &self.stats())
+            .field("available_permits", &self.permits.available_permits())
+            .field("tracked", &self.set.len())
+            .field("reports_queued", &self.reports.len())
+            .field("report_cap", &self.report_cap)
+            .field("cancelled", &self.token.is_cancelled())
+            .finish()
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[expect(
-    clippy::items_after_test_module,
-    reason = "the `Debug` impl appended below is deliberately last; see its comment for why it cannot precede this module"
-)]
 mod tests {
     #[cfg(all(unix, feature = "process"))]
     use super::CleanupOwners;
@@ -4001,7 +4426,7 @@ mod tests {
     use std::future::pending;
     use std::num::NonZeroU64;
     use std::sync::Arc;
-    #[cfg(feature = "process")]
+    #[cfg(any(feature = "process", feature = "script"))]
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::Poll;
@@ -4128,6 +4553,43 @@ mod tests {
         }
     }
 
+    /// A guard over the fixed test group 42, with its own lease and owners.
+    #[cfg(all(unix, feature = "process"))]
+    fn test_group<'ops>(
+        signaller: &'ops dyn GroupSignaller,
+        observer: &'ops dyn GroupObserver,
+        leader_reaped: bool,
+    ) -> ProcessGroup<'ops> {
+        ProcessGroup {
+            group: 42,
+            task: TaskId(0),
+            permit: test_lease(),
+            owners: Arc::new(CleanupOwners::default()),
+            armed: true,
+            leader_reaped,
+            signaller,
+            observer,
+        }
+    }
+
+    /// An observer that reports the group present `present_before_absent`
+    /// times, then absent.
+    #[cfg(all(unix, feature = "process"))]
+    const fn sequence(present_before_absent: usize) -> SequenceGroupObserver {
+        SequenceGroupObserver {
+            calls: AtomicUsize::new(0),
+            present_before_absent,
+        }
+    }
+
+    /// A signaller that counts its calls and always succeeds.
+    #[cfg(all(unix, feature = "process"))]
+    const fn recording() -> RecordingGroupSignaller {
+        RecordingGroupSignaller {
+            calls: AtomicUsize::new(0),
+        }
+    }
+
     #[cfg(all(unix, feature = "process"))]
     fn test_lease() -> Option<Lease> {
         let permit = Arc::new(lgwks_deps::tokio::sync::Semaphore::new(1))
@@ -4139,23 +4601,9 @@ mod tests {
     #[cfg(all(unix, feature = "process"))]
     #[test]
     fn a_reaped_or_recycled_group_id_is_never_signalled() {
-        let signaller = RecordingGroupSignaller {
-            calls: AtomicUsize::new(0),
-        };
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 0,
-        };
-        let mut group = ProcessGroup {
-            group: 42,
-            task: TaskId(0),
-            permit: test_lease(),
-            owners: Arc::new(CleanupOwners::default()),
-            armed: true,
-            leader_reaped: true,
-            signaller: &signaller,
-            observer: &observer,
-        };
+        let signaller = recording();
+        let observer = sequence(0);
+        let mut group = test_group(&signaller, &observer, true);
         assert_eq!(
             block_on(group.cleanup()),
             CleanupReceipt::CleanupFailed,
@@ -4177,20 +4625,8 @@ mod tests {
         // "the OS refused the kill", and reading it as a failure would report a
         // deadline stop as a cleanup failure on those platforms.
         let signaller = EpermGroupSignaller;
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: usize::MAX,
-        };
-        let mut group = ProcessGroup {
-            group: 42,
-            task: TaskId(0),
-            permit: test_lease(),
-            owners: Arc::new(CleanupOwners::default()),
-            armed: true,
-            leader_reaped: false,
-            signaller: &signaller,
-            observer: &observer,
-        };
+        let observer = sequence(usize::MAX);
+        let mut group = test_group(&signaller, &observer, false);
         assert_eq!(
             block_on(group.cleanup()),
             CleanupReceipt::CleanupPending,
@@ -4207,20 +4643,8 @@ mod tests {
     #[test]
     fn an_unexpected_signal_error_is_a_failed_cleanup() {
         let signaller = UnexpectedGroupSignaller;
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 0,
-        };
-        let mut group = ProcessGroup {
-            group: 42,
-            task: TaskId(0),
-            permit: test_lease(),
-            owners: Arc::new(CleanupOwners::default()),
-            armed: true,
-            leader_reaped: false,
-            signaller: &signaller,
-            observer: &observer,
-        };
+        let observer = sequence(0);
+        let mut group = test_group(&signaller, &observer, false);
         assert_eq!(
             block_on(group.cleanup()),
             CleanupReceipt::CleanupFailed,
@@ -4232,23 +4656,9 @@ mod tests {
     #[cfg(all(unix, feature = "process"))]
     #[test]
     fn bounded_group_termination_keeps_cleanup_owned_until_absence_is_observed() {
-        let signaller = RecordingGroupSignaller {
-            calls: AtomicUsize::new(0),
-        };
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 1,
-        };
-        let mut group = ProcessGroup {
-            group: 42,
-            task: TaskId(0),
-            permit: test_lease(),
-            owners: Arc::new(CleanupOwners::default()),
-            armed: true,
-            leader_reaped: false,
-            signaller: &signaller,
-            observer: &observer,
-        };
+        let signaller = recording();
+        let observer = sequence(1);
+        let mut group = test_group(&signaller, &observer, false);
         assert_eq!(
             block_on(group.cleanup()),
             CleanupReceipt::CleanupPending,
@@ -4291,13 +4701,8 @@ mod tests {
         };
         let owners = Arc::new(CleanupOwners::default());
         let task = TaskId(9);
-        let cleanup_observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: usize::MAX,
-        };
-        let signaller = RecordingGroupSignaller {
-            calls: AtomicUsize::new(0),
-        };
+        let cleanup_observer = sequence(usize::MAX);
+        let signaller = recording();
         let mut group = ProcessGroup {
             group: 42,
             task,
@@ -4320,10 +4725,7 @@ mod tests {
             CleanupReceipt::CleanupPending,
             "a bounded post-reap pass cannot claim absence"
         );
-        let later_observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 1,
-        };
+        let later_observer = sequence(1);
         drop(group);
         assert_eq!(
             semaphore.available_permits(),
@@ -4377,13 +4779,8 @@ mod tests {
         };
         let owners = Arc::new(CleanupOwners::default());
         let task = TaskId(10);
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 0,
-        };
-        let signaller = RecordingGroupSignaller {
-            calls: AtomicUsize::new(0),
-        };
+        let observer = sequence(0);
+        let signaller = recording();
         let mut group = ProcessGroup {
             group: 43,
             task,
@@ -4444,10 +4841,7 @@ mod tests {
             0,
             "an observer error is not a terminal receipt"
         );
-        let observer = SequenceGroupObserver {
-            calls: AtomicUsize::new(0),
-            present_before_absent: 1,
-        };
+        let observer = sequence(1);
         assert_eq!(report.reap_pending_cleanups_with(&observer), 0);
         assert_eq!(report.pending_cleanup_count(), 1);
         assert_eq!(report.reap_pending_cleanups_with(&observer), 1);
@@ -4793,16 +5187,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_ongoing_budget_stops_when_the_token_is_cancelled() {
+    /// Run an ongoing `repeat` whose body cancels its own token on entry and
+    /// then runs `rest`.
+    fn repeat_cancelling_itself<Rest, Fut>(rest: Rest) -> Outcome
+    where
+        Rest: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let token = CancellationToken::new();
         let trigger = token.clone();
-        let outcome = block_on(repeat(&token, Budget::Ongoing, move |_tick| {
-            let trigger = trigger.clone();
-            async move {
-                trigger.cancel();
-            }
-        }));
+        block_on(repeat(&token, Budget::Ongoing, move |_tick| {
+            trigger.cancel();
+            rest()
+        }))
+    }
+
+    #[test]
+    fn an_ongoing_budget_stops_when_the_token_is_cancelled() {
+        let outcome = repeat_cancelling_itself(|| async {});
         assert_eq!(
             outcome,
             Outcome::Cancelled { iterations: 1 },
@@ -4812,18 +5214,10 @@ mod tests {
 
     #[test]
     fn cancellation_interrupts_a_body_that_is_still_awaiting() {
-        let token = CancellationToken::new();
-        let trigger = token.clone();
-        let outcome = block_on(repeat(&token, Budget::Ongoing, move |_tick| {
-            let trigger = trigger.clone();
-            async move {
-                trigger.cancel();
-                // Never resolves. If cancellation were only observed between
-                // iterations, the loop would have to await this to completion
-                // and the test would hang rather than fail.
-                pending::<()>().await;
-            }
-        }));
+        // The body never resolves. If cancellation were only observed between
+        // iterations, the loop would have to await it to completion and the
+        // test would hang rather than fail.
+        let outcome = repeat_cancelling_itself(pending::<()>);
         assert!(
             outcome.was_cancelled(),
             "an in-flight body must be dropped at the cancel, got {outcome:?}"
@@ -4922,6 +5316,26 @@ mod tests {
         });
     }
 
+    /// Fill `supervisor`'s only slot with a body that waits for the returned
+    /// gate and then sets the returned done flag.
+    async fn occupy(supervisor: &mut Supervisor) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        let gate = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        supervisor
+            .spawn({
+                let gate = Arc::clone(&gate);
+                let done = Arc::clone(&done);
+                move |_token| async move {
+                    while !gate.load(Ordering::Relaxed) {
+                        yield_now().await;
+                    }
+                    done.store(true, Ordering::Relaxed);
+                }
+            })
+            .await;
+        (gate, done)
+    }
+
     #[test]
     fn cancellation_closes_admission_even_after_a_slot_frees() {
         block_on(async {
@@ -4931,20 +5345,7 @@ mod tests {
             // and the counter moves. The fence must refuse at the owned
             // admission point regardless of what the pool is doing.
             let mut supervisor = Supervisor::new(1);
-            let gate = Arc::new(AtomicBool::new(false));
-            let done = Arc::new(AtomicBool::new(false));
-            supervisor
-                .spawn({
-                    let gate = Arc::clone(&gate);
-                    let done = Arc::clone(&done);
-                    move |_token| async move {
-                        while !gate.load(Ordering::Relaxed) {
-                            yield_now().await;
-                        }
-                        done.store(true, Ordering::Relaxed);
-                    }
-                })
-                .await;
+            let (gate, done) = occupy(&mut supervisor).await;
             supervisor.cancel();
             gate.store(true, Ordering::Relaxed);
             // Let the occupier finish and its permit return to the pool: the
@@ -4995,20 +5396,7 @@ mod tests {
             // and the constructor never runs. Without any cancellation
             // fence this parks forever and the test never finishes.
             let mut supervisor = Supervisor::new(1);
-            let gate = Arc::new(AtomicBool::new(false));
-            let done = Arc::new(AtomicBool::new(false));
-            supervisor
-                .spawn({
-                    let gate = Arc::clone(&gate);
-                    let done = Arc::clone(&done);
-                    move |_token| async move {
-                        while !gate.load(Ordering::Relaxed) {
-                            yield_now().await;
-                        }
-                        done.store(true, Ordering::Relaxed);
-                    }
-                })
-                .await;
+            let (gate, done) = occupy(&mut supervisor).await;
             supervisor.cancel();
 
             let built = Arc::new(AtomicU64::new(0));
@@ -5058,8 +5446,10 @@ mod tests {
             static MARK_SEQ: AtomicU64 = AtomicU64::new(0);
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|since| since.as_nanos())
-                .unwrap_or(0);
+                .map_or_else(
+                    |before| before.duration().as_nanos(),
+                    |since| since.as_nanos(),
+                );
             let seq = MARK_SEQ.fetch_add(1, Ordering::Relaxed);
             let marker = std::env::temp_dir().join(format!("lgwks-bot-cancel-{nanos}-{seq}.mark"));
 
@@ -5947,34 +6337,108 @@ mod tests {
             }
         }
     }
-}
 
-/// Reports the supervisor's counters, its remaining capacity, and how much it
-/// is still tracking.
-///
-/// Manual rather than derived: the supervisor owns a `JoinSet`, a permit pool
-/// and a report buffer, and a derived rendering would descend into each of them
-/// without answering the question a reader of a supervisor's `Debug` actually
-/// has — what is still running, and what is left to run it. Every field printed
-/// here is one of those answers, and each is read through the accessor or
-/// length the type already exposes rather than through its interior.
-///
-/// Placed after the test module because the module's own guide cites the
-/// `#[cfg(test)]` line by number (`docs/guides/lgwks-bot/background-work.md`),
-/// and an item inserted above it would renumber that citation — and would land
-/// on a bare closing brace, which `scripts/check-doc-citations.py` rejects.
-/// Item order carries no meaning in Rust, so nothing is lost by writing this
-/// impl last; the expectation declared on the test module above is what tells
-/// the lint that the placement is deliberate rather than an oversight.
-impl core::fmt::Debug for Supervisor {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Supervisor")
-            .field("stats", &self.stats())
-            .field("available_permits", &self.permits.available_permits())
-            .field("tracked", &self.set.len())
-            .field("reports_queued", &self.reports.len())
-            .field("report_cap", &self.report_cap)
-            .field("cancelled", &self.token.is_cancelled())
-            .finish()
+    #[test]
+    fn wait_idle_joins_every_task_without_cancelling_and_leaves_the_supervisor_usable() {
+        block_on(async {
+            let ran = Arc::new(AtomicU64::new(0));
+            let mut supervisor = Supervisor::new(3);
+            for _ in 0..40 {
+                let ran = Arc::clone(&ran);
+                supervisor
+                    .spawn(move |token| async move {
+                        yield_now().await;
+                        if !token.is_cancelled() {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })
+                    .await;
+            }
+            supervisor.wait_idle().await;
+            let stats = supervisor.stats();
+            assert_eq!(stats.in_flight(), 0, "nothing is left in flight");
+            assert_eq!(stats.succeeded, 40, "every task completed, none cancelled");
+            assert_eq!(stats.cancelled, 0, "waiting is not stopping");
+            assert_eq!(ran.load(Ordering::SeqCst), 40, "every body ran to its end");
+            assert!(
+                !supervisor.is_cancelled(),
+                "the supervisor was not cancelled"
+            );
+
+            // Still usable: the wait did not consume the supervisor.
+            supervisor.spawn(|_token| async {}).await;
+            assert_eq!(
+                supervisor.wait_idle().await,
+                1,
+                "the next wait joins the next task"
+            );
+            assert_eq!(
+                supervisor.wait_idle().await,
+                0,
+                "an idle supervisor joins nothing"
+            );
+        });
+    }
+
+    #[test]
+    fn wait_idle_counts_reports_past_the_retention_cap_rather_than_losing_them() {
+        block_on(async {
+            let mut supervisor = Supervisor::new(2);
+            for _ in 0..2 {
+                supervisor.spawn(|_token| async {}).await;
+            }
+            // Fill the pool without reaping, so `wait_idle` has more outcomes
+            // to absorb than the cap retains.
+            supervisor.wait_idle().await;
+            for _ in 0..2 {
+                supervisor.spawn(|_token| async {}).await;
+            }
+            supervisor.wait_idle().await;
+            let stats = supervisor.stats();
+            let retained = drain(&mut supervisor).len();
+            assert_eq!(
+                u64::try_from(retained)
+                    .ok()
+                    .map(|kept| kept.saturating_add(stats.reports_dropped)),
+                Some(4),
+                "every outcome is either retained or counted as dropped"
+            );
+        });
+    }
+
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_spawn_waiting_on_a_cleanup_owned_permit_is_admitted_once_the_owner_settles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        block_on(async {
+            let mut supervisor = Supervisor::new(1);
+            let Some(permit) = supervisor.try_take() else {
+                return Err("a fresh supervisor of bound one has its permit".into());
+            };
+            // A group id above any pid limit: the native probe reports it absent,
+            // so the owner settles on the first reap that drives it — which only
+            // the waiting spawn's recheck performs.
+            let task = TaskId(u64::MAX);
+            supervisor
+                .cleanup_owners
+                .register(task, 0x7fff_fff0, Lease::plain(permit));
+            let admitted = crate::rt::time::timeout(
+                Duration::from_secs(5),
+                supervisor.spawn(|_token| async {}),
+            )
+            .await;
+            if admitted.is_err() {
+                return Err("the spawn never left the bound: the recheck did not release the owner's permit".into());
+            }
+            supervisor.wait_idle().await;
+            let settled = drain(&mut supervisor)
+                .into_iter()
+                .any(|outcome| matches!(outcome, TaskOutcome::CleanupSettled { task: settled, .. } if settled == task));
+            if !settled {
+                return Err("the owner's settlement was not reported".into());
+            }
+            assert_eq!(supervisor.stats().succeeded, 1, "the waiting body ran");
+            Ok(())
+        })
     }
 }

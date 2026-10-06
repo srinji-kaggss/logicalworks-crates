@@ -149,15 +149,13 @@ mod tests {
         y: i32,
     }
 
+    /// The round-trip fixture the codec's own tests render, shape and parse.
+    const POINT: Point = Point { x: 1, y: 2 };
+
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
     enum Shape {
         Circle(u32),
         Rect { w: u32, height: u32 },
-    }
-
-    #[derive(Deserialize)]
-    struct Borrowed<'a> {
-        value: &'a str,
     }
 
     // These tests return `Result` rather than unwrapping: a RON refusal reports
@@ -165,10 +163,9 @@ mod tests {
     // panicked with, without an `unwrap` in the tree.
     #[test]
     fn struct_roundtrips_through_string() -> Result<(), Box<dyn std::error::Error>> {
-        let point = Point { x: 1, y: 2 };
-        let text = to_string(&point)?;
+        let text = to_string(&POINT)?;
         let restored: Point = from_str(&text)?;
-        assert_eq!(point, restored);
+        assert_eq!(POINT, restored);
         Ok(())
     }
 
@@ -185,16 +182,19 @@ mod tests {
 
     #[test]
     fn pretty_output_has_indentation() -> Result<(), Box<dyn std::error::Error>> {
-        let point = Point { x: 1, y: 2 };
-        let text = to_string_pretty(&point)?;
-        assert!(text.contains('\n'));
+        assert!(
+            to_string_pretty(&POINT)?.contains('\n'),
+            "pretty RON spans lines"
+        );
         Ok(())
     }
 
     #[test]
     fn from_str_rejects_invalid() {
-        let result: Result<Point, _> = from_str("{{{");
-        assert!(result.is_err());
+        assert!(
+            from_str::<Point>("{{{").is_err(),
+            "an unclosed struct is refused"
+        );
     }
 
     #[test]
@@ -203,42 +203,20 @@ mod tests {
         assert!(matches!(result, Err(FromSliceError::Utf8(_))));
     }
 
+    /// INV-CODEC-1 for this codec: an unescaped field borrows from the input,
+    /// through both the text and the slice entry point.
     #[test]
     fn unescaped_string_fields_borrow_from_text_and_slice() -> Result<(), Box<dyn std::error::Error>>
     {
-        let text = "(value: \"borrowed\")";
-        let decoded: Borrowed<'_> = from_str(text)?;
-        assert_eq!(
-            decoded.value, "borrowed",
-            "the parsed field retains its value"
-        );
-        assert!(
-            text.as_ptr() <= decoded.value.as_ptr()
-                && decoded.value.as_ptr() < text.as_ptr().wrapping_add(text.len()),
-            "unescaped RON text borrows from the supplied input"
-        );
-
-        let bytes = text.as_bytes();
-        let decoded: Borrowed<'_> = from_slice(bytes)?;
-        assert_eq!(
-            decoded.value, "borrowed",
-            "the parsed slice field retains its value"
-        );
-        assert!(
-            bytes.as_ptr() <= decoded.value.as_ptr()
-                && decoded.value.as_ptr() < bytes.as_ptr().wrapping_add(bytes.len()),
-            "unescaped RON slice text borrows from the supplied input"
-        );
+        crate::serde_facade::ron_borrow_contract()?;
         Ok(())
     }
 
+    /// The other half of INV-CODEC-1 for this codec: an escaped field cannot
+    /// come back as a borrow, because it needs owned decoded storage.
     #[test]
     fn escaped_string_cannot_be_returned_as_a_borrowed_str() {
-        let result: Result<Borrowed<'_>, _> = from_str("(value: \"line\\nfeed\")");
-        assert!(
-            result.is_err(),
-            "escaped RON text requires owned decoded storage"
-        );
+        crate::serde_facade::ron_escaped_field_is_refused();
     }
 
     #[test]

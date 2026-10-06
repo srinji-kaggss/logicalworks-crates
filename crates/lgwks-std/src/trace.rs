@@ -163,9 +163,7 @@ impl DebugConfig {
 
     /// Builds a config from `LGWKS_LOG`, `RUST_LOG`, and `LGWKS_LOG_FORMAT`.
     pub fn from_env(service_name: impl Into<String>) -> Result<Self, DebugInstallError> {
-        let filter = env_string(LOG_FILTER_ENV)?
-            .or(env_string(RUST_LOG_FILTER_ENV)?)
-            .unwrap_or_else(|| DEFAULT_FILTER.to_owned());
+        let filter = filter_from_env()?;
         let format = DebugFormat::from_env()?;
         Ok(Self::new(service_name)
             .with_filter(filter)
@@ -357,6 +355,22 @@ fn env_string(variable: &'static str) -> Result<Option<String>, DebugInstallErro
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
         Err(source) => Err(DebugInstallError::InvalidEnvironment { variable, source }),
+    }
+}
+
+/// The filter directive this crate installs: the primary variable, then the
+/// standard one, then the documented default.
+///
+/// Each source is read with its own refusal propagated — a variable that is
+/// present but not valid Unicode is an error naming which variable it was —
+/// rather than one read standing in for the other two.
+fn filter_from_env() -> Result<String, DebugInstallError> {
+    match env_string(LOG_FILTER_ENV)? {
+        Some(primary) => Ok(primary),
+        None => match env_string(RUST_LOG_FILTER_ENV)? {
+            Some(standard) => Ok(standard),
+            None => Ok(DEFAULT_FILTER.to_owned()),
+        },
     }
 }
 

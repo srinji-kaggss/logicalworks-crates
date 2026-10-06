@@ -2,16 +2,14 @@
 //! against the real workspace lockfile.
 //!
 //! One definition, shared by every target that type-checks a downstream
-//! consumer (`t22_process_surface` and `t02_compile_surface`). The probe copies
-//! the workspace `Cargo.lock` and shares the workspace target directory, so it
-//! resolves the versions the workspace compiled rather than whatever the local
-//! registry cache holds newest, and it does not compile every dependency cold.
+//! consumer (`t22_process_surface`, `t02_compile_surface` and
+//! `script_refusals`). The probe copies the workspace `Cargo.lock` and shares
+//! the workspace target directory, so it resolves the versions the workspace
+//! compiled rather than whatever the local registry cache holds newest, and it
+//! does not compile every dependency cold. The positive control and the lint
+//! pass serve only the `script` consumers, so they compile under that feature.
 //!
 //! This module is included with `#[path = "support/compile.rs"] mod compile;`.
-#![allow(
-    dead_code,
-    reason = "each including test target uses a different subset of the probe harness"
-)]
 
 use std::fs;
 use std::path::Path;
@@ -26,9 +24,8 @@ use target_dir::{workspace_root, workspace_target_dir};
 ///
 /// The probe starts from the workspace lockfile, so it resolves the versions
 /// the workspace build compiled rather than whatever the local registry cache
-/// holds newest. Scratch is named by wall-clock nanos plus a sequence, not a
-/// process or thread id (both are reused) and not `lgwks_std::random` (behind
-/// features this test is built without).
+/// holds newest. The consumer is written into the shared scratch directory,
+/// which is removed however the probe ends.
 ///
 /// # Errors
 ///
@@ -48,6 +45,7 @@ pub fn compile_probe(
 /// # Errors
 ///
 /// As [`compile_probe`].
+#[cfg(feature = "script")]
 pub fn clippy_probe(
     name: &str,
     dependency: &str,
@@ -63,13 +61,8 @@ fn probe(
     dependency: &str,
     main: &str,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("{name}-{nanos}-{seq}"));
+    let scratch = crate::scratch::Scratch::new(name)?;
+    let root = scratch.path();
     fs::create_dir_all(root.join("src"))?;
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::copy(
@@ -84,13 +77,11 @@ fn probe(
         ),
     )?;
     fs::write(root.join("src/main.rs"), main)?;
-    let output = Command::new(env!("CARGO"))
+    Ok(Command::new(env!("CARGO"))
         .args([subcommand, "--offline", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", workspace_target_dir()?)
-        .output();
-    fs::remove_dir_all(&root)?;
-    Ok(output?)
+        .output()?)
 }
 
 /// The probe compiled, so a neighbouring negative probe that failed for a
@@ -100,12 +91,9 @@ fn probe(
 ///
 /// When the probe did not compile, with the compiler's own output in the
 /// message.
+#[cfg(feature = "script")]
 pub fn assert_compiles(output: &Output) {
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = rendered(output);
     assert!(
         output.status.success(),
         "the positive control must compile:\n{text}"
@@ -123,11 +111,7 @@ pub fn assert_compiles(output: &Output) {
 ///
 /// When the probe compiled, or failed with a different diagnostic.
 pub fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = rendered(output);
     assert!(
         !output.status.success(),
         "the probe unexpectedly compiled:\n{text}"
@@ -145,12 +129,9 @@ pub fn assert_refused_for(output: &Output, code: &str, symbol: &str) {
 /// # Panics
 ///
 /// When the probe compiled, or failed without naming `lint`.
+#[cfg(feature = "script")]
 pub fn assert_refused_by_lint(output: &Output, lint: &str) {
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let text = rendered(output);
     assert!(
         !output.status.success(),
         "the probe unexpectedly compiled:\n{text}"
@@ -159,4 +140,16 @@ pub fn assert_refused_by_lint(output: &Output, lint: &str) {
         text.contains("error") && text.contains(lint),
         "the probe failed, but not by `{lint}`:\n{text}"
     );
+}
+
+/// Everything the probe printed, stdout then stderr, as one text to search.
+///
+/// One reader for every assertion above, so a diagnostic cargo prints on one
+/// stream and rustc on the other is found wherever it landed.
+fn rendered(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }

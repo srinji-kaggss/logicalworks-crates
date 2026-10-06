@@ -47,41 +47,150 @@ impl fmt::Display for DecodeError {
 
 impl Error for DecodeError {}
 
-/// Narrows one masked 7-bit group (`value & 0x7f`) to the byte that carries it.
+/// One integer the encoder emits groups of, at any width the codec admits.
 ///
-/// Every caller masks with `0x7f` first, so the argument is always in
-/// `0..=127` and the narrowing is lossless for `u8`, `u32`, `u64`, `i32` and
-/// `i64` alike. The `unwrap_or` arm therefore cannot be reached; it exists
-/// because the target type is narrower than every source type and this crate
-/// bans `as`, not because a truncation is expected.
-fn group_byte<T: TryInto<u8>>(group: T) -> u8 {
-    group.try_into().ok().unwrap_or(0)
+/// The four widths are four implementations of one algorithm rather than four
+/// algorithms: the steps below are written once against this trait, and a width
+/// supplies only the three facts that differ — the group it emits, the value one
+/// group down, and when the remainder is exhausted.
+trait Emittable: Copy {
+    /// The low seven bits of the value: the group one step emits.
+    ///
+    /// Every width the codec encodes is 32 or 64 bits, so the seven payload
+    /// bits are the low seven bits of the value's first little-endian byte,
+    /// for a negative value exactly as for a positive one. Reading that byte
+    /// is what keeps the step infallible at every width, with no narrowing
+    /// conversion and no fallible path.
+    fn payload(self) -> u8;
+
+    /// The value with one group removed from the low end.
+    fn shifted(self) -> Self;
+
+    /// Whether nothing is left to encode once the emitted group is out.
+    ///
+    /// `sign_bit` is bit 6 of the group just emitted. An unsigned value is
+    /// exhausted when the remainder is zero. A signed value is exhausted when
+    /// the remainder is zero with a clear group sign, or all ones with a set
+    /// one — which is why the test reads the emitted bit: without it, a
+    /// positive value whose top payload bit happens to be set would be read as
+    /// negative.
+    fn is_exhausted(self, sign_bit: bool) -> bool;
 }
 
-/// Emits the low 7-bit group of `integer` and shifts it down by 7 in place.
+/// The `u64` width of the encoder.
+impl Emittable for u64 {
+    fn payload(self) -> u8 {
+        self.to_le_bytes()[0] & 0x7f
+    }
+
+    fn shifted(self) -> Self {
+        self >> 7
+    }
+
+    fn is_exhausted(self, _sign_bit: bool) -> bool {
+        self == 0
+    }
+}
+
+/// The `u32` width of the encoder.
+impl Emittable for u32 {
+    fn payload(self) -> u8 {
+        self.to_le_bytes()[0] & 0x7f
+    }
+
+    fn shifted(self) -> Self {
+        self >> 7
+    }
+
+    fn is_exhausted(self, _sign_bit: bool) -> bool {
+        self == 0
+    }
+}
+
+/// The `i64` width of the encoder.
+impl Emittable for i64 {
+    fn payload(self) -> u8 {
+        self.to_le_bytes()[0] & 0x7f
+    }
+
+    fn shifted(self) -> Self {
+        self >> 7
+    }
+
+    fn is_exhausted(self, sign_bit: bool) -> bool {
+        (self == 0 && !sign_bit) || (self == -1 && sign_bit)
+    }
+}
+
+/// The `i32` width of the encoder.
+impl Emittable for i32 {
+    fn payload(self) -> u8 {
+        self.to_le_bytes()[0] & 0x7f
+    }
+
+    fn shifted(self) -> Self {
+        self >> 7
+    }
+
+    fn is_exhausted(self, sign_bit: bool) -> bool {
+        (self == 0 && !sign_bit) || (self == -1 && sign_bit)
+    }
+}
+
+/// Emits one group of an unsigned value and shifts it down by 7 in place.
 ///
 /// Returns the byte to write and whether the encoding is now complete. The
 /// continuation bit (0x80) is set by the caller's step only while more groups
 /// remain, so the byte here is always a payload byte.
-fn encode_u64_step(integer: &mut u64) -> (u8, bool) {
-    let mut byte = group_byte(*integer & 0x7f);
-    *integer >>= 7;
-    let done = *integer == 0;
+fn encode_unsigned_step<T: Emittable>(integer: &mut T) -> (u8, bool) {
+    let mut byte = integer.payload();
+    *integer = integer.shifted();
+    let done = integer.is_exhausted(false);
     if !done {
         byte |= 0x80;
     }
     (byte, done)
 }
 
-/// Encodes an unsigned 64-bit integer into unsigned LEB128 (varuint) bytes.
-pub fn encode_u64(mut integer: u64, out: &mut Vec<u8>) {
+/// Emits one group of a signed value and shifts it down by 7 in place.
+///
+/// The signed twin of [`encode_unsigned_step`], differing only in the
+/// termination test, which reads the sign bit back out of the emitted group.
+fn encode_signed_step<T: Emittable>(integer: &mut T) -> (u8, bool) {
+    let mut byte = integer.payload();
+    *integer = integer.shifted();
+    let done = integer.is_exhausted(byte & 0x40 != 0);
+    if !done {
+        byte |= 0x80;
+    }
+    (byte, done)
+}
+
+/// Appends every group of an unsigned value, least significant group first.
+fn emit_unsigned_groups<T: Emittable>(integer: &mut T, out: &mut Vec<u8>) {
     loop {
-        let (byte, done) = encode_u64_step(&mut integer);
+        let (byte, done) = encode_unsigned_step(integer);
         out.push(byte);
         if done {
-            break;
+            return;
         }
     }
+}
+
+/// Appends every group of a signed value, least significant group first.
+fn emit_signed_groups<T: Emittable>(integer: &mut T, out: &mut Vec<u8>) {
+    loop {
+        let (byte, done) = encode_signed_step(integer);
+        out.push(byte);
+        if done {
+            return;
+        }
+    }
+}
+
+/// Encodes an unsigned 64-bit integer into unsigned LEB128 (varuint) bytes.
+pub fn encode_u64(mut integer: u64, out: &mut Vec<u8>) {
+    emit_unsigned_groups(&mut integer, out);
 }
 
 /// Rejects a 64-bit group that would not fit the destination width.
@@ -157,30 +266,9 @@ pub fn decode_u64(input: &[u8]) -> Result<(u64, usize), DecodeError> {
     Err(DecodeError::UnexpectedEnd { at: input.len() })
 }
 
-/// Emits the low 7-bit group of `integer` and shifts it down by 7 in place.
-///
-/// The 32-bit twin of [`encode_u64_step`], and identical in shape: the value
-/// width is the only difference, so the same bytes are produced for any integer
-/// that fits both types.
-fn encode_u32_step(integer: &mut u32) -> (u8, bool) {
-    let mut byte = group_byte(*integer & 0x7f);
-    *integer >>= 7;
-    let done = *integer == 0;
-    if !done {
-        byte |= 0x80;
-    }
-    (byte, done)
-}
-
 /// Encodes an unsigned 32-bit integer into unsigned LEB128 (varuint) bytes.
 pub fn encode_u32(mut integer: u32, out: &mut Vec<u8>) {
-    loop {
-        let (byte, done) = encode_u32_step(&mut integer);
-        out.push(byte);
-        if done {
-            break;
-        }
-    }
+    emit_unsigned_groups(&mut integer, out);
 }
 
 /// Rejects a 32-bit group that would not fit the destination width.
@@ -249,33 +337,9 @@ pub fn decode_u32(input: &[u8]) -> Result<(u32, usize), DecodeError> {
     Err(DecodeError::UnexpectedEnd { at: input.len() })
 }
 
-/// Emits the low 7-bit group of `integer` and shifts it down by 7 in place.
-///
-/// Signed LEB128 must terminate as soon as the remaining value is either all
-/// zero bits or all one bits *and* the emitted group's sign bit already says so.
-/// That test is why `sign_bit` is read back from the payload byte: without it,
-/// a positive value whose top payload bit happens to be set would be read as
-/// negative by the decoder.
-fn encode_i64_step(integer: &mut i64) -> (u8, bool) {
-    let mut byte = group_byte(*integer & 0x7f);
-    *integer >>= 7;
-    let sign_bit = (byte & 0x40) != 0;
-    let done = (*integer == 0 && !sign_bit) || (*integer == -1 && sign_bit);
-    if !done {
-        byte |= 0x80;
-    }
-    (byte, done)
-}
-
 /// Encodes a signed 64-bit integer into signed LEB128 (varint) bytes.
 pub fn encode_i64(mut integer: i64, out: &mut Vec<u8>) {
-    loop {
-        let (byte, done) = encode_i64_step(&mut integer);
-        out.push(byte);
-        if done {
-            break;
-        }
-    }
+    emit_signed_groups(&mut integer, out);
 }
 
 /// Rejects a signed 64-bit group that would not fit the destination width.
@@ -378,30 +442,9 @@ pub fn decode_i64(input: &[u8]) -> Result<(i64, usize), DecodeError> {
     Err(DecodeError::UnexpectedEnd { at: input.len() })
 }
 
-/// Emits the low 7-bit group of `integer` and shifts it down by 7 in place.
-///
-/// The 32-bit twin of [`encode_i64_step`], including the sign-bit test that
-/// decides when a signed encoding may stop.
-fn encode_i32_step(integer: &mut i32) -> (u8, bool) {
-    let mut byte = group_byte(*integer & 0x7f);
-    *integer >>= 7;
-    let sign_bit = (byte & 0x40) != 0;
-    let done = (*integer == 0 && !sign_bit) || (*integer == -1 && sign_bit);
-    if !done {
-        byte |= 0x80;
-    }
-    (byte, done)
-}
-
 /// Encodes a signed 32-bit integer into signed LEB128 (varint) bytes.
 pub fn encode_i32(mut integer: i32, out: &mut Vec<u8>) {
-    loop {
-        let (byte, done) = encode_i32_step(&mut integer);
-        out.push(byte);
-        if done {
-            break;
-        }
-    }
+    emit_signed_groups(&mut integer, out);
 }
 
 /// Rejects a signed 32-bit group that would not fit the destination width.

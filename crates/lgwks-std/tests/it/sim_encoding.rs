@@ -28,8 +28,7 @@ use seeded_bytes::{
     reference_nibble,
 };
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
 
 /// The widest payload any family in this file generates.
@@ -161,9 +160,11 @@ fn encoding_trace(seed: u64) -> u64 {
         fold_bytes(&mut trace, encoded.as_bytes());
 
         match reference_decode(&encoded) {
+            // The whole `Result` is compared, so a codec refusal here is a
+            // failure with the refusal printed beside the reference's answer.
             Reference::Decoded(text) => assert_eq!(
-                percent::decode(&encoded).unwrap_or_default(),
-                text,
+                percent::decode(&encoded),
+                Ok(text),
                 "seed {seed}: the decoded text must agree with the reference"
             ),
             Reference::Truncated { at } => assert_eq!(
@@ -457,7 +458,8 @@ fn every_truncated_prefix_is_refused_or_is_shorter() -> Result<(), PercentError>
     for sample in MULTIBYTE_SAMPLES {
         let encoded = percent::encode_component(sample);
         for cut in 0..encoded.len() {
-            let prefix = encoded.get(..cut).unwrap_or("");
+            // `cut` is a bound of this loop, so the prefix exists.
+            let prefix = &encoded[..cut];
             match reference_decode(prefix) {
                 Reference::Decoded(text) => assert_eq!(
                     percent::decode(prefix)?,
@@ -516,9 +518,11 @@ fn every_reported_coordinate_is_a_real_position_in_its_own_space() -> Result<(),
                         at < payload.len(),
                         "seed {seed}: a non-digit offset must be a position in the input"
                     );
-                    let offending = payload.as_bytes().get(at).copied().unwrap_or(b'%');
+                    // `at` was just asserted to be a position in the payload, so
+                    // the byte there is the one the refusal names.
+                    let offending = &payload.as_bytes()[at];
                     assert!(
-                        reference_nibble(offending).is_none(),
+                        reference_nibble(*offending).is_none(),
                         "seed {seed}: the named position {at} must hold a non-digit"
                     );
                     assert_eq!(
@@ -620,7 +624,8 @@ fn every_truncated_base64_prefix_is_refused_on_its_length() -> Result<(), base64
             let payload = next_bytes(&mut state, 16);
             let encoded = base64::encode(&payload);
             for cut in 0..encoded.len() {
-                let prefix = encoded.get(..cut).unwrap_or("");
+                // `cut` is a bound of this loop, so the prefix exists.
+                let prefix = &encoded[..cut];
                 if !cut.is_multiple_of(4) {
                     assert_eq!(
                         base64::decode(prefix),
@@ -713,10 +718,7 @@ fn the_wide_boundary_renders_and_decodes_at_its_declared_length()
         encoded.len() >= lossy.len(),
         "every byte needs at least one output character"
     );
-    fold(
-        &mut initial_trace(),
-        u64::try_from(encoded.len()).unwrap_or(0),
-    );
+    fold_usize(&mut initial_trace(), encoded.len());
     match reference_decode(&encoded) {
         Reference::Decoded(text) => assert_eq!(
             percent::decode(&encoded)?,

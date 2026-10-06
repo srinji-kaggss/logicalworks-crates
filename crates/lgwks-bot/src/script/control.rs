@@ -1,5 +1,6 @@
 //! Deadlines, retries and the bounds they take.
 
+use crate::journal::frame::SaturatingFrom;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
@@ -27,8 +28,8 @@ pub fn at_most(limit: usize) -> Result<NonZeroUsize, FlowError> {
         .filter(|bound| bound.get() <= MAX_IN_FLIGHT)
         .ok_or(FlowError::InvalidBound {
             what: "each: at most N at once",
-            value: u64::try_from(limit).unwrap_or(u64::MAX),
-            max: u64::try_from(MAX_IN_FLIGHT).unwrap_or(u64::MAX),
+            value: u64::saturating_from(limit),
+            max: u64::saturating_from(MAX_IN_FLIGHT),
         })
 }
 
@@ -344,16 +345,31 @@ fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     if base.is_zero() {
         return Duration::ZERO;
     }
+    // The doubling is applied the declared number of times rather than as a shift:
+    // `1 << n` for a runtime `n` is either an overflow or an `Option`, and both
+    // would want a value invented here. The trip count is [`MAX_BACKOFF`]'s own
+    // cap, so the loop is bounded and every intermediate saturates.
     let shift = attempt.saturating_sub(1).min(16);
-    let factor = 1_u32.checked_shl(shift).unwrap_or(u32::MAX);
-    let grown = base.saturating_mul(factor).min(MAX_BACKOFF);
-    let byte = usize::try_from(attempt & 31)
-        .ok()
-        .and_then(|index| key.as_bytes().get(index).copied())
-        .unwrap_or(0);
-    let jitter = grown
-        .saturating_mul(u32::from(byte))
-        .checked_div(512)
-        .unwrap_or(Duration::ZERO);
+    let mut doubled = base;
+    for _ in 0..shift {
+        doubled = doubled.saturating_mul(2);
+    }
+    let grown = doubled.min(MAX_BACKOFF);
+    // The jitter byte comes from the step key, so two siblings that failed
+    // together spread out rather than retrying in lockstep, and the same step
+    // always waits the same time. A key with no byte at this index contributes no
+    // jitter: the key is a step path, and the index is inside its low five bits.
+    let jitter_byte = key
+        .as_bytes()
+        .get(usize::saturating_from(attempt) & 31)
+        .copied()
+        .map_or(0, u32::from);
+    // The halving is done in nanoseconds, which is a width wide enough that the
+    // product cannot overflow and a divide by a constant is total — where
+    // `Duration` has no total divide and its checked one returns an `Option` whose
+    // absent case nobody here has measured. The conversion back saturates in the
+    // host's own width, which no jitter this formula can produce reaches.
+    let scaled = grown.as_nanos().saturating_mul(u128::from(jitter_byte));
+    let jitter = Duration::from_nanos(u64::saturating_from(scaled.div_euclid(512)));
     grown.saturating_add(jitter)
 }

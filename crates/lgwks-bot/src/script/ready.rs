@@ -155,13 +155,21 @@ impl Generation {
     #[must_use]
     pub fn next() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        Self(
-            COUNTER
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                    Some(value.saturating_add(1))
-                })
-                .unwrap_or(u64::MAX),
-        )
+        let mut held = COUNTER.load(Ordering::SeqCst);
+        loop {
+            let next = held.saturating_add(1);
+            match COUNTER.compare_exchange_weak(held, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Self(next),
+                // Another thread moved the counter between the read and the
+                // exchange, or the exchange lost a spurious race. Either way the
+                // observed value is the one the counter really holds, so this
+                // thread re-reads from there rather than handing out a
+                // generation another thread may already have issued — which is
+                // the collision a saturating `try_update` would have turned into
+                // a second `u64::MAX`.
+                Err(observed) => held = observed,
+            }
+        }
     }
 
     /// The number behind this generation.
@@ -822,11 +830,7 @@ impl<T: Clone> Readiness<T> {
     /// evidence the acceptance row asks for.
     #[must_use]
     pub fn dependants_live(&self) -> usize {
-        self.inner
-            .dependants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        crate::journal::owner::lock(&self.inner.dependants).len()
     }
 
     /// Signal that the instance at `generation` is ready, carrying `value`.
@@ -1161,17 +1165,23 @@ impl<T: Clone> Readiness<T> {
     /// the retained list can never exceed the cap — the two are one decision.
     fn admit(&self, scope: &Scope) -> Result<(), FlowError> {
         let cap = self.inner.cap;
-        // The cap is compared in the counter's own width rather than widened back, so
-        // the bound is enforced on `u64` and a cap too large for that width
-        // admits everything rather than admitting nothing. Every real cap fits:
-        // `MAX_DEPENDANTS` is 65 536, and a caller that asked for more than a
-        // `u64` of dependants is asking for a number, not a bound.
-        let cap_as_count = u64::try_from(cap).unwrap_or(u64::MAX);
+        // The comparison happens in the cap's own width rather than widening the
+        // cap into the counter's: a cap this host could name but the counter
+        // could not would then be enforced as "admit everything", and a caller who
+        // asked for a bound would get none. Narrowing the *count* instead means a
+        // count past what this host can name refuses, which is the fail-closed
+        // direction, and it is inside the charge rather than beside it so the
+        // counter's own update is what refuses and two admissions cannot both pass
+        // a check that raced.
         let charged = self
             .inner
             .admitted
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                (count < cap_as_count).then_some(count.saturating_add(1))
+                let within_cap = match usize::try_from(count) {
+                    Ok(admitted) => admitted < cap,
+                    Err(_wider_than_this_host_counts) => false,
+                };
+                within_cap.then_some(count.saturating_add(1))
             });
         if charged.is_err() {
             let refusal = Err(ReadinessError::DependantsFull {
@@ -1182,11 +1192,7 @@ impl<T: Clone> Readiness<T> {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "admit: returning an error to the caller");
             return refusal;
         }
-        self.inner
-            .dependants
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(scope.token().clone());
+        crate::journal::owner::lock(&self.inner.dependants).push(scope.token().clone());
         Ok(())
     }
 
@@ -1198,13 +1204,9 @@ impl<T: Clone> Readiness<T> {
     /// happens under the lock: taking the list and cancelling happen in two
     /// separate steps, which is the invariant this crate states everywhere else.
     fn cancel_dependants(&self) -> usize {
-        let tokens = std::mem::take(
-            &mut *self
-                .inner
-                .dependants
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let mut retained = crate::journal::owner::lock(&self.inner.dependants);
+        let tokens = std::mem::take(&mut *retained);
+        drop(retained);
         let reached = tokens.len();
         for token in tokens {
             token.cancel();
@@ -1219,10 +1221,7 @@ impl<T: Clone> Readiness<T> {
 
     /// Take the status lock.
     fn lock(&self) -> MutexGuard<'_, Status> {
-        self.inner
-            .status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::journal::owner::lock(&self.inner.status)
     }
 
     /// The refusal for a signal naming `got` while the readiness stands at

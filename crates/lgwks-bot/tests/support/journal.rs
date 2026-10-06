@@ -7,10 +7,6 @@
 //! Included with `#[path = "support/journal.rs"] mod shared;` rather than
 //! declared as its own test target: it holds no `#[test]`, only the scaffolding
 //! both targets need.
-#![allow(
-    dead_code,
-    reason = "each test target that includes this module uses a different subset of it"
-)]
 
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,10 +37,11 @@ static SCRATCH: AtomicU64 = AtomicU64::new(0);
 /// A scratch path unique to one test run.
 pub fn scratch(name: &str) -> std::path::PathBuf {
     let unique = SCRATCH.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or_default();
+    let nanos = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_nanos(),
+        // A clock set before the epoch still names an instant: how far before it.
+        Err(before) => before.duration().as_nanos(),
+    };
     std::env::temp_dir().join(format!("lgwks-journal-{name}-{nanos}-{unique}"))
 }
 
@@ -91,6 +88,20 @@ pub fn record_measurement(line: &str) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     writeln!(file, "{line}")
+}
+
+/// The nearest-rank percentile `per_mille` of an already-sorted sample, or
+/// `None` for an empty one.
+///
+/// Nearest rank rather than interpolation: the report then names a sample that
+/// was actually observed. `None` rather than a zero: an empty sample has no
+/// percentile, and a measurement line states the absence rather than a number
+/// nobody measured.
+pub fn percentile<T: Copy>(sorted: &[T], per_mille: usize) -> Option<T> {
+    let rank = sorted.len().saturating_mul(per_mille).div_ceil(1_000);
+    sorted
+        .get(rank.max(1).min(sorted.len()).saturating_sub(1))
+        .copied()
 }
 
 /// Walk one attempt up its whole ladder, every rung acknowledged in order.
@@ -170,15 +181,10 @@ pub fn key_for(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn Error>>
     let digest = ActionDigest::from_tagged("blake3_256", digest)?;
     let environment = EnvironmentId::from_hex(ENV)?;
     let epoch = EnvironmentEpoch::from_decimal("1")?;
-    Ok(EffectKey::new(
-        run,
-        action,
-        attempt,
-        flow,
-        digest,
-        environment,
-        epoch,
-    ))
+    Ok(
+        lgwks_bot::effect::EffectIdentity::new(run, environment, flow)
+            .key(action, attempt, digest, epoch),
+    )
 }
 
 /// A plain-process pause, for the kill harnesses' two branches that have no
@@ -189,14 +195,17 @@ pub fn key_for(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn Error>>
 /// stalls every task on it. Neither branch here has an executor, and the wait —
 /// a child parked while the parent decides when it dies — is the observation's
 /// subject rather than its scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the kill harness is a plain process with no async runtime and no reactor to \
-              stall; the parked child and the marker poll are the observation's shape, and \
-              `rt::time::sleep` cannot be awaited here"
-)]
 pub fn pause(millis: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(millis));
+    // Parked rather than slept: `park_timeout` may return early, so the loop
+    // waits out what is left of the span, and a span of zero returns at once.
+    let span = std::time::Duration::from_millis(millis);
+    let started = std::time::Instant::now();
+    while let Some(left) = span.checked_sub(started.elapsed()) {
+        if left.is_zero() {
+            break;
+        }
+        std::thread::park_timeout(left);
+    }
 }
 
 /// Owns a probe child and kills it, reaping it, however the test ends.
@@ -226,12 +235,10 @@ impl ProbeGuard {
         test_name: &str,
     ) -> Result<(), Box<dyn Error>> {
         let Some(mut child) = self.take() else {
-            {
-                let refusal =
-                    Err(format!("the probe child for {test_name} was gone before the kill").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("the probe child for {test_name} was gone before the kill").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "kill_after_marker: returning an error to the caller");
+            return refusal;
         };
         for _ in 0..2_000 {
             if marker.exists() {

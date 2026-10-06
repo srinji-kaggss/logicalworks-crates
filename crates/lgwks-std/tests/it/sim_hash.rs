@@ -24,9 +24,21 @@ use lgwks_std::hash::{Digest, DigestParseError, Hasher, blake3, keyed};
 
 use seeded_bytes::{below, fold_bytes, next_byte, next_bytes, repeated};
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
+
+/// The eight-byte little-endian length prefix a framed part is fed.
+///
+/// Written here from the documented frame rather than taken from the crate, so
+/// the framing families compare against an independent construction: the
+/// length's own bytes, eight of them, then the part.
+fn frame_prefix(length: usize) -> [u8; 8] {
+    let mut prefix = [0u8; 8];
+    for (slot, byte) in prefix.iter_mut().zip(length.to_le_bytes()) {
+        *slot = byte;
+    }
+    prefix
+}
 
 /// The widest message any family in this file hashes, so a boundary case is a
 /// wide payload and not a one-byte one.
@@ -46,7 +58,9 @@ fn seeded_chunks(state: &mut u64, message: &[u8]) -> Vec<Vec<u8>> {
     while cursor < message.len() {
         let width = below(state, 9).saturating_add(1);
         let end = cursor.saturating_add(width).min(message.len());
-        chunks.push(message.get(cursor..end).unwrap_or(&[]).to_vec());
+        // `cursor` is below the length and `end` is at most it, so the chunk
+        // exists; the loop advances `cursor` to `end`.
+        chunks.push(message[cursor..end].to_vec());
         cursor = end;
     }
     chunks
@@ -241,11 +255,8 @@ fn unframed_splits_conflate_where_framed_splits_do_not() {
             let (first, rest) = stream_bytes.split_at(first_len);
             let (middle_part, last) = rest.split_at(middle_len);
             assert_eq!(
-                [first.len(), middle_part.len(), last.len()]
-                    .map(|len| u64::try_from(len).unwrap_or(0))
-                    .into_iter()
-                    .sum::<u64>(),
-                u64::try_from(stream_bytes.len()).unwrap_or(0),
+                first.len() + middle_part.len() + last.len(),
+                stream_bytes.len(),
                 "the three parts tile the whole message"
             );
 
@@ -312,8 +323,10 @@ fn a_framed_feed_equals_the_digest_of_its_documented_prefix() {
 
             let mut expected = Vec::new();
             for part in [&first, &second] {
-                let length = u64::try_from(part.len()).unwrap_or(u64::MAX);
-                expected.extend_from_slice(&length.to_le_bytes());
+                // The frame is the documented eight-byte little-endian length
+                // followed by the part, built from the length's own bytes so the
+                // expectation and the implementation agree by construction.
+                expected.extend_from_slice(&frame_prefix(part.len()));
                 expected.extend_from_slice(part);
             }
             assert_eq!(
@@ -484,7 +497,7 @@ fn a_digest_hex_of_the_wrong_length_is_refused_on_its_length()
             for candidate in [
                 String::new(),
                 "0".to_owned(),
-                hex.get(..63).unwrap_or("").to_owned(),
+                hex[..63].to_owned(),
                 longer,
                 format!("{hex}0000"),
             ] {
@@ -531,7 +544,23 @@ fn a_digest_hex_with_a_bad_character_is_refused_as_a_hex_refusal()
             if let Some(slot) = corrupted.get_mut(position) {
                 *slot = alien;
             }
-            let corrupted = String::from_utf8(corrupted).unwrap_or_default();
+            // The digest hex is ASCII and `alien` is ASCII, so replacing one
+            // byte leaves the string valid UTF-8; the arm below names that
+            // invariant if it ever stops holding.
+            let corrupted = match String::from_utf8(corrupted) {
+                Ok(corrupted) => corrupted,
+                Err(failure) => {
+                    return Err(format!(
+                        "seed {seed}: the alien at {position} was not ASCII, so the corrupted digest is not text: {}",
+                        if failure.as_bytes().is_ascii() {
+                            "an ASCII failure the codec should not have refused"
+                        } else {
+                            "the corrupted bytes are not text"
+                        }
+                    )
+                    .into());
+                }
+            };
             match Digest::from_hex(&corrupted) {
                 Err(ref error) => assert_eq!(
                     parse_arm(error),
@@ -668,7 +697,7 @@ fn two_seeds_draw_two_different_messages() {
     let mut trace = initial_trace();
     fold_bytes(&mut trace, blake3(&left).as_bytes());
     fold_bytes(&mut trace, blake3(&right).as_bytes());
-    fold(&mut trace, u64::try_from(left.len()).unwrap_or(0));
+    fold_usize(&mut trace, left.len());
     assert_ne!(
         trace,
         initial_trace(),
@@ -743,10 +772,12 @@ fn ct_eq_sees_a_flip_at_every_seeded_position() {
         for (digest, _) in ct_eq_pairs(seed) {
             for _ in 0..64 {
                 let byte = below(&mut state, 32);
-                let bit = u32::try_from(below(&mut state, 8)).unwrap_or(0);
+                // `below` draws in `0..8`, so the bit index is a shift of a byte
+                // by at most seven and is never a width the shift cannot take.
+                let bit = below(&mut state, 8);
                 let mut flipped = *digest.as_bytes();
                 if let Some(slot) = flipped.get_mut(byte) {
-                    *slot ^= 1_u8.checked_shl(bit).unwrap_or(1);
+                    *slot ^= 1_u8 << bit;
                 }
                 let changed = Digest::from_bytes(flipped);
                 assert!(

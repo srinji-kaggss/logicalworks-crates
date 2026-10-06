@@ -31,12 +31,12 @@ use lgwks_bot::effect::{
     RunId,
 };
 
-const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
+use crate::journal_fixtures::{ACTION, DIGEST_HEX, ENV, FLOW_HEX, RUN};
+
+/// The second action, so one key can differ from another in exactly the field
+/// under test.
 const OTHER_ACTION: &str = "3132333435363738393a3b3c3d3e3f40";
-const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
+/// The second input digest, for the same reason.
 const OTHER_DIGEST_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e2f";
 
 /// The crate refuses a panicking path anywhere, tests included, so these tests
@@ -73,15 +73,14 @@ fn key(
     let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
     let key_environment = EnvironmentId::from_hex(ENV)?;
     let key_epoch = EnvironmentEpoch::new(counter(epoch)?);
-    Ok(EffectKey::new(
-        key_run,
-        key_action,
-        key_attempt,
-        key_flow_revision,
-        key_digest,
-        key_environment,
-        key_epoch,
-    ))
+    Ok(
+        lgwks_bot::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+            key_action,
+            key_attempt,
+            key_digest,
+            key_epoch,
+        ),
+    )
 }
 
 fn ordinary(attempt: u64) -> Result<EffectKey, Box<dyn std::error::Error>> {

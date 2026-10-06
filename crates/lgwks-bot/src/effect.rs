@@ -779,28 +779,6 @@ pub struct EffectKey {
 }
 
 impl EffectKey {
-    /// Assemble a key from its seven fields.
-    #[must_use]
-    pub const fn new(
-        run: RunId,
-        action: ActionId,
-        attempt: AttemptId,
-        flow: FlowRevision,
-        digest: ActionDigest,
-        environment: EnvironmentId,
-        epoch: EnvironmentEpoch,
-    ) -> Self {
-        Self {
-            run,
-            action,
-            attempt,
-            flow,
-            digest,
-            environment,
-            epoch,
-        }
-    }
-
     /// Which run every key built from this identity belongs to.
     ///
     /// Generated and persisted before the first admission, so two runs of the
@@ -1054,15 +1032,15 @@ impl EffectIdentity {
         digest: ActionDigest,
         epoch: EnvironmentEpoch,
     ) -> EffectKey {
-        EffectKey::new(
-            self.run,
+        EffectKey {
+            run: self.run,
             action,
             attempt,
-            self.flow,
+            flow: self.flow,
             digest,
-            self.environment,
+            environment: self.environment,
             epoch,
-        )
+        }
     }
 
     /// Re-render `key` under this identity's environment at `epoch`.
@@ -1073,13 +1051,10 @@ impl EffectIdentity {
     /// what makes it the *same* attempt.
     #[must_use]
     pub const fn at_epoch(self, key: EffectKey, epoch: EnvironmentEpoch) -> EffectKey {
-        EffectKey::new(
-            key.run(),
+        EffectIdentity::new(key.run(), self.environment, key.flow()).key(
             key.action(),
             key.attempt(),
-            key.flow(),
             key.digest(),
-            self.environment,
             epoch,
         )
     }
@@ -1131,15 +1106,14 @@ mod tests {
         let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
         let key_environment = EnvironmentId::from_hex(ENV)?;
         let key_epoch = EnvironmentEpoch::new(nonzero(epoch)?);
-        Ok(EffectKey::new(
-            key_run,
-            key_action,
-            key_attempt,
-            key_flow_revision,
-            key_digest,
-            key_environment,
-            key_epoch,
-        ))
+        Ok(
+            EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+                key_action,
+                key_attempt,
+                key_digest,
+                key_epoch,
+            ),
+        )
     }
 
     #[test]
@@ -1325,16 +1299,13 @@ mod tests {
     #[test]
     fn a_different_input_digest_is_a_different_key_and_not_an_epoch_move() -> TestResult {
         let base = key(1, 4)?;
-        let moved = EffectKey::new(
-            base.run(),
+        let moved = EffectIdentity::new(base.run(), base.environment(), base.flow()).key(
             base.action(),
             base.attempt(),
-            base.flow(),
             ActionDigest::from_tagged(
                 "blake3_256",
                 "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e2f",
             )?,
-            base.environment(),
             EnvironmentEpoch::new(nonzero(5)?),
         );
         assert_ne!(base.digest(), moved.digest());

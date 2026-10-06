@@ -1,47 +1,13 @@
 //! Shared probes for the test targets that run a supervised child.
 //!
-//! One copy of the pid-file scratch directory and the process-group absence
-//! wait, included by path from each test target that needs them. A copy per
+//! One copy of the pid-file reader and the process-group absence wait,
+//! included by path from each test target that needs them; the directory the
+//! pid files go in is the shared `scratch.rs`. A copy per
 //! file is how two targets drift into asserting different things about the same
 //! OS facility.
 
-#![allow(
-    dead_code,
-    reason = "each including test target uses a different subset of these probes"
-)]
-
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-
-/// Monotone per-process sequence, so two scratch directories in one binary
-/// never share a path even if the random tag does.
-static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A temporary directory a scenario's own commands write pid files into.
-pub struct PidDir(PathBuf);
-
-impl PidDir {
-    /// Create the directory for a test called `name`.
-    pub fn new(name: &str) -> std::io::Result<Self> {
-        let tag = lgwks_std::random::bytes::<8>().map_or(0, u64::from_le_bytes);
-        let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lgwks-bot-proc-{tag:016x}-{seq}-{name}"));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    /// The path of one file inside it.
-    pub fn join(&self, file: &str) -> PathBuf {
-        self.0.join(file)
-    }
-}
-
-impl Drop for PidDir {
-    /// Remove the directory, best effort.
-    fn drop(&mut self) {
-        let _ignored = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// Read a pid a scenario's own child wrote, or `None` while it is absent.
 pub fn read_pid(path: &Path) -> Option<i32> {
@@ -137,14 +103,12 @@ pub fn group_has_stopped(pgid: i32) -> bool {
 
 /// Wait until `done(pgid)` holds, up to `budget`.
 fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
-    let deadline = std::time::Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(std::time::Instant::now);
+    let started = std::time::Instant::now();
     loop {
         if done(pgid) {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if started.elapsed() >= budget {
             return done(pgid);
         }
         std::thread::park_timeout(Duration::from_millis(5));
@@ -157,14 +121,12 @@ fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
 /// child that records its own pid has provably reached the point under test, and
 /// a loaded host cannot make the test act before that point.
 pub fn wait_for_pid(path: &Path, budget: Duration) -> Option<i32> {
-    let deadline = std::time::Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(std::time::Instant::now);
+    let started = std::time::Instant::now();
     loop {
         if let Some(pid) = read_pid(path) {
             return Some(pid);
         }
-        if std::time::Instant::now() >= deadline {
+        if started.elapsed() >= budget {
             return read_pid(path);
         }
         std::thread::park_timeout(Duration::from_millis(5));
@@ -194,11 +156,13 @@ pub fn pid_is_alive(pid: i32) -> bool {
 /// apart (`Z` is a zombie), so the assertion carries it instead of a bare
 /// "still alive" that cannot be told from either.
 pub fn describe_pid(pid: i32) -> String {
-    let listing = std::process::Command::new("ps")
+    let listing = match std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,pgid=,stat=,comm="])
         .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-        .unwrap_or_default();
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(unlisted) => return format!("pid {pid}: `ps` could not list processes: {unlisted}"),
+    };
     let wanted = pid.to_string();
     let rows: Vec<&str> = listing
         .lines()
@@ -233,11 +197,9 @@ pub fn kill_pid(pid: i32) {
 /// `None` for a pid that is still running when the budget expires, so a caller
 /// cannot report a survivor as cleaned up by reading the timeout as success.
 pub fn wait_for_pid_gone(pid: i32, budget: Duration) -> Option<()> {
-    let deadline = std::time::Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(std::time::Instant::now);
+    let started = std::time::Instant::now();
     while pid_is_alive(pid) {
-        if std::time::Instant::now() >= deadline {
+        if started.elapsed() >= budget {
             return None;
         }
         std::thread::park_timeout(Duration::from_millis(5));

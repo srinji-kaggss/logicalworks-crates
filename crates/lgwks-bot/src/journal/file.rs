@@ -107,7 +107,7 @@
 //!
 //! The cross-process half of this — that the fence actually holds between two
 //! live processes and is reacquired when the holder dies — is exercised by
-//! `tests/journal_writer_fence.rs`, which re-executes this test binary as a
+//! `tests/it/journal_writer_fence.rs`, which re-executes this test binary as a
 //! second process rather than simulating one.
 
 use std::collections::HashMap;
@@ -115,7 +115,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, read_exact_or_eof};
+use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, SaturatingFrom, read_exact_or_eof};
 use super::owner::{StorageGate, StorageOwner};
 use super::{
     ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
@@ -348,11 +348,11 @@ fn next_frame(
         Prefix::Eof => return Ok(Err(Halt::Complete)),
         Prefix::Torn => return Ok(Err(Halt::Torn)),
         Prefix::Full => {
-            let requested = u64::try_from(held).unwrap_or(u64::MAX).saturating_add(1);
-            if requested > u64::try_from(max_events).unwrap_or(u64::MAX) {
+            let requested = u64::saturating_from(held).saturating_add(1);
+            if requested > u64::saturating_from(max_events) {
                 let refusal = Err(JournalError::CapacityExceeded {
                     resource: JournalLimitKind::Events,
-                    limit: u64::try_from(max_events).unwrap_or(u64::MAX),
+                    limit: u64::saturating_from(max_events),
                     requested,
                 });
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "next_frame: the file holds more events than the ceiling");
@@ -581,7 +581,7 @@ impl Replay {
             Ok(Some(read_len)) if read_len < LENGTH_BYTES => return None,
             Ok(Some(_)) => {}
         }
-        let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
+        let limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
         if index >= limit {
             return Some(Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
@@ -589,7 +589,7 @@ impl Replay {
                 requested: index.saturating_add(1),
             }));
         }
-        let payload_len = usize::try_from(u32::from_be_bytes(prefix)).unwrap_or(usize::MAX);
+        let payload_len = usize::saturating_from(u32::from_be_bytes(prefix));
         if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
             return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
                 index,
@@ -768,7 +768,7 @@ impl FileJournal {
                 (offset, true)
             }
             ScanStop::AmbiguousTail { offset } => {
-                let index = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+                let index = u64::saturating_from(entries.len());
                 let offset = resolve_ambiguous_tail(
                     &mut file,
                     offset,
@@ -818,10 +818,8 @@ impl FileJournal {
     /// bound. The history is not compacted to make room, so nothing
     /// acknowledged is evicted to admit more work.
     fn bound_events(&self, additional: u64) -> Result<(), JournalError> {
-        let requested = u64::try_from(self.committed.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(additional);
-        let limit = u64::try_from(MAX_JOURNAL_EVENTS).unwrap_or(u64::MAX);
+        let requested = u64::saturating_from(self.committed.len()).saturating_add(additional);
+        let limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
         if requested > limit {
             let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
@@ -971,9 +969,7 @@ impl FileJournal {
     /// [`JournalError::CapacityExceeded`] when the staged write is over the
     /// bound.
     fn bound_bytes(&self, staged: usize) -> Result<(), JournalError> {
-        let requested = self
-            .disk_len
-            .saturating_add(u64::try_from(staged).unwrap_or(u64::MAX));
+        let requested = self.disk_len.saturating_add(u64::saturating_from(staged));
         if requested > MAX_JOURNAL_BYTES {
             let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Bytes,
@@ -1048,7 +1044,7 @@ impl FileJournal {
         }
         self.disk_len = self
             .disk_len
-            .saturating_add(u64::try_from(frame_len).unwrap_or(u64::MAX));
+            .saturating_add(u64::saturating_from(frame_len));
     }
 
     /// Everything one append checks and frames before the disk is touched.
@@ -1179,7 +1175,7 @@ impl FileJournal {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        self.bound_events(u64::try_from(events.len()).unwrap_or(u64::MAX))?;
+        self.bound_events(u64::saturating_from(events.len()))?;
 
         // Validate and frame every rung against the evolving view before any
         // byte moves: the staged kinds for keys this batch is itself climbing
@@ -1463,7 +1459,6 @@ pub(super) mod tests {
     };
     use crate::journal::frame::probe::{declared_at, frame_starts, with_prefix};
     use crate::journal::{AttemptStatus, EventKind};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -1490,48 +1485,52 @@ pub(super) mod tests {
     const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
 
-    /// A counter that gives concurrent test runs distinct scratch names.
-    ///
-    /// Nanos plus a counter, not a process id: the OS reuses both pids and
-    /// threads, and a reused id must never make two runs share a journal.
-    static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
     /// A scratch path unique to one test run.
     ///
     /// Shared with `journal::owner`'s tests, so the journal's two test suites name
-    /// their scratch files one way (INV-DEP-6).
-    pub(in crate::journal) fn scratch(name: &str) -> PathBuf {
-        let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default();
-        std::env::temp_dir().join(format!("lgwks-journal-file-{name}-{nanos}-{unique}"))
+    /// their scratch files one way (INV-DEP-6). The construction itself is
+    /// `frame::probe`'s, because the two halves of a unique name are not a detail a
+    /// second copy may spell differently.
+    pub(in crate::journal) fn scratch(name: &str) -> Result<PathBuf, std::io::Error> {
+        crate::journal::frame::probe::scratch_path("journal-file", name)
     }
 
-    fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+    /// The one key builder: every field but the attempt is this module's fixture
+    /// constant, and a test that wants a second attempt differs only in that
+    /// field. Building it in three copies meant three places for a field to differ.
+    fn key_for_attempt(
+        attempt: &str,
+    ) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
         let run = RunId::from_hex(RUN)?;
         let action = ActionId::from_hex(ACTION)?;
-        let attempt = AttemptId::from_decimal("1")?;
+        let attempt = AttemptId::from_decimal(attempt)?;
         let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
         let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
         let environment = EnvironmentId::from_hex(ENV)?;
         let epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(crate::effect::EffectKey::new(
-            run,
-            action,
-            attempt,
-            flow,
-            digest,
-            environment,
-            epoch,
-        ))
+        Ok(crate::effect::EffectIdentity::new(run, environment, flow)
+            .key(action, attempt, digest, epoch))
+    }
+
+    /// The first attempt of the run every test in this module writes.
+    fn key() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
+        key_for_attempt("1")
+    }
+
+    /// A scratch path and the guard that removes it when the test ends.
+    ///
+    /// Both halves in one value because both are needed before anything is
+    /// written, and a guard returned beside its path cannot be dropped by a test
+    /// that only meant to keep the path.
+    fn subject(name: &str) -> Result<(PathBuf, TempGuard), Box<dyn std::error::Error>> {
+        let path = scratch(name)?;
+        let guard = TempGuard(path.clone());
+        Ok((path, guard))
     }
 
     #[test]
     fn a_batched_ladder_is_four_acknowledgments_from_one_sync() -> TestResult {
-        let path = scratch("batch");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("batch")?;
         let key = key()?;
         let verdict = crate::journal::Verification::new(
             crate::effect::Id128::from_hex(&"42".repeat(16))?,
@@ -1637,48 +1636,17 @@ pub(super) mod tests {
     /// A key for attempt `n`, so a frame count can be built without
     /// tripping the ladder's one-climb-per-key rule.
     fn attempt_key(n: u64) -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
-        let run = RunId::from_hex(RUN)?;
-        let action = ActionId::from_hex(ACTION)?;
-        let attempt = AttemptId::from_decimal(&n.to_string())?;
-        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
-        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
-        let environment = EnvironmentId::from_hex(ENV)?;
-        let epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(crate::effect::EffectKey::new(
-            run,
-            action,
-            attempt,
-            flow,
-            digest,
-            environment,
-            epoch,
-        ))
+        key_for_attempt(&n.to_string())
     }
 
     /// A second key, so a batch can fail on its own rung.
     fn key2() -> Result<crate::effect::EffectKey, Box<dyn std::error::Error>> {
-        let run = RunId::from_hex(RUN)?;
-        let action = ActionId::from_hex(ACTION)?;
-        let attempt = AttemptId::from_decimal("7")?;
-        let flow = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
-        let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
-        let environment = EnvironmentId::from_hex(ENV)?;
-        let epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(crate::effect::EffectKey::new(
-            run,
-            action,
-            attempt,
-            flow,
-            digest,
-            environment,
-            epoch,
-        ))
+        key_for_attempt("7")
     }
 
     #[test]
     fn a_batch_climbs_a_key_the_disk_already_knows() -> TestResult {
-        let path = scratch("batch-committed");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("batch-committed")?;
         let key = key()?;
         let mut journal = FileJournal::open(&path)?;
         // One rung committed by ordinary appends.
@@ -1704,8 +1672,7 @@ pub(super) mod tests {
 
     #[test]
     fn a_replayed_journal_is_the_journal_that_was_written() -> TestResult {
-        let path = scratch("replay");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("replay")?;
         let key = key()?;
         {
             let mut journal = FileJournal::open(&path)?;
@@ -1729,8 +1696,7 @@ pub(super) mod tests {
 
     #[test]
     fn confirm_outcome_attests_only_its_own_committed_outcome() -> TestResult {
-        let path = scratch("confirm");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("confirm")?;
         let key = key()?;
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
@@ -1785,8 +1751,7 @@ pub(super) mod tests {
 
     #[test]
     fn a_reopened_journal_answers_the_latest_outcome_by_key() -> TestResult {
-        let path = scratch("outcome-index");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("outcome-index")?;
         let key = key()?;
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
@@ -1820,8 +1785,7 @@ pub(super) mod tests {
 
     #[test]
     fn a_rotted_length_prefix_is_refused_and_nothing_is_trimmed() -> TestResult {
-        let path = scratch("length-rot");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("length-rot")?;
         {
             let mut journal = FileJournal::open(&path)?;
             for attempt in 1u64..=3 {
@@ -1841,14 +1805,14 @@ pub(super) mod tests {
         // have written this; only rot or a hand can have.
         let mut bytes = std::fs::read(&path)?;
         let first_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let len_bytes = u32::try_from(LENGTH_BYTES).unwrap_or(u32::MAX);
-        let head_bytes = u32::try_from(HEAD_BYTES).unwrap_or(u32::MAX);
-        let second = usize::try_from(
+        let len_bytes = u32::saturating_from(LENGTH_BYTES);
+        let head_bytes = u32::saturating_from(HEAD_BYTES);
+        let second = usize::saturating_from(
             first_len
                 .saturating_add(len_bytes)
                 .saturating_add(head_bytes),
         )
-        .unwrap_or(bytes.len());
+        .min(bytes.len());
         if second < bytes.len() {
             bytes[second] ^= 0x40;
         }
@@ -1875,8 +1839,7 @@ pub(super) mod tests {
 
     #[test]
     fn an_undecodable_committed_frame_is_refused_not_trimmed() -> TestResult {
-        let path = scratch("undecodable");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("undecodable")?;
         let key = key()?;
         {
             let mut journal = FileJournal::open(&path)?;
@@ -1887,7 +1850,7 @@ pub(super) mod tests {
         // head they carry.
         let mut bytes = std::fs::read(&path)?;
         let raw_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let payload_len = usize::try_from(raw_len).unwrap_or(usize::MAX);
+        let payload_len = usize::saturating_from(raw_len);
         let mid = LENGTH_BYTES.saturating_add(payload_len >> 1);
         bytes[mid] = bytes[mid].wrapping_add(0x55);
         std::fs::write(&path, &bytes)?;
@@ -1908,8 +1871,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_ladder_refuses_a_second_prepared_dispatch_from_a_replayed_view() -> TestResult {
-        let path = scratch("ladder");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("ladder")?;
         let key = key()?;
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append(journal.tail(), &EffectEvent::IntentAdmitted { key })?;
@@ -1960,8 +1922,9 @@ pub(super) mod tests {
                 return refusal;
             }
             let remaining = self.serve.saturating_sub(self.inner.position());
-            let cap = usize::try_from(remaining).unwrap_or(buf.len());
-            let cap = cap.min(buf.len());
+            // A `serve` this host cannot count is at least every byte the buffer
+            // holds, so the ceiling below is what bounds the read either way.
+            let cap = usize::saturating_from(remaining).min(buf.len());
             self.inner.read(&mut buf[..cap])
         }
     }
@@ -2041,8 +2004,7 @@ pub(super) mod tests {
 
     #[test]
     fn open_refuses_an_over_limit_file_without_truncating_it() -> TestResult {
-        let path = scratch("byte-limit");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("byte-limit")?;
         let file = File::create(&path)?;
         let requested = MAX_JOURNAL_BYTES.saturating_add(1);
         file.set_len(requested)?;
@@ -2070,8 +2032,7 @@ pub(super) mod tests {
 
     #[test]
     fn batch_admission_refuses_history_over_the_event_limit_without_writing() -> TestResult {
-        let path = scratch("event-limit");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("event-limit")?;
         let requested = MAX_JOURNAL_EVENTS.saturating_add(1);
         let mut events = Vec::new();
         for attempt in 1..=requested {
@@ -2146,8 +2107,7 @@ pub(super) mod tests {
 
     #[test]
     fn an_inflated_length_over_a_complete_final_frame_is_refused_not_trimmed() -> TestResult {
-        let path = scratch("inflated-length");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("inflated-length")?;
         let (mut bytes, third_start) = three_frame_file(&path)?;
         let before = bytes.len();
 
@@ -2206,8 +2166,7 @@ pub(super) mod tests {
 
     #[test]
     fn a_short_final_frame_is_still_repaired_as_a_torn_tail() -> TestResult {
-        let path = scratch("torn-tail");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("torn-tail")?;
         let (bytes, third_start) = three_frame_file(&path)?;
         let complete_len = u64::try_from(third_start)?;
 
@@ -2270,8 +2229,7 @@ pub(super) mod tests {
     /// ends inside the payload. Both are one lie told two ways, and both refuse.
     #[test]
     fn a_lengthened_acknowledged_final_frame_is_refused_not_trimmed() -> TestResult {
-        let path = scratch("lengthened-final");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("lengthened-final")?;
         let (bytes, third) = three_frame_file(&path)?;
         let declared = declared_at(&bytes, third);
         for extra in 1u32..=1024 {
@@ -2288,8 +2246,7 @@ pub(super) mod tests {
     /// frames after it are not read as one more candidate and dropped.
     #[test]
     fn an_inflated_non_final_length_is_refused_and_every_byte_survives() -> TestResult {
-        let path = scratch("inflated-middle");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("inflated-middle")?;
         let (bytes, _) = three_frame_file(&path)?;
         let middle = frame_starts(&bytes, 0)?[1];
         let remaining = u32::try_from(bytes.len() - middle)?;
@@ -2319,8 +2276,7 @@ pub(super) mod tests {
     /// from being bought by refusing everything.
     #[test]
     fn an_append_cut_at_every_byte_of_the_final_frame_is_repaired() -> TestResult {
-        let path = scratch("cut-every-byte");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("cut-every-byte")?;
         let (bytes, third) = three_frame_file(&path)?;
         for cut in third + 1..bytes.len() {
             std::fs::write(&path, &bytes[..cut])?;
@@ -2354,8 +2310,7 @@ pub(super) mod tests {
     /// does, so the open refuses rather than trimming both.
     #[test]
     fn a_damaged_cut_frame_with_an_acknowledged_frame_behind_it_is_refused() -> TestResult {
-        let path = scratch("damaged-middle");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("damaged-middle")?;
         let (bytes, _) = three_frame_file(&path)?;
         let starts = frame_starts(&bytes, 0)?;
         let middle = starts[1];
@@ -2372,8 +2327,7 @@ pub(super) mod tests {
     /// cut inside its head, and it is trimmed.
     #[test]
     fn a_final_frame_with_a_lying_length_and_a_damaged_head_is_the_stated_limit() -> TestResult {
-        let path = scratch("two-faults");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("two-faults")?;
         let (bytes, third) = three_frame_file(&path)?;
         let declared = declared_at(&bytes, third);
         let mut lied = with_prefix(&bytes, third, declared + 5);
@@ -2390,8 +2344,7 @@ pub(super) mod tests {
     /// its own descriptor, so a file changed after `open` is the case it can meet.
     #[test]
     fn a_streaming_replay_refuses_a_lengthened_final_frame_and_then_ends() -> TestResult {
-        let path = scratch("replay-lengthened");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("replay-lengthened")?;
         let (bytes, third) = three_frame_file(&path)?;
         let journal = FileJournal::open(&path)?;
         let declared = declared_at(&bytes, third);
@@ -2427,8 +2380,7 @@ pub(super) mod tests {
 
     #[test]
     fn a_failed_batch_write_latches_the_poison_like_a_single_append() -> TestResult {
-        let path = scratch("batch-poison");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("batch-poison")?;
         // Every call gets its own attempt key: the ladder refuses a second
         // rung one attempt, and that refusal must never mask the poison
         // fence these assertions are about.
@@ -2510,8 +2462,7 @@ pub(super) mod tests {
         use std::task::Poll;
         use std::time::{Duration, Instant};
 
-        let path = scratch("stalled-device");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("stalled-device")?;
         let mut journal = FileJournal::open_with_stalled_storage(&path)?;
         // Taken before the append starts: once the future holds the journal's
         // borrow, the journal itself is unreachable for the whole wait.
@@ -2600,8 +2551,7 @@ pub(super) mod tests {
         use std::future::poll_fn;
         use std::task::Poll;
 
-        let path = scratch("dropped-waiter");
-        let _guard = TempGuard(path.clone());
+        let (path, _guard) = subject("dropped-waiter")?;
         let mut journal = FileJournal::open_with_stalled_storage(&path)?;
         let gate = journal.storage_gate();
         let event = EffectEvent::IntentAdmitted {

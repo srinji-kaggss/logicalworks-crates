@@ -167,8 +167,19 @@ required = true
 # in, the three tiers (100, 1,000 and 10,000 concurrent runs) land in one shard:
 # on run 37205854158 that shard's test phase took 229 s against 61-63 s for the
 # other three, and set the whole run's wall at 481 s.
-command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}"
+command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot async runner tests"
+
+[[lane]]
+id = "acceptance-receipts"
+surfaces = "ci"
+required = true
+# The receipt, built from the four JUnit reports the lgwks-bot shards already
+# wrote. It reads XML and records into SQLite, so the job needs no Rust
+# toolchain and no build -- it costs seconds, and it does not run the suite a
+# second time.
+command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform linux-x86_64"
+ci_step = "Record acceptance receipts"
 
 [[lane]]
 id = "tests-bot-saturation"
@@ -357,19 +368,96 @@ id = "feat-std"
 group = "check"
 surfaces = "local ci"
 required = true
+# Every one of the twelve non-`full` features, each alone, plus the two
+# boundary sets. `core`, `trace`, `random`, `ron` and `process` were missing from
+# this list and so were never built by anything except the rustdoc lane: a
+# feature that silently needs another feature is exactly what an isolated build
+# refuses to hide. (#276)
 command = """\
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features\
 """
 ci_step = "Check lgwks-std feature matrix"
+
+# Every feature alone, *executed* rather than compiled. A `cargo check` says a
+# feature builds; only a run says its tests pass with nothing else switched on,
+# and a test that quietly needs a second feature passes in the full suite while
+# being unreachable for a consumer who selected one flag. The per-feature run is
+# one `nextest` invocation per feature, in the same feature sets the check lane
+# above uses. (#276)
+# Three shards of four features, each its own CI job: as one step on the
+# feature-matrix job the twelve runs took 228 s on GitHub and put that job at
+# 303 s, past the five-minute gate budget. (#276)
+[[lane]]
+id = "tests-std-per-feature-a"
+group = "std-per-feature"
+surfaces = "local ci"
+required = true
+command = """\
+cargo nextest run --locked -p lgwks_std --no-default-features --features core && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features trace && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features random && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features http\
+"""
+ci_step = "Run lgwks-std per-feature tests, shard a (core trace random http)"
+needs = ["bin:cargo-nextest"]
+
+[[lane]]
+id = "tests-std-per-feature-b"
+group = "std-per-feature"
+surfaces = "local ci"
+required = true
+command = """\
+cargo nextest run --locked -p lgwks_std --no-default-features --features hash && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features pattern && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features json && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features ron\
+"""
+ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron)"
+needs = ["bin:cargo-nextest"]
+
+[[lane]]
+id = "tests-std-per-feature-c"
+group = "std-per-feature"
+surfaces = "local ci"
+required = true
+command = """\
+cargo nextest run --locked -p lgwks_std --no-default-features --features wire && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features online && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw && \
+cargo nextest run --locked -p lgwks_std --no-default-features --features process\
+"""
+ci_step = "Run lgwks-std per-feature tests, shard c (wire online fs-raw process)"
+needs = ["bin:cargo-nextest"]
+
+# The declared target matrix, executed. Before this lane the only non-native
+# build in the gate was the bot's WASI boundary, so `lgwks_std`, `lgwks_ast` and
+# `lgwks_deps` were never checked for a target the gate does not run on, and
+# `random` refused at compile time on every target but three. The script runs
+# `cargo check --target <t>` per target and per crate: the Rust-only surface is
+# required on every target, and a check that needs a C toolchain this runner
+# lacks is recorded with the exact error rather than dropped. (#276)
+[[lane]]
+id = "target-matrix"
+group = "targets"
+surfaces = "local ci"
+required = true
+command = "./scripts/check-target-matrix.sh"
+ci_step = "Check lgwks-std across the declared target matrix"
+needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
 
 [[lane]]
 id = "feat-deps-base"
@@ -544,7 +632,7 @@ id = "gpui-windows"
 group = "check"
 surfaces = "local ci"
 required = false
-command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --no-default-features --features gpui --example gpui"
+command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir target --no-default-features --features gpui --example gpui"
 ci_step = "Check GPUI Windows renderer fixture"
 platforms = ["win32"]
 reason = "the GPUI Windows renderer builds only on Windows"

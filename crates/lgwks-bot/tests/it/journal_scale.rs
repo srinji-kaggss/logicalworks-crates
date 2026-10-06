@@ -34,7 +34,7 @@ use lgwks_bot::journal::{DurabilityPromise, EffectEvent, EffectJournal, FileJour
 
 use crate::journal_fixtures as shared;
 
-use shared::{TempGuard, key, record_measurement, scratch};
+use shared::{TempGuard, key, percentile, record_measurement, scratch};
 
 /// How many acknowledged appends the latency family times.
 const SAMPLES: usize = 1_024;
@@ -81,21 +81,6 @@ const FALLBACK_TENANTS: usize = 100;
 const RSS_SAMPLE_MS: u64 = 10;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// The nearest-rank percentile of an already-sorted slice, in microseconds.
-fn percentile(sorted: &[u128], percent: usize) -> u128 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let rank = sorted
-        .len()
-        .saturating_mul(percent)
-        .saturating_add(99)
-        .checked_div(100)
-        .unwrap_or(1)
-        .saturating_sub(1);
-    sorted[rank.min(sorted.len().saturating_sub(1))]
-}
 
 /// The attempt number tenant `tenant` writes for `step`.
 fn attempt_of(tenant: usize, step: usize) -> Result<u64, std::num::TryFromIntError> {
@@ -169,10 +154,26 @@ fn host_tenant_ceiling() -> Ceiling {
         (Some(from_fds), Some(from_threads)) => from_fds.min(from_threads),
         (Some(from_fds), None) => from_fds,
         (None, Some(from_threads)) => from_threads,
-        (None, None) => u64::try_from(FALLBACK_TENANTS).unwrap_or(1),
+        // Neither budget answered: keep the level round two proved, which is
+        // what the fallback constant is for, rather than folding to zero on a
+        // host that hides its limits.
+        (None, None) => {
+            return Ceiling {
+                tenants: FALLBACK_TENANTS,
+                measured_threads,
+                fd_limit,
+            };
+        }
     };
     Ceiling {
-        tenants: usize::try_from(tenants).unwrap_or(FALLBACK_TENANTS).max(1),
+        // A budget this host cannot address is clamped by its own address space,
+        // which is then the real ceiling: neither `ulimit -n` nor the thread
+        // probe answers anywhere near that, so the arm is the host's own limit
+        // rather than a substituted number.
+        tenants: match usize::try_from(tenants) {
+            Ok(tenants) => tenants.max(1),
+            Err(_too_wide) => usize::MAX,
+        },
         measured_threads,
         fd_limit,
     }
@@ -204,10 +205,15 @@ fn measure_thread_capacity() -> Option<u64> {
         }
     }
     if reached == 0 {
-        None
-    } else {
-        Some(u64::try_from(reached).unwrap_or(u64::MAX))
+        return None;
     }
+    // A level this host cannot name as a `u64` is not one any tier here can
+    // reach, so the answer is "not measured" rather than the largest number there
+    // is, which would read as a ceiling nobody hit.
+    let Ok(reached) = u64::try_from(reached) else {
+        return None;
+    };
+    Some(reached)
 }
 
 /// A soft resource limit `ulimit <flag>` reports, in the shell that inherits
@@ -284,8 +290,8 @@ fn read_rss_kb() -> Option<u64> {
 struct RssPeak {
     /// Set when the sampler should stop.
     stop: Arc<AtomicBool>,
-    /// The sampler thread; `None` if it could not be spawned.
-    handle: Option<std::thread::JoinHandle<u64>>,
+    /// The sampler thread, yielding the peak it read or `None` if it read none.
+    handle: Option<std::thread::JoinHandle<Option<u64>>>,
 }
 
 impl RssPeak {
@@ -296,15 +302,18 @@ impl RssPeak {
         let handle = std::thread::Builder::new()
             .name("rss-peak".to_owned())
             .spawn(move || {
-                let mut peak = read_rss_kb().unwrap_or(0);
+                // The peak is the largest reading this host actually took. A
+                // sample it could not read leaves the peak alone rather than
+                // lowering it, and a host with no reading at all reports none.
+                let mut peak: Option<u64> = None;
                 while !flag.load(Ordering::Relaxed) {
                     if let Some(kb) = read_rss_kb() {
-                        peak = peak.max(kb);
+                        peak = Some(peak.map_or(kb, |was: u64| was.max(kb)));
                     }
                     std::thread::park_timeout(Duration::from_millis(RSS_SAMPLE_MS));
                 }
                 if let Some(kb) = read_rss_kb() {
-                    peak = peak.max(kb);
+                    peak = Some(peak.map_or(kb, |was: u64| was.max(kb)));
                 }
                 peak
             })
@@ -316,7 +325,7 @@ impl RssPeak {
     fn stop(mut self) -> Option<u64> {
         self.stop.store(true, Ordering::Relaxed);
         let handle = self.handle.take()?;
-        handle.join().ok()
+        handle.join().ok().flatten()
     }
 }
 
@@ -337,12 +346,12 @@ struct TierReport {
     reached: usize,
     /// The wanted level the host's ceiling allows.
     ceiling: usize,
-    /// The 50th percentile append latency, microseconds.
-    p50: u128,
-    /// The 95th percentile append latency, microseconds.
-    p95: u128,
-    /// The 99th percentile append latency, microseconds.
-    p99: u128,
+    /// The 50th percentile append latency, microseconds, if the tier sampled any.
+    p50: Option<u128>,
+    /// The 95th percentile append latency, microseconds, if the tier sampled any.
+    p95: Option<u128>,
+    /// The 99th percentile append latency, microseconds, if the tier sampled any.
+    p99: Option<u128>,
     /// The process's peak resident set during the tier, kilobytes.
     peak_rss_kb: Option<u64>,
 }
@@ -355,17 +364,21 @@ impl TierReport {
             self.requested,
             self.reached,
             self.ceiling,
-            self.p50,
-            self.p95,
-            self.p99,
-            display_limit(self.peak_rss_kb),
+            display_limit(self.p50),
+            display_limit(self.p95),
+            display_limit(self.p99),
+            self.peak_rss_kb
+                .map_or_else(|| String::from("unmeasured"), |kib| kib.to_string()),
         ))
     }
 }
 
 /// Render an optional measurement for the report, naming what was not measured.
-fn display_limit(value: Option<u64>) -> String {
-    value.map_or_else(|| "unmeasured".to_owned(), |number| number.to_string())
+///
+/// One renderer for every optional reading in this file, so "unmeasured" means
+/// the same thing for a percentile and for a resident set.
+fn display_limit<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| String::from("unmeasured"), |number| number.to_string())
 }
 
 /// Run one tier at the level the ceiling allows and prove its properties.
@@ -425,9 +438,16 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
         .map_err(|error| std::io::Error::other(format!("the latency sink was poisoned: {error}")))?
         .clone();
     samples.sort_unstable();
-    let p50 = percentile(&samples, 50);
-    let p95 = percentile(&samples, 95);
-    let p99 = percentile(&samples, 99);
+    let p50 = percentile(&samples, 500);
+    let p95 = percentile(&samples, 950);
+    let p99 = percentile(&samples, 990);
+    // The peak is the concurrent phase's claim, and it is over: every tenant has
+    // joined. The sampler is stopped before the reopen below because on macOS it
+    // spawns `ps` through a shell, and a spawned child holds a copy of every
+    // descriptor the process has open until its exec closes them — including a
+    // journal's locked one. A reopen landing in that window was refused
+    // `Locked` by a lock no writer held, and a loaded host widens the window.
+    let peak_rss_kb = peak.stop();
 
     for (tenant, path) in paths.iter().enumerate() {
         let journal = FileJournal::open(path)?;
@@ -447,7 +467,7 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
         p50,
         p95,
         p99,
-        peak_rss_kb: peak.stop(),
+        peak_rss_kb,
     })
 }
 
@@ -479,10 +499,16 @@ fn append_latency_tails_are_bounded() -> TestResult {
         );
     }
     samples.sort_unstable();
-    let p50 = percentile(&samples, 50);
-    let p95 = percentile(&samples, 95);
-    let p99 = percentile(&samples, 99);
-    let max = samples.last().copied().unwrap_or(0);
+    let p50 = percentile(&samples, 500).ok_or("the latency sweep sampled nothing at all")?;
+    let p95 = percentile(&samples, 950).ok_or("the latency sweep sampled nothing at all")?;
+    let p99 = percentile(&samples, 990).ok_or("the latency sweep sampled nothing at all")?;
+    let max = match samples.last() {
+        Some(worst) => worst.to_string(),
+        // An empty sample has no slowest value, and the percentile fields beside
+        // it say `unmeasured`; a zero here would claim a run that finished
+        // inside the clock.
+        None => String::from("unmeasured"),
+    };
     record_measurement(&format!(
         "append p50_us={p50} p95_us={p95} p99_us={p99} max_us={max} samples={SAMPLES}"
     ))?;

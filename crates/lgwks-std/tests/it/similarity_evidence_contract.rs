@@ -7,7 +7,7 @@
 
 use lgwks_std::similarity::{
     BoundedJaccard, CheckedEvidence, CheckedSimilarity, Cosine, EditDistance, EditDistanceError,
-    EvidenceError, Similarity, Weighted, WeightedError,
+    EvidenceError, EvidenceVerdict, Similarity, Weighted, WeightedError,
 };
 use std::error::Error;
 
@@ -15,15 +15,28 @@ use std::error::Error;
 ///
 /// `clippy::float_cmp` is forbidden estate-wide and cannot be lowered, so the
 /// exact comparison is made on the bit pattern instead. Every value asserted
-/// here is a contract constant (`0.0`, `0.5`, `1.0`, `-1.0`, and one derived
-/// ratio), and the equality *is* the claim; `1.0 - 11.0/22.0` is also exact in
-/// binary floating point, so the bit comparison is not stricter than a
-/// tolerance it would need.
+/// here is a contract constant (`0.0`, `0.5`, `1.0`, and one derived ratio), and
+/// the equality *is* the claim; `1.0 - 11.0/22.0` is also exact in binary
+/// floating point, so the bit comparison is not stricter than a tolerance it
+/// would need.
 fn assert_exact(actual: f64, expected: f64, reason: &str) {
     assert!(
         actual.to_bits() == expected.to_bits(),
         "{reason}: expected exactly {expected}, got {actual}"
     );
+}
+
+/// The score a verdict measured, or the refusal that withheld it.
+///
+/// A verdict with no score is not a score of zero and is not a score of minus
+/// one: it is the state where a component refused and the composed verdict
+/// withdrew with it. This reports that state by name so an assertion below it
+/// fails on the withdrawal rather than on a number the comparison invented.
+fn measured(verdict: &EvidenceVerdict, reason: &str) -> Result<f64, String> {
+    match verdict.score() {
+        Some(score) => Ok(score),
+        None => Err(format!("{reason}: the verdict withdrew its whole score")),
+    }
 }
 
 /// Asserts a `Result` is `Err` with exactly `expected`, and says why.
@@ -180,7 +193,7 @@ fn all_zero_weight_refuses_regardless_of_threshold() -> Result<(), Box<dyn Error
     let half = CheckedEvidence::new(vec![Box::new(EditDistance::new(16))], vec![0.5], 0.4)?;
     let verdict = half.verdict("a", "a")?;
     assert_exact(
-        verdict.score().unwrap_or(-1.0),
+        measured(&verdict, "a weighted evidence deficit")?,
         0.5,
         "S1 repaired: a weighted evidence deficit is reported as 0.5, not identity",
     );
@@ -193,7 +206,7 @@ fn all_zero_weight_refuses_regardless_of_threshold() -> Result<(), Box<dyn Error
     let full = CheckedEvidence::new(vec![Box::new(EditDistance::new(16))], vec![1.0], 1.0)?;
     let verdict = full.verdict("a", "a")?;
     assert_exact(
-        verdict.score().unwrap_or(-1.0),
+        measured(&verdict, "weight one")?,
         1.0,
         "weight one restores identity",
     );
@@ -204,7 +217,7 @@ fn all_zero_weight_refuses_regardless_of_threshold() -> Result<(), Box<dyn Error
         CheckedEvidence::new(vec![Box::new(EditDistance::new(16))], vec![1.0], 0.0)?;
     let verdict = zero_threshold.verdict("abc", "xyz")?;
     assert_exact(
-        verdict.score().unwrap_or(-1.0),
+        measured(&verdict, "a measured zero")?,
         0.0,
         "a genuine measured zero is reported as a score",
     );
@@ -289,7 +302,12 @@ fn typed_refusals_carry_component_identity_through_composition() -> Result<(), B
         "the refused component still reports its own weight",
     );
     assert_exact(
-        verdict.outcomes()[1].score().unwrap_or(-1.0),
+        match verdict.outcomes()[1].score() {
+            Some(score) => score,
+            None => {
+                return Err("the structural neighbour was refused, not measured".into());
+            }
+        },
         1.0,
         "the structural neighbour measured identity and is still reported",
     );
@@ -350,7 +368,7 @@ fn the_legacy_weighted_path_remains_available_and_documented_as_lossy() -> Resul
 }
 
 #[test]
-fn bounded_jaccard_refuses_before_the_quadratic_scan() {
+fn bounded_jaccard_refuses_before_the_quadratic_scan() -> Result<(), EvidenceError> {
     let scorer = BoundedJaccard::<u32>::new(4);
     assert_eq!(
         scorer.maximum_length(),
@@ -358,7 +376,7 @@ fn bounded_jaccard_refuses_before_the_quadratic_scan() {
         "the declared budget is readable"
     );
     assert_exact(
-        CheckedSimilarity::try_score(&scorer, &[1, 2, 3, 4], &[4, 3, 2, 1]).unwrap_or(-1.0),
+        CheckedSimilarity::try_score(&scorer, &[1, 2, 3, 4], &[4, 3, 2, 1])?,
         1.0,
         "a within-budget set pair scores exactly",
     );
@@ -380,6 +398,7 @@ fn bounded_jaccard_refuses_before_the_quadratic_scan() {
         1.0,
         "set membership ignores order and duplicates",
     );
+    Ok(())
 }
 
 #[test]
@@ -393,12 +412,15 @@ fn budget_refusal_precedes_amplification_and_is_measurable() {
     // growth, and every loop runs long enough for the timer to resolve it.
     const REPEATS: u64 = 200_000;
     const TRIALS: usize = 5;
+    /// The member every position of the over-budget set carries.
+    const FILLER_MEMBER: u32 = 0x5EED;
     let scorer = BoundedJaccard::<u32>::new(16);
     let mut previous = 0_u128;
     for size in [2_000_usize, 4_000, 8_000] {
-        let big: Vec<u32> = (0..size)
-            .map(|value| u32::try_from(value % 4_000).unwrap_or(0))
-            .collect();
+        // The members are filler in the width the element type is: this family
+        // measures a refusal by length and what that refusal costs, so the count
+        // is the fact under test and the members are what fills it.
+        let big: Vec<u32> = (0..size).map(|_| FILLER_MEMBER).collect();
         assert_eq!(
             CheckedSimilarity::try_score(&scorer, &big, &big),
             Err(EvidenceError::CollectionTooLong {
@@ -463,7 +485,8 @@ fn the_heuristic_path_score_is_never_an_exact_match_proof() {
 }
 
 #[test]
-fn the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count() {
+fn the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count()
+-> Result<(), EditDistanceError> {
     let scorer = EditDistance::new(1);
     // `İ` lowercases to two scalars, so the raw scalar count is 1 while the
     // normalized count is 2. Only the normalized unit is the budget.
@@ -490,10 +513,11 @@ fn the_edit_budget_charges_the_normalized_unit_not_the_raw_scalar_count() {
     // maximum of two is exactly 0.5. The expansion is what changed the answer.
     let roomy = EditDistance::new(2);
     assert_exact(
-        roomy.try_score("İ", "i").unwrap_or(-1.0),
+        roomy.try_score("İ", "i")?,
         0.5,
         "S4 repaired: the expansion is charged, giving distance 1 over length 2",
     );
+    Ok(())
 }
 
 #[test]

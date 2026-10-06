@@ -210,8 +210,42 @@ pub struct Contract {
     /// from, so a CLI receipt can bind a run to the exact contract revision it
     /// read. See [`Contract::digest`] for what this does and does not claim.
     pub(crate) digest: String,
+    /// The repository's own policy, read from `[policy]`. Nothing in it has a
+    /// built-in default: this crate is published, so any value compiled into it
+    /// would bind every repository that runs the gate to one repository's
+    /// choices, with no way to change them short of a new release.
+    pub(crate) policy: Policy,
     /// Every approved dependency.
     pub(crate) entries: Vec<Entry>,
+}
+
+/// What a register declares about its own repository, beyond the approvals.
+///
+/// Each field is the register's decision, and an absent field is a decision
+/// not made — never a fallback to some other repository's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct Policy {
+    /// SPDX licence identifiers an external dependency may be under
+    /// (`accepted_licenses`). `None` means the register has not said, and the
+    /// licence audit refuses rather than guesses (`LicensePolicyUndeclared`).
+    pub(crate) accepted_licenses: Option<Vec<String>>,
+    /// The closed set of workspace members and approval owners this repository
+    /// has (`surfaces`). `None` means the repository keeps no closed set, and no
+    /// member or owner is refused for its name.
+    pub(crate) surfaces: Option<Vec<String>>,
+    /// Members whose approved edge set is closed (`frozen_surfaces`), and the
+    /// tier every approval they own must keep claiming (`frozen_tier`). The two
+    /// are declared together or not at all.
+    pub(crate) frozen: Option<Frozen>,
+}
+
+/// The frozen-surface half of [`Policy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Frozen {
+    /// Members whose edges may not grow or be re-tiered.
+    pub(crate) surfaces: Vec<String>,
+    /// The tier their approvals must keep.
+    pub(crate) tier: Tier,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -244,10 +278,17 @@ pub enum ContractError {
     },
     /// A required field was absent from an entry.
     MissingField {
-        /// The entry's crate name, or `<unnamed>`.
-        krate: String,
+        /// The entry's crate name, absent when the block named no crate.
+        ///
+        /// An `Option` because a block that declares no `crate` has no name to
+        /// report: a placeholder would be a name no register ever wrote, and a
+        /// reader chasing it would look for a crate the file does not mention.
+        /// The block's line identifies it instead.
+        krate: Option<String>,
         /// The absent field.
         field: &'static str,
+        /// One-based line where the block that lacks the field opened.
+        line: usize,
     },
     /// `tier` held a value outside `boundary` / `vendor`.
     BadTier {
@@ -269,6 +310,15 @@ pub enum ContractError {
         key: String,
         /// The offending value, verbatim, quotes included.
         value: String,
+    },
+    /// A `[policy]` key that only means something beside another was written
+    /// without it: `frozen_surfaces` names what is frozen and `frozen_tier` what
+    /// it is frozen at, and either alone is half a rule.
+    IncompletePolicy {
+        /// The key that was written.
+        present: &'static str,
+        /// The key it needs beside it.
+        missing: &'static str,
     },
     /// The same `[policy]` key was written more than once.
     DuplicatePolicyKey {
@@ -387,13 +437,27 @@ fn fmt_orphan_key(formatter: &mut fmt::Formatter<'_>, line: usize, key: &str) ->
     )
 }
 
-/// Renders `ContractError::MissingField`. The entry is named by crate because
-/// the field's line is not known once the draft has been closed.
-fn fmt_missing_field(formatter: &mut fmt::Formatter<'_>, krate: &str, field: &str) -> fmt::Result {
-    write!(
-        formatter,
-        "approval for {krate:?} is missing required field {field:?}"
-    )
+/// Renders `ContractError::MissingField`, always at the line the block opened.
+///
+/// The block's own line is the position a reader can act from even when the block
+/// never named itself, so a nameless block is reported by where it is rather than
+/// under a name no register wrote.
+fn fmt_missing_field(
+    formatter: &mut fmt::Formatter<'_>,
+    krate: Option<&str>,
+    field: &str,
+    line: usize,
+) -> fmt::Result {
+    match krate {
+        Some(krate) => write!(
+            formatter,
+            "line {line}: approval for {krate:?} is missing required field {field:?}"
+        ),
+        None => write!(
+            formatter,
+            "line {line}: approval block is missing required field {field:?}"
+        ),
+    }
 }
 
 /// Renders `ContractError::BadTier`, restating the only two admissible values
@@ -553,7 +617,11 @@ impl fmt::Display for ContractError {
             Self::Malformed { line, ref text } => fmt_malformed(formatter, line, text),
             Self::UnknownKey { line, ref key } => fmt_unknown_key(formatter, line, key),
             Self::OrphanKey { line, ref key } => fmt_orphan_key(formatter, line, key),
-            Self::MissingField { ref krate, field } => fmt_missing_field(formatter, krate, field),
+            Self::MissingField {
+                ref krate,
+                field,
+                line,
+            } => fmt_missing_field(formatter, krate.as_deref(), field, line),
             Self::BadTier { line, ref value } => fmt_bad_tier(formatter, line, value),
             Self::BadPolicyValue {
                 line,
@@ -564,6 +632,11 @@ impl fmt::Display for ContractError {
                 fmt_duplicate_policy_key(formatter, line, key)
             }
             Self::DuplicatePolicySection { line } => fmt_duplicate_policy_section(formatter, line),
+            Self::IncompletePolicy { present, missing } => write!(
+                formatter,
+                "[policy] declares `{present}` without `{missing}`; the two keys are one rule \
+                 and are written together"
+            ),
             Self::BadDate {
                 ref krate,
                 line,
@@ -682,13 +755,13 @@ pub(crate) struct RawEntry {
 }
 
 /// One schema-approved field with decoded value and source location.
-struct RawField {
+pub(crate) struct RawField {
     /// Key selected from the register-specific schema.
-    key: &'static str,
+    pub(crate) key: &'static str,
     /// Decoded TOML basic-string value.
     value: String,
     /// One-based source line.
-    line: usize,
+    pub(crate) line: usize,
 }
 
 impl RawEntry {
@@ -717,10 +790,15 @@ impl RawEntry {
     /// The absent branch is unreachable from `build`, which validates first;
     /// the method exists so the invariant is carried by the return type rather
     /// than by an `expect` that would abort the process on a parser bug.
-    pub(crate) fn require(&self, key: &'static str, krate: &str) -> Result<&str, ContractError> {
+    pub(crate) fn require(
+        &self,
+        key: &'static str,
+        krate: Option<&str>,
+    ) -> Result<&str, ContractError> {
         self.get(key).ok_or_else(|| ContractError::MissingField {
-            krate: krate.to_owned(),
+            krate: krate.map(str::to_owned),
             field: key,
+            line: self.line(),
         })
     }
 
@@ -761,6 +839,8 @@ struct Reader<'a> {
     repository: Option<String>,
     /// Register schema version, defaulting to 1 when `[policy] schema` is absent.
     schema: u32,
+    /// Repository-policy declarations, decoded later by the register that owns them.
+    policy_fields: Vec<RawField>,
     /// Raw entries in source order.
     entries: Vec<RawEntry>,
 }
@@ -811,8 +891,20 @@ fn handle_section_header(
     }
 }
 
-/// Every key the `[policy]` block defines.
+/// Every scalar key the `[policy]` block defines.
 const POLICY_KEYS: [&str; 3] = ["enforce", "repository", "schema"];
+
+/// The repository-policy keys a dependency register may declare in `[policy]`.
+///
+/// Read as strings and decoded by [`Contract::parse`], because what they mean
+/// is the dependency register's: the invariant register shares the line reader
+/// and refuses every one of them.
+const POLICY_DECLARATION_KEYS: [&str; 4] = [
+    "accepted_licenses",
+    "surfaces",
+    "frozen_surfaces",
+    "frozen_tier",
+];
 
 /// The register schema versions this build reads.
 ///
@@ -965,12 +1057,14 @@ fn apply_policy_pair(
     key: &str,
     value: &str,
     line_no: usize,
-    seen_keys: &mut Vec<String>,
-    enforce: &mut bool,
-    repository: &mut Option<String>,
-    schema: &mut u32,
+    reader: &mut Reader<'_>,
 ) -> Result<(), ContractError> {
-    if !POLICY_KEYS.contains(&key) {
+    let seen_keys = &mut reader.policy_keys;
+    let declaration = POLICY_DECLARATION_KEYS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == key);
+    if !POLICY_KEYS.contains(&key) && declaration.is_none() {
         let refusal = Err(ContractError::UnknownKey {
             line: line_no,
             key: key.to_owned(),
@@ -986,23 +1080,33 @@ fn apply_policy_pair(
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_policy_pair: returning an error to the caller");
         return refusal;
     }
+    if let Some(declared) = declaration {
+        let decoded = decode_string(value, key, line_no)?;
+        seen_keys.push(key.to_owned());
+        reader.policy_fields.push(RawField {
+            key: declared,
+            value: decoded,
+            line: line_no,
+        });
+        return Ok(());
+    }
     match key {
         "enforce" => {
             let decoded = decode_enforce(value, line_no)?;
             seen_keys.push(key.to_owned());
-            *enforce = decoded;
+            reader.enforce = decoded;
             Ok(())
         }
         "schema" => {
             let decoded = decode_schema(value, line_no)?;
             seen_keys.push(key.to_owned());
-            *schema = decoded;
+            reader.schema = decoded;
             Ok(())
         }
         _ => {
             let decoded = decode_string(value, key, line_no)?;
             seen_keys.push(key.to_owned());
-            *repository = Some(decoded);
+            reader.repository = Some(decoded);
             Ok(())
         }
     }
@@ -1064,15 +1168,7 @@ fn process_pair(
             line: line_no,
             key: key.to_owned(),
         }),
-        Section::Policy => apply_policy_pair(
-            key,
-            value,
-            line_no,
-            &mut reader.policy_keys,
-            &mut reader.enforce,
-            &mut reader.repository,
-            &mut reader.schema,
-        ),
+        Section::Policy => apply_policy_pair(key, value, line_no, reader),
         Section::Entry => {
             // `Section::Entry` is only ever entered by `handle_section_header`
             // pushing a draft, and a draft is never popped, so this is a failure
@@ -1140,6 +1236,8 @@ pub(crate) struct RawRegister {
     pub(crate) repository: Option<String>,
     /// Register schema version; 1 when absent.
     pub(crate) schema: u32,
+    /// `[policy]` declarations from [`POLICY_DECLARATION_KEYS`], in source order.
+    pub(crate) policy_fields: Vec<RawField>,
     /// Repeated blocks in source order.
     pub(crate) entries: Vec<RawEntry>,
 }
@@ -1164,6 +1262,7 @@ pub(crate) fn parse_register(
         enforce: true,
         repository: None,
         schema: 1,
+        policy_fields: Vec::new(),
         entries: Vec::new(),
     };
 
@@ -1175,6 +1274,7 @@ pub(crate) fn parse_register(
         enforce: reader.enforce,
         repository: reader.repository,
         schema: reader.schema,
+        policy_fields: reader.policy_fields,
         entries: reader.entries,
     })
 }
@@ -1261,13 +1361,22 @@ impl Contract {
             entries.push(entry);
         }
         check_aliases(&entries)?;
+        let policy = build_policy(&raw.policy_fields)?;
         Ok(Self {
             enforce: raw.enforce,
             repository: raw.repository,
             schema: raw.schema,
             digest: fingerprint(text),
+            policy,
             entries,
         })
+    }
+
+    /// The SPDX licence identifiers this register accepts, or `None` when it
+    /// has not declared any.
+    #[must_use]
+    pub fn accepted_licenses(&self) -> Option<&[String]> {
+        self.policy.accepted_licenses.as_deref()
     }
 
     /// The register schema version this contract was written under.
@@ -1342,13 +1451,27 @@ fn fingerprint(text: &str) -> String {
     format!("fnv1a128:{hash:032x}")
 }
 
+/// The line a diagnostic about `field` names.
+///
+/// A field the block wrote has its own line. A field it never wrote has none,
+/// and the diagnostic is then about the *block* — the repair is to add the key
+/// there — so the block's opening line is the position that tells the reader
+/// what to do. Both cases are stated once here rather than resolved by a
+/// substituted line at each of the three sites that need one.
+fn field_position(draft: &RawEntry, field: &str) -> usize {
+    match draft.field_line(field) {
+        Some(line) => line,
+        None => draft.line(),
+    }
+}
+
 /// Requires a field to be present and non-blank.
 ///
 /// Whitespace only counts as blank, so `owner = "   "` is refused exactly as a
 /// missing `owner` would be: a placeholder is not evidence.
 pub(crate) fn check_field_present(
     draft: &RawEntry,
-    krate: &str,
+    krate: Option<&str>,
     field: &'static str,
 ) -> Result<(), ContractError> {
     if draft
@@ -1358,15 +1481,16 @@ pub(crate) fn check_field_present(
         Ok(())
     } else {
         Err(ContractError::MissingField {
-            krate: krate.to_owned(),
+            krate: krate.map(str::to_owned),
             field,
+            line: draft.line(),
         })
     }
 }
 
 /// Rejects the first required field that is absent or blank, in `REQUIRED`
 /// order. `krate` is only used to name the offending block in the message.
-fn validate_required_fields(draft: &RawEntry, krate: &str) -> Result<(), ContractError> {
+fn validate_required_fields(draft: &RawEntry, krate: Option<&str>) -> Result<(), ContractError> {
     for field in REQUIRED {
         check_field_present(draft, krate, field)?;
     }
@@ -1380,7 +1504,7 @@ fn validate_required_fields(draft: &RawEntry, krate: &str) -> Result<(), Contrac
 /// branch here is typed rather than asserted so a reordering bug surfaces as a
 /// refusal instead of a panic.
 fn validate_tier(draft: &RawEntry, krate: &str) -> Result<Tier, ContractError> {
-    let tier_text = draft.require("tier", krate)?;
+    let tier_text = draft.require("tier", Some(krate))?;
     Tier::parse(tier_text).ok_or_else(|| ContractError::BadTier {
         line: draft.line,
         value: tier_text.to_owned(),
@@ -1441,7 +1565,7 @@ fn is_identifier(value: &str) -> bool {
 ///   SPDX identifier and licence-reference suffix this repository can meet.
 ///
 /// Whether the identifiers are *accepted* is a separate question, answered by
-/// [`crate::accepted_licenses`] in the audit rather than here: an expression can
+/// [`Contract::accepted_licenses`] in the audit rather than here: an expression can
 /// be perfectly legible and still name a licence this repository does not take.
 fn is_spdx_expression(value: &str) -> bool {
     // SPDX separates tokens with exactly one space; a doubled, padded or
@@ -1531,7 +1655,7 @@ fn validate_closed_value(
         Err(ContractError::InvalidField {
             krate: krate.to_owned(),
             field,
-            line: draft.field_line(field).unwrap_or(draft.line),
+            line: field_position(draft, field),
             value: value.to_owned(),
             expected,
         })
@@ -1554,7 +1678,7 @@ fn optional_bool(
         Some(value) => Err(ContractError::InvalidField {
             krate: krate.to_owned(),
             field: key,
-            line: draft.field_line(key).unwrap_or(draft.line),
+            line: field_position(draft, key),
             value: value.to_owned(),
             expected: "expected true or false",
         }),
@@ -1604,34 +1728,52 @@ fn is_feature_name(value: &str) -> bool {
 /// one. `crate` falls back to `<unnamed>` for diagnostics only; a block whose
 /// `crate` is absent still fails `validate_required_fields` immediately after.
 fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
-    let krate = draft.get("crate").unwrap_or("<unnamed>").to_owned();
-    validate_required_fields(draft, &krate)?;
+    // A block that names no crate is refused here, at its own line, naming the
+    // field it lacks — before any other field is read, so nothing else in the
+    // block is interpreted under a name the register did not write.
+    let Some(krate) = draft.get("crate").map(str::to_owned) else {
+        let refusal = Err(ContractError::MissingField {
+            krate: None,
+            field: "crate",
+            line: draft.line(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), line = draft.line(), "build: an approval block names no crate");
+        return refusal;
+    };
+    validate_required_fields(draft, Some(&krate))?;
     let tier = validate_tier(draft, &krate)?;
-    let approved_on = draft.require("approved_on", &krate)?.to_owned();
-    validate_date(
-        &approved_on,
-        &krate,
-        draft.field_line("approved_on").unwrap_or(draft.line),
-    )?;
-    let reason = draft.require("reason", &krate)?.to_owned();
+    let approved_on = draft.require("approved_on", Some(&krate))?.to_owned();
+    validate_date(&approved_on, &krate, field_position(draft, "approved_on"))?;
+    let reason = draft.require("reason", Some(&krate))?.to_owned();
     validate_reason(&reason, &krate)?;
 
     // Every remaining field is read while `krate` is still borrowable; the
     // struct literal below moves `krate`, so nothing may borrow it afterwards.
-    let version = draft.require("version", &krate)?.to_owned();
-    let owner = draft.require("owner", &krate)?.to_owned();
-    let capability = draft.require("capability", &krate)?.to_owned();
-    let license = draft.require("license", &krate)?.to_owned();
-    let source = draft.require("source", &krate)?.to_owned();
+    let version = draft.require("version", Some(&krate))?.to_owned();
+    let owner = draft.require("owner", Some(&krate))?.to_owned();
+    let capability = draft.require("capability", Some(&krate))?.to_owned();
+    let license = draft.require("license", Some(&krate))?.to_owned();
+    let source = draft.require("source", Some(&krate))?.to_owned();
     let origin = draft.get("origin").map(str::to_owned);
     let features = optional_feature_list(draft, "features", &krate)?;
     let required_features = optional_feature_list(draft, "required_features", &krate)?;
     let uses_default_features = optional_bool(draft, "uses_default_features", &krate)?;
     let optional = optional_bool(draft, "optional", &krate)?;
     let target = draft.get("target").map(str::to_owned);
-    let aliases = draft.get("aliases").map(split_csv).unwrap_or_default();
-    let allowed_consumers = split_csv(draft.require("allowed_consumers", &krate)?);
-    let allowed_kinds = split_csv(draft.require("allowed_kinds", &krate)?);
+    // An entry that authors no `aliases` line admits exactly the spelling it
+    // names as `crate`, which is what an empty list admits too: INV-DEP-13
+    // grandfathers a dimension an entry does not author, and for this dimension
+    // "not authored" and "no aliases beyond `crate`" are one admission. The two
+    // are not the same *repair*, and `field_position` is what tells them apart
+    // in a diagnostic. Refusing the absent key instead would refuse every
+    // register that predates it — this repository's own 33 entries author no
+    // alias list — so absence is read here rather than refused.
+    let aliases = match draft.get("aliases") {
+        Some(list) => split_csv(list),
+        None => Vec::new(),
+    };
+    let allowed_consumers = split_csv(draft.require("allowed_consumers", Some(&krate))?);
+    let allowed_kinds = split_csv(draft.require("allowed_kinds", Some(&krate))?);
     validate_closed_value(
         draft,
         &krate,
@@ -1726,8 +1868,8 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
             "expected a subset of the allowed features",
         )?;
     }
-    let approved_by = draft.require("approved_by", &krate)?.to_owned();
-    let review = draft.require("review", &krate)?.to_owned();
+    let approved_by = draft.require("approved_by", Some(&krate))?.to_owned();
+    let review = draft.require("review", Some(&krate))?.to_owned();
 
     Ok(Entry {
         krate,
@@ -1752,6 +1894,144 @@ fn build(draft: &RawEntry) -> Result<Entry, ContractError> {
         review,
         line: draft.line,
     })
+}
+
+/// Decodes the repository-policy declarations of a dependency register.
+///
+/// Every list is a comma-separated basic string, refused whole when a member is
+/// empty, repeated, or not in its vocabulary — a list that silently dropped a
+/// malformed member would admit less, or more, than the reviewer read.
+fn build_policy(fields: &[RawField]) -> Result<Policy, ContractError> {
+    let mut policy = Policy::default();
+    let mut frozen_surfaces: Option<(Vec<String>, usize)> = None;
+    let mut frozen_tier: Option<Tier> = None;
+    for field in fields {
+        let decoded = decode_policy_field(field);
+        let value = match decoded {
+            Ok(value) => value,
+            Err(error) => {
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_policy: returning an error to the caller");
+                return refusal;
+            }
+        };
+        match value {
+            PolicyValue::Licences(list) => policy.accepted_licenses = Some(list),
+            PolicyValue::Surfaces(list) => policy.surfaces = Some(list),
+            PolicyValue::Frozen(list) => frozen_surfaces = Some((list, field.line)),
+            PolicyValue::Tier(tier) => frozen_tier = Some(tier),
+        }
+    }
+    let missing = match (frozen_surfaces.is_some(), frozen_tier.is_some()) {
+        (true, false) => Some(("frozen_surfaces", "frozen_tier")),
+        (false, true) => Some(("frozen_tier", "frozen_surfaces")),
+        _ => None,
+    };
+    if let Some((present, missing)) = missing {
+        let refusal = Err(ContractError::IncompletePolicy { present, missing });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build_policy: returning an error to the caller");
+        return refusal;
+    }
+    if let (Some((surfaces, line)), Some(tier)) = (frozen_surfaces, frozen_tier) {
+        let checked = check_frozen_are_surfaces(&surfaces, policy.surfaces.as_deref(), line);
+        checked?;
+        policy.frozen = Some(Frozen { surfaces, tier });
+    }
+    Ok(policy)
+}
+
+/// One decoded `[policy]` declaration, before the freeze's two halves are
+/// paired.
+enum PolicyValue {
+    /// `accepted_licenses`.
+    Licences(Vec<String>),
+    /// `surfaces`.
+    Surfaces(Vec<String>),
+    /// `frozen_surfaces`.
+    Frozen(Vec<String>),
+    /// `frozen_tier`.
+    Tier(Tier),
+}
+
+/// Decodes one declaration against its own vocabulary.
+fn decode_policy_field(field: &RawField) -> Result<PolicyValue, ContractError> {
+    match field.key {
+        "accepted_licenses" => policy_list(field, is_spdx_term).map(PolicyValue::Licences),
+        "surfaces" => policy_list(field, is_identifier).map(PolicyValue::Surfaces),
+        "frozen_surfaces" => policy_list(field, is_identifier).map(PolicyValue::Frozen),
+        _ => Tier::parse(&field.value)
+            .map(PolicyValue::Tier)
+            .ok_or_else(|| ContractError::BadTier {
+                line: field.line,
+                value: field.value.clone(),
+            }),
+    }
+}
+
+/// A frozen surface the register's own closed surface set does not name is a
+/// contradiction in one block, refused at load rather than audited around.
+fn check_frozen_are_surfaces(
+    frozen: &[String],
+    surfaces: Option<&[String]>,
+    line: usize,
+) -> Result<(), ContractError> {
+    let Some(surfaces) = surfaces else {
+        return Ok(());
+    };
+    match frozen.iter().find(|name| !surfaces.contains(name)) {
+        Some(outside) => Err(ContractError::BadPolicyValue {
+            line,
+            key: "frozen_surfaces".to_owned(),
+            value: format!("{outside} (not one of the declared surfaces)"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Splits one policy list and refuses it whole on an empty, repeated or
+/// out-of-vocabulary member.
+fn policy_list(field: &RawField, member: fn(&str) -> bool) -> Result<Vec<String>, ContractError> {
+    let refuse = || ContractError::BadPolicyValue {
+        line: field.line,
+        key: field.key.to_owned(),
+        value: field.value.clone(),
+    };
+    let items = split_csv(&field.value);
+    let malformed = items.is_empty()
+        || items.iter().enumerate().any(|(index, item)| {
+            items.iter().take(index).any(|earlier| earlier == item) || !member(item)
+        });
+    if malformed {
+        let refusal = Err(refuse());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "policy_list: returning an error to the caller");
+        return refusal;
+    }
+    Ok(items)
+}
+
+/// Tests whether `term` is one SPDX licence term: an identifier, or an
+/// identifier `WITH` an exception identifier.
+///
+/// An identifier is ASCII letters, digits, `.`, `-` and `+`, which spans every
+/// SPDX list identifier and `LicenseRef-*`. This is the shape, not the SPDX
+/// list: which identifiers a repository accepts is exactly the decision this
+/// list records, so the reader admits any well-formed one.
+fn is_spdx_term(term: &str) -> bool {
+    let identifier = |word: &str| {
+        !word.is_empty()
+            && word
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+            && !matches!(word, "AND" | "OR" | "WITH")
+    };
+    let mut words = term.split(' ');
+    match (words.next(), words.next(), words.next(), words.next()) {
+        (Some(single), None, None, None) => identifier(single),
+        (Some(licence), Some("WITH"), Some(exception), None) => {
+            identifier(licence) && identifier(exception)
+        }
+        _ => false,
+    }
 }
 
 /// Splits a comma-separated list, retaining empty members for schema refusal.
@@ -2348,8 +2628,9 @@ mod tests {
         assert_eq!(
             Contract::parse(&complete(input)),
             Err(ContractError::MissingField {
-                krate: "serde".into(),
-                field: "reason"
+                krate: Some("serde".into()),
+                field: "reason",
+                line: 1
             })
         );
     }
@@ -2641,8 +2922,9 @@ mod tests {
         assert_eq!(
             Contract::parse(&without),
             Err(ContractError::MissingField {
-                krate: "serde".into(),
+                krate: Some("serde".into()),
                 field: "license",
+                line: 1,
             })
         );
     }

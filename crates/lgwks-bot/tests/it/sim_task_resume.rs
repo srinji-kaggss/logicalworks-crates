@@ -21,7 +21,7 @@
 //! between two step boundaries, so the steps before the boundary committed and
 //! the step at the boundary started without committing. Modelling it that way
 //! rather than by killing a child is what lets a family sweep thousands of crash
-//! points in seconds; the real `SIGKILL` is in `tests/task_resume.rs`, and this
+//! points in seconds; the real `SIGKILL` is in `tests/it/task_resume.rs`, and this
 //! family checks the property across a space that one file cannot enumerate.
 //!
 //! # Why a crash inside a step is modelled as "no record"
@@ -34,11 +34,11 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use crate::sim;
 
 use crate::band_family;
-
-use crate::resume_fixtures as shared;
 
 use std::error::Error;
 use std::future::Future;
@@ -49,8 +49,6 @@ use std::sync::Arc;
 use lgwks_bot::effect::RunId;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, Host, RunStore, Task, task};
-
-use shared::Scratch;
 
 use sim::Band;
 use sim::Rng;
@@ -91,14 +89,25 @@ struct Outcome {
     total: u32,
 }
 
+/// Fold a run's output into the trace, or the fact that it produced none.
+///
+/// A stopped run has no output, and the trace says so rather than recording an
+/// empty outcome nobody produced.
+fn record_output(output: Option<&Outcome>, trace: &mut Trace) {
+    match output {
+        Some(outcome) => outcome.record(trace),
+        None => trace.record("no-output"),
+    }
+}
+
 impl Outcome {
     /// Fold into the trace, so a family running a different scenario stays
     /// comparable with one running this.
     fn record(&self, trace: &mut Trace) {
-        trace.record_u64("steps-ran", u64::try_from(self.ran.len()).unwrap_or(0));
-        trace.record_u64("total", u64::from(self.total));
+        trace.record_number("steps-ran", self.ran.len());
+        trace.record_number("total", u64::from(self.total));
         for step in &self.ran {
-            trace.record_u64("ran", u64::from(*step));
+            trace.record_number("ran", u64::from(*step));
         }
     }
 }
@@ -110,12 +119,19 @@ impl Outcome {
 /// is entered, does no work, and the record never lands — exactly the state a
 /// `SIGKILL` mid-body leaves.
 fn step_body(index: u32, crash_at: usize) -> Result<u32, FlowError> {
-    if usize::try_from(index).unwrap_or(usize::MAX) == crash_at {
+    if u32::try_from(crash_at).is_ok_and(|at| at == index) {
         let refusal = Err(FlowError::Cancelled { at: Arc::from("") });
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step_body: returning an error to the caller");
         return refusal;
     }
     Ok(index)
+}
+
+/// One step of the simulated task, entered under its own name and remembered,
+/// so the store holds one record per completed step and each key is distinct.
+async fn run_step(scope: &Scope, index: u32, crash_at: usize) -> Result<u32, FlowError> {
+    let child = scope.enter(&format!("step-{index}"))?;
+    remember(&child, "value", || async { step_body(index, crash_at) }).await
 }
 
 /// The body of one simulated task.
@@ -124,12 +140,9 @@ fn step_body(index: u32, crash_at: usize) -> Result<u32, FlowError> {
 /// one record per completed step and each key is distinct.
 async fn work_body(scope: Scope, crash_at: usize, steps: usize) -> Result<Outcome, FlowError> {
     let mut outcome = Outcome::default();
-    for index in 0..steps {
-        let index_u32 = u32::try_from(index).unwrap_or_default();
-        let name = format!("step-{index}");
-        let child = scope.enter(&name)?;
-        let value = remember(&child, "value", || async { step_body(index_u32, crash_at) }).await?;
-        outcome.ran.push(index_u32);
+    for index in 0..u32::try_from(steps).map_err(FlowError::failed)? {
+        let value = run_step(&scope, index, crash_at).await?;
+        outcome.ran.push(index);
         outcome.total = outcome
             .total
             .checked_add(value)
@@ -150,14 +163,14 @@ fn boxed_work_body(scope: Scope, input: (usize, usize)) -> BodyFuture {
 }
 
 /// The uninterrupted outcome of a `steps`-step run.
-fn uninterrupted(steps: usize) -> Outcome {
+fn uninterrupted(steps: usize) -> Result<Outcome, Box<dyn Error>> {
     let mut outcome = Outcome::default();
     for index in 0..steps {
-        let index_u32 = u32::try_from(index).unwrap_or_default();
+        let index_u32 = u32::try_from(index)?;
         outcome.ran.push(index_u32);
         outcome.total = outcome.total.saturating_add(index_u32);
     }
-    outcome
+    Ok(outcome)
 }
 
 /// A host for `tenant` over `dir`, opened fresh every time.
@@ -217,10 +230,10 @@ fn crash_then_resume(
 
 /// One seed of the crash sweep: a full run, then a crash and resume at every boundary.
 fn crash_seed(rng: &mut Rng) -> TestResult {
-    let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
+    let steps = usize::try_from(rng.between(2, MAX_STEPS))?;
     let scratch = Scratch::new("sim-crash")?;
     let store_dir = scratch.path().join("store");
-    let expected = uninterrupted(steps);
+    let expected = uninterrupted(steps)?;
 
     // One full run establishes the records a resume would find.
     let seeded = lgwks_bot::block_on(host("sim", &store_dir)?.run(&work_task()?, (steps, steps)));
@@ -255,9 +268,8 @@ fn crash_points_resume_to_the_same_output(band: Band) -> TestResult {
 
 /// One seed of the run-once check: crash at a drawn boundary, resume, and count each step.
 fn once_per_seed(rng: &mut Rng) -> TestResult {
-    let steps = usize::try_from(rng.between(2, MAX_STEPS)).unwrap_or(2);
-    let crash_at =
-        usize::try_from(rng.below(u32::try_from(steps).unwrap_or(1))).unwrap_or_default();
+    let steps = usize::try_from(rng.between(2, MAX_STEPS))?;
+    let crash_at = usize::try_from(rng.below(u32::try_from(steps)?))?;
     let scratch = Scratch::new("sim-once")?;
     let store_dir = scratch.path().join("store");
     let host = host("sim", &store_dir)?;
@@ -294,14 +306,14 @@ fn once_per_seed(rng: &mut Rng) -> TestResult {
     assert_eq!(
         outcome.ran,
         (0..steps)
-            .map(|index| u32::try_from(index).unwrap_or_default())
-            .collect::<Vec<_>>(),
+            .map(u32::try_from)
+            .collect::<Result<Vec<_>, _>>()?,
         "seed {}: each step contributes exactly once over the whole life of the run",
         rng.below(u32::MAX)
     );
     assert_eq!(
         outcome.total,
-        uninterrupted(steps).total,
+        uninterrupted(steps)?.total,
         "the resumed total must equal the uninterrupted one"
     );
     Ok(())
@@ -409,26 +421,33 @@ fn tenant_runs_alone(
 fn tenants_stay_isolated(band: Band) -> TestResult {
     let mut rng = Rng::new(band.first);
     for _ in band.seeds() {
-        let tenants = usize::try_from(rng.between(2, 65)).unwrap_or(2);
-        let steps = usize::try_from(rng.between(1, 4)).unwrap_or(1);
-        let scratch = Scratch::new("sim-tenants")?;
-        let shared_path = scratch.path().join("shared.runstore");
-        let expected = uninterrupted(steps);
+        tenants_share_one_file(&mut rng)?;
+    }
+    Ok(())
+}
 
-        // Every tenant installs a handle on the *same* file.
-        let mut runs = Vec::new();
-        for index in 0..tenants {
-            tenant_runs_alone(&mut rng, &shared_path, steps, &expected, index, &mut runs)?;
-        }
+/// One draw of [`tenants_stay_isolated`]: a seeded tenant count and step count
+/// over one shared store file, every run offered to every tenant.
+fn tenants_share_one_file(rng: &mut Rng) -> TestResult {
+    let tenants = usize::try_from(rng.between(2, 65))?;
+    let steps = usize::try_from(rng.between(1, 4))?;
+    let scratch = Scratch::new("sim-tenants")?;
+    let shared_path = scratch.path().join("shared.runstore");
+    let expected = uninterrupted(steps)?;
 
-        // Every tenant's run id is offered to every tenant's handle on that one
-        // file. The owner attributes it to itself; every other tenant is refused
-        // the record and refuses to adopt the run.
-        for entry in &runs {
-            let (ref owner_name, run) = *entry;
-            for other in &runs {
-                offer_run(&mut rng, &shared_path, steps, owner_name, run, other)?;
-            }
+    // Every tenant installs a handle on the *same* file.
+    let mut runs = Vec::new();
+    for index in 0..tenants {
+        tenant_runs_alone(rng, &shared_path, steps, &expected, index, &mut runs)?;
+    }
+
+    // Every tenant's run id is offered to every tenant's handle on that one
+    // file. The owner attributes it to itself; every other tenant is refused
+    // the record and refuses to adopt the run.
+    for entry in &runs {
+        let (ref owner_name, run) = *entry;
+        for other in &runs {
+            offer_run(rng, &shared_path, steps, owner_name, run, other)?;
         }
     }
     Ok(())
@@ -437,30 +456,21 @@ fn tenants_stay_isolated(band: Band) -> TestResult {
 /// The same seed produces the same trace, twice.
 fn same_seed_replays(band: Band) -> TestResult {
     let body = |sim_run: &mut sim::Sim| -> TestResult {
-        let steps = usize::try_from(sim_run.rng().between(2, MAX_STEPS)).unwrap_or(2);
+        let steps = usize::try_from(sim_run.rng().between(2, MAX_STEPS))?;
         let scratch = Scratch::new("sim-replay")?;
         let store_dir = scratch.path().join("store");
-        let crash_at = usize::try_from(sim_run.rng().below(u32::try_from(steps).unwrap_or(1)))
-            .unwrap_or_default();
+        let crash_at = usize::try_from(sim_run.rng().below(u32::try_from(steps)?))?;
 
         let stopped =
             lgwks_bot::block_on(host("sim", &store_dir)?.run(&work_task()?, (crash_at, steps)));
-        stopped
-            .output()
-            .cloned()
-            .unwrap_or_default()
-            .record(&mut sim_run.trace);
+        record_output(stopped.output(), &mut sim_run.trace);
         let run = stopped.run_id().ok_or("a stored run must name a run id")?;
         let resumed = lgwks_bot::block_on(host("sim", &store_dir)?.resume(
             run,
             &work_task()?,
             (steps, steps),
         ));
-        resumed
-            .output()
-            .cloned()
-            .unwrap_or_default()
-            .record(&mut sim_run.trace);
+        record_output(resumed.output(), &mut sim_run.trace);
         Ok(())
     };
     sim::assert_replays(band, body)?;

@@ -112,10 +112,10 @@ impl Gate {
     /// The exit-side counterpart of [`Gate::await_arrivals`], bounded the same
     /// way and for the same reason.
     async fn await_exits(&self, expected: u64) {
-        let deadline = patience_deadline();
+        let started = std::time::Instant::now();
         while self.exited() < expected {
             assert!(
-                std::time::Instant::now() < deadline,
+                within_patience(started),
                 "only {} of {expected} bodies finished within {PATIENCE:?}",
                 self.exited()
             );
@@ -130,10 +130,10 @@ impl Gate {
     /// `yield_now` reschedules only the yielding task, so a loop of them never
     /// lets the task under observation run at all. A real timer does.
     async fn await_arrivals(&self, expected: u64) {
-        let deadline = patience_deadline();
+        let started = std::time::Instant::now();
         while self.arrived() < expected {
             assert!(
-                std::time::Instant::now() < deadline,
+                within_patience(started),
                 "only {} of {expected} bodies announced themselves within {PATIENCE:?}",
                 self.arrived()
             );
@@ -150,17 +150,19 @@ impl Gate {
 /// failing to say so is the alternative.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// The deadline after which a bounded wait in this file reports a failure.
+/// Whether a wait that started at `started` is still inside its patience budget.
 ///
-/// Built with `checked_add` because the repository forbids unchecked arithmetic,
-/// and the fallback is the honest one: a clock whose origin is so far in the
-/// future that five seconds cannot be added to it has, for this test's purposes,
-/// no deadline. The wait would then be bounded only by its own assertions, which
-/// is the behaviour the fallback is chosen to produce.
-fn patience_deadline() -> std::time::Instant {
-    std::time::Instant::now()
-        .checked_add(PATIENCE)
-        .unwrap_or(std::time::Instant::now())
+/// Measured as elapsed time rather than as a deadline computed by addition: an
+/// `Instant` far from its own origin cannot carry [`PATIENCE`], and a stand-in
+/// instant for that case would turn a bounded wait into an unbounded one, which
+/// is the opposite of what this helper exists to prevent.
+fn within_patience(started: std::time::Instant) -> bool {
+    match started.elapsed().checked_sub(PATIENCE) {
+        // Under the budget, or exactly on it: a `Duration` cannot represent
+        // "longer than this", so the subtraction is the total comparison.
+        None => true,
+        Some(over) => over.is_zero(),
+    }
 }
 
 /// Wait until `condition` reads true, or fail.
@@ -170,10 +172,10 @@ fn patience_deadline() -> std::time::Instant {
 /// supervisor's *counters* rather than for its bodies, and a copy of the loop at
 /// each call site would drift.
 async fn await_until(mut condition: impl FnMut() -> bool) {
-    let deadline = patience_deadline();
+    let started = std::time::Instant::now();
     while !condition() {
         assert!(
-            std::time::Instant::now() < deadline,
+            within_patience(started),
             "the awaited condition never became true within {PATIENCE:?}"
         );
         sleep(Duration::from_millis(1)).await;
@@ -347,7 +349,7 @@ fn the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated() -> Result<
         for (index, live) in snapshot.live().iter().enumerate() {
             assert_eq!(
                 live.task.get(),
-                u64::try_from(index).unwrap_or(u64::MAX),
+                u64::try_from(index)?,
                 "the listing is in spawn order, so entry {index} is the task \\
                  placed at that position"
             );
@@ -368,7 +370,8 @@ fn the_live_listing_is_bounded_by_the_ceiling_and_says_it_truncated() -> Result<
             3,
             "all three released bodies completed"
         );
-    });
+        Ok::<_, Box<dyn Error>>(())
+    })?;
     Ok(())
 }
 
@@ -484,23 +487,21 @@ fn an_undrained_supervisor_reports_dropped_detail_without_growing() -> Result<()
              accounted as finished",
             stats.completed
         );
-        let converted = report.into_outcomes();
-        assert!(
-            converted.is_ok(),
-            "a shutdown report with no retained cleanup owner converts to \\
-             exactly its outcomes"
-        );
-        let Ok(mut outcomes) = converted else {
-            return;
-        };
+        let mut outcomes = report.into_outcomes().map_err(|refused| {
+            format!(
+                "a shutdown report with no retained cleanup owner refused to convert \
+                 to exactly its outcomes: {refused:?}"
+            )
+        })?;
         outcomes.sort_by_key(TaskOutcome::task);
         assert_eq!(
             outcomes.len(),
-            usize::try_from(stats.completed - stats.reports_dropped).unwrap_or(usize::MAX),
+            usize::try_from(stats.completed - stats.reports_dropped)?,
             "the terminal record holds every outcome the retention cap kept, \\
              and no more"
         );
-    });
+        Ok::<_, Box<dyn Error>>(())
+    })?;
     Ok(())
 }
 
@@ -576,7 +577,8 @@ fn a_bounded_repeating_task_reports_exhaustion_not_a_hang() -> Result<(), Box<dy
 
     let (runtime, mut supervisor) = supervisor(2)?;
     runtime.block_on(async {
-        let iterations = std::num::NonZeroU64::new(4).unwrap_or(std::num::NonZeroU64::MIN);
+        let iterations =
+            std::num::NonZeroU64::new(4).ok_or("a repeating budget of zero iterations")?;
         let ran = Arc::new(AtomicU64::new(0));
         let ran_clone = Arc::clone(&ran);
         supervisor
@@ -615,6 +617,7 @@ fn a_bounded_repeating_task_reports_exhaustion_not_a_hang() -> Result<(), Box<dy
         );
         assert_eq!(report.stats().cancelled, 0, "nothing cancelled the loop");
         assert!(report.is_clean(), "an exhausted loop is a clean drain");
-    });
+        Ok::<_, Box<dyn Error>>(())
+    })?;
     Ok(())
 }

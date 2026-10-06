@@ -26,23 +26,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lgwks_bot::script::{FlowError, Scope, remember};
 
-/// A unit's delay, drawn from the plan when the oracle configured none.
+/// A unit's delay, drawn from this crate's plan when the oracle configured none.
 ///
-/// The same SplitMix64 the rest of this crate draws with, so one plan governs
-/// every instrument in the harness and a seed means one world.
+/// One plan governs every instrument in the harness, so a seed names one world
+/// across all three tasks rather than a world per module.
 fn planned_delay(seed: u64, index: u32) -> Duration {
-    let mut state = seed
-        .wrapping_add(0x9E37_79B9_7F4A_7C15)
-        .wrapping_mul(0xBF58_476D_1CE4_E5B9)
-        .wrapping_add(u64::from(index));
-    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    Duration::from_millis(1 + ((state ^ (state >> 27)) >> 31) % 4)
+    crate::planned_delay(seed, u64::from(index))
 }
 
 /// Why a durable unit did not produce its value.
@@ -95,15 +90,16 @@ impl UnitStats {
 
     /// How many times the body of unit `index` ran.
     ///
-    /// A missing index reads as zero rather than as a panic, because the answer
-    /// to "did this unit's body run" must be a number for every index a caller
-    /// asks about, including one this world is narrower than.
+    /// [`None`] means *no such unit*: an index outside this world's width, and
+    /// so no counter was ever kept for it. That is not the same answer as `Some(0)`,
+    /// which is a unit that exists and whose body has not run — a distinction the
+    /// recovery clauses depend on, since a missing counter reported as zero would
+    /// let a unit that was never attempted read as one that was attempted once
+    /// and replayed.
     #[must_use]
-    pub fn runs(&self, index: u32) -> u32 {
-        self.body_runs
-            .get(index as usize)
-            .copied()
-            .unwrap_or_default()
+    pub fn runs(&self, index: u32) -> Option<u32> {
+        let index = usize::try_from(index).ok()?;
+        self.body_runs.get(index).copied()
     }
 
     /// The per-index body-run counters, in index order.
@@ -143,11 +139,10 @@ impl UnitCounters {
         }
     }
 
-    /// The counter-vector lock, recovering from poisoning.
+    /// The counter-vector lock, recovering from poisoning as [`crate::lock`]
+    /// documents.
     fn lock(&self) -> MutexGuard<'_, Vec<AtomicU32>> {
-        self.body_runs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        crate::lock(&self.body_runs)
     }
 
     /// Read every counter into a [`UnitStats`].
@@ -160,6 +155,34 @@ impl UnitCounters {
                 .iter()
                 .map(|count| count.load(Ordering::Acquire))
                 .collect(),
+        }
+    }
+
+    /// Count one body run of unit `index`.
+    ///
+    /// Refuses an index with no counter rather than skipping it: the caller has
+    /// already refused such an index once, so reaching here is a harness bug,
+    /// and a skipped count would leave the recovery clauses reading a body run
+    /// that never happened.
+    fn count_body(&self, index: u32) -> Result<(), FlowError> {
+        let counters = self.lock();
+        let counted = match usize::try_from(index) {
+            Ok(index) => match counters.get(index) {
+                Some(slot) => {
+                    slot.fetch_add(1, Ordering::AcqRel);
+                    true
+                }
+                None => false,
+            },
+            Err(_overflow) => false,
+        };
+        if counted {
+            Ok(())
+        } else {
+            Err(FlowError::failed(format_args!(
+                "unit {index} has no counter in a world of {} units",
+                counters.len()
+            )))
         }
     }
 }
@@ -281,18 +304,31 @@ impl World {
     ///
     /// # Errors
     ///
-    /// [`UnitError::Unit`] when `index` is configured to fail, or when its record
-    /// could not be written — the two are one error on purpose, because a caller
-    /// that cannot tell them apart would re-run a unit whose value the store
-    /// already refused to keep, and the clause would then measure the harness
-    /// rather than the solution.
+    /// [`UnitError::Unit`] when `index` is configured to fail, when `index` is
+    /// outside this world's width, or when its record could not be written — one
+    /// error on purpose, because a caller that could tell them apart would
+    /// re-run a unit whose value the store already refused to keep, and the
+    /// clause would then measure the harness rather than the solution.
     pub async fn unit(&self, scope: &Scope, index: u32) -> Result<u64, UnitError> {
+        // An index past the end has no counter to run and no record to keep, so
+        // it is refused before the live guard and the sleep: entering the live
+        // set for a unit that cannot exist would report a body running that
+        // never did.
+        if index >= self.width {
+            let refusal = Err(UnitError::Unit { index });
+            lgwks_std::trace::warn!(
+                "unit {index} was run in a world of width {}: no such unit",
+                self.width
+            );
+            return refusal;
+        }
         let _live = UnitLiveGuard::enter(Arc::clone(&self.units));
-        let delay = self
-            .delays
-            .get(&index)
-            .copied()
-            .unwrap_or_else(|| planned_delay(self.seed, index));
+        // Two delay tiers, most specific first: a per-index override, then the
+        // seeded plan.
+        let delay = match self.delays.get(&index).copied() {
+            Some(override_delay) => override_delay,
+            None => planned_delay(self.seed, index),
+        };
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&index) {
             Err(UnitError::Unit { index })
@@ -311,9 +347,9 @@ impl World {
         let step = unit_step(index);
         let value = u64::from(index).saturating_mul(3);
         remember(scope, &step, move || async move {
-            if let Some(slot) = counters.lock().get(index as usize) {
-                slot.fetch_add(1, Ordering::AcqRel);
-            }
+            // The counter is counted inside the `remember` closure, so a replayed
+            // record does not increment it.
+            counters.count_body(index)?;
             Ok::<u64, FlowError>(value)
         })
         .await
@@ -377,9 +413,9 @@ impl Ledger {
         self.lock().len()
     }
 
-    /// The names lock, recovering from poisoning.
+    /// The names lock, recovering from poisoning as [`crate::lock`] documents.
     fn lock(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        self.names.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::lock(&self.names)
     }
 }
 
@@ -399,38 +435,3 @@ pub fn at_rest(world: &World) -> bool {
 /// makes "still live" an observation rather than a race. It is the same 200 ms
 /// the other two tasks' drop clauses allow.
 pub const SETTLE: Duration = Duration::from_millis(200);
-
-/// A one-shot flag the oracle can raise from outside a parked run, so an
-/// interrupted attempt has a way to be released rather than only a way to be
-/// killed.
-#[derive(Debug, Clone, Default)]
-pub struct Signal {
-    /// Whether the signal has been raised.
-    raised: Arc<AtomicBool>,
-}
-
-impl Signal {
-    /// A signal that has not been raised.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Raise it. Idempotent: raising twice is one raise.
-    pub fn raise(&self) {
-        self.raised.store(true, Ordering::SeqCst);
-    }
-
-    /// Has it been raised?
-    #[must_use]
-    pub fn raised(&self) -> bool {
-        self.raised.load(Ordering::SeqCst)
-    }
-
-    /// Wait until it is raised, on the engine's clock rather than a thread sleep.
-    pub async fn wait(&self) {
-        while !self.raised() {
-            lgwks_bot::rt::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-}

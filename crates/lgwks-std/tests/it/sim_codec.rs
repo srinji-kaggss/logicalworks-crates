@@ -26,8 +26,7 @@ use lgwks_std::ron::{self, FromSliceError};
 
 use seeded_bytes::{below, fold_bytes, next_byte, next_text};
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
 
 /// A value of every JSON/RON shape the two codecs disagree about: a scalar, a
@@ -461,7 +460,10 @@ fn trailing_content_after_a_document_is_refused_in_both_codecs() {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..24 {
-            let tail_len = below(&mut state, 8);
+            // The tail is at least one character: a document with nothing after
+            // it has no trailing content to refuse, so a zero-length draw would
+            // be asserting a refusal of a document that is complete.
+            let tail_len = below(&mut state, 8).saturating_add(1);
             let tail = next_text(&mut state, tail_len);
             let json_text = format!(r#"{{"value":"x"}}{tail}"#);
             assert!(
@@ -675,7 +677,7 @@ fn two_seeds_draw_two_different_values() {
     let right = draw_shape(&mut second);
     assert_ne!(left, right, "the two sweep seeds drew the same value");
     let mut trace = initial_trace();
-    fold(&mut trace, u64::try_from(left.items.len()).unwrap_or(0));
+    fold_usize(&mut trace, left.items.len());
     fold_bytes(&mut trace, left.name.as_bytes());
     fold_bytes(&mut trace, right.name.as_bytes());
     assert_ne!(

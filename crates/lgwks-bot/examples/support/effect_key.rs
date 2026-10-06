@@ -26,13 +26,8 @@ pub(crate) fn key(index: u32) -> Result<EffectKey, Box<dyn std::error::Error>> {
         ActionDigest::from_tagged("blake3_256", &format!("{:064x}", at.saturating_add(2)))?;
     let environment = EnvironmentId::from_hex(&format!("{:032x}", at.saturating_add(3)))?;
     let epoch = EnvironmentEpoch::from_decimal(&at.to_string())?;
-    Ok(EffectKey::new(
-        run,
-        action,
-        attempt,
-        flow,
-        digest,
-        environment,
-        epoch,
-    ))
+    Ok(
+        lgwks_bot::effect::EffectIdentity::new(run, environment, flow)
+            .key(action, attempt, digest, epoch),
+    )
 }

@@ -262,6 +262,17 @@ impl fmt::Display for Authority {
 #[derive(Debug, Default)]
 pub struct Broker {
     /// The known environments, by identity.
+    ///
+    /// Bounded by the environments one run created, not by traffic: an entry is
+    /// added by [`Broker::register`] or [`Broker::adopt`], both of which the host
+    /// calls once per environment it owns, and neither is a cache that refills on
+    /// its own. There is no eviction, and that is the point — [`Broker::close`]
+    /// marks an entry closed rather than removing it, so a warrant for a closed
+    /// environment is refused as `Closed` instead of looking like a warrant for
+    /// an environment this broker never heard of. A host that creates and
+    /// discards environments without bound holds one small entry per creation
+    /// for the life of the broker, which is the run's own resource count and is
+    /// the host's to keep bounded.
     environments: HashMap<EnvironmentId, Environment>,
 }
 
@@ -641,15 +652,14 @@ mod tests {
         let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
         let key_environment = EnvironmentId::from_hex(env)?;
         let key_epoch = EnvironmentEpoch::from_decimal(epoch)?;
-        Ok(EffectKey::new(
-            key_run,
-            key_action,
-            key_attempt,
-            key_flow_revision,
-            key_digest,
-            key_environment,
-            key_epoch,
-        ))
+        Ok(
+            crate::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+                key_action,
+                key_attempt,
+                key_digest,
+                key_epoch,
+            ),
+        )
     }
 
     /// The environment id most of these tests use.
@@ -670,6 +680,41 @@ mod tests {
         let tail = journal.tail();
         journal.compare_and_append(tail, &EffectEvent::IntentAdmitted { key })?;
         Ok(())
+    }
+
+    /// The shared subject of the dispatch tests: an environment the broker will
+    /// authorize, the key carrying its current generation, and a journal that
+    /// has already admitted that attempt.
+    ///
+    /// One struct rather than a four-tuple, because the three facts have to be
+    /// the *same* facts: a test that assembled its own could admit one key and
+    /// authorize another, and every assertion after that would be about a
+    /// situation the module cannot produce.
+    struct AdmittedEnvironment {
+        /// The broker, holding the environment open at `generation`.
+        broker: Broker,
+        /// The generation the broker issued, which `key` carries.
+        generation: EnvironmentEpoch,
+        /// The admitted attempt, on that environment and at that generation.
+        key: EffectKey,
+        /// A journal with that attempt already admitted.
+        journal: MemoryJournal,
+    }
+
+    /// A broker holding the shared environment at its first generation, that
+    /// generation's key, and a journal with the attempt already admitted.
+    fn admitted_environment() -> Result<AdmittedEnvironment, Box<dyn std::error::Error>> {
+        let mut broker = Broker::new();
+        let generation = broker.register(env()?)?;
+        let key = key(&generation.get().to_string())?;
+        let mut journal = MemoryJournal::new();
+        admitted(&mut journal, key)?;
+        Ok(AdmittedEnvironment {
+            broker,
+            generation,
+            key,
+            journal,
+        })
     }
 
     #[test]
@@ -896,15 +941,16 @@ mod tests {
 
     #[test]
     fn prepare_dispatch_records_the_attempt_it_authorized() -> TestResult {
-        let mut broker = Broker::new();
-        let first = broker.register(env()?)?;
-        let key = key(&first.get().to_string())?;
-        let mut journal = MemoryJournal::new();
-        admitted(&mut journal, key)?;
+        let AdmittedEnvironment {
+            broker,
+            generation,
+            key,
+            mut journal,
+        } = admitted_environment()?;
 
         let tail = journal.tail();
         let (authority, ack) = prepare(&broker, &mut journal, tail, key)?.into_parts();
-        assert_eq!(authority.epoch(), first);
+        assert_eq!(authority.epoch(), generation);
         assert_eq!(ack.position(), journal.tail());
         assert_eq!(journal.committed().len(), 2);
         Ok(())
@@ -912,11 +958,12 @@ mod tests {
 
     #[test]
     fn a_superseded_key_never_reaches_the_journal() -> TestResult {
-        let mut broker = Broker::new();
-        let first = broker.register(env()?)?;
-        let stale = key(&first.get().to_string())?;
-        let mut journal = MemoryJournal::new();
-        admitted(&mut journal, stale)?;
+        let AdmittedEnvironment {
+            mut broker,
+            key: stale,
+            mut journal,
+            ..
+        } = admitted_environment()?;
         let before = journal.tail();
 
         broker.replace(env()?)?;
@@ -936,11 +983,12 @@ mod tests {
 
     #[test]
     fn a_second_preparation_of_one_attempt_is_refused_by_the_ladder() -> TestResult {
-        let mut broker = Broker::new();
-        let first = broker.register(env()?)?;
-        let key = key(&first.get().to_string())?;
-        let mut journal = MemoryJournal::new();
-        admitted(&mut journal, key)?;
+        let AdmittedEnvironment {
+            broker,
+            key,
+            mut journal,
+            ..
+        } = admitted_environment()?;
 
         let tail = journal.tail();
         let first_prepare = prepare(&broker, &mut journal, tail, key)?;
@@ -982,11 +1030,12 @@ mod tests {
 
     #[test]
     fn a_stale_controller_cannot_append_after_recovery() -> TestResult {
-        let mut broker = Broker::new();
-        let first = broker.register(env()?)?;
-        let key = key(&first.get().to_string())?;
-        let mut journal = MemoryJournal::new();
-        admitted(&mut journal, key)?;
+        let AdmittedEnvironment {
+            broker,
+            key,
+            mut journal,
+            ..
+        } = admitted_environment()?;
 
         // A second controller reads the tail before the first appends.
         let stale_tail = journal.tail();

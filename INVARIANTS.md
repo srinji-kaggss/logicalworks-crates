@@ -10,7 +10,9 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   finished, standalone `lgwks_ast`, and the proc-macro crate `lgwks_macros`: five
   workspace members. Never grow `lgwks_ast`; never add a new owner or top-level
   crate for third-party code. A workspace member or approval owner outside those
-  five is refused by name as `UnknownSurface`. · why: #207 · enforced by:
+  five is refused by name as `UnknownSurface`; the five are this repository's
+  register's `[policy] surfaces`, not a list compiled into the gate
+  (INV-DEP-16). · why: #207 · enforced by:
   `lgwks_deps::tests::a_rogue_approval_owner_is_refused_by_name`,
   `lgwks_deps::tests::a_sixth_workspace_member_is_refused_by_name`, and
   `lgwks-deps check .`
@@ -111,6 +113,31 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `tests/it/check_cli.rs` (`the_human_receipt_binds_contract_subject_and_mode`,
   `the_json_receipt_has_stable_identity_fields`,
   `the_receipt_changes_when_its_subject_changes`)
+- **INV-DEP-16** The gate holds no repository's policy. Which licences an
+  inbound dependency may carry (`accepted_licenses`), the closed set of
+  workspace members and approval owners (`surfaces`), and which surfaces are
+  frozen at which tier (`frozen_surfaces`, `frozen_tier`) are each register's
+  `[policy]`, because `lgwks_deps` is published and audits other repositories:
+  a value compiled into it is one repository's choice imposed on every other,
+  with no way to change it short of a release. A register that approves an
+  observed edge and declares no accepted set is refused as
+  `LicensePolicyUndeclared` and never judged by a default; a register that
+  declares no surfaces or freeze binds none. INV-DEP-1's five surfaces and
+  `lgwks_ast`'s freeze are this repository's register declaring exactly that.
+  · why: Director 2026-10-05 — the compiled-in licence set refused the estate's
+  own MPL-2.0 `lgwks_bot` in every consuming repository · enforced by:
+  `tests/it/sim_license_policy.rs`
+  (`the_register_set_decides_every_seeded_expression`,
+  `an_undeclared_policy_is_refused_for_every_seeded_licence`,
+  `two_registers_judge_one_edge_each_by_its_own_set`,
+  `an_mpl_dependency_is_the_registers_decision`,
+  `the_same_seed_replays_and_distinct_seeds_diverge`),
+  `lgwks_deps::tests::a_register_without_surfaces_keeps_no_closed_set`,
+  `lgwks_deps::tests::the_freeze_is_declared_by_the_register`,
+  `lgwks_deps::tests::an_accepted_term_does_not_accept_its_prefix_extension`,
+  `tests/it/contract_schema_compat.rs`
+  (`a_policy_list_is_refused_whole_on_a_bad_member`,
+  `a_half_written_freeze_is_refused`)
 
 ## lgwks_bot — durable execution
 
@@ -540,7 +567,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   of which this crate has, and the bound is stated on the receipt itself rather
   than left to be inferred from a green test. · why: #87 acceptance row T21
   (LC-10), observed against a real `setsid` escape · enforced by:
-  `tests/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
+  `tests/it/process_escape.rs` (`a_session_escape_is_not_reported_as_complete_tree_cleanup`,
   `cleanup_never_signals_a_process_outside_the_supervisors_group`)
 - **INV-BOT-113** A callback that never reaches an await point is observable only
   from outside the process that runs it, and the observation is **detection, not
@@ -598,7 +625,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `same_seed_same_trace_hash_band_14..15`), `tests/it/store_read_failure.rs`
   (`an_unreadable_store_is_refused_as_itself_and_not_as_a_drift`,
   `the_fault_is_one_shot_and_the_step_after_it_replays`,
-  `a_compatible_resume_still_replays_after_no_fault`), and `tests/task_resume.rs`
+  `a_compatible_resume_still_replays_after_no_fault`), and `tests/it/task_resume.rs`
   (`a_pre_version_store_is_refused_naming_both_versions`,
   `a_foreign_file_is_still_refused_as_not_a_store`), and
   `tests/it/sim_store_faults.rs`
@@ -641,7 +668,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   second claimer, and a process can hold a live descriptor on a journal it no
   longer owns, because nothing revokes an open descriptor. · why: T16 ·
   enforced by:
-  `tests/owner_epoch_takeover.rs`
+  `tests/it/owner_epoch_takeover.rs`
   (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize`,
   `a_warrant_from_the_previous_generation_is_superseded`,
   `a_generation_the_broker_never_issued_is_not_a_supersession`,
@@ -676,7 +703,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_repaired_run_survives_a_reopened_host`,
   `a_host_spent_on_one_run_still_repairs_the_next`,
   `a_bounded_sweep_repairs_every_ticket_once`) and
-  `tests/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
+  `tests/it/task_resume.rs::a_pre_version_store_is_refused_naming_both_versions`
 
 - **INV-BOT-57** Each boundary of the durable ladder recovers its own answer, and
   recovery is itself a window the crashing process can do damage in. A kill
@@ -691,7 +718,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   an interrupted append — which was never anyone's answer — into a committed one.
   The ladder makes the duplicate settlement unrepresentable rather than merely
   discouraged. · why: T14 · enforced by:
-  `tests/durable_crash_observation.rs`
+  `tests/it/durable_crash_observation.rs`
   (`a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared`,
   `a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome`,
   `a_kill_during_recovery_leaves_the_journal_exactly_as_it_was`,
@@ -802,6 +829,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   `refusals_fold_their_arm_and_both_of_their_coordinates`,
   `the_same_seed_replays_to_the_same_encoding_trace`,
   `distinct_encoding_seeds_diverge_in_their_trace`)
+- **INV-RANDOM-1** `lgwks_std::random` holds no target list of its own: it
+  supports every target its `getrandom` backend supports, and the backend's own
+  refusal is the single compile-time gate, because a second list can only be
+  narrower and a narrower list refuses targets whose entropy source exists. All
+  randomness comes from that one source (INV-RANDOM-ONE-SOURCE), and a refused
+  read substitutes nothing. `EntropyError` carries the cause as data rather than
+  as a rendered `String`: a `#[non_exhaustive]` kind, the raw OS code where the
+  OS gave one, and its `std::io` classification. A code this crate cannot
+  represent at the declared width is dropped, never truncated into a code
+  naming a different failure. `fill_bytes` leaves its buffer **unspecified** on
+  a refusal and a caller must not read it; `bytes` returns no array at all.
+  · why: #276 · enforced by:
+  `random::tests::an_injected_os_code_round_trips_through_the_typed_error`,
+  `random::tests::an_injected_interruption_is_distinguished_from_a_missing_device`,
+  `random::tests::a_status_wider_than_the_declared_code_is_not_truncated`,
+  `random::tests::a_refused_fill_returns_the_typed_error_and_leaves_the_buffer_alone`,
+  `tests/it/sim_random_error.rs`, and the `target-matrix` lane
 - **INV-ID-1** UUID v4 masks apply to generated IDs only; parsing and raw-byte
   construction preserve arbitrary UUID values, and malformed hex reports both
   group start and invalid character offsets. · enforced by: `id::tests` and
@@ -1109,12 +1153,64 @@ Each of these was a shipped defect. Treat the list as the spec.
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
 
+- **INV-TASK-POOL-1** The blocking pool's ceiling is decided once and its
+  threads all have an owner. `configure_blocking_pool` fixes the ceiling
+  before the pool first runs, arbitrated by the pool's own creation, so a
+  configure and a first use race to build it and neither can miss the other's
+  write; every later attempt is refused typed (`InUse`, `AlreadyConfigured`,
+  `InvalidCeiling`) rather than silently ignored, and asking again for the
+  ceiling in force succeeds because the pool is at it. `shutdown_blocking_pool`
+  closes admission first, so a submit racing it is either admitted before the
+  flag or refused as `SpawnError::Shutdown` and there is no third outcome;
+  queued and running jobs are never cancelled — a thread with no job leaves
+  instead of parking, and a parked thread is woken to take a waiting job or
+  leave — and every thread's join handle is registered under the same lock that
+  counted the thread, so `PoolShutdown::Drained` means no thread outlives the
+  call and `DeadlineExceeded` reports, by count, the threads still executing
+  and the jobs still waiting, with those handles left for a later shutdown to
+  join. The handle list holds exactly `live + (threads that have left the
+  accounting and not yet returned)`; the second group has **no constant
+  bound**, because a departure frees its slot while the thread keeps running
+  its last instructions, and what bounds accumulation is that every thread
+  that has returned is joined at the next start or at a shutdown — without
+  that reap a bursty process keeps one handle per exited thread for ever.
+  A dropped `JoinHandle` still does not stop its thread, and cooperative
+  polling is not preemption: a closure that never returns is only detectable
+  from outside the process. · why: #264 (assurance gap X2, and the ceiling
+  and ownership items #286 and #289 left open) · enforced by:
+  `tests/sim_task_pool_public.rs`
+  (`the_public_pool_journey_configures_drains_joins_and_then_refuses`),
+  `task::tests` (`a_configure_after_the_pool_has_run_is_refused_with_the_running_ceiling`,
+  `a_second_configure_is_refused_named_or_is_the_ceiling_already_in_force`,
+  `a_ceiling_below_one_is_refused_before_the_pool_is_touched`,
+  `after_a_shutdown_admission_is_refused_and_the_job_never_runs`,
+  `a_thread_that_cannot_start_refuses_the_job_and_it_never_runs`,
+  `spawn_blocking_reports_a_refusal_to_its_awaiter_as_the_job_failing`,
+  `a_failed_start_beside_a_live_thread_leaves_the_job_to_that_thread`,
+  `no_more_than_the_ceiling_run_at_once_and_every_job_completes`,
+  `past_the_queue_bound_a_job_is_refused_with_a_typed_reason`,
+  `a_panicking_job_does_not_cost_the_pool_its_thread`), `sim_task_pool.rs`
+  (`sim_every_admitted_job_runs_once_under_every_interleaving`,
+  `sim_a_seed_replays_its_trace_and_distinct_seeds_diverge`), and
+  `sim_pool_lifetime.rs` (`sim_every_scenario_drains_joins_and_never_loses_a_job`,
+  `sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_takes_one`,
+  `sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles`,
+  `sim_a_seed_replays_its_pool_lifetime_trace`,
+  `sim_distinct_seeds_diverge_in_their_pool_lifetime_trace`).
+
 ## lgwks_ast
 
 - **INV-AST-1** Checked AST inspection charges nodes before descending and
   retains pending traversal state proportional to active depth, not sibling
   fan-out; the byte and node ceilings remain separate from parser allocation.
-  · why: #143 R17 · enforced by: `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`
+  A checked parse also bounds *depth* (`MAX_AST_DEPTH`), because a source of
+  `(((…` is a few bytes per level and produces one node per level, which the
+  byte and node ceilings admit in the hundreds of thousands of levels.
+  · why: #143 R17, #277 · enforced by:
+  `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
+  `lgwks_ast::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
+  `lgwks_ast::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
+  `lgwks_ast::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
 - **INV-AST-2** Content detection parses each distinct compiled candidate once;
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
@@ -1135,6 +1231,113 @@ Each of these was a shipped defect. Treat the list as the spec.
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
   `a_syntax_refusal_points_at_the_earliest_recovery_node`)
+- **INV-AST-3** The tree walk is linear in tree size, and it gets there by not
+  addressing a node's children by index. `inspect_ast` and
+  `diagnostic::diagnostics` drive a tree-sitter cursor; the only state either
+  retains is the cursor's own ancestor stack, so time is `O(nodes)` and resident
+  state is `O(depth)`. A walk that reached child *i* through
+  `ast_grep_core::Node::child(i)` is `O(i)` on a node whose visible children are
+  not its structural children, which is what a recovery-heavy parse produces,
+  and it was measured at 85 microseconds per node — 1.39 s of walk for a 16 KiB
+  source against 1.06 ms of parse, quadrupling on every doubling of the width,
+  inside `try_parse`. The cursor walk spends 40 ns per node on the same source at
+  every width from 2 KiB to 2 MiB. The cursor is reached through the node the
+  walk was handed, so the walk names no `tree-sitter` type (the crate's one
+  direct `tree-sitter` use is the parse deadline, INV-AST-5). Two properties move with it and are stated rather than left
+  implicit: nodes arrive in **source order**, not reverse-sibling order, so the
+  `limit + 1` witness is the earliest node rather than the last; and a
+  depth-capped walk holds the ceiling **plus** the one witness it must visit to
+  be able to say the tree is too deep. Every published guarantee survives both:
+  `AstMetrics` folds order-independently, the retained diagnostics are the
+  earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before they are
+  returned, and `diagnostics` sorts its own output. · why: #277 · enforced by:
+  `lgwks_ast::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
+  (the replaced walk is kept as a test-only model and the replacement must visit
+  the same nodes at the same depths with the same recovery state on five tree
+  shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
+  `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
+  `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
+- **INV-AST-4** Hostile input earns a typed refusal, and the input that could
+  not is refused *before* the grammar sees it. Four generators per compiled
+  grammar — a full-ceiling tiling of the grammar's own source, one line of
+  megabytes, a nesting run past the depth ceiling with and without its closers —
+  answer with a tree inside the crate's bounds or with a `ParseError` that names
+  itself. The **markdown** grammar needed one more, because
+  `tree-sitter-markdown` 0.5.3's external scanner serializes its open block
+  containers into a fixed 1 024-byte buffer and *asserts* when they do not fit,
+  and an assertion in a C parser is `abort()`: `"- "` repeated 255 times — 510
+  bytes — ended the process with `SIGABRT` rather than returning anything a
+  caller could handle. The crate cannot patch the scanner (the grammar arrives
+  compiled through `ast-grep-language`, and forking it is forbidden by #277; the
+  deadline of INV-AST-5 does not help, because an `abort()` is not a slow
+  parse), so it refuses the source first:
+  `MAX_MARKDOWN_CONTAINERS_PER_LINE` (64) and
+  `ParseError::ContainerNestingTooDeep`, applied by `markdown_containers` in one
+  `O(bytes)` pass with `O(1)` state on the markdown path only. **What the bound
+  is measured against:** seventeen container shapes bisected from a child
+  process — unordered and ordered list markers, blockquotes of one, two and
+  three `>`, tabs, list-in-quote, quote-in-list, list-in-quote-in-list, fenced
+  and indented code inside containers, and containers nested by indentation —
+  and *every* shape that aborts does so at **255 open containers**, whether it
+  spells them one per repetition (255 of `- `), two (128 of `> - `) or three
+  (85 of `>>> `). Three shapes never abort, because markdown does not nest a
+  blockquote, an ordered list or a tab run by indentation. The count is an
+  over-estimate wherever indentation and markers both carry depth, so a count of
+  64 cannot be 255 open containers: the margin is about 4x and it is on the safe
+  side. Known limit, stated rather than hidden: the guard runs on the **checked**
+  parse only. `parse` and `parse_with` return a `Parsed` rather than a
+  `Result`, so a refusal has nowhere to go in them, and their documentation says
+  so. · why: #277 · enforced by:
+  `tests/it/hostile.rs` (`markdown_never_reaches_the_scanner_past_its_bound`
+  proves from child processes — every shape at bound-1, bound and bound+1,
+  every shape at its own measured abort depth, and 1 000 seeded mixes of
+  container prefixes, 1 065 children and zero aborts — plus
+  `every_adversarial_shape_answers_typed`,
+  `the_byte_ceiling_is_refused_before_any_tree_exists`,
+  `every_refusal_renders_as_a_located_diagnostic`,
+  `the_unchecked_parse_of_the_same_shapes_still_answers`,
+  `multibyte_and_truncated_sources_are_answered`) and
+  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `the_container_count_does_not_charge_prose_or_a_thematic_break`,
+  `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
+  `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
+  nextest `slow-timeout` with `terminate-after`, so a walk that stops making
+  progress fails the run instead of holding it open
+
+- **INV-AST-5** A checked parse holds its thread for at most its deadline plus
+  one progress interval. `try_parse` and `try_parse_with` run under
+  `DEFAULT_PARSE_DEADLINE` (10 s) and `try_parse_within` under the caller's:
+  the tree is built by `tree_sitter::Parser::parse_with_options`, whose progress
+  callback the parser calls every hundred operations, and a callback that finds
+  the deadline passed stops the parse, which answers the typed
+  `ParseError::TimedOut { language, after }`. The byte ceiling does not give
+  this, because tree-sitter's GLR parser is super-linear in nesting on some
+  grammars: 256 KiB of nested braces held the Dart parser for 97.5 s. The
+  parser is cached per thread and per grammar (at most `MAX_CACHED_PARSERS`)
+  and is reset before and after every parse, because a stopped parse keeps its
+  state *for resuming* and a cached parser that kept it would continue somebody
+  else's source. The tree is the same `tree_sitter::Tree` ast-grep builds, handed
+  to it through `StrDoc`'s public fields, so callers receive the identical
+  `Parsed`. This is the crate's one direct `tree-sitter` edge, admitted in
+  `contract/APPROVED.toml` on the Director's word (2026-10-05) at the version
+  `ast-grep-core` already resolves, so no crate was added to the build. **Not
+  claimed:** a bound on the validation walk's time (linear, bounded by
+  `MAX_AST_NODES`) or on the parser's allocation (bounded by the byte ceiling and
+  measured per grammar in `bench/README.md`), and a parse small enough to finish
+  before the first progress check completes even under a zero deadline. · why:
+  #277 · enforced by: `tests/it/parse_deadline.rs`
+  (`a_slow_parse_is_stopped_at_its_deadline_and_the_thread_parses_again`,
+  `a_deadline_the_parse_fits_inside_answers_like_try_parse`,
+  `an_unrepresentable_deadline_runs_the_parse_to_completion`),
+  `tests/it/sim_parse_deadline.rs`
+  (`every_seed_is_stopped_then_parses_clean_on_the_same_thread`,
+  `the_same_seed_replays_to_the_same_deadline_trace`,
+  `distinct_seeds_diverge_in_their_deadline_trace`), the `try_parse_within`
+  doctest, and in lgwks_bot
+  `inspect::tests::a_parse_stopped_at_its_deadline_is_incomplete_not_an_infrastructure_failure`
+  and `tests/it/inspect.rs::a_subject_deeper_than_the_parser_admits_is_a_depth_budget_not_a_fault`,
+  which hold that a parse the deadline or the depth bound refused reaches an
+  inspection as an incomplete budget, never as an infrastructure failure
 
 ## Docs
 
@@ -1188,6 +1391,24 @@ Each of these was a shipped defect. Treat the list as the spec.
   `journal::frame::tests`, and `tests/it/sim_journal_tail.rs` (`lying_lengths_band_00..03`,
   `cut_appends_band_04..07`, `damaged_cut_frames_band_08..11`,
   `tenants_beside_a_refusal_band_12..13`)
+- **INV-BOT-151** One tenant cannot starve another of a supervisor's capacity.
+  A `Supervisor::with_tenancy` admits every `spawn_for` and `run_process_for`
+  through `rt::tenancy::DeficitRoundRobin`: no tenant holds more permits than its
+  `TenancyPolicy` ceiling, waits past its own queue bound, or pushes the
+  supervisor past its total waiting bound, and a freed permit goes to the next
+  tenant in the weighted round rather than to whoever arrives next. Every refusal
+  names the bound it reached (`SpawnRefused::TenantAtCapacity` names the tenant,
+  `SupervisorQueueFull` the supervisor). A tenant's live count is exactly the
+  owners still waiting, including when an owner leaves between the round's choice
+  and the delivery: the shell withdraws that waiter and the owner's report counts
+  nothing. **Not claimed:** throughput isolation from a tenant whose bodies burn
+  the runtime's CPU; the round decides admission, not scheduling of admitted
+  work. · why: #268 · enforced by: `rt::tenancy::tests`,
+  `rt::supervise::tenancy_support::tests::a_late_abandonment_leaves_the_live_count_exact`,
+  `tests/it/tenancy.rs` (`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
+  `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
+  `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and
+  `tests/it/sim_tenancy_model.rs` (seventeen properties over the whole seed space)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is
@@ -1344,7 +1565,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   Under contention the ordered step stays ordered: many appends through one owner
   thread lose nothing, a repeated submission commits one frame, and a replayed
   step is never re-recorded. · why: #87 step 5 (hyperscale) · enforced by:
-  `tests/task_resume.rs::concurrent_runs_across_tiers` and
+  `tests/it/task_resume.rs::concurrent_runs_across_tiers` and
   `tests/it/sim_store_scale.rs` (`concurrent_appends_lose_nothing`,
   `an_interrupted_step_records_exactly_once`,
   `tenants_interleaved_stay_isolated`, `same_seed_replays`)
@@ -1363,7 +1584,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   guarantee is exactly-once for a *recorded* step and at-least-once for an
   unrecorded one; an external effect a step performs still needs the effect
   journal, not this. · why: #87 step 5 (host-held continuation) · enforced by:
-  `tests/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
+  `tests/it/task_resume.rs` (`a_killed_process_resumes_without_rerunning_finished_steps`,
   `a_run_without_a_store_claims_no_durability`,
   `two_tenants_resuming_one_run_id_stay_isolated`,
   `a_torn_final_record_is_dropped_and_earlier_ones_survive`,
@@ -1435,7 +1656,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `saturation_reaches_every_tier_and_records_the_ceiling`,
   `the_batch_bounds_are_declared_and_never_silent`, `same_seed_replays`),
   `tests/it/resume_liveness.rs::a_grouped_batch_still_lets_the_runtime_turn`,
-  `tests/durable_crash_group_commit.rs`
+  `tests/it/durable_crash_group_commit.rs`
   (`a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`,
   `a_killed_run_with_no_acknowledgment_leaves_no_record`), and
   `crates/lgwks-bot/examples/resume_cost.rs`
@@ -1457,7 +1678,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `crates/lgwks-bot/src/journal/owner.rs::tests::a_failed_batch_flush_acknowledges_nobody_and_folds_nothing`
   (the failed batch's durable reality is read from a reopen of the file, not the
   handle that refused it), and
-  `tests/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
+  `tests/it/durable_crash_group_commit.rs::a_real_kill_mid_batch_holds_exactly_the_acknowledged_prefix`
 - **INV-BOT-132** One storage owner serves every durable store with one ordered
   step whose answer has three shapes: `Settled` (nothing was written, the answer is
   ready), `Unsynced` (bytes are on the file and the answer and fold are owed the
@@ -1611,7 +1832,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   committed event and no torn tail, and the retry lands exactly once. The kill
   is a real `SIGKILL` of a child that handed the storage owner the append and
   then parked. · why: #122 item 2 / #156 · enforced by:
-  `tests/durable_crash_observation.rs`
+  `tests/it/durable_crash_observation.rs`
   (`a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
 - **INV-BOT-45** Concurrent tenant appends over separate files stay isolated,
   lose nothing and duplicate nothing, and one acknowledged append's latency
@@ -2142,14 +2363,14 @@ Each of these was a shipped defect. Treat the list as the spec.
 - Partial answer, 2026-09-23: INV-BOT-2, INV-BOT-3, INV-BOT-4 and the
   journal-before-acknowledge half of INV-BOT-1 are exercised under a real
   process kill against a real file store by
-  `tests/durable_crash_observation.rs` (rows #100, #101, #102, #104, #106 of
+  `tests/it/durable_crash_observation.rs` (rows #100, #101, #102, #104, #106 of
   the #109 register). The still-unnamed remainder — INV-BOT-5's poll path
   under a real store (#99), INV-BOT-9's descendant tree (#107 T21/T22), and
   INV-BOT-10's real frame (#108) — is where the next regression will come
   from.
 - 2026-10-05 (#280): #109 closed on 2026-09-23 with those three rows repaired
   and covered by in-process regression tests, not by an external observation.
-  INV-BOT-9's T21 is now observed by `tests/process_escape.rs`, which shows a
+  INV-BOT-9's T21 is now observed by `tests/it/process_escape.rs`, which shows a
   `setsid` descendant escaping the group and the receipt not claiming it
   (INV-BOT-112); stopping that descendant is #263. INV-BOT-5's real-store poll
   path and INV-BOT-10's real frame still have no named external test.

@@ -130,7 +130,16 @@ fn hex_property_catches_a_decoder_that_drops_a_half_byte() -> Outcome {
     /// Decodes the even prefix and silently drops a trailing nibble.
     fn lenient(input: &[u8]) -> Result<Vec<u8>, hex::DecodeError> {
         let even = input.len().saturating_sub(input.len() & 1);
-        hex::decode(input.get(..even).unwrap_or_default())
+        // `even` drops at most the trailing nibble, so the even prefix is a
+        // slice of the input; an input with no even prefix is an odd-length
+        // refusal, which is what the codec itself would answer.
+        match input.get(..even) {
+            Some(even) => hex::decode(even),
+            None => Err(hex::DecodeError::OddLength {
+                len: input.len(),
+                at: input.len(),
+            }),
+        }
     }
     let minimal = shrunk(&text_from(b"0123456789abcdefABCDEF"), |input| {
         hex_property(lenient, &input)
@@ -268,8 +277,13 @@ fn percent_escape(
             let low = char::from(low)
                 .to_digit(16)
                 .ok_or(percent::DecodeError::NotHexDigit { at: low_at })?;
-            // Two hex digits are at most 0xff, so the conversion cannot fail.
-            Ok(u8::try_from(high.saturating_mul(16).saturating_add(low)).unwrap_or(u8::MAX))
+            // Two hex digits are at most 0xff. The narrowing is checked anyway,
+            // and its refusal names the digit rather than substituting a byte,
+            // because a value above 0xff is not a byte this reference produced.
+            match u8::try_from(high.saturating_mul(16).saturating_add(low)) {
+                Ok(packed) => Ok(packed),
+                Err(_) => Err(percent::DecodeError::NotHexDigit { at: high_at }),
+            }
         }
         _ => Err(percent::DecodeError::TruncatedEscape { at }),
     }
@@ -463,9 +477,12 @@ fn leb128_property_catches_a_decoder_that_accepts_padding() -> Outcome {
     /// A textbook unsigned decoder with no minimality check.
     fn lenient(input: &[u8]) -> Result<(u32, usize), leb128::DecodeError> {
         let mut value = 0u32;
+        // Five groups is the whole 32-bit width, so the shift is counted in
+        // groups and never reaches the width a shift by itself could overflow.
+        let mut shift = 0u32;
         for (index, &byte) in input.iter().enumerate().take(5) {
-            let shift = u32::try_from(index.saturating_mul(7)).unwrap_or(u32::MAX);
-            value |= u32::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
+            value |= u32::from(byte & 0x7f) << shift;
+            shift = shift.saturating_add(7);
             if byte & 0x80 == 0 {
                 return Ok((value, index.saturating_add(1)));
             }
@@ -524,7 +541,7 @@ fn rfc3339_property_catches_a_renderer_that_rounds_to_milliseconds() -> Outcome 
         let Ok((secs, nanos)) = unix_parts(at) else {
             return to_rfc3339(at);
         };
-        let sub_milli = nanos.checked_rem(1_000_000).unwrap_or(0);
+        let sub_milli = nanos.rem_euclid(1_000_000);
         from_unix_parts(secs, nanos.saturating_sub(sub_milli))
             .map_or_else(|_| to_rfc3339(at), to_rfc3339)
     }
@@ -630,7 +647,7 @@ fn wire_checked_access_refuses_or_accepts_corrupt_bytes_without_crashing() -> Ou
             corrupt.extend_from_slice(&bytes);
             let len = corrupt.len().max(1);
             for (at, byte) in flips {
-                if let Some(slot) = corrupt.get_mut(at.checked_rem(len).unwrap_or(0)) {
+                if let Some(slot) = corrupt.get_mut(at.rem_euclid(len)) {
                     *slot ^= byte;
                 }
             }
@@ -745,8 +762,16 @@ fn glob_as_regex(pattern: &str) -> String {
         } else if rest.starts_with('?') {
             (String::from("[^/]"), 1)
         } else if rest.starts_with('[') {
-            let close = rest.find(']').unwrap_or(rest.len());
-            let body = rest.get(1..close).unwrap_or_default();
+            // A close bracket at or after the opener ends the class; a token
+            // with none runs to its end, which is how a glob spells one.
+            let close = match rest.find(']') {
+                Some(close) => close,
+                None => rest.len(),
+            };
+            // The opener is at index 0 and a `]` is at index 1 or later, so
+            // `close` is at least 1 and the body is the span between them: `[]`
+            // and a bare `[` both spell the empty class, which this is.
+            let body = &rest[1..close];
             let (negated, members) = match body.strip_prefix(['!', '^']) {
                 Some(members) => (true, members),
                 None => (false, body),
@@ -765,14 +790,23 @@ fn glob_as_regex(pattern: &str) -> String {
             };
             (class, close.saturating_add(1))
         } else {
-            let literal = rest.chars().next().unwrap_or_default();
+            // The loop condition leaves a non-empty remainder, so the token has
+            // a first scalar to escape; an empty remainder ends the pattern.
+            let Some(literal) = rest.chars().next() else {
+                break;
+            };
             (
                 format!(r"\x{{{:x}}}", u32::from(literal)),
                 literal.len_utf8(),
             )
         };
         out.push_str(&piece);
-        rest = rest.get(used..).unwrap_or_default();
+        // A translator that consumed past the end of the token leaves no
+        // remainder, and the pattern ends there rather than restarting.
+        let Some(tail) = rest.get(used..) else {
+            break;
+        };
+        rest = tail;
     }
     out.push_str(r"\z");
     out

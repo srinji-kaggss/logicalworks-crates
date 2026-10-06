@@ -141,7 +141,16 @@ impl Authority {
 
 /// The authority installed for the current future, if any.
 pub(crate) fn authority() -> Option<Authority> {
-    AUTHORITY.try_with(Clone::clone).unwrap_or(None)
+    // A task-local read that fails means the future was polled outside every scope,
+    // which is a different fact from a scope that installed the absence on purpose.
+    // The access error is recorded rather than dropped, because a caller reading
+    // "no authority" from a future that should have had one is looking at a wiring
+    // defect, and a silently discarded error is how that stays invisible.
+    let installed = AUTHORITY.try_with(Clone::clone);
+    if let Err(ref access) = installed {
+        lgwks_std::trace::debug!(error = ?access, "authority: polled outside every scope, so no authority is installed");
+    }
+    installed.ok().flatten()
 }
 
 /// Install `authority` for the futures polled inside `body`; `None` installs the
@@ -619,12 +628,25 @@ pub(crate) async fn within<R>(
 /// host-installed identity and a bare scope — cannot disagree about whether a run
 /// declared one.
 pub(crate) fn installed_definition() -> Option<Arc<DefinitionIdentity>> {
-    DEFINITION.try_with(Clone::clone).unwrap_or(None)
+    // Recorded, then dropped: a scope that installed no identity is the ordinary
+    // case, a failed access is a wiring defect, and only one of the two should read
+    // as absence.
+    let installed = DEFINITION.try_with(Clone::clone);
+    if let Err(ref access) = installed {
+        lgwks_std::trace::debug!(error = ?access, "installed_definition: polled outside every scope, so no identity is installed");
+    }
+    installed.ok().flatten()
 }
 
 /// The store installed for the current future, if any.
 pub(crate) fn installed() -> Option<Records> {
-    RECORDS.try_with(Clone::clone).unwrap_or(None)
+    // As `installed_definition`: a scope that installed no store is ordinary, and a
+    // failed access is recorded so it cannot be read as one.
+    let installed = RECORDS.try_with(Clone::clone);
+    if let Err(ref access) = installed {
+        lgwks_std::trace::debug!(error = ?access, "installed: polled outside every scope, so no store is installed");
+    }
+    installed.ok().flatten()
 }
 
 /// The definition a durable step records under.

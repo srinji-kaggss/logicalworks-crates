@@ -35,9 +35,20 @@ use std::time::Duration;
 use crate::seeded_sweep;
 
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
-    next_seed,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_nanos,
+    fold_usize, initial_trace, next_index, next_seed,
 };
+
+/// The first component's weight per tenant slot.
+///
+/// The weight is a value this table names rather than a scaled index: the three
+/// tenant configurations each get a weight this states, and no conversion
+/// between the index width and a weight's width can change which one a tenant
+/// was given.
+const FIRST_WEIGHTS: [f64; 3] = [0.25, 0.5, 0.75];
+
+/// The trace arm a refused verdict folds as, distinct from every score.
+const REFUSED_ARM: u64 = u64::MAX;
 
 /// The concurrency tiers the interleaved run sweeps.
 const TIERS: [usize; 3] = [100, 1_000, 10_000];
@@ -101,7 +112,7 @@ fn tenants() -> Option<Vec<TenantPolicy>> {
         // comparison that refuses on length and the other is an edit distance
         // that refuses on budget, so the score is not a single number two
         // policies happen to weight differently.
-        let first_weight = 0.25 + 0.25 * f64::from(u32::try_from(slot).unwrap_or(0));
+        let first_weight = FIRST_WEIGHTS[slot.rem_euclid(FIRST_WEIGHTS.len())];
         let second_weight = 1.0 - first_weight;
         let retry = RetryPolicy::new(3, Duration::from_millis(100), Duration::MAX)
             .with_max_delay(Duration::from_secs(cap_seconds));
@@ -192,10 +203,13 @@ struct TenantAnswer {
 
 /// Scores [`SHARED_INPUT`] against one tenant's three policies.
 fn answer(tenant: &TenantPolicy, scratch: &mut GlobScratch) -> TenantAnswer {
-    let verdict: &EvidenceVerdict = &tenant
-        .evidence
-        .verdict(SHARED_INPUT, SHARED_INPUT)
-        .unwrap_or_else(|refusal| unreachable_verdict(&refusal));
+    let Ok(answered) = tenant.evidence.verdict(SHARED_INPUT, SHARED_INPUT) else {
+        // The verdict is borrowed for the whole answer, so a refusal has nowhere
+        // to go: it is reported with its cause and the process stops, rather than
+        // folding a verdict the tenant's own budget refused.
+        unreachable_verdict(&tenant.evidence);
+    };
+    let verdict: &EvidenceVerdict = &answered;
     TenantAnswer {
         matched: tenant.pattern.is_match_with(SHARED_INPUT, scratch),
         score_bits: verdict.score().map_or(0, f64::to_bits),
@@ -364,9 +378,9 @@ fn seeded_run(seed: u64, tenants: &[TenantPolicy]) -> u64 {
     let mut trace = initial_trace();
     let mut state = seed;
     for _ in 0..64 {
-        let Some(tenant) =
-            tenants.get(usize::try_from(next_seed(&mut state)).unwrap_or(0) % TENANTS)
-        else {
+        // The tenant is drawn in the index width the table is indexed in, so a
+        // draw names a tenant rather than a narrowed position of one.
+        let Some(tenant) = tenants.get(next_index(&mut state).rem_euclid(tenants.len())) else {
             continue;
         };
         let mut scratch = GlobScratch::new();
@@ -381,23 +395,20 @@ fn seeded_run(seed: u64, tenants: &[TenantPolicy]) -> u64 {
                 fold(&mut trace, u64::from(inner.is_accepted()));
             }
             Err(reason) => {
-                fold(
-                    &mut trace,
-                    u64::try_from(reason.to_string().len()).unwrap_or(u64::MAX),
-                );
-                fold(&mut trace, u64::MAX);
+                fold_usize(&mut trace, reason.to_string().len());
+                fold(&mut trace, REFUSED_ARM);
             }
         }
         for attempt in 0..4 {
-            fold(
+            // The delay is folded as the whole nanosecond count the policy
+            // returned, a half at a time, so two tenants whose delays share their
+            // low 64 bits do not fold alike.
+            fold_nanos(
                 &mut trace,
-                u64::try_from(
-                    tenant
-                        .retry
-                        .delay(attempt, next_seed(&mut state))
-                        .as_nanos(),
-                )
-                .unwrap_or(u64::MAX),
+                tenant
+                    .retry
+                    .delay(attempt, next_seed(&mut state))
+                    .as_nanos(),
             );
         }
     }

@@ -43,6 +43,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lgwks_std::hash::{Digest, Hasher};
+
+use crate::journal::frame::SaturatingFrom;
 use lgwks_std::wire::{WireError, from_bytes, to_bytes};
 
 use crate::effect::RunId;
@@ -543,7 +545,7 @@ impl RunStore {
             .truncate(false)
             .open(&path)
             .map_err(StoreError::storage)?;
-        let header = u64::try_from(STORE_HEADER.len()).unwrap_or(u64::MAX);
+        let header = u64::saturating_from(STORE_HEADER.len());
         if !existed || file.metadata().map_err(StoreError::storage)?.len() == 0 {
             file.write_all(&STORE_HEADER)
                 .and_then(|()| file.sync_all())
@@ -1103,12 +1105,10 @@ fn decide_and_write(
                 Appended::Conflicting
             })));
         }
-        if u64::try_from(owned.steps.len()).unwrap_or(u64::MAX) >= MAX_RECORDS_PER_RUN {
+        if u64::saturating_from(owned.steps.len()) >= MAX_RECORDS_PER_RUN {
             let refusal = Err(refusal(StoreError::Limit {
                 kind: StoreLimitKind::Records,
-                requested: u64::try_from(owned.steps.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
+                requested: u64::saturating_from(owned.steps.len()).saturating_add(1),
                 limit: MAX_RECORDS_PER_RUN,
             }));
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
@@ -1119,7 +1119,7 @@ fn decide_and_write(
     let previous = tail_head(index);
     let (framed, head) = frame(stored, &previous).map_err(refusal)?;
 
-    let staged = u64::try_from(framed.len()).unwrap_or(u64::MAX);
+    let staged = u64::saturating_from(framed.len());
     let next = index
         .committed
         .checked_add(staged)
@@ -1141,8 +1141,7 @@ fn decide_and_write(
         .len();
     if on_disk != index.committed {
         let refusal = Err(refusal(StoreError::Corrupt {
-            at: u64::try_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len()))
-                .unwrap_or(u64::MAX),
+            at: u64::saturating_from(index.runs.get(&stored.run).map_or(0, |run| run.steps.len())),
         }));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "decide_and_write: returning an error to the caller");
         return refusal;
@@ -1294,7 +1293,7 @@ impl StoredDefinition {
             name: identity.name().to_owned(),
             revision: identity.revision(),
             input: identity.input().as_bytes().to_vec(),
-            steps: u64::try_from(identity.steps()).unwrap_or(u64::MAX),
+            steps: u64::saturating_from(identity.steps()),
             codec: identity.codec().to_owned(),
         }
     }
@@ -1305,7 +1304,7 @@ impl StoredDefinition {
             &self.name,
             self.revision,
             digest_from_record(&self.input),
-            usize::try_from(self.steps).unwrap_or(usize::MAX),
+            usize::saturating_from(self.steps),
         )
         .with_codec(&self.codec)
     }
@@ -1393,8 +1392,8 @@ fn store_full(requested: u64) -> StoreError {
 fn record_too_large(len: usize) -> StoreError {
     StoreError::Limit {
         kind: StoreLimitKind::RecordBytes,
-        requested: u64::try_from(len).unwrap_or(u64::MAX),
-        limit: u64::try_from(MAX_RECORD_BYTES).unwrap_or(u64::MAX),
+        requested: u64::saturating_from(len),
+        limit: u64::saturating_from(MAX_RECORD_BYTES),
     }
 }
 
@@ -1450,8 +1449,8 @@ fn next_frame(file: &mut File, cursor: &Cursor<'_>) -> Result<Option<Framed>, St
         StoreError::storage,
         corrupt,
         |previous, payload| {
-            let copy = frame::misaligned_copy(payload);
-            from_bytes::<Stored, WireError>(copy.as_deref().unwrap_or(payload))
+            let aligned = frame::decodable(payload);
+            from_bytes::<Stored, WireError>(aligned.as_slice())
                 .ok()
                 .map(|stored| stored.head_from(previous, payload))
         },
@@ -1498,7 +1497,7 @@ fn replay(file: &mut File) -> Result<Index, StoreError> {
     check_format_version(header)?;
     let mut index = Index {
         runs: HashMap::new(),
-        committed: u64::try_from(STORE_HEADER.len()).unwrap_or(u64::MAX),
+        committed: u64::saturating_from(STORE_HEADER.len()),
         tail: genesis_head(),
     };
     let mut previous = genesis_head();
@@ -1632,7 +1631,7 @@ mod tests {
     /// 32 leaves the payload whole and the head short, more ends inside the payload.
     #[test]
     fn a_lengthened_acknowledged_final_record_is_refused_not_trimmed() -> TestResult {
-        let scratch = Scratch::new("store-lengthened");
+        let scratch = Scratch::new("store-lengthened")?;
         let bytes = written(scratch.path(), 3)?;
         let last = frame_starts(&bytes, STORE_HEADER.len())?[2];
         let declared = declared_at(&bytes, last);
@@ -1648,7 +1647,7 @@ mod tests {
     /// first behind the prefix, so it authenticates and the frames after it are kept.
     #[test]
     fn an_inflated_record_with_records_behind_it_is_refused_untouched() -> TestResult {
-        let scratch = Scratch::new("store-inflated");
+        let scratch = Scratch::new("store-inflated")?;
         let bytes = written(scratch.path(), 3)?;
         let middle = frame_starts(&bytes, STORE_HEADER.len())?[1];
         let remaining = u32::try_from(bytes.len() - middle)?;
@@ -1664,7 +1663,7 @@ mod tests {
     /// refuses, because the record behind it authenticates.
     #[test]
     fn a_damaged_cut_record_with_an_acknowledged_one_behind_it_is_refused() -> TestResult {
-        let scratch = Scratch::new("store-damaged");
+        let scratch = Scratch::new("store-damaged")?;
         let bytes = written(scratch.path(), 3)?;
         let middle = frame_starts(&bytes, STORE_HEADER.len())?[1];
         let remaining = u32::try_from(bytes.len() - middle)?;
@@ -1681,7 +1680,7 @@ mod tests {
     /// them, since each repair is an `fsync`.
     #[test]
     fn an_append_cut_inside_the_final_record_is_repaired() -> TestResult {
-        let scratch = Scratch::new("store-cut");
+        let scratch = Scratch::new("store-cut")?;
         let bytes = written(scratch.path(), 3)?;
         let last = frame_starts(&bytes, STORE_HEADER.len())?[2];
         let kept = u64::try_from(last)?;
@@ -1718,7 +1717,7 @@ mod tests {
     /// byte and each try decodes, so the cost is the thing to bound.
     #[test]
     fn a_ceiling_sized_noise_tail_is_trimmed_in_bounded_time() -> TestResult {
-        let scratch = Scratch::new("store-noise");
+        let scratch = Scratch::new("store-noise")?;
         let mut bytes = written(scratch.path(), 1)?;
         let kept = u64::try_from(bytes.len())?;
         bytes.extend_from_slice(&u32::try_from(MAX_RECORD_BYTES)?.to_be_bytes());

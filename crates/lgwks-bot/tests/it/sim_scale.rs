@@ -90,15 +90,16 @@ fn tier(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let dir = sim.scratch("tier")?;
         let path = sim.journal_path(&dir, 0);
-        let requested = TIERS[usize::try_from(sim.rng().below(4)).unwrap_or(0)];
+        let requested = TIERS[usize::try_from(sim.rng().below(4))?];
         // The journal's shipped event cap is the real bound on how much history
         // one store can hold, and an attempt costs two events, so the attempts
         // one journal can fence is half the cap. Both numbers go into the
         // trace: a scale claim that quietly shrank to fit would be reporting a
         // level nobody ran.
-        let ceiling = u32::try_from(MAX_JOURNAL_EVENTS.checked_div(2).unwrap_or(2))
-            .unwrap_or(2)
-            .max(1);
+        let attempts = MAX_JOURNAL_EVENTS
+            .checked_div(2)
+            .ok_or("an attempt costs two events")?;
+        let ceiling = u32::try_from(attempts)?.max(1);
         let level = requested.min(ceiling);
 
         let mut journal = FileJournal::open(&path)?;
@@ -135,10 +136,11 @@ fn tier(band: Band) -> TestResult {
         drop(reopened);
 
         sim.record("tier-fences");
-        sim.trace.record_u64("tier-requested", u64::from(requested));
-        sim.trace.record_u64("tier-reached", u64::from(level));
-        sim.trace.record_u64("tier-ceiling", u64::from(ceiling));
-        sim.trace.record_count("tier-events", held);
+        sim.trace
+            .record_number("tier-requested", u64::from(requested));
+        sim.trace.record_number("tier-reached", u64::from(level));
+        sim.trace.record_number("tier-ceiling", u64::from(ceiling));
+        sim.trace.record_number("tier-events", held);
         Ok(())
     })
 }
@@ -226,8 +228,10 @@ fn provision(band: Band) -> TestResult {
         let (distinct, _) = provision_tenants(sim, &dir, total)?;
 
         sim.record("provisions-isolated");
-        sim.trace.record_u64("provision-tenants", u64::from(total));
-        sim.trace.record_count("provision-distinct-tails", distinct);
+        sim.trace
+            .record_number("provision-tenants", u64::from(total));
+        sim.trace
+            .record_number("provision-distinct-tails", distinct);
         Ok(())
     })
 }
@@ -245,20 +249,20 @@ fn the_named_five_thousand_tenant_provision() -> TestResult {
     let (distinct, events) = provision_tenants(&sim, &dir, TENANT_PROVISIONS)?;
 
     assert_eq!(
-        u64::try_from(events).unwrap_or(0),
+        u64::try_from(events)?,
         u64::from(TENANT_PROVISIONS).saturating_mul(2),
         "{TENANT_PROVISIONS} provisions did not each land one two-rung ladder"
     );
     assert_eq!(
         distinct,
-        usize::try_from(TENANT_PROVISIONS).unwrap_or(0),
+        usize::try_from(TENANT_PROVISIONS)?,
         "{TENANT_PROVISIONS} provisions produced {distinct} distinct tails, so two \
          tenants shared a fence"
     );
     sim.record("named-provision-isolated");
     sim.trace
-        .record_u64("named-provision-tenants", u64::from(TENANT_PROVISIONS));
-    sim.trace.record_count("named-provision-events", events);
+        .record_number("named-provision-tenants", u64::from(TENANT_PROVISIONS));
+    sim.trace.record_number("named-provision-events", events);
     Ok(())
 }
 
@@ -280,7 +284,7 @@ fn ephemeral(band: Band) -> TestResult {
         );
         drop(journal);
         sim.record("state-is-ephemeral");
-        sim.trace.record_count("ephemeral-entries", entries);
+        sim.trace.record_number("ephemeral-entries", entries);
         Ok(())
     })
 }
@@ -300,9 +304,10 @@ fn portable(band: Band) -> TestResult {
         let bytes = std::fs::read(journal.path())?;
         drop(journal);
 
+        let named = journal_path_of(&path).ok_or("a journal path names its file")?;
         assert_eq!(
             journal_path_of(&path),
-            Some(journal_path_of(&path).unwrap_or_default()),
+            Some(named),
             "a path did not name the same file twice"
         );
         let reopened = FileJournal::open(&path)?;
@@ -317,7 +322,7 @@ fn portable(band: Band) -> TestResult {
             "reading a journal through a nested path rewrote it"
         );
         sim.record("path-is-portable");
-        sim.trace.record_count("portable-bytes", bytes.len());
+        sim.trace.record_number("portable-bytes", bytes.len());
         Ok(())
     })
 }
@@ -342,8 +347,8 @@ fn tails(band: Band) -> TestResult {
         let (distinct, _) = provision_tenants(sim, &dir, tenants)?;
 
         sim.record("tails-are-per-tenant");
-        sim.trace.record_u64("tails-tenants", u64::from(tenants));
-        sim.trace.record_count("tails-distinct", distinct);
+        sim.trace.record_number("tails-tenants", u64::from(tenants));
+        sim.trace.record_number("tails-distinct", distinct);
         Ok(())
     })
 }
@@ -362,7 +367,7 @@ fn fanout(band: Band) -> TestResult {
         let mut journal = FileJournal::open(&path)?;
         journal.compare_and_append_all(&events)?;
 
-        let expected = usize::try_from(attempts).unwrap_or(0).saturating_mul(2);
+        let expected = usize::try_from(attempts)?.saturating_mul(2);
         assert_eq!(
             journal.events().count(),
             expected,
@@ -375,14 +380,15 @@ fn fanout(band: Band) -> TestResult {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             keys.len(),
-            usize::try_from(attempts).unwrap_or(0),
+            usize::try_from(attempts)?,
             "a fan-out of {attempts} attempts produced {} distinct keys",
             keys.len()
         );
         drop(journal);
         sim.record("fanout-exact");
-        sim.trace.record_u64("fanout-attempts", u64::from(attempts));
-        sim.trace.record_count("fanout-events", expected);
+        sim.trace
+            .record_number("fanout-attempts", u64::from(attempts));
+        sim.trace.record_number("fanout-events", expected);
         Ok(())
     })
 }
@@ -404,10 +410,13 @@ fn replay(band: Band) -> TestResult {
         }
         // Every tenant was written twice and every one still holds one ladder:
         // the journal refuses the repeat, which is what makes a replay safe.
-        let width = usize::try_from(tenants).unwrap_or(1);
+        let width = usize::try_from(tenants)?;
         let mut per_tenant = vec![0usize; width];
         for (index, count) in totals.iter().enumerate() {
-            per_tenant[index.checked_rem(width).unwrap_or(0)] = *count;
+            let slot = index
+                .checked_rem(width)
+                .ok_or("the replay has at least one tenant")?;
+            per_tenant[slot] = *count;
         }
         for (tenant, count) in per_tenant.iter().enumerate() {
             assert_eq!(
@@ -416,7 +425,8 @@ fn replay(band: Band) -> TestResult {
             );
         }
         sim.record("replay-adds-nothing");
-        sim.trace.record_u64("replay-tenants", u64::from(tenants));
+        sim.trace
+            .record_number("replay-tenants", u64::from(tenants));
         Ok(())
     })
 }
@@ -447,7 +457,7 @@ fn crashprefix(band: Band) -> TestResult {
         let uncertain = recovered.recover().uncertain();
         assert_eq!(
             uncertain.len(),
-            usize::try_from(cut).unwrap_or(0),
+            usize::try_from(cut)?,
             "every prepared dispatch in the prefix must be uncertain, and {} were not",
             uncertain.len()
         );
@@ -469,8 +479,8 @@ fn crashprefix(band: Band) -> TestResult {
         );
         drop(repaired);
         sim.record("crash-leaves-recoverable-prefix");
-        sim.trace.record_u64("crash-cut", u64::from(cut));
-        sim.trace.record_count("crash-prefix", prefix);
+        sim.trace.record_number("crash-cut", u64::from(cut));
+        sim.trace.record_number("crash-prefix", prefix);
         Ok(())
     })
 }
@@ -502,7 +512,7 @@ fn fairness(band: Band) -> TestResult {
             run.entered()
         );
         sim.record("one-tenant-one-dispatch");
-        sim.trace.record_count("fairness-keys", keys.len());
+        sim.trace.record_number("fairness-keys", keys.len());
         Ok(())
     })
 }
@@ -535,8 +545,8 @@ fn latency(band: Band) -> TestResult {
             );
         }
         sim.record("per-tenant-work-constant");
-        sim.trace.record_count("latency-tenants", per_tenant.len());
-        sim.trace.record_count("latency-single", single_events);
+        sim.trace.record_number("latency-tenants", per_tenant.len());
+        sim.trace.record_number("latency-single", single_events);
         Ok(())
     })
 }

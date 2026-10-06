@@ -109,11 +109,11 @@ struct Observed {
 impl Observed {
     /// Append this observation to `trace`.
     fn record(&self, trace: &mut Trace) {
-        trace.record_u64("queued", self.queued);
-        trace.record_u64("refused", self.refused);
-        trace.record_u64("abandoned", self.abandoned);
-        trace.record_u64("compactions", self.compactions);
-        trace.record_count("widest", self.widest);
+        trace.record_number("queued", self.queued);
+        trace.record_number("refused", self.refused);
+        trace.record_number("abandoned", self.abandoned);
+        trace.record_number("compactions", self.compactions);
+        trace.record_number("widest", self.widest);
     }
 }
 
@@ -127,17 +127,6 @@ fn roster(tenants: u32) -> Result<usize, Box<dyn Error>> {
     match usize::try_from(tenants) {
         Ok(as_index) => Ok(as_index),
         Err(refusal) => Err(format!("a roster of {tenants} is not addressable: {refusal}").into()),
-    }
-}
-
-/// A count wide enough for a trace record.
-///
-/// The ceiling rather than a different number, because a trace that recorded a
-/// silent zero for a count nobody could read would be a receipt for nothing.
-fn wide(count: usize) -> u64 {
-    match u64::try_from(count) {
-        Ok(as_count) => as_count,
-        Err(_) => u64::MAX,
     }
 }
 
@@ -165,12 +154,7 @@ fn scenario(seed: u64) -> Result<(Trace, Observed), Box<dyn Error>> {
     let mut next_waiter = 0_u64;
 
     for _ in 0..ACTS {
-        let index = match usize::try_from(rng.below(TENANTS)) {
-            Ok(as_index) => as_index,
-            Err(refusal) => {
-                return Err(format!("a drawn tenant index is not addressable: {refusal}").into());
-            }
-        };
+        let index = self::roster(rng.below(TENANTS))?;
         let Some(tenant) = named.get(index).cloned() else {
             trace.record("a-tenant-index-past-the-roster");
             continue;
@@ -193,7 +177,7 @@ fn scenario(seed: u64) -> Result<(Trace, Observed), Box<dyn Error>> {
                     }
                     Arrival::Refused { limit } => {
                         observed.refused = observed.refused.saturating_add(1);
-                        trace.record_u64("refused-at", wide(limit));
+                        trace.record_number("refused-at", limit);
                     }
                     // Unreachable: the pool answers `None` to every arrival.
                     // Recorded rather than asserted, so a scenario that met it
@@ -221,7 +205,7 @@ fn scenario(seed: u64) -> Result<(Trace, Observed), Box<dyn Error>> {
                 let after = core.retained_of(&tenant);
                 if after < before {
                     observed.compactions = observed.compactions.saturating_add(1);
-                    trace.record_u64("compacted-by", wide(before.saturating_sub(after)));
+                    trace.record_number("compacted-by", before.saturating_sub(after));
                     // A compaction retains exactly the waiters that answer live,
                     // so the retained count and the scheduler's own live count are
                     // the same number afterwards. A compaction that dropped a live
@@ -239,8 +223,8 @@ fn scenario(seed: u64) -> Result<(Trace, Observed), Box<dyn Error>> {
         for (position, name) in named.iter().enumerate() {
             let retained = core.retained_of(name);
             observed.widest = observed.widest.max(retained);
-            trace.record_count("retained", retained);
-            trace.record_count("live", core.queued_of(name));
+            trace.record_number("retained", retained);
+            trace.record_number("live", core.queued_of(name));
             let ceiling = retention_ceiling();
             assert!(
                 retained <= ceiling,
@@ -349,11 +333,11 @@ struct Sweep {
 impl Sweep {
     /// Append this sweep to `trace`, in a fixed field order.
     fn record(&self, trace: &mut Trace) {
-        trace.record_u64("bound-queued", self.queued);
-        trace.record_u64("bound-per-tenant-refused", self.per_tenant_refused);
-        trace.record_u64("bound-supervisor-refused", self.supervisor_refused);
-        trace.record_u64("bound-abandoned", self.abandoned);
-        trace.record_count("bound-widest", self.widest);
+        trace.record_number("bound-queued", self.queued);
+        trace.record_number("bound-per-tenant-refused", self.per_tenant_refused);
+        trace.record_number("bound-supervisor-refused", self.supervisor_refused);
+        trace.record_number("bound-abandoned", self.abandoned);
+        trace.record_number("bound-widest", self.widest);
     }
 }
 
@@ -378,12 +362,7 @@ fn sweep_bound(seed: u64, tenants: u32, queue_total: usize) -> Result<Sweep, Box
     let mut abandoned: BTreeSet<u64> = BTreeSet::new();
     let mut next_waiter = 0_u64;
     for _ in 0..ACTS {
-        let index = match usize::try_from(rng.below(tenants.max(1))) {
-            Ok(as_index) => as_index,
-            Err(refusal) => {
-                return Err(format!("a drawn tenant index is not addressable: {refusal}").into());
-            }
-        };
+        let index = self::roster(rng.below(tenants.max(1)))?;
         let Some(tenant) = named.get(index).cloned() else {
             trace.record("a-tenant-index-past-the-roster");
             continue;
@@ -399,7 +378,7 @@ fn sweep_bound(seed: u64, tenants: u32, queue_total: usize) -> Result<Sweep, Box
                     }
                     Arrival::SupervisorFull { limit } => {
                         observed.supervisor_refused = observed.supervisor_refused.saturating_add(1);
-                        trace.record_u64("supervisor-refused-at", wide(limit));
+                        trace.record_number("supervisor-refused-at", limit);
                     }
                     _ => trace.record("an-arrival-was-admitted-with-a-spent-pool"),
                 }
@@ -418,8 +397,8 @@ fn sweep_bound(seed: u64, tenants: u32, queue_total: usize) -> Result<Sweep, Box
         }
         let retained = core.retained_total();
         observed.widest = observed.widest.max(retained);
-        trace.record_count("retained", retained);
-        trace.record_count("tenants-with-queues", core.tenants_with_queues());
+        trace.record_number("retained", retained);
+        trace.record_number("tenants-with-queues", core.tenants_with_queues());
         assert!(
             retained <= queue_total,
             "seed {seed}: {tenants} tenants retained {retained} waiters against a \
@@ -448,7 +427,9 @@ fn the_supervisor_waiting_bound_is_global(band: sim::Band) -> TestResult {
 
     for (tier_index, tenants) in TIERS.iter().copied().enumerate() {
         let Some(bound) = BOUNDS.get(tier_index).copied() else {
-            return Err("a tier had no bound beside it".into());
+            let refusal = Err("a tier had no bound beside it".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "the_supervisor_waiting_bound_is_global: returning an error to the caller");
+            return refusal;
         };
         let mut widest = 0_usize;
         let mut refused = 0_u64;
@@ -534,14 +515,14 @@ struct Fairness {
 impl Fairness {
     /// Append this round to `trace`, in tenant order.
     fn record(&self, trace: &mut Trace, tenants: u32) {
-        trace.record_u64("fair-tenants", u64::from(tenants));
-        trace.record_u64("fair-total-weight", self.total_weight);
-        trace.record_u64("fair-handed-out", self.handed_out);
-        trace.record_u64("fair-worst-deviation", self.worst_deviation);
-        trace.record_u64("fair-longest-wait", self.longest_wait);
+        trace.record_number("fair-tenants", u64::from(tenants));
+        trace.record_number("fair-total-weight", self.total_weight);
+        trace.record_number("fair-handed-out", self.handed_out);
+        trace.record_number("fair-worst-deviation", self.worst_deviation);
+        trace.record_number("fair-longest-wait", self.longest_wait);
         for (weight, grants) in self.weights.iter().zip(&self.grants) {
-            trace.record_u64("fair-weight", *weight);
-            trace.record_u64("fair-grants", *grants);
+            trace.record_number("fair-weight", *weight);
+            trace.record_number("fair-grants", *grants);
         }
     }
 }
@@ -600,10 +581,14 @@ fn fair_round(tenants: u32, seed: u64) -> Result<Fairness, Box<dyn Error>> {
     for index in 0..tenants {
         let weight = u64::from(rng.between(1, 4));
         let Ok(declared) = u32::try_from(weight) else {
-            return Err("a weight drawn between one and four is not a u32".into());
+            let refusal = Err("a weight drawn between one and four is not a u32".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+            return refusal;
         };
         let Some(nonzero) = NonZeroU32::new(declared) else {
-            return Err("a weight drawn between one and four is never zero".into());
+            let refusal = Err("a weight drawn between one and four is never zero".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+            return refusal;
         };
         let tenant = Tenant::new(&format!("fair-{index}"))?;
         policy = policy.with_weight(&tenant, nonzero)?;
@@ -621,23 +606,34 @@ fn fair_round(tenants: u32, seed: u64) -> Result<Fairness, Box<dyn Error>> {
             match arrival {
                 Arrival::Queued => {}
                 Arrival::Refused { limit } => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "at tier {tenants} a backlogged tenant hit its own queue bound \
                          of {limit} on its {next_waiter}th arrival"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+                    return refusal;
                 }
                 Arrival::Immediate(_) => {
-                    return Err("a backlogged tenant was admitted against a spent pool".into());
+                    let refusal =
+                        Err("a backlogged tenant was admitted against a spent pool".into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+                    return refusal;
                 }
                 Arrival::SupervisorFull { limit } => {
-                    return Err(format!(
+                    let refusal = Err(format!(
                         "at tier {tenants} a backlogged tenant hit the supervisor's own \
                          bound of {limit} on its {next_waiter}th arrival"
                     )
                     .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+                    return refusal;
                 }
-                _ => return Err("an unknown arrival outcome".into()),
+                _ => {
+                    let refusal = Err("an unknown arrival outcome".into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+                    return refusal;
+                }
             }
             next_waiter = next_waiter.saturating_add(1);
         }
@@ -655,24 +651,30 @@ fn fair_round(tenants: u32, seed: u64) -> Result<Fairness, Box<dyn Error>> {
         let mut is_live = |_waiter: &u64| true;
         let outcome = core.grant(handed_out, &mut is_live);
         let GrantOutcome::Granted(grant) = outcome else {
-            return Err(format!(
+            let refusal = Err(format!(
                 "a continuously backlogged world of {tenants} tenants ran out of waiters \
                  after {handed_out} grants"
             )
             .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+            return refusal;
         };
         let Some(index) = named
             .iter()
             .position(|candidate| *candidate == grant.tenant)
         else {
-            return Err("the round granted to a tenant this sweep never built".into());
+            let refusal = Err("the round granted to a tenant this sweep never built".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+            return refusal;
         };
         // The admission the grant took is released immediately: the question is
         // the order, and a tenant held at its ceiling would drop off the ring and
         // turn a fairness question into a queue-length one.
         core.note_release(&grant.tenant);
         let Some(previous) = last_served.get(index).copied() else {
-            return Err("the grant named a tenant this sweep never sized a tally for".into());
+            let refusal = Err("the grant named a tenant this sweep never sized a tally for".into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+            return refusal;
         };
         let waited = handed_out.saturating_sub(previous);
         longest_wait = longest_wait.max(waited);
@@ -693,9 +695,10 @@ fn fair_round(tenants: u32, seed: u64) -> Result<Fairness, Box<dyn Error>> {
         if handed_out.is_multiple_of(total_weight) || handed_out == target {
             for (position, count) in grants.iter().copied().enumerate() {
                 let Some(weight) = weights.get(position).copied() else {
-                    return Err(
-                        "the round named a tenant this sweep never drew a weight for".into(),
-                    );
+                    let refusal =
+                        Err("the round named a tenant this sweep never drew a weight for".into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fair_round: returning an error to the caller");
+                    return refusal;
                 };
                 let above = count
                     .saturating_mul(total_weight)
@@ -771,10 +774,10 @@ fn backlogged_tenants_take_shares_in_proportion_to_their_weights(band: sim::Band
         // where it means something -- inside `fair_round`, against the round
         // length of the world that produced the gap -- and the widest round this
         // band drew is recorded beside the longest gap so a reader has both.
-        trace.record_u64("fair-tier-grants", rounds);
-        trace.record_u64("fair-tier-widest-round", world_weight);
-        trace.record_u64("fair-tier-worst-deviation", worst_deviation);
-        trace.record_u64("fair-tier-longest-wait", longest);
+        trace.record_number("fair-tier-grants", rounds);
+        trace.record_number("fair-tier-widest-round", world_weight);
+        trace.record_number("fair-tier-worst-deviation", worst_deviation);
+        trace.record_number("fair-tier-longest-wait", longest);
     }
     Ok(())
 }
@@ -930,18 +933,19 @@ fn flood_round_structure_in(seed: u64, arm: Arm) -> Result<(), Box<dyn Error>> {
                     Ok(Err(SpawnRefused::TenantAtCapacity { .. }))
                     | Ok(Err(SpawnRefused::SupervisorQueueFull { .. })) => {}
                     Ok(Err(SpawnRefused::Cancelled)) => {
-                        return Err(format!(
+                        let refusal = Err(format!(
                             "seed {seed}: the {} arm refused a submission as cancelled at \
                              round {round} slot {slot}",
                             arm.label()
-                        )
-                        .into());
+                        ));
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flood: a submission was refused as cancelled");
+                        return refusal;
                     }
                     _ => {
                         let loud_state = supervisor.tenant_capacity(&loud);
                         let quiet_state = supervisor.tenant_capacity(&quiet);
                         let free = supervisor.snapshot().free();
-                        return Err(format!(
+                        let refusal = Err(format!(
                             "seed {seed}: the {} arm wedged -- round {round} slot {slot} on \
                              the {label} tenant never resolved within {FLOOD_BOUND:?}. A \
                              contended submission parked and no admitted task returned its \
@@ -952,8 +956,9 @@ fn flood_round_structure_in(seed: u64, arm: Arm) -> Result<(), Box<dyn Error>> {
                             loud_state.1,
                             quiet_state.0,
                             quiet_state.1,
-                        )
-                        .into());
+                        ));
+                        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "flood: a contended submission wedged");
+                        return refusal;
                     }
                 }
             }

@@ -417,6 +417,13 @@ pub enum IncompleteReason {
         /// The applied bound.
         limit: usize,
     },
+    /// The parser was still working when its deadline passed and was stopped,
+    /// so there is no tree to inspect. A statement about the subject's cost
+    /// for this grammar, not about its syntax.
+    ParseDeadlineExceeded {
+        /// The deadline the parser ran under, in milliseconds.
+        deadline_ms: u64,
+    },
 }
 
 /// One rule's coverage in one inspection.
@@ -726,21 +733,45 @@ fn rule_matches(rule_id: &str, node_kind: &str, node_text: &str) -> bool {
 /// formatters insert is absorbed. Anything with no head yields `""`, which
 /// matches no rule.
 fn macro_head(node_text: &str) -> &str {
+    // Two answers, both real: a terminator ends the head there, and text with no
+    // terminator *is* its own head. Nothing here is a value standing in for a
+    // piece that was missing.
     node_text
-        .split(['!', '(', ' ', '\t', '\n'])
-        .next()
-        .unwrap_or("")
+        .split_once(['!', '(', ' ', '\t', '\n'])
+        .map_or(node_text, |(head, _)| head)
 }
 
 /// A bounded, char-boundary-safe preview of `source[start..end]`.
 fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
-    let slice = source.get(start..end).unwrap_or("");
+    // A byte range that names nothing in this source — a stale node, a parser
+    // reporting past the end — has no text to preview. That is the empty preview
+    // *with* the truncated flag set, so a caller cannot read it as a node whose
+    // text was genuinely empty.
+    let Some(slice) = source.get(start..end) else {
+        return (String::new(), true);
+    };
     let cutoff = slice
         .char_indices()
         .nth(MAX_PREVIEW_BYTES)
         .map_or(slice.len(), |(at, _)| at);
     let truncated = cutoff < slice.len();
     (slice[..cutoff].to_owned(), truncated)
+}
+
+/// Milliseconds in `duration`, saturating at the representable ceiling.
+///
+/// Split through the two infallible `Duration` projections so the ceiling comes
+/// out of saturating arithmetic rather than out of a narrowing conversion whose
+/// failure arm would have had to report a deadline the parser never reached.
+/// `u64::MAX` milliseconds is about half a million years, so the ceiling is
+/// unreachable by a real parse and exists so a caller asking past it gets a
+/// stated bound rather than a wrapped one.
+fn deadline_millis(duration: std::time::Duration) -> u64 {
+    const MILLIS_PER_SEC: u64 = 1_000;
+    duration
+        .as_secs()
+        .saturating_mul(MILLIS_PER_SEC)
+        .saturating_add(u64::from(duration.subsec_millis()))
 }
 
 /// The parser this operation calls, as a seam.
@@ -954,6 +985,42 @@ fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> 
             return base(
                 Verdict::Incomplete {
                     reason: IncompleteReason::NodeBudgetExceeded { observed, limit },
+                },
+                Some(language_name),
+                coverage,
+                Vec::new(),
+                empty,
+            );
+        }
+        // The parser's own depth refusals — the tree it built, or the markdown
+        // containers it was never handed — are a depth budget reached, so they
+        // are incomplete rather than an infrastructure fault: a deeply nested
+        // file is a fact about the subject.
+        Err(ParseError::AstTooDeep {
+            observed, limit, ..
+        })
+        | Err(ParseError::ContainerNestingTooDeep {
+            observed, limit, ..
+        }) => {
+            return base(
+                Verdict::Incomplete {
+                    reason: IncompleteReason::DepthBudgetExceeded {
+                        reached: observed,
+                        limit,
+                    },
+                },
+                Some(language_name),
+                coverage,
+                Vec::new(),
+                empty,
+            );
+        }
+        Err(ParseError::TimedOut { after, .. }) => {
+            return base(
+                Verdict::Incomplete {
+                    reason: IncompleteReason::ParseDeadlineExceeded {
+                        deadline_ms: deadline_millis(after),
+                    },
                 },
                 Some(language_name),
                 coverage,
@@ -1240,6 +1307,36 @@ mod tests {
         assert!(
             !matches!(report.verdict(), Verdict::Clean { .. }),
             "an infrastructure failure must never read as clean"
+        );
+        Ok(())
+    }
+
+    /// A parse stopped at its deadline is an incomplete inspection that names
+    /// the deadline, never an infrastructure failure and never clean.
+    ///
+    /// The seam here is the real `lgwks_ast` deadline path with a deadline of
+    /// zero, not a fabricated refusal: the subject is large enough that the
+    /// parser reaches its first progress check, so `try_parse_within` really
+    /// stops it, and what this asserts is how the operation reports that.
+    #[test]
+    fn a_parse_stopped_at_its_deadline_is_incomplete_not_an_infrastructure_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subject = "fn f() {".repeat(4_000);
+        let request = InspectRequest::new("src/lib.rs", &subject);
+        let stopped: ParseFn =
+            |code, language| lgwks_ast::try_parse_within(code, language, std::time::Duration::ZERO);
+        let report = inspect_with(&request, stopped);
+        match report.verdict().clone() {
+            Verdict::Incomplete {
+                reason: IncompleteReason::ParseDeadlineExceeded { deadline_ms },
+            } => assert_eq!(deadline_ms, 0, "the report names the deadline applied"),
+            other => {
+                return Err(format!("expected a deadline refusal, got {other:?}").into());
+            }
+        }
+        assert!(
+            report.findings().is_empty(),
+            "a parse with no tree retains no finding"
         );
         Ok(())
     }

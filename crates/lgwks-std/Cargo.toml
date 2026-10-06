@@ -105,3 +105,12 @@ name = "http_alloc"
 path = "tests/http_alloc.rs"
 required-features = ["http"]
 
+# Owns its process, and is its own binary for that reason: a shutdown closes
+# the blocking pool's admission for the life of the process, so no other test
+# could run beside it. It is the only place the public
+# `configure_blocking_pool` and `shutdown_blocking_pool` can be driven against
+# the real process-wide pool (#264).
+[[test]]
+name = "sim_task_pool_public"
+path = "tests/sim_task_pool_public.rs"
+

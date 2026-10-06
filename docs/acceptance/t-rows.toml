@@ -1,0 +1,562 @@
+# Machine-readable acceptance map for the T01-T36 falsifier rows in
+# `docs/orchestration-acceptance.spec.md`. One file, one concern: which named
+# tests address which row, and how far that evidence honestly reaches.
+#
+# Every `tests` entry is a nextest test name as `cargo nextest list` prints it:
+# `<binary>::<test>` for a separate integration binary, and `it::<test>` for the
+# consolidated `tests/it/` binary, where `<test>` is `module::function`.
+# `scripts/acceptance-receipts.py` reads this file, runs exactly these tests, and
+# writes the observed result to `evidence/<revision>.json`.
+#
+# `state` is the spec's own evidence ladder:
+#   planned                  - no test addresses the row
+#   missing                  - a test is named but none observed passing
+#   present                  - a named test exercises part of the row
+#   exercised                - the row's falsifier is driven through its interface
+#   independently_evidenced - plus evidence from outside this crate's tests
+#   accepted                 - the release run recorded it
+# `gap` states, in one sentence, what the named tests still do not assert. A row
+# with no gap is one whose text is fully falsified by the tests named.
+
+schema = 1
+spec = "docs/orchestration-acceptance.spec.md"
+generated_by = "scripts/acceptance-receipts.py"
+
+[[row]]
+id = "T01"
+requires = "DX-01/03/04"
+row = "A one-shot task returns a typed value with one task declaration and call; no fake observer/tick loop or manual reaping."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::a_one_declaration_one_call_returns_a_typed_value_t01",
+  "it::task_front_door::one_declaration_one_call_returns_a_typed_value",
+  "it::task_front_door::a_task_body_runs_under_its_own_named_step",
+  "it::task_front_door::a_report_claims_no_external_effect",
+]
+
+[[row]]
+id = "T02"
+requires = "DX-04/05"
+row = "Compile-fail source/condition/action mismatch and cross-schema result binding; equivalent correct local borrowed/non-Send program compiles and runs."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t02_compile_surface::a_source_condition_action_mismatch_is_refused",
+  "it::t02_compile_surface::a_cross_schema_result_binding_is_refused",
+  "it::t02_compile_surface::a_correct_local_borrowed_non_send_consumer_compiles",
+  "it::t02_compile_surface::a_local_borrowed_non_send_body_runs_on_the_host",
+]
+
+[[row]]
+id = "T03"
+requires = "DX-05/LC-08"
+row = "Drop local composition while suspended; no borrowed child escapes. An independently timed child process detects a non-yielding callback without claiming in-process preemption."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::a_dropped_suspended_run_releases_its_permit_t03",
+  "it::task_front_door::dropping_a_suspended_run_releases_its_permit",
+  "t03_non_yielding::a_non_yielding_callback_is_detected_from_outside_and_not_preempted",
+  "t03_non_yielding::the_same_front_door_admits_a_callback_that_does_yield",
+]
+
+[[row]]
+id = "T04"
+requires = "LC-02/03"
+row = "Nested `all`/`map` at concurrency one finishes; parents waiting for children do not hoard execution permits."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::nested_runs_finish_at_a_ceiling_of_one_t04",
+  "it::task_front_door::nested_runs_complete_at_a_ceiling_of_one",
+  "it::sim_task::ceiling_binds_the_peak_band_00",
+  "it::sim_task::ceiling_binds_the_peak_band_01",
+  "it::sim_task::ceiling_binds_the_peak_band_02",
+  "it::sim_task::ceiling_binds_the_peak_band_03",
+]
+
+[[row]]
+id = "T05"
+requires = "LC-02/11"
+row = "Large outputs, full stderr and slow stdout consumer stay within declared retained-byte ceilings; malformed/truncated framed output is not parsed as success."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sys_process_binding::a_flooding_child_against_a_slow_reader_stays_within_its_ceiling",
+  "it::sys_process_binding::a_chatty_child_is_drained_and_truncated_within_its_ceiling",
+  "it::sys_process_binding::a_framed_record_cut_off_mid_frame_is_a_typed_refusal",
+  "it::sys_process_binding::a_capture_ceiling_ends_the_framed_read_rather_than_the_child",
+  "it::sys_process_binding::execute_reports_the_exit_code_and_the_captured_streams",
+]
+
+[[row]]
+id = "T06"
+requires = "LC-03"
+row = "Saturated task A cannot starve independent B; one slow source does not block unrelated ready work. Use controlled completions, not sleeps as the oracle."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sim_t_rows::a_held_mass_never_starves_an_independent_chain_t06",
+  "it::observe_refresh::a_chain_held_at_capacity_does_not_starve_an_independent_chain",
+  "it::observe_refresh::a_slow_source_does_not_block_an_independent_chain",
+  "it::observe_refresh::a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier",
+  "it::sim_observe_refresh::a_seeded_mass_of_held_chains_never_starves_an_independent_chain",
+  "it::sim_observe_refresh::saturation_band_30",
+  "it::sim_observe_refresh::saturation_band_31",
+]
+
+[[row]]
+id = "T07"
+requires = "LC-04"
+row = "A succeeds with a new fingerprint, B fails the atomic observation group, then B recovers; A's uncommitted update still executes exactly once. Test initial and subsequent changes."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sim_t_rows::a_failed_group_leaves_its_own_chain_forced_t07",
+  "it::observe_refresh::a_failed_refresh_keeps_the_baseline_marked",
+  "it::sim_observe_refresh::a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it",
+  "it::observe_refresh::two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain",
+  "it::sim_observe_refresh::two_tenants_interleaved_ticks_never_cross_attribution",
+]
+
+[[row]]
+id = "T08"
+requires = "LC-04"
+row = "Disconnect, watch overflow, stale remote key and invalidation failure force refresh rather than permanent quiet state."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sim_t_rows::every_declared_reason_forces_a_refresh_t08",
+  "it::observe_refresh::a_declared_failure_forces_a_refresh_rather_than_a_permanent_quiet_state",
+  "it::observe_refresh::a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet",
+  "it::observe_refresh::a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each",
+  "it::observe_refresh::a_stalled_chain_is_re_polled_and_commits_when_it_answers",
+  "it::sim_observe_refresh::a_seeded_reason_per_chain_is_reported_against_its_own_chain",
+  "it::sim_observe_refresh::forced_refresh_band_00",
+  "it::sim_observe_refresh::forced_refresh_band_01",
+  "it::sim_observe_refresh::forced_refresh_band_02",
+]
+
+[[row]]
+id = "T09"
+requires = "DX-07"
+row = "Identical event payloads with different event IDs both execute; duplicate delivery of the same event does not. Latest-state mode reports intentional supersession separately."
+state = "exercised"
+gap = ""
+tests = [
+  "it::observe_refresh::identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not",
+  "it::observe_refresh::an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired",
+  "it::durable_dispatch::two_equal_payloads_with_distinct_event_ids_are_two_events",
+  "it::sim_observe_refresh::event_identities_band_14",
+  "it::sim_observe_refresh::event_identities_band_15",
+  "it::sim_observe_refresh::a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once",
+]
+
+[[row]]
+id = "T10"
+requires = "DX-06/LC-01"
+row = "A required predecessor fails, is abandoned, is skipped or becomes Unknown; dependent writes never run merely because it is no longer active."
+state = "present"
+gap = "The Unknown half is now swept over a seeded number of recovery cycles, with the dependent proved not to run and the predecessor's body proved to be entered exactly once; the other three predecessor states (Failed, Abandoned, Skipped) are named only through the ecs_tick and durable_dispatch journeys, not swept for one dependent."
+tests = [
+  "it::sim_t_rows::a_required_predecessor_holds_its_dependent_t10",
+  "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
+  "it::durable_dispatch::a_recovered_unknown_blocks_a_false_condition_and_its_successor",
+  "ecs_tick::an_abandoned_entry_blocks_its_successors",
+  "ecs_tick::a_skipped_entry_does_not_block_its_successor",
+  "ecs_tick::an_abandoned_entry_is_never_a_quiet_tick",
+]
+
+[[row]]
+id = "T11"
+requires = "LC-05/06"
+row = "A Unknown -> NotApplied -> B Unknown; delayed A NotApplied and A Applied cannot alter B. Duplicate A evidence stays attributable to A."
+state = "present"
+gap = "Holding an indeterminate predecessor across a seeded number of restarts, under one attributable key, with the body never re-entered, is now swept; no named test still delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown."
+tests = [
+  "it::sim_t_rows::an_indeterminate_predecessor_is_never_resent_t11",
+  "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
+  "it::durable_dispatch::a_recovered_unknown_blocks_a_false_condition_and_its_successor",
+  "it::durable_dispatch::a_poll_failure_does_not_erase_a_recovered_unknown",
+  "it::durable_dispatch::a_restart_holds_an_uncertain_attempt_rather_than_resending_it",
+  "it::effect_journal::e10_a_lost_reply_leaves_the_attempt_unknown_rather_than_not_applied",
+  "it::effect_journal::e10_evidence_settles_the_unknown_without_a_second_dispatch",
+  "it::wrong_identity_evidence::a_duplicate_is_idempotent_and_a_contradiction_is_refused",
+  "it::sim_dispatch::not_applied_r00",
+  "it::sim_dispatch::applied_never_r00",
+  "it::sim_dispatch::store_isolation_r00",
+]
+
+[[row]]
+id = "T12"
+requires = "LC-05/06"
+row = "Wrong tenant/run/action/payload/revision/environment/epoch evidence is refused without mutation; checked counter exhaustion never aliases an issued identity."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sim_t_rows::identical_digests_never_cross_tenants_t12",
+  "it::wrong_identity_evidence::every_wrong_identity_field_is_refused_and_the_correct_one_is_not",
+  "it::wrong_identity_evidence::a_settlement_carrying_another_runs_identity_is_refused",
+  "it::wrong_identity_evidence::a_refused_settlement_leaves_a_real_file_journal_byte_identical",
+  "it::wrong_identity_evidence::a_checked_counter_exhaustion_never_aliases_an_issued_identity",
+  "it::wrong_identity_evidence::a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable",
+  "it::sim_dispatch::store_isolation_r00",
+  "it::sim_dispatch::store_isolation_r01",
+]
+
+[[row]]
+id = "T13"
+requires = "LC-06/07"
+row = "Permanent policy refusal plus repeated NotApplied does not yield unlimited retries; authorized repair is distinct and root budgets remain charged."
+state = "exercised"
+gap = ""
+tests = [
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention",
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_across_runs",
+  "it::proposal::a_ledger_of_distinct_failures_reaches_its_own_intervention",
+  "it::repair::the_root_budget_stays_charged_across_repair_and_resume",
+  "it::repair::a_denied_repair_costs_nothing",
+  "it::sim_repair::a_spent_budget_refuses_every_later_attempt",
+]
+
+[[row]]
+id = "T14"
+requires = "LC-05/12/13"
+row = "Crash before intent ack, after ack before dispatch, after dispatch before response, after response before receipt and during recovery. No unknown effect is blindly replayed."
+state = "present"
+gap = "Four of the five named boundaries are covered; the crash before intent ack (nothing committed) has no named test of its own."
+tests = [
+  "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared",
+  "it::durable_crash_observation::a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
+  "it::durable_crash_observation::a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome",
+  "it::durable_crash_observation::a_kill_during_recovery_leaves_the_journal_exactly_as_it_was",
+  "it::durable_crash_observation::a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
+  "it::durable_crash_observation::a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
+  "it::effect_journal::e11_a_blind_resend_is_not_representable",
+]
+
+[[row]]
+id = "T15"
+requires = "LC-12"
+row = "Definition/input/order/schema drift during replay returns a typed incompatibility before new effects; replayed model results incur no new model request."
+state = "exercised"
+gap = ""
+tests = [
+  "it::sim_replay_drift::drift_kinds_are_refused_typed_band_00",
+  "it::sim_replay_drift::every_axis_is_refused_with_its_exact_drift_band_20",
+  "it::sim_replay_drift::compatible_resume_replays_without_a_new_request_band_04",
+  "it::sim_replay_drift::a_refusal_leaves_the_store_byte_identical_band_12",
+  "it::sim_replay_drift::same_seed_same_trace_hash_band_14",
+  "it::store_read_failure::an_unreadable_store_is_refused_as_itself_and_not_as_a_drift",
+]
+
+[[row]]
+id = "T16"
+requires = "LC-13"
+row = "Old worker returns after owner-epoch takeover; its receipt cannot authorize a stale dispatch or overwrite the current owner."
+state = "exercised"
+gap = ""
+tests = [
+  "it::owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize",
+  "it::owner_epoch_takeover::a_warrant_from_the_previous_generation_is_superseded",
+  "it::owner_epoch_takeover::the_current_generation_may_still_settle_its_own_attempt",
+  "it::owner_epoch_takeover::a_generation_and_a_tail_are_two_fences_and_both_answer",
+  "lgwks_bot::broker::tests::a_warrant_minted_before_a_replacement_is_refused_at_the_boundary",
+  "lgwks_bot::broker::tests::a_stale_controller_cannot_append_after_recovery",
+]
+
+[[row]]
+id = "T17"
+requires = "LC-08"
+row = "Drop a scoped waiter during an effect, then drain the still-owning host; report uncertainty and cleanup separately. Explicit durable submission outlives its client by contract."
+state = "present"
+gap = "Dropping the client and holding the uncertain attempt are named; no named test asserts that uncertainty and cleanup are reported as two independent facts from the same drained host."
+tests = [
+  "it::request_key::a_dropped_client_leaves_the_request_in_flight_for_a_later_client",
+  "it::request_key::a_host_stop_mid_run_leaves_the_request_resumable",
+  "it::durable_dispatch::a_restart_holds_an_uncertain_attempt_rather_than_resending_it",
+  "it::sim_journal::recover_uncertain_r00",
+  "it::sim_journal::recover_uncertain_r01",
+]
+
+[[row]]
+id = "T18"
+requires = "LC-09"
+row = "Readiness failure, duplicate readiness, stale generation and failure after ready reach the right caller/dependants; no readiness sleeps in task code."
+state = "exercised"
+gap = ""
+tests = [
+  "it::ready::a_failure_before_ready_reaches_the_dependant_and_the_report",
+  "it::ready::a_duplicate_ready_signal_is_refused_and_releases_nothing",
+  "it::ready::a_stale_generation_is_refused_and_releases_nothing",
+  "it::ready::a_failure_after_ready_cancels_every_dependant_still_running",
+  "it::ready::no_readiness_path_sleeps_or_polls",
+  "it::ready::real_process::a_child_that_dies_after_announcing_stops_the_dependants",
+  "it::sim_ready::a_duplicate_releases_once_in_every_interleaving_band_00",
+  "it::sim_ready::a_failure_after_ready_reaches_every_running_dependant_band_00",
+]
+
+[[row]]
+id = "T19"
+requires = "LC-10"
+row = "`sh -c 'sleep 60 & exit 0'`: parent exit is not reported as complete tree cleanup while descendants remain. Also test nonzero parent exit."
+state = "exercised"
+gap = ""
+tests = [
+  "it::process_ownership::zero_exit_does_not_fabricate_tree_cleanup",
+  "it::process_ownership::nonzero_exit_does_not_fabricate_tree_cleanup",
+  "it::sys_process_binding::a_zero_exit_reaps_a_living_descendant_before_claiming_cleanup",
+  "it::rt_process::a_non_zero_exit_is_reported_failed_with_its_status",
+]
+
+[[row]]
+id = "T20"
+requires = "LC-10"
+row = "Abort/drop before manager future's first poll; spawned descendants remain owned and are stopped or cleanup is explicitly unresolved."
+state = "exercised"
+gap = ""
+tests = [
+  "it::process_ownership::cancellation_before_manager_task_poll_keeps_descendant_owned",
+  "it::process_ownership::cancel_before_spawn_process_refuses_without_starting_the_command",
+  "it::sys_process_binding::a_cancelled_supervisor_refuses_before_starting_anything",
+]
+
+[[row]]
+id = "T21"
+requires = "LC-10"
+row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
+state = "present"
+gap = "Signalling only into the supervised group and a session escape are named; no named test exercises PID or process-group reuse, and the row is not executed per backend."
+tests = [
+  "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group",
+  "it::process_escape::a_session_escape_is_not_reported_as_complete_tree_cleanup",
+  "it::gh_binding::a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code",
+]
+
+[[row]]
+id = "T22"
+requires = "DX-10"
+row = "External consumer cannot execute a public process description via `spawn`, `status`, `output`, mutable engine handle or Deref escape. Exercise the sanctioned path positively."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t22_process_surface::public_process_description_rejects_direct_execution",
+  "it::t22_process_surface::a_process_description_cannot_report_a_status",
+  "it::t22_process_surface::a_process_description_cannot_produce_output",
+  "it::t22_process_surface::a_process_description_exposes_no_mutable_engine_handle",
+  "it::t22_process_surface::a_process_description_cannot_deref_to_an_engine",
+  "it::t22_process_surface::the_readable_description_surface_compiles_for_an_external_consumer",
+  "it::t22_process_surface::the_sanctioned_runner_accepts_the_same_description",
+  "it::t22_process_surface::supervisor_is_the_sanctioned_process_runner",
+]
+
+[[row]]
+id = "T23"
+requires = "DX-08"
+row = "Multiple missing permissions/adapters/inputs yield one complete presently knowable NeedSet. Repair only publication authority; prior analysis is not rerun."
+state = "exercised"
+gap = ""
+tests = [
+  "it::repair::a_run_short_of_authority_is_blocked_naming_every_need",
+  "it::repair::a_repair_widens_one_run_and_not_the_host",
+  "it::repair::a_custom_capability_outside_the_ticket_is_refused",
+  "it::repair::a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis",
+  "it::repair::a_blocked_run_leaves_its_finished_analysis_recorded",
+  "it::sim_repair::a_wide_need_set_costs_one_analysis",
+  "it::sim_spec_materialize::generated_specs_admit_exactly_their_injected_needs",
+]
+
+[[row]]
+id = "T24"
+requires = "DX-08/LC-01"
+row = "Same repair ticket delivered twice, stale repair epoch and denied repair cannot widen authority or repeat an already completed effect."
+state = "exercised"
+gap = ""
+tests = [
+  "it::repair::a_ticket_from_an_older_epoch_is_refused_as_stale",
+  "it::repair::a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged",
+  "it::repair::an_over_wide_grant_is_refused_rather_than_narrowed",
+  "it::sim_repair::a_bounded_sweep_repairs_every_ticket_once",
+  "it::sim_repair::every_repair_charges_the_root_budget_once",
+]
+
+[[row]]
+id = "T25"
+requires = "DX-09"
+row = "Native task and supported wire form produce the same normalized operation trace for the same inputs. Unknown operations fail before execution."
+state = "exercised"
+gap = ""
+tests = [
+  "it::spec_materialize::one_chain_traces_match",
+  "it::spec_materialize::two_entries_in_one_chain_trace_in_declaration_order",
+  "it::sim_spec_materialize::spec_replay_0000",
+  "it::sim_spec_materialize::spec_replay_0001",
+  "it::ephemeral::a_minted_id_round_trips_through_its_wire_form",
+  "it::proposal::an_unknown_operation_is_refused_whatever_asked_for_it",
+]
+
+[[row]]
+id = "T26"
+requires = "AI-02/03"
+row = "Malformed model output and tool-output instruction injection cannot change trusted intent, install tools or obtain credentials. Sandbox escape refusals remain observable."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::an_unknown_operation_is_refused_by_name_t26",
+  "it::t_rows::a_credential_read_is_refused_and_changes_nothing_t26",
+  "it::proposal::a_malformed_payload_never_becomes_work",
+  "it::proposal::an_injected_instruction_is_refused_by_name",
+  "it::proposal::an_injected_instruction_is_refused_at_its_step_on_a_real_run",
+  "it::proposal::a_sandbox_escape_stays_an_observable_refusal",
+  "it::proposal::a_credential_read_is_refused",
+  "it::proposal::a_capability_the_run_does_not_hold_is_refused_by_name",
+  "it::gh_binding::a_changed_file_inventory_is_read_as_data",
+]
+
+[[row]]
+id = "T27"
+requires = "AI-04"
+row = "Context reset preserves completed work, user corrections, Unknown effects and evidence references; truncated data never becomes a full-coverage claim."
+state = "exercised"
+gap = ""
+tests = [
+  "it::proposal::a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence",
+  "it::proposal::a_truncated_payload_never_becomes_a_full_coverage_claim",
+]
+
+[[row]]
+id = "T28"
+requires = "AI-04/05"
+row = "Parallel workers cannot read another tenant's same-digest artifact; conflicting writes are serialized while independent reads progress."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::a_same_digest_artifact_stays_inside_its_tenant_t28",
+  "it::proposal::two_tenants_on_one_digest_stay_isolated",
+  "it::proposal::conflicting_writes_to_one_key_are_serialized_and_idempotent",
+  "it::proposal::concurrent_writers_of_one_key_commit_exactly_once_per_tenant",
+  "it::sim_proposal::two_tenants_on_one_digest_stay_isolated_band_08",
+  "it::sim_proposal::two_tenants_on_one_digest_stay_isolated_band_09",
+  "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_12",
+  "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_13",
+  "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_14",
+  "it::sim_proposal::concurrent_readers_and_conflicting_writers_band_15",
+]
+
+[[row]]
+id = "T29"
+requires = "AI-06"
+row = "Repeated unchanged failure reaches finite typed intervention, not infinite tool/model repairs; new evidence is recorded and does not erase root spend."
+state = "exercised"
+gap = ""
+tests = [
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention",
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_across_runs",
+  "it::proposal::new_evidence_does_not_erase_root_spend",
+  "it::proposal::a_plan_budget_bounds_repair_across_runs",
+]
+
+[[row]]
+id = "T30"
+requires = "AI-07"
+row = "Same request key plus different payload is Conflict; a duplicate identical request reattaches; distinct request keys are not silently collapsed."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::one_request_key_serves_one_payload_t30",
+  "it::request_key::same_key_with_a_different_payload_is_a_typed_conflict",
+  "it::request_key::a_duplicate_identical_request_reattaches_without_rerunning",
+  "it::request_key::distinct_request_keys_are_distinct_runs",
+  "it::request_key::a_reattach_survives_a_reopened_store",
+  "it::sim_request_key::drop_and_reattach_band_08",
+  "it::sim_request_key::collisions_across_two_tenants_band_00",
+]
+
+[[row]]
+id = "T31"
+requires = "PR-02/03/04"
+row = "Untrusted PR, pagination, rename, unavailable diff and build-script execution produce correct subject/coverage and sandbox decisions."
+state = "present"
+gap = "Untrusted PR, rename, unavailable diff, both diff ceilings and build-script execution are named; pagination of a list endpoint has no named test."
+tests = [
+  "sim_review_path::an_untrusted_build_script_is_never_executed",
+  "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed",
+  "sim_review_path::a_renamed_repository_is_refused_naming_both",
+  "it::pr_review_journey::a_renamed_repository_is_refused_and_never_silently_re_pointed",
+  "sim_review_path::an_unavailable_diff_publishes_nothing",
+  "it::pr_review_journey::an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing",
+  "sim_review_path::the_two_diff_ceilings_are_refused_separately",
+  "sim_review_path::a_partial_submission_reports_both_counts",
+  "it::gh_binding::an_unavailable_diff_is_a_typed_coverage_refusal",
+  "it::gh_binding::a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal",
+  "it::gh_binding::a_review_list_past_the_ceiling_is_refused_not_truncated",
+]
+
+[[row]]
+id = "T32"
+requires = "PR-05/06"
+row = "Head advances between analysis and publication; report reviewed A/current B or refuse per declared policy, never relabel evidence as B."
+state = "exercised"
+gap = ""
+tests = [
+  "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing",
+  "sim_review_path::head_moved_between_snapshot_and_publish_r32",
+  "sim_review_path::a_publication_is_pinned_to_the_read_commit",
+]
+
+[[row]]
+id = "T33"
+requires = "PR-07/08"
+row = "Provider accepts review but response is lost; reconciliation finds and verifies the exact review, or remains Unknown. No duplicate post. Test partially submitted reviews/comments."
+state = "exercised"
+gap = ""
+tests = [
+  "it::pr_review_journey::a_lost_response_is_reconciled_by_reading_back_and_never_reposted",
+  "it::pr_review_journey::a_partial_submission_is_reconciled_as_partial_and_never_reposted",
+  "it::pr_review_journey::a_pending_draft_is_reconciled_as_a_draft_and_never_reposted",
+  "it::pr_review_journey::a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost",
+  "it::pr_review_journey::a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled",
+  "sim_review_path::duplicate_submission_r16",
+  "sim_review_path::verified_and_not_observed_r32",
+]
+
+[[row]]
+id = "T34"
+requires = "PR-09/10"
+row = "Real readback proves exact IDs/state/subject/payload; lost read permission reports unverified/blocking state while retaining applied-effect evidence."
+state = "exercised"
+gap = ""
+tests = [
+  "it::pr_review_journey::a_lost_read_permission_reports_unverified_and_retains_the_review_id",
+  "sim_review_path::an_unverified_effect_retains_its_review_id",
+  "sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
+  "it::gh_binding::a_record_still_being_appended_is_not_read_back",
+]
+
+[[row]]
+id = "T35"
+requires = "LC-01/11"
+row = "Process exit zero with invalid result, model says done without evidence, and successful draft with failed publish all report their distinct true outcomes."
+state = "exercised"
+gap = ""
+tests = [
+  "it::proposal::the_three_untrue_successes_report_distinct_outcomes",
+  "it::sys_process_binding::exit_zero_is_reported_as_zero_not_success",
+  "it::rt_process::a_command_that_exits_zero_is_reported_completed",
+  "it::pr_review_journey::a_non_zero_exit_is_not_a_published_review",
+]
+
+[[row]]
+id = "T36"
+requires = "DX-11"
+row = "Progress buffer overflow loses only declared detail and increments counters; authoritative terminal/Unknown state is still retrievable. A quiet client never requires a task-owned reporting loop."
+state = "exercised"
+gap = ""
+tests = [
+  "it::t_rows::an_overflowing_progress_buffer_keeps_the_terminal_state_t36",
+  "it::t_rows::a_failed_overflowing_run_still_reports_its_terminal_failure_t36",
+  "it::task_front_door::an_overflowing_trail_counts_what_it_dropped",
+  "it::task_front_door::an_overflowing_trail_still_reports_the_terminal_failure",
+  "it::proposal::reads_progress_while_a_write_is_in_flight",
+]

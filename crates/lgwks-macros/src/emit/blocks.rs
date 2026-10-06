@@ -4,11 +4,49 @@ use lgwks_deps::proc_macro2::{TokenStream, TokenTree};
 use lgwks_deps::quote::quote;
 use lgwks_deps::syn::{Error, Result};
 
-use crate::lines::{Line, Node, ident, is_ident, is_punct, text};
+use crate::lines::{Line, Node, after, ident, is_ident, is_punct, text};
 use crate::refuse;
 
 use super::words::{bound, duration, refuse_typed_concurrency, rewrite, run_only, shape_tokens};
 use super::{Labels, Piece, Place, Shapes, block, construct_expr, ok, runtime};
+
+/// The pattern before a line's `in`, and the items after it.
+///
+/// `None` when the line names no such keyword, which is the refusal each form
+/// reports in its own words. The search is what proves the keyword is on the
+/// line, so neither side is a stand-in for a tail that is not there.
+fn split_at_keyword<'a>(
+    tokens: &'a [TokenTree],
+    keyword: &str,
+) -> Option<(&'a [TokenTree], &'a [TokenTree])> {
+    let at = tokens.iter().position(|token| is_ident(token, keyword))?;
+    let (before, at_keyword) = tokens.split_at(at);
+    Some((before, after(at_keyword, 1)))
+}
+
+/// The pattern and the items `each x in xs:` and `for x in xs:` both read.
+///
+/// Both forms refuse the same two ways — no pattern before the `in`, and no
+/// items after it — so the search and the two refusals are stated once here and
+/// each form passes the keyword its author wrote.
+fn pattern_and_items<'a>(
+    line: &Line,
+    tokens: &'a [TokenTree],
+    form: &str,
+) -> Result<(&'a [TokenTree], &'a [TokenTree])> {
+    if let Some((pattern, items)) = split_at_keyword(tokens, "in")
+        && !pattern.is_empty()
+        && !items.is_empty()
+    {
+        return Ok((pattern, items));
+    }
+    let refusal = Err(Error::new(
+        line.span,
+        format!("`{form}` reads `{form} <name> in <items>:`"),
+    ));
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "pattern_and_items: returning an error to the caller");
+    refusal
+}
 
 /// `if cond:` with its `else if cond:` and `else:` siblings.
 pub(super) fn if_chain(
@@ -44,9 +82,9 @@ pub(super) fn if_chain(
         let condition_tokens: &[TokenTree] = if is_final_else {
             &[]
         } else if position == 0 {
-            line.tokens.get(1..).unwrap_or_default()
+            after(&line.tokens, 1)
         } else {
-            match *line.tokens.get(1..).unwrap_or_default() {
+            match *after(&line.tokens, 1) {
                 [ref word, ref rest @ ..] if is_ident(word, "if") && !rest.is_empty() => rest,
                 _ => {
                     let refusal = Err(Error::new(
@@ -106,17 +144,8 @@ pub(super) fn each(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
-    let tokens = line.tokens.get(1..).unwrap_or_default();
-    let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
-        let refusal = Err(Error::new(
-            line.span,
-            "`each` reads `each <name> in <items>:`",
-        ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "each: returning an error to the caller");
-        return refusal;
-    };
-    let (pattern, after_in) = tokens.split_at(in_at);
-    let after_in = after_in.get(1..).unwrap_or_default();
+    let tokens = after(&line.tokens, 1);
+    let (pattern, after_in) = pattern_and_items(line, tokens, "each")?;
     let bound_at = after_in.windows(3).rposition(|window| {
         matches!(*window, [ref comma, ref at, ref most] if is_punct(comma, ',') && is_ident(at, "at") && is_ident(most, "most"))
     });
@@ -124,7 +153,11 @@ pub(super) fn each(
         None => (after_in, None),
         Some(bound_at) => {
             let (items, clause) = after_in.split_at(bound_at);
-            match *clause.get(3..).unwrap_or_default() {
+            // The window that found the bound matched three tokens, so the
+            // clause is at least `, at most` long and dropping them cannot run
+            // off its end.
+            let (_, after_bound) = clause.split_at(3);
+            match *after_bound {
                 [ref limit @ .., ref at, ref once]
                     if is_ident(at, "at") && is_ident(once, "once") && !limit.is_empty() =>
                 {
@@ -195,7 +228,7 @@ pub(super) fn within(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
-    let spec = line.tokens.get(1..).unwrap_or_default();
+    let spec = after(&line.tokens, 1);
     let limit = duration(spec, line)?;
     let label = labels.next("within");
     let (body, inner) = nested_body(children)?;
@@ -221,14 +254,14 @@ pub(super) fn retry(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
-    let mut rest = line.tokens.get(1..).unwrap_or_default();
+    let mut rest = after(&line.tokens, 1);
     if let [ref up, ref to, ref tail @ ..] = *rest
         && is_ident(up, "up")
         && is_ident(to, "to")
     {
         rest = tail;
     }
-    let Some(times_at) = rest.iter().position(|token| is_ident(token, "times")) else {
+    let Some((count, after)) = split_at_keyword(rest, "times") else {
         let refusal = Err(Error::new(
             line.span,
             "`retry` reads `retry up to N times:` or `retry up to N times, waiting 100ms:`",
@@ -236,9 +269,7 @@ pub(super) fn retry(
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
         return refusal;
     };
-    let (count, after) = rest.split_at(times_at);
     let subject = text(count);
-    let after = after.get(1..).unwrap_or_default();
     let waiting = match *after {
         [] => quote!(::core::time::Duration::from_millis(100)),
         [ref comma, ref word, ref spec @ ..]
@@ -284,7 +315,7 @@ pub(super) fn step(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
-    let name = match *line.tokens.get(1..).unwrap_or_default() {
+    let name = match *after(&line.tokens, 1) {
         [ref only] => ident(only),
         _ => None,
     };
@@ -365,7 +396,7 @@ fn together_child(
 ) -> Result<(TokenStream, TokenStream)> {
     let child_line = &child.line;
     refuse::check(&child_line.tokens)?;
-    let (pattern, value) = if child_line.keyword().as_deref() == Some("let") {
+    let (pattern, value) = if child_line.starts_with("let") {
         let (pattern, rest) = split_let(child_line)?;
         (pattern, rest)
     } else {
@@ -379,8 +410,7 @@ fn together_child(
         span: child_line.span,
     };
     let branch = if value_line.opens_block {
-        let keyword = value_line.keyword().unwrap_or_default();
-        let (expr, shape) = construct_expr(&value_line, &keyword, &child.children, labels)?;
+        let (expr, shape) = construct_expr(&value_line, &child.children, labels)?;
         shapes.push(shape);
         expr
     } else {
@@ -407,25 +437,8 @@ pub(super) fn for_loop(
     labels: &mut Labels,
     place: Place,
 ) -> Result<(Piece, TokenStream)> {
-    let tokens = line.tokens.get(1..).unwrap_or_default();
-    let Some(in_at) = tokens.iter().position(|token| is_ident(token, "in")) else {
-        let refusal = Err(Error::new(
-            line.span,
-            "`for` reads `for <name> in <items>:`",
-        ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "for_loop: returning an error to the caller");
-        return refusal;
-    };
-    let (pattern, items) = tokens.split_at(in_at);
-    let items = items.get(1..).unwrap_or_default();
-    if pattern.is_empty() || items.is_empty() {
-        let refusal = Err(Error::new(
-            line.span,
-            "`for` reads `for <name> in <items>:`",
-        ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "for_loop: returning an error to the caller");
-        return refusal;
-    }
+    let tokens = after(&line.tokens, 1);
+    let (pattern, items) = pattern_and_items(line, tokens, "for")?;
     let label = labels.next(&format!("for:{}", text(pattern)));
     let mut run_shapes = Shapes::default();
     let items = rewrite(items, labels, &mut run_shapes, line)?;
@@ -476,7 +489,7 @@ pub(super) fn nested_body(children: &[Node]) -> Result<(TokenStream, Shapes)> {
 
 /// Split `let <pattern> = <rest>` at its assignment `=`.
 pub(super) fn split_let(line: &Line) -> Result<(TokenStream, Vec<TokenTree>)> {
-    let tokens = line.tokens.get(1..).unwrap_or_default();
+    let tokens = after(&line.tokens, 1);
     let mut previous_joint = false;
     let mut at = None;
     for (index, token) in tokens.iter().enumerate() {
@@ -498,8 +511,13 @@ pub(super) fn split_let(line: &Line) -> Result<(TokenStream, Vec<TokenTree>)> {
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");
         return refusal;
     };
-    let (pattern, rest) = tokens.split_at(at);
-    let rest = rest.get(1..).unwrap_or_default();
+    // The `=` this search found splits the line: the pattern is every token
+    // before it, and `after` reads the value off the tokens past it, which is
+    // one reading of "after the word the caller matched" shared with every other
+    // block form. Splitting past the `=` instead would bind `let x =` as the
+    // pattern, which is the one thing a pattern cannot be.
+    let (pattern, at_equals) = tokens.split_at(at);
+    let rest = after(at_equals, 1);
     if pattern.is_empty() || rest.is_empty() {
         let refusal = Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");

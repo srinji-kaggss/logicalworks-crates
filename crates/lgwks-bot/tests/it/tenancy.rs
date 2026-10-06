@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::Runtime;
-use lgwks_bot::rt::supervise::{SpawnRefused, Supervisor};
+use lgwks_bot::rt::supervise::{ShutdownReport, SpawnRefused, Supervisor};
+use lgwks_bot::rt::sync::CancellationToken;
 use lgwks_bot::rt::sync::Notify;
 use lgwks_bot::rt::tenancy::TenancyPolicy;
 use lgwks_bot::rt::time::sleep;
@@ -31,15 +32,12 @@ use lgwks_bot::script::Tenant;
 
 /// A count wide enough to compare against a `Stats` counter.
 ///
-/// The counters this file compares against are `u64`, and a count that cannot be
-/// widened is a count nobody can compare -- so the refusal is reported as the
-/// ceiling, which no count in this file can reach, rather than as a different
-/// number that would make a comparison pass.
-fn wide(count: usize) -> u64 {
-    match u64::try_from(count) {
-        Ok(as_count) => as_count,
-        Err(_) => u64::MAX,
-    }
+/// The counters this file compares against are `u64`. A count that cannot be
+/// widened is refused rather than replaced by a ceiling, because a substituted
+/// number is one a comparison could pass against.
+fn wide(count: usize) -> Result<u64, String> {
+    u64::try_from(count)
+        .map_err(|refusal| format!("{count} does not widen to a counter: {refusal}"))
 }
 
 /// What a test reports when its precondition did not hold.
@@ -94,6 +92,14 @@ impl Gate {
     fn release(&self) {
         self.open.notify_waiters();
     }
+
+    /// Complete exactly one parked body: the controlled completion a parked
+    /// loud submission is waiting for. `notify_one` wakes one waiter, or stores
+    /// the wake for the next body to park, so no completion is lost to a race
+    /// between the release and the park.
+    fn release_one(&self) {
+        self.open.notify_one();
+    }
 }
 
 /// Wait until `predicate` holds, or the budget runs out. A bounded poll, so a
@@ -102,7 +108,9 @@ async fn until(budget: Duration, mut predicate: impl FnMut() -> bool) -> Result<
     let start = Instant::now();
     while !predicate() {
         if start.elapsed() >= budget {
-            return Err(format!("the precondition did not hold within {budget:?}"));
+            let refusal = Err(format!("the precondition did not hold within {budget:?}"));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "until: returning an error to the caller");
+            return refusal;
         }
         sleep(Duration::from_millis(1)).await;
     }
@@ -116,12 +124,9 @@ async fn until(budget: Duration, mut predicate: impl FnMut() -> bool) -> Result<
 /// quiet tenant is being served out of the loud tenant's queue, which is the
 /// regression this bound catches. A generous ceiling, because it is a ceiling on
 /// a *failure*; the strict fair-share numbers are the unit-tested property.
-fn quiet_ceiling() -> Duration {
-    let count = match u32::try_from(QUIET_TASKS) {
-        Ok(as_count) => as_count,
-        Err(_) => u32::MAX,
-    };
-    QUIET_HOLD.saturating_mul(count)
+fn quiet_ceiling() -> Result<Duration, std::num::TryFromIntError> {
+    let count = u32::try_from(QUIET_TASKS)?;
+    Ok(QUIET_HOLD.saturating_mul(count))
 }
 
 /// The `n`-th percentile of a latency sample, nearest-rank. Every sample is a
@@ -214,7 +219,7 @@ fn a_noisy_tenant_cannot_starve_a_quiet_one() -> TestResult {
         // and ran once admitted) and the quiet tenant's. Nothing was lost or
         // aborted by the admission.
         assert!(
-            report.stats().completed >= wide(loud_submitted) + wide(QUIET_TASKS),
+            report.stats().completed >= wide(loud_submitted)? + wide(QUIET_TASKS)?,
             "every admitted task, loud and quiet, ran to completion \
              (spawned={} completed={})",
             report.stats().spawned,
@@ -241,12 +246,13 @@ fn a_noisy_tenant_cannot_starve_a_quiet_one() -> TestResult {
         QUIET_TASKS,
         "every quiet task was admitted and measured"
     );
+    let ceiling = quiet_ceiling()?;
     assert!(
-        quiet_waits.iter().all(|wait| *wait < quiet_ceiling()),
+        quiet_waits.iter().all(|wait| *wait < ceiling),
         "no quiet admission waited on the loud tenant's queue"
     );
     assert!(
-        quiet_p99 < quiet_ceiling(),
+        quiet_p99 < ceiling,
         "the quiet tenant's p99 admission wait ({quiet_p99:?}, p50 {quiet_p50:?}) is \
          bounded by its own share's service rate"
     );
@@ -345,137 +351,146 @@ fn a_tenant_past_its_queue_bound_is_refused_by_name() -> TestResult {
     );
     Ok(())
 }
-/// The adversarial arm of the noisy-neighbour sweep: a tenant whose spawns all
-/// fail at once does not cost its neighbours throughput.
+/// The adversarial arm of the noisy-neighbour sweep (#268): a tenant that floods
+/// with spawns that fail at once does not cost its neighbour throughput.
 ///
-/// The neighbour's throughput is measured twice on the same supervisor shape —
-/// once with the adversary absent and once with it flooding — and the two are
-/// compared. Both runs do identical work with identical bodies, so the only
-/// difference is the adversary's presence, which is exactly the question: "does
-/// a failing tenant cost its neighbours anything?"
+/// The attacker's bodies end the instant they are polled, so every one of its
+/// admissions is a full churn through the round: an arrival, a grant, a release
+/// handed back through the round, and an entry that drains and is removed. A
+/// supervised body returns `()`, so for the scheduler a body that fails at once
+/// and one that returns at once are the same event: the permit comes back in the
+/// tick it was taken. [`FLOOD_PER_NEIGHBOUR`] of those land before every one of
+/// the neighbour's submissions.
+///
+/// The neighbour's throughput is the time it spends inside its own `spawn_for`
+/// calls: with its ceiling reached, each call returns only when one of its own
+/// bodies completes, so that sum is the rate the scheduler serves it at.
+/// Admission takes `&mut Supervisor`, so one caller submits for both tenants;
+/// the caller's time spent submitting the attacker's work is the harness's, not
+/// the neighbour's, and is not counted. In production the two tenants are two
+/// callers.
+///
+/// Both arms run [`ROUNDS`] times, interleaved, on identically shaped
+/// supervisors, and each arm's cost is its fastest round, because load on a
+/// shared host only ever adds wall time. Neither arm sleeps or waits before its
+/// timed window, so neither starts with parked workers the other did not have.
 #[test]
 fn an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput() -> TestResult {
     let attacker = Tenant::new("attacker")?;
     let neighbour = Tenant::new("neighbour")?;
     let runtime = Runtime::new()?;
 
-    // The neighbour's measured work: each admitted body does a fixed amount of
-    // arithmetic and returns. Identical in both runs.
-    let work = || async {
-        let mut accumulator: u64 = 0;
-        for step in 0..2_000_u64 {
-            accumulator = accumulator.wrapping_add(step.wrapping_mul(2_654_435_761));
-        }
-        // Consume the result so the loop cannot be optimised away. A supervised
-        // body returns `()`, so the work is observable through a sink rather
-        // than a return value.
-        CONSUMED.fetch_add(
-            match usize::try_from(std::hint::black_box(accumulator)) {
-                Ok(as_index) => as_index,
-                Err(_) => usize::MAX,
-            },
-            Ordering::Relaxed,
-        );
-    };
+    let mut baseline_walls = Vec::with_capacity(ROUNDS);
+    let mut attacked_walls = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let (baseline_wall, baseline_report) =
+            runtime.block_on(neighbour_arm(&neighbour, &attacker, 0))?;
+        let (attacked_wall, attacked_report) =
+            runtime.block_on(neighbour_arm(&neighbour, &attacker, FLOOD_PER_NEIGHBOUR))?;
 
-    // Baseline: the neighbour alone.
-    let baseline = runtime.block_on(async {
-        let mut supervisor = Supervisor::with_tenancy(POOL, TenancyPolicy::new(half(), POOL));
-        let started = Instant::now();
-        for _ in 0..NEIGHBOUR_TASKS {
-            supervisor
-                .spawn_for(&neighbour, move |_token| work())
-                .await
-                .map_err(|refusal| format!("the neighbour was refused at baseline: {refusal}"))?;
+        // Nothing either tenant submitted was lost, in any round. A task still
+        // queued when `shutdown` lands is reported cancelled after completing,
+        // so the accounting is `completed == spawned`.
+        let flood = wide(NEIGHBOUR_TASKS.saturating_mul(FLOOD_PER_NEIGHBOUR))?;
+        for (report, expected, arm) in [
+            (&baseline_report, wide(NEIGHBOUR_TASKS)?, "baseline"),
+            (
+                &attacked_report,
+                wide(NEIGHBOUR_TASKS)?.saturating_add(flood),
+                "attacked",
+            ),
+        ] {
+            let stats = report.stats();
+            assert_eq!(
+                stats.spawned, expected,
+                "the {arm} arm admitted every task both tenants submitted"
+            );
+            assert_eq!(
+                stats.completed, stats.spawned,
+                "every task the {arm} arm admitted reached a terminal outcome"
+            );
         }
-        let report = supervisor.shutdown().await;
-        Ok::<(Duration, _), String>((started.elapsed(), report))
-    })?;
+        baseline_walls.push(baseline_wall);
+        attacked_walls.push(attacked_wall);
+    }
+    let baseline_best = baseline_walls
+        .iter()
+        .min()
+        .copied()
+        .ok_or("a baseline round ran")?;
+    let attacked_best = attacked_walls
+        .iter()
+        .min()
+        .copied()
+        .ok_or("an attacked round ran")?;
 
-    // Attacked: the adversary floods with bodies that fail at once — a task that
-    // returns immediately releases its permit in the same tick it took it, which
-    // is the cheapest possible churn for the scheduler to absorb.
-    let attacked = runtime.block_on(async {
-        let mut supervisor = Supervisor::with_tenancy(POOL, TenancyPolicy::new(half(), POOL));
-        // The adversary holds its own ceiling on bodies that park, so its
-        // occupancy is a constant pressure rather than a burst the neighbour
-        // might simply outlast.
-        let hold = Gate::new();
-        for _ in 0..half() {
-            let gate_for_task = hold.clone();
-            supervisor
-                .spawn_for(&attacker, move |_token| async move {
-                    gate_for_task.wait().await;
-                })
-                .await
-                .map_err(|refusal| format!("the adversary was refused: {refusal}"))?;
-        }
-        until(BUDGET, || hold.parked() >= half()).await?;
-
-        // Now the neighbour does exactly the baseline's work while the adversary
-        // holds half the pool.
-        let started = Instant::now();
-        for _ in 0..NEIGHBOUR_TASKS {
-            supervisor
-                .spawn_for(&neighbour, move |_token| work())
-                .await
-                .map_err(|refusal| format!("the neighbour was refused under attack: {refusal}"))?;
-        }
-        let elapsed = started.elapsed();
-        hold.release();
-        let report = supervisor.shutdown().await;
-        Ok::<(Duration, _), String>((elapsed, report))
-    })?;
-
-    // The neighbour lost nothing in either run: every task it submitted reached
-    // a terminal outcome. A task still queued when `shutdown` lands is reported
-    // cancelled *after* completing, so the accounting is `completed == spawned`,
-    // and neither run refused a single neighbour task (the `?` above would have
-    // returned early).
-    let baseline_stats = baseline.1.stats();
-    let attacked_stats = attacked.1.stats();
-    assert_eq!(
-        baseline_stats.completed, baseline_stats.spawned,
-        "every task the neighbour submitted at baseline reached a terminal outcome"
-    );
-    assert_eq!(
-        attacked_stats.completed, attacked_stats.spawned,
-        "every task the neighbour submitted under attack reached a terminal outcome"
-    );
-    assert_eq!(
-        baseline_stats.spawned,
-        wide(NEIGHBOUR_TASKS),
-        "the neighbour submitted every task at baseline"
-    );
-    // The counters are supervisor-wide, so the attacked run's total includes the
-    // adversary's own `half()` tasks: the neighbour's share is the total minus
-    // them, and it must be exactly what it submitted.
-    let adversary = wide(half());
-    assert_eq!(
-        attacked_stats.spawned,
-        u64::try_from(NEIGHBOUR_TASKS)
-            .saturating_sub(1)
-            .saturating_add(adversary),
-        "the neighbour submitted every task under attack, alongside the adversary's own"
-    );
-    // Throughput: the attacked run may not be more than 10% slower than the
-    // baseline. The neighbour's share of the pool is fixed by the policy, so the
-    // adversary's presence cannot change how many of its tasks run at once.
-    let budget = Duration::from_micros(
-        u64::try_from(baseline.0.as_micros())
-            .saturating_sub(1)
-            .saturating_div(10),
-    );
-    let ceiling = baseline.0.saturating_add(budget);
+    // The spec's bound: the neighbour's throughput under the flood is within 10%
+    // of its throughput alone.
+    let budget = baseline_best
+        .checked_div(10)
+        .ok_or("a tenth of the baseline wall time")?;
+    let ceiling = baseline_best.saturating_add(budget);
     assert!(
-        attacked.0 <= ceiling,
-        "the neighbour's admission+completion under attack took {:?}, within 10% of \
-         the {:?} baseline (ceiling {:?})",
-        attacked.0,
-        baseline.0,
-        ceiling
+        attacked_best <= ceiling,
+        "the neighbour's admission time under a fail-at-once flood was {attacked_best:?} \
+         at best over {ROUNDS} rounds, more than 10% over its {baseline_best:?} best \
+         alone (ceiling {ceiling:?}; baseline rounds {baseline_walls:?}, attacked \
+         rounds {attacked_walls:?})"
     );
     Ok(())
+}
+
+/// One arm of [`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`]:
+/// the neighbour's fixed workload, with `flood` fail-at-once attacker
+/// submissions before each of its own.
+///
+/// Returns the time the neighbour spent inside its own `spawn_for` calls, and
+/// the supervisor's report once every task has ended.
+async fn neighbour_arm(
+    neighbour: &Tenant,
+    attacker: &Tenant,
+    flood: usize,
+) -> Result<(Duration, ShutdownReport), String> {
+    let mut supervisor = Supervisor::with_tenancy(POOL, TenancyPolicy::new(half(), POOL));
+    let mut neighbour_time = Duration::ZERO;
+    for _ in 0..NEIGHBOUR_TASKS {
+        for _ in 0..flood {
+            admit(&mut supervisor, attacker, |_token| async {}).await?;
+        }
+        let submitted = Instant::now();
+        admit(&mut supervisor, neighbour, |_token| neighbour_work()).await?;
+        neighbour_time = neighbour_time.saturating_add(submitted.elapsed());
+    }
+    Ok((neighbour_time, supervisor.shutdown().await))
+}
+
+/// Submit one body for `tenant` inside [`FLOOD_BOUND`], naming the tenant
+/// when the submission is refused.
+async fn admit<F, Fut>(supervisor: &mut Supervisor, tenant: &Tenant, body: F) -> Result<(), String>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let admitted = bounded(
+        "one tenant's submission",
+        supervisor.spawn_for(tenant, body),
+    )
+    .await?;
+    admitted.map_err(|refusal| format!("{tenant} was refused: {refusal}"))
+}
+
+/// The neighbour's measured body: a fixed amount of arithmetic, identical in
+/// both arms, sunk into [`CONSUMED`] so the optimiser cannot remove it.
+async fn neighbour_work() {
+    let mut accumulator: u64 = 0;
+    for step in 0..2_000_u64 {
+        accumulator = accumulator.wrapping_add(step.wrapping_mul(2_654_435_761));
+    }
+    let sunk = match usize::try_from(std::hint::black_box(accumulator)) {
+        Ok(as_index) => as_index,
+        Err(_) => usize::MAX,
+    };
+    CONSUMED.fetch_add(sunk, Ordering::Relaxed);
 }
 
 /// Half the pool: the per-tenant ceiling both tests hand out, and the share one
@@ -487,6 +502,18 @@ fn half() -> usize {
 /// How many tasks the neighbour runs in the adversarial arm.
 const NEIGHBOUR_TASKS: usize = 2_000;
 
+/// How many interleaved rounds each arm of the throughput comparison runs.
+///
+/// One round per arm is a single few-millisecond sample, and a sample that size
+/// on a host running the rest of the suite measures the host. Nine rounds per
+/// arm cost well under a second together.
+const ROUNDS: usize = 9;
+
+/// How many fail-at-once attacker submissions land before each neighbour
+/// submission in the adversarial arm: a flood four times the neighbour's own
+/// volume, eight thousand spawns per round.
+const FLOOD_PER_NEIGHBOUR: usize = 4;
+
 /// Where the neighbour's arithmetic is sunk, so the optimiser cannot remove the
 /// work the two runs are being compared on. Wrapping add is used throughout so
 /// no run panics on overflow.
@@ -497,26 +524,21 @@ static CONSUMED: AtomicUsize = AtomicUsize::new(0);
 /// The issue's number, not a pilot: a tenant that submits ten thousand tasks is
 /// the shape of the failure, and a smaller number would not reach the loud
 /// tenant's own queue bound often enough to show what it does at the bound.
-const LOUD_TOTAL: usize = 384;
+const LOUD_TOTAL: usize = 10_000;
 
 /// How many tasks the quiet tenant submits alongside the flood.
 const QUIET_FLOOD_TOTAL: usize = 100;
 
-/// The per-tenant queue bound the flood runs under: **zero**.
+/// The per-tenant queue bound the flood runs under.
 ///
-/// A contended arrival is therefore *refused*, and a refusal waits for nothing.
-/// That is not a shortcut, it is the only shape a single-caller harness can
-/// drive: admission takes `&mut Supervisor`, so the loop that would open the loud
-/// tenant's completion gate is the same loop whose submission is waiting for a
-/// permit, and a submission that parks leaves nothing to open the gate. The first
-/// version of this test used a non-zero bound and wedged for twelve minutes with
-/// every worker parked and nothing runnable;
-/// `sim_tenancy::a_flood_round_completes_within_its_bound` reaches the same state
-/// in 250 ms and names the round and the slot.
-///
-/// The per-tenant *ceiling* carries the isolation here: the loud tenant holds its
-/// whole share for the whole run, and every submission past it is refused by name.
-const FLOOD_QUEUE: usize = 0;
+/// Non-zero, so a loud submission past the loud tenant's ceiling *parks* in its
+/// own queue rather than being refused — the queue is what the issue's flood
+/// exercises. Admission takes `&mut Supervisor`, so the loop that submits is the
+/// only caller; a parked loud submission is resolved by [`submit_loud`], which
+/// completes exactly one held loud body while the submission waits. One loud
+/// submission is parked at a time, so a bound of eight is never reached and the
+/// flood is never refused.
+const FLOOD_QUEUE: usize = 8;
 
 /// How long one submission may wait before the test fails naming where.
 ///
@@ -545,6 +567,40 @@ where
     }
 }
 
+/// Submit one loud body, completing one held loud body if the submission parks.
+///
+/// The submission is polled first, so it registers in the loud tenant's queue
+/// before anything is released; only a submission that is still pending after
+/// that poll triggers its one controlled completion. The completed body returns
+/// its permit to the round, the round grants it to the loud tenant's waiter, and
+/// the waiter's wake re-polls this future. A submission that never resolves after
+/// its completion is a lost wakeup in the round, and [`bounded`] names it.
+async fn submit_loud(
+    supervisor: &mut Supervisor,
+    loud: &Tenant,
+    gate: &Gate,
+) -> Result<Result<(), SpawnRefused>, String> {
+    let body_gate = gate.clone();
+    let mut submission = std::pin::pin!(
+        supervisor.spawn_for(loud, move |_token| async move { body_gate.wait().await })
+    );
+    let mut released = false;
+    bounded(
+        "a parked loud submission after one controlled completion",
+        std::future::poll_fn(|context| {
+            if let std::task::Poll::Ready(outcome) = submission.as_mut().poll(context) {
+                return std::task::Poll::Ready(outcome);
+            }
+            if !released {
+                released = true;
+                gate.release_one();
+            }
+            std::task::Poll::Pending
+        }),
+    )
+    .await
+}
+
 /// The `n`-th percentile with a floor, for a ratio against a measured baseline.
 ///
 /// A baseline of zero makes any multiplier meaningless, so the ceiling is at
@@ -566,41 +622,28 @@ fn percentile_over(
         .max(measured.min(baseline.saturating_mul(2)))
 }
 
-/// The noisy-neighbour sweep at the issue's volume: one tenant submits ten
-/// thousand tasks while another submits a hundred, and the quiet tenant's
-/// admission wait is bounded by its own share rather than by the flood.
+/// Acceptance (#268): a tenant that submits ten thousand tasks cannot starve
+/// another.
 ///
-/// The loud tenant's completions are **controlled**, not timed: its bodies park
-/// on a gate, and the test opens it once per round, so the loud tenant's occupancy
-/// is created rather than raced. That is also what lets a single `&mut Supervisor`
-/// submit both tenants' work at all -- admission takes `&mut self`, so two of one
-/// supervisor's own waiters cannot exist at the same time.
+/// The loud tenant takes its whole ceiling with bodies that hold their permits
+/// until released, then submits ten thousand more. Every one of those lands past
+/// its ceiling and parks in the loud tenant's own queue; [`submit_loud`] then
+/// completes exactly one held loud body, and the round hands the freed permit to
+/// that parked submission. Completions are controlled, never slept for, and the
+/// loud tenant sits at its ceiling for the entire flood. Between batches the
+/// quiet tenant submits one task, and its admission wait is timed.
 ///
-/// **What each round does, and why the order is that order.** The gate opens, so
-/// the loud tenant's bodies from the previous round complete and its permits come
-/// back; the round's loud submissions land; the gate opens again, so *this*
-/// round's bodies complete and the permits they were holding are available; and
-/// only then does the quiet tenant submit. The second release is what keeps the
-/// pool from being held by bodies nobody will wake: a caller that parks for a
-/// permit only the gate can free would be waiting for the next round, and the
-/// next round cannot start until the caller returns. The quiet submission is
-/// therefore admitted out of permits the loud tenant is *releasing*, which is the
-/// contended case, and its wait is what is timed.
+/// What would fail:
+/// - a quiet admission that waited on the loud tenant's queue never resolves,
+///   because nothing completes loud work while the quiet submission is awaited,
+///   and [`bounded`] fails the test after two seconds instead of hanging;
+/// - a lost wakeup in the round leaves a parked loud submission unresolved
+///   after its one completion, and is named the same way;
+/// - the loud tenant holding more than its ceiling, or being refused while its
+///   queue had room, fails the in-flight and refusal assertions.
 ///
-/// **What this measures and what the other test measures.** This is the
-/// *submission-pressure* question at the issue's volume: can ten thousand
-/// submissions from one tenant push another tenant's admission wait past what it
-/// pays alone. The *occupancy* question -- one tenant parked at its ceiling while
-/// another is admitted -- is
-/// [`a_noisy_tenant_cannot_starve_a_quiet_one`](super::a_noisy_tenant_cannot_starve_a_quiet_one),
-/// which holds the loud tenant at its ceiling for the whole quiet tenant's run.
-/// Splitting them is not a convenience: holding the loud tenant at its ceiling
-/// while it submits ten thousand times is a self-deadlock, because nothing but
-/// the loud tenant could free the permit its own next submission is waiting for.
-///
-/// The comparison is against the same quiet workload alone on an identically shaped
-/// supervisor, so "the flood did not cost the quiet tenant anything" is a
-/// measurement of two runs rather than a bound invented here.
+/// The quiet tenant's p99 under the flood is compared with the same quiet
+/// workload on an identically shaped supervisor with no other tenant.
 #[test]
 fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResult {
     let loud = Tenant::new("loud")?;
@@ -674,16 +717,7 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
                     break;
                 }
                 submitted = submitted.saturating_add(1);
-                let gate_for_task = gate.clone();
-                match bounded(
-                    "flooding the loud tenant",
-                    supervisor.spawn_for(
-                        &loud,
-                        move |_token| async move { gate_for_task.wait().await },
-                    ),
-                )
-                .await?
-                {
+                match submit_loud(&mut supervisor, &loud, &gate).await? {
                     Ok(()) => admitted = admitted.saturating_add(1),
                     Err(SpawnRefused::TenantAtCapacity { ref tenant, .. }) => {
                         assert_eq!(
@@ -726,7 +760,7 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
         gate.release();
         let report = supervisor.shutdown().await;
         assert!(
-            report.stats().completed >= wide(quiet_waits.len()),
+            report.stats().completed >= wide(quiet_waits.len())?,
             "every quiet task the flood admitted reached a terminal outcome \
              (spawned={} completed={})",
             report.stats().spawned,
@@ -756,6 +790,11 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
         LOUD_TOTAL,
         "every loud submission is either admitted or refused by name: nothing was \\
          dropped on the floor"
+    );
+    assert_eq!(
+        refused_tenant, 0,
+        "a loud submission past the ceiling parks in the loud tenant's own queue and \
+         is admitted after one controlled completion; the queue bound is never reached"
     );
     assert!(
         refused_supervisor == 0,
@@ -836,7 +875,7 @@ fn every_tenant_of_a_fleet_is_admitted_at_each_declared_in_flight_tier() -> Test
             let report = supervisor.shutdown().await;
             assert_eq!(
                 report.stats().completed,
-                wide(admitted),
+                wide(admitted)?,
                 "at tier {tier} every admitted task reached a terminal outcome"
             );
             Ok::<_, String>((

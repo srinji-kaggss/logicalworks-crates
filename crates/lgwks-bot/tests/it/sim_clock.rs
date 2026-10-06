@@ -57,11 +57,17 @@ const WATCHDOG_LIMIT: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Receipt {
     /// Budget remaining after the scenario, per budget.
-    remaining: Vec<u64>,
+    ///
+    /// A `Duration` rather than a nanosecond count: a budget this family sweeps
+    /// is seconds long, and narrowing one to `u64` nanoseconds would need a
+    /// fallback for the case where it does not fit — and a fallback would make a
+    /// wrapped reading and a genuinely unstarted clock the same number in the
+    /// receipt, which is the failure this family exists to catch.
+    remaining: Vec<Duration>,
     /// How many times a deadline was observed exhausted.
     exhausted_count: u32,
     /// The largest advance the scenario refused, or zero.
-    refused_ceiling_nanos: u64,
+    refused_ceiling: Duration,
     /// Whether the watchdog outlived its limit during the run.
     watchdog_fired: bool,
 }
@@ -71,20 +77,20 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
     let mut rng = Rng::new(seed ^ 0xc10c_10c1_c10c_10c1);
     let mut trace = Trace::new();
     let clock = Clock::virtual_at(Duration::ZERO);
-    let budgets: Vec<Duration> = (1..=4)
+    let budgets: Vec<Duration> = (1_u64..=4)
         .map(|index| {
             let span = u64::from(rng.between(1, 3));
             // Saturating rather than a bare product: this repository forbids
             // unchecked arithmetic, and both factors are bounded, so saturation
             // is the shape the lint admits and a fact the value already meets.
-            Duration::from_secs(span.saturating_mul(u64::try_from(index).unwrap_or(0)))
+            Duration::from_secs(span.saturating_mul(index))
         })
         .collect();
 
     let mut receipt = Receipt {
         remaining: Vec::new(),
         exhausted_count: 0,
-        refused_ceiling_nanos: 0,
+        refused_ceiling: Duration::ZERO,
         watchdog_fired: false,
     };
 
@@ -100,7 +106,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         let after = match clock.advance(step) {
             Ok(landed) => landed,
             Err(ClockError::OutOfRange { ceiling, .. }) => {
-                receipt.refused_ceiling_nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(0);
+                receipt.refused_ceiling = ceiling;
                 trace.record("advance-refused-out-of-range");
                 break;
             }
@@ -114,10 +120,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         };
         // Monotonicity is the whole contract of an advance: never backwards,
         // and never more than asked unless the ceiling clamped it.
-        trace.record_u64(
-            "elapsed-nanos",
-            u64::try_from(after.as_nanos()).unwrap_or(0),
-        );
+        record_duration(&mut trace, "elapsed", after);
         if after < before {
             trace.record("monotonicity-violated");
         }
@@ -127,9 +130,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
             if deadline.is_exhausted() {
                 receipt.exhausted_count = receipt.exhausted_count.saturating_add(1);
             }
-            receipt
-                .remaining
-                .push(u64::try_from(deadline.remaining().as_nanos()).unwrap_or(0));
+            receipt.remaining.push(deadline.remaining());
             // The remaining budget is the restart-safe quantity, and it is a
             // pure function of the clock and the budget — this is the identity
             // a restart depends on.
@@ -156,15 +157,12 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         trace.record("a-day-of-logical-time-exhausts-a-one-second-budget");
     }
     receipt.watchdog_fired = deadline.watchdog_exceeded(WATCHDOG_LIMIT);
-    trace.record_u64(
-        "final-nanos",
-        u64::try_from(clock.now().as_nanos()).unwrap_or(0),
-    );
+    record_duration(&mut trace, "final", clock.now());
     // The watchdog's *reading* is real time and is deliberately NOT recorded: a
     // trace that carried nanoseconds of wall clock would differ on every run and
     // stop being a replay receipt. What is recorded is the boolean below, which
     // is false on any run that finished inside a microsecond of real work.
-    trace.record_u64("watchdog-fired", u64::from(receipt.watchdog_fired));
+    trace.record_number("watchdog-fired", u64::from(receipt.watchdog_fired));
     (trace, receipt)
 }
 
@@ -325,4 +323,255 @@ fn the_elapsed_ceiling_saturates_instead_of_wrapping_into_the_past()
         "a refused advance leaves the clock unchanged rather than wrapping"
     );
     Ok(())
+}
+
+// ── Origin-to-counter saturation ───────────────────────────────────────────
+//
+// `Clock::virtual_at` converts an origin `Duration` into the `u64` nanosecond
+// counter every budget, deadline and snapshot is derived from. `Duration`
+// reaches `u128` nanoseconds and that counter reaches `u64` of them, so an
+// origin past ~584 years cannot be represented and the conversion has to
+// saturate at the ceiling. A conversion that wrapped instead would report a
+// clock in the recent past for an origin centuries away, and every deadline
+// computed from it would fire immediately and look legitimate — the exact
+// failure INV-BOT-30 names. The sweep below pins that identity across the whole
+// representable range rather than at one hand-picked value.
+
+/// The classes of origin this family sweeps, by what each one would break.
+///
+/// Declared as data rather than drawn: a uniform draw over `Duration` would
+/// essentially never land on a sub-second origin or on one nanosecond below the
+/// ceiling, and those are the two boundaries the identity is about. Every
+/// scenario sweeps every class, and the seed supplies the offset inside each.
+const ORIGIN_CLASSES: [&str; 6] = [
+    "zero",
+    "sub-second",
+    "whole-second",
+    "below-ceiling",
+    "at-ceiling",
+    "past-ceiling",
+];
+
+/// One origin in the class `ORIGIN_CLASSES[index]` describes, offset by `span`.
+///
+/// The span is what the seed varies; the index is what the table fixes, so a
+/// class is never skipped for want of a draw that happened to hit it.
+fn origin_in_class(index: usize, span: u64) -> Duration {
+    match index {
+        0 => Duration::ZERO,
+        1 => Duration::from_nanos(span),
+        2 => Duration::from_secs(span),
+        // One second at most below the ceiling, so every draw in this class is a
+        // horizon a caller is plausibly near rather than a rounded figure.
+        3 => Duration::from_nanos(u64::MAX.saturating_sub(span)),
+        4 => Clock::elapsed_ceiling(),
+        _ => Duration::MAX,
+    }
+}
+
+/// Every class of origin for this scenario, each with its own seeded offset.
+fn seeded_origins(rng: &mut Rng) -> Vec<(&'static str, Duration)> {
+    ORIGIN_CLASSES
+        .iter()
+        .enumerate()
+        .map(|(index, class)| {
+            (
+                *class,
+                origin_in_class(index, u64::from(rng.below(1_000_000))),
+            )
+        })
+        .collect()
+}
+
+/// One origin read back through the counter the clock actually keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OriginReading {
+    /// Which class of origin produced this reading.
+    class: &'static str,
+    /// The origin the clock was restored at.
+    origin: Duration,
+    /// What the clock then read.
+    read: Duration,
+}
+
+/// Record a duration as the two projections that carry it exactly.
+///
+/// `as_secs` and `subsec_nanos` are both infallible, so a duration at the far
+/// end of the range reaches the trace without a fallible narrowing and without
+/// a value that stands in for one.
+fn record_duration(trace: &mut Trace, label: &str, value: Duration) {
+    trace.record(label);
+    trace.record_number("secs", value.as_secs());
+    trace.record_number("subsec-nanos", u64::from(value.subsec_nanos()));
+}
+
+/// Run one origin scenario from `seed`, returning its trace and its readings.
+fn origin_scenario(seed: u64) -> (Trace, Vec<OriginReading>) {
+    let mut rng = Rng::new(seed ^ 0x0e5a_7e00_0e5a_7e00);
+    let mut trace = Trace::new();
+    let ceiling = Clock::elapsed_ceiling();
+    let mut observed = Vec::new();
+
+    for (class, origin) in seeded_origins(&mut rng) {
+        let budget = Duration::from_secs(u64::from(rng.below(3_600)));
+        let clock = Clock::virtual_at(origin);
+        let read = clock.now();
+
+        record_duration(&mut trace, class, origin);
+        record_duration(&mut trace, "read", read);
+
+        // The identity: a clock restored at an origin reads back the smaller of
+        // that origin and the ceiling. Everything else in the module is derived
+        // from this counter.
+        if read != origin.min(ceiling) {
+            trace.record("origin-not-clamped-to-its-own-ceiling");
+        }
+        // A restart restores a *duration*, and the resumed clock must agree
+        // with the one it was resumed from rather than drifting on the round
+        // trip.
+        if Clock::virtual_at(read).now() != read {
+            trace.record("restart-drifted-the-counter");
+        }
+        // The budget is never over-reported. A wrapped counter would leave the
+        // origin looking recent and hand back a remainder larger than the whole
+        // budget.
+        let remaining = clock.snapshot().remaining_from(budget);
+        record_duration(&mut trace, "remaining", remaining);
+        if remaining > budget {
+            trace.record("remaining-exceeded-its-own-budget");
+        }
+
+        // And the advance path uses the same conversion, so it gets the same
+        // identity: a step lands on the smaller of "where the clock was plus
+        // the step" and the ceiling, and never below where it was.
+        let step = Duration::from_millis(u64::from(rng.below(120_000)));
+        match clock.advance(step) {
+            Ok(landed) => {
+                record_duration(&mut trace, "landed", landed);
+                if landed != read.saturating_add(step).min(ceiling) {
+                    trace.record("advance-not-clamped-to-its-own-ceiling");
+                }
+                if landed < read {
+                    trace.record("advance-went-backwards");
+                }
+            }
+            Err(ClockError::OutOfRange { .. }) => {
+                // Only reachable from a clock already at the ceiling, which is
+                // the `at-ceiling` and `past-ceiling` classes; recorded so the
+                // trace says which class refused rather than collapsing the two
+                // refusals into one line.
+                trace.record("advance-refused-at-the-ceiling");
+            }
+            Err(other) => {
+                trace.record(&format!("advance-refused-{other}"));
+            }
+        }
+        observed.push(OriginReading {
+            class,
+            origin,
+            read,
+        });
+    }
+    (trace, observed)
+}
+
+/// The saturation identity replays: the same seed gives the same trace and the
+/// same readings, so a hash recorded against this sweep is a receipt.
+#[test]
+fn the_same_seed_replays_the_same_origin_trace() -> Result<(), Box<dyn std::error::Error>> {
+    let mut first: Vec<(u64, Vec<OriginReading>)> = Vec::new();
+    let mut second: Vec<(u64, Vec<OriginReading>)> = Vec::new();
+    for seed in seeds() {
+        let (trace_a, observed_a) = origin_scenario(seed);
+        let (trace_b, observed_b) = origin_scenario(seed);
+        assert_eq!(
+            trace_a.hash(),
+            trace_b.hash(),
+            "seed {seed} produced two different origin traces, so an origin hash \
+             is not a replay receipt"
+        );
+        first.push((trace_a.hash(), observed_a));
+        second.push((trace_b.hash(), observed_b));
+    }
+    assert_eq!(first, second, "the readings diverged across a repeat sweep");
+    Ok(())
+}
+
+/// No seed in the band observes a counter outside the representable range, and
+/// every one of them exercises an origin at the ceiling — the half of the range
+/// where a conversion is wrong rather than merely untidy.
+#[test]
+fn no_swept_origin_reads_outside_the_representable_range() {
+    let ceiling = Clock::elapsed_ceiling();
+    let mut saturated = 0_u32;
+    for seed in seeds() {
+        let (trace, observed) = origin_scenario(seed);
+        for reading in observed {
+            assert!(
+                reading.read <= ceiling,
+                "seed {seed}: a {} origin of {:?} read back as {:?}, which is past \
+                 the ceiling {ceiling:?} rather than clamped to it",
+                reading.class,
+                reading.origin,
+                reading.read
+            );
+            assert_eq!(
+                reading.read,
+                reading.origin.min(ceiling),
+                "seed {seed}: a {} origin of {:?} read back as {:?}",
+                reading.class,
+                reading.origin,
+                reading.read
+            );
+            if reading.origin >= ceiling {
+                saturated = saturated.saturating_add(1);
+            }
+        }
+        // A trace carrying no violation at all is the claim being made, and the
+        // hash is checked against the sweep in the replay test above.
+        assert!(
+            !trace.is_empty(),
+            "seed {seed} recorded nothing, so the sweep measured nothing"
+        );
+    }
+    assert!(
+        saturated > 0,
+        "no seed in {BAND_FIRST}..{} reached the ceiling, so the saturating half \
+         of the conversion was never exercised",
+        BAND_FIRST.saturating_add(BAND_COUNT)
+    );
+}
+
+/// The conversion keeps sub-second precision and clips at exactly the ceiling.
+///
+/// A whole-second-only conversion would pass every test above — every sweep
+/// assertion compares two readings of the same conversion — and would silently
+/// shorten every sub-second deadline, so the two facts are pinned directly.
+#[test]
+fn the_nanos_conversion_keeps_subsecond_precision_and_stops_at_the_ceiling() {
+    let ceiling = Clock::elapsed_ceiling();
+    let cases = [
+        (Duration::ZERO, Duration::ZERO),
+        (Duration::from_nanos(1), Duration::from_nanos(1)),
+        (Duration::from_millis(1_500), Duration::from_millis(1_500)),
+        (Duration::new(1, 999_999_999), Duration::new(1, 999_999_999)),
+        // One nanosecond below the ceiling must survive exactly: a ceiling that
+        // clips one value early would report a clock slightly in the past for
+        // an origin it can represent.
+        (
+            Duration::from_nanos(u64::MAX.saturating_sub(1)),
+            Duration::from_nanos(u64::MAX.saturating_sub(1)),
+        ),
+        (ceiling, ceiling),
+        // Past the ceiling in both directions: saturates, never wraps.
+        (Duration::MAX, ceiling),
+        (ceiling.saturating_add(Duration::from_secs(1)), ceiling),
+    ];
+    for (origin, expected) in cases {
+        assert_eq!(
+            Clock::virtual_at(origin).now(),
+            expected,
+            "an origin of {origin:?} must read back as {expected:?}"
+        );
+    }
 }

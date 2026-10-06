@@ -20,10 +20,23 @@ mod sim {
     use crate::sim_wire::rng::Rng;
     use crate::sim_wire::wire_record::{ArchivedConsumerRecord, ConsumerChild, ConsumerRecord};
 
+    /// The width of the signed field's drawn range.
+    const SIGNED_SPAN: isize = 4_096;
+
+    /// Where that range sits around zero: half of it below zero and half above,
+    /// so a drawn value exercises both signs.
+    const SIGNED_MIDPOINT: isize = 2_048;
+
+    /// The lowercase alphabet the drawn names and keys are made of.
+    const LETTERS: [u8; 26] = *b"abcdefghijklmnopqrstuvwxyz";
+
     /// A lowercase letter drawn from the generator.
     fn letter(rng: &mut Rng) -> char {
-        let offset = u8::try_from(rng.below(26)).unwrap_or(0);
-        char::from(b'a'.saturating_add(offset))
+        // The alphabet is the table, so a letter is a position in it rather than
+        // an offset added to `'a'`, and no conversion sits between the draw and
+        // the character it names.
+        let position = rng.below(LETTERS.len());
+        char::from(LETTERS[position])
     }
 
     /// A word of `1..=max` letters drawn from the generator.
@@ -38,12 +51,23 @@ mod sim {
         let name = word(&mut rng, 16);
         let index_count = rng.below(6);
         let indices: Vec<usize> = (0..index_count).map(|_| rng.below(1024)).collect();
-        let span = isize::try_from(rng.below(4096)).unwrap_or(0);
-        let signed_index = span.saturating_sub(2048);
+        // The signed field is drawn from the low bytes of the stream's own word,
+        // which is where a signed value's own bits are: the draw is read as its
+        // two's complement and then offset around the middle of the field's
+        // range, so no narrowing decides what a negative draw becomes.
+        let raw = rng.next().to_le_bytes();
+        let signed_index = isize::from(i16::from_le_bytes([raw[0], raw[1]]))
+            .rem_euclid(SIGNED_SPAN)
+            .saturating_sub(SIGNED_MIDPOINT);
         let mut fields = BTreeMap::new();
         for _ in 0..rng.below(4) {
             let key = word(&mut rng, 6);
-            fields.insert(key, u32::try_from(rng.below(1_000)).unwrap_or(0));
+            // The map's values are the low half of the stream's own word, which
+            // is the width the archived value is: a value is one the map holds
+            // rather than a narrowed index.
+            let word = rng.next().to_le_bytes();
+            let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            fields.insert(key, value);
         }
         let child = (rng.below(2) == 1).then(|| Box::new(ConsumerChild { value: rng.next() }));
         ConsumerRecord {
@@ -134,7 +158,7 @@ mod sim {
             let bytes = to_bytes::<WireError>(&value_for(seed))?;
             // Drop the first byte: the archive is now offset-misaligned against
             // the type's primitive alignment, which checked access must refuse.
-            let shifted = bytes.get(1..).unwrap_or_default();
+            let shifted = &bytes[1..];
             assert!(
                 access::<ArchivedConsumerRecord, WireError>(shifted).is_err(),
                 "seed {seed}: access accepted a misaligned {} -byte archive",

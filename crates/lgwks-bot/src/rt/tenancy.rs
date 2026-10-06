@@ -279,7 +279,10 @@ impl TenancyPolicy {
     /// The tenant's weight, 1 for a tenant the policy does not name.
     #[must_use]
     pub fn weight_of(&self, tenant: &Tenant) -> NonZeroU32 {
-        self.weights.get(tenant).copied().unwrap_or(NonZeroU32::MIN)
+        match self.weights.get(tenant).copied() {
+            Some(weight) => weight,
+            None => NonZeroU32::MIN,
+        }
     }
 }
 
@@ -485,7 +488,8 @@ impl<W> Entry<W> {
 /// The scheduler is pure on purpose. It owns the queues, the deficits and the
 /// active ring, and it never owns a permit: permits are handed in by the
 /// executor ([`grant`](Self::grant)) and handed back ([`GrantOutcome::Idle`]
-/// when nobody can take one), so the same type drives a live [`Supervisor`] and
+/// when nobody can take one), so the same type drives a live
+/// [`Supervisor`](crate::rt::supervise::Supervisor) and
 /// a seeded simulation with a counter for a pool — the simulation exercises the
 /// real decision, not a copy of it.
 ///
@@ -563,7 +567,9 @@ impl<W> DeficitRoundRobin<W> {
         }
     }
 
-    /// The policy in force.
+    /// The ceilings, queue bounds and weights this round admits under, fixed
+    /// when it was built; a refusal reads its limit from here so the number a
+    /// caller is told is the number that was enforced.
     #[must_use]
     pub fn policy(&self) -> &TenancyPolicy {
         &self.policy
@@ -790,20 +796,6 @@ impl<W> DeficitRoundRobin<W> {
             // is zero. Setting it rather than recomputing keeps the two from
             // disagreeing if a liveness predicate is stricter than the count.
             entry.abandoned = 0;
-        }
-    }
-
-    /// Record that a waiter the scheduler already popped and charged was found
-    /// abandoned at delivery time.
-    ///
-    /// The counter-part of [`note_abandoned`](Self::note_abandoned): the
-    /// abandonment was counted when the owner left, and the waiter is now gone
-    /// from the queue without a grant skipping it, so the count comes back down.
-    /// Charging the admission back is the caller's `note_release`, which the
-    /// executor performs with the recycled permit.
-    pub fn note_grant_abandoned(&mut self, tenant: &Tenant) {
-        if let Some(entry) = self.entries.get_mut(tenant) {
-            entry.abandoned = entry.abandoned.saturating_sub(1);
         }
     }
 

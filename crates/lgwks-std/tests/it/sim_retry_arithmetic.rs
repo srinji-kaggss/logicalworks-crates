@@ -10,15 +10,9 @@ use std::time::Duration;
 use crate::seeded_sweep;
 
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
-    next_seed,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_nanos,
+    initial_trace, next_index, next_seed,
 };
-
-/// Folds a nanosecond count into the trace, saturating a narrowing cast so a
-/// wide `Duration` cannot alias a small one.
-fn fold_nanos(trace: &mut u64, nanos: u128) {
-    fold(trace, u64::try_from(nanos).unwrap_or(u64::MAX));
-}
 
 /// Returns the exact capped backoff in nanoseconds by bounded repeated doubling.
 ///
@@ -51,9 +45,7 @@ fn reference_delay_nanos(base_nanos: u128, cap_nanos: u128, attempt: u32, entrop
     // `+ 1` and the subtraction cannot overflow or underflow: the remainder is
     // below `backoff + 1` by construction.
     let inclusive_range = backoff.saturating_add(1);
-    let jitter = u128::from(entropy)
-        .checked_rem(inclusive_range)
-        .unwrap_or(0);
+    let jitter = u128::from(entropy).rem_euclid(inclusive_range);
     backoff.saturating_sub(jitter)
 }
 
@@ -83,9 +75,11 @@ fn run_seeded_sweep(seed: u64) -> u64 {
     let attempts = [0_u32, 1, 30, 31, 32, 35, 1_000, u32::MAX];
 
     for _ in 0..400 {
-        let base = bases[usize::try_from(next_seed(&mut state).rem_euclid(6)).unwrap_or(0)];
-        let cap = caps[usize::try_from(next_seed(&mut state).rem_euclid(8)).unwrap_or(0)];
-        let attempt = attempts[usize::try_from(next_seed(&mut state).rem_euclid(8)).unwrap_or(0)];
+        // Each table is indexed by a draw in the index width, which is what the
+        // shared stream reports, so a position is the position the draw named.
+        let base = bases[next_index(&mut state).rem_euclid(bases.len())];
+        let cap = caps[next_index(&mut state).rem_euclid(caps.len())];
+        let attempt = attempts[next_index(&mut state).rem_euclid(attempts.len())];
         let entropy = next_seed(&mut state);
 
         let policy = RetryPolicy::new(1, base, Duration::MAX).with_max_delay(cap);
@@ -183,9 +177,7 @@ fn the_inclusive_jitter_formula_holds_over_the_whole_duration_domain() {
         let backoff =
             reference_backoff_nanos(Duration::MAX.as_nanos(), Duration::MAX.as_nanos(), 0);
         let inclusive_range = backoff.saturating_add(1);
-        let jitter = u128::from(entropy)
-            .checked_rem(inclusive_range)
-            .unwrap_or(0);
+        let jitter = u128::from(entropy).rem_euclid(inclusive_range);
         assert_eq!(
             observed.as_nanos(),
             backoff.saturating_sub(jitter),

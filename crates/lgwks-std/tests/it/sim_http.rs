@@ -220,11 +220,14 @@ mod sim {
         let mut index = 0_usize;
         let pieces = script.chunks.len().max(1);
         while written < script.sent {
-            let piece = script
-                .chunks
-                .get(index.checked_rem(pieces).unwrap_or(0))
-                .copied()
-                .unwrap_or(1);
+            // The chunk schedule is cycled: a script with one piece writes that
+            // piece for the whole body and a script with four writes them in
+            // turn, so every piece size is exercised at every body length.
+            let position = index.checked_rem(pieces);
+            let piece = match position.and_then(|at| script.chunks.get(at)) {
+                Some(piece) => *piece,
+                None => 1,
+            };
             let take = piece.min(script.sent.saturating_sub(written)).max(1);
             stream.write_all(&vec![b'x'; take])?;
             written = written.saturating_add(take);
@@ -292,6 +295,10 @@ mod sim {
     }
 
     /// Accept `count` connections and return each request head.
+    ///
+    /// A refused connection ends the round: both tenants have been answered by
+    /// then, and a server that cannot accept a third connection is the one fact
+    /// the heads would otherwise hide.
     fn serve_many(listener: &TcpListener, reply: &[u8], count: usize) -> Vec<Vec<u8>> {
         let mut heads = Vec::new();
         for _ in 0..count {

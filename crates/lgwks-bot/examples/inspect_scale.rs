@@ -24,8 +24,18 @@ use lgwks_bot::domain::inspect::{InspectionJob, inspection_task};
 use lgwks_bot::inspect::{Budgets, InspectRequest, inspect};
 use lgwks_bot::task::Host;
 
+#[path = "../tests/support/lock.rs"]
+mod lock;
+#[path = "support/measure.rs"]
+mod measure;
+
+use lock::take_unpoisoned;
+
 /// The admission ceiling the tiers run under.
 const CEILING: usize = 32;
+
+/// Subject bytes the `alloc` mode inspects when the command line names none.
+const DEFAULT_ALLOC_BYTES: usize = 4_096;
 
 /// The tiers the hyperscale sweep runs.
 const TIERS: [usize; 3] = [100, 1_000, 10_000];
@@ -33,47 +43,47 @@ const TIERS: [usize; 3] = [100, 1_000, 10_000];
 /// A one-violation subject every tier inspects.
 const SUBJECT: &str = "fn f() { g().unwrap(); }\n";
 
+/// Run the sweep the command line names, or the tier sweep when it names none.
+///
+/// A mode that is not one of the two is refused rather than folded into the
+/// tier sweep: a mistyped mode that silently measures the wrong thing is the
+/// defect this arm exists to remove.
 fn main() -> std::io::Result<()> {
-    let mode = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tiers".to_owned());
-    match mode.as_str() {
-        "alloc" => {
-            let bytes = std::env::args()
-                .nth(2)
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(4096);
+    let mut args = std::env::args().skip(1);
+    let mode = args.next();
+    match mode.as_deref() {
+        Some("alloc") => {
+            let requested = args.next();
+            let bytes = match requested {
+                Some(text) => text.parse::<usize>().map_err(to_io)?,
+                None => DEFAULT_ALLOC_BYTES,
+            };
             allocation(bytes)
         }
-        _ => tiers(),
+        None => tiers(),
+        Some(other) => {
+            let mut err = std::io::stderr().lock();
+            writeln!(err, "unknown mode {other:?}; expected `tiers` or `alloc`")?;
+            Err(std::io::Error::other(format!(
+                "unknown mode {other:?}; expected `tiers` or `alloc`"
+            )))
+        }
     }
-}
-
-/// The `quantile`-th percentile of a sorted slice, in microseconds.
-fn percentile(values: &[u64], quantile: usize) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let index = values
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(quantile)
-        .checked_div(100)
-        .unwrap_or(0);
-    values.get(index).copied().unwrap_or(0)
 }
 
 /// Drive one concurrency tier through a bounded host and print its percentiles.
 fn one_tier(out: &mut std::io::Stdout, jobs: usize) -> std::io::Result<()> {
+    let ceiling = NonZeroUsize::new(CEILING)
+        .ok_or_else(|| to_io("the admission ceiling must be non-zero"))?;
     let host = Host::builder("scale")
         .map_err(to_io)?
-        .max_concurrent_tasks(NonZeroUsize::new(CEILING).unwrap_or(NonZeroUsize::MIN))
+        .max_concurrent_tasks(ceiling)
         .default_deadline(Duration::from_secs(120))
         .build()
         .map_err(to_io)?;
     let task = inspection_task("inspect").map_err(to_io)?;
     let next = AtomicUsize::new(0);
-    let latencies: Mutex<Vec<u64>> = Mutex::new(Vec::with_capacity(jobs));
+    let latencies: Mutex<Vec<u128>> = Mutex::new(Vec::with_capacity(jobs));
 
     std::thread::scope(|scope| {
         for _ in 0..CEILING {
@@ -87,26 +97,28 @@ fn one_tier(out: &mut std::io::Stdout, jobs: usize) -> std::io::Result<()> {
                     if let Ok(report) =
                         host.block_on(&task, InspectionJob::new("scale.rs", SUBJECT))
                         && report.into_result().is_ok()
-                        && let Ok(mut guard) = latencies.lock()
                     {
-                        guard
-                            .push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+                        // The width `as_micros` reports: a per-inspection latency
+                        // is microseconds, and narrowing it would need a
+                        // stand-in for a span of 584 942 years.
+                        let micros = started.elapsed().as_micros();
+                        take_unpoisoned(&latencies).push(micros);
                     }
                 }
             });
         }
     });
 
-    let mut values = latencies.into_inner().unwrap_or_default();
-    values.sort_unstable();
+    let mut values = take_unpoisoned(&latencies).clone();
+    let summary = measure::Summary::of(&mut values);
     writeln!(
         out,
-        "tier={jobs} ceiling={CEILING} reached={} peak_in_flight={} p50={}us p95={}us p99={}us",
-        values.len(),
-        host.admission().peak_in_flight(),
-        percentile(&values, 50),
-        percentile(&values, 95),
-        percentile(&values, 99),
+        "{}",
+        summary.line(&format!(
+            "tier={jobs} ceiling={CEILING} reached={} peak_in_flight={}",
+            values.len(),
+            host.admission().peak_in_flight()
+        ))
     )?;
     Ok(())
 }
@@ -126,7 +138,10 @@ fn allocation(bytes: usize) -> std::io::Result<()> {
     // One violation per line, and a line is about forty bytes, so the finding
     // count stays under `MAX_FINDINGS` across the sizes the report sweeps and
     // the retained output can be compared linearly.
-    let lines = bytes.checked_div(40).unwrap_or(1).saturating_add(1);
+    let lines = bytes
+        .checked_div(40)
+        .ok_or_else(|| to_io("a generated line is forty bytes"))?
+        .saturating_add(1);
     let mut source = String::with_capacity(bytes);
     for index in 0..lines {
         let line = format!("fn f{index}() {{ let value = input.unwrap(); }}\n");

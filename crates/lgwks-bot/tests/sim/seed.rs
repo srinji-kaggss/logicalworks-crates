@@ -9,13 +9,6 @@
 //! copy, so a seed recorded against one crate's suite means the same draw
 //! sequence in every other.
 
-// Each including test crate uses a different subset of the generator and the
-// trace, so every one of them sees an item another never touches.
-#![allow(
-    dead_code,
-    reason = "each including sim target uses a different subset of the seed substrate"
-)]
-
 // ── Randomness ────────────────────────────────────────────────────────────
 
 /// A xoshiro256** generator, seeded through splitmix64.
@@ -82,13 +75,13 @@ impl Rng {
     /// biases toward the low residues and is raw arithmetic that wraps the day
     /// a constant changes.
     pub fn below(&mut self, bound: u32) -> u32 {
-        if bound == 0 {
-            return 0;
-        }
         // Two to the thirty-second: the width of the draw this consumes.
         let width = u64::from(u32::MAX).saturating_add(1);
         let range = u64::from(bound);
-        let threshold = width.checked_rem(range).unwrap_or(0);
+        // A zero bound is the only one with no residue, and nothing lies below it.
+        let Some(threshold) = width.checked_rem(range) else {
+            return 0;
+        };
         let entropy = u64::from(u32::MAX);
         loop {
             let draw = self.next_u64() & entropy;
@@ -98,7 +91,9 @@ impl Rng {
             if product < threshold {
                 continue;
             }
-            return u32::try_from(product >> 32).unwrap_or(0);
+            // The high half of the product, read as its four high bytes.
+            let [.., b4, b5, b6, b7] = product.to_le_bytes();
+            return u32::from_le_bytes([b4, b5, b6, b7]);
         }
     }
 
@@ -108,11 +103,6 @@ impl Rng {
             return low;
         }
         low.saturating_add(self.below(high.saturating_sub(low).saturating_add(1)))
-    }
-
-    /// A `bool` that is true with probability `per_mille / 1000`.
-    pub fn chance(&mut self, per_mille: u32) -> bool {
-        self.below(1000) < per_mille
     }
 }
 
@@ -126,7 +116,10 @@ impl Rng {
 /// of defence over a fact the hash already established.
 #[derive(Clone, Debug, Default)]
 pub struct Trace {
-    bytes: Vec<u8>,
+    /// Every fact recorded, framed; [`super::seed_helpers`] reads whether it is
+    /// empty, so the field is visible to the substrate around this file.
+    pub(super) bytes: Vec<u8>,
+    /// How many facts were recorded, mixed into each frame.
     len: u64,
 }
 
@@ -150,19 +143,15 @@ impl Trace {
         self.bytes.extend_from_slice(fact.as_bytes());
     }
 
-    /// Append a labelled fact and a number, which is what most facts are.
-    pub fn record_u64(&mut self, label: &str, value: u64) {
+    /// Append a labelled number, which is what most facts are.
+    ///
+    /// Written as its decimal digits, whatever its width: a count, an id and a
+    /// draw of equal value trace identically on every target, so a `usize` on a
+    /// 32-bit host and a `u64` on a 64-bit one produce the same receipt, and
+    /// there is no widening to fail.
+    pub fn record_number(&mut self, label: &str, value: impl std::fmt::Display) {
         self.record(label);
         self.record(&value.to_string());
-    }
-
-    /// Append a labelled count of things.
-    ///
-    /// A `usize` widened here rather than at each call site, so the
-    /// conversion is one reviewed line instead of forty casts that each have to
-    /// be re-checked on a 32-bit target.
-    pub fn record_count(&mut self, label: &str, value: usize) {
-        self.record_u64(label, u64::try_from(value).unwrap_or(0));
     }
 
     /// The FNV-1a 64 digest of everything recorded.
@@ -178,15 +167,5 @@ impl Trace {
             digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
         }
         digest
-    }
-
-    /// How many bytes of fact the trace holds.
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    /// Whether anything was recorded.
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
     }
 }

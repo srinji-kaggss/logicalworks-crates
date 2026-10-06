@@ -4,10 +4,12 @@
 //! cargo run --release -p lgwks_bot --example measure_overhead -- [runs]
 //! ```
 //!
-//! Two lines are printed, one JSON object each: `host_run` (one `Host::run` of
-//! an immediately-ready body) and `process_run` (one `sys::Process` execute of
-//! `true`). Latency is in microseconds per call, measured around the public
-//! entry point. Peak RSS is read externally (`/usr/bin/time -l`), not from
+//! Two lines are printed through the shared instrument every other measurement
+//! harness in this crate uses (`support/measure.rs`), so the numbers here and
+//! the numbers `resume_cost`, `tail_cost` and `poll_deadline_cost` print mean
+//! the same thing: `host_run` is one `Host::run` of an immediately-ready body
+//! and `process_run` is one `sys::Process` execute of `true`. Latency is in
+//! microseconds per call, measured around the public entry point. Peak RSS is read externally (`/usr/bin/time -l`), not from
 //! inside: a process id is an identity the OS reuses, which the estate's
 //! std-first gate refuses.
 //!
@@ -24,36 +26,39 @@ use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{Auth, Cap, Execute, GrantSet};
 
-/// The value at `permille` of a sorted sample, in microseconds.
-fn percentile(sorted: &[u64], permille: usize) -> u64 {
-    let rank = sorted
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(permille)
-        .checked_div(1_000)
-        .unwrap_or(0);
-    sorted.get(rank).copied().unwrap_or(0)
-}
+#[path = "support/measure.rs"]
+mod measure;
 
-/// Summarise a sample as one JSON line, in microseconds.
-fn report(name: &str, mut samples: Vec<u64>, runs: usize) -> std::io::Result<()> {
-    samples.sort_unstable();
-    writeln!(
-        std::io::stdout().lock(),
-        "{{\"name\":\"{name}\",\"runs\":{runs},\"p50_us\":{},\"p95_us\":{},\"p99_us\":{},\
-         \"max_us\":{}}}",
-        percentile(&samples, 500),
-        percentile(&samples, 950),
-        percentile(&samples, 990),
-        percentile(&samples, 1_000),
-    )
+/// Runs each mechanism is measured over when the command line names no count.
+const DEFAULT_RUNS: &str = "2000";
+
+/// Summarise a sample as one report line, in microseconds.
+///
+/// `n` is the number of samples actually collected and `max` is the slowest one,
+/// read off the sorted sample rather than from a running maximum the loop would
+/// have had to keep. A sample with none in it prints `max=unmeasured` rather
+/// than a zero nobody measured.
+fn report(name: &str, mut samples: Vec<u128>) -> std::io::Result<()> {
+    let summary = measure::Summary::of(&mut samples);
+    let reached = samples.len();
+    let mut out = std::io::stdout().lock();
+    let _written = match samples.last() {
+        Some(worst) => writeln!(out, "{} n={reached} max={worst}us", summary.line(name)),
+        None => writeln!(out, "{} n={reached} max=unmeasured", summary.line(name)),
+    };
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runs = std::env::args()
-        .nth(1)
-        .and_then(|text| text.parse::<usize>().ok())
-        .unwrap_or(2_000);
+    let requested = std::env::args().nth(1);
+    let runs: usize = match requested {
+        Some(text) => text.parse()?,
+        None => DEFAULT_RUNS.parse()?,
+    };
+    // The measured body's input is a `u64`, so the run count is drawn in that
+    // width once here: a count this host cannot address is a refusal, not a
+    // wrapped index.
+    let run_count = u64::try_from(runs)?;
     let runtime = lgwks_bot::Runtime::new()?;
 
     // One Host::run of an immediately-ready body.
@@ -65,11 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let mut host_samples = Vec::with_capacity(runs);
     runtime.block_on(async {
-        for index in 0..runs {
-            let input = u64::try_from(index).unwrap_or(0);
+        for input in 0..run_count {
             let started = Instant::now();
             let report = host.run(&ready, input).await;
-            host_samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            host_samples.push(started.elapsed().as_micros());
             assert_eq!(
                 report.output().copied(),
                 Some(input),
@@ -77,21 +81,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     });
-    report("host_run", host_samples, runs)?;
+    report("host_run", host_samples)?;
 
     // One sys::Process execute of `true`.
     let auth: Auth = GrantSet::empty().grant(Cap::sys()).issue(&[Cap::sys()])?;
     let process = Process::new("true");
     let mut process_samples = Vec::with_capacity(runs);
     runtime.block_on(async {
-        for _ in 0..runs {
+        for _ in 0..run_count {
             let started = Instant::now();
             let state = process.execute_action((auth.clone(), &())).await?;
-            process_samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            process_samples.push(started.elapsed().as_micros());
             assert_eq!(state.exit_code, Some(0), "the measured child exited zero");
         }
         Ok::<(), lgwks_bot::BotError>(())
     })?;
-    report("process_run", process_samples, runs)?;
+    report("process_run", process_samples)?;
     Ok(())
 }

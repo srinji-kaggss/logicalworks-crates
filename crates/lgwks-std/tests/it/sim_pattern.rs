@@ -29,8 +29,7 @@ use lgwks_std::pattern::{
 
 use seeded_bytes::{below, fold_bytes, next_byte, next_text};
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
 
 /// The input ceiling the bounded families configure, and the size of the
@@ -633,7 +632,7 @@ fn two_seeds_draw_two_different_haystacks() {
     let mut trace = initial_trace();
     fold_bytes(&mut trace, left.as_bytes());
     fold_bytes(&mut trace, right.as_bytes());
-    fold(&mut trace, u64::try_from(left.len()).unwrap_or(0));
+    fold_usize(&mut trace, left.len());
     assert_ne!(
         trace,
         initial_trace(),

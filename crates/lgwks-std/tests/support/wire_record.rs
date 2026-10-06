@@ -3,9 +3,9 @@
 //! The same type definitions back the retained fixture reader (`wire_fixture.rs`),
 //! the seeded simulations (`sim_wire.rs`), and the feature-unification probe
 //! (`wire_feature_unification.rs`), so the three cannot drift into testing
-//! different schemas.
+//! different schemas. All three are modules of the one `it` binary, which reads
+//! every item here, so the schema needs neither an `allow` nor tests of its own.
 #![cfg(feature = "wire")]
-#![allow(dead_code, reason = "each test target uses a subset of these items")]
 
 use std::collections::BTreeMap;
 
@@ -51,9 +51,9 @@ pub fn sample() -> ConsumerRecord {
 }
 
 /// The format the retained fixture bytes were produced under.
-pub const PINNED_POINTER_WIDTH_BITS: u8 = 32;
+pub const PINNED_POINTER_WIDTH_BITS: usize = 32;
 /// The fixture's archived `u32` alignment, in bytes.
-pub const PINNED_U32_ALIGNMENT: u8 = 4;
+pub const PINNED_U32_ALIGNMENT: usize = 4;
 
 /// The hex payload of the retained fixture, with `#` metadata lines removed.
 #[must_use]

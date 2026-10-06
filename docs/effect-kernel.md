@@ -143,7 +143,7 @@ length-framed event per frame with the append's chain head stored beside it,
 `sync_all` before every acknowledgment, a torn tail truncated on open because
 it was never acknowledged, and a frame whose bytes or stored head lie refused
 as `JournalError::Corrupt` because it may have been.
-`tests/durable_crash_observation.rs` is the external half of this design: a
+`tests/it/durable_crash_observation.rs` is the external half of this design: a
 real `SIGKILL` mid-ladder against that real file, then a restart, then the
 recovered answer asserted — rows #100, #101, #102, #104 and #106 of the #109
 register. Its concurrent-writer exclusion is a caller obligation, recorded in

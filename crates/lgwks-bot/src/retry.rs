@@ -567,15 +567,14 @@ mod tests {
         let key_digest = ActionDigest::from_tagged("blake3_256", digest_hex)?;
         let key_environment = EnvironmentId::from_hex(ENV)?;
         let key_epoch = EnvironmentEpoch::from_decimal("1")?;
-        Ok(EffectKey::new(
-            key_run,
-            key_action,
-            key_attempt,
-            key_flow_revision,
-            key_digest,
-            key_environment,
-            key_epoch,
-        ))
+        Ok(
+            crate::effect::EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
+                key_action,
+                key_attempt,
+                key_digest,
+                key_epoch,
+            ),
+        )
     }
 
     /// The payload binding of the shared attempt.
@@ -586,6 +585,25 @@ mod tests {
     /// A payload binding that differs from [`payload`].
     fn other_payload() -> Result<ActionDigest, Box<dyn std::error::Error>> {
         Ok(ActionDigest::from_tagged("blake3_256", OTHER_DIGEST_HEX)?)
+    }
+
+    /// An unresolved attempt under a live authority and nothing else claimed:
+    /// zero attempts made, zero elapsed, and the shared payload.
+    ///
+    /// The subject the contract tests below all start from. Built once because
+    /// they differ from each other in exactly one clause — the contract, its
+    /// window, or its late-arrival behaviour — and a fixture each of them wrote
+    /// out by hand is how two of them come to differ in a second one and stop
+    /// testing what their names say.
+    fn unresolved() -> Result<RetryFacts, Box<dyn std::error::Error>> {
+        Ok(RetryFacts::new(
+            RetryPolicy::DEFAULT,
+            0,
+            RetryClass::RequiresEvidence,
+            dispatched(DIGEST_HEX)?,
+            payload()?,
+        )
+        .with_live_authority())
     }
 
     /// Facts that permit a retry, so each test changes exactly one thing.
@@ -724,14 +742,7 @@ mod tests {
 
     #[test]
     fn an_unknown_outcome_with_no_evidence_is_refused() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority();
+        let facts = unresolved()?;
         assert_eq!(
             retry_admissible(&facts),
             RetryDecision::Refused(vec![RetryRefusal::NotProvenUndone])
@@ -744,15 +755,7 @@ mod tests {
         // RQ-009: a GUI click has no generic deduplication contract, so an
         // unsettled click is never retried on the contract half of the
         // disjunct. Nothing here can express otherwise.
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_elapsed(Duration::from_secs(1));
+        let facts = unresolved()?.with_elapsed(Duration::from_secs(1));
 
         assert_eq!(
             retry_admissible(&facts),
@@ -763,16 +766,9 @@ mod tests {
 
     #[test]
     fn a_contract_inside_its_window_covers_a_resend() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
-        .with_elapsed(Duration::from_secs(30));
+        let facts = unresolved()?
+            .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
+            .with_elapsed(Duration::from_secs(30));
 
         assert_eq!(retry_admissible(&facts), RetryDecision::UnderContract);
         Ok(())
@@ -780,16 +776,9 @@ mod tests {
 
     #[test]
     fn a_contract_past_its_window_is_worthless_if_a_late_duplicate_applies() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
-        .with_elapsed(Duration::from_secs(601));
+        let facts = unresolved()?
+            .with_contract(contract(Duration::from_secs(600), LateArrival::Applied)?)
+            .with_elapsed(Duration::from_secs(601));
 
         assert_eq!(
             retry_admissible(&facts),
@@ -800,19 +789,12 @@ mod tests {
 
     #[test]
     fn an_unspecified_late_arrival_is_not_a_refusal() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(contract(
-            Duration::from_secs(600),
-            LateArrival::Unspecified,
-        )?)
-        .with_elapsed(Duration::from_secs(601));
+        let facts = unresolved()?
+            .with_contract(contract(
+                Duration::from_secs(600),
+                LateArrival::Unspecified,
+            )?)
+            .with_elapsed(Duration::from_secs(601));
 
         assert!(
             !retry_admissible(&facts).permits_retry(),
@@ -824,16 +806,9 @@ mod tests {
     #[test]
     fn a_contract_past_its_window_still_covers_when_the_remote_refuses_late_duplicates()
     -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(contract(Duration::from_secs(600), LateArrival::Refused)?)
-        .with_elapsed(Duration::from_secs(86_400));
+        let facts = unresolved()?
+            .with_contract(contract(Duration::from_secs(600), LateArrival::Refused)?)
+            .with_elapsed(Duration::from_secs(86_400));
 
         assert_eq!(retry_admissible(&facts), RetryDecision::UnderContract);
         Ok(())
@@ -841,15 +816,7 @@ mod tests {
 
     #[test]
     fn a_contract_for_another_payload_does_not_cover() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(DeduplicationContract::new(
+        let facts = unresolved()?.with_contract(DeduplicationContract::new(
             ActionId::from_hex(ACTION)?,
             other_payload()?,
             DedupScope::new("tenant-7")?,
@@ -866,15 +833,7 @@ mod tests {
 
     #[test]
     fn a_contract_for_another_action_does_not_cover() -> TestResult {
-        let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
-            0,
-            RetryClass::RequiresEvidence,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
-        )
-        .with_live_authority()
-        .with_contract(DeduplicationContract::new(
+        let facts = unresolved()?.with_contract(DeduplicationContract::new(
             ActionId::from_hex(OTHER_ACTION)?,
             payload()?,
             DedupScope::new("tenant-7")?,

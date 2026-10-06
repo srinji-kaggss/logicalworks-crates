@@ -193,7 +193,7 @@ fn record_verdict(slot: &Arc<std::sync::Mutex<String>>, verdict: &str) {
 ///
 /// The clock is returned as well as the run, so a caller can inspect the
 /// watchdog the run left behind.
-fn wall_twin(plan: Plan) -> (Observed, Clock) {
+fn wall_twin(plan: Plan) -> Result<(Observed, Clock), Box<dyn std::error::Error>> {
     let short = Plan {
         budget: plan.budget.min(REAL_WAIT_CEILING),
         over: plan.over,
@@ -206,8 +206,8 @@ fn wall_twin(plan: Plan) -> (Observed, Clock) {
         SpendsHow::Unmoved
     };
     let clock = Clock::wall();
-    let run = block_on(run_repeating(clock.clone(), short, how));
-    (run, clock)
+    let run = block_on(run_repeating(clock.clone(), short, how))?;
+    Ok((run, clock))
 }
 
 /// The refusal a step must have reported, or a [`Defect`] naming what it did.
@@ -264,7 +264,11 @@ struct Observed {
 /// cancel and the test would be asserting on which of the two the executor
 /// happened to reach first. Parked in a body and advanced from a second task,
 /// the loop's *budget* is what stops it, on every run.
-async fn run_repeating(clock: Clock, plan: Plan, how: SpendsHow) -> Observed {
+async fn run_repeating(
+    clock: Clock,
+    plan: Plan,
+    how: SpendsHow,
+) -> Result<Observed, Box<dyn std::error::Error>> {
     use lgwks_bot::rt::sync::Notify;
 
     let mut trace = Trace::new();
@@ -278,7 +282,9 @@ async fn run_repeating(clock: Clock, plan: Plan, how: SpendsHow) -> Observed {
     // it terminates and what is compared is the *terminal state*, not how long
     // each side took to reach it.
     let budget = if how == SpendsHow::Unmoved {
-        Budget::Iterations(NonZeroU64::new(FROZEN_ITERATIONS).unwrap_or(NonZeroU64::MIN))
+        Budget::Iterations(
+            NonZeroU64::new(FROZEN_ITERATIONS).ok_or("a frozen budget of zero iterations")?,
+        )
     } else {
         Budget::For(plan.budget)
     };
@@ -320,9 +326,17 @@ async fn run_repeating(clock: Clock, plan: Plan, how: SpendsHow) -> Observed {
     let advance = async move {
         parked.notified().await;
         if how == SpendsHow::Advanced {
-            let target = plan
-                .budget
-                .saturating_mul(u32::try_from(plan.over).unwrap_or(u32::MAX));
+            let over = match u32::try_from(plan.over) {
+                Ok(over) => over,
+                // An over-advance this host cannot express is recorded as its own
+                // verdict rather than folded into the largest one, because the
+                // arms below are compared against each other.
+                Err(_too_wide) => {
+                    record_verdict(&writing_verdict, "over-advance-unrepresentable");
+                    return;
+                }
+            };
+            let target = plan.budget.saturating_mul(over);
             match advance_clock.advance(target) {
                 Ok(_) => record_verdict(&writing_verdict, "landed"),
                 Err(ClockError::NotVirtual) => {
@@ -401,11 +415,11 @@ async fn run_repeating(clock: Clock, plan: Plan, how: SpendsHow) -> Observed {
     );
     // The wall watchdog is a separate fact from the logical counter: it must
     // not have moved by however much logical time the advance spent.
-    trace.record_u64(
+    trace.record_number(
         "watchdog-under-a-second",
         u64::from(clock.wall_watchdog().elapsed() < Duration::from_secs(1)),
     );
-    Observed { trace, succeeded }
+    Ok(Observed { trace, succeeded })
 }
 
 /// An advanced virtual clock exhausts the supervisor's real budget loop, and the
@@ -437,7 +451,7 @@ fn an_advanced_clock_stops_the_real_budget_loop_the_same_way_real_time_does()
         } else {
             SpendsHow::Unmoved
         };
-        let virtual_run = block_on(run_repeating(virtual_clock, plan, virtual_how));
+        let virtual_run = block_on(run_repeating(virtual_clock, plan, virtual_how))?;
         if virtual_run.trace.is_empty() {
             return Err(Box::new(Defect(format!(
                 "seed {seed}: advances={} over={} budget={:?} produced no trace",
@@ -448,7 +462,7 @@ fn an_advanced_clock_stops_the_real_budget_loop_the_same_way_real_time_does()
         // The wall twin: the same body, the same budget shape, the same
         // terminal outcome — reached by real elapsed time instead of by
         // arithmetic.
-        let (wall_run, wall_clock) = wall_twin(plan);
+        let (wall_run, wall_clock) = wall_twin(plan)?;
 
         // The wall watchdog is independent of everything above: a run that spent
         // no logical time at all must still show a real watchdog that moved.
@@ -808,12 +822,12 @@ fn the_supervisor_accounts_exactly_at_every_concurrency_tier()
         let stats = observed.stats();
         assert_eq!(
             stats.spawned,
-            u64::try_from(tier).unwrap_or(u64::MAX),
+            u64::try_from(tier)?,
             "at {tier} tasks every spawn must be counted exactly once"
         );
         assert_eq!(
             stats.completed,
-            u64::try_from(tier).unwrap_or(u64::MAX),
+            u64::try_from(tier)?,
             "at {tier} tasks every task must reach a terminal state"
         );
         // `shutdown` cancels first and then drains cooperatively, so a body
@@ -1158,10 +1172,11 @@ fn repeat_on_reads_the_clock_it_is_given() -> Result<(), Box<dyn std::error::Err
 fn a_hundred_thousand_joined_tasks_all_reach_a_terminal_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let tier = 100_000_usize;
+    let tier_u64 = u64::try_from(tier)?;
     let completed = block_on(async {
         let mut set: JoinSet<u64> = JoinSet::new();
-        for index in 0..tier {
-            set.spawn(async move { u64::try_from(index).unwrap_or(0) });
+        for index in 0..tier_u64 {
+            set.spawn(async move { index });
         }
         let mut finished = 0_u64;
         let mut total = 0_u64;
@@ -1176,15 +1191,15 @@ fn a_hundred_thousand_joined_tasks_all_reach_a_terminal_state()
     let (finished, total) = completed;
     assert_eq!(
         finished,
-        u64::try_from(tier).unwrap_or(u64::MAX),
+        u64::try_from(tier)?,
         "every joined task must return a result, not a cancelled or panicked one"
     );
     // The sum of `0..tier` — an order check, so a join set that returned the
     // right *number* of the wrong values is caught rather than passed.
-    let expected = (u64::try_from(tier).unwrap_or(0))
-        .saturating_mul(u64::try_from(tier).unwrap_or(0).saturating_sub(1))
+    let expected = tier_u64
+        .saturating_mul(tier_u64.saturating_sub(1))
         .checked_div(2)
-        .unwrap_or(0);
+        .ok_or("the triangular number of an even count does not divide by two")?;
     assert_eq!(
         total, expected,
         "the joined values must be the ones submitted"
@@ -1248,7 +1263,7 @@ fn a_deep_nest_of_clock_governed_steps_is_stack_bounded() -> Result<(), Box<dyn 
 
     assert_eq!(
         outcome,
-        u64::try_from(DEPTH).unwrap_or(u64::MAX),
+        u64::try_from(DEPTH)?,
         "every level of the nest must run exactly once and report its own depth"
     );
     Ok(())

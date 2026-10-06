@@ -1203,7 +1203,14 @@ impl Frontier {
             }
         }
 
-        binding.unwrap_or(Verdict::Admit)
+        // Two answers, both real: a constraint on this host was saturated and
+        // the fold above carries the latest deferral, or none was and `Admit`
+        // is what that means. The fold is never left holding nothing that was
+        // meant to be reported.
+        match binding {
+            Some(verdict) => verdict,
+            None => Verdict::Admit,
+        }
     }
 
     /// The deferral for `key` at `at`, or `None` when it has room.
@@ -2121,7 +2128,13 @@ mod tests {
 
         // The property the acceptance criteria state: for every host selection
         // returns, the gate admits it on unchanged state.
-        let selected = next.unwrap_or_default();
+        // Refused rather than defaulted: with no host selected there is nothing
+        // to admit, and the round trip this checks cannot be checked at all.
+        let Some(selected) = next else {
+            return Err("the gate selected no host, so the round trip cannot be \
+                        exercised"
+                .into());
+        };
         let permit = match frontier.admit(&selected, Duration::ZERO) {
             Admission::Admit(permit) => permit,
             other => {
@@ -2404,11 +2417,13 @@ mod tests {
 
         fn build() -> Frontier {
             let mut frontier = frontier();
-            for index in 0..20_u32 {
+            // Three hosts per origin, the shared-infrastructure case at size.
+            // Cycled from the table rather than indexed by a remainder, so the
+            // grouping is stated rather than recomputed.
+            const ORIGINS: [&str; 3] = ["origin-0", "origin-1", "origin-2"];
+            for (index, origin) in (0..20_u32).zip(ORIGINS.iter().cycle()) {
                 let host = format!("h{index}.example");
-                // Three hosts per origin: the shared-infrastructure case at size.
-                let origin = format!("origin-{}", index.checked_rem(3).unwrap_or(0));
-                ready(&mut frontier, &host, &origin);
+                ready(&mut frontier, &host, origin);
             }
             frontier
         }

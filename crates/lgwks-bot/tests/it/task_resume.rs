@@ -27,6 +27,8 @@
 
 #![cfg(all(feature = "script", feature = "ephemeral"))]
 
+use crate::scratch::Scratch;
+
 use std::error::Error;
 use std::future::Future;
 use std::io::Write as _;
@@ -42,10 +44,10 @@ use lgwks_bot::rt::runtime;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Disposition, EffectKnowledge, Host, RunStore, StoreError, Task, task};
 
-#[path = "support/resume.rs"]
-mod shared;
+use crate::journal_fixtures::pause;
+use crate::resume_fixtures as shared;
 
-use shared::{Scratch, Summary, marker, peak_rss_mib, ran, record_run};
+use shared::{Summary, marker, peak_rss_mib, ran, record_run, store_file};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -109,25 +111,6 @@ fn stored_host(tenant: &str, dir: &Path) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?.run_store(dir)?.build()?)
 }
 
-/// A plain-process pause, for the two places this file waits without a runtime:
-/// the child parking until the parent kills it, and the parent polling for the
-/// child's evidence.
-///
-/// The workspace's ban on `std::thread::sleep` exists because blocking an
-/// executor thread stalls every task on it. Neither place here has an executor:
-/// this file drives its runs through `block_on`, which returns before the wait,
-/// and the parked child and the marker poll *are* the observation's subject
-/// rather than its scaffolding.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the kill harness is a plain process with no async runtime and no reactor to stall; \
-              the parked child and the marker poll are the observation's shape, and \
-              `rt::time::sleep` cannot be awaited here"
-)]
-fn pause(millis: u64) {
-    std::thread::sleep(Duration::from_millis(millis));
-}
-
 /// Without a store the run claims nothing, and a durable step is just a step.
 #[test]
 fn a_run_without_a_store_claims_no_durability() -> TestResult {
@@ -183,7 +166,7 @@ fn a_run_without_a_store_claims_no_durability() -> TestResult {
 #[test]
 fn a_recorded_step_returns_without_polling_its_future() -> TestResult {
     let scratch = Scratch::new("replay")?;
-    let store = scratch.join("store");
+    let store = scratch.path().join("store");
     let host = stored_host("acme", &store)?;
     let input = scratch.path().to_path_buf();
 
@@ -226,9 +209,9 @@ fn a_recorded_step_returns_without_polling_its_future() -> TestResult {
 #[test]
 fn a_killed_process_resumes_without_rerunning_finished_steps() -> TestResult {
     let scratch = Scratch::new("kill")?;
-    let work = scratch.join("work");
-    let store = scratch.join("store");
-    let run_file = scratch.join("run-id");
+    let work = scratch.path().join("work");
+    let store = scratch.path().join("store");
+    let run_file = scratch.path().join("run-id");
     std::fs::create_dir_all(&work)?;
 
     let mut child = spawn_child(&work, &store, &run_file)?;
@@ -335,25 +318,22 @@ fn child_body() -> TestResult {
 
     let report = lgwks_bot::block_on(host.run(&body, work));
     if report.disposition() != Disposition::Succeeded {
-        {
-            let refusal =
-                Err(format!("the child run did not succeed: {:?}", report.error()).into());
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "child_body: returning an error to the caller");
-            return refusal;
-        };
+        let refusal = Err(format!("the child run did not succeed: {:?}", report.error()).into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "child_body: returning an error to the caller");
+        return refusal;
     }
     Ok(())
 }
 
 fn spawn_child(work: &Path, store: &Path, run_file: &Path) -> Result<Child, Box<dyn Error>> {
-    let executable = std::env::current_exe()?;
-    Ok(std::process::Command::new(executable)
-        .args([CHILD_TEST, "--exact", "--nocapture"])
-        .env(CHILD_ENV, "1")
-        .env(CHILD_WORK, work)
-        .env(CHILD_STORE, store)
-        .env(CHILD_RUN, run_file)
-        .spawn()?)
+    Ok(
+        crate::probe_command(&crate::probe_test(module_path!(), CHILD_TEST))?
+            .env(CHILD_ENV, "1")
+            .env(CHILD_WORK, work)
+            .env(CHILD_STORE, store)
+            .env(CHILD_RUN, run_file)
+            .spawn()?,
+    )
 }
 
 /// The child process, re-entered as the parked task.
@@ -425,7 +405,7 @@ fn wait_for_marker(path: &Path, within: Duration) -> TestResult {
 #[test]
 fn two_tenants_resuming_one_run_id_stay_isolated() -> TestResult {
     let scratch = Scratch::new("tenants")?;
-    let shared = scratch.join("shared.runstore");
+    let shared = scratch.path().join("shared.runstore");
     let input = scratch.path().to_path_buf();
 
     let alpha = Host::builder("alpha")?
@@ -485,7 +465,7 @@ fn two_tenants_resuming_one_run_id_stay_isolated() -> TestResult {
 #[test]
 fn a_torn_final_record_is_dropped_and_earlier_ones_survive() -> TestResult {
     let scratch = Scratch::new("torn")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     let host = stored_host("acme", &store_dir)?;
     let input = scratch.path().to_path_buf();
 
@@ -562,7 +542,7 @@ const CURRENT_FORMAT: u8 = 2;
 #[test]
 fn a_pre_version_store_is_refused_naming_both_versions() -> TestResult {
     let scratch = Scratch::new("format")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     let host = stored_host("acme", &store_dir)?;
     let report = lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
     assert_eq!(
@@ -639,7 +619,7 @@ fn a_pre_version_store_is_refused_naming_both_versions() -> TestResult {
 #[test]
 fn a_foreign_file_is_still_refused_as_not_a_store() -> TestResult {
     let scratch = Scratch::new("foreign")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     std::fs::create_dir_all(&store_dir)?;
     let path = store_dir.join("acme.runstore");
     // Shares the version byte with the `\x01` store and differs in the first one,
@@ -661,7 +641,7 @@ fn a_foreign_file_is_still_refused_as_not_a_store() -> TestResult {
 #[test]
 fn a_store_corrupt_before_the_tail_is_refused_not_trimmed() -> TestResult {
     let scratch = Scratch::new("corrupt")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     let host = stored_host("acme", &store_dir)?;
     let report = lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
     assert!(report.run_id().is_some());
@@ -698,7 +678,7 @@ fn a_store_corrupt_before_the_tail_is_refused_not_trimmed() -> TestResult {
 #[test]
 fn an_oversized_record_is_refused_naming_the_ceiling() -> TestResult {
     let scratch = Scratch::new("caps")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     let host = stored_host("acme", &store_dir)?;
 
     let huge = task("huge", |scope: Scope, _dir: PathBuf| async move {
@@ -729,7 +709,7 @@ fn an_oversized_record_is_refused_naming_the_ceiling() -> TestResult {
 #[test]
 fn a_recorded_step_replays_under_a_changed_body() -> TestResult {
     let scratch = Scratch::new("changed")?;
-    let host = stored_host("acme", &scratch.join("store"))?;
+    let host = stored_host("acme", &scratch.path().join("store"))?;
 
     let first = task("value", |scope: Scope, n: u32| async move {
         remember(&scope, "the-step", || async move { Ok::<_, FlowError>(n) }).await
@@ -756,7 +736,7 @@ fn a_recorded_step_replays_under_a_changed_body() -> TestResult {
 #[test]
 fn a_stopped_run_carries_a_ticket_that_names_where_it_stopped() -> TestResult {
     let scratch = Scratch::new("ticket")?;
-    let host = stored_host("acme", &scratch.join("store"))?;
+    let host = stored_host("acme", &scratch.path().join("store"))?;
     let failing = task("boom", |scope: Scope, _dir: PathBuf| async move {
         remember(&scope, "doomed", || async {
             Err::<u32, _>(FlowError::transient("this step cannot succeed"))
@@ -803,7 +783,7 @@ fn a_stopped_run_carries_a_ticket_that_names_where_it_stopped() -> TestResult {
 #[test]
 fn a_foreign_ticket_is_refused_before_any_step_runs() -> TestResult {
     let scratch = Scratch::new("foreign")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     let alpha = stored_host("alpha", &store_dir)?;
     let failing = task("boom", |scope: Scope, _dir: PathBuf| async move {
         remember(&scope, "doomed", || async {
@@ -845,7 +825,7 @@ fn a_foreign_ticket_is_refused_before_any_step_runs() -> TestResult {
 #[test]
 fn a_duplicate_append_of_the_same_record_is_a_no_op() -> TestResult {
     let scratch = Scratch::new("dupe")?;
-    let host = stored_host("acme", &scratch.join("store"))?;
+    let host = stored_host("acme", &scratch.path().join("store"))?;
     let once = lgwks_bot::block_on(host.run(&three_step_task()?, scratch.path().to_path_buf()));
     let run = once.run_id().ok_or("a stored run must name its run id")?;
     let store = host.run_store().ok_or("a stored host keeps a store")?;
@@ -872,7 +852,7 @@ fn a_duplicate_append_of_the_same_record_is_a_no_op() -> TestResult {
 #[test]
 fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
     let scratch = Scratch::new("install")?;
-    let store_dir = scratch.join("store");
+    let store_dir = scratch.path().join("store");
     std::fs::create_dir_all(&store_dir)?;
     std::fs::write(store_dir.join("acme.runstore"), b"not a store at all")?;
 
@@ -895,7 +875,7 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
 ///
 /// ```text
 /// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral --release \
-///     --test task_resume concurrent_runs_across_tiers -- --ignored --nocapture
+///     --test it task_resume::concurrent_runs_across_tiers -- --ignored --nocapture
 /// ```
 ///
 /// Measured on the machine that recorded it, over all three tiers including the
@@ -941,7 +921,7 @@ const SCALE_TIERS: [usize; 3] = [100, 1_000, 10_000];
 ///
 /// ```text
 /// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral \
-///     --test task_resume concurrent_runs_across_tiers -- --ignored --nocapture
+///     --test it task_resume::concurrent_runs_across_tiers -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "the concurrent-run scale measurement; run it with \
@@ -967,7 +947,7 @@ fn concurrent_runs_across_tiers() -> TestResult {
 fn measure_tier(runs: usize) -> TestResult {
     const TENANTS: [&str; 2] = ["scale-a", "scale-b"];
     let scratch = Scratch::new("scale")?;
-    let path = scratch.store();
+    let path = store_file(scratch.path());
     let work = shared::one_step_task()?;
     // One store handle, cloned into both tenants' hosts. Two handles over one file
     // would be two writers, which the store's length fence refuses — and which is
@@ -997,10 +977,12 @@ fn measure_tier(runs: usize) -> TestResult {
         // The tenant alternates with the index, so two identities are in flight at
         // once against the same store and the same chain rather than one after the
         // other.
-        let which = index.checked_rem(TENANTS.len()).unwrap_or_default();
+        let which = index
+            .checked_rem(TENANTS.len())
+            .ok_or("the scale run alternates over at least one tenant")?;
         let host = &hosts[which];
         let at = Instant::now();
-        let report = runtime::block_on(host.run(&work, u32::try_from(index).unwrap_or_default()));
+        let report = runtime::block_on(host.run(&work, u32::try_from(index)?));
         samples.push(at.elapsed().as_micros());
         if !report.disposition().is_success() {
             let refusal = Err(format!("run {index} failed: {:?}", report.error()).into());
@@ -1039,7 +1021,7 @@ fn measure_tier(runs: usize) -> TestResult {
         );
     }
 
-    let summary = Summary::of(&mut samples);
+    let summary = Summary::of(&mut samples).ok_or("the tier measured no samples")?;
     let rss = peak_rss_mib();
     let mut line = std::io::stdout().lock();
     let _written = writeln!(

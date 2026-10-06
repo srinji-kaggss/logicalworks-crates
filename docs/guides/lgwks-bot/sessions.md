@@ -261,9 +261,9 @@ carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session.rs:966`);
+  (`crates/lgwks-bot/src/session.rs:983`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session.rs:993`).
+  (`crates/lgwks-bot/src/session.rs:1010`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an

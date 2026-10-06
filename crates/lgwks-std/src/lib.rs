@@ -79,6 +79,10 @@ pub mod retry;
 /// RON encoding and decoding via serde (feature `ron`).
 #[cfg(feature = "ron")]
 pub mod ron;
+/// The borrowing contract the serde-backed codec facades share, asserted once
+/// for `json` and `ron` (test builds only).
+#[cfg(all(test, any(feature = "json", feature = "ron")))]
+mod serde_facade;
 /// Pure, replaceable similarity metrics and weighted composition.
 pub mod similarity;
 /// Single-threaded executor: `block_on`, `join_all`, `spawn_blocking`.

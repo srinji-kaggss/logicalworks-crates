@@ -20,8 +20,7 @@ use seeded_bytes::{
     below, fold_bytes, fold_refusal, next_byte, next_bytes, next_text, reference_nibble, repeated,
 };
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
-    initial_trace,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
 
 /// The widest payload any family in this file generates, so a boundary case is
@@ -33,6 +32,18 @@ const BOUNDARY_LENGTHS: [usize; 6] = [0, 1, 2, 3, 255, WIDE_PAYLOAD_BYTES];
 
 /// A character the hex alphabet never contains, used to corrupt an input.
 const ALIEN_DIGIT: u8 = b'g';
+
+/// How many payloads the case-drawing family redraws before it insists.
+///
+/// It is a bound and not a loop condition that never ends: six of a byte's
+/// sixteen low-nibble values are letters, so a payload of one byte or more
+/// carries one with probability at least three in eight per byte.
+const LETTER_DRAW_LIMIT: usize = 8;
+
+/// The lowercase hex alphabet, indexed by nibble: the table is the documented
+/// two-characters-per-byte rule rather than a call into the shipped encoder, so
+/// this reference cannot agree with it by construction.
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// What the reference transcoder says about one payload.
 enum Reference {
@@ -62,12 +73,10 @@ enum Refusal {
 /// characters per byte and lowercase digit rule rather than from the shipped
 /// encoder.
 fn reference_encode(bytes: &[u8]) -> String {
-    let mut rendered = String::new();
+    let mut rendered = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
-        let high = u32::from(byte >> 4);
-        let low = u32::from(byte & 0x0f);
-        rendered.push(char::from_digit(high, 16).unwrap_or('?'));
-        rendered.push(char::from_digit(low, 16).unwrap_or('?'));
+        rendered.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        rendered.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
     }
     rendered
 }
@@ -161,7 +170,7 @@ fn hex_trace(seed: u64) -> u64 {
         );
         fold_bytes(&mut trace, &payload);
         fold_bytes(&mut trace, encoded.as_bytes());
-        fold_usize(&mut trace, decoded.map_or(0, |bytes| bytes.len()));
+        fold_usize(&mut trace, payload.len());
 
         let mut destination = vec![0xa5; length];
         let written = decode_into(&encoded, &mut destination);
@@ -307,8 +316,8 @@ fn a_non_digit_is_reported_at_its_first_exact_offset() -> Result<(), DecodeError
                     "seed {seed}: position {position} must be named at offset {at}"
                 ),
                 Reference::Decoded(expected) => assert_eq!(
-                    decode(&corrupted).unwrap_or_default(),
-                    expected,
+                    decode(&corrupted),
+                    Ok(expected),
                     "seed {seed}: position {position} did not make the input malformed"
                 ),
                 Reference::Refused(Refusal::Odd { len }) => {
@@ -411,13 +420,24 @@ fn uppercase_and_lowercase_spellings_decode_to_the_same_bytes() -> Result<(), De
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..32 {
-            let span = below(&mut state, 24);
-            let payload = next_bytes(&mut state, span);
+            let span = below(&mut state, 24).saturating_add(1);
+            // The case needs a payload that renders two spellings, which means a
+            // hex letter in it, and that is drawn rather than assumed: a byte's
+            // low nibble is a letter in six of its sixteen values, so a payload
+            // of a byte or more almost always has one. The redraw is bounded, and
+            // the assertion below says so if the bound is what ended it.
+            let mut payload = next_bytes(&mut state, span);
+            for _ in 0..LETTER_DRAW_LIMIT {
+                if payload.iter().any(|byte| byte & 0x0f >= 10) {
+                    break;
+                }
+                payload = next_bytes(&mut state, span);
+            }
             let lower = encode(&payload);
             let upper = lower.to_ascii_uppercase();
             assert_ne!(
                 lower, upper,
-                "seed {seed}: a payload with a letter must have two spellings"
+                "seed {seed}: {LETTER_DRAW_LIMIT} payloads of {span} bytes carried no hex letter"
             );
 
             let from_lower = decode(&lower)?;
@@ -514,7 +534,12 @@ fn every_truncated_prefix_is_refused_or_is_a_shorter_value() -> Result<(), Decod
             let payload = next_bytes(&mut state, 8);
             let encoded = encode(&payload);
             for cut in 0..encoded.len() {
-                let prefix = encoded.as_bytes().get(..cut).unwrap_or(&[]);
+                // `encode` emits ASCII, so every byte offset in the rendering is
+                // also a character boundary and the prefix at `cut` exists for
+                // every `cut` in this loop. The same file asserts the rendering
+                // against the reference alphabet above, so this is a property
+                // the family has already established rather than a hope.
+                let prefix = &encoded[..cut];
                 if !cut.is_multiple_of(2) {
                     assert_eq!(
                         decode(prefix),
@@ -611,7 +636,7 @@ fn a_seed_draws_a_different_payload_at_the_same_length() {
     );
     let mut trace = initial_trace();
     fold_bytes(&mut trace, &left);
-    fold(&mut trace, u64::try_from(right.len()).unwrap_or(0));
+    fold_usize(&mut trace, right.len());
     assert_ne!(
         trace,
         initial_trace(),

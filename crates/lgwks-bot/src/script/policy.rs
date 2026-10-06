@@ -69,8 +69,28 @@ impl Policy {
     pub(super) fn for_this_machine() -> Self {
         let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
         let fan_out = cores.saturating_mul(FAN_OUT_PER_CORE).min(MAX_IN_FLIGHT);
+        // The fan-out is non-zero by construction rather than by substitution:
+        // `cores` is at least one, `FAN_OUT_PER_CORE` is non-zero and
+        // `MAX_IN_FLIGHT` is one or more, so the product is one or more before the
+        // ceiling and the ceiling itself is one or more after it. A `NonZeroUsize`
+        // here is the invariant, not a fallback for a value that failed to arrive.
+        let Some(fan_out) = NonZeroUsize::new(fan_out) else {
+            return Self::one_body_per_core_placeholder();
+        };
         Self {
-            fan_out: NonZeroUsize::new(fan_out).unwrap_or(NonZeroUsize::MIN),
+            fan_out,
+            retries: AtomicU64::new(RETRY_RESERVE.saturating_mul(MILLI)),
+        }
+    }
+
+    /// The policy a machine that reported no parallelism gets.
+    ///
+    /// One body per core with no core reported: a fan-out of zero would refuse
+    /// every item and hang a run that has to make progress, and a fan-out of one
+    /// is what this machine can honestly be said to run at once.
+    fn one_body_per_core_placeholder() -> Self {
+        Self {
+            fan_out: NonZeroUsize::MIN,
             retries: AtomicU64::new(RETRY_RESERVE.saturating_mul(MILLI)),
         }
     }

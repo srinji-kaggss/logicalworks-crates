@@ -18,12 +18,17 @@
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::rt::task::join_all_bounded;
 use lgwks_bot::rt::time::{sleep, timeout};
 use lgwks_bot::script::{FlowError, Scope, StepKey, Tenant};
+
+#[path = "../tests/support/lock.rs"]
+mod lock;
+
+use lock::take_unpoisoned;
 
 /// Pages per tenant.
 const PAGES: u32 = 10_000;
@@ -65,7 +70,7 @@ impl Site {
     /// first attempt of every 97th page, and a key seen before is a duplicate.
     async fn fetch(&self, key: StepKey, page: u32) -> Result<u64, FlowError> {
         sleep(Duration::from_millis(1)).await;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = take_unpoisoned(&self.state);
         if page.is_multiple_of(97) && state.failed_once.insert(page) {
             state.transient = state.transient.saturating_add(1);
             let refusal = Err(FlowError::transient("the site was busy"));
@@ -82,13 +87,13 @@ impl Site {
 
     /// `(fetched, duplicates, transient)`.
     fn counts(&self) -> (u64, u64, u64) {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = take_unpoisoned(&self.state);
         (state.fetched, state.duplicates, state.transient)
     }
 
     /// Every key this site served.
     fn keys(&self) -> HashSet<StepKey> {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = take_unpoisoned(&self.state);
         state.served.clone()
     }
 }
@@ -118,17 +123,26 @@ async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result
             let key = Scope::root(Tenant::new(&tenant)?)
                 .enter(&format!("page#{page}"))?
                 .key();
-            let mut last = None;
-            for _attempt in 0..3_u32 {
-                match timeout(Duration::from_secs(1), site.fetch(key, page)).await {
+            // Three attempts, spelled as a ceiling inside the loop rather than as
+            // a `for` with an arm after it: every arm either returns or counts
+            // towards the ceiling, so there is no outcome left to invent for the
+            // path out of the loop and no stand-in error standing in for a
+            // refusal nobody produced.
+            let mut attempt = 0_u32;
+            loop {
+                let refusal = match timeout(Duration::from_secs(1), site.fetch(key, page)).await {
                     Ok(Ok(size)) => return Ok(size),
-                    Ok(Err(error)) if error.is_retryable() => last = Some(error),
-                    Ok(Err(error)) => { let refusal = Err(error); lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "crawl_by_hand: returning an error to the caller"); return refusal; },
-                    Err(_elapsed) => last = Some(FlowError::transient("timed out")),
+                    Ok(Err(error)) => error,
+                    Err(_elapsed) => FlowError::transient("timed out"),
+                };
+                attempt = attempt.saturating_add(1);
+                if !refusal.is_retryable() || attempt >= 3 {
+                    let refusal = Err(refusal);
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "crawl_by_hand: returning an error to the caller");
+                    return refusal;
                 }
                 sleep(Duration::from_millis(5)).await;
             }
-            Err(last.unwrap_or_else(|| FlowError::failed("no attempt ran")))
         }
     });
     let mut total: u64 = 0;
@@ -136,6 +150,29 @@ async fn crawl_by_hand(site: Arc<Site>, tenant: &str, pages: Vec<u32>) -> Result
         total = total.saturating_add(outcome?);
     }
     Ok(total)
+}
+
+/// Pages per second over `elapsed`, or `None` when the window is not a number.
+///
+/// `None` is the elapsed window rounding to zero at the microsecond resolution
+/// the report prints in: a clock below the run rather than a page count, and a
+/// printed zero would read as a rate the site achieved.
+fn rate(elapsed: Duration) -> Option<u128> {
+    let micros = elapsed.as_micros();
+    if micros == 0 {
+        return None;
+    }
+    u128::from(PAGES.saturating_mul(2))
+        .saturating_mul(1_000_000)
+        .checked_div(micros)
+}
+
+/// The throughput clause of the timing line, or the explicit absence.
+fn rate_field(elapsed: Duration) -> String {
+    match rate(elapsed) {
+        Some(pages) => format!("{pages} pages/s"),
+        None => String::from("pages/s unmeasured at this clock's resolution"),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -169,12 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              {duplicates} duplicates, total {total} (expected {expected})"
         )?;
         if total != expected || fetched != u64::from(PAGES) {
-            {
-                let refusal =
-                    Err(format!("{name}: the crawl did not fetch every page exactly once").into());
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
-                return refusal;
-            };
+            let refusal =
+                Err(format!("{name}: the crawl did not fetch every page exactly once").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: returning an error to the caller");
+            return refusal;
         }
     }
     let shared = acme_site.keys().intersection(&globex_site.keys()).count();
@@ -194,18 +229,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
     let by_hand = started.elapsed();
-    let rate = |elapsed: Duration| {
-        u128::from(PAGES.saturating_mul(2))
-            .saturating_mul(1_000_000)
-            .checked_div(elapsed.as_micros().max(1))
-            .unwrap_or(0)
-    };
     writeln!(
         out,
-        "   time: script! {scripted:.2?} ({} pages/s), by hand {by_hand:.2?} ({} pages/s), \
+        "   time: script! {scripted:.2?} ({}), by hand {by_hand:.2?} ({}), \
          {} in flight per tenant (chosen by the machine)",
-        rate(scripted),
-        rate(by_hand),
+        rate_field(scripted),
+        rate_field(by_hand),
         machine_bound(),
     )?;
     writeln!(out, "\n{ARCHITECTURE}")?;

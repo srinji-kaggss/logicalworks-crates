@@ -646,25 +646,23 @@ pub async fn review_pr(
             applied,
             intended,
         }),
-        Reconcile::None if created_id.is_some() => {
-            // The create returned an id, and the read-back either did not
-            // return it or returned it saying something else. Either is a
-            // contradiction, not a success: it is reported, never "fixed" by
-            // re-posting.
-            Err(FlowError::failed(format!(
-                "GitHub accepted review {} at {} but the read-back did not return it as \
-                 published; no second review was created",
-                created_id.unwrap_or_default(),
-                reviewed
-            )))
-        }
-        Reconcile::None => Ok(ReviewOutcome::Unknown {
-            commit_id: reviewed,
-            reason: String::from(
-                "the publication response was lost and the read-back found no matching review; \
-                 the review may or may not exist, so nothing was created again",
-            ),
-        }),
+        // Two facts, two arms, and the id decides which: an id the create
+        // returned that the read-back does not agree with is a contradiction,
+        // while no id at all means the response was lost and the effect may or
+        // may not exist. Neither is fixed by posting again.
+        Reconcile::None => match created_id {
+            Some(id) => Err(FlowError::failed(format!(
+                "GitHub accepted review {id} at {reviewed} but the read-back did not return \
+                 it as published; no second review was created"
+            ))),
+            None => Ok(ReviewOutcome::Unknown {
+                commit_id: reviewed,
+                reason: String::from(
+                    "the publication response was lost and the read-back found no matching \
+                     review; the review may or may not exist, so nothing was created again",
+                ),
+            }),
+        },
     }
 }
 

@@ -69,7 +69,7 @@ fn entry_text(krate: &str, aliases: Option<&str>) -> String {
 /// A single-entry register for `krate`.
 fn register(krate: &str, aliases: Option<&str>) -> Result<Contract, Box<dyn Error>> {
     Ok(Contract::parse(&format!(
-        "[policy]\nschema = 2\nenforce = true\n\n{}",
+        "[policy]\nschema = 2\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n{}",
         entry_text(krate, aliases)
     ))?)
 }
@@ -114,7 +114,7 @@ fn an_explicit_alias_admits_the_alias_spelling_only() -> TestResult {
 #[test]
 fn two_fold_alike_packages_are_two_authorities() -> TestResult {
     let text = format!(
-        "[policy]\nschema = 2\nenforce = true\n\n{}{}",
+        "[policy]\nschema = 2\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n{}{}",
         entry_text("engine-core", None),
         entry_text("engine_core", None)
     );
@@ -175,7 +175,7 @@ fn git_and_path_edges_use_the_same_identity_rule() -> TestResult {
 #[test]
 fn an_alias_that_collides_with_another_package_is_refused_at_load() {
     let text = format!(
-        "[policy]\nschema = 2\nenforce = true\n\n{}{}",
+        "[policy]\nschema = 2\nenforce = true\naccepted_licenses = \"MIT, Apache-2.0\"\n\n{}{}",
         entry_text("engine-core", Some("engine_core")),
         entry_text("engine_core", None)
     );

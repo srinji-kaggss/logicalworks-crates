@@ -63,15 +63,38 @@
 //! A recoverable tree-sitter tree is not proof of valid syntax: recovery emits
 //! `ERROR` and `MISSING` nodes. [`try_parse`] therefore refuses before any
 //! detector sees the tree: oversized bytes, a parser that cannot produce a
-//! tree, a tree past [`MAX_AST_NODES`], or one carrying recovery nodes. The
-//! unchecked [`parse`] exists for diagnostics and tests that inspect
-//! malformed trees on purpose.
+//! tree, a parse still running at its deadline, a tree past [`MAX_AST_NODES`],
+//! or one carrying recovery nodes. The unchecked [`parse`] exists for
+//! diagnostics and tests that inspect malformed trees on purpose.
 //!
-//! The two bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+//! The byte ceiling bounds what the parser is handed, not how long it works:
+//! tree-sitter's GLR parser is super-linear in nesting on some grammars, and a
+//! quarter of the byte ceiling of nested braces held the Dart parser for 97.5 s.
+//! The checked parse therefore runs under [`DEFAULT_PARSE_DEADLINE`] (or the
+//! caller's own, through [`try_parse_within`]): the parser asks at every
+//! hundredth operation whether to continue, stops when the deadline has passed,
+//! frees its thread, and the call answers [`ParseError::TimedOut`].
+//!
+//! The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
 //! bytes handed to the parser and is what keeps parse work linear in input;
-//! [`MAX_AST_NODES`] is measured on the tree *after* tree-sitter has built it,
-//! so it bounds the validation walk and every downstream walk, not the
-//! parser's own allocation. Neither is a hard memory ceiling.
+//! [`MAX_AST_NODES`] and [`MAX_AST_DEPTH`] are measured on the tree *after*
+//! tree-sitter has built it, so they bound the validation walk and every
+//! downstream walk, not the parser's own allocation. The parser's allocation
+//! is bounded by input, not by a counter in this crate: the worst case at the
+//! byte ceiling is **the measured peak RSS in
+//! [`bench/README.md`](https://github.com/srinji-kaggss/logicalworks-crates/blob/main/bench/README.md),
+//! per grammar**, produced by the `parse_budget` example. Read that number for
+//! what one parse of a full [`MAX_SOURCE_BYTES`] source costs resident memory;
+//! the two tree bounds are what make the *walk* bounded, not the parser.
+//!
+//! The walk itself is linear in tree size and holds state proportional to
+//! depth. That is a property of *how* it walks rather than of any ceiling: it
+//! drives a tree-sitter cursor, so no node is reached by its index among its
+//! siblings. Indexing is `O(index)` on a recovery-heavy tree, where the visible
+//! children are not the structural ones, and a walk that did it was quadratic
+//! in fan-out — 85 microseconds per node on a 16 KiB source of unbalanced
+//! delimiters, and hours for one file at the byte ceiling. See the walk's own
+//! documentation for the measurement and the regression test that holds it.
 //!
 //! Content sniffing is opt-in for the same reason: [`try_detect_content`]
 //! trial-parses each distinct candidate grammar in full, so the caller names
@@ -96,6 +119,12 @@ pub mod diagnostic;
 /// the version-suffixed private module.
 #[doc(hidden)]
 pub use thiserror::*;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
 use ast_grep_core::Language as CoreLanguage;
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
@@ -125,8 +154,94 @@ pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Largest concrete syntax tree admitted; bounds downstream walks, which a
 /// byte bound alone does not price. Measured on the tree after tree-sitter has
-/// built it, so it does not cap the parser's own allocation.
+/// built it, so it does not cap the parser's own allocation. The walk is linear
+/// in tree size, so this ceiling prices its *worst case*, not its running cost.
 pub const MAX_AST_NODES: usize = 2_000_000;
+
+/// Deepest branch a checked parse admits, root counting as 1.
+///
+/// [`MAX_AST_NODES`] prices a *wide* tree; a *deep* one is bounded by neither it
+/// nor the byte ceiling in any useful way, because a source of `(((…` is a few
+/// bytes per nesting level and yields one node per level plus the delimiters. The
+/// node ceiling therefore admits a tree hundreds of thousands of levels deep,
+/// and the traversal retains one frame per active ancestor, so the depth is
+/// bounded explicitly instead.
+///
+/// The bound is on the checked parse ([`try_parse`], [`try_parse_with`]). The
+/// public [`inspect_ast`] walk is uncapped in depth, because a caller inspecting
+/// a tree on purpose may want the real depth of a malformed one; the ceiling's
+/// only producer is the checked parse, which reports it as
+/// [`ParseError::AstTooDeep`].
+pub const MAX_AST_DEPTH: usize = 512;
+
+/// How long a checked parse may hold its thread when the caller names no
+/// deadline (10 s).
+///
+/// The byte ceiling bounds what the parser is handed, not how long it works on
+/// it: tree-sitter's GLR parser is super-linear in nesting on some grammars, and
+/// the parse-budget rig measured 97.5 s for 256 KiB of nested braces under the
+/// Dart grammar and 29.8 s for a 512 KiB single line of Scala, with the 2 MiB
+/// forms of both unfinished at 120 s (`bench/README.md`). This is the bound on
+/// that: the parser is asked every hundred operations whether to continue, and
+/// past the deadline it stops, releases its thread and the call answers
+/// [`ParseError::TimedOut`].
+///
+/// Ten seconds is chosen from the same measurement. The slowest grammar on its
+/// own valid source at the full byte ceiling is `javascript` at 1 MB/s p99,
+/// about two seconds for 2 MiB, and the slowest *legitimate* shape measured —
+/// one megabyte-and-a-half line of Ruby — is 5.6 s; ten seconds admits both on
+/// the measuring host and stops every adversarial row the rig recorded. A
+/// caller with a tighter budget, or a slower host, names its own through
+/// [`try_parse_within`].
+pub const DEFAULT_PARSE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Grammars one thread keeps a ready parser for before it starts over.
+///
+/// A parser is per thread and per grammar, so the cache is never shared and
+/// never locked; the ceiling exists because a caller-registered grammar is a
+/// key this crate does not choose, and an unbounded map keyed by it would grow
+/// with whatever a long-lived thread was handed. Every compiled grammar fits
+/// with room to spare, so the built-in set never evicts.
+const MAX_CACHED_PARSERS: usize = 64;
+
+thread_local! {
+    /// This thread's parser per grammar, reset before every parse.
+    static PARSERS: RefCell<HashMap<TSLanguage, tree_sitter::Parser>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Largest number of block containers one line of markdown may declare (64).
+///
+/// **This is a process-safety bound, not a quality bound.** tree-sitter's
+/// markdown grammar keeps its open block containers in an external scanner whose
+/// state is serialized into a fixed 1 024-byte buffer, and it *asserts* — which
+/// is `abort()`, not a catchable error — when that state does not fit. A source
+/// that opens 255 containers does not return a `ParseError`: it ends the
+/// process, with the caller inside it. `- ` repeated 255 times is 510 bytes.
+///
+/// The bound therefore sits well below the smallest measured abort. Bisected
+/// from a child process across seventeen container shapes — unordered and
+/// ordered list markers, blockquotes of one, two and three `>`, tabs,
+/// list-in-quote, quote-in-list, list-in-quote-in-list, fenced and indented
+/// code inside containers, and containers nested by indentation — **every
+/// aborting shape reaches its abort at the same 255 open containers**, whether
+/// it spells them one per repetition (255 repetitions), two per repetition
+/// (128) or three (85). [`markdown_containers`]
+/// counts that quantity directly, so the margin is `255 / 64`, about 4x, and
+/// the count is additionally an over-estimate wherever indentation and markers
+/// both contribute depth.
+///
+/// The cost of the margin is a refusal, not a crash: a document nested more
+/// than 64 containers deep on one line is refused as
+/// [`ParseError::ContainerNestingTooDeep`] before the scanner sees it. A
+/// document nested 30 deep, which is already past what any real file contains,
+/// still parses.
+///
+/// Only a grammar registered under the name `markdown` is measured against it,
+/// and only on the checked parse. The count needs no grammar and no cargo
+/// feature, so the rule is present in every build rather than appearing only
+/// where `lang-md` happens to be on.
+pub const MAX_MARKDOWN_CONTAINERS_PER_LINE: usize = 64;
 
 /// Largest probe source admitted to [`try_detect_content`] (64 KiB). Content
 /// detection costs one full parse per distinct candidate grammar, so it is
@@ -349,8 +464,6 @@ fn program_after_env<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a
 }
 
 /// Whether an interpreter name is `name` itself, or a versioned spelling of it.
-///
-/// Whether an interpreter name is the language `name`, allowing a version.
 ///
 /// A shebang spells the interpreter the way the language names itself, which is
 /// not how the file extension is spelled: `python3` is the interpreter and `py`
@@ -605,6 +718,60 @@ pub enum ParseError {
         /// The applied bound.
         limit: usize,
     },
+    /// The tree is nested deeper than the checked parse admits.
+    ///
+    /// A separate arm from [`ParseError::AstTooLarge`], because a caller acts on
+    /// them differently: a node refusal says *this source is large*, and a depth
+    /// refusal says *this source is shaped like the deeply-nested input a hostile
+    /// parser input is made of*. Both name the bound and the observed value, and
+    /// both are refusals of the whole file rather than located diagnostics.
+    #[error("{language} AST nests deeper than {limit} levels (observed at least {observed})")]
+    AstTooDeep {
+        /// The language name.
+        language: &'static str,
+        /// Branch depth observed up to the bound.
+        observed: usize,
+        /// The applied bound.
+        limit: usize,
+    },
+    /// One line declares more block containers than the checked parse admits.
+    ///
+    /// A *pre-parse* refusal, and a separate arm from
+    /// [`ParseError::AstTooDeep`] because it measures something else about
+    /// something else. `AstTooDeep` counts the depth of a tree that was built;
+    /// this counts containers declared by the *text*, before any grammar runs,
+    /// because the grammar cannot be run at all: the markdown scanner's own
+    /// serialization buffer overflows first and takes the process with it. See
+    /// [`MAX_MARKDOWN_CONTAINERS_PER_LINE`].
+    ///
+    /// Reported before the parse rather than after it, so a caller sees a
+    /// refusal it can act on instead of a process that is no longer there.
+    #[error(
+        "{language} declares at least {observed} block containers on one line; \
+         the limit is {limit}"
+    )]
+    ContainerNestingTooDeep {
+        /// The language name.
+        language: &'static str,
+        /// Containers counted on the offending line.
+        observed: usize,
+        /// The applied bound.
+        limit: usize,
+    },
+    /// The parser was still working when its deadline passed, and was stopped.
+    ///
+    /// A refusal of the whole file, like the size and shape refusals, and not a
+    /// statement about its syntax: the source may be perfectly valid and merely
+    /// expensive for this grammar. The thread that ran the parse is free again
+    /// when this is returned, and its parser is reset, so the next parse on the
+    /// same thread starts clean rather than resuming this one.
+    #[error("{language} parse stopped at its deadline of {after:?}")]
+    TimedOut {
+        /// The language name.
+        language: &'static str,
+        /// The deadline that was applied.
+        after: Duration,
+    },
 }
 
 /// Every recovery node in `tree`, as a located diagnostic.
@@ -736,6 +903,14 @@ pub struct SyntaxDiagnostic {
 pub enum InspectionStopReason {
     /// The walk observed one node beyond its configured node limit.
     NodeLimitExceeded,
+    /// The walk descended one level beyond its configured depth limit.
+    ///
+    /// Only the checked parse configures a depth limit — see [`MAX_AST_DEPTH`] —
+    /// and it turns this into [`ParseError::AstTooDeep`] rather than handing a
+    /// caller a partial [`AstMetrics`], so the variant is recorded here rather
+    /// than dropped so the metrics cannot report an incomplete walk with no
+    /// reason.
+    DepthLimitExceeded,
 }
 
 /// Complete content-detection result after every distinct candidate was checked.
@@ -773,7 +948,7 @@ pub struct AstMetrics {
 }
 
 impl AstMetrics {
-    /// Fold one visited `node`, seen at `depth`, into the running metrics.
+    /// Fold one visited node into the running metrics.
     ///
     /// Called once per node of a walk, so this is where the three accumulators
     /// are kept monotone: `nodes` saturates instead of wrapping (unreachable at
@@ -781,10 +956,10 @@ impl AstMetrics {
     /// `max_depth` keeps the deepest branch seen, and `has_syntax_issues` is
     /// sticky: once an `ERROR` or `MISSING` node is seen, no later clean node
     /// may clear it, because the walk has no way to unsee it.
-    fn including<L: LanguageExt>(mut self, node: &AstNode<'_, L>, depth: usize) -> Self {
+    fn charging(mut self, visit: &Visit) -> Self {
         self.nodes = self.nodes.saturating_add(1);
-        self.max_depth = self.max_depth.max(depth);
-        self.has_syntax_issues = self.has_syntax_issues || node.is_error() || node.is_missing();
+        self.max_depth = self.max_depth.max(visit.depth);
+        self.has_syntax_issues = self.has_syntax_issues || visit.recovery.is_some();
         self
     }
 }
@@ -902,37 +1077,103 @@ fn keep_first_incomplete(
     }
 }
 
-/// Production boundary: refuse oversized bytes, then reject recovery nodes and
-/// over-budget trees in one traversal.
+/// Production boundary: refuse oversized bytes, stop a parse past
+/// [`DEFAULT_PARSE_DEADLINE`], then reject recovery nodes and over-budget trees
+/// in one traversal.
 pub fn try_parse(code: &str, language: Language) -> Result<Parsed, ParseError> {
+    try_parse_within(code, language, DEFAULT_PARSE_DEADLINE)
+}
+
+/// [`try_parse`] under a deadline the caller names.
+///
+/// The deadline bounds the parser, which is the work that is super-linear on
+/// hostile input; the byte check before it and the validation walk after it are
+/// linear and bounded by [`MAX_SOURCE_BYTES`] and [`MAX_AST_NODES`]. A parse
+/// still running when `deadline` passes is stopped at the parser's next progress
+/// check — every hundred parser operations — and answers
+/// [`ParseError::TimedOut`]; one that finishes first answers exactly as
+/// [`try_parse`] does. A source small enough to parse before the first check
+/// therefore completes even under `Duration::ZERO`, because a parse that
+/// finished has spent nothing the deadline could have saved.
+///
+/// ```
+/// use std::time::Duration;
+/// use lgwks_ast::{Language, ParseError};
+///
+/// let nested = "fn f() {".repeat(4_000);
+/// let refusal = lgwks_ast::try_parse_within(&nested, Language::Rust, Duration::ZERO);
+/// assert!(matches!(refusal, Err(ParseError::TimedOut { .. })));
+/// // The thread is free, and its parser starts clean.
+/// assert!(lgwks_ast::try_parse_within("fn f() {}", Language::Rust, Duration::from_secs(1)).is_ok());
+/// ```
+pub fn try_parse_within(
+    code: &str,
+    language: Language,
+    deadline: Duration,
+) -> Result<Parsed, ParseError> {
     parse_bounded(
         code,
         &language.support_lang(),
         language.name(),
-        MAX_SOURCE_BYTES,
-        MAX_AST_NODES,
+        Bounds {
+            source_bytes: MAX_SOURCE_BYTES,
+            ast_nodes: MAX_AST_NODES,
+            ast_depth: MAX_AST_DEPTH,
+            deadline,
+        },
     )
 }
 
 /// Checked parse of a caller-registered grammar, held to the same byte bound,
-/// node bound, and recovery refusal as [`try_parse`].
+/// deadline, node bound, depth bound, and recovery refusal as [`try_parse`].
 pub fn try_parse_with<L: LanguageExt>(
     code: &str,
     language: &L,
     name: &'static str,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
-    parse_bounded(code, language, name, MAX_SOURCE_BYTES, MAX_AST_NODES)
+    parse_bounded(
+        code,
+        language,
+        name,
+        Bounds {
+            source_bytes: MAX_SOURCE_BYTES,
+            ast_nodes: MAX_AST_NODES,
+            ast_depth: MAX_AST_DEPTH,
+            deadline: DEFAULT_PARSE_DEADLINE,
+        },
+    )
+}
+
+/// The policy one checked parse applies, named at the call site.
+#[derive(Clone, Copy)]
+struct Bounds {
+    /// Largest source handed to the parser.
+    source_bytes: usize,
+    /// Largest tree the walk admits.
+    ast_nodes: usize,
+    /// Deepest branch the walk admits.
+    ast_depth: usize,
+    /// How long the parser may run.
+    deadline: Duration,
 }
 
 /// The one body behind [`try_parse`] and [`try_parse_with`]: byte bound, then
-/// tree, then node bound, then recovery refusal.
+/// the tree under its deadline, then node bound, then depth bound, then
+/// recovery refusal.
 ///
 /// The bounds are parameters rather than constants read in place so both entry
 /// points state the policy they apply at the call site, and so a later caller
 /// with a different budget reuses this ordering instead of restating it. The
 /// order is the point: the byte check runs before the parser allocates, the
-/// node check before any walk of the tree, and both before any tree reaches a
-/// caller.
+/// node and depth checks before any walk of the tree reaches a caller, and both
+/// before the recovery check, so a refusal never describes a tree this walk did
+/// not finish inspecting.
+///
+/// The two tree bounds are separate refusals because they price different
+/// shapes: [`ParseError::AstTooLarge`] is a wide tree, and
+/// [`ParseError::AstTooDeep`] is a narrow one whose source is a few bytes per
+/// nesting level, which the byte ceiling admits in the hundreds of thousands of
+/// levels and the node ceiling admits in full.
 ///
 /// `language` is borrowed and cloned into the `StrDoc` because a grammar may be
 /// a registered [`CustomLang`] or a built-in [`Language`]; `name` is the stable
@@ -941,18 +1182,39 @@ fn parse_bounded<L: LanguageExt>(
     code: &str,
     language: &L,
     name: &'static str,
-    max_source_bytes: usize,
-    max_ast_nodes: usize,
+    bounds: Bounds,
 ) -> Result<AstGrep<StrDoc<L>>, ParseError> {
+    let Bounds {
+        source_bytes: max_source_bytes,
+        ast_nodes: max_ast_nodes,
+        ast_depth: max_ast_depth,
+        deadline,
+    } = bounds;
     validate_source_size(code, max_source_bytes)?;
-    let parsed = AstGrep::try_new(code, language.clone()).map_err(|detail| {
-        ParseError::ParserUnavailable {
-            language: name,
-            detail,
-        }
-    })?;
+    // Before the parser, and only for the markdown grammar: its external scanner
+    // serializes open block containers into a fixed buffer and asserts when they
+    // do not fit, which ends the process rather than returning an error. Every
+    // other grammar reaches `try_new` on any source inside the byte bound.
+    if name == MARKDOWN {
+        validate_markdown_containers(code, name, MAX_MARKDOWN_CONTAINERS_PER_LINE)?;
+    }
+    let tree = parse_tree(code, &language.get_ts_language(), name, deadline);
+    let parsed = AstGrep::doc(StrDoc {
+        src: code.to_owned(),
+        lang: language.clone(),
+        tree: tree?,
+    });
     let (metrics, _, diagnostics, diagnostics_truncated) =
-        inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes));
+        inspect_ast_with_pending(&parsed.root(), Some(max_ast_nodes), Some(max_ast_depth));
+    if metrics.stop_reason == Some(InspectionStopReason::DepthLimitExceeded) {
+        let refusal = Err(ParseError::AstTooDeep {
+            language: name,
+            observed: metrics.max_depth,
+            limit: max_ast_depth,
+        });
+        tracing::debug!(error = ?refusal.as_ref().err(), "parse_bounded: returning an error to the caller");
+        return refusal;
+    }
     if !metrics.complete {
         let refusal = Err(ParseError::AstTooLarge {
             language: name,
@@ -974,8 +1236,132 @@ fn parse_bounded<L: LanguageExt>(
     Ok(parsed)
 }
 
+/// Build `code`'s tree with this thread's parser for `grammar`, stopping it at
+/// `deadline`.
+///
+/// This is the one place the crate names `tree-sitter` directly, and it does so
+/// for the one thing `ast-grep-core` does not expose: its `parse_lang` builds the
+/// parser privately and calls `Parser::parse` with no progress callback, so a
+/// tree built through it cannot be stopped. The tree built here is the same
+/// `tree_sitter::Tree` ast-grep would have built — same grammar, same source,
+/// same parser defaults — and is handed to it through `StrDoc`'s public fields,
+/// so a caller receives the identical [`Parsed`].
+///
+/// The parser is cached per thread and per grammar, as ast-grep's is. If the
+/// cache is already borrowed on this thread, which nothing in this crate does,
+/// the parse runs on a fresh parser rather than failing.
+fn parse_tree(
+    code: &str,
+    grammar: &TSLanguage,
+    name: &'static str,
+    deadline: Duration,
+) -> Result<tree_sitter::Tree, ParseError> {
+    PARSERS.with(|cache| match cache.try_borrow_mut() {
+        Ok(mut parsers) => {
+            if parsers.len() >= MAX_CACHED_PARSERS && !parsers.contains_key(grammar) {
+                parsers.clear();
+            }
+            let parser = match parsers.entry(grammar.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let fresh = new_parser(grammar, name);
+                    entry.insert(fresh?)
+                }
+            };
+            run_parser(parser, code, name, deadline)
+        }
+        Err(busy) => {
+            tracing::debug!(
+                ?busy,
+                "parse_tree: the parser cache is in use; parsing on a fresh parser"
+            );
+            let fresh = new_parser(grammar, name);
+            run_parser(&mut fresh?, code, name, deadline)
+        }
+    })
+}
+
+/// A parser for `grammar`, or the grammar's own refusal of it.
+fn new_parser(grammar: &TSLanguage, name: &'static str) -> Result<tree_sitter::Parser, ParseError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(grammar)
+        .map(|()| parser)
+        .map_err(|error| {
+            let refusal = ParseError::ParserUnavailable {
+                language: name,
+                detail: error.to_string(),
+            };
+            tracing::debug!(error = ?refusal, "new_parser: returning an error to the caller");
+            refusal
+        })
+}
+
+/// Run one parse of `code` on `parser`, asking at every progress check whether
+/// `deadline` has passed.
+///
+/// The parser is reset before and after. Before, because a parser from the
+/// cache may hold state from whatever ran on it last; after, because a stopped
+/// parse keeps its partial state *for resuming*, and a cached parser that kept
+/// it would hand the next caller on this thread a continuation of somebody
+/// else's source.
+fn run_parser(
+    parser: &mut tree_sitter::Parser,
+    code: &str,
+    name: &'static str,
+    deadline: Duration,
+) -> Result<tree_sitter::Tree, ParseError> {
+    parser.reset();
+    // `None` is a deadline past what the clock can represent, which never
+    // arrives: the parse runs to completion, as it would with no bound at all.
+    let stop_at = Instant::now().checked_add(deadline);
+    let mut expired = false;
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if stop_at.is_some_and(|at| Instant::now() >= at) {
+            expired = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let bytes = code.as_bytes();
+    let tree = parser.parse_with_options(
+        // The parser reads the source through a closure that must answer with a
+        // slice, so the end of the source is expressed as an empty one. Clamping
+        // the offset to the source's length is what makes the split total: an
+        // offset at or past the last byte then yields exactly the empty slice,
+        // which is what the parser reads as the end of its input.
+        &mut |offset, _| bytes.split_at(offset.min(bytes.len())).1,
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+    );
+    parser.reset();
+    tree.ok_or_else(|| {
+        let refusal = if expired {
+            ParseError::TimedOut {
+                language: name,
+                after: deadline,
+            }
+        } else {
+            ParseError::ParserUnavailable {
+                language: name,
+                detail: "the parser returned no tree".to_owned(),
+            }
+        };
+        tracing::debug!(error = ?refusal, "run_parser: returning an error to the caller");
+        refusal
+    })
+}
+
 /// Unchecked parse for diagnostics and tests that intentionally inspect
 /// malformed trees. Production call sites use [`try_parse`].
+///
+/// **This path does not run [`MAX_MARKDOWN_CONTAINERS_PER_LINE`].** It returns a
+/// [`Parsed`] rather than a `Result`, so a refusal has nowhere to go here, and a
+/// markdown source past that bound will abort the process inside the grammar's
+/// external scanner rather than return anything. It also runs neither
+/// [`MAX_AST_NODES`] nor [`MAX_AST_DEPTH`]. A caller accepting untrusted input
+/// uses [`try_parse`], which is the path every bound lives on.
 #[must_use]
 pub fn parse(code: &str, language: Language) -> Parsed {
     parse_with(code, &language.support_lang())
@@ -1000,6 +1386,169 @@ fn validate_source_size(source: &str, limit: usize) -> Result<(), ParseError> {
         .ok_or(ParseError::SourceTooLarge { actual, limit })
 }
 
+/// The name the markdown guard is keyed on.
+///
+/// A caller registering its own grammar chooses this name, so a custom grammar
+/// called `markdown` is measured by the same rule. That is the intended reading:
+/// the name is the stable identity a caller matches findings on, and a caller who
+/// claims to be markdown gets markdown's bound.
+const MARKDOWN: &str = "markdown";
+
+/// The containers declared on the first line of `source` that exceeds `limit`,
+/// or `None` when no line does.
+///
+/// The count is an **upper bound** on the scanner's open containers, for two
+/// reasons, and both push the same way:
+///
+/// - Indentation and markers can both carry nesting, so their depths are added
+///   rather than the larger taken. A list nested by indentation opens one
+///   container per line and adds depth through its indent; a line carrying both
+///   is charged for both.
+/// - A marker is counted wherever it appears in a line, not only where it could
+///   legally open a container. `a - b - c` counts two. That is prose, not
+///   nesting, and refusing it costs nothing because the bound is 64; the point
+///   is that a count which is *too high* is a refusal and a count which is too
+///   low is a crash.
+///
+/// One pass over the bytes, and four `usize`s of state: no line is buffered, no
+/// allocation is made, and the walk stops at the first line over the bound, so a
+/// hostile source costs `O(bytes)` and nothing else. Returning `None` for a
+/// source inside the bound is the whole contract — the deepest count *within* the
+/// bound is not interesting to a caller, who has already been told it passed.
+#[must_use]
+pub fn markdown_containers(source: &str, limit: usize) -> Option<usize> {
+    for line in source.split('\n') {
+        let (indent_columns, rest) = split_indent(line);
+        // Two spaces per level of indentation-nested container: the narrowest
+        // indent a real nested list carries. A tab is four columns, which is the
+        // width every markdown tool agrees on for one. The divisor is a
+        // non-zero constant, so the division saturates rather than standing in a
+        // column count for a divisor that does not exist.
+        let from_indent = indent_columns.saturating_div(2);
+        let counted = from_indent.saturating_add(count_markers(rest));
+        if counted > limit {
+            return Some(counted);
+        }
+    }
+    None
+}
+
+/// The leading whitespace of `line` in columns, and the line without it.
+fn split_indent(line: &str) -> (usize, &str) {
+    let mut columns = 0_usize;
+    for (at, character) in line.char_indices() {
+        match character {
+            ' ' => columns = columns.saturating_add(1),
+            '\t' => columns = columns.saturating_add(4),
+            _ => return (columns, &line[at..]),
+        }
+    }
+    (columns, "")
+}
+
+/// The block containers `line` declares, after its indentation.
+///
+/// Counts, per markdown's block grammar: every `>` (a run of them is that many
+/// levels of blockquote), every `-`, `*` or `+` immediately followed by a space
+/// or the end of the line (a list marker needs that space; `---` is a thematic
+/// break and `*emphasis*` is not a list), every digit run followed by `.` or `)`
+/// and then that same space, and one for a line that opens a code fence.
+///
+/// Markers are counted **anywhere** in the line, not only where one could
+/// legally open a container. `1. 1. 1. x` is three nested ordered lists and
+/// `a - b - c` is prose that happens to contain two dashes; the second is
+/// counted and the bound is 64, so the price of the over-count is a refusal on
+/// a line nobody writes, while the price of an under-count is a process that is
+/// no longer there.
+fn count_markers(line: &str) -> usize {
+    if opens_code_fence(line) {
+        return 1;
+    }
+    let mut counted = 0_usize;
+    let mut rest = line;
+    while let Some(character) = rest.chars().next() {
+        let tail = &rest[character.len_utf8()..];
+        if character == '>' {
+            counted = counted.saturating_add(1);
+        } else if matches!(character, '-' | '*' | '+') {
+            if is_marker_end(tail) {
+                counted = counted.saturating_add(1);
+            }
+        } else if character.is_ascii_digit() {
+            counted = counted.saturating_add(ordered_marker_len(rest));
+        }
+        rest = tail;
+    }
+    counted
+}
+
+/// Whether `tail` begins the space or end of line a list marker needs.
+fn is_marker_end(tail: &str) -> bool {
+    tail.is_empty() || tail.starts_with([' ', '\t'])
+}
+
+/// How many containers one ordered-list marker at the head of `rest` declares.
+///
+/// `1.` and `1)` open a list; `1.5` is a number, `v1.2` is prose, and `1234567.`
+/// is a list whose item number is seven digits long. The marker is one
+/// container however long its number is, which is why this counts a container
+/// and not the digits it consumed.
+fn ordered_marker_len(rest: &str) -> usize {
+    let digits = rest
+        .char_indices()
+        .find(|entry| !entry.1.is_ascii_digit())
+        .map_or(rest.len(), |(offset, _)| offset);
+    let after_digits = &rest[digits..];
+    if after_digits
+        .strip_prefix(['.', ')'])
+        .is_some_and(is_marker_end)
+    {
+        1
+    } else {
+        0
+    }
+}
+
+/// Whether `line` opens a fenced code block.
+fn opens_code_fence(line: &str) -> bool {
+    let fence = line.trim_start();
+    let run = fence
+        .chars()
+        .take_while(|marker| *marker == '`' || *marker == '~')
+        .count();
+    run >= 3
+}
+
+/// Refuse a markdown source whose container nesting the scanner could not
+/// serialize, before the scanner is handed it.
+///
+/// The refusal is [`ParseError::ContainerNestingTooDeep`]; `None` means the
+/// source is inside [`MAX_MARKDOWN_CONTAINERS_PER_LINE`] and the grammar may see
+/// it. The check is `O(bytes)` with `O(1)` state, and it runs after the byte
+/// bound so an oversized source is still refused as oversized.
+fn validate_markdown_containers(
+    source: &str,
+    name: &'static str,
+    limit: usize,
+) -> Result<(), ParseError> {
+    let Some(observed) = markdown_containers(source, limit) else {
+        return Ok(());
+    };
+    let refusal = Err(ParseError::ContainerNestingTooDeep {
+        language: name,
+        observed,
+        limit,
+    });
+    tracing::warn!(
+        language = name,
+        observed,
+        limit,
+        "validate_markdown_containers: refusing before the grammar's external scanner, whose \
+         serialization buffer would overflow and abort the process"
+    );
+    refusal
+}
+
 /// Whether the tree holds an `ERROR` or `MISSING` node. Ask before reporting:
 /// on unreadable source, no finding means nothing parsed, not nothing wrong.
 #[must_use]
@@ -1020,24 +1569,57 @@ pub fn max_depth<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// returned metrics preserve that cap and identify incomplete inspection;
 /// `has_syntax_issues == false` is not evidence of a clean tree unless
 /// `complete` is also true.
+///
+/// This walk is uncapped in depth, so `max_depth` is the real depth of the
+/// tree and a malformed one is measured rather than refused. [`MAX_AST_DEPTH`]
+/// is the checked parse's ceiling and has no parameter here on purpose: a
+/// caller inspecting a tree on purpose is not the hostile-input case, and
+/// refusing it would make the reported depth a constant.
 #[must_use]
 pub fn inspect_ast<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
 ) -> AstMetrics {
-    inspect_ast_with_pending(root, stop_after_nodes).0
+    inspect_ast_with_pending(root, stop_after_nodes, None).0
 }
 
-/// Inspect without retaining all siblings in one pending vector.
+/// Inspect in one cursor-driven pre-order pass, retaining no sibling frontier.
 ///
-/// Each frame owns one node, its next child index, and depth: at most one
-/// frame per active ancestor. The bounded path therefore allocates according
-/// to tree depth, not the root's fan-out. `peak_frames` is kept private as a
-/// directly asserted resource invariant rather than exported as a public
-/// metric whose callers might mistake it for a configured limit.
+/// The walk drives a tree-sitter cursor directly. The cursor owns a stack of the
+/// ancestors it has descended through and nothing else, so the traversal
+/// retains state proportional to active depth and never to a node's fan-out
+/// (#277). The previous hand-rolled frame walk reached each child through
+/// `ast_grep_core::Node::child` by index, and that call is `O(index)` on a node
+/// whose visible children are not its structural ones — which is exactly what a
+/// recovery-heavy parse produces. The measured cost was quadratic in fan-out: a
+/// 16 KiB source of unbalanced delimiters, 16 385 nodes wide and 2 deep, spent
+/// 1.39 s in the walk against 1.06 ms in the parser, and doubling the width
+/// quadrupled the walk. The cursor walk spends 40 ns per node on that same
+/// source, at every width from 2 KiB to 2 MiB.
+///
+/// The cursor is reached through the node the walk was handed, so the walk
+/// names no `tree-sitter` type: every call below is an inherent method on a type
+/// this crate already holds. (The crate's one direct `tree-sitter` use is the
+/// parse deadline in `parse_tree`, which `ast-grep-core` has no door for.)
+///
+/// Two properties move with the traversal and are worth stating rather than
+/// leaving to be discovered:
+///
+/// - **Order.** Nodes arrive in source order, not reverse-sibling order. Every
+///   published guarantee survives it: [`AstMetrics`] folds order-independently,
+///   and the retained diagnostics are the earliest ones under
+///   [`MAX_SYNTAX_DIAGNOSTICS`] and are sorted by source position before they
+///   are returned. What changes is only which node is the `limit + 1` witness,
+///   and it is now the one earliest in the file rather than the last.
+/// - **Frames.** The second return value is `peak_depth`: the deepest cursor
+///   stack the walk held, which is the number of active ancestors and therefore
+///   the memory the traversal actually retains. It is kept private as a
+///   directly asserted resource invariant rather than exported as a public
+///   metric whose callers might mistake it for a configured limit.
 fn inspect_ast_with_pending<'t, L: LanguageExt>(
     root: &AstNode<'t, L>,
     stop_after_nodes: Option<usize>,
+    stop_after_depth: Option<usize>,
 ) -> (AstMetrics, usize, Vec<SyntaxDiagnostic>, bool) {
     let mut metrics = AstMetrics {
         nodes: 0,
@@ -1049,70 +1631,116 @@ fn inspect_ast_with_pending<'t, L: LanguageExt>(
     };
     let mut diagnostics = Vec::new();
     let mut diagnostics_truncated = false;
-    // Frame = (node, depth, remaining child index). Visiting the next lower
-    // index preserves the former stack walk's reverse-sibling order without
-    // enqueuing the sibling frontier.
-    let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
-    let mut peak_frames = 1;
-    metrics = metrics.including(root, 1);
-    record_syntax_diagnostic(root, &mut diagnostics, &mut diagnostics_truncated);
-    if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-        mark_inspection_incomplete(&mut metrics);
-        return (metrics, peak_frames, diagnostics, diagnostics_truncated);
-    }
-    while let Some(frame) = frames.last_mut() {
-        let Some(child_index) = frame.2.checked_sub(1) else {
-            frames.pop();
-            continue;
+    let mut cursor = root.get_inner_node().walk();
+    // The cursor starts on the root, which counts as depth 1, so its zero-based
+    // depth is always one less than the depth a caller reads.
+    let mut cursor_depth = 0_usize;
+    let mut peak_depth = 0_usize;
+    loop {
+        let node = cursor.node();
+        let span = node.range();
+        let recovery = if node.is_error() {
+            Some(SyntaxIssueKind::Error)
+        } else if node.is_missing() {
+            Some(SyntaxIssueKind::Missing)
+        } else {
+            None
         };
-        frame.2 = child_index;
-        let next_child = frame.0.child(child_index);
-        let Some(child) = next_child else {
-            continue;
+        let visit = Visit {
+            depth: cursor_depth.saturating_add(1),
+            recovery,
+            span,
         };
-        let child_depth = frame.1.saturating_add(1);
-        metrics = metrics.including(&child, child_depth);
-        record_syntax_diagnostic(&child, &mut diagnostics, &mut diagnostics_truncated);
-        if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
-            mark_inspection_incomplete(&mut metrics);
+        peak_depth = peak_depth.max(visit.depth);
+        metrics = metrics.charging(&visit);
+        // The witness node is charged before the walk ends, so a refusal that
+        // stops at a ceiling still reports the damage it saw on the way to the
+        // ceiling rather than dropping it.
+        push_recovery_span(&visit, &mut diagnostics, &mut diagnostics_truncated);
+        if let Some(reason) = charge_reason(&metrics, stop_after_nodes, stop_after_depth) {
+            mark_inspection_incomplete(&mut metrics, reason);
             break;
         }
-        let child_count = child.children().len();
-        frames.push((child, child_depth, child_count));
-        peak_frames = peak_frames.max(frames.len());
+        // Descend into the first child, or climb until a sibling exists. The
+        // cursor's own stack is the ancestor record, so unwinding costs one step
+        // per level rather than a search for the parent.
+        if cursor.goto_first_child() {
+            cursor_depth = cursor_depth.saturating_add(1);
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                diagnostics.sort_unstable_by_key(syntax_position);
+                return (metrics, peak_depth, diagnostics, diagnostics_truncated);
+            }
+            cursor_depth = cursor_depth.saturating_sub(1);
+        }
     }
     diagnostics.sort_unstable_by_key(syntax_position);
-    (metrics, peak_frames, diagnostics, diagnostics_truncated)
+    (metrics, peak_depth, diagnostics, diagnostics_truncated)
 }
 
-/// Mark a walk as partial after it observes the node beyond its configured cap.
-fn mark_inspection_incomplete(metrics: &mut AstMetrics) {
+/// One node as the walk read it, detached from the cursor that produced it.
+///
+/// The walk asks three questions of every node and keeps nothing else, so the
+/// facts are copied out here rather than a node handle: a handle borrows the
+/// cursor's position, and a list of them would be the sibling frontier this
+/// traversal exists not to build.
+struct Visit {
+    /// One-based branch depth, the root counting as 1.
+    depth: usize,
+    /// The recovery kind this node carries, or `None` for a clean node.
+    recovery: Option<SyntaxIssueKind>,
+    /// Inclusive start and exclusive end byte offsets in the source, in the
+    /// node type's own range so no conversion sits in the walk's inner loop.
+    span: ast_grep_core::tree_sitter::TSRange,
+}
+
+/// Which cap this observation already exceeded, if either.
+///
+/// Evaluated after every node, the root included, so a ceiling at or below one
+/// stops the walk there and the overflow witness is charged before the walk
+/// ends — the accounting the previous root-only check gave, applied at every
+/// level. With both ceilings configured the node one is reported, because the
+/// node charge is the first the root trips and a caller reading one reason
+/// wants the one that fired first.
+fn charge_reason(
+    metrics: &AstMetrics,
+    stop_after_nodes: Option<usize>,
+    stop_after_depth: Option<usize>,
+) -> Option<InspectionStopReason> {
+    if stop_after_nodes.is_some_and(|limit| metrics.nodes > limit) {
+        return Some(InspectionStopReason::NodeLimitExceeded);
+    }
+    stop_after_depth
+        .is_some_and(|limit| metrics.max_depth > limit)
+        .then_some(InspectionStopReason::DepthLimitExceeded)
+}
+
+/// Mark a walk as partial after it observes the value beyond its configured cap.
+fn mark_inspection_incomplete(metrics: &mut AstMetrics, reason: InspectionStopReason) {
     metrics.complete = false;
-    metrics.stop_reason = Some(InspectionStopReason::NodeLimitExceeded);
+    metrics.stop_reason = Some(reason);
 }
 
 /// Retain one recovery-node span until the public diagnostic ceiling is reached.
-fn record_syntax_diagnostic<L: LanguageExt>(
-    node: &AstNode<'_, L>,
+fn push_recovery_span(
+    visit: &Visit,
     diagnostics: &mut Vec<SyntaxDiagnostic>,
     diagnostics_truncated: &mut bool,
 ) {
-    let kind = if node.is_error() {
-        Some(SyntaxIssueKind::Error)
-    } else if node.is_missing() {
-        Some(SyntaxIssueKind::Missing)
-    } else {
-        None
-    };
-    let Some(kind) = kind else {
+    let Some(kind) = visit.recovery else {
         return;
     };
-    let span = node.range();
+    let span = visit.span;
     push_syntax_diagnostic(
         SyntaxDiagnostic {
             kind,
-            start_byte: span.start,
-            end_byte: span.end,
+            start_byte: span.start_byte,
+            end_byte: span.end_byte,
         },
         diagnostics,
         diagnostics_truncated,
@@ -1126,12 +1754,14 @@ fn syntax_position(diagnostic: &SyntaxDiagnostic) -> (usize, usize) {
 
 /// Retain a diagnostic under the fixed per-parse ceiling, keeping the earliest.
 ///
-/// The walk visits siblings in reverse order, so "the first
-/// [`MAX_SYNTAX_DIAGNOSTICS`] seen" would be the last ones in the file, and
-/// the error a reader needs first — where the source stopped parsing — would
-/// be the one dropped. At the ceiling a new diagnostic replaces the latest one
-/// retained when it starts earlier; the retained set is always the earliest in
-/// source order, in constant memory.
+/// The ceiling is a constant, so something has to be dropped once it is
+/// reached, and the error a reader needs first — where the source stopped
+/// parsing — is the one that must not be it. At the ceiling a new diagnostic
+/// replaces the latest one retained when it starts earlier; the retained set is
+/// always the earliest in source order, in constant memory, whatever order the
+/// walk reached them in. (The cursor-driven walk reaches them in source order
+/// already; the rule is what keeps the property true of any traversal order,
+/// including a caller-supplied one.)
 fn push_syntax_diagnostic(
     diagnostic: SyntaxDiagnostic,
     diagnostics: &mut Vec<SyntaxDiagnostic>,
@@ -1206,6 +1836,11 @@ mod tests {
 
     #[test]
     fn a_small_node_budget_does_not_retain_a_wide_sibling_frontier() {
+        // INV-AST-1, on the adversarial width: 4 096 immediate siblings under
+        // the root, which is the shape a sibling frontier would have to be
+        // sized for. The walk stops at the cap after two nodes, so the retained
+        // state must be the two levels of cursor stack it descended through and
+        // nothing resembling the 4 096 children behind the first of them.
         let source = (0..4_096)
             .map(|index| format!("fn f{index}() {{}}\n"))
             .collect::<String>();
@@ -1216,7 +1851,7 @@ mod tests {
             "the fixture presents 4,096 immediate siblings to the traversal"
         );
 
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1));
+        let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&parsed.root(), Some(1), None);
 
         assert_eq!(metrics.nodes, 2, "one node beyond the cap proves refusal");
         assert_eq!(
@@ -1225,26 +1860,47 @@ mod tests {
             "the public inspector preserves the budget's overflow witness"
         );
         assert_eq!(
-            peak_frames, 1,
-            "the overflow witness is counted without enqueuing its siblings"
+            peak_depth, 2,
+            "retained a cursor stack {peak_depth} deep for a 4,096-child root, \
+             which is a sibling frontier rather than a depth"
+        );
+        assert!(
+            peak_depth < 16,
+            "the retained depth must not scale with the root's {width} children",
+            width = parsed.root().children().len()
         );
     }
 
     #[test]
-    fn a_node_budget_preserves_the_existing_reverse_sibling_order() {
-        let parsed = parse("fn okay() {}\n@\n", Language::Rust);
+    fn a_node_budget_charges_children_in_source_order() {
+        // Which node is the `limit + 1` witness is the one thing the cursor walk
+        // changed, and it is stated rather than left implicit: children arrive
+        // in source order, so a cap below the tree size charges the *earliest*
+        // children. Both halves matter — a witness taken from the end of the
+        // file could report damage a caller would never see, and one taken from
+        // the front cannot.
+        let parsed = parse(
+            "fn first() {}\nfn second() {}\nfn third() {}\n",
+            Language::Rust,
+        );
         let root = parsed.root();
         assert!(
-            root.children().last().is_some_and(|node| node.is_error()),
-            "the fixture puts a recovery node in the last root-child position"
+            root.children().len() >= 3,
+            "the fixture presents at least three root children to the traversal"
         );
 
         let metrics = inspect_ast(&root, Some(1));
 
         assert_eq!(metrics.nodes, 2, "the overflow witness is counted");
         assert!(
-            metrics.has_syntax_issues,
-            "reverse-sibling traversal encounters the last root child first"
+            !metrics.has_syntax_issues,
+            "the first child of valid source is clean, so the cap charged a clean \
+             witness rather than one from the end of the file"
+        );
+        assert_eq!(
+            metrics.stop_reason,
+            Some(InspectionStopReason::NodeLimitExceeded),
+            "the cap, not a clean tree, is what stopped the walk"
         );
     }
 
@@ -1257,7 +1913,7 @@ mod tests {
         // 2,000,000 nodes and is never hit). This one runs to completion.
         //
         // A deep, narrow tree: each level has one child, so the number of active
-        // ancestors is the depth, and the frames retained must be that depth
+        // ancestors is the depth, and the state retained must be that depth
         // rather than the total node count.
         let depth = 200;
         let source = format!(
@@ -1266,7 +1922,7 @@ mod tests {
             "}".repeat(depth)
         );
         let parsed = parse(&source, Language::Rust);
-        let (metrics, peak_frames, _, _) = inspect_ast_with_pending(&parsed.root(), None);
+        let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&parsed.root(), None, None);
 
         assert!(
             metrics.max_depth > 50,
@@ -1274,17 +1930,157 @@ mod tests {
             metrics.max_depth
         );
         assert_eq!(
-            peak_frames, metrics.max_depth,
-            "retained {peak_frames} frames for a tree {} deep; the walk is not \
-             retaining exactly the active ancestors",
+            peak_depth, metrics.max_depth,
+            "retained a stack {peak_depth} deep for a tree {} deep; the walk is \
+             not retaining exactly the active ancestors",
             metrics.max_depth
         );
         assert!(
-            metrics.nodes > peak_frames.saturating_mul(4),
-            "retained {peak_frames} frames for a tree of {} nodes, which is a \
-             sibling frontier rather than a depth",
+            metrics.nodes > peak_depth.saturating_mul(4),
+            "retained a stack {peak_depth} deep for a tree of {} nodes, which is \
+             a sibling frontier rather than a depth",
             metrics.nodes
         );
+    }
+
+    /// The walk this crate replaced, kept as the model the cursor walk is
+    /// checked against.
+    ///
+    /// It is the frame walk from before #277, verbatim in its traversal: a
+    /// stack of `(node, depth, next child index)` with children taken by index,
+    /// descending into the highest index first. It exists so the replacement can
+    /// be shown to visit the same nodes at the same depths rather than merely
+    /// to be shown green, and it is `#[cfg(test)]` because nothing ships it.
+    fn positional_walk<L: LanguageExt>(root: &AstNode<'_, L>) -> (usize, usize, usize, bool) {
+        let mut frames = vec![(root.clone(), 1_usize, root.children().len())];
+        let mut nodes = 1_usize;
+        let mut peak_frames = 1_usize;
+        let mut deepest = 1_usize;
+        let mut issues = root.is_error() || root.is_missing();
+        while let Some(frame) = frames.last_mut() {
+            let Some(child_index) = frame.2.checked_sub(1) else {
+                frames.pop();
+                continue;
+            };
+            frame.2 = child_index;
+            let Some(child) = frame.0.child(child_index) else {
+                continue;
+            };
+            let child_depth = frame.1.saturating_add(1);
+            nodes = nodes.saturating_add(1);
+            deepest = deepest.max(child_depth);
+            issues = issues || child.is_error() || child.is_missing();
+            let child_count = child.children().len();
+            frames.push((child, child_depth, child_count));
+            peak_frames = peak_frames.max(frames.len());
+        }
+        (nodes, deepest, peak_frames, issues)
+    }
+
+    #[test]
+    fn the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did() {
+        // The differential evidence for #277. The traversal changed; what it
+        // must not have changed is the answer. Five trees chosen for the shapes
+        // that separate the two: flat and wide, deep and narrow, recovery-heavy,
+        // empty, and a real function.
+        let wide = (0..4_096)
+            .map(|index| format!("fn f{index}() {{}}\n"))
+            .collect::<String>();
+        let deep = format!("{}fn f() {{}}{}", "fn f() {".repeat(200), "}".repeat(200));
+        let fixtures = [
+            String::new(),
+            String::from("fn main() {}\n"),
+            wide,
+            deep,
+            String::from("@\nfn broken( {\n"),
+        ];
+        for (index, source) in fixtures.iter().enumerate() {
+            let parsed = parse(source.as_str(), Language::Rust);
+            let root = parsed.root();
+            let (model_nodes, model_depth, model_peak, model_issues) = positional_walk(&root);
+            let (metrics, peak_depth, _, _) = inspect_ast_with_pending(&root, None, None);
+
+            assert_eq!(
+                metrics.nodes, model_nodes,
+                "fixture {index}: {} nodes visited against the model's {model_nodes}",
+                metrics.nodes
+            );
+            assert_eq!(
+                metrics.max_depth, model_depth,
+                "fixture {index}: depth {} against the model's {model_depth}",
+                metrics.max_depth
+            );
+            assert_eq!(
+                peak_depth, model_peak,
+                "fixture {index}: retained {peak_depth} against the model's \
+                 {model_peak} active ancestors"
+            );
+            assert_eq!(
+                metrics.has_syntax_issues, model_issues,
+                "fixture {index}: recovery state disagrees with the model"
+            );
+        }
+    }
+
+    #[test]
+    fn the_walk_costs_the_same_per_node_however_wide_the_tree_is()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The measured regression behind #277, asserted as a bound rather than
+        // a timing: the old walk indexed children, which is `O(index)` on a
+        // recovery-heavy tree, so the per-node cost grew with the root's width.
+        // Four widths of unbalanced delimiters — the shape that produced
+        // 85 microseconds per node — must now cost within a small constant of
+        // each other. The factor is generous on purpose: this asserts a
+        // complexity class, and a wall-clock ratio is evidence of one, not a
+        // benchmark. A regression to index-addressed children would multiply
+        // the wide case by the width ratio (16x here) and fail by an order of
+        // magnitude rather than by a hair.
+        const WIDTHS: [usize; 4] = [1_024, 2_048, 4_096, 16_384];
+        let mut per_node_nanos = Vec::with_capacity(WIDTHS.len());
+        for width in WIDTHS {
+            let source = "(".repeat(width);
+            let parsed = parse(&source, Language::Rust);
+            let root = parsed.root();
+            // The root counts as a node, so the model never reports zero and the
+            // divisor below is a count rather than a stand-in for one.
+            let nodes = positional_walk(&root).0.max(1);
+            let started = std::time::Instant::now();
+            let metrics = inspect_ast(&root, None);
+            let elapsed = started.elapsed().as_nanos();
+            assert_eq!(metrics.nodes, nodes, "the model and the walk disagree");
+            per_node_nanos.push(elapsed.saturating_div(nanos_per(nodes)?));
+        }
+        let cheapest = per_node_nanos
+            .iter()
+            .copied()
+            .min()
+            .ok_or("four widths produced no per-node cost")?;
+        let dearest = per_node_nanos
+            .iter()
+            .copied()
+            .max()
+            .ok_or("four widths produced no per-node cost")?;
+        assert!(
+            dearest <= cheapest.saturating_mul(4),
+            "per-node walk cost {cheapest}..={dearest} ns across widths \
+             {WIDTHS:?}; the cost must not scale with fan-out"
+        );
+        Ok(())
+    }
+
+    /// `nodes` as the divisor a per-node cost is taken over.
+    ///
+    /// The node count is a `usize` because the walk counts in one, and a per-node
+    /// nanosecond figure is a `u128` because a wide tree's elapsed time is; the
+    /// conversion is stated here rather than substituted for at each call site.
+    fn nanos_per(nodes: usize) -> Result<u128, Box<dyn std::error::Error>> {
+        let divisor = u128::try_from(nodes)?;
+        if divisor == 0 {
+            let refusal = Err("a per-node cost over no nodes is not a cost".into());
+            tracing::debug!(error = ?refusal.as_ref().err(), "nanos_per: returning an error to the caller");
+            return refusal;
+        }
+        Ok(divisor)
     }
 
     #[test]
@@ -1343,11 +2139,20 @@ mod tests {
 
     #[test]
     fn recovery_beyond_the_visit_cap_is_not_reported_as_clean() {
-        let parsed = parse("@\nfn a() {}\nfn b() {}", Language::Rust);
-        let partial = inspect_ast(&parsed.root(), Some(1));
+        // The recovery node has to be *beyond* the cap now that children are
+        // charged in source order: `fn a() {}` on the first line puts two clean
+        // nodes in front of it, so a cap of one stops before the `@`.
+        let parsed = parse("fn a() {}\nfn b() {}\n@\n", Language::Rust);
+        let root = parsed.root();
+        assert!(
+            root.children().last().is_some_and(|node| node.is_error()),
+            "the fixture puts a recovery node in the last root-child position"
+        );
+
+        let partial = inspect_ast(&root, Some(1));
         assert!(
             !partial.complete,
-            "the small cap stops before the early recovery node"
+            "the small cap stops before the late recovery node"
         );
         assert!(
             !partial.has_syntax_issues,
@@ -1686,7 +2491,6 @@ mod tests {
         // extension to read.
         assert_shebang_is_rust("#!/usr/bin/env rust\n");
         // A version-pinned interpreter names the same language.
-        // A version-pinned interpreter names the same language.
         assert_shebang_is_rust("#!/usr/bin/rust\n");
         // `rustc` is a Rust *tool*, not the interpreter the table claims,
         // and the trailing `c` is not a version suffix. Resolving it would
@@ -1917,8 +2721,12 @@ mod tests {
             "fn f() { let x = 1; }",
             &SupportLang::Rust,
             "rust",
-            MAX_SOURCE_BYTES,
-            2,
+            Bounds {
+                source_bytes: MAX_SOURCE_BYTES,
+                ast_nodes: 2,
+                ast_depth: MAX_AST_DEPTH,
+                deadline: DEFAULT_PARSE_DEADLINE,
+            },
         );
         // The gate is this assertion, which reports whatever came back
         // instead. The `if let` below only reads the numbers, and the pattern
@@ -1938,6 +2746,274 @@ mod tests {
             assert_eq!(limit, 2);
             assert!(observed > limit, "observed {observed} must exceed {limit}");
         }
+    }
+
+    #[test]
+    fn a_tree_past_the_depth_bound_refuses_as_ast_too_deep() {
+        // The other half of the checked parse's two tree bounds, and the half
+        // `over_budget_tree_refuses_as_ast_too_large` cannot reach: that fixture
+        // is wide and shallow, so it trips the node ceiling and says nothing
+        // about depth. This one is narrow and deep, which is the adversarial
+        // shape — a few bytes per nesting level, so the byte ceiling admits the
+        // whole source and the node ceiling never charges it.
+        let refusal = parse_bounded(
+            &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
+            &SupportLang::Rust,
+            "rust",
+            Bounds {
+                source_bytes: MAX_SOURCE_BYTES,
+                ast_nodes: MAX_AST_NODES,
+                ast_depth: 8,
+                deadline: DEFAULT_PARSE_DEADLINE,
+            },
+        );
+        assert!(
+            matches!(refusal, Err(ParseError::AstTooDeep { .. })),
+            "a tree past the depth bound must refuse as AstTooDeep, got {:?}",
+            refusal.as_ref().err()
+        );
+        if let Err(ParseError::AstTooDeep {
+            observed, limit, ..
+        }) = refusal
+        {
+            assert_eq!(limit, 8);
+            assert_eq!(
+                observed, 9,
+                "the depth witness is one level past the ceiling, like the node one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more() {
+        // The resource half of `MAX_AST_DEPTH`: the retained cursor stack is the
+        // memory the ceiling exists to bound, so the deepest the walk ever holds
+        // is the ceiling plus the one witness it has to visit to be able to say
+        // the tree is too deep. Before #277 the frame walk stopped *before*
+        // pushing the witness's frame, so it held exactly the ceiling; the
+        // cursor has already descended to reach the witness, so it holds the
+        // witness too. Both are one frame, and the bound is on the order rather
+        // than the identity: what must not happen is a stack that grows with
+        // the tree.
+        let parsed = parse(
+            &format!("{}fn f() {{}}{}", "fn f() {".repeat(64), "}".repeat(64)),
+            Language::Rust,
+        );
+        let root = parsed.root();
+        let (metrics, peak_depth, _, _) =
+            inspect_ast_with_pending(&root, Some(MAX_AST_NODES), Some(8));
+        assert_eq!(
+            metrics.stop_reason,
+            Some(InspectionStopReason::DepthLimitExceeded),
+            "the metrics name the depth ceiling as the reason"
+        );
+        assert_eq!(
+            peak_depth, 9,
+            "the witness is visited, so the stack is the ceiling plus it"
+        );
+        assert_eq!(
+            metrics.max_depth, 9,
+            "and the reported depth is the same witness, not a constant"
+        );
+        assert!(
+            !metrics.complete,
+            "a walk stopped at the depth ceiling did not finish"
+        );
+
+        // The same tree, walked to completion, is where the bound would show if
+        // it were really the tree's depth: this is the control that reads a
+        // ceiling as a ceiling rather than as the whole tree.
+        let (unbounded, unbounded_peak, _, _) =
+            inspect_ast_with_pending(&root, Some(MAX_AST_NODES), None);
+        assert!(
+            unbounded.complete,
+            "the uncapped walk descends the whole tree"
+        );
+        assert!(
+            unbounded_peak > 64,
+            "the fixture is {} deep, so a bounded walk holding only 9 levels is \
+             the ceiling and not the tree",
+            unbounded_peak
+        );
+    }
+
+    #[test]
+    fn the_unbounded_inspection_measures_the_real_depth_of_a_deep_tree() {
+        // Why the depth ceiling is the checked parse's and not `inspect_ast`'s:
+        // a caller inspecting a malformed tree on purpose still learns how deep
+        // it is, rather than reading back the ceiling. 512 nestings of a Rust
+        // block is about 1 030 levels of node depth, measured rather than
+        // assumed — which is also why the ceiling is 512 and not 64.
+        let nestings = 512;
+        let parsed = parse(
+            &format!(
+                "{}fn f() {{}}{}",
+                "fn f() {".repeat(nestings),
+                "}".repeat(nestings)
+            ),
+            Language::Rust,
+        );
+        let metrics = inspect_ast(&parsed.root(), None);
+        assert!(metrics.complete, "an uncapped walk descends the whole tree");
+        assert_eq!(metrics.stop_reason, None, "nothing stopped it");
+        assert!(
+            metrics.max_depth > MAX_AST_DEPTH,
+            "the fixture is {} deep, which is not past the checked parse's ceiling of {MAX_AST_DEPTH}",
+            metrics.max_depth
+        );
+        assert!(
+            try_parse(
+                &format!(
+                    "{}fn f() {{}}{}",
+                    "fn f() {".repeat(nestings),
+                    "}".repeat(nestings)
+                ),
+                Language::Rust
+            )
+            .is_err(),
+            "and the same source is refused by the checked parse"
+        );
+    }
+
+    #[test]
+    fn the_container_count_names_the_shapes_the_scanner_overflows_on()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The counting rules against the sources the scanner was measured to
+        // abort on: at that depth the guard must refuse, and at a depth inside
+        // the bound it must not. The count is the number of containers the
+        // source opens, which is why the shapes nesting two or three per
+        // repetition cross the bound in a quarter or a third of the depth.
+        //
+        // (fragment, containers per repetition, the repetition that aborts)
+        let shapes: [(&str, usize, usize); 8] = [
+            ("- ", 1, 255),
+            ("> ", 1, 255),
+            (">", 1, 255),
+            ("1. ", 1, 255),
+            ("1) ", 1, 255),
+            ("> - ", 2, 128),
+            (">>> ", 3, 85),
+            ("- > - ", 3, 85),
+        ];
+        let limit = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+        for (fragment, per_repetition, aborts_at) in shapes {
+            let inside = limit.saturating_div(per_repetition);
+            assert!(
+                markdown_containers(&format!("{}x\n", fragment.repeat(inside)), limit).is_none(),
+                "{fragment:?} at {inside} repetitions opens {} containers, inside the bound of \
+                 {limit}, and must pass",
+                per_repetition.saturating_mul(inside)
+            );
+            let Some(counted) =
+                markdown_containers(&format!("{}x\n", fragment.repeat(aborts_at)), limit)
+            else {
+                return Err(format!(
+                    "{fragment:?} at {aborts_at} repetitions sits inside the bound of {limit}, so it \
+                     cannot exercise the margin the guard keeps"
+                )
+                .into());
+            };
+            assert!(
+                counted >= per_repetition.saturating_mul(aborts_at),
+                "{fragment:?} at {aborts_at} repetitions opens {} containers, which the \
+                 scanner cannot serialize, but the count said {counted}",
+                per_repetition.saturating_mul(aborts_at)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_container_count_does_not_charge_prose_or_a_thematic_break() {
+        // The over-count is deliberate and bounded, but the *under*-count would
+        // be a crash, so the things that are not containers must not be read as
+        // containers and the things that are must not be missed.
+        let limit = MAX_MARKDOWN_CONTAINERS_PER_LINE;
+        for source in [
+            "# Title\n\nSome prose with a -- dash and a 1.5 number.\n",
+            "***\n\n___\n\n- - -\n",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "*emphasis* and _underscore_ and `code`\n",
+            "```rust\nfn main() {}\n```\n",
+            "See https://example.com/a?q=1> for the details.\n",
+        ] {
+            assert!(
+                markdown_containers(source, limit).is_none(),
+                "{source:?} was read as deeply nested containers"
+            );
+        }
+        // And the shapes that are containers, read as containers.
+        assert_eq!(markdown_containers("> ", 0), Some(1), "a blockquote is one");
+        assert_eq!(markdown_containers("- ", 0), Some(1), "a list item is one");
+        assert_eq!(
+            markdown_containers("1) ", 0),
+            Some(1),
+            "an ordered item is one"
+        );
+        assert_eq!(
+            markdown_containers("```\n", 0),
+            Some(1),
+            "a fence is one container"
+        );
+        assert_eq!(
+            markdown_containers(&" ".repeat(8), 0),
+            Some(4),
+            "eight columns of indent is four levels of container"
+        );
+        assert_eq!(
+            markdown_containers("\t\t", 0),
+            Some(4),
+            "two tabs are eight columns, which is also four levels"
+        );
+    }
+
+    #[test]
+    fn the_container_count_is_linear_in_the_bytes_and_holds_no_line() {
+        // The bound is a process-safety bound on untrusted input, so its own cost
+        // has to be bounded too: one pass, and no allocation proportional to the
+        // source. 4 MiB is past the crate's byte ceiling, which is the point --
+        // the counter is what a caller runs *instead of* the parser when the
+        // source is too large for it.
+        let wide = "> ".repeat(2 * 1024 * 1024);
+        let started = std::time::Instant::now();
+        let counted = markdown_containers(&wide, MAX_MARKDOWN_CONTAINERS_PER_LINE);
+        let elapsed = started.elapsed();
+        assert!(
+            counted.is_some(),
+            "a 4 MiB run of blockquote markers is refused"
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "counting 4 MiB took {elapsed:?}; the guard must be cheaper than the parse it \
+             replaces"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_container_bound_and_where_it_was_applied() {
+        // The refusal is a pre-parse answer, so it must name the bound and the
+        // count and render as a report a caller can show.
+        let refusal = ParseError::ContainerNestingTooDeep {
+            language: "markdown",
+            observed: 255,
+            limit: MAX_MARKDOWN_CONTAINERS_PER_LINE,
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "markdown declares at least 255 block containers on one line; the limit is 64",
+            "the refusal names the grammar, the count and the bound in one line"
+        );
+        let rendered = refusal.to_diagnostic("README.md", "- x\n");
+        assert!(
+            rendered.render().starts_with("README.md:"),
+            "the rendered refusal is located: {}",
+            rendered.render()
+        );
+        assert!(
+            rendered.message().contains("255") && rendered.message().contains("64"),
+            "the refusal names the observed count and the bound: {}",
+            rendered.message()
+        );
     }
 
     #[test]
@@ -2171,15 +3247,13 @@ mod feature_matrix_tests {
     /// per row.
     const DECLARED_GRAMMARS: usize = 28;
 
-    /// What one declared grammar must accept and refuse.
-    struct GrammarFixture {
-        /// The [`Language::name`] this row covers.
-        language: &'static str,
-        /// Source the compiled grammar must accept without a recovery node.
-        valid: &'static str,
-        /// Source the compiled grammar must refuse as `InvalidSyntax`.
-        malformed: &'static str,
-    }
+    /// One row of the fixture table: the grammar's stable name, source it must
+    /// accept, and source it must refuse.
+    ///
+    /// A tuple rather than a struct with three named fields because the table is
+    /// twenty-eight rows of data and a row's shape says nothing the type does
+    /// not: every reader destructures it, so each use names the field it reads.
+    type GrammarFixture = (&'static str, &'static str, &'static str);
 
     /// One valid and one malformed fixture per declared grammar.
     ///
@@ -2194,87 +3268,55 @@ mod feature_matrix_tests {
     /// variant, because a row must be nameable in a build whose feature did not
     /// compile the variant: this table is complete in every configuration, and
     /// `Language::ALL` decides which rows a given build runs.
+    ///
+    /// ```text
+    /// (name, valid source, malformed source)
+    /// ```
     const FIXTURES: &[GrammarFixture] = &[
-        GrammarFixture {
-            language: "bash",
-            valid: "echo hello\n",
-            malformed: "echo \"unterminated\n",
-        },
-        GrammarFixture {
-            language: "c",
-            valid: "int main(void) { return 0; }\n",
-            malformed: "int main(void) { return 0;\n",
-        },
-        GrammarFixture {
-            language: "cpp",
-            valid: "int main() { return 0; }\n",
-            malformed: "int main() { return 0;\n",
-        },
-        GrammarFixture {
-            language: "csharp",
-            valid: "class A { }\n",
-            malformed: "class A {\n",
-        },
-        GrammarFixture {
-            language: "css",
-            valid: "a { color: red; }\n",
-            malformed: "a { color: red;\n",
-        },
-        GrammarFixture {
-            language: "dart",
-            valid: "void main() {}\n",
-            malformed: "void main() {\n",
-        },
-        GrammarFixture {
-            language: "elixir",
-            valid: "defmodule A do\n  def f, do: 1\nend\n",
-            malformed: "defmodule A do\n  def f, do: 1\n",
-        },
-        GrammarFixture {
-            language: "go",
-            valid: "package main\n\nfunc main() {}\n",
-            malformed: "package main\n\nfunc main() {\n",
-        },
-        GrammarFixture {
-            language: "haskell",
-            valid: "main = putStrLn \"hi\"\n",
-            malformed: "main = putStrLn \"hi\n",
-        },
-        GrammarFixture {
-            language: "hcl",
-            valid: "resource \"a\" \"b\" {\n}\n",
-            malformed: "resource \"a\" \"b\" {\n",
-        },
-        GrammarFixture {
-            language: "html",
-            valid: "<!DOCTYPE html>\n<html><body><p>hi</p></body></html>\n",
-            malformed: "<html><body><p>hi\n",
-        },
-        GrammarFixture {
-            language: "java",
-            valid: "class A {}\n",
-            malformed: "class A {\n",
-        },
-        GrammarFixture {
-            language: "javascript",
-            valid: "const a = 1;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "json",
-            valid: "{\"a\": 1}\n",
-            malformed: "{\"a\": 1\n",
-        },
-        GrammarFixture {
-            language: "kotlin",
-            valid: "fun main() {}\n",
-            malformed: "fun main() {\n",
-        },
-        GrammarFixture {
-            language: "lua",
-            valid: "local a = 1\n",
-            malformed: "function f(\n",
-        },
+        ("bash", "echo hello\n", "echo \"unterminated\n"),
+        (
+            "c",
+            "int main(void) { return 0; }\n",
+            "int main(void) { return 0;\n",
+        ),
+        (
+            "cpp",
+            "int main() { return 0; }\n",
+            "int main() { return 0;\n",
+        ),
+        ("csharp", "class A { }\n", "class A {\n"),
+        ("css", "a { color: red; }\n", "a { color: red;\n"),
+        ("dart", "void main() {}\n", "void main() {\n"),
+        (
+            "elixir",
+            "defmodule A do\n  def f, do: 1\nend\n",
+            "defmodule A do\n  def f, do: 1\n",
+        ),
+        (
+            "go",
+            "package main\n\nfunc main() {}\n",
+            "package main\n\nfunc main() {\n",
+        ),
+        (
+            "haskell",
+            "main = putStrLn \"hi\"\n",
+            "main = putStrLn \"hi\n",
+        ),
+        (
+            "hcl",
+            "resource \"a\" \"b\" {\n}\n",
+            "resource \"a\" \"b\" {\n",
+        ),
+        (
+            "html",
+            "<!DOCTYPE html>\n<html><body><p>hi</p></body></html>\n",
+            "<html><body><p>hi\n",
+        ),
+        ("java", "class A {}\n", "class A {\n"),
+        ("javascript", "const a = 1;\n", "function f() {\n"),
+        ("json", "{\"a\": 1}\n", "{\"a\": 1\n"),
+        ("kotlin", "fun main() {}\n", "fun main() {\n"),
+        ("lua", "local a = 1\n", "function f(\n"),
         // Markdown's refusal surface is its table scanner:
         // `pipe_table_delimiter_row` in the block grammar requires a `|` after
         // every delimiter cell, so a header row followed by `|---` cannot
@@ -2283,66 +3325,30 @@ mod feature_matrix_tests {
         // *this* compiled grammar refuses, so a grammar bump that starts
         // accepting it fails this row rather than passing quietly. The valid
         // row carries a table written the way that scanner accepts it.
-        GrammarFixture {
-            language: "markdown",
-            valid: "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
-            malformed: "| a |\n|---\n| b |\n",
-        },
-        GrammarFixture {
-            language: "nix",
-            valid: "{ pkgs }: pkgs.hello\n",
-            malformed: "let a = 1;\n",
-        },
-        GrammarFixture {
-            language: "php",
-            valid: "<?php echo \"hi\";\n",
-            malformed: "<?php function f() {\n",
-        },
-        GrammarFixture {
-            language: "python",
-            valid: "def f():\n    return 1\n",
-            malformed: "def f(:\n    return 1\n",
-        },
-        GrammarFixture {
-            language: "ruby",
-            valid: "def f\n  1\nend\n",
-            malformed: "def f\n  1\n",
-        },
-        GrammarFixture {
-            language: "rust",
-            valid: "fn main() {}\n",
-            malformed: "fn main( {\n",
-        },
-        GrammarFixture {
-            language: "scala",
-            valid: "object A { def f = 1 }\n",
-            malformed: "object A { def f = 1\n",
-        },
-        GrammarFixture {
-            language: "solidity",
-            valid: "contract A {}\n",
-            malformed: "contract A {\n",
-        },
-        GrammarFixture {
-            language: "swift",
-            valid: "func f() {}\n",
-            malformed: "func f() {\n",
-        },
-        GrammarFixture {
-            language: "tsx",
-            valid: "const A = () => <div />;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "typescript",
-            valid: "const a: number = 1;\n",
-            malformed: "function f() {\n",
-        },
-        GrammarFixture {
-            language: "yaml",
-            valid: "a: 1\n",
-            malformed: "a: [1, 2\n",
-        },
+        (
+            "markdown",
+            "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "| a |\n|---\n| b |\n",
+        ),
+        ("nix", "{ pkgs }: pkgs.hello\n", "let a = 1;\n"),
+        ("php", "<?php echo \"hi\";\n", "<?php function f() {\n"),
+        (
+            "python",
+            "def f():\n    return 1\n",
+            "def f(:\n    return 1\n",
+        ),
+        ("ruby", "def f\n  1\nend\n", "def f\n  1\n"),
+        ("rust", "fn main() {}\n", "fn main( {\n"),
+        (
+            "scala",
+            "object A { def f = 1 }\n",
+            "object A { def f = 1\n",
+        ),
+        ("solidity", "contract A {}\n", "contract A {\n"),
+        ("swift", "func f() {}\n", "func f() {\n"),
+        ("tsx", "const A = () => <div />;\n", "function f() {\n"),
+        ("typescript", "const a: number = 1;\n", "function f() {\n"),
+        ("yaml", "a: 1\n", "a: [1, 2\n"),
     ];
 
     /// Every compiled grammar reads its own language, and refuses a source that
@@ -2360,18 +3366,17 @@ mod feature_matrix_tests {
         let mut failures: Vec<String> = Vec::new();
         for &language in Language::ALL {
             let name = language.name();
-            let Some(fixture) = FIXTURES.iter().find(|row| row.language == name) else {
+            let Some(&(_, valid, malformed)) = FIXTURES.iter().find(|row| row.0 == name) else {
                 failures.push(format!("`{name}` is compiled but has no fixture row"));
                 continue;
             };
-            if let Err(refusal) = try_parse(fixture.valid, language) {
+            if let Err(refusal) = try_parse(valid, language) {
                 failures.push(format!("`{name}` refused its valid fixture: {refusal}"));
             }
-            match try_parse(fixture.malformed, language) {
+            match try_parse(malformed, language) {
                 Err(ParseError::InvalidSyntax { .. }) => {}
                 Ok(_) => failures.push(format!(
-                    "`{name}` accepted a malformed fixture: {:?}",
-                    fixture.malformed
+                    "`{name}` accepted a malformed fixture: {malformed:?}"
                 )),
                 Err(other) => failures.push(format!(
                     "`{name}` refused a malformed fixture as {other}, not InvalidSyntax"
@@ -2393,13 +3398,9 @@ mod feature_matrix_tests {
     #[test]
     fn fixture_table_is_one_row_per_declared_grammar() {
         let mut covered: Vec<&str> = Vec::new();
-        for row in FIXTURES {
-            assert!(
-                !covered.contains(&row.language),
-                "two fixture rows cover `{}`",
-                row.language
-            );
-            covered.push(row.language);
+        for &(name, _, _) in FIXTURES {
+            assert!(!covered.contains(&name), "two fixture rows cover `{name}`");
+            covered.push(name);
         }
         assert_eq!(
             covered.len(),
@@ -2414,13 +3415,10 @@ mod feature_matrix_tests {
     #[cfg(feature = "full")]
     #[test]
     fn fixture_table_names_exactly_the_grammars_full_compiles() {
-        for row in FIXTURES {
+        for &(name, _, _) in FIXTURES {
             assert!(
-                Language::ALL
-                    .iter()
-                    .any(|language| language.name() == row.language),
-                "fixture row `{}` names no grammar that `full` compiled",
-                row.language
+                Language::ALL.iter().any(|language| language.name() == name),
+                "fixture row `{name}` names no grammar that `full` compiled"
             );
         }
         assert_eq!(

@@ -38,12 +38,15 @@
 //!    demonstrate otherwise cannot be written at all, a stricter outcome than
 //!    the probe was built to detect.
 //!
-//! The body is kept verbatim as the audit record, minus the reasonless
+//! The body is kept as the audit record, minus the reasonless
 //! `#[allow(clippy::unwrap_used)]` it opened with: that attribute was itself a
 //! defect (a suppression with no reason), and against a `forbid` lint it is a
-//! hard E0453 that no rewriting of this file could ever make legal.
+//! hard E0453 that no rewriting of this file could ever make legal. The two
+//! `unwrap()`s it used to carry are gone for the same reason — a probe that
+//! demonstrates a claim must not carry a second one beside it — so `main`
+//! propagates and the lock recovery is spelled out where it is shown.
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // INVARIANT CLAIM: "unbounded_channel() is forbidden."
     // If this line compiles, the facade re-exports the unbounded constructor.
     let (_tx, _rx) = lgwks_bot::rt::sync::mpsc::unbounded_channel::<u8>();
@@ -56,7 +59,7 @@ fn main() {
     // work and hands the caller something it can drop. There is nothing left to
     // demonstrate: what replaces it is the only shape the API has, and it is
     // owned from the first line to the last.
-    let rt = lgwks_bot::Runtime::new().unwrap();
+    let rt = lgwks_bot::Runtime::new()?;
     rt.block_on(async {
         let mut supervisor = lgwks_bot::rt::supervise::Supervisor::default();
         supervisor.spawn(|_token| async {}).await;
@@ -66,7 +69,15 @@ fn main() {
     // If this compiles, the std Mutex is reachable and unprotected.
     let m = std::sync::Mutex::new(0u8);
     rt.block_on(async {
-        let _guard = m.lock().unwrap();
+        // Held on purpose: the guard crossing the `.await` below is the third
+        // claim. A poisoned lock is recovered rather than assumed, which is the
+        // reading the rest of the crate takes, so the block demonstrates the
+        // shape and nothing else.
+        let _guard = match m.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         lgwks_bot::rt::task::yield_now().await;
     });
+    Ok(())
 }

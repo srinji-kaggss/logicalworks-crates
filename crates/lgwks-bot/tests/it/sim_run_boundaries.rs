@@ -224,22 +224,6 @@ fn a_partition_holds_everything_until_its_tick_band_27() -> TestResult {
 }
 
 #[test]
-fn crashes_land_on_a_tick_the_clock_can_reach_band_28() -> TestResult {
-    crashes_land_on_a_tick_the_clock_can_reach(Band::new(
-        sim::band_of(28).first,
-        sim::band_of(28).count,
-    ))
-}
-
-#[test]
-fn crashes_land_on_a_tick_the_clock_can_reach_band_29() -> TestResult {
-    crashes_land_on_a_tick_the_clock_can_reach(Band::new(
-        sim::band_of(29).first,
-        sim::band_of(29).count,
-    ))
-}
-
-#[test]
 fn generations_are_never_zero_band_30() -> TestResult {
     generations_are_never_zero(Band::new(sim::band_of(30).first, sim::band_of(30).count))
 }
@@ -273,7 +257,7 @@ fn an_advance_delivers_everything_that_became_due_band_33() -> TestResult {
 fn the_band_table_is_contiguous_and_gapless(band: Band) -> TestResult {
     let table = sim::bands(sim::SEED_SPACE, sim::BANDS);
     assert_eq!(
-        u64::try_from(table.len()).unwrap_or_default(),
+        u64::try_from(table.len())?,
         sim::BANDS,
         "the band table's length is not the declared band count"
     );
@@ -311,7 +295,7 @@ fn the_seed_space_is_covered_exactly_once(band: Band) -> TestResult {
     }
     assert_eq!(
         seen.len(),
-        usize::try_from(sim::SEED_SPACE).unwrap_or_default(),
+        usize::try_from(sim::SEED_SPACE)?,
         "the bands cover {} seeds rather than the declared space",
         seen.len()
     );
@@ -323,47 +307,15 @@ fn the_seed_space_is_covered_exactly_once(band: Band) -> TestResult {
 ///
 /// Two schedules for one seed would make every store family's pass rate a coin
 /// flip on a second run, and `assert_replays` would catch it there rather than
-/// here. The comparison is field by field because a schedule that matched only in
-/// aggregate could differ on the one dimension a scenario depends on.
+/// here. The comparison is the derived `Eq` over every field, so a schedule
+/// cannot match in aggregate and differ on the one dimension a scenario
+/// depends on, and a field added later is compared without being listed.
 fn a_fault_schedule_is_a_function_of_its_seed(band: Band) -> TestResult {
     for seed in band.seeds() {
-        let first = Faults::for_seed(seed);
-        let second = Faults::for_seed(seed);
         assert_eq!(
-            first.disk_refuse, second.disk_refuse,
-            "seed {seed}: disk_refuse drifted"
-        );
-        assert_eq!(
-            first.disk_tear, second.disk_tear,
-            "seed {seed}: disk_tear drifted"
-        );
-        assert_eq!(
-            first.net_drop, second.net_drop,
-            "seed {seed}: net_drop drifted"
-        );
-        assert_eq!(
-            first.net_duplicate, second.net_duplicate,
-            "seed {seed}: net_duplicate drifted"
-        );
-        assert_eq!(
-            first.partition_until, second.partition_until,
-            "seed {seed}: the partition moved"
-        );
-        assert_eq!(
-            first.crash_at, second.crash_at,
-            "seed {seed}: the crash moved"
-        );
-        assert_eq!(
-            first.tenants, second.tenants,
-            "seed {seed}: the tenant count drifted"
-        );
-        assert_eq!(
-            first.concurrency, second.concurrency,
-            "seed {seed}: the concurrency drifted"
-        );
-        assert_eq!(
-            first.generations, second.generations,
-            "seed {seed}: the generation count drifted"
+            Faults::for_seed(seed),
+            Faults::for_seed(seed),
+            "seed {seed}: the fault schedule drifted between two derivations"
         );
     }
     Ok(())
@@ -371,7 +323,7 @@ fn a_fault_schedule_is_a_function_of_its_seed(band: Band) -> TestResult {
 
 /// Every scheduled fault is one the harness can actually carry out.
 ///
-/// A per-mille chance above a thousand, or a concurrency of zero, is a schedule
+/// A per-mille chance above a thousand, or a run with no tenant, is a schedule
 /// the harness silently cannot honour: `chance` would compare against a number
 /// it never reaches and the fault would never fire, so the family relying on it
 /// would report coverage it never exercised.
@@ -379,8 +331,6 @@ fn a_fault_schedule_never_proposes_an_impossible_run(band: Band) -> TestResult {
     for seed in band.seeds() {
         let faults = Faults::for_seed(seed);
         for (name, per_mille) in [
-            ("disk_refuse", faults.disk_refuse),
-            ("disk_tear", faults.disk_tear),
             ("net_drop", faults.net_drop),
             ("net_duplicate", faults.net_duplicate),
         ] {
@@ -392,10 +342,6 @@ fn a_fault_schedule_never_proposes_an_impossible_run(band: Band) -> TestResult {
         assert!(
             faults.tenants > 0,
             "seed {seed}: a run with no tenant proves nothing"
-        );
-        assert!(
-            faults.concurrency > 0,
-            "seed {seed}: zero concurrency means nothing was ever in flight"
         );
     }
     Ok(())
@@ -448,11 +394,11 @@ fn the_network_conserves_every_envelope(band: Band) -> TestResult {
         let faults = Faults::for_seed(seed);
         let mut rng = Rng::new(seed);
         let mut net = Network::new();
-        let mut sent = 0usize;
+        let mut sent = 0u32;
         let mut horizon = 0u64;
         for _ in 0..24 {
-            let fill = u8::try_from(seed).unwrap_or(0);
-            let width = usize::try_from(rng.between(1, 8)).unwrap_or(1);
+            let fill = u8::try_from(seed)?;
+            let width = usize::try_from(rng.between(1, 8))?;
             let body = vec![fill; width];
             let from = rng.below(8);
             let to = rng.below(8);
@@ -476,12 +422,9 @@ fn the_network_conserves_every_envelope(band: Band) -> TestResult {
         // wire. A drop loses one and a duplicate adds one, so the sum is
         // `sent - dropped + duplicated`.
         let (delivered, dropped, duplicated) = net.counts();
-        let expected = sent
-            .saturating_sub(usize::try_from(dropped).unwrap_or_default())
-            .saturating_add(usize::try_from(duplicated).unwrap_or_default());
+        let expected = sent.saturating_sub(dropped).saturating_add(duplicated);
         assert_eq!(
-            usize::try_from(delivered).unwrap_or_default(),
-            expected,
+            delivered, expected,
             "seed {seed}: sent {sent}, dropped {dropped}, duplicated {duplicated}, \
              so {expected} deliveries were due and {delivered} happened"
         );
@@ -511,7 +454,10 @@ fn a_message_is_never_delivered_before_it_is_due(band: Band) -> TestResult {
         for _ in 0..20 {
             let got = net.deliver(now, &mut rng, &faults);
             for envelope in got.iter() {
-                let scheduled = due_at.get(&envelope.from).copied().unwrap_or(0);
+                let scheduled = due_at
+                    .get(&envelope.from)
+                    .copied()
+                    .ok_or("a delivered envelope was scheduled")?;
                 assert!(
                     now >= scheduled,
                     "a message due at {scheduled} was delivered at {now}"
@@ -544,7 +490,7 @@ fn a_duplicate_carries_a_later_attempt_count(band: Band) -> TestResult {
         let original = first
             .first()
             .map(|envelope| envelope.attempts)
-            .unwrap_or_default();
+            .ok_or("the first delivery carried an envelope")?;
         let second = net.deliver(64, &mut rng, &faults);
         for envelope in second.iter() {
             assert!(
@@ -593,19 +539,19 @@ fn the_same_seed_replays_to_the_same_trace(band: Band) -> TestResult {
             net.send(
                 index,
                 index.saturating_add(1),
-                vec![u8::try_from(index).unwrap_or(0)],
+                vec![u8::try_from(index)?],
                 due,
             );
         }
         for _ in 0..12 {
             let now = harness.tick(4);
             let got = net.deliver(now, harness.rng(), &faults);
-            harness.trace.record_count("delivered", got.len());
+            harness.trace.record_number("delivered", got.len());
         }
         let (delivered, dropped, duplicated) = net.counts();
-        harness.trace.record_u64("d", u64::from(delivered));
-        harness.trace.record_u64("x", u64::from(dropped));
-        harness.trace.record_u64("u", u64::from(duplicated));
+        harness.trace.record_number("d", u64::from(delivered));
+        harness.trace.record_number("x", u64::from(dropped));
+        harness.trace.record_number("u", u64::from(duplicated));
         Ok(())
     };
     sim::assert_replays(band, body)?;
@@ -627,17 +573,17 @@ fn distinct_seeds_reach_distinct_traces(band: Band) -> TestResult {
             net.send(
                 index,
                 index.saturating_add(1),
-                vec![u8::try_from(index).unwrap_or(0)],
+                vec![u8::try_from(index)?],
                 u64::from(index),
             );
         }
         for _ in 0..8 {
             let now = harness.tick(3);
             let got = net.deliver(now, &mut rng, &faults);
-            harness.trace.record_count("n", got.len());
+            harness.trace.record_number("n", got.len());
         }
         let (delivered, _, _) = net.counts();
-        harness.trace.record_u64("d", u64::from(delivered));
+        harness.trace.record_number("d", u64::from(delivered));
         hashes.insert(harness.hash());
     }
     assert!(
@@ -674,36 +620,6 @@ fn a_partition_holds_everything_until_its_tick(band: Band) -> TestResult {
             released.len(),
             1,
             "seed {seed}: the message was not delivered after the partition lifted"
-        );
-    }
-    Ok(())
-}
-
-/// A scheduled crash names a reachable tick, or none at all.
-fn crashes_land_on_a_tick_the_clock_can_reach(band: Band) -> TestResult {
-    for seed in band.seeds() {
-        let faults = Faults::for_seed(seed);
-        if faults.crash_at == u64::MAX {
-            continue;
-        }
-        assert!(
-            faults.crash_at > 0,
-            "seed {seed}: a crash at tick zero would fire before any step ran"
-        );
-        let mut harness = Sim::new(seed);
-        let mut now = 0u64;
-        let mut fired = false;
-        for _ in 0..4096 {
-            if now >= faults.crash_at {
-                fired = true;
-                break;
-            }
-            now = harness.tick(1);
-        }
-        assert!(
-            fired,
-            "seed {seed}: the clock never reached the scheduled crash at {}",
-            faults.crash_at
         );
     }
     Ok(())
