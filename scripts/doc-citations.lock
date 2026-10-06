@@ -19,21 +19,21 @@ crates/lgwks-bot/src/cap.rs:290	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:391	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:489	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
-crates/lgwks-bot/src/ecs.rs:1362	#[derive(Resource, Debug)]
-crates/lgwks-bot/src/ecs.rs:1815	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs.rs:3933	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs.rs:4012	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs.rs:4233	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:4340	{
-crates/lgwks-bot/src/ecs.rs:4392	*slot = Some(value);
-crates/lgwks-bot/src/ecs.rs:4493	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:4622	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs.rs:5134	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5159	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs.rs:5249	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5939	Ok(_) => {
-crates/lgwks-bot/src/ecs.rs:6091	.ensure_outcome(*key, evidence)
-crates/lgwks-bot/src/ecs.rs:6117	}),
+crates/lgwks-bot/src/ecs.rs:1404	#[derive(Resource, Debug)]
+crates/lgwks-bot/src/ecs.rs:1857	/// chain's before committing anything.
+crates/lgwks-bot/src/ecs.rs:3975	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs.rs:4054	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs.rs:4275	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:4382	{
+crates/lgwks-bot/src/ecs.rs:4434	*slot = Some(value);
+crates/lgwks-bot/src/ecs.rs:4535	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:4664	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs.rs:5176	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5201	// borrow of the plan would outlive the schedule that wrote it. An empty
+crates/lgwks-bot/src/ecs.rs:5291	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5981	Ok(_) => {
+crates/lgwks-bot/src/ecs.rs:6133	.ensure_outcome(*key, evidence)
+crates/lgwks-bot/src/ecs.rs:6159	}),
 crates/lgwks-bot/src/error.rs:186	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {
@@ -51,9 +51,9 @@ crates/lgwks-bot/src/language.rs:580	/// Creates a resolver pre-loaded with lear
 crates/lgwks-bot/src/language.rs:611	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	.insert(alias.utterance.clone(), alias)
 crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:80	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:100	/// engine's `task_local!` needs only the `rt` feature this module already
-crates/lgwks-bot/src/rt/mod.rs:111	#[cfg(feature = "io")]
+crates/lgwks-bot/src/rt/mod.rs:86	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:106	/// engine's `task_local!` needs only the `rt` feature this module already
+crates/lgwks-bot/src/rt/mod.rs:117	#[cfg(feature = "io")]
 crates/lgwks-bot/src/rt/process.rs:51	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:476	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:1116	pub enum ProcessRunError {
@@ -62,14 +62,14 @@ crates/lgwks-bot/src/rt/runtime.rs:179	if self.worker_threads.is_some() && worke
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget`]. Every iteration races the
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:152	/// otherwise never make, which is why it is not larger.
-crates/lgwks-bot/src/rt/supervise.rs:168	/// longer than the budget overruns it by one iteration. Cancellation is not
-crates/lgwks-bot/src/rt/supervise.rs:870	/// long enough on one worker and far too short on several, and the failure is
-crates/lgwks-bot/src/rt/supervise.rs:934	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:1312	/// # Why the description is borrowed
-crates/lgwks-bot/src/rt/supervise.rs:1478	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
-crates/lgwks-bot/src/rt/supervise.rs:3249	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:3358	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:162	/// otherwise never make, which is why it is not larger.
+crates/lgwks-bot/src/rt/supervise.rs:178	/// longer than the budget overruns it by one iteration. Cancellation is not
+crates/lgwks-bot/src/rt/supervise.rs:1566	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:1630	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:2128	/// # Why the description is borrowed
+crates/lgwks-bot/src/rt/supervise.rs:2361	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+crates/lgwks-bot/src/rt/supervise.rs:4298	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:4407	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

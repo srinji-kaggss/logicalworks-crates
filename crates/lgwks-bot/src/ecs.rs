@@ -823,6 +823,42 @@ impl Effects {
         ))
     }
 
+    /// Continue the run's journal if it has reached its watermark.
+    ///
+    /// Asked on the shipped append path rather than by a caller a test wrote,
+    /// because a lifecycle policy nobody consults is a policy that does not exist
+    /// (issue #267). The question is one call and one answer on every append: a
+    /// journal that does not continue says so and the append proceeds exactly as
+    /// it always did, which is why adding this changed no existing behaviour.
+    ///
+    /// The whole controller state moves with the journal, and that is the point:
+    /// `unsettled`, `recording`, `applied_latest` and `attempted` are this
+    /// controller's fold of the history, and the successor carries the same facts
+    /// in its checkpoint, so the two agree by construction. Only the *fence* moves
+    /// and it moves to the successor's own tail, which is the position after its
+    /// seal frame — the append that follows is the successor's second event, and
+    /// it is fenced on the successor's chain rather than the predecessor's.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the continuation reports. A journal that cannot continue at this
+    /// size refuses the *continuation*, not the append, and the append then lands
+    /// in the journal it was always going to land in — which is what leaves the
+    /// ladder's own reservation the last line of defence rather than the first.
+    fn continue_if_due(&mut self) -> Result<(), JournalError> {
+        if !self.scope.journal().continuation_watermark()?.is_due() {
+            return Ok(());
+        }
+        let successor = match self.scope.journal_mut().continue_as_new()? {
+            Some(successor) => successor,
+            None => return Ok(()),
+        };
+        let adopted = successor.tail();
+        self.scope.journal = successor;
+        self.tail = adopted;
+        Ok(())
+    }
+
     /// Append one fact, fencing on the tail represented by this controller's
     /// recovery fold.
     ///
@@ -833,6 +869,7 @@ impl Effects {
     ///
     /// Whatever the journal refuses.
     fn append(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
+        self.continue_if_due()?;
         self.scope
             .journal_mut()
             .compare_and_append(self.tail, event)
@@ -844,7 +881,12 @@ impl Effects {
     /// is a statement about that caller and not about the append. A dispatch
     /// path is on an executor, where a journal whose durability path blocks
     /// would charge the device's latency to everything else on the thread.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the journal refuses.
     async fn append_async(&mut self, event: &EffectEvent) -> Result<DurableAck, JournalError> {
+        self.continue_if_due()?;
         self.scope
             .journal_mut()
             .compare_and_append_async(self.tail, event)

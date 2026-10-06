@@ -115,12 +115,17 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use super::continuation::{
+    Continuation, ContinuationPolicy, ContinuationWatermark, SealPause, SettledAttempt,
+    UnresolvedAttempt, successor_path,
+};
 use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, SaturatingFrom, read_exact_or_eof};
 use super::owner::{StorageGate, StorageOwner};
 use super::{
-    ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence, EffectJournal,
-    EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition, MAX_JOURNAL_BYTES,
-    MAX_JOURNAL_EVENTS, Recovered, chain, check_append_order, next_allowed_of, recover,
+    AttemptStatus, ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence,
+    EffectJournal, EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition,
+    MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, Recovered, check_append_order, next_allowed_of,
+    recover_continued,
 };
 use lgwks_std::wire::{WireError, from_bytes};
 
@@ -130,12 +135,24 @@ use lgwks_std::wire::{WireError, from_bytes};
 /// bytes. A length field beyond this bound does not name a frame this
 /// journal writes, so a complete prefix carrying one is refused as rot; a
 /// partial prefix is a torn tail.
-const MAX_FRAME_BYTES: usize = 64 * 1024;
+///
+/// A sealed checkpoint is framed under this same bound, which is why the carried
+/// state is charged against its own declared counts first: a carry this grammar
+/// cannot frame is refused before a byte moves, not discovered at the writer.
+pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// The most successor files one `open_active` walk will follow.
+///
+/// A declared bound rather than a loop until a name repeats, because the chain is
+/// unbounded in principle — a run that continues for a year has a year of files —
+/// and a walk with no bound is a walk that can park on a directory tree somebody
+/// else is generating. A generation beyond this is reported, not guessed past.
+pub const MAX_GENERATION_WALK: u64 = 4096;
 
 /// One whole piece of a frame's bytes: the payload or the head.
 ///
 /// The crate-wide grammar names the pieces it reads; this is the same shape under
-/// the name this module's own error vocabulary uses, so `Interrupted` here and
+/// the name this module's error vocabulary uses, so `Interrupted` here and
 /// there cannot be two different classifications of the same bytes.
 type FramePiece = Piece;
 
@@ -159,6 +176,14 @@ pub enum CorruptionKind {
     Framed,
     /// The stored head does not follow from the events before it.
     Chain(ChainBreak),
+    /// The file holds a second sealed checkpoint.
+    ///
+    /// One journal continues once. A second seal frame in one file is bytes no
+    /// writer of this journal produces, and it is refused rather than read as a
+    /// later continuation: the successor is a distinct file, so a seal that
+    /// appears here twice means the file's own chain has been given two
+    /// incompatible answers about where its authoritative journal is.
+    Sealed,
 }
 
 impl CorruptionKind {
@@ -171,6 +196,7 @@ impl CorruptionKind {
                 "the frame's length prefix cannot be true of any frame this journal writes"
             }
             Self::Chain(_) => "the stored head does not follow from the events before it",
+            Self::Sealed => "the file holds a second sealed checkpoint",
         }
     }
 }
@@ -292,10 +318,16 @@ fn resolve_ambiguous_tail(
     Ok(offset)
 }
 
-/// A whole, decodable frame read from a journal file.
-struct Whole {
-    /// The event the payload decoded to.
-    event: EffectEvent,
+/// A whole frame read from a journal file, before its payload is decoded.
+///
+/// The payload is handed back rather than decoded here because this file holds
+/// **two** record types — an effect event and a sealed checkpoint — and the
+/// question "which is this?" is answered by the payload's magic prefix, which the
+/// caller sees. A reader that decoded here would have to guess and fall back,
+/// and a guess that falls back is how a sealed checkpoint gets read as an event.
+struct Frame {
+    /// The archived record, exactly as the frame stored it.
+    payload: Vec<u8>,
     /// The chain head the frame recorded for itself.
     head: [u8; HEAD_BYTES],
     /// The payload length the frame declared.
@@ -342,7 +374,7 @@ fn next_frame(
     held: usize,
     max_events: usize,
     index: u64,
-) -> Result<Result<Whole, Halt>, JournalError> {
+) -> Result<Result<Frame, Halt>, JournalError> {
     let mut prefix = [0u8; LENGTH_BYTES];
     match super::frame::read_prefix(reader, &mut prefix).map_err(JournalError::Storage)? {
         Prefix::Eof => return Ok(Err(Halt::Complete)),
@@ -377,15 +409,8 @@ fn next_frame(
     if let FramePiece::Interrupted = read_exact_classified(reader, &mut head)? {
         return Ok(Err(Halt::Ambiguous));
     }
-    let event = from_bytes::<EffectEvent, WireError>(&payload).map_err(|error| {
-        lgwks_std::trace::debug!(?error, index, "next_frame: the payload did not decode");
-        JournalError::Corrupt(Box::new(Corruption::new(
-            index,
-            CorruptionKind::Undecodable,
-        )))
-    })?;
-    Ok(Ok(Whole {
-        event,
+    Ok(Ok(Frame {
+        payload,
         head,
         payload_len,
     }))
@@ -393,53 +418,166 @@ fn next_frame(
 
 /// Read frames from `reader`, stopping at the first torn frame.
 ///
-/// Returns the decoded entries, or the corruption that refuses the file.
-/// The scan is streaming and every iteration consumes at least one byte, so
-/// the loop is bounded by the file's own length.
-fn scan(
-    reader: &mut impl Read,
-    previous: JournalPosition,
-    max_events: usize,
-) -> Result<(Vec<JournalEntry>, ScanStop), JournalError> {
+/// Returns the decoded entries, the sealed checkpoint this file opened from (only
+/// a successor has one), or the corruption that refuses the file. The scan is
+/// streaming and every iteration consumes at least one byte, so the loop is
+/// bounded by the file's own length.
+///
+/// The first frame is where a continuation lives, and it is read by the same loop
+/// rather than by a second pass: its payload carries the magic prefix, and the
+/// chain it continues from is the `predecessor` position inside it. Verifying that
+/// frame against the position it *names* rather than against the genesis is what
+/// lets a successor's own chain start at its predecessor's tail and still be a
+/// chain — the same thing an etcd snapshot does when its index names the entry it
+/// was taken at.
+fn scan(reader: &mut impl Read, max_events: usize) -> Result<Scanned, JournalError> {
     let mut entries = Vec::new();
-    let mut position = previous;
+    let mut carried: Option<Continuation> = None;
+    let mut seal: Option<Continuation> = None;
+    let mut position = JournalPosition::genesis();
+    let mut chain_from = JournalPosition::genesis();
     let mut offset = 0u64;
     let mut index = 0u64;
     loop {
-        let Whole {
-            event,
+        let Frame {
+            payload,
             head,
             payload_len,
         } = match next_frame(reader, entries.len(), max_events, index)? {
-            Ok(whole) => whole,
-            Err(halt) => return Ok((entries, halt.at(offset))),
+            Ok(frame) => frame,
+            Err(halt) => {
+                return Ok(Scanned {
+                    entries,
+                    carried,
+                    seal,
+                    chain_from,
+                    tail: position,
+                    stop: halt.at(offset),
+                });
+            }
         };
-        let head_digest = chain(position, &event)?;
-        let recomputed = JournalPosition {
-            sequence: position.sequence().saturating_add(1),
-            head: head_digest,
-        };
-        let recorded = JournalPosition {
-            sequence: recomputed.sequence(),
-            head: lgwks_std::hash::Digest::from_bytes(head),
-        };
-        if recorded != recomputed {
-            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Chain(ChainBreak::Disagreement {
-                    at: recorded.sequence(),
-                    recorded,
-                    recomputed,
-                }),
-            ))));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: returning an error to the caller");
-            return refusal;
+
+        if let Some(decoded) = Continuation::from_payload(&payload) {
+            // A checkpoint is legal in exactly two places: as this file's first
+            // frame, which is the predecessor's seal this file continues from, and
+            // as this file's last, which is this file sealing itself. Two in one
+            // file are bytes no writer of this journal produces; one in the middle
+            // is caught by the event-after-seal arm below, because a frame that
+            // follows a seal cannot be part of the chain that seal closed.
+            if seal.is_some() {
+                let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                    index,
+                    CorruptionKind::Sealed,
+                ))));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: the file holds a second sealed checkpoint");
+                return refusal;
+            }
+            let checkpoint = match decoded {
+                Ok(checkpoint) => checkpoint,
+                Err(cause) => {
+                    lgwks_std::trace::debug!(index, "scan: the sealed checkpoint did not decode");
+                    return Err(cause);
+                }
+            };
+            position = verify_frame(&payload, &head, checkpoint.predecessor(), index)?;
+            // Only the carried seal moves where this file's events chain from. This
+            // file's *own* closing seal follows its events, so taking its position
+            // would start the chain after the last event it is meant to verify.
+            if index == 0 {
+                carried = Some(checkpoint);
+                chain_from = position;
+            } else {
+                seal = Some(checkpoint);
+            }
+        } else {
+            if seal.is_some() {
+                let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                    index,
+                    CorruptionKind::Sealed,
+                ))));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: an event follows this journal's own seal");
+                return refusal;
+            }
+            let event: EffectEvent = match from_bytes::<EffectEvent, WireError>(&payload) {
+                Ok(event) => event,
+                Err(error) => {
+                    lgwks_std::trace::debug!(?error, index, "scan: the payload did not decode");
+                    let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                        index,
+                        CorruptionKind::Undecodable,
+                    ))));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "scan: returning an error to the caller");
+                    return refusal;
+                }
+            };
+            position = verify_frame(&payload, &head, position, index)?;
+            entries.push(JournalEntry::new(position, event));
         }
-        entries.push(JournalEntry::new(recorded, event));
-        position = recorded;
         offset = offset.saturating_add(super::frame::framed_len(payload_len));
         index = index.saturating_add(1);
     }
+}
+
+/// The position one whole frame records, or the refusal that its stored head is
+/// not.
+///
+/// The chain function is the shared one every frame of this chain uses, whether
+/// its payload is an event or a sealed checkpoint: a frame that cannot
+/// re-derive its own head was not framed by this journal's writer, and the bytes
+/// behind it may have been acknowledged.
+fn verify_frame(
+    payload: &[u8],
+    head: &[u8; HEAD_BYTES],
+    position: JournalPosition,
+    index: u64,
+) -> Result<JournalPosition, JournalError> {
+    let recomputed = JournalPosition {
+        sequence: position.sequence().saturating_add(1),
+        head: super::chain_over_bytes(&position.head(), payload),
+    };
+    let recorded = JournalPosition {
+        sequence: recomputed.sequence(),
+        head: lgwks_std::hash::Digest::from_bytes(*head),
+    };
+    if recorded != recomputed {
+        let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+            index,
+            CorruptionKind::Chain(ChainBreak::Disagreement {
+                at: recorded.sequence(),
+                recorded,
+                recomputed,
+            }),
+        ))));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "verify_frame: returning an error to the caller");
+        return refusal;
+    }
+    Ok(recorded)
+}
+
+/// What a scan found: the events, the two checkpoints a file can hold, and where
+/// the scan stopped.
+struct Scanned {
+    /// Every effect event committed before the stop, in commit order.
+    entries: Vec<JournalEntry>,
+    /// The predecessor's seal, when this file is a successor.
+    carried: Option<Continuation>,
+    /// This file's own seal, when it has sealed itself.
+    seal: Option<Continuation>,
+    /// The position the committed events' chain starts from.
+    ///
+    /// The genesis for a base journal and the seal frame's own position for a
+    /// successor, because the seal frame is not an event and so is not in
+    /// `committed_entries`: folding a successor's events from the genesis, or from
+    /// the predecessor's tail, disagrees at its very first entry.
+    chain_from: JournalPosition,
+    /// The last position the scan verified, which is the journal's tail.
+    ///
+    /// Read from the loop rather than recomputed from the entries, because a
+    /// journal that has sealed itself has a tail one past its last event and a
+    /// seal frame is not an event.
+    tail: JournalPosition,
+    /// Where the scan stopped.
+    stop: ScanStop,
 }
 
 /// An effect journal whose acknowledged appends are on the disk.
@@ -457,7 +595,7 @@ pub struct FileJournal {
     /// The thread that holds the file, and the one door an append reaches the
     /// disk through. It also carries the poison, so the handle never has to
     /// guess whether a write it did not see succeed.
-    storage: StorageOwner<(), ()>,
+    storage: StorageOwner<(), SealOutcome>,
     /// A read-only window onto the same file, so the fence can check the
     /// acknowledged length without a round trip to the storage owner.
     view: FileView,
@@ -470,8 +608,50 @@ pub struct FileJournal {
     outcomes: HashMap<crate::effect::EffectKey, (JournalPosition, EffectEvidence)>,
     /// Byte length of the acknowledged prefix on disk.
     disk_len: u64,
+    /// The last committed position, including this file's own seal when it has one.
+    position: JournalPosition,
     /// Whether open repaired a torn tail to get here.
     torn_tail_repaired: bool,
+    /// Whether this handle continues at the watermark.
+    ///
+    /// Declared by the constructor rather than inferred, because "this journal
+    /// will not continue" is a policy and a policy nobody chose is not one: the
+    /// default constructor keeps every existing behaviour, and a host running
+    /// unattended asks for the lifecycle explicitly.
+    continuing: bool,
+    /// Where this handle continues.
+    continuation: ContinuationPolicy,
+    /// The predecessor's seal, when this file is a successor.
+    ///
+    /// The carried state a recovery fold starts from, and the reason a successor's
+    /// [`FileJournal::recover`] answers exactly what its predecessor's did. Kept
+    /// whole rather than folded into the indexes beside it, because a fold is a
+    /// report and the record behind it is the evidence.
+    carried: Option<Continuation>,
+    /// This file's own seal, when it has sealed itself.
+    seal: Option<Continuation>,
+    /// The position the committed events' chain starts from.
+    ///
+    /// The genesis for a base journal and the seal frame's own position for a
+    /// successor, because the seal frame is not an event and so is not in
+    /// `committed_entries`: folding a successor's events from the genesis, or from
+    /// the predecessor's tail, disagrees at its very first entry.
+    chain_from: JournalPosition,
+    /// The predecessor's chain head, which is the position this file's first frame
+    /// chains from. Carried beside the checkpoint because the seal frame is not
+    /// an event and so is not in [`Self::committed`].
+    base: JournalPosition,
+    /// One folded record per action the sealed history walked, the answer to "was
+    /// this attempt already walked?" for an attempt the checkpoint does not carry.
+    folded: Vec<SettledAttempt>,
+    /// Where this handle's own seal sent the authoritative journal.
+    ///
+    /// `Some` means this handle sealed the file and must not append again. The
+    /// predecessor is read-only from here, and the refusal is the seal rather
+    /// than the device's poison: the bytes are exactly what was asked for.
+    sealed_by: Option<PathBuf>,
+    /// The boundary an armed continuation stops at, if one is armed.
+    pause: Option<SealPause>,
 }
 
 impl core::fmt::Debug for FileJournal {
@@ -481,12 +661,252 @@ impl core::fmt::Debug for FileJournal {
             .field("committed_events", &self.committed.len())
             .field("disk_len", &self.disk_len)
             .field("torn_tail_repaired", &self.torn_tail_repaired)
+            .field("continuing", &self.continuing)
+            .field("generation", &self.generation())
+            .field("sealed_by", &self.sealed_by)
             .finish()
     }
 }
 
-/// A read-only window onto the journal's file, for the handle's own fence.
+/// What one ordered step on the journal's storage owner produced.
 ///
+/// The owner's answer type rather than `()` because a seal has to say more than an
+/// append does, and a type that could only say `()` would make the seal report
+/// through a side channel the owner does not have. It is the same thread and the
+/// same ordered step either way (INV-BOT-50), so this is a richer answer and not a
+/// second mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SealOutcome {
+    /// An ordinary append moved its bytes and owes the batch's one flush.
+    Appended,
+    /// A seal wrote the predecessor's frame and the successor's first frame.
+    Sealed {
+        /// How many bytes the predecessor's seal frame added.
+        bytes: usize,
+    },
+    /// The armed fault injector stopped the seal at this boundary.
+    Paused(SealPause),
+}
+
+/// Which constructor a handle came in through.
+///
+/// Three shapes rather than three booleans, because the two properties are not
+/// independent: a fault injector and a continuing journal are both things a
+/// caller *declares*, and a struct of two flags would let a caller open a stalled
+/// journal that also claims to continue without either being what it meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenKind {
+    /// An ordinary journal, opened with [`FileJournal::open`].
+    Plain,
+    /// An ordinary journal whose device answers only when released.
+    Stalled,
+    /// A journal that continues at the policy's trigger points.
+    Continuing(ContinuationPolicy),
+}
+
+impl OpenKind {
+    /// Whether the device holds its flush until released.
+    const fn stalled(self) -> bool {
+        matches!(self, Self::Stalled)
+    }
+
+    /// Whether this handle continues at the watermark.
+    const fn continues(self) -> bool {
+        matches!(self, Self::Continuing(_))
+    }
+
+    /// The trigger points a continuing handle was opened with.
+    const fn policy(self) -> ContinuationPolicy {
+        match self {
+            Self::Continuing(policy) => policy,
+            Self::Plain | Self::Stalled => ContinuationPolicy::declared(),
+        }
+    }
+}
+
+/// Record one carried key's rung in an append fence's ladder index.
+///
+/// The carried rung and the rung an event recorded are the same fact about the
+/// same key, so they land in the same index: a successor's ladder check is
+/// literally the predecessor's, with the checkpoint as where the index was
+/// seeded.
+fn ladder_hold(
+    ladder: &mut HashMap<crate::effect::EffectKey, EventKind>,
+    key: crate::effect::EffectKey,
+    rung: EventKind,
+) {
+    ladder.insert(key, rung);
+}
+
+/// Whether `successor` is a complete, authenticated successor of `seal`'s
+/// predecessor.
+///
+/// The one fact that decides who is authoritative, asked of the bytes rather than
+/// of anything a running process remembers: a successor exists, its first frame
+/// is whole, and that frame chains from exactly the predecessor's tail the seal
+/// names. Anything short of all three — absent, torn, or naming some other
+/// position — is a continuation that never committed, and the predecessor stays
+/// live.
+///
+/// Read through its own descriptor with the shared grammar's classification, so a
+/// torn first frame reads as *not complete* rather than as a decode failure: this
+/// question is "did the continuation commit?", and a half-written file is the
+/// answer "no", not an error.
+fn successor_is_complete(successor: &Path, seal: &Continuation) -> bool {
+    let Ok(mut file) = OpenOptions::new().read(true).open(successor) else {
+        return false;
+    };
+    let mut prefix = [0u8; LENGTH_BYTES];
+    let Ok(Prefix::Full) = super::frame::read_prefix(&mut file, &mut prefix) else {
+        return false;
+    };
+    let declared = super::frame::declared_length(&prefix);
+    if !super::frame::is_possible_length(declared, MAX_FRAME_BYTES) {
+        return false;
+    }
+    let mut payload = vec![0u8; declared];
+    let mut head = [0u8; HEAD_BYTES];
+    if super::frame::read_piece(&mut file, &mut payload).is_err()
+        || super::frame::read_piece(&mut file, &mut head).is_err()
+    {
+        return false;
+    }
+    match Continuation::from_payload(&payload) {
+        Some(Ok(carried)) => {
+            carried.predecessor() == seal.predecessor()
+                && super::chain_over_bytes(&seal.predecessor().head(), &payload)
+                    == lgwks_std::hash::Digest::from_bytes(head)
+        }
+        Some(Err(_)) | None => false,
+    }
+}
+
+/// Make the successor's name itself durable, where the platform has such a call.
+///
+/// A directory entry that has not reached the disk is a successor that a power
+/// loss would not find, and the whole authority rule asks whether that file is
+/// there. `#[cfg(unix)]` rather than best-effort: on a platform with no directory
+/// sync the call cannot be made at all, and a swallowed error would be a bound
+/// nothing observes. What the journal promises is process-crash survival, which
+/// does not depend on this call — the name is in the running system's page cache
+/// across any process death — so its absence costs power-loss durability the
+/// journal never claimed.
+#[cfg(unix)]
+fn sync_directory(path: &Path, created_here: bool) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    File::open(parent)?.sync_all()?;
+    // Only a directory this seal *created* still has an unflushed name of its own.
+    // Every later generation writes into a directory that already exists, and a
+    // directory fsync is the most expensive call this seal makes, so paying for the
+    // grandparent on every continuation would cost a long run far more than the
+    // durability it buys.
+    if created_here && let Some(grandparent) = parent.parent() {
+        File::open(grandparent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// [`sync_directory`] where the platform has no directory sync to make.
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path, _created_here: bool) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Write the seal frame into the successor, creating it or completing it.
+///
+/// The two cases are one operation because one is the other's recovery: a
+/// successor that exists here is a continuation that did not commit — this
+/// journal's authority rule already decided that, or the open would have refused
+/// — so its bytes are an interrupted write and taking them back is the same repair
+/// the open performs on a torn tail. Its frame is rewritten byte for byte, so the
+/// result is the same file either way.
+fn write_successor(successor: &Path, frame: &[u8]) -> std::io::Result<bool> {
+    // The generation directory is a name this seal creates, so it is made here
+    // rather than by an operator: a host that asked for a lifecycle asked for the
+    // directories that lifecycle needs. Its own durability is `sync_parent`'s.
+    //
+    // Whether this call created it is read *before* creating it and reported,
+    // because only a name that has just been created still needs its own parent
+    // entry flushed, and a directory fsync is the most expensive call this seal
+    // makes. Asked after the create, the answer is always "it exists", and a new
+    // generation directory's entry would never reach the disk.
+    let created = successor.parent().is_some_and(|parent| !parent.exists());
+    if let Some(parent) = successor.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let written = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(successor)
+    {
+        Ok(mut file) => file.write_all(frame),
+        Err(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let file = OpenOptions::new().read(true).write(true).open(successor)?;
+            file.set_len(0)?;
+            let mut handle = file;
+            handle.write_all(frame)
+        }
+        Err(error) => {
+            let refusal = Err(error);
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "write_successor: the successor could not be created");
+            return refusal;
+        }
+    };
+    written.map(|()| created)
+}
+
+/// The seal, as the one ordered step the journal's storage owner runs.
+///
+/// Every byte this journal ever writes goes through this owner thread
+/// (INV-BOT-50), and a continuation is not an exception to that: it is the case
+/// where the fence, the write and the flush guard **two** files, so running it
+/// anywhere else would make the length check and the write it guards overtakable
+/// by the very appends they exist to order against.
+///
+/// The four pauses sit between the four durable steps, in the order the steps
+/// happen, so a kill at any of them leaves a different file to reopen and a
+/// harness can sweep the whole set from [`SealPause::all`].
+fn seal_on_owner(
+    file: &mut File,
+    expected_len: u64,
+    frame: &[u8],
+    successor: &Path,
+    pause: Option<SealPause>,
+) -> std::io::Result<super::owner::Stage<SealOutcome, ()>> {
+    fence_and_write(file, expected_len, frame)?;
+    let Some(paused) = paused_at(pause, SealPause::AfterSealWrite) else {
+        let created_directory = write_successor(successor, frame)?;
+        let Some(paused) = paused_at(pause, SealPause::AfterSuccessorWrite) else {
+            OpenOptions::new().read(true).open(successor)?.sync_all()?;
+            let Some(paused) = paused_at(pause, SealPause::AfterSuccessorSync) else {
+                sync_directory(successor, created_directory)?;
+                let Some(paused) = paused_at(pause, SealPause::AfterDirectorySync) else {
+                    return Ok(super::owner::Stage::Unsynced {
+                        answer: SealOutcome::Sealed { bytes: frame.len() },
+                        bytes: frame.len(),
+                        settle: Box::new(|_: &mut ()| {}),
+                    });
+                };
+                return Ok(super::owner::Stage::Settled(Ok(paused)));
+            };
+            return Ok(super::owner::Stage::Settled(Ok(paused)));
+        };
+        return Ok(super::owner::Stage::Settled(Ok(paused)));
+    };
+    Ok(super::owner::Stage::Settled(Ok(paused)))
+}
+
+/// The pause answer for `boundary`, when this seal is armed to stop there.
+fn paused_at(pause: Option<SealPause>, boundary: SealPause) -> Option<SealOutcome> {
+    match pause {
+        Some(armed) if armed == boundary => Some(SealOutcome::Paused(boundary)),
+        _ => None,
+    }
+}
+
+/// A read-only window onto the journal's file, for the handle's own fence.///
 /// It exists so the fence can ask how long the file is without asking the
 /// storage owner, and asking the owner would mean waiting for the device
 /// before deciding whether to append at all. It cannot write: it is opened
@@ -533,6 +953,15 @@ impl FileView {
 /// bytes the handle would refuse. It is bounded by [`MAX_JOURNAL_EVENTS`]; a
 /// file longer than that ends the stream with
 /// [`JournalError::CapacityExceeded`] rather than continuing past the ceiling.
+///
+/// A sealed checkpoint gets the open scan's dispositions too, because it is not an
+/// event. A successor's first frame is the seal its predecessor wrote: it is
+/// verified against the predecessor's tail it names and moves where this file's
+/// events chain from, and it is not yielded — the carried state is
+/// [`FileJournal::checkpoint`], and [`FileJournal::recover`] is the fold that
+/// includes it. This file's own closing seal ends the stream, and a frame after it
+/// is refused. So the stream is exactly [`FileJournal::events`] on every file of a
+/// chain, which is what lets a successor be streamed at all.
 pub struct Replay {
     /// The streaming frame reader, on its own descriptor.
     reader: BufReader<File>,
@@ -540,6 +969,13 @@ pub struct Replay {
     position: JournalPosition,
     /// How many events the stream has already yielded, for the event ceiling.
     yielded: u64,
+    /// How many frames the stream has consumed, which is where a refusal is
+    /// located: the open scan counts frames, and a successor's first frame is
+    /// a checkpoint rather than an event.
+    frames: u64,
+    /// Whether the stream has passed this file's own closing seal, after which
+    /// no frame is legal.
+    sealed: bool,
     /// Where the next frame's length prefix begins.
     offset: u64,
     /// Whether the stream has reached its end (clean, torn, or refused).
@@ -562,6 +998,8 @@ impl Replay {
             reader: BufReader::new(file),
             position: JournalPosition::genesis(),
             yielded: 0,
+            frames: 0,
+            sealed: false,
             offset: 0,
             done: false,
         })
@@ -569,11 +1007,26 @@ impl Replay {
 
     /// Read exactly one more committed event, or end the stream.
     ///
-    /// `None` means the acknowledged prefix is exhausted at a clean end or a
-    /// torn tail, which is never an error: the tail was never acknowledged, so
-    /// the stream of committed events is complete without it.
+    /// `None` means the acknowledged prefix is exhausted at a clean end, a torn
+    /// tail or this file's own seal, which is never an error: the tail was never
+    /// acknowledged and the seal is not an event, so the stream of committed
+    /// events is complete without either. Bounded: every turn consumes a frame,
+    /// and at most one checkpoint frame is consumed without yielding, because a
+    /// second one is refused.
     fn read_one(&mut self) -> Option<Result<EffectEvent, JournalError>> {
-        let index = self.yielded;
+        loop {
+            match self.read_frame()? {
+                Ok(Some(event)) => return Some(Ok(event)),
+                Ok(None) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    /// Consume one whole frame: `Some(Ok(Some(event)))` for an event,
+    /// `Some(Ok(None))` for a checkpoint frame, `None` at the end.
+    fn read_frame(&mut self) -> Option<Result<Option<EffectEvent>, JournalError>> {
+        let frame = self.frames;
         let mut prefix = [0u8; LENGTH_BYTES];
         match read_exact_or_eof(&mut self.reader, &mut prefix) {
             Err(error) => return Some(Err(error)),
@@ -582,19 +1035,23 @@ impl Replay {
             Ok(Some(_)) => {}
         }
         let limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
-        if index >= limit {
-            return Some(Err(JournalError::CapacityExceeded {
+        if self.yielded >= limit {
+            let refusal = Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
                 limit,
-                requested: index.saturating_add(1),
-            }));
+                requested: self.yielded.saturating_add(1),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "Replay::read_frame: the stream reached the event ceiling");
+            return Some(refusal);
         }
         let payload_len = usize::saturating_from(u32::from_be_bytes(prefix));
         if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
-            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
+            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                frame,
                 CorruptionKind::Framed,
-            )))));
+            ))));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "Replay::read_frame: a length no writer produces");
+            return Some(refusal);
         }
         let mut payload = vec![0u8; payload_len];
         match read_exact_classified(&mut self.reader, &mut payload) {
@@ -608,43 +1065,50 @@ impl Replay {
             Err(error) => return Some(Err(error)),
             Ok(FramePiece::Filled) => {}
         }
-        let event: EffectEvent = match from_bytes::<EffectEvent, WireError>(&payload) {
-            Ok(event) => event,
-            Err(_) => {
-                return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
-                    index,
-                    CorruptionKind::Undecodable,
-                )))));
-            }
-        };
-        let head_digest = match chain(self.position, &event) {
-            Ok(digest) => digest,
-            Err(error) => return Some(Err(error)),
-        };
-        let recorded = JournalPosition {
-            sequence: self.position.sequence().saturating_add(1),
-            head: lgwks_std::hash::Digest::from_bytes(head),
-        };
-        let recomputed = JournalPosition {
-            sequence: recorded.sequence(),
-            head: head_digest,
-        };
-        if recorded != recomputed {
-            return Some(Err(JournalError::Corrupt(Box::new(Corruption::new(
-                index,
-                CorruptionKind::Chain(ChainBreak::Disagreement {
-                    at: recorded.sequence(),
-                    recorded,
-                    recomputed,
-                }),
-            )))));
-        }
-        self.position = recorded;
-        self.yielded = self.yielded.saturating_add(1);
+        let admitted = self.admit(&payload, &head, frame);
+        self.frames = self.frames.saturating_add(1);
         self.offset = self
             .offset
             .saturating_add(super::frame::framed_len(payload_len));
-        Some(Ok(event))
+        Some(admitted)
+    }
+
+    /// Decide one whole frame the way the open scan decides it.
+    fn admit(
+        &mut self,
+        payload: &[u8],
+        head: &[u8; HEAD_BYTES],
+        frame: u64,
+    ) -> Result<Option<EffectEvent>, JournalError> {
+        if self.sealed {
+            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                frame,
+                CorruptionKind::Sealed,
+            ))));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "Replay::admit: a frame follows this journal's own seal");
+            return refusal;
+        }
+        if let Some(decoded) = Continuation::from_payload(payload) {
+            let checkpoint = decoded?;
+            let sealed_at = verify_frame(payload, head, checkpoint.predecessor(), frame)?;
+            // Either seal is the last whole frame, which is what a cut after it
+            // resolves against. The carried one is where this file's events chain
+            // from; this file's own one closes it, and nothing may follow.
+            self.position = sealed_at;
+            self.sealed = frame != 0;
+            return Ok(None);
+        }
+        let Ok(event) = from_bytes::<EffectEvent, WireError>(payload) else {
+            let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
+                frame,
+                CorruptionKind::Undecodable,
+            ))));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "Replay::admit: the payload did not decode");
+            return refusal;
+        };
+        self.position = verify_frame(payload, head, self.position, frame)?;
+        self.yielded = self.yielded.saturating_add(1);
+        Ok(Some(event))
     }
 
     /// What a frame that ran past the end of the file means to this stream.
@@ -654,7 +1118,7 @@ impl Replay {
     /// acknowledged frame under a lying length is the refusal `open` would have
     /// made. A stream that ended quietly there would hand a fold fewer events than
     /// were acknowledged, which is the loss the refusal exists to prevent.
-    fn end_of_acknowledged_prefix(&mut self) -> Option<Result<EffectEvent, JournalError>> {
+    fn end_of_acknowledged_prefix(&mut self) -> Option<Result<Option<EffectEvent>, JournalError>> {
         match resolve_ambiguous_tail(
             self.reader.get_mut(),
             self.offset,
@@ -703,27 +1167,192 @@ impl FileJournal {
     /// may have been. The distinction is reported: after a repair,
     /// [`FileJournal::torn_tail_repaired`] is `true`.
     ///
+    /// This handle does **not** continue past its ceilings; use
+    /// [`FileJournal::open_continuing`] for a run that is meant to be
+    /// unattended. That is a policy rather than a default, so every existing
+    /// behaviour of this constructor is unchanged.
+    ///
     /// # Errors
     ///
     /// [`JournalError::Locked`] when another writer holds the file;
     /// [`JournalError::Storage`] when the file cannot be opened, read or
     /// repaired; [`JournalError::Corrupt`] when committed bytes are refused;
+    /// [`JournalError::Superseded`] when this file has been continued and its
+    /// successor is the authoritative journal; and
     /// [`JournalError::CapacityExceeded`] when the complete history exceeds
     /// [`MAX_JOURNAL_BYTES`] or [`MAX_JOURNAL_EVENTS`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
-        Self::open_impl(path.as_ref(), false)
+        Self::open_impl(path.as_ref(), OpenKind::Plain)
+    }
+
+    /// Open a journal that continues at the declared watermark.
+    ///
+    /// The lifecycle an unattended run needs, and the same journal in every other
+    /// respect: the same frame grammar, the same chain, the same storage-owner
+    /// thread, the same refusals. What it adds is that
+    /// [`EffectJournal::continue_as_new`] seals this journal at
+    /// [`CONTINUATION_WATERMARK_NUMERATOR`](super::continuation::CONTINUATION_WATERMARK_NUMERATOR)
+    /// of either ceiling and hands back the
+    /// successor, so a bot that runs for weeks keeps acting instead of stopping
+    /// safely at a ceiling.
+    ///
+    /// The watermark leaves the remaining fifth of each ceiling as settlement
+    /// headroom, so an attempt already handed to the outside world can always
+    /// record its outcome — which is #143's "near-full settlement-capacity
+    /// reservation", the half that had no API behind it.
+    ///
+    /// A journal whose sealed successor is complete refuses itself with
+    /// [`JournalError::Superseded`] rather than reporting an empty run, and
+    /// [`FileJournal::open_active`] follows the chain for a caller that only has
+    /// the original path.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`FileJournal::open`] reports.
+    pub fn open_continuing(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        Self::open_impl(
+            path.as_ref(),
+            OpenKind::Continuing(ContinuationPolicy::declared()),
+        )
+    }
+
+    /// Open a journal that continues at `policy`'s two trigger points.
+    ///
+    /// The same lifecycle as [`FileJournal::open_continuing`] with the trigger
+    /// stated rather than derived, for a host whose retention budget is not this
+    /// crate's default and for a simulation that has to reach a hundred
+    /// continuations inside a test's wall clock. A policy at or past a ceiling is
+    /// refused by [`ContinuationPolicy::new`] rather than clamped, so this
+    /// constructor cannot open a journal whose trigger is unreachable.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`FileJournal::open`] reports.
+    pub fn open_continuing_with(
+        path: impl AsRef<Path>,
+        policy: ContinuationPolicy,
+    ) -> Result<Self, JournalError> {
+        Self::open_impl(path.as_ref(), OpenKind::Continuing(policy))
+    }
+
+    /// Open the journal at `path`, following its continuations to the live one.
+    ///
+    /// What a restarting controller wants: it holds the path its host recorded, and
+    /// the file at that path may be a hundred sealed predecessors old. The walk
+    /// follows one [`JournalError::Superseded`] at a time and stops at the first
+    /// journal that is not sealed, and it is bounded by
+    /// `MAX_GENERATION_WALK` rather than by a loop that could follow a
+    /// directory tree somebody else is generating.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the last journal reports, and [`JournalError::Superseded`] naming
+    /// the next successor when the walk ran out of generations.
+    pub fn open_active(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        let mut here = path.as_ref().to_path_buf();
+        for _ in 0..MAX_GENERATION_WALK {
+            match Self::open_impl(&here, OpenKind::Continuing(ContinuationPolicy::declared())) {
+                Ok(journal) => return Ok(journal),
+                Err(JournalError::Superseded { path: next }) => here = PathBuf::from(next),
+                Err(other) => {
+                    let refusal = Err(other);
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "FileJournal::open_active: a generation on the walk refused to open");
+                    return refusal;
+                }
+            }
+        }
+        let next = successor_path(&here).display().to_string();
+        let refusal = Err(JournalError::Superseded { path: next });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_active: the generation walk ran out before reaching a live journal");
+        refusal
+    }
+
+    /// Arm the next continuation to stop at `boundary`.
+    ///
+    /// A fault injector, and the reason it is public rather than hidden behind
+    /// `cfg(test)` is the one [`FileJournal::open_with_stalled_storage`] gives: a
+    /// continuation has four places where bytes become durable in order, and "which
+    /// journal is authoritative after the disk dies at the third one" is a question
+    /// about a real process. A continuation armed to stop refuses with
+    /// [`JournalError::ContinuationPaused`] naming the boundary it reached,
+    /// *before* the next byte moves, so a harness that kills the process on that
+    /// refusal kills it exactly at the boundary.
+    ///
+    /// [`SealPause::all`] sweeps the whole set, so a boundary added later is swept
+    /// the day it exists rather than the day somebody remembers.
+    pub fn arm_continuation_pause(&mut self, boundary: SealPause) {
+        self.pause = Some(boundary);
+    }
+
+    /// Which generation this journal is. One for a journal that never continued.
+    ///
+    /// Counted from this file's own name rather than read out of its checkpoint,
+    /// so it answers the same for a predecessor that carries no checkpoint at all
+    /// — and so two places never hold a generation that can disagree.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        super::continuation::generation_of(&self.path)
+    }
+
+    /// The predecessor's sealed checkpoint this journal's chain starts from, when
+    /// this journal is a successor.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&Continuation> {
+        self.carried.as_ref()
+    }
+
+    /// This journal's own seal, when it has sealed itself.
+    #[must_use]
+    pub fn own_seal(&self) -> Option<&Continuation> {
+        self.seal.as_ref()
+    }
+
+    /// The predecessor's chain head, which is the position this journal's first
+    /// frame chains from.
+    #[must_use]
+    pub const fn base(&self) -> JournalPosition {
+        self.base
+    }
+
+    /// The position this journal's committed events chain from.
+    ///
+    /// What [`verify_chain_from`](crate::journal::verify_chain_from) takes for this
+    /// journal: the genesis for a base journal, and the seal frame's own position for
+    /// a successor. Both are facts about the file rather than about a caller's view of
+    /// it, which is what makes a successor's chain checkable at all.
+    #[must_use]
+    pub const fn chain_from(&self) -> JournalPosition {
+        self.chain_from
+    }
+
+    /// Where this handle's own seal sent the authoritative journal.
+    #[must_use]
+    pub fn sealed_by(&self) -> Option<&Path> {
+        self.sealed_by.as_deref()
+    }
+
+    /// The successor of this journal's path.
+    ///
+    /// The same name the checkpoint carries and the walk follows, so a caller
+    /// predicting where a continuation will go and a reader following one to its
+    /// end cannot disagree.
+    #[must_use]
+    pub fn successor_path(&self) -> PathBuf {
+        successor_path(&self.path)
     }
 
     /// Open, with the device's answering behaviour chosen by the caller.
     ///
-    /// One implementation for both constructors: a stalled device is a
-    /// property of the storage owner, not a second way to open a journal.
+    /// One implementation for every constructor: a stalled device is a property of
+    /// the storage owner and a continuing journal is a declared policy, and neither
+    /// is a second way to open a journal.
     ///
     /// # Errors
     ///
-    /// Whatever the file, the lock or the scan reports.
-    fn open_impl(path: &Path, stalled: bool) -> Result<Self, JournalError> {
+    /// Whatever the file, the lock, the scan or the authority rule reports.
+    fn open_impl(path: &Path, kind: OpenKind) -> Result<Self, JournalError> {
         let path = path.to_path_buf();
+        super::continuation::refuse_ambiguous_base(&path)?;
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -754,8 +1383,33 @@ impl FileJournal {
 
         file.seek_read_zero()?;
         let mut reader = BufReader::new(&mut file);
-        let (entries, stop) = scan(&mut reader, JournalPosition::genesis(), MAX_JOURNAL_EVENTS)?;
+        let scanned = scan(&mut reader, MAX_JOURNAL_EVENTS)?;
         drop(reader);
+        let Scanned {
+            entries,
+            carried,
+            seal,
+            chain_from,
+            tail,
+            stop,
+        } = scanned;
+
+        // The authority rule, asked before anything is repaired: a journal whose
+        // successor is complete is not this run's journal, and repairing its tail
+        // would be writing to a file this process does not own.
+        if let Some(checkpoint) = seal.as_ref() {
+            // The successor's name is a property of *this* file, read from the
+            // path the caller already opened rather than from the checkpoint: that
+            // is what lets the seal frame be byte-identical in both files.
+            let next = successor_path(&path);
+            if successor_is_complete(&next, checkpoint) {
+                let refusal = Err(JournalError::Superseded {
+                    path: next.display().to_string(),
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "open_impl: this journal is sealed and its successor is authoritative");
+                return refusal;
+            }
+        }
 
         let (acked_len, torn_tail_repaired) = match stop {
             ScanStop::Complete(len) => (len, false),
@@ -769,21 +1423,20 @@ impl FileJournal {
             }
             ScanStop::AmbiguousTail { offset } => {
                 let index = u64::saturating_from(entries.len());
-                let offset = resolve_ambiguous_tail(
-                    &mut file,
-                    offset,
-                    entries
-                        .last()
-                        .map_or_else(JournalPosition::genesis, JournalEntry::position),
-                    index,
-                )?;
+                // The cut is resolved against the last whole frame, whatever it
+                // was: the carried seal of a successor with no event of its own,
+                // this file's own seal, or its last event. Reading it off the
+                // events alone named the genesis for the first two, and a later
+                // whole frame chained from a seal would not authenticate there, so
+                // an acknowledged frame under a lying length read as a torn append.
+                let offset = resolve_ambiguous_tail(&mut file, offset, tail, index)?;
                 file.set_len(offset).map_err(JournalError::Storage)?;
                 file.sync_all().map_err(JournalError::Storage)?;
                 (offset, true)
             }
         };
 
-        let ladder = entries
+        let mut ladder: HashMap<crate::effect::EffectKey, EventKind> = entries
             .iter()
             .map(|entry| (entry.event().key(), entry.event().kind()))
             .collect();
@@ -793,18 +1446,48 @@ impl FileJournal {
                 outcomes.insert(key, (entry.position(), evidence));
             }
         }
+        // The carried state seeds the append fence's own indexes: the same ladder
+        // and the same folded folds, so a successor's append check is literally the
+        // predecessor's with the checkpoint as where the index was primed.
+        let mut folded = Vec::new();
+        let mut base = JournalPosition::genesis();
+        if let Some(checkpoint) = carried.as_ref() {
+            base = checkpoint.predecessor();
+            folded = checkpoint.settled().to_vec();
+            for held in checkpoint.unresolved() {
+                if let Some(rung) = held.rung() {
+                    ladder_hold(&mut ladder, held.key(), rung);
+                }
+            }
+            for held in checkpoint.settled() {
+                if let Some(rung) = held.rung() {
+                    ladder_hold(&mut ladder, held.key(), rung);
+                }
+            }
+        }
 
-        let storage = StorageOwner::spawn(file, (), stalled).map_err(JournalError::Storage)?;
+        let storage =
+            StorageOwner::spawn(file, (), kind.stalled()).map_err(JournalError::Storage)?;
         let view = FileView::read_only(&path)?;
         Ok(Self {
             path,
             storage,
             view,
             committed: entries,
+            position: tail,
             ladder,
             outcomes,
             disk_len: acked_len,
             torn_tail_repaired,
+            continuing: kind.continues(),
+            continuation: kind.policy(),
+            carried,
+            seal,
+            base,
+            chain_from,
+            folded,
+            sealed_by: None,
+            pause: None,
         })
     }
 
@@ -870,9 +1553,14 @@ impl FileJournal {
     }
 
     /// What the journal has learned about each attempt.
+    ///
+    /// A successor folds its carried checkpoint first, so the answer is the same
+    /// one its predecessor would have given: an attempt that was
+    /// `OutcomeUnknown` before a continuation is `OutcomeUnknown` after it, with
+    /// the same verification digest on the settled ones.
     #[must_use]
     pub fn recover(&self) -> Recovered {
-        recover(self.events())
+        recover_continued(self.carried.as_ref(), self.events())
     }
 
     /// The one door both append paths take before they are allowed to write.
@@ -894,6 +1582,7 @@ impl FileJournal {
     ///
     /// [`JournalError::Storage`] when this handle is stale and must be reopened.
     fn fence(&self) -> Result<(), JournalError> {
+        self.refuse_sealed()?;
         if self.storage.poisoned() {
             let refusal = Err(JournalError::Storage(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -912,6 +1601,25 @@ impl FileJournal {
             return refusal;
         }
         Ok(())
+    }
+
+    /// Refuse every write on a handle that sealed its own journal.
+    ///
+    /// Asked **first**, ahead of the ladder and the length fence, because a sealed
+    /// journal has no ladder answer left to give: its successor is the journal,
+    /// and a caller that got `OutOfOrder` or `AttemptAlreadyWalked` instead would
+    /// be told about a fact about *this* file when the truth is that this file is
+    /// not the one to write to any more. The other refusals still name what they
+    /// found, and they are the right answer on a handle that has not sealed.
+    fn refuse_sealed(&self) -> Result<(), JournalError> {
+        let Some(next) = self.sealed_by.as_ref() else {
+            return Ok(());
+        };
+        let refusal = Err(JournalError::Superseded {
+            path: next.display().to_string(),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_sealed: this handle sealed its journal and is read-only");
+        refusal
     }
 
     /// Frame one event: its length prefix, its archived bytes, and the chain
@@ -999,6 +1707,84 @@ impl FileJournal {
         self.write_and_sync_blocking(frames)
     }
 
+    /// Whether this handle continues at its declared trigger points.
+    ///
+    /// The `continuing` flag and the policy are one fact read twice, so they are
+    /// kept in step at construction and this is the only place that compares them.
+    /// A handle opened by [`FileJournal::open`] carries the declared policy and
+    /// `false`, which is why it answers `false` rather than consulting the policy
+    /// it never asked for.
+    fn continuation_continues(&self) -> bool {
+        self.continuing
+    }
+
+    /// Where a continuation of this handle would go.
+    fn successor(&self) -> PathBuf {
+        successor_path(&self.path)
+    }
+
+    /// The fold every continuation carries, read from this handle's own history.
+    ///
+    /// Two lists, and the split between them is the whole design: the **unresolved**
+    /// attempts in full identity, because dropping one would be the one thing this
+    /// mechanism must never do, and one folded record per **action** for everything
+    /// already settled, because `AttemptId` is monotonic per action so that one
+    /// record answers "was this walked?" for every attempt behind it.
+    fn carried(&self) -> (Vec<SettledAttempt>, Vec<UnresolvedAttempt>) {
+        let recovered = self.recover();
+        let mut settled: Vec<SettledAttempt> = Vec::new();
+        let mut unresolved: Vec<UnresolvedAttempt> = Vec::new();
+        // One record per *action*, kept in first-seen order, which is what bounds
+        // the carry by the shape of a bot rather than by how long it has run. An
+        // action already folded is replaced in place, so the vector's order stays
+        // the admission order a recovery fold reads in and the record is the
+        // latest attempt of that action rather than the first one seen.
+        let mut folded_at: HashMap<crate::effect::ActionId, usize> = HashMap::new();
+        for attempt in recovered.attempts() {
+            match attempt.status() {
+                AttemptStatus::Prepared => {
+                    unresolved.push(UnresolvedAttempt::new(
+                        attempt.key(),
+                        EventKind::IntentAdmitted,
+                    ));
+                }
+                AttemptStatus::OutcomeUnknown => {
+                    unresolved.push(UnresolvedAttempt::new(
+                        attempt.key(),
+                        EventKind::DispatchPrepared,
+                    ));
+                }
+                status => {
+                    let rung = if recovered
+                        .history(attempt.key())
+                        .last()
+                        .is_some_and(|change| {
+                            change.to() == AttemptStatus::Verified
+                                || change.to() == AttemptStatus::VerificationFailed
+                        }) {
+                        EventKind::Verified
+                    } else {
+                        EventKind::OutcomeObserved
+                    };
+                    let record =
+                        SettledAttempt::new(attempt.key(), rung, status, attempt.verification());
+                    match folded_at.get(&record.action()) {
+                        Some(at) => {
+                            if let Some(slot) = settled.get_mut(*at) {
+                                *slot = record;
+                            }
+                        }
+                        None => {
+                            let _ = folded_at.insert(record.action(), settled.len());
+                            settled.push(record);
+                        }
+                    }
+                }
+            }
+        }
+        (settled, unresolved)
+    }
+
     /// [`Self::write_and_sync`] for the door a task awaits rather than sits through.
     ///
     /// # Errors
@@ -1013,6 +1799,7 @@ impl FileJournal {
             self.storage
                 .submit_async(move |file, _state| commit(file, expected, &frames))
                 .await
+                .map(|_| ())
                 .map_err(write_refusal)
         })
     }
@@ -1029,6 +1816,7 @@ impl FileJournal {
         let expected = self.disk_len;
         self.storage
             .submit(move |file, _state| commit(file, expected, &staged))
+            .map(|_| ())
             .map_err(write_refusal)
     }
 
@@ -1038,6 +1826,7 @@ impl FileJournal {
     /// so the two cannot disagree.
     fn accept(&mut self, event: &EffectEvent, position: JournalPosition, frame_len: usize) {
         self.committed.push(JournalEntry::new(position, *event));
+        self.position = position;
         self.ladder.insert(event.key(), event.kind());
         if let EffectEvent::OutcomeObserved { key, evidence } = *event {
             self.outcomes.insert(key, (position, evidence));
@@ -1068,6 +1857,7 @@ impl FileJournal {
         expected_tail: JournalPosition,
         event: &EffectEvent,
     ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        self.refuse_sealed()?;
         let actual = self.tail();
         check_append_order(
             expected_tail,
@@ -1075,11 +1865,150 @@ impl FileJournal {
             event,
             self.ladder.get(&event.key()).copied(),
         )?;
+        self.refuse_walked(event)?;
         self.fence()?;
         self.bound_events(1)?;
         let (position, frame) = self.frame(event, actual)?;
         self.bound_bytes(frame.len())?;
         Ok((position, frame))
+    }
+
+    /// The seal, handing back the successor as the concrete adapter.
+    ///
+    /// [`EffectJournal::continue_as_new`] is this wrapped in the trait object a
+    /// controller holds, and this is the form a caller with a typed handle wants:
+    /// the successor's [`FileJournal::checkpoint`], [`FileJournal::base`] and
+    /// [`FileJournal::compare_and_append_all`] are all this adapter's own surface,
+    /// and a caller that had to reach them through the trait could not read the
+    /// thing it just sealed.
+    ///
+    /// # Errors
+    ///
+    /// Every [`JournalError`] [`EffectJournal::continue_as_new`] reports.
+    pub fn continue_as_file(&mut self) -> Result<Option<Self>, JournalError> {
+        if !self.continuation_continues() {
+            return Ok(None);
+        }
+
+        if let Some(next) = self.sealed_by.clone() {
+            let refusal = Err(JournalError::Superseded {
+                path: next.display().to_string(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "continue_as_new: this handle already sealed its journal");
+            return refusal;
+        }
+        let successor = self.successor();
+        let (settled, unresolved) = self.carried();
+        let checkpoint = Continuation::new(
+            self.generation().saturating_add(1),
+            self.tail(),
+            settled,
+            unresolved,
+        )?;
+        let payload = checkpoint.to_payload()?;
+        let (_position, framed) = self.frame_payload(payload, self.tail())?;
+        let expected = self.disk_len;
+        let pause = self.pause.take();
+        let sealed_at = successor.clone();
+        let answer = self
+            .storage
+            .submit(move |file, _state| seal_on_owner(file, expected, &framed, &sealed_at, pause))
+            .map_err(write_refusal)?;
+        match answer {
+            SealOutcome::Sealed { bytes } => {
+                self.disk_len = self.disk_len.saturating_add(u64::saturating_from(bytes));
+                self.sealed_by = Some(successor.clone());
+                Ok(Some(Self::open_impl(
+                    &successor,
+                    OpenKind::Continuing(self.continuation),
+                )?))
+            }
+            SealOutcome::Paused(boundary) => {
+                self.sealed_by = Some(successor);
+                let refusal = Err(JournalError::ContinuationPaused { boundary });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "continue_as_new: an armed fault injector stopped the seal");
+                refusal
+            }
+            // The seal job and the append job share one answer type and one thread,
+            // and neither can answer with the other's arm. This arm is therefore
+            // unreachable by construction, and is typed rather than a panic.
+            SealOutcome::Appended => {
+                let refusal = Err(JournalError::Storage(std::io::Error::other(
+                    "the seal reported an append's answer; the journal's own steps disagree",
+                )));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "continue_as_new: returning an error to the caller");
+                refusal
+            }
+        }
+    }
+
+    /// Refuse an append naming an attempt the sealed history already walked.
+    ///
+    /// The counterpart of carrying one folded record per action rather than every
+    /// attempt: this is where "at or below the latest attempt of that action"
+    /// becomes a refusal instead of a promise nobody keeps. The comparison is on
+    /// `AttemptId`, which is monotonic per `ActionId` and never reused, so it is
+    /// the same question the ladder asks for a key the journal *does* hold and
+    /// the same answer: this attempt was already recorded.
+    fn refuse_walked(&self, event: &EffectEvent) -> Result<(), JournalError> {
+        let key = event.key();
+        if self.ladder.contains_key(&key) {
+            return Ok(());
+        }
+        let walked = self
+            .folded
+            .iter()
+            .find(|entry| entry.already_walked(key))
+            .map(|entry| entry.attempt());
+        match walked {
+            Some(latest) => {
+                let refusal = Err(JournalError::AttemptAlreadyWalked {
+                    key: Box::new(key),
+                    latest,
+                });
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "refuse_walked: the sealed history already walked this attempt");
+                refusal
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Frame an already-archived payload at the end of this chain.
+    ///
+    /// The shared framing step, taken with this journal's own head function, so a
+    /// sealed checkpoint is chained exactly as an effect event is. That is what
+    /// lets the successor's first frame be the predecessor's last one byte for
+    /// byte, and it is the whole reason no second chain function exists here.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Exhausted`] when the position cannot advance,
+    /// [`JournalError::Storage`] when the payload is past the frame bound, and
+    /// whatever [`Self::fence`] reports, because a seal is a write like any other.
+    fn frame_payload(
+        &self,
+        payload: Vec<u8>,
+        from: JournalPosition,
+    ) -> Result<(JournalPosition, Vec<u8>), JournalError> {
+        self.fence()?;
+        let sequence = from
+            .sequence()
+            .checked_add(1)
+            .ok_or(JournalError::Exhausted)?;
+        let (framed, head) = super::frame::frame_record::<Vec<u8>, _, _, _, _>(
+            &payload,
+            &from.head,
+            MAX_FRAME_BYTES,
+            |archived: &Vec<u8>| Ok(archived.clone()),
+            |_payload, previous, archived| super::chain_over_bytes(previous, archived),
+            |_len| {
+                JournalError::Storage(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the sealed checkpoint exceeds this journal's frame bound",
+                ))
+            },
+        )?;
+        Ok((JournalPosition { sequence, head }, framed))
     }
 
     /// Open a journal whose storage does not answer a flush until
@@ -1101,7 +2030,7 @@ impl FileJournal {
     ///
     /// Whatever [`FileJournal::open`] reports.
     pub fn open_with_stalled_storage(path: impl AsRef<Path>) -> Result<Self, JournalError> {
-        Self::open_impl(path.as_ref(), true)
+        Self::open_impl(path.as_ref(), OpenKind::Stalled)
     }
 
     /// A handle that can release the stall, independently of this journal.
@@ -1169,8 +2098,8 @@ impl FileJournal {
         events: &[EffectEvent],
     ) -> Result<Vec<DurableAck>, JournalError> {
         // The fence runs once for the batch, ahead of everything including the
-        // empty case: a stale handle answers for itself, not with an empty
-        // success.
+        // empty case: a stale or sealed handle answers for itself, not with an
+        // empty success.
         self.fence()?;
         if events.is_empty() {
             return Ok(Vec::new());
@@ -1223,6 +2152,34 @@ impl FileJournal {
     }
 }
 
+/// The length fence and the write it guards, as one step.
+///
+/// Both doors that write a frame open with this: the append and the seal. They are
+/// the same check over the same number for the same reason — an append that wrote
+/// past a file that had moved would fork the chain — and the seal inherits the
+/// append's fence rather than being trusted to re-check it.
+fn fence_and_write(file: &mut File, expected_len: u64, bytes: &[u8]) -> std::io::Result<()> {
+    let on_disk = file.metadata()?.len();
+    if on_disk != expected_len {
+        let refusal = Err(stale_file());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "fence_and_write: returning an error to the caller");
+        return refusal;
+    }
+    file.write_all(bytes)
+}
+
+/// The device error for a file whose acknowledged length no longer matches.
+///
+/// One definition because the append and the seal ask the same question at the
+/// same layer — "is this still the file I hold?" — and two spellings of the
+/// answer would make a caller grep for one of them.
+fn stale_file() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "the journal file moved under this controller; reopen before appending",
+    )
+}
+
 /// The ordered step that is the append: check the fence, write.
 ///
 /// It runs on the storage owner's thread, which is what makes the length check and
@@ -1239,24 +2196,15 @@ fn commit(
     file: &mut File,
     expected_len: u64,
     frames: &[u8],
-) -> std::io::Result<super::owner::Stage<(), ()>> {
-    let on_disk = file.metadata()?.len();
-    if on_disk != expected_len {
-        let refusal = Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the journal file moved under this controller; reopen before appending",
-        ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "commit: returning an error to the caller");
-        return refusal;
-    }
-    file.write_all(frames)?;
+) -> std::io::Result<super::owner::Stage<SealOutcome, ()>> {
+    fence_and_write(file, expected_len, frames)?;
     // A journal folds no state of its own, so the settle closure is empty: the
     // bytes and the acknowledgment are the whole of the step. The one thing that
     // does move is `self.disk_len`, and that is the caller's, mutated after its
     // answer lands rather than here — so two appends can never have folded a length
     // the file had not reached.
     Ok(super::owner::Stage::Unsynced {
-        answer: (),
+        answer: SealOutcome::Appended,
         bytes: frames.len(),
         settle: Box::new(|_: &mut ()| {}),
     })
@@ -1285,10 +2233,7 @@ impl EffectJournal for FileJournal {
     }
 
     fn tail(&self) -> JournalPosition {
-        match self.committed.last() {
-            Some(entry) => entry.position(),
-            None => JournalPosition::genesis(),
-        }
+        self.position
     }
 
     fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
@@ -1303,9 +2248,15 @@ impl EffectJournal for FileJournal {
         &self,
         position: JournalPosition,
     ) -> Result<Option<JournalEntry>, JournalError> {
+        // `committed` holds this file's own events, and a successor's first one is
+        // not sequence one: its sequences continue from the seal frame it was opened
+        // from. Indexed from the genesis instead, every position a continued
+        // journal acknowledged read back as absent, and a controller settling an
+        // attempt across a continuation reported its outcome as unrecorded.
         let Some(index) = position
             .sequence()
-            .checked_sub(1)
+            .checked_sub(self.chain_from.sequence())
+            .and_then(|offset| offset.checked_sub(1))
             .and_then(|n| usize::try_from(n).ok())
         else {
             return Ok(None);
@@ -1330,6 +2281,58 @@ impl EffectJournal for FileJournal {
     /// enforce, checked here against the count this serialized path reads.
     fn reserve_handoff_capacity(&self, rungs: u64) -> Result<(), JournalError> {
         self.bound_events(rungs)
+    }
+
+    /// How much of each ceiling this journal has used, and whether it continues.
+    ///
+    /// Read from the handle's own committed count and acknowledged byte length,
+    /// which are the two numbers the append fence already keeps exact. There is no
+    /// third source and no rounding: the watermark falls where the constants say,
+    /// and a caller reading this can compare it against the same ceiling every
+    /// other refusal names.
+    fn continuation_watermark(&self) -> Result<ContinuationWatermark, JournalError> {
+        let events = u64::saturating_from(self.committed.len());
+        let limits = (u64::saturating_from(MAX_JOURNAL_EVENTS), MAX_JOURNAL_BYTES);
+        let watermark = ContinuationWatermark::measured(
+            events,
+            limits.0,
+            self.disk_len,
+            limits.1,
+            self.continuation,
+        );
+        Ok(match self.continuation_continues() {
+            true => watermark,
+            false => ContinuationWatermark::inert(events, limits.0, self.disk_len, limits.1),
+        })
+    }
+
+    /// Seal this journal and hand back the successor opened from the checkpoint.
+    ///
+    /// One ordered step on the storage owner, because a continuation writes two
+    /// files and the fence that guards the predecessor's length has to run on the
+    /// thread that holds it. The step is: the seal frame into this journal, the
+    /// same bytes into the successor, the successor's flush, its directory entry's
+    /// flush, and then the batch's one flush over the predecessor's seal — which
+    /// is the order the crash table in [`super::continuation`] reasons about, in
+    /// that order.
+    ///
+    /// `None` for a journal opened without a lifecycle, which is what leaves every
+    /// existing behaviour of this adapter unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Superseded`] when this handle already sealed its journal,
+    /// [`JournalError::CapacityExceeded`] when the carried state is past a declared
+    /// bound or the frame is past the shared ceiling,
+    /// [`JournalError::ContinuationPaused`] when an armed fault injector stopped the
+    /// seal, and [`JournalError::OutcomeUnknown`] when the device's answer was lost
+    /// after bytes may have moved.
+    fn continue_as_new(&mut self) -> Result<Option<Box<dyn EffectJournal>>, JournalError> {
+        let opened = self.continue_as_file()?;
+        Ok(opened.map(|journal| {
+            let boxed: Box<dyn EffectJournal> = Box::new(journal);
+            boxed
+        }))
     }
 
     /// Append one event at `expected_tail`, or refuse.
@@ -1457,6 +2460,7 @@ pub(super) mod tests {
     use crate::effect::{
         ActionDigest, ActionId, AttemptId, EnvironmentEpoch, EnvironmentId, FlowRevision, RunId,
     };
+    use crate::journal::chain;
     use crate::journal::frame::probe::{declared_at, frame_starts, with_prefix};
     use crate::journal::{AttemptStatus, EventKind};
 
@@ -1526,6 +2530,30 @@ pub(super) mod tests {
         let path = scratch(name)?;
         let guard = TempGuard(path.clone());
         Ok((path, guard))
+    }
+
+    /// The successor writer reports a generation directory it made, and only one.
+    ///
+    /// The answer decides whether the directory's own name is flushed into its
+    /// parent, so an answer of "already there" for a directory this call created
+    /// is a new generation whose name a power loss can take back. Read after the
+    /// create, it was always "already there".
+    #[test]
+    fn writing_a_successor_reports_the_directory_it_created() -> TestResult {
+        let (base, _guard) = subject("successor-dir")?;
+        std::fs::create_dir_all(&base)?;
+        let first = base.join("run.jrnl.cont").join("000001");
+        assert!(
+            write_successor(&first, b"frame")?,
+            "the first generation's directory is created by this write"
+        );
+        let second = base.join("run.jrnl.cont").join("000002");
+        assert!(
+            !write_successor(&second, b"frame")?,
+            "a later generation writes into a directory that already exists"
+        );
+        assert_eq!(std::fs::read(&second)?, b"frame");
+        Ok(())
     }
 
     #[test]
@@ -1945,7 +2973,7 @@ pub(super) mod tests {
                 inner: std::io::Cursor::new(frame.clone()),
                 serve,
             };
-            match scan(&mut faulty, JournalPosition::genesis(), MAX_JOURNAL_EVENTS) {
+            match scan(&mut faulty, MAX_JOURNAL_EVENTS) {
                 Err(JournalError::Storage(_)) => {}
                 Err(other) => {
                     return Err(format!(
@@ -1953,7 +2981,8 @@ pub(super) mod tests {
                     )
                     .into());
                 }
-                Ok((_, stop)) => {
+                Ok(scanned) => {
+                    let stop = scanned.stop;
                     return Err(format!(
                         "a fault {serve} bytes in stopped the scan as {stop:?}, not storage"
                     )
@@ -1981,7 +3010,7 @@ pub(super) mod tests {
         bytes.extend_from_slice(&frame_bytes(first_position, &second)?);
         let mut reader = std::io::Cursor::new(bytes);
 
-        match scan(&mut reader, genesis, 1) {
+        match scan(&mut reader, 1) {
             Err(JournalError::CapacityExceeded {
                 resource: JournalLimitKind::Events,
                 limit,
@@ -1991,7 +3020,8 @@ pub(super) mod tests {
                 assert_eq!(requested, 2);
             }
             Err(other) => return Err(format!("expected event-limit refusal, got {other}").into()),
-            Ok((entries, _)) => {
+            Ok(scanned) => {
+                let entries = scanned.entries;
                 return Err(format!(
                     "two frames under a one-event limit must refuse, retained {}",
                     entries.len()
@@ -2236,6 +3266,45 @@ pub(super) mod tests {
             let lied = with_prefix(&bytes, third, declared + extra);
             std::fs::write(&path, &lied)?;
             require_refused_untouched(&path, &lied, 2, &format!("final frame L+{extra}"))?;
+        }
+        Ok(())
+    }
+
+    /// The same lie on a successor whose one event follows the seal it carries.
+    ///
+    /// The cut is resolved against the last whole frame, and in a successor with
+    /// no event before the lie that frame is the carried seal. Resolved against
+    /// the events alone it was the genesis, which the acknowledged event does not
+    /// chain from, so the lie read as a torn append and the event was trimmed.
+    #[test]
+    fn a_lengthened_event_behind_a_carried_seal_is_refused_not_trimmed() -> TestResult {
+        let (dir, _guard) = subject("lengthened-successor")?;
+        std::fs::create_dir_all(&dir)?;
+        let successor = {
+            let mut journal = FileJournal::open_continuing_with(
+                dir.join("run.jrnl"),
+                crate::journal::ContinuationPolicy::declared(),
+            )?;
+            let first = EffectEvent::IntentAdmitted {
+                key: attempt_key(1)?,
+            };
+            journal.compare_and_append(journal.tail(), &first)?;
+            let mut next = journal
+                .continue_as_file()?
+                .ok_or("a continuing journal hands back its successor")?;
+            let second = EffectEvent::IntentAdmitted {
+                key: attempt_key(2)?,
+            };
+            next.compare_and_append(next.tail(), &second)?;
+            next.path().to_path_buf()
+        };
+        let bytes = std::fs::read(&successor)?;
+        let event = frame_starts(&bytes, 0)?[1];
+        let declared = declared_at(&bytes, event);
+        for extra in 1u32..=96 {
+            let lied = with_prefix(&bytes, event, declared + extra);
+            std::fs::write(&successor, &lied)?;
+            require_refused_untouched(&successor, &lied, 0, &format!("successor event L+{extra}"))?;
         }
         Ok(())
     }
