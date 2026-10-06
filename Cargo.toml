@@ -19,8 +19,8 @@ resolver = "2"
 # crates.io.
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
-lgwks_std = { version = "2.0.0", path = "crates/lgwks-std" }
-lgwks_bot = { version = "2.0.0", path = "crates/lgwks-bot" }
+lgwks_std = { version = "2.1.0", path = "crates/lgwks-std" }
+lgwks_bot = { version = "2.1.0", path = "crates/lgwks-bot" }
 lgwks_ast = { version = "1.1.0", path = "crates/lgwks-ast" }
 lgwks_macros = { version = "1.1.1", path = "crates/lgwks-macros" }
 # Dependents reach the storefront without its `scan` default (the gate tool's

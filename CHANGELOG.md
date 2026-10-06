@@ -9,6 +9,25 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
+
+### Upgrading
+
+Two minor bumps; nothing a 2.0.0 caller wrote stops compiling. `lgwks_ast`,
+`lgwks_deps` and `lgwks_macros` are unchanged.
+
+- **lgwks_std 2.1.0** — additive: `seeded` (#344) and the orphaned-group reap
+  in `process` (#318). The new enums (`seeded::DrawError`,
+  `process::OrphanReap`, `process::ProcessIdentityError`) are non-exhaustive.
+- **lgwks_bot 2.1.0** — additive: `Supervisor::spawn_process_identified` and
+  `IdentifiedSpawn` (#318), and `ResidualRisk::LeaderExited` on the
+  non-exhaustive `ResidualRisk` (#347). **Behaviour change** a caller will see:
+  a supervised process that exits on its own now reports
+  `Containment::is_complete() == false` (and `ShutdownReport::is_clean()`
+  follows), because the cleanup could not see a tree its leader left; a
+  deadline or cancel kill is unchanged. Read `CleanupReceipt` for "the group is
+  gone" and `Containment` for "nothing else survived".
+
 ### lgwks_std — a seeded stream every estate simulation can share (#344)
 
 Every estate repository writing deterministic simulations carried its own

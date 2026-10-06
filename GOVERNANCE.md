@@ -180,6 +180,22 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-06 — Release cut: lgwks_std 2.1.0, lgwks_bot 2.1.0
+
+- **Director-ordered** (same order as the 2.0.0 cut below). The cut is
+  `origin/main` at c5aababd (PR #350 merged; its last PR run 37494277818 green,
+  slowest job 4 m 22 s) plus this commit.
+- Both crates add public items only and take the minor position
+  (`docs/releasing.md` §3): #318's orphaned-group reap, #344's `seeded` stream,
+  and #347's `ResidualRisk::LeaderExited` on a non-exhaustive enum. The
+  behaviour change a caller will see — an exited leader's `Containment` is no
+  longer complete — is a stricter report, which §3 places at minor, and the
+  CHANGELOG's upgrade list names it. `lgwks_ast`, `lgwks_deps` and
+  `lgwks_macros` have no source change since 2.0.0 and are not cut.
+
+**Does not claim:** that anything is uploaded when this entry lands, or that
+#351 (the neighbour-throughput test at 11% on GitHub runners) is resolved.
+
 ### 2026-10-06 — Release cut: lgwks_std 2.0.0, lgwks_ast 1.1.0, lgwks_deps 3.0.0, lgwks_bot 2.0.0, lgwks_macros 1.1.1
 
 - **Director-ordered** ("U WILL ENSURE LOGICALWORKS-CRATES is GOOGLE AND APPLE
