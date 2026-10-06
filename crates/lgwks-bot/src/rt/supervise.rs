@@ -602,6 +602,16 @@ pub enum ResidualRisk {
     /// [`lgwks_std::process::MAX_CAPTURED_DESCENDANTS`], so it held a prefix of
     /// the tree rather than the tree.
     CaptureTruncated,
+    /// The leader had already exited when the cleanup began, so no capture could
+    /// name its tree.
+    ///
+    /// A process's children are re-parented when it exits, not when it is
+    /// reaped, so a walk from an exited leader reaches nothing whatever it left
+    /// running. A descendant that stayed in the group is still stopped by the
+    /// group signal; one that called `setsid` before the exit is out of reach.
+    /// The cleanup therefore reads no table, and the report names that rather
+    /// than presenting an empty capture as an empty tree.
+    LeaderExited,
 }
 
 /// What one cleanup attempt read, signalled, and could not account for.
@@ -673,9 +683,13 @@ impl Containment {
 
     /// Whether the capture was whole and every captured descendant stopped.
     ///
-    /// `false` for a survivor, for a truncated capture and for a target that
-    /// exposed no process table: all three are "this report does not account for
-    /// the whole tree", which is the one question the flag answers.
+    /// `false` for a survivor, for a truncated capture, for a target that
+    /// exposed no process table, and for a leader that had already exited on its
+    /// own when the cleanup began ([`ResidualRisk::LeaderExited`]): all four are
+    /// "this report does not account for the whole tree", which is the one
+    /// question the flag answers. The last is the common case for a process that
+    /// simply finished, and it is `false` because a `setsid` descendant it left
+    /// running is invisible from an exited leader, not because one was seen.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.survivors.is_empty() && self.residual.is_none() && self.mechanism.read_a_table()
@@ -906,7 +920,10 @@ impl ShutdownReport {
     /// question is asking whether the work finished, and a cancelled task did
     /// not. So does a supervised process that exited non-zero: it ended, and
     /// the caller's question is whether the work succeeded, not whether the
-    /// task stopped.
+    /// task stopped. So, too, does a supervised process whose containment report
+    /// is not complete (`Containment::is_complete`, behind the `process`
+    /// feature) — including one that exited on its own,
+    /// since nothing can say whether it left a `setsid` descendant running.
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.outcomes.iter().all(|outcome| {
@@ -3908,6 +3925,9 @@ struct ProcessGroup<'ops> {
     armed: bool,
     /// Whether the leader has been reaped and the numeric id released.
     leader_reaped: bool,
+    /// Whether the leader was observed to have exited before the cleanup began,
+    /// after which a walk from it can name nothing.
+    leader_exited: bool,
     /// Whether the group was observed absent: by a signal refusal, or by the
     /// post-reap signal-zero probe.
     group_absent: bool,
@@ -4412,6 +4432,9 @@ async fn drive_process_observed(
             Some(pid) => observe_pid_without_reaping(clock, pid, deadline, token).await,
             None => ProcessObservation::Unobservable,
         };
+        if matches!(observation, ProcessObservation::Exited) {
+            group.mark_exited();
+        }
         let cleanup = group.cleanup().await;
         (observation, cleanup)
     };
@@ -4681,6 +4704,7 @@ impl<'ops> ProcessGroup<'ops> {
             owners,
             armed: true,
             leader_reaped: false,
+            leader_exited: false,
             group_absent: false,
             containment: Containment::default(),
             signalled_pids: std::collections::BTreeSet::new(),
@@ -4749,7 +4773,15 @@ impl<'ops> ProcessGroup<'ops> {
     /// [`ResidualRisk::TableUnreadable`], leaves the group signal as the only
     /// thing this cleanup can rely on, and stops the per-process phases of the
     /// round rather than reporting "every descendant was".
+    ///
+    /// `None` without a read once the leader is known to have exited: its
+    /// children were re-parented at the exit, so the walk could only come back
+    /// empty, and on a host whose reading is a whole-table `ps` it would cost a
+    /// process spawn per supervised process to learn nothing (#345, #347).
     fn read_tree(&mut self) -> Option<Capture> {
+        if self.leader_exited {
+            return None;
+        }
         match self.capture.capture(self.group) {
             Ok(set) => {
                 self.containment.record_capture(&set);
@@ -4976,6 +5008,16 @@ impl<'ops> ProcessGroup<'ops> {
     /// Record that reaping released the group leader's numeric id.
     fn mark_reaped(&mut self) {
         self.leader_reaped = true;
+    }
+
+    /// Record that the leader exited on its own before the cleanup began.
+    ///
+    /// Every later capture is skipped and the report carries
+    /// [`ResidualRisk::LeaderExited`], so a cleanup of a process that finished
+    /// by itself claims the group it signalled and not a tree it never saw.
+    fn mark_exited(&mut self) {
+        self.leader_exited = true;
+        self.containment.note(ResidualRisk::LeaderExited);
     }
 }
 
@@ -5550,6 +5592,7 @@ mod tests {
             owners,
             armed: true,
             leader_reaped,
+            leader_exited: false,
             group_absent: false,
             containment: Containment::default(),
             signalled_pids: std::collections::BTreeSet::new(),
@@ -5863,6 +5906,62 @@ mod tests {
         assert!(
             group.containment().is_complete(),
             "the report must name the mechanism it ran and carry no survivor"
+        );
+        drop(group);
+    }
+
+    /// A leader that exited on its own has had its children re-parented, so the
+    /// cleanup reads no table, still signals the group, and names why its report
+    /// is not the tree (#347).
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn a_leader_that_exited_on_its_own_reads_no_table_and_claims_no_tree() {
+        let signaller = recording();
+        let observer = sequence(0);
+        let capture = ScriptedCapture {
+            tree: vec![70],
+            ..ScriptedCapture::default()
+        };
+        let mut group = capture_group(&signaller, &observer, &capture);
+        group.mark_exited();
+        assert_eq!(
+            block_on(group.cleanup()),
+            CleanupReceipt::CleanupPending,
+            "the exited leader is unreaped, so its group is still pinned and pending"
+        );
+        assert_eq!(
+            capture.reads(),
+            0,
+            "a walk from an exited leader can name nothing, so no table is read"
+        );
+        assert_eq!(
+            capture.signals(),
+            0,
+            "nothing was named, so no pid is signalled"
+        );
+        assert!(
+            signaller.calls.load(Ordering::Relaxed) >= 1,
+            "the group is still signalled: a member that stayed in it is still reachable"
+        );
+        assert_eq!(
+            group.containment().residual_risk(),
+            Some(ResidualRisk::LeaderExited),
+            "the report names the limit rather than presenting an empty capture as an empty tree"
+        );
+        assert_eq!(
+            group.containment().mechanism(),
+            ContainmentMechanism::ProcessGroupOnly,
+            "no table was read"
+        );
+        group.mark_reaped();
+        assert_eq!(
+            block_on(group.confirm_absence()),
+            CleanupReceipt::CleanupConfirmed,
+            "the group itself is observed gone after the reap"
+        );
+        assert!(
+            !group.containment().is_complete(),
+            "a confirmed group is not a confirmed tree when the tree was never seen"
         );
         drop(group);
     }
@@ -7249,8 +7348,9 @@ mod tests {
     // The arms above are the cases a reader thinks of. This family is the rest:
     // one seed draws a whole world — how many descendants a reading names, which
     // of them have already ended, which ignore every signal, whether the table
-    // can be read at all, whether the reading is truncated, what the group signal
-    // answers and when the group is observed absent — and a model written from
+    // can be read at all, whether the reading is truncated, whether the leader had
+    // already exited on its own, what the group signal answers and when the group
+    // is observed absent — and a model written from
     // the documented contract says what the drain must then report. Every world
     // is driven through the real `ProcessGroup`, so the arms the simulation
     // covers are the arms production runs.
@@ -7278,13 +7378,20 @@ mod tests {
     #[cfg(all(unix, feature = "process"))]
     impl Seed {
         /// The draw for `field` in `0..bound`.
+        ///
+        /// The seed and field are combined and passed through the splitmix64
+        /// finalizer, so two fields of one seed are independent draws. A
+        /// combination that was only multiplied made every field a fixed offset
+        /// of every other, and some pairs of choices could never be drawn
+        /// together: across 4,096 seeds no leader that exited on its own was
+        /// ever paired with a refused group signal.
         fn draw(&self, field: u64, bound: NonZeroU64) -> Result<u64, std::num::TryFromIntError> {
-            reduce(
-                self.0
-                    .wrapping_add(field.wrapping_mul(0x9E37_79B9_7F4A_7C15))
-                    .wrapping_mul(0x2545_F491_4F6C_DD1D),
-                bound,
-            )
+            let mut mixed = self
+                .0
+                .wrapping_add(field.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            reduce(mixed ^ (mixed >> 31), bound)
         }
 
         /// A draw in `0..=max`.
@@ -7320,6 +7427,8 @@ mod tests {
         unreadable: bool,
         /// Whether the reading stopped at its bound.
         truncated: bool,
+        /// Whether the leader exited on its own before the cleanup began.
+        exited: bool,
         /// What the group signal answers.
         group: WorldGroup,
         /// How many post-reap probes answer "present" before one answers "absent".
@@ -7369,27 +7478,51 @@ mod tests {
                 _ => WorldGroup::Delivered,
             };
             let present_probes = usize::try_from(draws.below(6, 2)?)?;
-            // An unreadable table names nothing, so the model of a world whose
-            // reading failed is an empty tree: the drain's per-process phases do
-            // not run at all, and a model that still counted the drawn pids would
-            // be reporting a capture that never happened.
-            let named: Vec<i32> = if unreadable { Vec::new() } else { tree.clone() };
-            let survivors: Vec<i32> = named
-                .iter()
-                .copied()
-                .filter(|pid| immortal.contains(pid))
-                .collect();
+            let exited = draws.below(7, 3)? == 0;
+
+            // The model is the drain's documented contract, phase by phase.
+            //
+            // Phase 1, the reading: none when the leader had already exited (its
+            // children were re-parented at the exit, so a walk names nothing) or
+            // when the table cannot be read. Either way the tree is empty, and a
+            // model that still counted the drawn pids would report a capture that
+            // never happened.
+            let read = !unreadable && !exited;
+            let named: Vec<i32> = if read { tree.clone() } else { Vec::new() };
+            // Phase 2, the group signal: a refusal ends the drain at once, after
+            // the reading and before any pid is signalled or observed.
+            let refused = group == WorldGroup::Refused;
+            // Phases 3 and 4, signal and observe each named pid, run only on a
+            // named tree under a group signal the OS accepted.
+            let per_pid = read && !refused;
+            let survivors: Vec<i32> = if per_pid {
+                named
+                    .iter()
+                    .copied()
+                    .filter(|pid| immortal.contains(pid))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // One round when nothing is left running, every round while something
-            // is: that is the loop's own exit condition, not a choice.
+            // is: that is the loop's own exit condition, not a choice. A pid is
+            // signalled the first round it is named, unless it had already ended,
+            // and again each later round only while it is observed running.
             let rounds = if survivors.is_empty() {
                 1
             } else {
                 CONTAINMENT_ROUNDS
             };
             let delivered = named.iter().filter(|pid| !gone.contains(pid)).count();
-            let signalled =
-                delivered.saturating_add(survivors.len().saturating_mul(rounds.saturating_sub(1)));
-            let residual = if unreadable {
+            let signalled = if per_pid {
+                delivered.saturating_add(survivors.len().saturating_mul(rounds.saturating_sub(1)))
+            } else {
+                0
+            };
+            // The first limit noted wins, and the reading is where each is noted.
+            let residual = if exited {
+                Some(ResidualRisk::LeaderExited)
+            } else if unreadable {
                 Some(ResidualRisk::TableUnreadable)
             } else if truncated {
                 Some(ResidualRisk::CaptureTruncated)
@@ -7410,21 +7543,44 @@ mod tests {
                 immortal,
                 unreadable,
                 truncated,
+                exited,
                 group,
                 present_probes,
                 expected,
                 containment: Containment {
-                    mechanism: if unreadable {
-                        ContainmentMechanism::ProcessGroupOnly
-                    } else {
+                    mechanism: if read {
                         ContainmentMechanism::ProcessTableSnapshot
+                    } else {
+                        ContainmentMechanism::ProcessGroupOnly
                     },
                     captured: named.len(),
-                    signalled: if unreadable { 0 } else { signalled },
+                    signalled,
                     survivors,
                     residual,
                 },
             })
+        }
+
+        /// The receipt the post-reap pass must reach, from the world alone.
+        ///
+        /// A survivor is observed again and never promoted. Otherwise the group
+        /// is settled absent when the pinned phase already observed it gone, or
+        /// when the post-reap probes reach their first "absent" inside the bounded
+        /// rounds. It is read from the world rather than by probing the scripted
+        /// observer again: a pass that returned at its first probe has not
+        /// consumed the world's "present" answers, so a fresh probe would report a
+        /// group the drain had correctly settled as still there.
+        fn settled(&self) -> CleanupReceipt {
+            if !self.containment.survivors.is_empty() {
+                return CleanupReceipt::CleanupSurvivors {
+                    survivors: self.containment.survivors.clone(),
+                };
+            }
+            if self.group == WorldGroup::Absent || self.present_probes < CONTAINMENT_ROUNDS {
+                CleanupReceipt::CleanupConfirmed
+            } else {
+                CleanupReceipt::CleanupPending
+            }
         }
 
         /// The scripted capture this world drives.
@@ -7500,10 +7656,9 @@ mod tests {
         let signaller = world.signaller();
         let observer = sequence(world.present_probes);
         let mut group = capture_group(&signaller, &observer, &capture);
-        // The model's survivor list is moved into the second receipt below, so it
-        // is taken once here rather than borrowed out of a value the assertion
-        // above already compared.
-        let modelled_survivors = world.containment.survivors.clone();
+        if world.exited {
+            group.mark_exited();
+        }
         let pinned = block_on(group.cleanup());
         assert_eq!(
             pinned, world.expected,
@@ -7519,21 +7674,21 @@ mod tests {
             world.containment.signalled(),
             "{at}: the drain must deliver exactly the signals the model counts"
         );
+        if world.exited {
+            assert_eq!(
+                capture.reads(),
+                0,
+                "{at}: a leader that had exited has no tree to walk, so no table is read"
+            );
+            assert!(
+                !group.containment().is_complete(),
+                "{at}: a cleanup that never saw the tree must not claim it"
+            );
+        }
         // The post-reap pass decides the group, and a survivor is never promoted.
         group.mark_reaped();
         let settled = block_on(group.confirm_absence());
-        let absent = matches!(observer.exists(42), Ok(false));
-        let expected = if modelled_survivors.is_empty() {
-            if absent {
-                CleanupReceipt::CleanupConfirmed
-            } else {
-                CleanupReceipt::CleanupPending
-            }
-        } else {
-            CleanupReceipt::CleanupSurvivors {
-                survivors: modelled_survivors,
-            }
-        };
+        let expected = world.settled();
         assert_eq!(
             settled, expected,
             "{at}: only an observed absence settles the group, and a survivor is never \
@@ -7558,10 +7713,10 @@ mod tests {
         0x5EED_2630_0000_0004,
         0x5EED_2630_0000_0005,
         0x5EED_2630_0000_0006,
-        0x5EED_2630_0000_0007,
-        0x5EED_2630_0000_0008,
+        0x5EED_2630_0000_000E,
+        0x5EED_2630_0000_0019,
+        0x5EED_2630_0000_0025,
         0x5EED_2630_FFFF_FFFF,
-        0x5EED_2631_0000_0001,
         0xDEAD_BEEF_0263_0001,
         0xC0FF_EE00_2630_0001,
     ];
@@ -7603,6 +7758,43 @@ mod tests {
                 DRAIN_SEEDS.len()
             );
         }
+        Ok(())
+    }
+
+    /// How many consecutive seeds the exited-leader sweep draws.
+    #[cfg(all(unix, feature = "process"))]
+    const EXITED_SWEEP_SEEDS: u64 = 4_096;
+
+    /// Every world in a wide seeded sweep reaches the model, and the sweep holds
+    /// both leaders that exited on their own and leaders that did not, under
+    /// every group answer, so the exited arm is exercised against each receipt
+    /// rather than once.
+    #[cfg(all(unix, feature = "process"))]
+    #[test]
+    fn sim_an_exited_leader_reads_no_table_and_claims_no_tree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut exited_arms = std::collections::BTreeSet::new();
+        let mut alive = 0_u64;
+        for offset in 0..EXITED_SWEEP_SEEDS {
+            let seed = 0x5EED_0347_0000_0000_u64.wrapping_add(offset);
+            sim_drain(seed)?;
+            let world = World::draw(seed)?;
+            if world.exited {
+                exited_arms.insert(receipt_arm(&world.expected));
+            } else {
+                alive = alive.saturating_add(1);
+            }
+        }
+        assert_eq!(
+            exited_arms,
+            std::collections::BTreeSet::from([1_u64, 2, 3]),
+            "an exited leader must be driven to the confirmed, pending and failed receipts; \
+             it can never have a named survivor, because nothing was named"
+        );
+        assert!(
+            alive > 0,
+            "the sweep must still hold leaders that were alive at the cleanup"
+        );
         Ok(())
     }
 

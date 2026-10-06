@@ -64,13 +64,13 @@ crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
 crates/lgwks-bot/src/rt/supervise.rs:211	/// otherwise never make, which is why it is not larger.
 crates/lgwks-bot/src/rt/supervise.rs:227	/// longer than the budget overruns it by one iteration. Cancellation is not
-crates/lgwks-bot/src/rt/supervise.rs:1864	/// long enough on one worker and far too short on several, and the failure is
-crates/lgwks-bot/src/rt/supervise.rs:2021	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:2532	/// # Why the description is borrowed
-crates/lgwks-bot/src/rt/supervise.rs:2595	pub async fn spawn_process_identified(
-crates/lgwks-bot/src/rt/supervise.rs:2817	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
-crates/lgwks-bot/src/rt/supervise.rs:5161	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:5270	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:1881	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:2038	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:2549	/// # Why the description is borrowed
+crates/lgwks-bot/src/rt/supervise.rs:2612	pub async fn spawn_process_identified(
+crates/lgwks-bot/src/rt/supervise.rs:2834	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+crates/lgwks-bot/src/rt/supervise.rs:5203	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:5312	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

@@ -574,7 +574,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   reaped leader again: the OS may have reissued that id, and a walk from it names
   whoever holds it now. Every process outcome carries
   a `Containment` report naming the mechanism, how many pids it captured and
-  signalled, and its residual risk (`TableUnreadable`, `CaptureTruncated`), so
+  signalled, and its residual risk (`TableUnreadable`, `CaptureTruncated`,
+  `LeaderExited` — INV-BOT-158), so
   "nothing survived" and "nothing was looked at" never read alike. **Not
   claimed:** a descendant forked after the last capture that left the group in
   the same window, or one orphaned to init before the cleanup ran; closing those
@@ -620,6 +621,26 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`a_matching_leader_has_its_group_and_every_descendant_stopped`,
   `a_forged_start_on_a_live_pid_is_never_signalled`,
   `a_damaged_record_is_refused_by_the_arm_that_names_its_damage`)
+- **INV-BOT-158** A cleanup that begins after its leader exited on its own claims
+  the group and not the tree. A process's children are re-parented at its exit,
+  not at its reap, so once the non-reaping observation reports the leader exited
+  (`ProcessObservation::Exited`) no walk from it can name a descendant. The
+  cleanup then reads no process table at all, signals the group as before, and
+  its `Containment` carries `ResidualRisk::LeaderExited` under
+  `ProcessGroupOnly`, so `is_complete()` is `false` and the report says why. The
+  read it skips was a whole-table `ps -A` per supervised process on macOS (p50
+  12.5 ms) that could only come back empty. A deadline or cancel kill observes
+  the leader alive and captures, signals and observes exactly as INV-BOT-112
+  states. **Not claimed:** that a process which exited on its own left nothing
+  running; a `setsid` descendant it started is out of reach, and sampling the
+  tree while the leader lives would need identity-checked pid signals
+  (INV-BOT-157) to avoid signalling a reissued pid. · why: #347, #345 · enforced
+  by: `tests/it/process_escape.rs`
+  (`a_leader_that_exits_on_its_own_does_not_claim_the_tree_it_left`,
+  `a_session_escape_is_captured_and_stopped_by_pid`),
+  `rt::supervise::tests` (`a_leader_that_exited_on_its_own_reads_no_table_and_claims_no_tree`,
+  `sim_an_exited_leader_reads_no_table_and_claims_no_tree`,
+  `sim_a_seeded_drain_reaches_the_models_receipt`)
 - **INV-BOT-156** Shutdown never reports a supervised process that answered its
   token as aborted. A process task is cooperative by construction — its wait
   races the token — and answering the token *is* its cleanup, which spends

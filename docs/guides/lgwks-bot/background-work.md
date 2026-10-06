@@ -9,7 +9,7 @@ for a blocking call. The units differ, and so do the guarantees.
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:2021`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise.rs:2038`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise.rs:2532`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise.rs:2549`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -140,7 +140,7 @@ to them is a record written before the kill.
 
 `Supervisor::spawn_process_identified(spec)` starts the child exactly as
 `spawn_process` does and also returns the identity of its group leader
-(`crates/lgwks-bot/src/rt/supervise.rs:2595`): the pid **and** the instant the OS
+(`crates/lgwks-bot/src/rt/supervise.rs:2612`): the pid **and** the instant the OS
 records that pid's process started. Store `leader().to_string()` durably — a
 database row, written before the lane does work — and a successor parses it back
 and calls `reap_orphaned_group` (`crates/lgwks-std/src/process.rs:1158`):
@@ -176,7 +176,7 @@ record is the caller's job.
 
 `Supervisor::run_process(spec)` is `spawn_process` with the completion handed
 back: it awaits the child and returns a `ProcessRun`
-(`crates/lgwks-bot/src/rt/supervise.rs:2817`). It reuses the same process-group
+(`crates/lgwks-bot/src/rt/supervise.rs:2834`). It reuses the same process-group
 ownership, deadline and cleanup machinery, so a deadline stops the **group**,
 and the run reports the same `CleanupReceipt` a supervised task would.
 
@@ -347,7 +347,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:5161`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise.rs:5203`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 hands the closure to a pool thread and offers no abort, and its bound is a
@@ -370,7 +370,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:1864`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:1881`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -380,7 +380,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:5270` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:5312` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,
