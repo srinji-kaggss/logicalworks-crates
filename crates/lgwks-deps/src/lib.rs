@@ -918,7 +918,7 @@ fn target_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
 /// conversion between those two vocabularies, named because the gate compares
 /// them in more than one place and an entry that authors no `target` at all is a
 /// *third* fact — an unconstrained dimension — which this function is not for
-/// and which callers read from [`contract::Entry::target`] directly.
+/// and which callers inside this crate read from an entry's `target` field directly.
 ///
 /// ```
 /// use lgwks_deps::declared_scope;
