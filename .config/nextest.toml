@@ -21,6 +21,18 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'
 
+# The noisy-neighbour throughput comparison (#268) times a few milliseconds of
+# admission per round and holds the attacked arm to within 10% of the baseline's
+# median. Beside sibling tests it measured the runner instead: in CI run
+# 37462753688 the quiet rounds sat at 2.37-2.45 ms (baseline) and 2.51-2.64 ms
+# (attacked), about 6% apart, while roughly half the rounds of each arm landed
+# on 4-13 ms of host contention and the attacked median fell into that tail.
+# It runs with every test slot to itself, like journal_scale, so the comparison
+# is between the two arms rather than between two moments of the runner.
+[[profile.default.overrides]]
+filter = 'package(lgwks_bot) & binary(it) & test(=tenancy::an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput)'
+threads-required = 'num-test-threads'
+
 # #277: two lgwks_ast modules exist to catch a walk that stops making progress,
 # so they are the last place a missing bound would show up as a run that never
 # ends. nextest's default has no timeout at all, which means "the suite hung"

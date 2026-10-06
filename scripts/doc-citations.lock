@@ -19,21 +19,21 @@ crates/lgwks-bot/src/cap.rs:290	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:391	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:489	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
-crates/lgwks-bot/src/ecs.rs:1404	#[derive(Resource, Debug)]
-crates/lgwks-bot/src/ecs.rs:1857	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs.rs:3975	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs.rs:4054	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs.rs:4275	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:4382	{
-crates/lgwks-bot/src/ecs.rs:4434	*slot = Some(value);
-crates/lgwks-bot/src/ecs.rs:4535	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:4664	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs.rs:5176	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5201	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs.rs:5291	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5981	Ok(_) => {
-crates/lgwks-bot/src/ecs.rs:6133	.ensure_outcome(*key, evidence)
-crates/lgwks-bot/src/ecs.rs:6159	}),
+crates/lgwks-bot/src/ecs.rs:1428	struct TickError(Option<BotError>);
+crates/lgwks-bot/src/ecs.rs:1970	/// chain's before committing anything.
+crates/lgwks-bot/src/ecs.rs:4088	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs.rs:4167	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs.rs:4502	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:4668	*slot = Some(value);
+crates/lgwks-bot/src/ecs.rs:4780	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:4943	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs.rs:5055	*failure = Some(error);
+crates/lgwks-bot/src/ecs.rs:5455	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5507	// borrow of the plan would outlive the schedule that wrote it. An empty
+crates/lgwks-bot/src/ecs.rs:5629	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:6933	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:7132	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs.rs:7152	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:186	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {
@@ -101,7 +101,7 @@ crates/lgwks-bot/src/session.rs:4005	return refusal;
 crates/lgwks-bot/src/session.rs:4229	NodeKind::Route { dispatch, fallback } => {
 crates/lgwks-bot/src/session.rs:4243	/// The one place a session reads a terminal outcome. `drive` reaches this
 crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:785	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:797	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:88	pub mod scan;
 crates/lgwks-std/src/task.rs:419	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>

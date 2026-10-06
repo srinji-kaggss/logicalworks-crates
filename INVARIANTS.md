@@ -1538,6 +1538,24 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`a_seeded_credential_lives_exactly_as_long_as_its_grant`,
   `a_perpetual_grant_is_never_refused_however_far_the_clock_advances`,
   `the_same_seed_replays_to_the_same_credential_trace`)
+- **INV-BOT-155** A source's own revision may skip its poll, and only an
+  unchanged revision equal to the one committed with the held value may. A
+  revision is committed together with its value or not at all (INV-BOT-5 with a
+  change tick in place of a digest), so a poll that failed, stalled or read an
+  equal value leaves it where it was and the next tick asks again. Comparison is
+  equality only: a revision that wraps or regresses is a change, never an
+  ordering a wrap could invalidate, and a revision that moved while the value did
+  not costs a spare poll and never suppresses an effect. A source that declares
+  its baseline unsound (INV-BOT-120) is polled whatever its revision says. A
+  source reporting `None` takes the value-comparison path, and both paths fire on
+  the same ticks. **Not claimed:** that a source's revision is honest; a source
+  that reports an unchanged revision over a changed value is a source defect the
+  substrate cannot see. · why: #279 · enforced by: `tests/it/sim_change_ticks.rs`
+  (`the_change_tick_and_the_digest_fire_on_the_same_ticks`,
+  `a_revision_that_wraps_is_a_change`, `a_regressing_revision_is_a_change`,
+  `a_forced_refresh_beats_a_quiet_revision`,
+  `the_change_tick_never_fires_twice_for_one_movement`,
+  `a_seed_that_changes_the_schedule_changes_the_trace`, `the_same_seed_replays`)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is

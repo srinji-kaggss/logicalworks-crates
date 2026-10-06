@@ -226,6 +226,16 @@ use super::verb::{Evaluate, Execute, Observe};
 // cancelled a poll traceable to a named authority.
 use crate::clock::Clock;
 
+/// The per-stage tick profiler. Compiled out entirely without the default-off
+/// `profile` feature: every charge site in this file sits behind the same
+/// `cfg`, so a build without it reads no clock and does no per-stage arithmetic.
+#[cfg(feature = "profile")]
+mod profile;
+#[cfg(feature = "profile")]
+use profile::Charge;
+#[cfg(feature = "profile")]
+pub use profile::{TickProfile, TickStage};
+
 // ── The effect path: identity, fencing, and the write-ahead record ─────────
 
 /// The domain separator for an [`ActionId`] derived from a bot's structure.
@@ -1421,15 +1431,118 @@ struct TickError(Option<BotError>);
 #[derive(Resource, Debug, Default)]
 struct Order(Vec<Entity>);
 
-/// The chains whose source moved on this tick, one flag per chain.
+/// The observation phase's reusable buffers.
+///
+/// Every buffer here was a fresh heap allocation on every tick, and each of them
+/// was paid by a tick that changed nothing: a quiet tick allocated a
+/// `Vec<Option<RefreshReason>>` the size of the world, a `Vec<usize>` for stalls
+/// that stayed empty, and a `Vec<(usize, &EcsChain)>` holding the whole wave
+/// before deciding that none of the wave had to be polled. A substrate that asks
+/// "has anything moved?" once per chain per tick and then allocates several
+/// times per chain to ask it is not measuring the question.
+///
+/// So the buffers live here, are taken out for the phase, and go back with their
+/// capacity: the first tick pays for them and no tick after pays again. The
+/// contents are cleared every tick and never retained — a scratch that kept its
+/// entries would be a cache, and what these hold is per-tick state whose whole
+/// meaning is that it does not survive.
+#[derive(Resource, Debug, Default)]
+struct PollScratch {
+    /// One entry per chain: what that chain's source declared about its own
+    /// caching, read once per tick.
+    declared: Vec<Option<RefreshReason>>,
+    /// The chains whose poll the wave gave up on, in declaration order.
+    stalled: Vec<usize>,
+    /// The current wave's own indices that have to be polled.
+    slots: Vec<usize>,
+}
+
+/// The change ticks: the revision each chain's committed value was read at, and
+/// the revision each source reported on this tick.
+///
+/// Two buffers rather than one because they answer two different questions, and
+/// conflating them is the mistake that makes a poll look like a commit: `seen` is
+/// what the substrate **holds**, and moves only where a value was committed;
+/// `polled` is what the source **said** on the tick the value was read. A poll
+/// that failed, was cancelled at its deadline, or produced a value equal to the
+/// one already held writes `polled` and leaves `seen` alone, so the next tick
+/// asks again — the fingerprint-commit rule (#99 / INV-BOT-5) applied to a change
+/// tick rather than to a digest.
+#[derive(Debug, Default)]
+struct ChangeTicks {
+    /// The revision of the value the substrate currently holds, per chain.
+    seen: Vec<Option<u64>>,
+    /// The revision each source reported on this tick, per chain.
+    polled: Vec<Option<u64>>,
+}
+
+impl ChangeTicks {
+    /// Whether `chain`'s source reported the revision its committed value was
+    /// read at, so the poll can be skipped.
+    ///
+    /// Equality is the whole comparison. A revision that wraps, or regresses, is a
+    /// *different* revision and therefore a change: there is no ordering here that
+    /// a wrap could invalidate, and a source is free to use a saturating counter,
+    /// a timestamp in its own units, or a content digest as its revision.
+    fn quiet(&self, chain: usize, reported: Option<u64>) -> bool {
+        reported.is_some() && self.seen.get(chain).copied().flatten() == reported
+    }
+
+    /// Commit the revision a value was read at, and only then.
+    ///
+    /// Called from the commit pass of [`observe_fold`] and nowhere else, which is
+    /// what makes the rule a fact about one place rather than an intention.
+    fn commit(&mut self, chain: usize, polled: Option<u64>) {
+        if let Some(slot) = self.seen.get_mut(chain) {
+            *slot = polled;
+        }
+    }
+}
+
+/// The decision phase's per-tick scratch: which chains moved, what the walk will
+/// do with each chain's live transition, and the admitted input each binding
+/// takes.
 ///
 /// A world resource rather than a local, because it is per-tick scratch and the
 /// point of scratch is that it is allocated once. Built as `vec![false; count]`
 /// inside the decision system, this was a fresh zeroed allocation every tick —
 /// one of a set of them, added together, that made the schedule's own bookkeeping
 /// the larger half of a tick's cost.
+///
+/// One resource for all three rather than three, because they are resized
+/// together: a plan that grows its chain count is a bot whose chain count grew,
+/// and three buffers resized independently could hold three different widths for
+/// one tick.
 #[derive(Default)]
-struct Moving(Vec<bool>);
+struct AdmitScratch {
+    /// Which chains the change filter reported as moved.
+    moving: Vec<bool>,
+    /// What the walk will do with each chain, in declaration order.
+    kinds: Vec<AdmitKind>,
+    /// The admitted-input identity each binding takes, `None` where it binds none.
+    inputs: Vec<Option<AdmittedInput>>,
+}
+
+/// The decision pass's scratch, taken out whole so the walk can read and write it
+/// while the world is borrowed for the query.
+///
+/// The one step rather than three because the borrow is the whole reason:
+/// `fire_plan` holds `&mut World`, and a mutable borrow of a single resource
+/// cannot survive the immutable borrow the change query needs. One `mem::take`
+/// moves all three buffers and keeps all three allocations.
+impl AdmitScratch {
+    /// Take the scratch out of the world, resized to `count` chains.
+    fn take(world: &mut World, count: usize) -> Self {
+        let mut scratch = std::mem::take(&mut *world.non_send_mut::<AdmitScratch>());
+        scratch.moving.clear();
+        scratch.moving.resize(count, false);
+        scratch.kinds.clear();
+        scratch.kinds.resize(count, AdmitKind::Idle);
+        scratch.inputs.clear();
+        scratch.inputs.resize(count, None);
+        scratch
+    }
+}
 
 /// The retry policy in force: one authority per world, like `Grants`.
 #[derive(Resource, Debug)]
@@ -2444,7 +2557,7 @@ impl Drop for WavePoll<'_> {
 async fn bounded_wave(
     deadline: Duration,
     watchdog: &PollWatchdog,
-    polls: Vec<WavePoll<'_>>,
+    polls: impl IntoIterator<Item = WavePoll<'_>>,
 ) -> (Vec<Result<Option<Erased>, BotError>>, bool) {
     let clock = Clock::wall();
     // The wave-level mirror the report reads, set only on the path that really
@@ -4093,30 +4206,6 @@ fn revision_of(world: &World, chain: usize) -> u64 {
 /// once. Once a transition is bound to it, the transition is what speaks for
 /// it, and the slot being empty is not a loss — it is the record that the value
 /// is out on loan, which [`observe_fold`] reads back through the binding.
-/// The admitted-input identity of `value` for `chain`, or the fallback stamp.
-fn admitted_identity(world: &mut World, chain: usize, value: Option<&Erased>) -> AdmittedInput {
-    let identify = world
-        .non_send::<Chains>()
-        .0
-        .get(chain)
-        .map(|held| held.identify);
-    match (identify, value) {
-        (Some(identify), Some(value)) => identify(value.as_any()),
-        // A fallback stamp is content-free, so it can never name an event.
-        _ => AdmittedInput {
-            identity: world.non_send_mut::<Ledger>().mint_input(),
-            event: false,
-        },
-    }
-}
-
-/// Move the newest observation for `chain` out of its slot.
-///
-/// Moved, not copied. A source's `Output` carries no `Clone` bound and this is
-/// the reason it does not need one: the value is not wanted in two places at
-/// once. Once a transition is bound to it, the transition is what speaks for
-/// it, and the slot being empty is not a loss — it is the record that the value
-/// is out on loan, which [`observe_fold`] reads back through the binding.
 ///
 /// The take is also what admits the value: a generation is being opened over
 /// exactly this payload, so a later commit that overtakes it is superseding work
@@ -4166,12 +4255,157 @@ fn admits(world: &World, chain: usize, bound: Option<&Erased>) -> bool {
         .is_some_and(|chain| !(chain.same)(bound.as_any(), next.as_any()))
 }
 
+/// What the decision pass decided for one chain, before it walks any of them.
+///
+/// The value is computed in one batched pass over every chain — see
+/// [`plan_admissions`] — so the walk that follows reads a decision rather than
+/// making one. That is what lets the two halves of change detection be measured
+/// apart (which chains moved, and which admitted inputs are new) and it is also
+/// what keeps the admitted-input stamps in declaration order: the pass walks
+/// chains by index, exactly as the walk this replaces did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmitKind {
+    /// Keep the live transition exactly as it stands. No observation is taken
+    /// and no input is minted: the entries still running were acknowledged
+    /// against the payload the transition holds.
+    Keep,
+    /// Resume into a new revision over the newest observation, bound to
+    /// [`AdmittedInput`].
+    Resume,
+    /// Open a fresh transition over the newest observation, bound to
+    /// [`AdmittedInput`]. Only reachable for a chain that has no live
+    /// transition.
+    Open,
+    /// Nothing to walk: no transition is held and the source did not move.
+    Idle,
+}
+
+/// A chain's batched decision: its [`AdmitKind`] and the input it binds to.
+#[derive(Clone, Copy)]
+enum Admit {
+    /// Keep the live transition, or have nothing to walk.
+    Keep,
+    /// Resume or open, bound to this admitted input.
+    Bind(AdmittedInput),
+}
+
+impl Admit {
+    /// Compose a chain's decision from the two passes that produced it.
+    ///
+    /// A kind that needs an input the fingerprint pass did not derive reads as
+    /// [`Self::Keep`] rather than as a fabricated one: a transition bound to an
+    /// input nobody derived would mint dispatch identities that cannot be
+    /// recovered against, and keeping the previous transition is the safe answer
+    /// because the next tick re-plans from the same observations.
+    fn bind(kind: AdmitKind, input: Option<AdmittedInput>) -> Self {
+        match (kind, input) {
+            (AdmitKind::Resume | AdmitKind::Open, Some(input)) => Self::Bind(input),
+            _ => Self::Keep,
+        }
+    }
+}
+
+/// Decide every chain's [`AdmitKind`] in one pass, in declaration order.
+///
+/// Two questions per chain, and the answers are cached rather than recomputed
+/// inside the walk: whether the `Changed<Revision>` query reported the chain as
+/// moved, and whether the newest observation is admitted over the payload a
+/// retained transition holds. The second is the value comparison, and it is the
+/// expensive one — computing it here and reading it there is what keeps the walk
+/// from paying for it twice.
+///
+/// The `has_open` test is read here and again by the walk, and it is a scan of
+/// one transition's entry states rather than a comparison of values, so the
+/// repeat costs less than the caching saves.
+fn plan_admissions(world: &World, moving: &[bool], kinds: &mut [AdmitKind]) {
+    for (chain, kind) in kinds.iter_mut().enumerate() {
+        let ledger = world.non_send::<Ledger>();
+        let held = ledger.transitions.get(chain).and_then(Option::as_ref);
+        *kind = match held {
+            Some(transition) if transition.has_open() => AdmitKind::Keep,
+            Some(transition) => {
+                if admits(world, chain, transition.value.as_ref()) {
+                    AdmitKind::Resume
+                } else {
+                    AdmitKind::Keep
+                }
+            }
+            // A transition is opened **over an observation** or not at all. The
+            // change filter alone is not enough to open one: a component is
+            // "changed" from the moment it is spawned, so a freshly assembled bot
+            // reports every chain as moved with no committed observation behind
+            // it, and a transition bound to nothing is never walked — its entries
+            // stay `NotStarted` and the tick reports all of them pending.
+            //
+            // The change-tick skip is what makes this reachable rather than
+            // theoretical: a quiet source commits nothing, so its slot stays empty
+            // however many ticks the filter keeps calling it moved.
+            None if moving.get(chain).copied().is_some_and(|held| held)
+                && world
+                    .non_send::<Observed>()
+                    .0
+                    .get(chain)
+                    .is_some_and(|slot| slot.is_some()) =>
+            {
+                AdmitKind::Open
+            }
+            None => AdmitKind::Idle,
+        };
+    }
+}
+
+/// Derive the admitted-input identity for every chain whose kind binds one.
+///
+/// One batch, in two halves. The first half holds the world shared and reads the
+/// value each identity is derived from; the second holds it exclusively and mints
+/// the content-free fallback stamp for the chains whose binding cannot supply
+/// one. The split is why the stamps are still consumed in declaration order: the
+/// fallback is what a dispatch digest binds when nothing else can be, and two
+/// derivations of one identity are two identities the moment they disagree.
+fn plan_inputs(world: &mut World, kinds: &[AdmitKind], inputs: &mut [Option<AdmittedInput>]) {
+    let binds = |kind: &AdmitKind| matches!(kind, AdmitKind::Resume | AdmitKind::Open);
+    {
+        let chains = world.non_send::<Chains>();
+        let observed = world.non_send::<Observed>();
+        for (chain, kind) in kinds.iter().enumerate() {
+            if !binds(kind) {
+                continue;
+            }
+            let (Some(held), Some(value)) = (
+                chains.0.get(chain),
+                observed.0.get(chain).and_then(|slot| slot.as_ref()),
+            ) else {
+                continue;
+            };
+            if let Some(slot) = inputs.get_mut(chain) {
+                *slot = Some((held.identify)(value.as_any()));
+            }
+        }
+    }
+    let mut ledger = world.non_send_mut::<Ledger>();
+    for (chain, kind) in kinds.iter().enumerate() {
+        if !binds(kind) {
+            continue;
+        }
+        if inputs.get(chain).is_some_and(Option::is_none) {
+            // A fallback stamp is content-free, so it can never name an event.
+            let minted = AdmittedInput {
+                identity: ledger.mint_input(),
+                event: false,
+            };
+            if let Some(slot) = inputs.get_mut(chain) {
+                *slot = Some(minted);
+            }
+        }
+    }
+}
+
 /// The transition a chain should be walking this tick, if any.
 ///
-/// Three ways one exists: work is outstanding (walked whether or not the source
-/// moved — that is the whole point), the transition is kept only for an
-/// abandonment record and the newest observation is not admitted over it, or a
-/// transition is opened or resumed under an observation that is.
+/// The decision is [`Admit`]'s, computed for every chain in one batched pass
+/// rather than made here per chain: that is what makes the change detection and
+/// the identity derivation two separately measurable stages, and it keeps the
+/// admitted-input stamps in declaration order.
 ///
 /// Opening and resuming are where the payload is bound, and both *take* it out
 /// of the observation slot. That is the mechanism that keeps a transition on
@@ -4183,22 +4417,17 @@ fn admits(world: &World, chain: usize, bound: Option<&Erased>) -> bool {
 fn resume(
     world: &mut World,
     chain: usize,
-    moving: bool,
+    admit: Admit,
     held: Option<Transition>,
 ) -> Option<Transition> {
-    match held {
+    match (admit, held) {
         // Outstanding work keeps the payload it was opened under. A newer
         // observation is not admitted here, and deliberately: the entries
         // still running were acknowledged against this one.
-        Some(transition) if transition.has_open() => Some(transition),
-        // Nothing open: the transition is only a name for the work of a
-        // generation that has finished. It gives way to the newest observation
-        // when that observation has actually moved away from its binding, and
-        // is otherwise kept exactly as it stands — abandonment record and all.
-        Some(transition) if !admits(world, chain, transition.value.as_ref()) => Some(transition),
-        Some(transition) => {
+        (Admit::Keep, Some(transition)) => Some(transition),
+        (Admit::Keep, None) => None,
+        (Admit::Bind(input), Some(transition)) => {
             let value = take_observed(world, chain);
-            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::resumed(
                 input,
                 revision_of(world, chain),
@@ -4206,14 +4435,13 @@ fn resume(
                 value,
             ))
         }
-        None if moving => {
+        (Admit::Bind(input), None) => {
             let entries = world
                 .non_send::<Chains>()
                 .0
                 .get(chain)
                 .map_or(0, |chain| chain.entries.len());
             let value = take_observed(world, chain);
-            let input = admitted_identity(world, chain, value.as_ref());
             Some(Transition::opened(
                 input,
                 revision_of(world, chain),
@@ -4221,7 +4449,6 @@ fn resume(
                 value,
             ))
         }
-        None => None,
     }
 }
 
@@ -4422,6 +4649,13 @@ fn observe_fold(world: &mut World) {
     changed.clear();
     changed.resize(polled.len(), false);
     let mut superseded: Vec<SupersededObservation> = Vec::new();
+    // The change tick commits **here and only here**: beside the arm that put a
+    // new value in the slot. A tick that parked, stopped on a failure, or left a
+    // result equal to the value it already held reaches none of it, so the
+    // revision stays where it was and the next tick asks again — the
+    // fingerprint-commit rule (#99 / INV-BOT-5) applied to a change tick rather
+    // than to a digest.
+    let revisions = std::mem::take(&mut world.non_send_mut::<ChangeTicks>().polled);
     {
         let mut observed = world.non_send_mut::<Observed>();
         for (index, result) in polled.iter_mut().enumerate() {
@@ -4441,6 +4675,17 @@ fn observe_fold(world: &mut World) {
             }
         }
     }
+    // A second pass, with the observation slot released, so the commit reads the
+    // same `changed` the revision walk below reads. One flag is one chain: a
+    // chain that took a value commits the revision that value was read at, and
+    // every other chain's revision stays exactly where it was.
+    for index in 0..changed.len() {
+        if changed.get(index).copied().is_some_and(|held| held) {
+            let reported = revisions.get(index).copied().flatten();
+            world.non_send_mut::<ChangeTicks>().commit(index, reported);
+        }
+    }
+    world.non_send_mut::<ChangeTicks>().polled = revisions;
     put_polled(world, polled);
 
     // Walked by index rather than over a cloned `Order`: the entity is one
@@ -4560,9 +4805,24 @@ fn fire_plan(world: &mut World) {
     // intermediate `Vec<usize>` of moved chains is gone with it: filling the
     // flags directly from the query is one pass instead of two and allocates
     // nothing.
-    let mut moving = std::mem::take(&mut world.non_send_mut::<Moving>().0);
-    moving.clear();
-    moving.resize(count, false);
+    //
+    // The admission plan rides in the same resource, because it is the same
+    // per-tick scratch for the same phase and a second resource for it would be
+    // a second place for the two halves of change detection to be resized
+    // independently.
+    let mut scratch = AdmitScratch::take(world, count);
+    let AdmitScratch {
+        ref mut moving,
+        ref mut kinds,
+        ref mut inputs,
+    } = scratch;
+
+    // Which chains moved, and whether each newest observation is admitted over
+    // the payload a retained transition holds. Both are change detection outside
+    // the poll, and both are answered here for every chain at once so the walk
+    // below reads a decision rather than making one.
+    #[cfg(feature = "profile")]
+    let compare_charge = Charge::new(TickStage::Compare);
     {
         let mut query = world.query_filtered::<&SourceId, Changed<Revision>>();
         for id in query.iter(world) {
@@ -4571,17 +4831,34 @@ fn fire_plan(world: &mut World) {
             }
         }
     }
+    plan_admissions(world, moving, kinds);
+    #[cfg(feature = "profile")]
+    drop(compare_charge);
+
+    // The admitted-input identity of every value a chain will bind, derived in
+    // one batch so the stamps stay in declaration order.
+    #[cfg(feature = "profile")]
+    let fingerprint_charge = Charge::new(TickStage::Fingerprint);
+    plan_inputs(world, kinds, inputs);
+    #[cfg(feature = "profile")]
+    drop(fingerprint_charge);
 
     failures.resize_with(count, || None);
 
+    #[cfg(feature = "profile")]
+    let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
         let held = world.non_send_mut::<Ledger>().take(index);
-        let Some(mut transition) = resume(
-            world,
-            index,
-            moving.get(index).is_some_and(|moved| *moved),
-            held,
-        ) else {
+        let admit = Admit::bind(
+            // A chain the compare pass did not reach is idle, which is the same
+            // answer the buffer's own initial value carries.
+            match kinds.get(index).copied() {
+                Some(kind) => kind,
+                None => AdmitKind::Idle,
+            },
+            inputs.get(index).copied().flatten(),
+        );
+        let Some(mut transition) = resume(world, index, admit, held) else {
             continue;
         };
 
@@ -4653,7 +4930,9 @@ fn fire_plan(world: &mut World) {
         }
     }
 
-    world.non_send_mut::<Moving>().0 = moving;
+    #[cfg(feature = "profile")]
+    drop(decide_charge);
+    *world.non_send_mut::<AdmitScratch>() = scratch;
     put_plan_buffers(world, steps, failures);
 }
 
@@ -5183,19 +5462,46 @@ impl EcsBot {
         // and a mutable borrow of a resource cannot be held across them.
         let mut polled = std::mem::take(&mut self.world.non_send_mut::<Polled>().0);
         polled.clear();
-        let (invalidations, stalled, watchdogs) = self.poll_sources(&mut polled).await;
+        // The revisions the sources reported, taken out with the rest of the
+        // observation phase's scratch: this method holds `&self` across every
+        // poll, so it cannot write the world it is reading.
+        let mut revisions = std::mem::take(&mut self.world.non_send_mut::<ChangeTicks>().polled);
+        // Taken rather than borrowed for the same reason `revisions` is, and
+        // because the observation phase is the tick's only writer of these
+        // buffers. It goes back with its capacity, which is the entire point:
+        // a quiet tick fills the buffers, publishes them, and hands them to the
+        // next tick instead of asking the allocator for them again.
+        let mut scratch = {
+            let mut guard = self.world.non_send_mut::<PollScratch>();
+            std::mem::take(&mut *guard)
+        };
+        #[cfg(feature = "profile")]
+        let poll_charge = Charge::new(TickStage::Poll);
+        let watchdogs = self
+            .poll_sources(&mut polled, &mut revisions, &mut scratch)
+            .await;
+        #[cfg(feature = "profile")]
+        drop(poll_charge);
         self.world.non_send_mut::<Polled>().0 = polled;
+        // Handed back before the schedule runs, because `observe_fold` commits
+        // each chain's revision from it and that commit is the whole rule.
+        self.world.non_send_mut::<ChangeTicks>().polled = revisions;
 
         // Published before the schedule runs, so the report describes this tick's
         // observation phase even when the schedule step stops on a failure and
         // the effects phase never runs. A caller reading the report after a
         // failed tick is exactly the caller who needs to know a source had
         // already declared its cache unsound when it failed.
-        self.record_invalidations(&invalidations);
+        self.record_invalidations(&scratch.declared);
         self.publish_refreshes();
-        self.publish_stalls(&stalled, watchdogs);
+        self.publish_stalls(&scratch.stalled, watchdogs);
+        *self.world.non_send_mut::<PollScratch>() = scratch;
 
+        #[cfg(feature = "profile")]
+        let schedule_charge = Charge::new(TickStage::Schedule);
         self.schedule.run(&mut self.world);
+        #[cfg(feature = "profile")]
+        drop(schedule_charge);
 
         // Taken rather than borrowed: the effects are awaited below, and a
         // borrow of the plan would outlive the schedule that wrote it. An empty
@@ -5209,7 +5515,11 @@ impl EcsBot {
             mut failures,
         } = plan;
         let budget = self.world.resource::<Policy>().0.max_attempts();
+        #[cfg(feature = "profile")]
+        let act_charge = Charge::new(TickStage::Act);
         let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+        #[cfg(feature = "profile")]
+        drop(act_charge);
 
         // Handed back with their capacity, not dropped. The plan is taken out of
         // the world to run because the driver needs it mutably while it awaits,
@@ -5249,6 +5559,34 @@ impl EcsBot {
             }),
             None => Ok(self.world.resource::<Fired>().0),
         }
+    }
+
+    /// One tick, with each stage of it measured.
+    ///
+    /// The same [`tick_async`](Self::tick_async) on the same four phases, with the
+    /// per-stage instrument armed around it; the `Result` is the identical value
+    /// that call would have returned. Nothing here is a reimplementation of the
+    /// tick, so a profile is a decomposition of the real path rather than of a
+    /// model of it.
+    ///
+    /// # The instrument is not free, and this is how its cost is known
+    ///
+    /// Measuring six stages costs seven clock reads. A caller that wants both a
+    /// wall time and a profile therefore times the *same* workload through both
+    /// doors and takes the difference as the instrument's cost on that tick —
+    /// which is what `bench/` does, and the only way the two figures can be read
+    /// together. The **shares** the profile reports are the claim it supports;
+    /// the absolute per-stage times carry the instrument.
+    ///
+    /// Stages are a partition of the tick and nest in one direction: the
+    /// schedule step wraps the stages inside it, so [`TickStage::Schedule`] is
+    /// the *residual* — the dispatch of the two systems plus the commit
+    /// bookkeeping inside `observe_fold` that nothing else claims.
+    #[cfg(feature = "profile")]
+    pub async fn tick_profiled(&mut self) -> (Result<usize, BotError>, TickProfile) {
+        profile::begin();
+        let outcome = self.tick_async().await;
+        (outcome, profile::end())
     }
 
     /// Run one tick on this thread, without an async runtime.
@@ -5391,6 +5729,19 @@ impl EcsBot {
     /// the change filter re-evaluates the entries against the value that is
     /// actually current rather than against the one the failure left behind.
     ///
+    /// # The change-tick skip, and what it is not
+    ///
+    /// A source that implements [`Observe::revision`](crate::verb::Observe::revision)
+    /// and reports the revision its committed value was read at is **not polled
+    /// at all**. No future is built, no value is boxed, nothing is allocated, and
+    /// the wave is narrower by however many sources are quiet. The check is one
+    /// `&self` call and one integer comparison.
+    ///
+    /// The skip is suppressed for a chain that declared its baseline unsound,
+    /// which is the case where believing a revision would be exactly wrong: the
+    /// substrate has been told its held value is not what the source would report
+    /// now, and a revision is a claim about the value rather than a repair of it.
+    ///
     /// # Where the reason comes from
     ///
     /// Read from the source itself, after its poll resolves, never guessed by
@@ -5412,62 +5763,113 @@ impl EcsBot {
     async fn poll_sources(
         &self,
         polled: &mut Vec<Result<Option<Erased>, BotError>>,
-    ) -> (Vec<Option<RefreshReason>>, Vec<usize>, u32) {
+        revisions: &mut Vec<Option<u64>>,
+        scratch: &mut PollScratch,
+    ) -> u32 {
         let count = self.world.non_send::<Chains>().0.len();
         polled.clear();
         polled.resize_with(count, || Ok(None));
+        revisions.clear();
+        revisions.resize(count, None);
 
         // What each chain declares about its own caching, one entry per chain and
         // read once per tick. Copied out of the world rather than borrowed across
         // the polls: the marks are written after the polls resolve, and the
         // closures below borrow the world's sources immutably for their whole
         // life.
-        let mut declared = self.declared_refresh(count);
+        self.declared_refresh(&mut scratch.declared, count);
         // The chains whose poll was cancelled, in declaration order. Collected
         // here rather than published by the caller because the poll phase is the
         // only place that knows which poll was cut short, and the report must be
         // published before the schedule step runs on the strength of this tick's
         // observation — a tick that then failed still has to say which source it
         // gave up on.
-        let mut stalled: Vec<usize> = Vec::new();
+        scratch.stalled.clear();
+        let PollScratch {
+            ref mut declared,
+            ref mut stalled,
+            ref mut slots,
+        } = *scratch;
         // The deadline threads this tick actually started, one per wave that had
         // a poll left pending. Published beside the stalls they may have caused,
         // because a caller triaging a wedged source wants to know whether the bot
         // spent a thread on it and how many.
         let mut watchdogs = 0_u32;
 
+        // One guard for the whole phase, held across every await, rather than a
+        // fresh `Vec` of `(chain, source)` pairs per wave. The old code copied the
+        // wave out because `join_all_boxed` takes an iterator of futures and each
+        // of those borrows the world, and the borrow was thought to need an owner
+        // rather than a guard: it does not. `Chains` is borrowed shared, nothing
+        // in this function is mutably borrowed, and no system runs while a poll is
+        // pending — so the guard *is* the owner, and the wave's pairs cost nothing.
+        let chains = self.world.non_send::<Chains>();
         for wave_index in 0..count.div_ceil(MAX_IN_FLIGHT_POLLS) {
             let base = wave_index.saturating_mul(MAX_IN_FLIGHT_POLLS);
-            // The wave as `(chain index, source)` pairs, read out before the
-            // await: `join_all_boxed` takes an iterator of futures, and each of
-            // those borrows the world, so the slice has to be owned by the time
-            // the first one exists. A `Vec` of references into a resource that
-            // is not written across the await is the borrow; nothing here is
-            // `mut` borrowed while any poll is pending.
-            let wave: Vec<(usize, &EcsChain)> = self
-                .world
-                .non_send::<Chains>()
-                .0
-                .iter()
-                .enumerate()
-                .skip(base)
-                .take(MAX_IN_FLIGHT_POLLS)
-                .collect();
+            let width = count.saturating_sub(base).min(MAX_IN_FLIGHT_POLLS);
+
+            // Which chains in this wave must be polled. A chain is **skipped**
+            // when it reported a revision equal to the one its committed value
+            // was read at and did not declare its baseline unsound: it keeps its
+            // slot in `polled` as `Ok(None)` — "this source did not move" — and no
+            // future is built for it, which is the whole saving.
+            //
+            // The indices are the *wave's* own slots, not positions in `polls`,
+            // so each `WavePoll::slot` is still its own index in the wave's wakers
+            // and the results below land on the chains that produced them.
+            slots.clear();
+            {
+                let ticks = self.world.non_send::<ChangeTicks>();
+                for slot in 0..width {
+                    let index = base.saturating_add(slot);
+                    let Some(chain) = chains.0.get(index) else {
+                        continue;
+                    };
+                    let unsound = declared
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|reason| reason.invalidates_baseline());
+                    let reported = chain.source.revision();
+                    if let Some(slot) = revisions.get_mut(index) {
+                        *slot = reported;
+                    }
+                    // `None` from a source that cannot report a revision is never
+                    // quiet: that is the value-comparison path, and it runs on
+                    // every tick as it always has.
+                    if !(ticks.quiet(index, reported) && !unsound) {
+                        slots.push(slot);
+                    }
+                }
+            }
+
+            // A wave whose every source was skipped is a tick that asked and was
+            // told nothing had moved. There is no future to join, no deadline to
+            // keep, and no watcher to arm — the watchdog is two `Arc`s and its
+            // state is a `Mutex`, so arming one for a wave with no members to
+            // watch was a thread's worth of bookkeeping spent on the answer
+            // "nothing happened".
+            if slots.is_empty() {
+                continue;
+            }
 
             // One watchdog for the wave rather than one per poll, and one
             // deadline the whole wave shares: `bounded_wave` owns it and reports
             // whether it really did start a thread, which is the number the tick
-            // report names.
-            let wave_watchdog = PollWatchdog::new(self.poll_deadline, wave.len());
+            // report names. Its width is the number of polls that will actually
+            // run.
+            let wave_watchdog = PollWatchdog::new(self.poll_deadline, slots.len());
             let (results, armed) = {
-                let polls: Vec<WavePoll<'_>> = wave
-                    .iter()
-                    .enumerate()
-                    .map(|(slot, &(index, chain))| {
-                        // `chunks` gives no index, so the chain's position is the
-                        // wave's start plus the offset within it. This is the same
-                        // index `Observed` and `Ledger` are keyed by, which is what
-                        // makes the baseline below the right one to hand over.
+                // Scoped to the wave, because each poll borrows that wave's
+                // watchdog and a buffer outliving the watchdog would be a buffer
+                // holding dangling borrows. Built from `drain(..)` into the wave
+                // rather than moved, so a bot with more chains than fit in one
+                // wave reuses one allocation across its waves.
+                let mut polls: Vec<WavePoll<'_>> = Vec::new();
+                for &slot in slots.iter() {
+                    {
+                        let index = base.saturating_add(slot);
+                        let chain = &chains.0[index];
                         let seen = self.world.non_send::<Observed>();
                         let ledger = self.world.non_send::<Ledger>();
                         let grants = self.world.resource::<Grants>();
@@ -5492,20 +5894,26 @@ impl EcsBot {
                                 .and_then(|slot| slot.as_ref())
                                 .or_else(|| ledger.bound(index))
                         };
-                        WavePoll {
+                        polls.push(WavePoll {
                             chain: index,
                             slot,
                             installed: false,
                             poll: Box::pin(chain.source.poll_any(&grants.0, baseline)),
                             watchdog: &wave_watchdog,
-                        }
-                    })
-                    .collect();
-                bounded_wave(self.poll_deadline, &wave_watchdog, polls).await
+                        });
+                    }
+                }
+                bounded_wave(self.poll_deadline, &wave_watchdog, polls.drain(..)).await
             };
             watchdogs = watchdogs.saturating_add(u32::from(armed));
 
-            for (&(index, _), result) in wave.iter().zip(results) {
+            // Zipped against the slots that were polled, not against the wave:
+            // `results` has one entry per built future, so pairing it with the
+            // wave would put every result after the first skip on the wrong
+            // chain — a mis-pairing the rendezvous would then refuse as a type
+            // mismatch, or, worse, commit one chain's value to another's.
+            for (&slot, result) in slots.iter().zip(results) {
+                let index = base.saturating_add(slot);
                 let Some(slot) = polled.get_mut(index) else {
                     continue;
                 };
@@ -5522,7 +5930,6 @@ impl EcsBot {
         // after it resolved: a source that reached its failure *inside* the poll
         // has only now recorded it, and asking before the poll would have asked
         // about the previous tick's state.
-        let chains = self.world.non_send::<Chains>();
         for (index, reason) in declared.iter_mut().enumerate() {
             let Some(chain) = chains.0.get(index) else {
                 continue;
@@ -5558,7 +5965,7 @@ impl EcsBot {
         // depended on which wave finished first could not be compared across two
         // runs of one seed.
         stalled.sort_unstable();
-        (declared, stalled, watchdogs)
+        watchdogs
     }
 
     /// What each of `count` chains declares about its own caching right now.
@@ -5569,10 +5976,11 @@ impl EcsBot {
     /// the mark is the substrate's record that the baseline it forced a read for
     /// was never successfully replaced, and clearing it on silence would be the
     /// permanent quiet state, one cause at a time.
-    fn declared_refresh(&self, count: usize) -> Vec<Option<RefreshReason>> {
+    fn declared_refresh(&self, declared: &mut Vec<Option<RefreshReason>>, count: usize) {
         let chains = self.world.non_send::<Chains>();
         let invalidated = self.world.non_send::<Invalidated>();
-        let mut declared: Vec<Option<RefreshReason>> = vec![None; count];
+        declared.clear();
+        declared.resize(count, None);
         for (index, chain) in chains.0.iter().enumerate() {
             // A chain already marked this tick keeps the mark it has: re-reading
             // it would let a later poll within the same tick overwrite the reason
@@ -5584,7 +5992,6 @@ impl EcsBot {
                 declared[index] = Some(reason);
             }
         }
-        declared
     }
 
     /// Write this tick's marks into the world, so the schedule step and the
@@ -6890,12 +7297,25 @@ impl EcsBot {
         // what that means, and there is no answer that is better than "this
         // cannot happen".
         world.insert_non_send(Polled::default());
+        // The change ticks, sized here so neither buffer is ever resized on the
+        // observation path. `seen` starts empty of revisions: a chain with no
+        // committed value has nothing a source's revision could equal, so its
+        // first tick is a poll like any other.
+        world.insert_non_send(ChangeTicks {
+            seen: vec![None; count],
+            polled: vec![None; count],
+        });
         // The change flags and the plan's buffers are per-tick scratch, inserted
         // here so the first tick allocates them once and every later tick reuses
         // the same allocations. Nothing else writes them.
-        world.insert_non_send(Moving::default());
+        world.insert_non_send(AdmitScratch::default());
         world.insert_non_send(Moved::default());
         world.insert_non_send(Plan::default());
+        // The observation phase's own scratch, empty on purpose: the first tick
+        // sizes these to the world and every tick after reuses that capacity,
+        // which is the whole of how a tick that changed nothing came to cost no
+        // allocations at all.
+        world.insert_non_send(PollScratch::default());
         // One slot per chain, sized here so the observation phase never resizes
         // it: a `resize` per tick would be an allocation the first time and a
         // capacity check every tick after, for a buffer whose length is the
@@ -7128,6 +7548,118 @@ pub(super) mod tests {
         fn domain_id(&self) -> &str {
             "test::counted"
         }
+    }
+
+    /// A source that reports a change tick as well as a value.
+    struct Rev {
+        value: Rc<Cell<u64>>,
+        rev: Rc<Cell<u64>>,
+        polls: Rc<Cell<usize>>,
+        caps: Vec<Cap>,
+    }
+
+    impl Observe for Rev {
+        type Output = u64;
+
+        fn required_caps(&self) -> &[Cap] {
+            &self.caps
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u64, BotError> {
+            call.0.check(&self.caps)?;
+            self.polls.set(self.polls.get().saturating_add(1));
+            Ok(self.value.get())
+        }
+
+        fn revision(&self) -> Option<u64> {
+            Some(self.rev.get())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::rev"
+        }
+    }
+
+    /// An action over a `u64`, counting its own calls.
+    struct CountU64(Rc<Cell<usize>>);
+
+    impl Execute for CountU64 {
+        type Input = u64;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
+        async fn execute_action(&self, call: (Auth, &u64)) -> Result<(), BotError> {
+            call.0.check(&[])?;
+            self.0.set(self.0.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &'static str {
+            "test::count_u64"
+        }
+    }
+
+    #[test]
+    fn a_change_tick_source_fires_once_per_movement_and_is_not_polled_otherwise() -> TestResult {
+        let value = Rc::new(Cell::new(0u64));
+        let rev = Rc::new(Cell::new(0u64));
+        let polls = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(Cell::new(0usize));
+        let mut bot = EcsBot::builder("revs")
+            .observe(Rev {
+                value: Rc::clone(&value),
+                rev: Rc::clone(&rev),
+                polls: Rc::clone(&polls),
+                caps: Vec::new(),
+            })
+            .on(
+                |value: &u64| value.is_multiple_of(2),
+                CountU64(Rc::clone(&counter)),
+            )
+            .with_effects(test_effects()?)
+            .build(&GrantSet::empty())?;
+        let mut fired = Vec::new();
+        for step in 0..6u64 {
+            // The value and the revision move together, every other tick: the
+            // promise `Observe::revision` asks for, kept in both directions.
+            // Halving a `u64` by a literal cannot overflow or divide by zero,
+            // so the refusal is a statement about that rather than a path a
+            // reader has to imagine.
+            let held = step
+                .checked_div(2)
+                .ok_or("halving a u64 by two cannot fail")?;
+            value.set(held);
+            rev.set(held);
+            fired.push(bot.tick()?);
+        }
+        // The value steps 0, 0, 1, 1, 2, 2 and the revision steps with it. Tick 2
+        // moves to an **odd** value, so the condition runs and answers false —
+        // which is the half the skip must not lose: a movement is evaluated, and
+        // only a tick that did not move is skipped.
+        assert_eq!(
+            fired,
+            vec![1, 0, 0, 0, 1, 0],
+            "one fire per even movement and nothing while the revision holds: {fired:?}"
+        );
+        assert_eq!(
+            polls.get(),
+            3,
+            "a skipped chain is not polled at all, so three movements are three polls"
+        );
+        assert_eq!(
+            bot.pending(),
+            Vec::new(),
+            "a value that moves must be acted on, and a chain with nothing outstanding \
+             must not be reported"
+        );
+        Ok(())
     }
 
     /// A source that fails once its script runs out.
