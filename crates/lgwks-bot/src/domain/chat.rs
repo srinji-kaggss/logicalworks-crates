@@ -70,13 +70,16 @@ impl ChatMessage {
         &self.channel
     }
 
-    /// The sender's identifier.
+    /// The address the message was sent from, exactly as the provider spelled it:
+    /// no normalisation and no prefix stripping, so a condition can match on the
+    /// provider's own spelling rather than on this crate's idea of it.
     #[must_use]
     pub fn sender(&self) -> &str {
         &self.sender
     }
 
-    /// The message text.
+    /// The message body, exactly as the provider delivered it — not trimmed, not
+    /// normalised, and not decoded from any markup the transport carried.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
