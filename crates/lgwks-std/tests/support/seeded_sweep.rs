@@ -121,6 +121,20 @@ pub fn fold_usize(trace: &mut u64, value: usize) {
     fold(trace, word_of(value));
 }
 
+/// Folds a nanosecond count into the trace without narrowing it.
+///
+/// The count is a `u128` because a `Duration` reports nanoseconds in that width,
+/// and the trace word is 64 bits. Narrowing it would alias two counts that share
+/// their low 64 bits — the one collision a replay trace cannot have — so the
+/// count is folded a half at a time, and each half is a `u64` already.
+pub fn fold_nanos(trace: &mut u64, nanos: u128) {
+    let bytes = nanos.to_le_bytes();
+    let (halves, _) = bytes.as_chunks::<8>();
+    for half in halves {
+        fold(trace, u64::from_le_bytes(*half));
+    }
+}
+
 /// An elapsed duration in nanoseconds, as the trace word counts time.
 ///
 /// `Duration::as_nanos` is a `u128` and the trace word is 64 bits, so the
@@ -169,7 +183,8 @@ mod tests {
 
     use super::{
         FNV_BASIS, SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold,
-        fold_score, fold_usize, initial_trace, nanos_of, next_index, next_seed, word_of,
+        fold_nanos, fold_score, fold_usize, initial_trace, nanos_of, next_index, next_seed,
+        word_of,
     };
 
     /// A stand-in family: it makes every draw this module offers, so the stream
@@ -288,6 +303,19 @@ mod tests {
             nanos_of(std::time::Duration::ZERO),
             0,
             "no elapsed time is zero nanoseconds"
+        );
+    }
+
+    #[test]
+    /// A nanosecond count is folded whole, not narrowed to its low half.
+    fn sim_a_nanosecond_count_is_folded_whole() {
+        let mut low = initial_trace();
+        fold_nanos(&mut low, 1);
+        let mut high = initial_trace();
+        fold_nanos(&mut high, 1_u128.wrapping_add(1_u128 << 64));
+        assert_ne!(
+            low, high,
+            "two counts differing only above the low 64 bits folded alike"
         );
     }
 

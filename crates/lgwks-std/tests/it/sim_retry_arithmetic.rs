@@ -10,24 +10,9 @@ use std::time::Duration;
 use crate::seeded_sweep;
 
 use seeded_sweep::{
-    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
-    next_index, next_seed,
+    SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_nanos,
+    initial_trace, next_index, next_seed,
 };
-
-/// Folds a nanosecond count into the trace without narrowing it.
-///
-/// The count is a `u128` because a `Duration` reports nanoseconds in that width,
-/// and the trace word is 64 bits. Narrowing it would alias two counts that share
-/// their low 64 bits, which is the one collision a replay trace cannot have, so
-/// the count is folded a half at a time: the low word and then the high word,
-/// either of which is a `u64` already.
-fn fold_nanos(trace: &mut u64, nanos: u128) {
-    let bytes = nanos.to_le_bytes();
-    let (halves, _) = bytes.as_chunks::<8>();
-    for half in halves {
-        fold(trace, u64::from_le_bytes(*half));
-    }
-}
 
 /// Returns the exact capped backoff in nanoseconds by bounded repeated doubling.
 ///
