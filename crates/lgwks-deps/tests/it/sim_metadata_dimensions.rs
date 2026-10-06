@@ -466,8 +466,9 @@ fn build_member(
             dep.source = None;
             if coin(rng) {
                 let target = rng.pick_named("member names", names)?;
+                let path = format!("../{target}");
                 dep.name.clone_from(target);
-                dep.path = Some(format!("../{target}"));
+                dep.path = Some(path);
             } else {
                 dep.path = Some(format!("../outside/dep{index}"));
             }
@@ -727,10 +728,14 @@ fn truncated_scenario(seed: u64) -> Outcome<Scenario> {
     // document, so the slice is bounded by the draw rather than by a clamped
     // index that a short document could push past the end.
     let Some(offset) = cut_offset(&mut rng, full.len()) else {
-        return Err("a document shorter than one eighth has no strict prefix to cut".into());
+        let message = "a document shorter than one eighth has no strict prefix to cut";
+        lgwks_std::trace::debug!(error = ?message, length = full.len(), "truncated_scenario: the document has no eighth to cut at");
+        return Err(message.into());
     };
     let Some(cut) = full.get(..offset) else {
-        return Err("a cut share must name a byte boundary inside the document".into());
+        let message = "a cut share must name a byte boundary inside the document";
+        lgwks_std::trace::debug!(error = ?message, offset, "truncated_scenario: the drawn cut is not a byte boundary");
+        return Err(message.into());
     };
     Ok(Scenario {
         document: cut.to_owned(),

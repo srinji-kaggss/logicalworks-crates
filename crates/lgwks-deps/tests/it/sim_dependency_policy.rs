@@ -41,6 +41,21 @@ impl Tally {
     }
 }
 
+/// The verdict for one identity draw, through the public API the audit uses.
+///
+/// The approval and the observed edge are built here so the family loop states
+/// one fallible step: a loop that built both itself was a chain of four `?`
+/// where a reader could not see which draw had refused.
+fn identity_verdict(
+    approved: &str,
+    observed: &str,
+    alias: Option<&str>,
+) -> Result<u8, Box<dyn Error>> {
+    let approval = register(approved, "registry", &alias_line(alias))?;
+    let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
+    Ok(code_for(&approval, observed_edge))
+}
+
 /// Runs one identity family for `seed`: approved spelling vs observed spelling.
 fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     // The observed name is one of two fold-alikes; the approved name is one of
@@ -50,16 +65,16 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let mut hasher = DefaultHasher::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        let approved = *rng.pick_named("identity names", &names)?;
-        let observed = *rng.pick_named("identity names", &names)?;
+        let approved = rng.pick_named("identity names", &names)?;
+        let observed = rng.pick_named("identity names", &names)?;
+        let approved = *approved;
+        let observed = *observed;
         let alias: Option<&str> = if coin(&mut rng) {
             names.iter().copied().find(|name| *name != approved)
         } else {
             None
         };
-        let approval = register(approved, "registry", &alias_line(alias))?;
-        let observed_edge = edge(observed, Some(REGISTRY), &[], true, false, None, None)?;
-        let code = code_for(&approval, observed_edge);
+        let code = identity_verdict(approved, observed, alias)?;
         let admits = approved == observed || alias == Some(observed);
         tally.record(
             code,

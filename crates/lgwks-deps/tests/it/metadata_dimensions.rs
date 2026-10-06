@@ -210,12 +210,19 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // A scratch tree this run owns is this run's to remove; a removal that
-        // fails leaves the tree for the build's own temporary directory, and the
-        // suffix guarantees the next run cannot read it as its own. `Drop` has no
-        // channel to report a failure through, which is why the removal reports
-        // nothing rather than being skipped.
-        std::fs::remove_dir_all(&self.root).ok();
+        // A scratch tree this run owns is this run's to remove. `Drop` has no
+        // channel to return through, so a removal that fails is *reported* on
+        // the debug stream rather than discarded: a tree left behind is a fact
+        // the next run should be able to see, and the suffix guarantees the next
+        // run cannot read it as its own.
+        if let Err(cause) = std::fs::remove_dir_all(&self.root) {
+            let refused: Result<(), _> = Err(cause);
+            lgwks_std::trace::debug!(
+                error = ?refused.as_ref().err(),
+                root = %self.root.display(),
+                "Scratch::drop: the scratch tree could not be removed"
+            );
+        }
     }
 }
 
