@@ -438,7 +438,7 @@ fn stored_lags_history_but_still_fences_a_replay(band: Band) -> TestResult {
         let head = journal.tail();
         let lagged = journal.events().count().saturating_sub(complete);
         assert!(
-            lagged >= usize::try_from(depth).unwrap_or(usize::MAX),
+            lagged >= usize::try_from(depth)?,
             "the fact is not lagging: only {lagged} events separate it from the head"
         );
 
@@ -454,7 +454,7 @@ fn stored_lags_history_but_still_fences_a_replay(band: Band) -> TestResult {
         );
         assert_eq!(
             journal.events().count(),
-            complete.saturating_add(usize::try_from(depth).unwrap_or(0).saturating_mul(2)),
+            complete.saturating_add(usize::try_from(depth)?.saturating_mul(2)),
             "a refused replay still changed the journal"
         );
         drop(journal);

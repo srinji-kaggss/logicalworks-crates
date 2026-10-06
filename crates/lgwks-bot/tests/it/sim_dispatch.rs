@@ -166,9 +166,14 @@ impl Run {
         self.entered.get()
     }
 
-    /// A count drawn from this run's seed, in `1..=span`.
-    fn churn(&self, sim: &mut sim::Sim, span: u32) -> usize {
-        usize::try_from(sim.rng().between(1, span)).unwrap_or(1)
+    /// A count drawn from this run's seed, in `1..=span`, or `None` when the
+    /// draw does not fit this host's address space.
+    ///
+    /// `None` rather than a count of one: a stand-in here would be a scenario
+    /// that churned once on a host that could not address the draw, and the
+    /// failure this family looks for is exactly a scenario that did not run.
+    fn churn(&self, sim: &mut sim::Sim, span: u32) -> Option<usize> {
+        usize::try_from(sim.rng().between(1, span)).ok()
     }
 }
 
@@ -350,7 +355,9 @@ fn applied_never_retries(band: Band) -> TestResult {
         let mut second = restart_and_settle(&run, EffectEvidence::Applied)?;
         let after_settle = run.entered();
 
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..later {
             drop(second.tick());
         }
@@ -367,7 +374,9 @@ fn ladder_once(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let run = Run::new();
         let mut bot = run.lands()?;
-        let ticks = run.churn(sim, 4);
+        let ticks = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..ticks {
             drop(bot.tick());
         }
@@ -447,7 +456,9 @@ fn held_not_exhausted(band: Band) -> TestResult {
         let mut second = run.never()?;
         let held = second.tick();
         let before = run.entered();
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..later {
             drop(second.tick());
         }
@@ -497,7 +508,9 @@ fn settle_is_idempotent(band: Band) -> TestResult {
 
         bot.resolve_effect(&key, EffectEvidence::NotApplied)?;
         let after_first = run.recorded()?.len();
-        let repeats = run.churn(sim, 4);
+        let repeats = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..repeats {
             drop(bot.resolve_effect(&key, EffectEvidence::NotApplied));
         }
@@ -549,7 +562,9 @@ fn store_isolation(band: Band) -> TestResult {
 fn crash_loop(band: Band) -> TestResult {
     sim::assert_replays(band, |sim| {
         let run = Run::new();
-        let cycles = run.churn(sim, 8);
+        let cycles = run
+            .churn(sim, 8)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..cycles {
             drop(run.lands()?.tick());
         }
@@ -573,7 +588,9 @@ fn unknown_survives(band: Band) -> TestResult {
         drop(bot.tick());
         let key = run.first_key()?;
         let before = run.recorded()?.len();
-        let later = run.churn(sim, 4);
+        let later = run
+            .churn(sim, 4)
+            .ok_or("a churn count this host cannot address")?;
 
         for _ in 0..later {
             drop(bot.tick());
@@ -610,7 +627,9 @@ fn repeat_settle_safe(band: Band) -> TestResult {
         bot.resolve_effect(&key, evidence)?;
         let settled = run.count(EventKind::OutcomeObserved)?;
 
-        let churn = run.churn(sim, 8);
+        let churn = run
+            .churn(sim, 8)
+            .ok_or("a churn count this host cannot address")?;
         for _ in 0..churn {
             drop(bot.tick());
             drop(bot.resolve_effect(&key, evidence));

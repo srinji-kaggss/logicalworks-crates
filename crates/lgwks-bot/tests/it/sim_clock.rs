@@ -56,14 +56,31 @@ const WATCHDOG_LIMIT: Duration = Duration::from_secs(1);
 /// be compared as one number rather than by reading two traces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Receipt {
-    /// Budget remaining after the scenario, per budget.
-    remaining: Vec<u64>,
+    /// Budget remaining after the scenario, per budget, in nanoseconds.
+    ///
+    /// Nanoseconds at the width `Duration::as_nanos` reports them: a receipt is a
+    /// reading, and narrowing it to the trace's `u64` to store it would need a
+    /// stand-in for a span of 584 942 years.
+    remaining: Vec<u128>,
     /// How many times a deadline was observed exhausted.
     exhausted_count: u32,
-    /// The largest advance the scenario refused, or zero.
-    refused_ceiling_nanos: u64,
+    /// The largest advance the scenario refused, in nanoseconds; zero if none.
+    refused_ceiling_nanos: u128,
     /// Whether the watchdog outlived its limit during the run.
     watchdog_fired: bool,
+}
+
+/// Record a nanosecond reading under `label`.
+///
+/// The trace counts in `u64`, and a logical clock's reading leaves that width
+/// only past 584 942 years of *simulated* time. Such a reading is recorded as the
+/// fact that it did not fit, so a trace replays to the same shape on every host
+/// rather than to a number no run produced.
+fn record_nanos(trace: &mut Trace, label: &str, value: Duration) {
+    match u64::try_from(value.as_nanos()) {
+        Ok(nanos) => trace.record_u64(label, nanos),
+        Err(_past_the_trace) => trace.record(&format!("{label}: past the trace's width")),
+    }
 }
 
 /// Run one scenario from `seed` against a virtual clock, returning its trace.
@@ -77,7 +94,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
             // Saturating rather than a bare product: this repository forbids
             // unchecked arithmetic, and both factors are bounded, so saturation
             // is the shape the lint admits and a fact the value already meets.
-            Duration::from_secs(span.saturating_mul(u64::try_from(index).unwrap_or(0)))
+            Duration::from_secs(span.saturating_mul(index))
         })
         .collect();
 
@@ -100,7 +117,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         let after = match clock.advance(step) {
             Ok(landed) => landed,
             Err(ClockError::OutOfRange { ceiling, .. }) => {
-                receipt.refused_ceiling_nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(0);
+                receipt.refused_ceiling_nanos = ceiling.as_nanos();
                 trace.record("advance-refused-out-of-range");
                 break;
             }
@@ -114,10 +131,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         };
         // Monotonicity is the whole contract of an advance: never backwards,
         // and never more than asked unless the ceiling clamped it.
-        trace.record_u64(
-            "elapsed-nanos",
-            u64::try_from(after.as_nanos()).unwrap_or(0),
-        );
+        record_nanos(&mut trace, "elapsed-nanos", after);
         if after < before {
             trace.record("monotonicity-violated");
         }
@@ -127,9 +141,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
             if deadline.is_exhausted() {
                 receipt.exhausted_count = receipt.exhausted_count.saturating_add(1);
             }
-            receipt
-                .remaining
-                .push(u64::try_from(deadline.remaining().as_nanos()).unwrap_or(0));
+            receipt.remaining.push(deadline.remaining().as_nanos());
             // The remaining budget is the restart-safe quantity, and it is a
             // pure function of the clock and the budget — this is the identity
             // a restart depends on.
@@ -156,10 +168,7 @@ fn scenario(seed: u64) -> (Trace, Receipt) {
         trace.record("a-day-of-logical-time-exhausts-a-one-second-budget");
     }
     receipt.watchdog_fired = deadline.watchdog_exceeded(WATCHDOG_LIMIT);
-    trace.record_u64(
-        "final-nanos",
-        u64::try_from(clock.now().as_nanos()).unwrap_or(0),
-    );
+    record_nanos(&mut trace, "final-nanos", clock.now());
     // The watchdog's *reading* is real time and is deliberately NOT recorded: a
     // trace that carried nanoseconds of wall clock would differ on every run and
     // stop being a replay receipt. What is recorded is the boolean below, which
