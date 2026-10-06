@@ -91,18 +91,50 @@ pub fn fold_score(trace: &mut u64, score: f64) {
     fold(trace, score.to_bits());
 }
 
+/// The counter's own bytes read as the trace word, most significant first.
+///
+/// This is the one reading of a `usize` this crate folds: every bit of a counter
+/// wider than the word reaches it, where a narrowing cast would have aliased two
+/// counters onto one value — the single collision a replay trace cannot have.
+/// `as` is `as_conversions = forbid` and `From<usize> for u64` does not exist,
+/// so the word is mixed a byte at a time through `u8` into `u64`, the one
+/// infallible numeric widening in the language.
+///
+/// It is a fold and not a cast: it is a value for entropy and for a trace, not a
+/// copy of the counter, and no caller may read it as the counter itself.
+#[must_use]
+pub fn word_of(value: usize) -> u64 {
+    let mut word = 0_u64;
+    for byte in value.to_ne_bytes() {
+        word = word.wrapping_mul(31).wrapping_add(u64::from(byte));
+    }
+    word
+}
+
 /// Folds one counted value into the trace, saturating a cast rather than
 /// truncating it so a wide counter cannot alias a small one.
 ///
-/// The counter's own bytes are folded, most significant first, which is the
-/// saturating reading done without a conversion at all: every bit of a counter
-/// wider than the trace word reaches the trace, where a narrowing cast would
-/// have folded two different counters onto one value — the single collision a
-/// replay trace cannot have.
+/// The whole counter reaches the trace through [`word_of`], so the fold is the
+/// same reading everywhere: no caller can fold a counter one way and read it
+/// another.
 pub fn fold_usize(trace: &mut u64, value: usize) {
-    for byte in value.to_ne_bytes().iter().rev() {
-        fold(trace, u64::from(*byte));
-    }
+    fold(trace, word_of(value));
+}
+
+/// An elapsed duration in nanoseconds, as the trace word counts time.
+///
+/// `Duration::as_nanos` is a `u128` and the trace word is 64 bits, so the
+/// conversion would need a checked narrowing at every sample. It is read as
+/// seconds and sub-second nanoseconds instead — both of which `Duration` reports
+/// in a width that fits — and combined with saturating arithmetic, so a duration
+/// that somehow outlasted `u64::MAX` nanoseconds reads as the largest sample
+/// rather than as a wrapped one.
+#[must_use]
+pub fn nanos_of(elapsed: std::time::Duration) -> u64 {
+    elapsed
+        .as_secs()
+        .saturating_mul(1_000_000_000_u64)
+        .saturating_add(u64::from(elapsed.subsec_nanos()))
 }
 
 /// Runs `sweep` twice under `seed` and asserts the traces agree.
@@ -137,7 +169,7 @@ mod tests {
 
     use super::{
         FNV_BASIS, SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold,
-        fold_score, fold_usize, initial_trace, next_index, next_seed,
+        fold_score, fold_usize, initial_trace, nanos_of, next_index, next_seed, word_of,
     };
 
     /// A stand-in family: it makes every draw this module offers, so the stream
@@ -218,6 +250,44 @@ mod tests {
         assert_ne!(
             low, high,
             "a counter differing only in its sign bit folded onto the same trace value"
+        );
+    }
+
+    #[test]
+    /// A counter's word reading and its fold are one reading, not two.
+    fn sim_a_counters_word_and_its_fold_are_one_reading() {
+        let mut folded = initial_trace();
+        fold_usize(&mut folded, 4_096);
+        let mut direct = initial_trace();
+        fold(&mut direct, word_of(4_096));
+        assert_eq!(
+            folded, direct,
+            "folding a counter and folding its word reading must be the same observation"
+        );
+        assert_ne!(
+            word_of(1),
+            word_of(1_usize.wrapping_add(1_usize << (usize::BITS - 1))),
+            "two counters differing only in their sign bit read as one word"
+        );
+    }
+
+    #[test]
+    /// A duration is read as its whole nanosecond count, not narrowed.
+    fn sim_a_duration_reads_as_its_whole_nanosecond_count() {
+        assert_eq!(
+            nanos_of(std::time::Duration::from_nanos(1_500)),
+            1_500,
+            "a duration under a second is its own nanosecond count"
+        );
+        assert_eq!(
+            nanos_of(std::time::Duration::from_secs(2)),
+            2_000_000_000,
+            "a duration over a second carries both of its halves"
+        );
+        assert_eq!(
+            nanos_of(std::time::Duration::ZERO),
+            0,
+            "no elapsed time is zero nanoseconds"
         );
     }
 

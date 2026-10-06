@@ -43,12 +43,26 @@
 
 use crate::consumer_probe;
 
-use consumer_probe::{build_and_run, manifest, measurement};
+use consumer_probe::{MISSING_MEASUREMENT, build_and_run, manifest, measurement};
 use lgwks_std::glob::{GlobDialect, GlobPattern, GlobScratch};
 use lgwks_std::retry::RetryPolicy;
 use lgwks_std::similarity::{CheckedEvidence, EditDistance, EvidenceVerdict};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
+
+use crate::seeded_sweep::{nanos_of, word_of};
+
+/// The attempts the shared retry policy is driven across, one per caller
+/// position modulo the window.
+///
+/// The table is the rule rather than a narrowing of the caller's position: a
+/// caller's attempt is a value this names, so no conversion between the index
+/// width and the width a policy takes an attempt in can change which attempt a
+/// caller was given.
+const ATTEMPT_WINDOW: [u32; 40] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+];
 
 /// The concurrency tiers this file sweeps.
 const TIERS: [usize; 3] = [100, 1_000, 10_000];
@@ -226,8 +240,8 @@ fn answer(
         refusal,
         delay_nanos: retry
             .delay(
-                u32::try_from(index % 40).unwrap_or(0),
-                u64::try_from(index).unwrap_or(0),
+                ATTEMPT_WINDOW[index.rem_euclid(ATTEMPT_WINDOW.len())],
+                word_of(index),
             )
             .as_nanos(),
     }
@@ -273,11 +287,7 @@ impl Shared {
         let retry = read(&self.retry);
         let start = Instant::now();
         let value = answer(&pattern, &evidence, &retry, scratch, index);
-        (
-            value,
-            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
-            scratch.scalar_capacity(),
-        )
+        (value, nanos_of(start.elapsed()), scratch.scalar_capacity())
     }
 }
 
@@ -289,7 +299,10 @@ impl Shared {
 /// the join in [`run_tier`]. Recovering the guard is what keeps one caller's
 /// panic from turning every other caller's tier into a deadlock.
 fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// The single-threaded reference: one answer per caller index, computed on this
@@ -334,9 +347,13 @@ fn run_tier(shared: &Arc<Shared>, tier: usize) -> (Vec<Observation>, Vec<String>
                 shared.observe(&mut scratch, index)
             }) {
             Ok(joined) => {
-                let observation = joined
-                    .join()
-                    .unwrap_or_else(|panic| (panicked_caller(&format!("{panic:?}")), 0, 0));
+                // A caller that panicked is a counted divergence, not a lost
+                // observation: the record it leaves is one that cannot equal any
+                // reference answer, and it says which panic it was.
+                let observation = match joined.join() {
+                    Ok(observed) => observed,
+                    Err(panic) => (panicked_caller(&format!("{panic:?}")), 0, 0),
+                };
                 observations.push(observation);
             }
             Err(error) => failures.push(format!("caller {index}: {error}")),
@@ -368,16 +385,16 @@ fn percentiles(samples: &[u64]) -> (u64, u64, u64) {
     }
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
-    let count = u64::try_from(sorted.len()).unwrap_or(u64::MAX);
-    let rank = |percent: u64| -> u64 {
-        let index = usize::try_from(
-            percent
-                .saturating_mul(count)
-                .div_ceil(100)
-                .saturating_sub(1),
-        )
-        .unwrap_or(usize::MAX);
-        sorted.get(index).copied().unwrap_or(0)
+    let count = sorted.len();
+    let rank = |percent: usize| -> u64 {
+        let index = percent
+            .saturating_mul(count)
+            .div_ceil(100)
+            .saturating_sub(1)
+            .min(count.saturating_sub(1));
+        // The index is the nearest rank clamped to the last position, so it is a
+        // position this owns rather than an absent value.
+        sorted[index]
     };
     (rank(50), rank(95), rank(99))
 }
@@ -405,10 +422,13 @@ fn one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier()
             0,
             "tier {tier}: the downstream run must diverge nowhere:\n{stdout}"
         );
-        assert_eq!(
-            measurement(&stdout, &format!("tier{tier}-reached")),
-            u64::try_from(tier).unwrap_or(u64::MAX),
-            "tier {tier}: the host must reach every requested caller:\n{stdout}"
+        // The report is a word and the tier is an index, so the comparison is
+        // guarded by the one conversion between them rather than made through a
+        // substituted value.
+        let reached = measurement(&stdout, &format!("tier{tier}-reached"));
+        assert!(
+            u64::try_from(tier).is_ok_and(|requested| reached == requested),
+            "tier {tier}: the host must reach every requested caller, reported {reached}:\n{stdout}"
         );
         let mut previous = 0_u64;
         for field in ["p50", "p95", "p99"] {
@@ -425,7 +445,10 @@ fn one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier()
         let baseline = measurement(&stdout, "baseline-rss");
         let peak = measurement(&stdout, &format!("tier{tier}-rss"));
         assert!(
-            baseline > 0 && peak > 0,
+            baseline > 0
+                && baseline < MISSING_MEASUREMENT
+                && peak > 0
+                && peak < MISSING_MEASUREMENT,
             "tier {tier}: the probe must report a readable resident-size figure, \
              got baseline={baseline} peak={peak}:\n{stdout}"
         );
@@ -613,6 +636,35 @@ const STACK_BYTES: usize = 64 * 1024;
 const SHARED_PATTERN: &str = "*a**/b[0-9]?";
 const FIXTURES: usize = 4;
 
+/// The attempts the shared retry policy is driven across, one per caller
+/// position modulo the window: a caller's attempt is a value this names rather
+/// than a narrowing of its position.
+const ATTEMPT_WINDOW: [u32; 40] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+];
+
+/// The caller's position read as the word a policy takes entropy in, mixed a
+/// byte at a time so no bit of the position is dropped.
+fn word_of(value: usize) -> u64 {
+    let mut word = 0_u64;
+    for byte in value.to_ne_bytes() {
+        word = word
+            .wrapping_mul(31)
+            .wrapping_add(u64::from(byte));
+    }
+    word
+}
+
+/// An elapsed duration in nanoseconds, read as seconds plus sub-second
+/// nanoseconds so no narrowing of a `u128` nanosecond count is needed.
+fn nanos_of(elapsed: std::time::Duration) -> u64 {
+    elapsed
+        .as_secs()
+        .saturating_mul(1_000_000_000_u64)
+        .saturating_add(u64::from(elapsed.subsec_nanos()))
+}
+
 fn peak_rss_bytes() -> Option<u64> {
     if let Some(statm) = std::fs::read_to_string("/proc/self/statm").ok() {
         if let Some(pages) = statm.split_whitespace().nth(1) {
@@ -683,7 +735,11 @@ fn answer(
         accepted: verdict.as_ref().is_ok_and(|inner| inner.is_accepted()),
         refusal,
         delay_nanos: u128::from(
-            retry.delay(u32::try_from(index % 40).unwrap_or(0), u64::try_from(index).unwrap_or(0)).as_nanos(),
+            retry.delay(
+                ATTEMPT_WINDOW[index.rem_euclid(ATTEMPT_WINDOW.len())],
+                word_of(index),
+            )
+            .as_nanos(),
         ),
     }
 }
@@ -695,7 +751,10 @@ struct Shared {
 }
 
 fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 fn percentiles(samples: &[u64]) -> (u64, u64, u64) {
@@ -704,11 +763,16 @@ fn percentiles(samples: &[u64]) -> (u64, u64, u64) {
     }
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
-    let count = u64::try_from(sorted.len()).unwrap_or(u64::MAX);
-    let rank = |percent: u64| -> u64 {
-        let index = usize::try_from(percent.saturating_mul(count).div_ceil(100).saturating_sub(1))
-            .unwrap_or(usize::MAX);
-        sorted.get(index).copied().unwrap_or(0)
+    let count = sorted.len();
+    let rank = |percent: usize| -> u64 {
+        let index = percent
+            .saturating_mul(count)
+            .div_ceil(100)
+            .saturating_sub(1)
+            .min(count.saturating_sub(1));
+        // The index is the nearest rank clamped to the last position, so it is a
+        // position this owns rather than an absent value.
+        sorted[index]
     };
     (rank(50), rank(95), rank(99))
 }
@@ -744,8 +808,12 @@ fn main() {
         }
     }
 
-    let baseline_rss = peak_rss_bytes().unwrap_or(0);
-    println!("baseline-rss {baseline_rss}");
+    // A resident-size figure the platform cannot report is not printed at all:
+    // the caller reads a missing measurement as absent and refuses the tier,
+    // which is what an unread figure means.
+    if let Some(baseline) = peak_rss_bytes() {
+        println!("baseline-rss {baseline}");
+    }
 
     for tier in TIERS {
         let mut answers: Vec<CallerAnswer> = Vec::with_capacity(tier);
@@ -763,19 +831,23 @@ fn main() {
                     let retry = read(&owned.retry);
                     let start = Instant::now();
                     let value = answer(&pattern, &evidence, &retry, &mut scratch, index);
-                    (value, u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
+                    (value, nanos_of(start.elapsed()))
                 });
             match built {
                 Ok(joined) => {
-                    let (value, nanos) = joined.join().unwrap_or_else(|_| {
-                        (CallerAnswer {
-                            matched: false,
-                            score_bits: 0,
-                            accepted: false,
-                            refusal: String::from("caller panicked"),
-                            delay_nanos: 0,
-                        }, 0)
-                    });
+                    let (value, nanos) = match joined.join() {
+                        Ok(observed) => observed,
+                        Err(_) => (
+                            CallerAnswer {
+                                matched: false,
+                                score_bits: 0,
+                                accepted: false,
+                                refusal: String::from("caller panicked"),
+                                delay_nanos: 0,
+                            },
+                            0,
+                        ),
+                    };
                     answers.push(value);
                     durations.push(nanos);
                     reached += 1;
@@ -789,13 +861,15 @@ fn main() {
             .filter(|(answer, expected)| *answer != *expected)
             .count();
         let (p50, p95, p99) = percentiles(&durations);
-        let rss = peak_rss_bytes().unwrap_or(0);
+        let rss = peak_rss_bytes();
         println!("tier{tier}-reached {reached}");
         println!("tier{tier}-divergences {divergences}");
         println!("tier{tier}-p50 {p50}");
         println!("tier{tier}-p95 {p95}");
         println!("tier{tier}-p99 {p99}");
-        println!("tier{tier}-rss {rss}");
+        if let Some(rss) = rss {
+            println!("tier{tier}-rss {rss}");
+        }
     }
 
     // The drain check: after every tier has joined, one more call on the same
