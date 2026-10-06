@@ -664,3 +664,61 @@ fn a_changed_file_inventory_is_read_as_data() -> TestResult {
     assert_eq!(empty.patch_bytes(), 0);
     Ok(())
 }
+
+// ── A refused credential is a typed repair on the verb path ─────────────────
+
+/// Row 3 of #278 on the shipped adapter: a `gh` whose token the receiver
+/// refuses, polled through the `Observe` verb a bot actually runs, reports
+/// `CredentialRejected` carrying the re-grant — not the generic domain failure
+/// a retry policy would repeat.
+#[test]
+fn a_refused_credential_reaches_the_observe_verb_as_its_repair() -> TestResult {
+    use lgwks_bot::cap::Cap;
+    use lgwks_bot::domain::gh::{PrSnapshotSource, PullRequest};
+    use lgwks_bot::error::BotError;
+    use lgwks_bot::spec::NeedSet;
+    use lgwks_bot::verb::Observe;
+    use lgwks_bot::{GrantSet, RetryClass};
+
+    let fake = FakeGh::install("credential", HEAD)?;
+    fake.configure(Scenario::new(HEAD).deny_credential(401))?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(64 * 1024)?)
+        .deadline(Some(Duration::from_secs(10)))
+        .env("PATH", fake.search_path()?);
+    let source = PrSnapshotSource::new(gh, PullRequest::new(Repository::new("acme/widgets")?, 7));
+    let auth = GrantSet::empty()
+        .grant(Cap::net())
+        .grant(Cap::sys())
+        .issue(source.required_caps())?;
+
+    let polled = lgwks_bot::Runtime::new()?.block_on(source.poll((auth, ())));
+    let Err(rejection) = polled else {
+        return Err(format!("a refused credential must not read a snapshot: {polled:?}").into());
+    };
+    assert_eq!(
+        rejection.retry_class(),
+        RetryClass::Never,
+        "the same token against the same receiver is refused again: {rejection}"
+    );
+    let BotError::CredentialRejected {
+        ref domain,
+        status,
+        ref needs,
+    } = rejection
+    else {
+        return Err(format!("a 401 must be CredentialRejected, not {rejection}").into());
+    };
+    assert_eq!(
+        domain, "gh::pr_snapshot",
+        "attributed to the verb that saw it"
+    );
+    assert_eq!(status, 401, "with the status the receiver named");
+    assert_eq!(
+        needs,
+        &NeedSet::expired_credentials("gh::pr_snapshot", &[Cap::net()]),
+        "and the repair names the network authority the token stands for"
+    );
+    Ok(())
+}

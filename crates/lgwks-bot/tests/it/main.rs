@@ -94,7 +94,6 @@ mod resume_fixtures;
 #[path = "../support/liveness.rs"]
 mod liveness_fixtures;
 
-#[cfg(feature = "rt")]
 #[path = "../support/scratch.rs"]
 mod scratch;
 
@@ -126,6 +125,7 @@ fn probe_test(module: &str, test: &str) -> String {
 
 mod ambiguous_commit;
 mod authority;
+mod credential;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -170,6 +170,7 @@ mod sim_clock_kill;
 mod sim_clock_wiring;
 mod sim_continuation;
 mod sim_continuation_seal;
+mod sim_credential;
 mod sim_dispatch;
 mod sim_epoch_identity;
 mod sim_group_commit;
@@ -194,6 +195,7 @@ mod sim_scale;
 mod sim_script;
 mod sim_source_matrix;
 mod sim_spec_materialize;
+mod sim_stability;
 mod sim_store_faults;
 mod sim_store_scale;
 mod sim_substrate;
@@ -205,6 +207,7 @@ mod sim_task_resume;
 mod sim_tenancy;
 mod sim_tenancy_model;
 mod spec_materialize;
+mod stability;
 mod store_read_failure;
 mod sys_process_binding;
 mod sys_process_portable;

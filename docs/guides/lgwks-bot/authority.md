@@ -34,7 +34,7 @@ before it ever ticks. The same gate runs on both terminal builder calls
 `assemble`.
 
 **One refusal carries every unmet requirement.** `BotError::CapabilityDenied`
-holds a `Deficit` (`crates/lgwks-bot/src/cap.rs:202`) — the whole difference
+holds a `Deficit` (`crates/lgwks-bot/src/cap.rs:204`) — the whole difference
 between what the bot requires and what it was granted — rather than the first
 element of it. The shape matters more than it looks: a check that returns one
 missing capability at a time makes admission a loop where each pass reveals one
@@ -42,17 +42,17 @@ more word, so a bot short of four capabilities takes four refusals to diagnose
 and the caller never holds the whole picture. Each `Shortage` also names the
 domain that declared it, because `bot.net` says what is missing and
 `gh::pr_status` says who is asking.
-`GrantSet::admit` (`crates/lgwks-bot/src/gate.rs:73`) is the same gate for a
+`GrantSet::admit` (`crates/lgwks-bot/src/gate.rs:116`) is the same gate for a
 single requirement list, and `GrantSet::uncovered`
-(`crates/lgwks-bot/src/gate.rs:63`) is the total form both are built on.
+(`crates/lgwks-bot/src/gate.rs:106`) is the total form both are built on.
 
 ## The refusal derives its own repair
 
 A `Deficit` already names every capability that would close it, so the caller
 does not translate a diagnostic into a repair by hand:
-`Deficit::to_grant_set` (`crates/lgwks-bot/src/cap.rs:288`) returns exactly the
+`Deficit::to_grant_set` (`crates/lgwks-bot/src/cap.rs:290`) returns exactly the
 set that closes the shortfall. `GrantSet::grant`
-(`crates/lgwks-bot/src/gate.rs:44`) is consuming and de-duplicating, so folding
+(`crates/lgwks-bot/src/gate.rs:59`) is consuming and de-duplicating, so folding
 it into a set the caller already holds is `held.grant(..)` per element and
 reaches a fixed point.
 
@@ -65,9 +65,9 @@ true.
 
 ## Every call presents a proof
 
-`GrantSet::issue` (`crates/lgwks-bot/src/gate.rs:88`) is the only path that
+`GrantSet::issue` (`crates/lgwks-bot/src/gate.rs:131`) is the only path that
 constructs an `Auth`. Its constructor is crate-private
-(`crates/lgwks-bot/src/cap.rs:365`), and `Auth` is not `Serialize`, so authority
+(`crates/lgwks-bot/src/cap.rs:391`), and `Auth` is not `Serialize`, so authority
 cannot round-trip through JSON.
 
 Each verb takes an `(Auth, input)` tuple. `poll`, `execute_action`, and `query`
@@ -76,13 +76,31 @@ does not, because it takes no `Auth` at all: it is a boolean over already-observ
 state with no side effect to gate.
 
 Coverage is exact set membership, not subsumption
-(`crates/lgwks-bot/src/cap.rs:414`). A proof scoped to `bot.fs` presented to a
+(`crates/lgwks-bot/src/cap.rs:489`). A proof scoped to `bot.fs` presented to a
 source requiring `bot.net` is denied. A proof covering nothing authorizes
 nothing. Both cases have tests in `crates/lgwks-bot/src/spec.rs`
 (`wrong_scope_proof_is_denied_confused_deputy`, `call_with_empty_proof_is_denied_at_the_callee`).
 
 The framework mints a fresh proof per call from the grant set it retained, so you
 never thread an `Auth` through your own call sites for the chained path.
+
+## A credential can lapse, and a receiver can refuse one
+
+`GrantSet::grant_expiring(cap, ttl)` gives a capability a lifetime, and
+`GrantSet::issue_at(required, clock)` mints a proof carrying the shortest
+lifetime among the capabilities it covers. The lifetime is a duration on the
+declared clock, never a timestamp. `Auth::check` refuses a lapsed proof
+*before* it checks coverage, as `BotError::CredentialExpired`: the capabilities
+are still held and name nothing, so the repair is a re-grant, not a grant.
+
+An adapter whose receiver refuses the token it presented reports
+`BotError::CredentialRejected`, built by `cap::upstream_credential_rejection`
+for a status `cap::is_credential_status` accepts (401, 403, 404). It carries the
+repair as a `NeedSet` whose `Need::CredentialExpired` names what to re-grant,
+and `NeedSet::proposed_grants` turns it into a grant set. Both are
+`RetryClass::Never`: the same credential against the same receiver is refused
+again, so neither feeds a retry loop. The shipped `gh` adapter reports a
+refused token this way on its `Observe` verb and in every flow.
 
 ## The grant set is a snapshot
 
@@ -94,7 +112,7 @@ world.insert_resource(Grants(grants.clone()));
 ```
 
 `Grants` is a private resource holding that clone. `GrantSet`
-(`crates/lgwks-bot/src/gate.rs:12`) has three methods that add or inspect:
+(`crates/lgwks-bot/src/gate.rs:14`) has three methods that add or inspect:
 `empty`, `all_shipped`, `grant`, plus `admit` and `issue`. There is no `revoke`,
 and no method that removes a capability.
 
@@ -103,8 +121,11 @@ The consequences, stated plainly:
 - Dropping or changing the `GrantSet` you passed to `build` does not narrow the
   bot. It keeps the authority it was admitted with for its whole life.
 - An `Auth` you hold stays valid for the capabilities it covers. It is a
-  capability-membership proof inside this process, not a signature, not an
-  identity, and not a lease with an expiry.
+  capability-membership proof inside this process, not a signature and not an
+  identity. A proof minted from an expiring grant lapses when its lifetime has
+  passed (see "A credential can lapse" below), but that lifetime is fixed at the
+  mint and a built bot mints afresh on every call, so it does not narrow a
+  running bot.
 - Narrowing a running bot is a decision made outside this API. Build it from a
   narrower set, or stop calling `tick`.
 
@@ -164,7 +185,7 @@ rather than a repair, and it is not made here.
 
 ## Capability names
 
-Four capabilities ship (`crates/lgwks-bot/src/cap.rs:53`):
+Four capabilities ship (`crates/lgwks-bot/src/cap.rs:55`):
 
 | Constant | Name | Used for |
 |---|---|---|
@@ -174,7 +195,7 @@ Four capabilities ship (`crates/lgwks-bot/src/cap.rs:53`):
 | `Cap::NOTIFY` | `bot.notify` | Slack, email, webhook push |
 
 `GrantSet::all_shipped()` grants all four. `Cap::new` accepts any name
-(`crates/lgwks-bot/src/cap.rs:64`), because custom capabilities are data-driven:
+(`crates/lgwks-bot/src/cap.rs:66`), because custom capabilities are data-driven:
 `Cap::new("your.domain.cap")` is a valid capability that nothing grants unless
 you grant it. Enforcement is equality at the gate, so a misspelled name is simply
 a capability that never matches, not an error at construction.
@@ -195,6 +216,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`grant` is idempotent (`crates/lgwks-bot/src/gate.rs:44`), so granting a
+`grant` is idempotent (`crates/lgwks-bot/src/gate.rs:59`), so granting a
 capability twice is the same as granting it once and you need not track what an
 earlier call added.

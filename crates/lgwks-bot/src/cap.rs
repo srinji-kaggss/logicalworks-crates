@@ -20,7 +20,9 @@
 use lgwks_std::json::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
+use std::time::Duration;
 
+use super::clock::Clock;
 use super::error::BotError;
 use super::gate::GrantSet;
 
@@ -350,7 +352,31 @@ where
 /// measured in `bench/README.md`, where the unsorted form reached 12.9
 /// microseconds for 128 capabilities against 3.4 nanoseconds for one.
 #[derive(Debug, Clone)]
-pub struct Auth(Vec<Cap>);
+pub struct Auth {
+    /// The capabilities this proof covers, sorted and deduplicated.
+    covers: Vec<Cap>,
+    /// The credential's own expiry, when the grant that minted it carried one.
+    ///
+    /// `None` is the ordinary case and it is not "expired": a grant that named
+    /// no expiry is a grant that never expires on its own, and conflating the
+    /// two would make every ordinary proof look like a lapsed one.
+    lease: Option<Lease>,
+}
+
+/// How long a minted proof stays usable, and on whose clock.
+///
+/// A **duration on the granting clock**, never a wall-clock timestamp: an
+/// instant has no epoch, means nothing on another host, and is exactly the
+/// value INV-BOT-30 forbids persisting as though it were a time. Two proofs
+/// minted on two hosts therefore both read "how long since I was issued", which
+/// is the only comparison two hosts can make soundly.
+#[derive(Debug, Clone)]
+struct Lease {
+    /// The clock the expiry is measured on, shared with whoever issued it.
+    clock: Clock,
+    /// The reading on that clock at which the proof stops being usable.
+    expires_at: Duration,
+}
 
 impl Auth {
     /// Mint a proof covering exactly `caps`. Crate-private on purpose: this is
@@ -365,13 +391,62 @@ impl Auth {
     pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
         caps.sort_unstable();
         caps.dedup();
-        Self(caps)
+        Self {
+            covers: caps,
+            lease: None,
+        }
+    }
+
+    /// Attach a credential expiry measured on `clock`.
+    ///
+    /// Crate-private because the seal is the point: a caller that could name its
+    /// own expiry could mint a proof that outlives the authority behind it, and
+    /// [`GrantSet::issue`] is the only path that decides one.
+    pub(crate) fn with_lease(mut self, clock: Clock, ttl: Duration) -> Self {
+        self.lease = Some(Lease {
+            expires_at: clock.now().saturating_add(ttl),
+            clock,
+        });
+        self
+    }
+
+    /// The reading at which this proof expires, when its grant named one.
+    ///
+    /// A reading on the **granting** clock, so it is comparable only against
+    /// that clock — which is why it is not a timestamp and why
+    /// [`ClockSnapshot`](crate::clock::ClockSnapshot) is the form that crosses
+    /// a process boundary.
+    #[must_use]
+    pub fn expires_at(&self) -> Option<Duration> {
+        self.lease.as_ref().map(|lease| lease.expires_at)
+    }
+
+    /// How much of this proof's life is left, when its grant named one.
+    ///
+    /// Saturating at zero rather than wrapping: a caller asking how long it has
+    /// must never be handed a large positive number for a proof that has already
+    /// lapsed, which is the mistake a raw subtraction makes.
+    #[must_use]
+    pub fn remaining(&self) -> Option<Duration> {
+        let lease = self.lease.as_ref()?;
+        Some(lease.expires_at.saturating_sub(lease.clock.now()))
+    }
+
+    /// Whether this proof's credential has expired.
+    ///
+    /// The total form of the check [`Auth::check`] performs first, for a caller
+    /// that wants the answer without the error.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.clock.now() >= lease.expires_at)
     }
 
     /// The capabilities this proof covers, in name order.
     #[must_use]
     pub fn covers(&self) -> &[Cap] {
-        &self.0
+        &self.covers
     }
 
     /// Whether this proof covers `cap`.
@@ -380,7 +455,7 @@ impl Auth {
     /// because [`Auth`] is sorted by construction.
     #[must_use]
     pub fn covers_cap(&self, cap: &Cap) -> bool {
-        self.0.binary_search(cap).is_ok()
+        self.covers.binary_search(cap).is_ok()
     }
 
     /// The requirements in `required` that this proof does not cover, in
@@ -412,10 +487,83 @@ impl Auth {
     /// [`BotError::CapabilityDenied`] when any required capability is not
     /// covered.
     pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
+        self.check_expiry()?;
         match Deficit::from_shortages(self.uncovered(required)) {
             Some(deficit) => Err(BotError::CapabilityDenied { deficit }),
             None => Ok(()),
         }
+    }
+
+    /// Refuse a proof whose credential has expired, naming every capability the
+    /// proof covered.
+    ///
+    /// Checked **before** coverage, and separately from it, because the two
+    /// failures have opposite repairs: a deficit is closed by granting, and an
+    /// expired credential is closed by *re-granting* — the capability is still
+    /// held and still worthless. A caller handed one arm for both would grant
+    /// what it already has and be refused again.
+    fn check_expiry(&self) -> Result<(), BotError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Ok(());
+        };
+        let now = lease.clock.now();
+        if now < lease.expires_at {
+            return Ok(());
+        }
+        let refusal = Err(BotError::CredentialExpired {
+            capabilities: self.covers.clone(),
+            expired_at: lease.expires_at,
+            now,
+        });
+        lgwks_std::trace::debug!(
+            error = ?refusal.as_ref().err(),
+            "check_expiry: returning an error to the caller"
+        );
+        refusal
+    }
+}
+
+/// Whether `status` says the receiver refused the **credential**, as opposed to
+/// failing for a reason no authority can repair.
+///
+/// One named predicate rather than a status number repeated at each adapter: the
+/// decision is the same everywhere, and a site that hard-coded its own list
+/// would drift from the one the repair is built on.
+///
+/// `404` is included for the reason [`crate::domain::gh::GhError`] documents it:
+/// a resource that is absent and a resource this credential cannot see are the
+/// same answer on the wire, and reading the second as a transport failure is how
+/// a permission loss gets retried for ever.
+#[must_use]
+pub const fn is_credential_status(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404)
+}
+
+/// The refusal an adapter reports when the *upstream* refused the credential it
+/// presented, as a typed outcome carrying the repair rather than a generic
+/// failure.
+///
+/// Call it only for a status [`is_credential_status`] accepts: a receiver that
+/// failed for another reason has not refused the credential, and reporting a
+/// re-grant for it sends a caller to repair something that is not broken.
+///
+/// A distinct variant from [`BotError::CapabilityDenied`] because the two are
+/// opposite facts. A denied capability was never granted; a rejected
+/// credential **was** granted and the receiver refused it anyway, which means
+/// its issuer has cancelled, rotated or expired the authority behind it. The
+/// repair is the same shape — a [`NeedSet`](crate::spec::NeedSet) naming the
+/// capabilities to re-grant — and it is carried in the error so a caller cannot
+/// read the status and then have to reconstruct what to do about it.
+///
+/// Never a retry: retrying the same credential against the same receiver
+/// produces the same refusal, so this is the typed outcome that stops a
+/// refresh-then-retry loop rather than feeding one.
+#[must_use]
+pub fn upstream_credential_rejection(domain: &str, status: u16, required: &[Cap]) -> BotError {
+    BotError::CredentialRejected {
+        domain: domain.to_owned(),
+        status,
+        needs: crate::spec::NeedSet::expired_credentials(domain, required),
     }
 }
 
