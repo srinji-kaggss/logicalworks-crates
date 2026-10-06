@@ -32,6 +32,7 @@ mod prop_codecs;
 mod serde_facade_consumers;
 mod sim_codec;
 mod sim_encoding;
+mod sim_fs_capability;
 mod sim_fs_walk;
 mod sim_glob_sweep;
 mod sim_hash;
