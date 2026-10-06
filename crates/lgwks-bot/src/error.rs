@@ -41,6 +41,7 @@ use std::fmt::Write as FmtWrite;
 use std::time::Duration;
 
 use super::broker::DispatchError;
+use super::cap::Cap;
 use super::cap::Deficit;
 use super::ecs::{EffectEvidence, PendingWork, WorkId};
 use super::effect::{ActionDigest, ActionId, AttemptId, EffectKey};
@@ -268,6 +269,49 @@ pub enum BotError {
         deadline: Duration,
         /// The largest budget that would have been accepted.
         ceiling: Duration,
+    },
+    /// The credential behind a proof expired, so the proof is worthless however
+    /// much authority it still carries.
+    ///
+    /// The opposite of [`Self::CapabilityDenied`] rather than a variant of it: a
+    /// deficit is closed by *granting*, and an expired credential is closed by
+    /// **re-granting** — the capabilities are still held and now name nothing.
+    /// A caller handed one arm for both would grant what it already has and be
+    /// refused again, which is the admission loop `Deficit` exists to end, one
+    /// layer out.
+    ///
+    /// Carries the capabilities and the two readings, so a caller can report how
+    /// much life the credential had rather than only that it had none. `Refused`
+    /// and so `RetryClass::Never`: presenting the same credential again produces
+    /// the same refusal, and the repair is a new grant.
+    CredentialExpired {
+        /// Every capability the lapsed proof covered, in name order.
+        capabilities: Vec<Cap>,
+        /// The reading on the granting clock at which it expired.
+        expired_at: Duration,
+        /// The reading the check was made at.
+        now: Duration,
+    },
+    /// A receiver refused the credential an adapter presented.
+    ///
+    /// Distinct from [`Self::CapabilityDenied`] because the authority *was*
+    /// granted and the receiver rejected it anyway: revoked, rotated or expired
+    /// upstream. The repair is carried in the error as a
+    /// [`NeedSet`](crate::spec::NeedSet), so a caller reads what to re-grant
+    /// rather than reconstructing it from a status code — and it is a `NeedSet`,
+    /// not a string, so the whole shortfall arrives at once the way every other
+    /// admission shortfall does.
+    ///
+    /// Never a retry. The same credential against the same receiver gives the
+    /// same status, so this is the typed outcome that ends a refresh-then-retry
+    /// loop rather than feeding one.
+    CredentialRejected {
+        /// The domain whose upstream refused the credential.
+        domain: String,
+        /// The status the receiver reported.
+        status: u16,
+        /// What a caller must re-grant for the call to be worth making again.
+        needs: crate::spec::NeedSet,
     },
     /// A domain action failed at runtime.
     ///
@@ -904,6 +948,12 @@ impl BotError {
             // value that was to be replaced is still the one the substrate
             // holds, so nothing was committed and a later tick is a plain retry.
             Self::UnstableObservation { .. } => DispatchCertainty::NotDelivered,
+            // A lapsed credential is a refusal, and so is a rejected one: both
+            // happen before any effect is attempted, and neither is repaired by
+            // presenting the same authority again.
+            Self::CredentialExpired { .. } | Self::CredentialRejected { .. } => {
+                DispatchCertainty::Refused
+            }
             _ => DispatchCertainty::Refused,
         }
     }
@@ -1394,6 +1444,28 @@ impl fmt::Display for BotError {
                 "source poll for chain {chain} was cancelled at its declared {deadline:?} \
                  per-poll deadline: nothing was read, nothing committed, and the other chains \
                  of this tick were not stopped"
+            ),
+            Self::CredentialExpired {
+                ref capabilities,
+                expired_at,
+                now,
+            } => {
+                let names: Vec<&str> = capabilities.iter().map(|cap| cap.as_str()).collect();
+                write!(
+                    f,
+                    "the credential expired at {expired_at:?} and this call is at {now:?}; it \
+                     covered [{}], and re-granting is the repair",
+                    names.join(", ")
+                )
+            }
+            Self::CredentialRejected {
+                ref domain,
+                status,
+                ref needs,
+            } => write!(
+                f,
+                "{} was refused by its upstream with status {status}: {needs}",
+                Escaped(domain)
             ),
             Self::UnstableObservation {
                 ref domain,

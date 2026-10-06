@@ -151,7 +151,7 @@ the `.on` calls.
 
 `build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/gate.rs:73`), and `Schedule::initialize` with
+not cover (`crates/lgwks-bot/src/gate.rs:116`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
 totally ordered (`crates/lgwks-bot/src/ecs.rs:4392`).
 

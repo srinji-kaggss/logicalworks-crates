@@ -126,6 +126,7 @@ fn probe_test(module: &str, test: &str) -> String {
 
 mod ambiguous_commit;
 mod authority;
+mod credential;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -167,6 +168,7 @@ mod session;
 mod sim_clock;
 mod sim_clock_kill;
 mod sim_clock_wiring;
+mod sim_credential;
 mod sim_dispatch;
 mod sim_epoch_identity;
 mod sim_group_commit;

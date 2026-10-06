@@ -399,7 +399,7 @@ The state of that, honestly:
 | An OS dialog stole focus mid-flow | ❌ | no coverage |
 | A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
 | Clock skew between two hosts | ❌ | no coverage |
-| A credential expired mid-run | ❌ | no coverage |
+| A credential expired mid-run | ✅ tested | `GrantSet::grant_expiring` + `Auth::check`: a lapsed proof is `BotError::CredentialExpired` (`Refused`, `RetryClass::Never`), an upstream 401/403/404 is `BotError::CredentialRejected` carrying a `NeedSet` repair (`cap::is_credential_status`, `GhError::repair`), wired through `PrSnapshotSource::poll` and every `gh` flow; `tests/it/credential.rs` spends a real credential's life on a real wall clock over a real file, `gh_binding.rs` and `sim_review_path.rs` drive a real `gh` child refusing the token, `tests/it/sim_credential.rs` sweeps 1,024 seeds |
 | The locale changed a date or number format | ❌ | no coverage |
 | Two operators edited one record | ❌ | no coverage |
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |

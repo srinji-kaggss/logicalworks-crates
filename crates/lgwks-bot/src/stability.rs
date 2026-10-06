@@ -223,8 +223,10 @@ impl Reading {
     /// reports nothing cannot contradict itself.
     #[must_use]
     pub fn is_whole(&self) -> bool {
+        // Compared in `u64`, the subject's own width: a read whose length does
+        // not fit one cannot equal any length the subject reported.
         self.reported.is_none_or(|reported| {
-            self.bytes.len() == usize::try_from(reported).unwrap_or(usize::MAX)
+            u64::try_from(self.bytes.len()).is_ok_and(|read| read == reported)
         })
     }
 
@@ -460,31 +462,33 @@ pub async fn read_stable_file(path: &Path) -> Result<Reading, ReadFailure> {
 }
 
 /// One pass: the bytes, and the metadata the subject reported with them.
-fn read_file(path: &Path) -> Result<(Vec<u8>, u64, SystemTime), ReadFailure> {
+fn read_file(path: &Path) -> Result<Reading, ReadFailure> {
     let bytes = std::fs::read(path)?;
     // The stat is taken *after* the read, so a writer that appends between the
     // two is reported as a reading shorter than the subject now claims rather
     // than as a length that happened to match. That direction is the safe one:
     // it refuses the pair instead of admitting it.
     let metadata = std::fs::metadata(path)?;
-    let reported = metadata.len();
-    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    Ok((bytes, reported, modified))
+    let mut reading = Reading::of_bytes(bytes);
+    reading.reported = Some(metadata.len());
+    // A platform that keeps no modification time reports `Unsupported` here, and
+    // the reading carries that absence rather than a stand-in instant: both
+    // passes then carry the same `None`, so the length and the digest decide,
+    // and no reading ever claims a time the filesystem did not state.
+    reading.modified = metadata.modified().ok();
+    Ok(reading)
 }
 
 /// The stable-read loop over one path, called from inside the blocking task.
 fn settle_file(path: &Path) -> Result<Reading, ReadFailure> {
-    read_stable(|| {
-        let (bytes, reported, modified) = read_file(path)?;
-        Ok(Reading::of_subject(bytes, reported, modified))
-    })
+    read_stable(|| read_file(path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Drift, MAX_STABILITY_READS, ReadFailure, Reading, read_stable, read_stable_file};
     use std::error::Error;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -495,11 +499,26 @@ mod tests {
         Box::new(std::io::Error::other(cause.into()))
     }
 
+    /// Nanoseconds since the Unix epoch, saturating at zero on a host whose
+    /// clock reads before it.
+    ///
+    /// A unique-name suffix, not a clock the assertions depend on: a clock before
+    /// the epoch is a host whose time source is broken, and refusing the test
+    /// over it would make a name this file only needs to be unique into a
+    /// dependency on the wall clock.
+    fn epoch_nanos() -> u128 {
+        match std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(elapsed) => elapsed.as_nanos(),
+            Err(_) => 0,
+        }
+    }
+
     /// A fixed modification time, so two readings of the same bytes agree.
+    ///
+    /// The epoch itself: any fixed instant serves, and this one needs no
+    /// arithmetic that could fail.
     fn stamp() -> SystemTime {
         SystemTime::UNIX_EPOCH
-            .checked_add(std::time::Duration::from_secs(1_700_000_000))
-            .unwrap_or(SystemTime::UNIX_EPOCH)
     }
 
     /// What one reading of a scripted subject produced.
@@ -509,20 +528,19 @@ mod tests {
     /// the script is refused rather than invented.
     struct Script {
         readings: Vec<Reading>,
-        cursor: AtomicU64,
+        cursor: AtomicUsize,
     }
 
     impl Script {
         fn new(readings: Vec<Reading>) -> Self {
             Self {
                 readings,
-                cursor: AtomicU64::new(0),
+                cursor: AtomicUsize::new(0),
             }
         }
 
         fn next(&self) -> Result<Reading, ReadFailure> {
-            let index =
-                usize::try_from(self.cursor.fetch_add(1, Ordering::Relaxed)).unwrap_or(usize::MAX);
+            let index = self.cursor.fetch_add(1, Ordering::Relaxed);
             match self.readings.get(index) {
                 Some(reading) => Ok(reading.clone()),
                 None => Err(ReadFailure::Unreadable {
@@ -565,7 +583,7 @@ mod tests {
                     5,
                     stamp()
                         .checked_add(std::time::Duration::from_secs(1))
-                        .unwrap_or(stamp()),
+                        .ok_or_else(|| failed("one second after the epoch is representable"))?,
                 ),
                 Drift::Modified,
                 "a subject that was touched",
@@ -601,7 +619,7 @@ mod tests {
     /// number of reads, and it names what it saw.
     #[test]
     fn a_subject_that_never_settles_is_refused_at_the_bound() -> TestResult {
-        let width = usize::try_from(MAX_STABILITY_READS).unwrap_or(usize::MAX);
+        let width = usize::try_from(MAX_STABILITY_READS)?;
         let mut drawn = Vec::new();
         for index in 0..=MAX_STABILITY_READS {
             drawn.push(Reading::of_subject(
@@ -657,17 +675,48 @@ mod tests {
         Ok(())
     }
 
+    /// A directory this test owns, named by an *atomic* create rather than by a
+    /// process or thread id.
+    ///
+    /// Both of those are reused by the operating system, so a name built from
+    /// one is a second run's directory to open and this run's records to
+    /// inherit. `create_dir` refuses a name that is already there, so the first
+    /// process to create it owns it and a second one steps to the next
+    /// candidate: ownership is decided by the filesystem rather than guessed
+    /// from a number that can be recycled. The clock only makes the first
+    /// candidate unlikely to collide; it is not what makes the name unique.
+    fn owned_dir(tag: &str) -> Result<std::path::PathBuf, std::io::Error> {
+        let base = std::env::temp_dir();
+        for attempt in 0..32u32 {
+            let candidate = base.join(format!("lgwks-stability-{tag}-{}-{attempt}", epoch_nanos()));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    let refusal = Err::<std::path::PathBuf, std::io::Error>(error);
+                    lgwks_std::trace::debug!(
+                        error = ?refusal.as_ref().err(),
+                        "owned_dir: returning an error to the caller"
+                    );
+                    return refusal;
+                }
+            }
+        }
+        let refusal = Err::<std::path::PathBuf, std::io::Error>(std::io::Error::other(
+            "no unused scratch directory name after 32 attempts",
+        ));
+        lgwks_std::trace::debug!(
+            error = ?refusal.as_ref().err(),
+            "owned_dir: returning an error to the caller"
+        );
+        refusal
+    }
+
     /// The real file path, against a real file.
     #[test]
     fn a_real_file_is_read_stably_and_a_missing_one_is_unreadable() -> TestResult {
-        let path = std::env::temp_dir().join(format!(
-            "lgwks-stability-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
+        let directory = owned_dir("file")?;
+        let path = directory.join("subject.json");
         std::fs::write(&path, b"{\"a\":1}\n")?;
         let settled = crate::block_on(read_stable_file(&path))?;
         assert_eq!(
@@ -686,7 +735,7 @@ mod tests {
             matches!(outcome, Err(ReadFailure::Unreadable { .. })),
             "a file that does not exist is unreadable, never unstable: {outcome:?}"
         );
-        drop(std::fs::remove_file(&path));
+        drop(std::fs::remove_dir_all(&directory));
         Ok(())
     }
 }

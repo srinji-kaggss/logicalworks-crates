@@ -216,7 +216,7 @@ happened" as two variants, not one variant with a flag.
 
 `EffectIndeterminate` is documented as the case you reach "when a request timed
 out, or a connection dropped, *after* the request was sent"
-(`crates/lgwks-bot/src/error.rs:185`). Its `Display` renders the domain, the
+(`crates/lgwks-bot/src/error.rs:186`). Its `Display` renders the domain, the
 cause, and the words "may have taken effect", so an operator reading a log line
 sees the indeterminacy rather than having to infer it.
 

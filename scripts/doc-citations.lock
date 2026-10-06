@@ -12,12 +12,12 @@ crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registere
 crates/lgwks-ast/src/lib.rs:3405	assert_eq!(
 crates/lgwks-ast/src/lib.rs:3408	"the fixture table must cover every grammar the manifest declares"
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
-crates/lgwks-bot/src/cap.rs:53	pub const NET: &str = "bot.net";
-crates/lgwks-bot/src/cap.rs:64	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
-crates/lgwks-bot/src/cap.rs:202	pub struct Deficit {
-crates/lgwks-bot/src/cap.rs:288	pub fn to_grant_set(&self) -> GrantSet {
-crates/lgwks-bot/src/cap.rs:365	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
-crates/lgwks-bot/src/cap.rs:414	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
+crates/lgwks-bot/src/cap.rs:55	pub const NET: &str = "bot.net";
+crates/lgwks-bot/src/cap.rs:66	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
+crates/lgwks-bot/src/cap.rs:204	pub struct Deficit {
+crates/lgwks-bot/src/cap.rs:290	pub fn to_grant_set(&self) -> GrantSet {
+crates/lgwks-bot/src/cap.rs:391	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
+crates/lgwks-bot/src/cap.rs:489	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs.rs:1362	#[derive(Resource, Debug)]
 crates/lgwks-bot/src/ecs.rs:1815	/// chain's before committing anything.
@@ -34,12 +34,12 @@ crates/lgwks-bot/src/ecs.rs:5249	pub fn tick(&mut self) -> Result<usize, BotErro
 crates/lgwks-bot/src/ecs.rs:5939	Ok(_) => {
 crates/lgwks-bot/src/ecs.rs:6091	.ensure_outcome(*key, evidence)
 crates/lgwks-bot/src/ecs.rs:6117	}),
-crates/lgwks-bot/src/error.rs:185	/// the calling thread until its verb futures resolve, and the thread it was
-crates/lgwks-bot/src/gate.rs:12	pub struct GrantSet {
-crates/lgwks-bot/src/gate.rs:44	pub fn grant(mut self, cap: Cap) -> Self {
-crates/lgwks-bot/src/gate.rs:63	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
-crates/lgwks-bot/src/gate.rs:73	pub fn admit(&self, required: &[Cap]) -> Result<(), BotError> {
-crates/lgwks-bot/src/gate.rs:88	pub fn issue(&self, required: &[Cap]) -> Result<Auth, BotError> {
+crates/lgwks-bot/src/error.rs:186	/// the calling thread until its verb futures resolve, and the thread it was
+crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
+crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {
+crates/lgwks-bot/src/gate.rs:106	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
+crates/lgwks-bot/src/gate.rs:116	pub fn admit(&self, required: &[Cap]) -> Result<(), BotError> {
+crates/lgwks-bot/src/gate.rs:131	pub fn issue(&self, required: &[Cap]) -> Result<Auth, BotError> {
 crates/lgwks-bot/src/language.rs:1	//! Language understanding: turning what a person actually typed into a choice.
 crates/lgwks-bot/src/language.rs:76	/// The longest normalized input the shipped resolver will compare.
 crates/lgwks-bot/src/language.rs:85	/// receipt. `the_digest_input_bound_is_the_shipped_bound` asserts the two agree,

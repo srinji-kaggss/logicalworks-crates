@@ -25,7 +25,7 @@
 use std::error::Error;
 use std::time::{Duration, SystemTime};
 
-use lgwks_bot::stability::{MAX_STABILITY_READS, Reading, read_stable};
+use lgwks_bot::stability::{MAX_STABILITY_READS, ReadFailure, Reading, read_stable};
 
 use crate::sim::Sim;
 
@@ -60,14 +60,21 @@ fn refuse(cause: impl Into<String>) -> Result<(), Box<dyn Error>> {
     refusal
 }
 
-/// The subject's modification time at `tick`.
+/// A modelled read the model itself cannot express, as the reader's own
+/// failure type: a tick past what `SystemTime` or `usize` can hold is a broken
+/// scenario, and the reader reports it as unreadable rather than as a reading
+/// the model invented.
+fn unmodelled(cause: &str) -> ReadFailure {
+    ReadFailure::from(std::io::Error::other(cause.to_owned()))
+}
+
+/// The subject's modification time at `tick`, or `None` past the range a
+/// `SystemTime` holds.
 ///
 /// Derived from the virtual tick rather than read, so two reads a tick apart
 /// carry different timestamps exactly as a real filesystem would report.
-fn stamp_at(tick: u64) -> SystemTime {
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(tick))
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+fn stamp_at(tick: u64) -> Option<SystemTime> {
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(tick))
 }
 
 /// A modelled writer: a document assembled out of chunks, one landing every
@@ -88,12 +95,11 @@ impl Subject {
         }
     }
 
-    /// Which chunk has landed by `tick`, counting from zero.
-    fn written_at(&self, tick: u64) -> usize {
-        let elapsed = tick.checked_div(self.period).unwrap_or_default();
-        usize::try_from(elapsed)
-            .unwrap_or(usize::MAX)
-            .min(self.chunks.len())
+    /// Which chunk has landed by `tick`, counting from zero, or `None` for a
+    /// tick the model cannot index (a zero period, or more chunks than `usize`).
+    fn written_at(&self, tick: u64) -> Option<usize> {
+        let elapsed = usize::try_from(tick.checked_div(self.period)?).ok()?;
+        Some(elapsed.min(self.chunks.len()))
     }
 
     /// The bytes present once chunk `written` has landed.
@@ -111,8 +117,8 @@ impl Subject {
     /// Reported by a writer that is part-way through, and by a finished one
     /// equally — that is what makes an in-flight read distinguishable from a
     /// whole one without trusting the read to notice it on its own.
-    fn intended_len(&self) -> u64 {
-        u64::try_from(self.chunks.iter().flatten().count()).unwrap_or(0)
+    fn intended_len(&self) -> Option<u64> {
+        u64::try_from(self.chunks.iter().flatten().count()).ok()
     }
 
     /// One read at `tick`.
@@ -121,13 +127,19 @@ impl Subject {
     /// document that is still being written yields the prefix that has landed
     /// and the length it intends to reach, so the reading is visibly short: the
     /// tear, as the reader sees it.
-    fn read_at(&self, tick: u64) -> Reading {
-        let written = self.written_at(tick);
-        Reading::of_subject(
+    fn read_at(&self, tick: u64) -> Result<Reading, ReadFailure> {
+        let written = self
+            .written_at(tick)
+            .ok_or_else(|| unmodelled("a tick the chunk index cannot hold"))?;
+        let intended = self
+            .intended_len()
+            .ok_or_else(|| unmodelled("a document longer than u64 bytes"))?;
+        let stamp = stamp_at(tick).ok_or_else(|| unmodelled("a tick past SystemTime"))?;
+        Ok(Reading::of_subject(
             self.bytes_through(written),
-            self.intended_len(),
-            stamp_at(tick),
-        )
+            intended,
+            stamp,
+        ))
     }
 }
 
@@ -152,12 +164,13 @@ fn subject_for(sim: &mut Sim) -> (Subject, u64) {
 ///
 /// Without this the whole space collapses onto two or three hashes — one per
 /// verdict — and a replay receipt over it would be a receipt over a constant.
-fn record_shape(sim: &mut Sim, subject: &Subject) {
+fn record_shape(sim: &mut Sim, subject: &Subject) -> Result<(), Box<dyn Error>> {
     // Recorded through the same trace as the verdict, so a shape that never
     // reached a verdict is still visible to a reader comparing two runs.
     sim.trace
-        .record_u64("chunks", u64::try_from(subject.chunks.len()).unwrap_or(0));
-    sim.trace.record_u64("period", subject.period);
+        .record_number("chunks", u64::try_from(subject.chunks.len())?);
+    sim.trace.record_number("period", subject.period);
+    Ok(())
 }
 
 /// One scenario: read the modelled subject through the shipped protocol, with
@@ -172,22 +185,23 @@ fn scenario(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
     // would settle.
     let reading = read_stable(|| {
         tick = tick.saturating_add(1);
-        Ok(subject.read_at(tick))
+        subject.read_at(tick)
     });
 
-    record_shape(sim, &subject);
-    sim.trace.record_u64("read_tick", tick);
+    record_shape(sim, &subject)?;
+    sim.trace.record_number("read_tick", tick);
     match reading {
         Ok(settled) => {
             sim.record("settled");
-            sim.trace.record_u64(
-                "settled_len",
-                u64::try_from(settled.bytes().len()).unwrap_or(0),
-            );
+            sim.trace
+                .record_number("settled_len", u64::try_from(settled.bytes().len())?);
             if !settled.is_whole() {
                 return refuse("an admitted reading must never contradict its own length");
             }
-            let expected = subject.bytes_through(subject.written_at(tick));
+            let written = subject
+                .written_at(tick)
+                .ok_or("the reader's last tick indexes a chunk")?;
+            let expected = subject.bytes_through(written);
             if settled.bytes() != expected.as_slice() {
                 return refuse("an admitted reading must be the bytes the subject held");
             }
@@ -202,7 +216,7 @@ fn scenario(sim: &mut Sim) -> Result<(), Box<dyn Error>> {
             }
             sim.record(unstable.drift().as_str());
             sim.trace
-                .record_u64("refused_reads", u64::from(unstable.reads()));
+                .record_number("refused_reads", u64::from(unstable.reads()));
         }
     }
     Ok(())
@@ -226,7 +240,7 @@ fn a_seeded_reader_never_admits_a_torn_reading() -> TestResult {
     let hashes = sweep()?;
     assert_eq!(
         hashes.len(),
-        usize::try_from(SEEDS).unwrap_or(usize::MAX),
+        usize::try_from(SEEDS)?,
         "the sweep must cover every seed it declares"
     );
     Ok(())
@@ -246,7 +260,7 @@ fn a_writer_that_never_pauses_is_never_admitted() -> TestResult {
         let mut tick = 0u64;
         let reading = read_stable(|| {
             tick = tick.saturating_add(1);
-            Ok(subject.read_at(tick))
+            subject.read_at(tick)
         });
         match reading {
             Ok(_) => admitted = admitted.saturating_add(1),
@@ -267,7 +281,7 @@ fn a_writer_that_never_pauses_is_never_admitted() -> TestResult {
     );
     assert_eq!(
         refused,
-        u32::try_from(SEEDS).unwrap_or(u32::MAX),
+        u32::try_from(SEEDS)?,
         "and it must be refused for every seed, at the declared bound"
     );
     Ok(())
@@ -279,8 +293,8 @@ fn a_writer_that_never_pauses_is_never_admitted() -> TestResult {
 #[test]
 fn a_renamed_subject_is_read_whole_or_refused() -> TestResult {
     let whole = b"{\"revision\":9}".to_vec();
-    let reported = u64::try_from(whole.len()).unwrap_or(0);
-    let stamp = stamp_at(7);
+    let reported = u64::try_from(whole.len())?;
+    let stamp = stamp_at(7).ok_or("seven seconds after the epoch is a SystemTime")?;
     let mut settled = 0u32;
     for _seed in FIRST_SEED..FIRST_SEED.saturating_add(SEEDS) {
         // A renamed subject is one whose bytes never change: every open sees
@@ -296,7 +310,7 @@ fn a_renamed_subject_is_read_whole_or_refused() -> TestResult {
     }
     assert_eq!(
         settled,
-        u32::try_from(SEEDS).unwrap_or(u32::MAX),
+        u32::try_from(SEEDS)?,
         "and it must settle for every seed, not merely most of them"
     );
     Ok(())

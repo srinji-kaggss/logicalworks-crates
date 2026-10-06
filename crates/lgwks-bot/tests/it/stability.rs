@@ -196,7 +196,7 @@ fn classify(failure: BotError) -> Result<Polled, Box<dyn Error>> {
 /// Poll the store once through `Observe`.
 async fn poll_once(store: &JsonStore) -> Result<Polled, Box<dyn Error>> {
     match Observe::poll(store, (proof()?, ())).await {
-        Ok(state) => Ok(Polled::Settled(state.raw)),
+        Ok(state) => Ok(Polled::Settled(state.raw().to_owned())),
         Err(failure) => classify(failure),
     }
 }
@@ -204,7 +204,7 @@ async fn poll_once(store: &JsonStore) -> Result<Polled, Box<dyn Error>> {
 /// Query the store once through `Query`, which reaches the same reader.
 async fn query_once(store: &JsonStore) -> Result<Polled, Box<dyn Error>> {
     match Query::query(store, (proof()?, &())).await {
-        Ok(state) => Ok(Polled::Settled(state.raw)),
+        Ok(state) => Ok(Polled::Settled(state.raw().to_owned())),
         Err(failure) => classify(failure),
     }
 }
