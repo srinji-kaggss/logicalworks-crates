@@ -138,6 +138,7 @@ mod sim_journal_tail;
 mod sim_network;
 mod sim_observe_refresh;
 mod sim_process;
+mod sim_process_orphans;
 mod sim_process_output;
 mod sim_proposal;
 mod sim_ready;

@@ -2259,6 +2259,10 @@ impl OwnedChild {
     /// drops an `OwnedChild` — killing and parking the child — rather than
     /// leaking a running process behind an error.
     fn own(mut inner: std::process::Child) -> io::Result<Self> {
+        // A start is one of the two moments [`ORPHANS`] is collected, so a
+        // supervisor that only ever starts children still releases the ones
+        // its earlier drivers parked.
+        reap_orphans();
         let stdout = inner.stdout.take();
         let stderr = inner.stderr.take();
         let mut child = Self {
