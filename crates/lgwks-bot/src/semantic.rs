@@ -100,7 +100,7 @@ use lgwks_std::similarity::{Cosine, CosineError};
 use crate::language::{Alias, LanguageResolver, decide};
 use crate::session::{
     AnswerDomain, DegradedReason, MatchTier, PolicyVersion, Provenance, Question, Resolution,
-    Resolver, Verdict,
+    Resolver, Verdict, by_score_descending,
 };
 
 /// A source of dense vector representations for text, and its own identity.
@@ -611,14 +611,10 @@ impl<E: Embedder> SemanticResolver<E> {
             }
         }
 
-        // Stable sort by descending score, matching the lexicon: the input is in
-        // ascending index order, so equal scores keep lowest-index-first.
-        scored.sort_by(|left, right| {
-            right
-                .2
-                .partial_cmp(&left.2)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Best-first through the crate's one comparator, the same one the lexicon
+        // ranks with: the input is in ascending index order into a stable sort,
+        // so a tie keeps lowest-index-first.
+        scored.sort_by(by_score_descending);
         Ok(scored)
     }
 }
@@ -717,15 +713,51 @@ mod tests {
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "embed: returning an error to the caller");
                 return refusal;
             }
-            Ok(self
-                .vectors
-                .get(text)
-                .cloned()
-                .unwrap_or_else(|| self.fallback.clone()))
+            match self.vectors.get(text) {
+                Some(vector) => Ok(vector.clone()),
+                // The stub's declared contract, not a stand-in: a text it was not
+                // handed answers with the fallback, which a test can make
+                // deliberately wrong-length to reach the mismatch path.
+                None => Ok(self.fallback.clone()),
+            }
         }
     }
 
     const DIMENSION: usize = 2;
+
+    /// The two-option field most of these tests ask about.
+    ///
+    /// Named once because the option *texts* are part of each premise: a test
+    /// that misspells one is measuring a field the lexicon resolves differently,
+    /// and the misspelling is invisible in a diff full of vectors.
+    fn the_field() -> Vec<String> {
+        options(&["Repeat last order", "Cancel"])
+    }
+
+    /// Resolve `"the usual"` against [`the_field`] with the default policy.
+    ///
+    /// The question and the field are the same in every test that only varies
+    /// the vectors, so the thing under test is the embedder and not a
+    /// differently-worded question.
+    fn resolve_with(embedder: StubEmbedder) -> crate::session::Verdict {
+        SemanticResolver::new(embedder).resolve("the usual", &ask(&the_field()))
+    }
+
+    /// Two candidates whose cosines against `"the usual"` are `0.73` and `0.71`.
+    ///
+    /// The second component of each is the positive root that makes the cosine
+    /// exact, so the margin these tests assert is the margin the arithmetic
+    /// produces rather than one the vectors were rounded to.
+    fn near_tie_vectors() -> Vec<(&'static str, Vec<f32>)> {
+        vec![
+            ("the usual", vec![1.0, 0.0]),
+            (
+                "Repeat last order",
+                vec![0.73, (1.0_f32 - 0.73_f32.powi(2)).sqrt()],
+            ),
+            ("Cancel", vec![0.71, (1.0_f32 - 0.71_f32.powi(2)).sqrt()]),
+        ]
+    }
 
     /// Builds a stub embedder and the call counter the test watches.
     ///
@@ -915,22 +947,8 @@ mod tests {
         // `0.02`. The runner-up misses the `0.72` threshold by one hundredth,
         // which is exactly what used to delete it. A threshold says an option
         // may not win; it does not make the proximity that was measured vanish.
-        let (embedder, _) = stub(
-            vec![
-                ("the usual", vec![1.0, 0.0]),
-                (
-                    "Repeat last order",
-                    vec![0.73, (1.0_f32 - 0.73_f32.powi(2)).sqrt()],
-                ),
-                ("Cancel", vec![0.71, (1.0_f32 - 0.71_f32.powi(2)).sqrt()]),
-            ],
-            vec![0.0, 1.0],
-            false,
-        )?;
-        let verdict = SemanticResolver::new(embedder).resolve(
-            "the usual",
-            &ask(&options(&["Repeat last order", "Cancel"])),
-        );
+        let (embedder, _) = stub(near_tie_vectors(), vec![0.0, 1.0], false)?;
+        let verdict = resolve_with(embedder);
         assert!(
             matches!(verdict.resolution(), Resolution::Ambiguous { tied, .. } if *tied == vec![0, 1]),
             "the near tie must be reported as one, got {verdict:?}"
@@ -944,23 +962,10 @@ mod tests {
         // The same field with a wide margin: the winner is decisive, and the
         // number it reports must be the `0.02` it actually holds, not the `0.73`
         // of its own score reported over an emptied field.
-        let (embedder, _) = stub(
-            vec![
-                ("the usual", vec![1.0, 0.0]),
-                (
-                    "Repeat last order",
-                    vec![0.73, (1.0_f32 - 0.73_f32.powi(2)).sqrt()],
-                ),
-                ("Cancel", vec![0.71, (1.0_f32 - 0.71_f32.powi(2)).sqrt()]),
-            ],
-            vec![0.0, 1.0],
-            false,
-        )?;
+        let (embedder, _) = stub(near_tie_vectors(), vec![0.0, 1.0], false)?;
         let policy = SemanticPolicy::new(0.72, 0.01)?;
-        let verdict = SemanticResolver::with_policy(embedder, policy).resolve(
-            "the usual",
-            &ask(&options(&["Repeat last order", "Cancel"])),
-        );
+        let verdict = SemanticResolver::with_policy(embedder, policy)
+            .resolve("the usual", &ask(&the_field()));
         assert!(
             matches!(
                 verdict.resolution(),
@@ -1016,10 +1021,7 @@ mod tests {
             vec![0.0, 1.0],
             false,
         )?;
-        let verdict = SemanticResolver::new(embedder).resolve(
-            "the usual",
-            &ask(&options(&["Repeat last order", "Cancel"])),
-        );
+        let verdict = resolve_with(embedder);
         assert_eq!(
             verdict.into_resolution(),
             Resolution::Degraded {
@@ -1150,10 +1152,7 @@ mod tests {
             vec![0.0, 1.0],
             false,
         )?;
-        let verdict = SemanticResolver::new(embedder).resolve(
-            "the usual",
-            &ask(&options(&["Repeat last order", "Cancel"])),
-        );
+        let verdict = resolve_with(embedder);
         assert_eq!(
             verdict.into_resolution(),
             Resolution::Degraded {
@@ -1185,14 +1184,7 @@ mod tests {
     fn a_failing_embedder_is_degraded_rather_than_absent() -> Result<(), Box<dyn std::error::Error>>
     {
         let (embedder, _calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], true)?;
-        let resolver = SemanticResolver::new(embedder);
-
-        let resolution = resolver
-            .resolve(
-                "the usual",
-                &ask(&options(&["Repeat last order", "Cancel"])),
-            )
-            .into_resolution();
+        let resolution = resolve_with(embedder).into_resolution();
 
         assert_eq!(
             resolution,
@@ -1215,14 +1207,7 @@ mod tests {
             vec![0.0, 1.0, 2.0],
             false,
         )?;
-        let resolver = SemanticResolver::new(embedder);
-
-        let resolution = resolver
-            .resolve(
-                "the usual",
-                &ask(&options(&["Repeat last order", "Cancel"])),
-            )
-            .into_resolution();
+        let resolution = resolve_with(embedder).into_resolution();
 
         assert_eq!(
             resolution,

@@ -91,23 +91,15 @@
 //! caller's executor.
 
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
-// deliberately not `Send`). The lint fires on `pub trait` methods declared
-// `async fn` without a `-> impl Future + Send` bound; that is exactly the shape
-// INV-BOT-FOUR-VERBS requires, because a `Send` bound would force every domain
-// to be `Send` and rule out the thread-local state `Bot::tick` is built for.
-//
-// This is the crate's one suppression, and it names its reason. `expect` is not
-// available here: the lint is denied crate-wide rather than triggered by this
-// item alone, so an `#[expect]` would report an unfulfilled expectation at every
-// other `async fn` in `verb`.
+// deliberately not `Send`). The verb traits declare their async methods as
+// return-position `impl Future` rather than `async fn`, which is exactly the
+// shape INV-BOT-FOUR-VERBS requires without a crate-level lint suppression:
+// a `Send` bound would force every domain to be `Send` and rule out the
+// thread-local state `Bot::tick` is built for, and implementers still write
+// `async fn` in their impls.
 //
 // Remaining lint contract (missing_docs deny, unsafe_code forbid,
 // broken_intra_doc_links deny) comes from the workspace.
-#![allow(
-    async_fn_in_trait,
-    reason = "the four verb traits are the crate's public async contract and must stay non-Send; \
-              see docs/async-sdk-shape.md and INV-BOT-FOUR-VERBS"
-)]
 
 /// Compiles every Rust block in `README.md` as a doctest.
 ///
@@ -127,8 +119,9 @@ use std::pin::Pin;
 
 /// A boxed, non-`Send` future used to type-erase the async verbs behind the
 /// `Bot`'s dynamic chains and behind [`domain::flow::PipelineStep`]. The public
-/// traits stay native `async fn`; only the erasure boundary boxes, which is
-/// what avoids an `async-trait` dependency.
+/// verb traits declare return-position `impl Future`, so a domain still writes
+/// `async fn` in its impl and only the erasure boundary boxes — which is what
+/// avoids an `async-trait` dependency.
 ///
 /// Public because it appears in the public `PipelineStep` signature: an
 /// implementer must be able to name the return type.

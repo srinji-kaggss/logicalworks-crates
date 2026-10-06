@@ -733,21 +733,45 @@ fn rule_matches(rule_id: &str, node_kind: &str, node_text: &str) -> bool {
 /// formatters insert is absorbed. Anything with no head yields `""`, which
 /// matches no rule.
 fn macro_head(node_text: &str) -> &str {
+    // Two answers, both real: a terminator ends the head there, and text with no
+    // terminator *is* its own head. Nothing here is a value standing in for a
+    // piece that was missing.
     node_text
-        .split(['!', '(', ' ', '\t', '\n'])
-        .next()
-        .unwrap_or("")
+        .split_once(['!', '(', ' ', '\t', '\n'])
+        .map_or(node_text, |(head, _)| head)
 }
 
 /// A bounded, char-boundary-safe preview of `source[start..end]`.
 fn bounded_preview(source: &str, start: usize, end: usize) -> (String, bool) {
-    let slice = source.get(start..end).unwrap_or("");
+    // A byte range that names nothing in this source — a stale node, a parser
+    // reporting past the end — has no text to preview. That is the empty preview
+    // *with* the truncated flag set, so a caller cannot read it as a node whose
+    // text was genuinely empty.
+    let Some(slice) = source.get(start..end) else {
+        return (String::new(), true);
+    };
     let cutoff = slice
         .char_indices()
         .nth(MAX_PREVIEW_BYTES)
         .map_or(slice.len(), |(at, _)| at);
     let truncated = cutoff < slice.len();
     (slice[..cutoff].to_owned(), truncated)
+}
+
+/// Milliseconds in `duration`, saturating at the representable ceiling.
+///
+/// Split through the two infallible `Duration` projections so the ceiling comes
+/// out of saturating arithmetic rather than out of a narrowing conversion whose
+/// failure arm would have had to report a deadline the parser never reached.
+/// `u64::MAX` milliseconds is about half a million years, so the ceiling is
+/// unreachable by a real parse and exists so a caller asking past it gets a
+/// stated bound rather than a wrapped one.
+fn deadline_millis(duration: std::time::Duration) -> u64 {
+    const MILLIS_PER_SEC: u64 = 1_000;
+    duration
+        .as_secs()
+        .saturating_mul(MILLIS_PER_SEC)
+        .saturating_add(u64::from(duration.subsec_millis()))
 }
 
 /// The parser this operation calls, as a seam.
@@ -995,7 +1019,7 @@ fn inspect_mode(request: &InspectRequest<'_>, parse: ParseFn, enforce: bool) -> 
             return base(
                 Verdict::Incomplete {
                     reason: IncompleteReason::ParseDeadlineExceeded {
-                        deadline_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
+                        deadline_ms: deadline_millis(after),
                     },
                 },
                 Some(language_name),
