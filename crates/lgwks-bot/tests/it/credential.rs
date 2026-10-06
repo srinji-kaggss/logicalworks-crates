@@ -81,7 +81,7 @@ fn a_proof_that_lapses_mid_run_refuses_the_verb() -> TestResult {
     let grants = GrantSet::empty().grant_expiring(Cap::fs(), LIFETIME);
     let auth = grants.issue_at(&[Cap::fs()], &clock)?;
 
-    let raw = lgwks_bot::block_on(poll_with(&store, &auth))?;
+    let raw = lgwks_std::task::block_on(poll_with(&store, &auth))?;
     assert_eq!(
         raw, "{\"revision\":1}",
         "a fresh credential reads the store it is entitled to read"
@@ -94,7 +94,7 @@ fn a_proof_that_lapses_mid_run_refuses_the_verb() -> TestResult {
 
     spend(ELAPSED);
 
-    match lgwks_bot::block_on(poll_with(&store, &auth)) {
+    match lgwks_std::task::block_on(poll_with(&store, &auth)) {
         Ok(raw) => Err(Box::new(std::io::Error::other(format!(
             "a credential that expired {ELAPSED:?} ago must not read the store, but it \
              returned {raw}"
@@ -137,7 +137,7 @@ fn a_fresh_grant_mints_a_working_proof_again() -> TestResult {
         .issue_at(&[Cap::fs()], &clock)?;
     spend(ELAPSED);
     assert!(
-        lgwks_bot::block_on(poll_with(&store, &lapsed)).is_err(),
+        lgwks_std::task::block_on(poll_with(&store, &lapsed)).is_err(),
         "the control: the credential is lapsed before the repair is attempted"
     );
 
@@ -148,7 +148,7 @@ fn a_fresh_grant_mints_a_working_proof_again() -> TestResult {
         !reissued.is_expired(),
         "a fresh grant is not lapsed, whatever the old one was"
     );
-    let raw = lgwks_bot::block_on(poll_with(&store, &reissued))?;
+    let raw = lgwks_std::task::block_on(poll_with(&store, &reissued))?;
     assert_eq!(
         raw, "{\"revision\":1}",
         "and the re-granted credential reads the store again"
@@ -174,7 +174,7 @@ fn a_grant_without_a_lifetime_never_expires() -> TestResult {
         !auth.is_expired(),
         "and the proof is still live however long the test waited"
     );
-    let raw = lgwks_bot::block_on(poll_with(&store, &auth))?;
+    let raw = lgwks_std::task::block_on(poll_with(&store, &auth))?;
     assert_eq!(raw, "{\"revision\":1}", "so the verb still reads the store");
     Ok(())
 }

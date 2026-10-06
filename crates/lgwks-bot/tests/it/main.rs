@@ -94,7 +94,6 @@ mod resume_fixtures;
 #[path = "../support/liveness.rs"]
 mod liveness_fixtures;
 
-#[cfg(feature = "rt")]
 #[path = "../support/scratch.rs"]
 mod scratch;
 

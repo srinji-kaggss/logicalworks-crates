@@ -422,7 +422,11 @@ fn the_authority_source_offers_no_revoke_operation() -> TestResult {
 
     // The matcher's own controls: it must flag the operation and its `_`
     // extensions, and must not flag a different word that shares the prefix.
-    for operation in ["pub fn expire(&mut self)", "fn expire_now()", "fn expire<T>()"] {
+    for operation in [
+        "pub fn expire(&mut self)",
+        "fn expire_now()",
+        "fn expire<T>()",
+    ] {
         assert!(
             declares(operation, "fn expire"),
             "control: `{operation}` declares the operation and must be flagged"

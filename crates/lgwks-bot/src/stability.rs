@@ -721,7 +721,7 @@ mod tests {
         let directory = owned_dir("file")?;
         let path = directory.join("subject.json");
         std::fs::write(&path, b"{\"a\":1}\n")?;
-        let settled = crate::block_on(read_stable_file(&path))?;
+        let settled = lgwks_std::task::block_on(read_stable_file(&path))?;
         assert_eq!(
             settled.bytes(),
             b"{\"a\":1}\n",
@@ -733,7 +733,7 @@ mod tests {
         );
 
         let absent = path.with_extension("absent");
-        let outcome = crate::block_on(read_stable_file(&absent));
+        let outcome = lgwks_std::task::block_on(read_stable_file(&absent));
         assert!(
             matches!(outcome, Err(ReadFailure::Unreadable { .. })),
             "a file that does not exist is unreadable, never unstable: {outcome:?}"

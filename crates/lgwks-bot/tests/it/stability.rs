@@ -293,7 +293,7 @@ fn a_query_over_a_moving_store_is_pending_too() -> TestResult {
     let mut live = LiveStore::new("concurrent-query", Protocol::Rewrite)?;
     let mut readings = Vec::new();
     for _ in 0..300 {
-        readings.push(lgwks_bot::block_on(query_once(&live.store))?);
+        readings.push(lgwks_std::task::block_on(query_once(&live.store))?);
     }
     live.quiesce();
     let (_, pending) = tally(readings)?;
@@ -353,7 +353,7 @@ impl LiveStore {
         let mut polls = 0u32;
         while started.elapsed() < window && polls < POLL_CAP {
             polls = polls.saturating_add(1);
-            readings.push(lgwks_bot::block_on(poll_once(&self.store))?);
+            readings.push(lgwks_std::task::block_on(poll_once(&self.store))?);
         }
         Ok(readings)
     }
@@ -371,7 +371,7 @@ impl LiveStore {
         let started = std::time::Instant::now();
         let mut readings = Vec::new();
         while started.elapsed() < budget {
-            let polled = lgwks_bot::block_on(poll_once(&self.store))?;
+            let polled = lgwks_std::task::block_on(poll_once(&self.store))?;
             let unsettled = matches!(polled, Polled::Pending(_));
             readings.push(polled);
             if unsettled {
@@ -388,7 +388,7 @@ impl LiveStore {
     fn settle(&self, window: std::time::Duration) -> Result<Option<String>, Box<dyn Error>> {
         let started = std::time::Instant::now();
         while started.elapsed() < window {
-            if let Polled::Settled(raw) = lgwks_bot::block_on(poll_once(&self.store))? {
+            if let Polled::Settled(raw) = lgwks_std::task::block_on(poll_once(&self.store))? {
                 return Ok(Some(raw));
             }
         }
@@ -540,7 +540,7 @@ fn an_absent_store_is_unreadable_rather_than_unsettled() -> TestResult {
     let path = scratch.path().join("never-written.json");
     let store = JsonStore::new(&path);
 
-    match lgwks_bot::block_on(poll_once(&store))? {
+    match lgwks_std::task::block_on(poll_once(&store))? {
         Polled::Unreadable(BotError::DomainError { ref cause, .. }) => {
             assert!(
                 cause.contains("No such file") || cause.contains("not found"),
