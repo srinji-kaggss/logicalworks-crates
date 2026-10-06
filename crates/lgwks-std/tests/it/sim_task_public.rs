@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use lgwks_std::task::{block_on, join_all, spawn_blocking, try_spawn_blocking};
 
 use crate::rng::Rng;
-use crate::seeded_sweep::{SWEEP_SEEDS, fold, initial_trace};
+use crate::seeded_sweep::{SWEEP_SEEDS, fold_usize, initial_trace, next_index};
 
 /// The pool's documented thread ceiling.
 const THREAD_CEILING: usize = 512;
@@ -31,9 +31,15 @@ const MAX_WORK: usize = 64;
 /// The value job `index` of the burst seeded by `seed` must return: computed
 /// from the seed and position alone, so a result that crossed to another job
 /// or another burst cannot match.
-fn expected(seed: u64, index: usize) -> u64 {
-    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(u64::try_from(index).unwrap_or(u64::MAX))
+///
+/// The value is an index-width number end to end, because the job returns it and
+/// the trace folds it: the seed becomes the base through the same word-fold the
+/// stream uses, and the position is added to it, so two positions of one burst
+/// can never share a value and no conversion between the 64-bit seed and the
+/// index width can truncate one.
+fn expected(seed: u64, index: usize) -> usize {
+    let mut stream = seed;
+    next_index(&mut stream).wrapping_add(index)
 }
 
 /// A burst drawn from `seed`: each job's position and how long it works.
@@ -54,7 +60,7 @@ fn work_for(work: usize) {
 
 /// Runs the burst seeded by `seed` through `spawn_blocking` and returns the
 /// results in the order `join_all` hands them back.
-fn run_burst(seed: u64) -> Vec<u64> {
+fn run_burst(seed: u64) -> Vec<usize> {
     let handles: Vec<_> = burst(seed)
         .into_iter()
         .map(|(index, work)| {
@@ -76,7 +82,7 @@ fn pool_trace(seed: u64) -> u64 {
             expected(seed, index),
             "seed {seed:#x}: job {index} returned another job's value"
         );
-        fold(&mut trace, value);
+        fold_usize(&mut trace, value);
     }
     trace
 }
@@ -166,7 +172,11 @@ fn a_panicking_job_fails_only_its_own_awaiter() {
         // run beside their siblings rather than one at a time.
         let mut handles = Vec::with_capacity(jobs.len());
         for (index, work) in jobs {
-            let fails = failing.get(index).copied().unwrap_or(false);
+            // `failing` was drawn with one entry per job, so this position is
+            // one it holds; the index is bounded by the draw that filled it.
+            let Some(&fails) = failing.get(index) else {
+                continue;
+            };
             handles.push(spawn_blocking(move || {
                 work_for(work);
                 if fails {
@@ -177,7 +187,9 @@ fn a_panicking_job_fails_only_its_own_awaiter() {
         }
         for (index, handle) in handles.into_iter().enumerate() {
             let outcome = catch_unwind(AssertUnwindSafe(|| block_on(handle)));
-            let fails = failing.get(index).copied().unwrap_or(false);
+            let Some(&fails) = failing.get(index) else {
+                continue;
+            };
             match outcome {
                 Ok(value) => {
                     assert!(!fails, "seed {seed:#x}: job {index} was meant to fail");
