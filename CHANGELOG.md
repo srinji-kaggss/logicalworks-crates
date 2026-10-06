@@ -67,10 +67,20 @@ shared reading.
   readings and not a fallback**: both arms are stated where the split is made.
 - **`line_literal` saturates**, so a source longer than `u32::MAX` lines keeps the
   last line there is instead of wrapping onto another line's number.
+- **Two split points were off by one**, and the crate's own tests could not see
+  either: `split_let` bound `let x =` as the pattern of a binding, and `run_call`
+  skipped the callee path twice when it reported the tokens left after the call.
+  Both reached `lgwks_bot`'s `script!` users as un-compilable expansions, which is
+  how they were found. `emit::words::tests::an_expansion_with_a_run_call_is_still_rust`
+  pins them: it expands every shape a `run` call reaches — the whole line, a
+  `let` binding, a binding inside `together:`, a `::` callee with tokens after the
+  call — and asserts the expansion re-parses as Rust, that the tokens after a call
+  survive, and that a `let` binds its name. Reintroducing either defect fails it.
 
-Behaviour is unchanged. All 9 `lgwks_macros` tests pass, including the property
+Behaviour is unchanged. All 10 `lgwks_macros` tests pass, including the property
 suite that renders trees, reads them back and asserts a line moved off its column
-is refused at that line.
+is refused at that line, and `lgwks_bot`'s 192 `script!` tests pass against the
+rewritten emitter.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 

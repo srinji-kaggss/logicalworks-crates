@@ -511,9 +511,13 @@ pub(super) fn split_let(line: &Line) -> Result<(TokenStream, Vec<TokenTree>)> {
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");
         return refusal;
     };
-    // Past the `=` this search found, so the pattern is every token before it
-    // and the value is every token after it.
-    let (pattern, rest) = tokens.split_at(at.saturating_add(1));
+    // The `=` this search found splits the line: the pattern is every token
+    // before it, and `after` reads the value off the tokens past it, which is
+    // one reading of "after the word the caller matched" shared with every other
+    // block form. Splitting past the `=` instead would bind `let x =` as the
+    // pattern, which is the one thing a pattern cannot be.
+    let (pattern, at_equals) = tokens.split_at(at);
+    let rest = after(at_equals, 1);
     if pattern.is_empty() || rest.is_empty() {
         let refusal = Err(Error::new(line.span, "`let` reads `let <name> = <value>`"));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "split_let: returning an error to the caller");

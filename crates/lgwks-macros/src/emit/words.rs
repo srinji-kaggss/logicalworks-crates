@@ -82,8 +82,10 @@ pub(super) fn run_call<'line>(
     };
     // The callee path is every token read above, and the call consumed the
     // argument group as well, so what is left is what follows it.
+    // The walk above left `rest` on the argument group, so the call consumed that
+    // group too and what follows the call is what is past it.
+    let after_args = after(rest, 1);
     let path_tokens: TokenStream = path.iter().cloned().collect();
-    let after_args = after(rest, path.len());
     let arguments: Vec<TokenTree> = args_group.stream().into_iter().collect();
     let arguments = rewrite(&arguments, labels, shapes, line)?;
     let callee_name = callee.to_string();
@@ -414,5 +416,74 @@ pub(super) fn run_only(
             shapes.truncate(lookahead_shapes);
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use lgwks_deps::proc_macro2::TokenStream;
+
+    use crate::emit;
+    use crate::lines;
+
+    /// Expand `source` the way the macro does, as text.
+    fn expand(source: &str) -> Result<String, String> {
+        let stream = TokenStream::from_str(source).map_err(|error| error.to_string())?;
+        lines::tree(lines::split(stream))
+            .and_then(emit::script)
+            .map(|tokens| tokens.to_string())
+            .map_err(|error| error.to_string())
+    }
+
+    /// An expansion carrying a `run` call is still Rust.
+    ///
+    /// The re-parse is the whole assertion: `script!` emits an `async fn` and an
+    /// `ARCHITECTURE` const, so text that parses back is an expansion a compiler
+    /// can read. Splicing a call into the middle of a line is the one thing that
+    /// can break that, and it is invisible to an assertion that only looks for a
+    /// callee's name — a call whose tail arithmetic was off by one still
+    /// contained the callee.
+    #[test]
+    fn an_expansion_with_a_run_call_is_still_rust() -> Result<(), String> {
+        // Every shape a `run` call reaches: the whole line, a `let` binding, a
+        // binding inside a `for` body, and a `::` callee with tokens after the
+        // call. Each is a different route through `rewrite`, so a tail that is
+        // off by one in one of them shows here.
+        let source = "flow f(log: &RefCell<Vec<u8>>, rows: Vec<u8>) -> u8:\n\
+                      \x20   together:\n\
+                      \x20       let joined = run branch(log, \"a\")\n\
+                      \x20   let first = run branch(log, \"a\")\n\
+                      \x20   for value in [1, 2]:\n\
+                      \x20       let seen = run outer::inner(value)\n\
+                      \x20   let scaled = run outer::fetch(rows).pow(2)\n\
+                      \x20   give back first + seen + scaled\n";
+        let expanded = expand(source)?;
+        assert!(
+            expanded.contains("branch"),
+            "the callee is in the expansion: {expanded}"
+        );
+        assert!(
+            expanded.contains("outer :: inner"),
+            "a `::` path is in the expansion: {expanded}"
+        );
+        // The tokens after a call on the same line belong to the line, not to
+        // the call: a callee that consumed one token too many takes the rest of
+        // the expression with it, and the expansion is still valid Rust
+        // afterwards — which is why the re-parse alone does not catch it.
+        assert!(
+            expanded.contains("pow"),
+            "the tokens after a `run` call survive: {expanded}"
+        );
+        // A `let` inside `together:` binds the joined result, so the pattern the
+        // split produced is the name alone and never the name with its `=`.
+        assert!(
+            expanded.contains("let (joined ,) ="),
+            "a `let` binding binds its name: {expanded}"
+        );
+        TokenStream::from_str(&expanded)
+            .map(|_| ())
+            .map_err(|error| format!("the expansion is not Rust ({error}): {expanded}"))
     }
 }
