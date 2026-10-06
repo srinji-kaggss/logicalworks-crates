@@ -980,11 +980,50 @@ impl NeedSet {
     pub fn proposed_grants(&self) -> GrantSet {
         let mut grants = GrantSet::empty();
         for need in &self.needs {
-            if let Need::MissingCapability { ref capability, .. } = *need {
-                grants = grants.grant(capability.clone());
+            match *need {
+                Need::MissingCapability { ref capability, .. } => {
+                    grants = grants.grant(capability.clone());
+                }
+                // A lapsed credential is repaired by re-granting the same names:
+                // the proposal is the same set a deficit derives, and what makes
+                // it a *repair* rather than a shortage is that the caller has
+                // already got them.
+                Need::CredentialExpired {
+                    ref capabilities, ..
+                } => {
+                    for capability in capabilities {
+                        grants = grants.grant(capability.clone());
+                    }
+                }
+                _ => {}
             }
         }
         grants
+    }
+
+    /// The repair an adapter reports when its upstream refused the credential it
+    /// presented: one need naming every capability to re-grant, attributed to
+    /// `domain`.
+    ///
+    /// Built here rather than assembled by each adapter, because the whole point
+    /// of this type is that the shortfall arrives complete and in one piece: an
+    /// adapter that named one capability at a time would reproduce the very loop
+    /// a `NeedSet` was introduced to end. Sorted and de-duplicated, so two
+    /// callers deriving the repair from the same requirements produce the same
+    /// need set.
+    ///
+    /// Not a shortage, and deliberately shaped unlike one: the capabilities are
+    /// still granted, so the repair *re-grants* them rather than reporting them
+    /// missing.
+    #[must_use]
+    pub fn expired_credentials(domain: &str, capabilities: &[Cap]) -> Self {
+        let mut sorted = capabilities.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        Self::new(vec![Need::CredentialExpired {
+            domain: domain.to_owned(),
+            capabilities: sorted,
+        }])
     }
 }
 
@@ -1053,6 +1092,22 @@ pub enum Need {
         /// The condition identifier the spec spelled.
         condition: String,
     },
+    /// A credential the run's authority rests on expired, or a receiver refused
+    /// the one it presented.
+    ///
+    /// Not a [`Self::MissingCapability`] for the same reason
+    /// [`BotError::CredentialExpired`] is not a capability denial: the
+    /// capability is still granted and now names nothing, so the repair is a
+    /// *re-grant* of capabilities that are already
+    /// held. A need set that named them as missing would produce an admission
+    /// that grants what it already has and refuses again.
+    CredentialExpired {
+        /// The domain whose authority lapsed or was rejected upstream.
+        domain: String,
+        /// Every capability to re-grant, sorted by name so two callers deriving
+        /// the repair from the same facts produce the same need.
+        capabilities: Vec<Cap>,
+    },
     /// A domain requires a capability the caller's grant set does not carry.
     MissingCapability {
         /// The owning chain's index in the spec.
@@ -1068,16 +1123,22 @@ pub enum Need {
 }
 
 impl Need {
-    /// The chain index this need is attributed to.
+    /// The chain index this need is attributed to, when it belongs to one.
+    ///
+    /// `Option` rather than a bare index because one need genuinely has no
+    /// chain: a credential that lapsed is a fact about the run's authority, not
+    /// about a position in a document, and attributing it to chain 0 would
+    /// point a repair at a place it has nothing to do with.
     #[must_use]
-    pub fn chain(&self) -> usize {
+    pub fn chain(&self) -> Option<usize> {
         match *self {
             Self::UnknownSource { chain, .. }
             | Self::UnknownAction { chain, .. }
             | Self::SourceTargetRejected { chain, .. }
             | Self::ActionTargetRejected { chain, .. }
             | Self::UnknownCondition { chain, .. }
-            | Self::MissingCapability { chain, .. } => chain,
+            | Self::MissingCapability { chain, .. } => Some(chain),
+            Self::CredentialExpired { .. } => None,
         }
     }
 
@@ -1090,7 +1151,9 @@ impl Need {
             | Self::ActionTargetRejected { action, .. }
             | Self::UnknownCondition { action, .. } => Some(action),
             Self::MissingCapability { action, .. } => action,
-            Self::UnknownSource { .. } | Self::SourceTargetRejected { .. } => None,
+            Self::UnknownSource { .. }
+            | Self::SourceTargetRejected { .. }
+            | Self::CredentialExpired { .. } => None,
         }
     }
 }
@@ -1133,6 +1196,18 @@ impl std::fmt::Display for Need {
                 Escaped(domain),
                 Escaped(cause)
             ),
+            Self::CredentialExpired {
+                ref domain,
+                ref capabilities,
+            } => {
+                let names: Vec<&str> = capabilities.iter().map(|cap| cap.as_str()).collect();
+                write!(
+                    formatter,
+                    "{}: re-grant [{}], whose credential expired or was refused upstream",
+                    Escaped(domain),
+                    names.join(", ")
+                )
+            }
             Self::UnknownCondition {
                 chain,
                 action,

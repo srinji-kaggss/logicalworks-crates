@@ -1445,6 +1445,80 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_lengthened_event_behind_a_carried_seal_is_refused_on_every_seed`), and
   `examples/journal_continuation.rs`
   (10,000,000 attempts against an oracle)
+- **INV-BOT-153** A reading is admitted only when two independent reads of its
+  subject agree on the reported length, the modification time and the BLAKE3
+  digest of the bytes, and a read shorter than its subject claims is refused on
+  its own (`Drift::Truncated`) before any comparison. A subject that never
+  settles within `stability::MAX_STABILITY_READS` is
+  `BotError::UnstableObservation` naming the axis that kept moving: pending and
+  `NotDelivered`, never a change and never a failure of the domain, so the chain
+  keeps the value it already holds. A platform that keeps no modification time
+  reads as `None` on both passes and never as an instant the filesystem did not
+  state. Wired: `domain::data::JsonStore` reads through
+  `stability::read_stable_file` on every `Observe` and `Query`. **Not claimed:**
+  that a settled reading is valid JSON, or that a writer that rewrites in place
+  and pauses longer than one read pair is caught; that guarantee belongs to the
+  writer's rename-into-place discipline. · why: #278 row 1 · enforced by:
+  `tests/it/stability.rs` (`a_store_being_rewritten_is_pending_until_it_settles`,
+  `an_unsettled_reading_is_pending_rather_than_a_committed_change`,
+  `an_unsettled_reading_names_its_reads_and_its_axis`,
+  `a_store_written_by_rename_is_never_read_half_written`,
+  `a_query_over_a_moving_store_is_pending_too`,
+  `an_absent_store_is_unreadable_rather_than_unsettled`,
+  `a_dropped_store_takes_its_writer_with_it`), `stability::tests`, and
+  `tests/it/sim_stability.rs` (`a_seeded_reader_never_admits_a_torn_reading`,
+  `a_writer_that_never_pauses_is_never_admitted`,
+  `a_renamed_subject_is_read_whole_or_refused`,
+  `the_same_seed_replays_to_the_same_stability_trace`)
+- **INV-BOT-154** A credential's life is a duration on the declared clock, and a
+  lapsed or refused credential is a typed repair, never a retry.
+  `GrantSet::grant_expiring` names a lifetime, a re-grant keeps the **shorter**
+  one, and `GrantSet::issue_at` mints a proof carrying the shortest lifetime
+  among the capabilities it covers; a grant that named none never expires.
+  `Auth::check` refuses a lapsed proof *before* coverage as
+  `BotError::CredentialExpired`, because its repair is a re-grant of what is
+  still held, the opposite of a deficit's. A receiver that refuses the token an
+  adapter presented (401/403/404, `cap::is_credential_status`) is
+  `BotError::CredentialRejected` carrying a `NeedSet` whose one
+  `Need::CredentialExpired` names what to re-grant. Both are `Refused` and
+  `RetryClass::Never`. Wired: the `gh` adapter's `Unauthorized` reaches
+  `PrSnapshotSource::poll` and every flow (`From<GhError> for FlowError`) through
+  one `GhError::credential_rejection`, so the review path's head read reports the
+  repair rather than a `DomainError` a retry policy would repeat against the same
+  token. **Not claimed:** refreshing a token; the repair is reported, and
+  re-granting is the caller's. Nor that a lifetime narrows a built bot: the
+  bot mints a fresh proof per call from the set it retained, so a lifetime
+  bounds a proof in hand, and there is still no revocation. · why: #278 row 3 · enforced by:
+  `tests/it/credential.rs` (`a_proof_that_lapses_mid_run_refuses_the_verb`,
+  `a_fresh_grant_mints_a_working_proof_again`,
+  `a_grant_without_a_lifetime_never_expires`,
+  `a_proof_takes_the_shortest_of_its_capabilities_lifetimes`,
+  `an_upstream_rejection_carries_the_repair_and_is_never_retried`,
+  `a_github_permission_loss_repairs_authority_and_a_transport_loss_does_not`),
+  `tests/it/gh_binding.rs::a_refused_credential_reaches_the_observe_verb_as_its_repair`,
+  `tests/sim_review_path.rs::a_refused_credential_stops_the_review_with_its_repair`,
+  and `tests/it/sim_credential.rs`
+  (`a_seeded_credential_lives_exactly_as_long_as_its_grant`,
+  `a_perpetual_grant_is_never_refused_however_far_the_clock_advances`,
+  `the_same_seed_replays_to_the_same_credential_trace`)
+- **INV-BOT-155** A source's own revision may skip its poll, and only an
+  unchanged revision equal to the one committed with the held value may. A
+  revision is committed together with its value or not at all (INV-BOT-5 with a
+  change tick in place of a digest), so a poll that failed, stalled or read an
+  equal value leaves it where it was and the next tick asks again. Comparison is
+  equality only: a revision that wraps or regresses is a change, never an
+  ordering a wrap could invalidate, and a revision that moved while the value did
+  not costs a spare poll and never suppresses an effect. A source that declares
+  its baseline unsound (INV-BOT-120) is polled whatever its revision says. A
+  source reporting `None` takes the value-comparison path, and both paths fire on
+  the same ticks. **Not claimed:** that a source's revision is honest; a source
+  that reports an unchanged revision over a changed value is a source defect the
+  substrate cannot see. · why: #279 · enforced by: `tests/it/sim_change_ticks.rs`
+  (`the_change_tick_and_the_digest_fire_on_the_same_ticks`,
+  `a_revision_that_wraps_is_a_change`, `a_regressing_revision_is_a_change`,
+  `a_forced_refresh_beats_a_quiet_revision`,
+  `the_change_tick_never_fires_twice_for_one_movement`,
+  `a_seed_that_changes_the_schedule_changes_the_trace`, `the_same_seed_replays`)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is

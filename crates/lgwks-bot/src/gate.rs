@@ -1,9 +1,11 @@
 //! `gate` owns capability admission and enforces INV-BOT-SAME-GATE: shipped
 //! and custom domains pass the identical capability check at `Bot::build()`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use super::cap::{Auth, Cap, Deficit, Demand, Shortage, uncovered};
+use super::clock::Clock;
 use super::error::BotError;
 
 /// A set of granted capabilities. The bot builder checks every domain's
@@ -15,6 +17,15 @@ pub struct GrantSet {
     /// duplicate `grant` for the same capability must be idempotent rather than
     /// accumulate.
     granted: HashSet<Cap>,
+    /// How long each capability's grant stays usable, for the grants that named
+    /// a lifetime. Absent for a grant that named none, and absence means "no
+    /// expiry of its own" rather than "already expired".
+    ///
+    /// A map rather than one duration on the set because a host's own authority
+    /// and a delegated tenant's credential are not the same thing: a bot that
+    /// runs for weeks should hold its filesystem capability for weeks while the
+    /// token it holds for a remote API expires in an hour.
+    expiries: HashMap<Cap, Duration>,
 }
 
 impl GrantSet {
@@ -23,6 +34,7 @@ impl GrantSet {
     pub fn empty() -> Self {
         Self {
             granted: HashSet::new(),
+            expiries: HashMap::new(),
         }
     }
 
@@ -34,7 +46,10 @@ impl GrantSet {
         granted.insert(Cap::fs());
         granted.insert(Cap::sys());
         granted.insert(Cap::notify());
-        Self { granted }
+        Self {
+            granted,
+            expiries: HashMap::new(),
+        }
     }
 
     /// Grant a single capability. Idempotent: granting a capability already
@@ -44,6 +59,34 @@ impl GrantSet {
     pub fn grant(mut self, cap: Cap) -> Self {
         self.granted.insert(cap);
         self
+    }
+
+    /// Grant a capability for `ttl` and no longer.
+    ///
+    /// The lifetime is a duration, measured from the moment the proof is minted,
+    /// on the clock the minting host declared ([`Self::issue_at`]) or on a wall
+    /// clock ([`Self::issue`]). It is never a timestamp: a credential that names
+    /// an absolute instant means nothing on the host that has to honour it, and
+    /// is the one value this crate refuses to persist (INV-BOT-30).
+    ///
+    /// A capability granted twice keeps the **shorter** lifetime. The shorter
+    /// one is the one the caller asked for last, and widening a credential's
+    /// life by re-granting it is the shape of a bug that is invisible until a
+    /// token its issuer cancelled keeps working.
+    #[must_use]
+    pub fn grant_expiring(mut self, cap: Cap, ttl: Duration) -> Self {
+        self.granted.insert(cap.clone());
+        self.expiries
+            .entry(cap)
+            .and_modify(|held| *held = (*held).min(ttl))
+            .or_insert(ttl);
+        self
+    }
+
+    /// How long `cap`'s grant stays usable, when it named a lifetime.
+    #[must_use]
+    pub fn expiry_of(&self, cap: &Cap) -> Option<Duration> {
+        self.expiries.get(cap).copied()
     }
 
     /// Whether this set grants `cap`.
@@ -86,8 +129,37 @@ impl GrantSet {
     /// [`BotError::CapabilityDenied`] naming every requirement this set does not
     /// grant.
     pub fn issue(&self, required: &[Cap]) -> Result<Auth, BotError> {
+        self.issue_at(required, &Clock::wall())
+    }
+
+    /// Mint a proof whose credential lifetime is measured on `clock`.
+    ///
+    /// The same admission as [`Self::issue`], plus the expiry: a proof covering a
+    /// capability this set granted with a lifetime carries that lifetime, and one
+    /// covering a capability granted without one carries none. Where several
+    /// capabilities in `required` have lifetimes, the proof takes the shortest,
+    /// because a proof is presented as a whole and must not outlive its weakest
+    /// part.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::CapabilityDenied`] naming every ungranted requirement.
+    pub fn issue_at(&self, required: &[Cap], clock: &Clock) -> Result<Auth, BotError> {
         self.admit(required)?;
-        Ok(Auth::new(required.to_vec()))
+        let proof = Auth::new(required.to_vec());
+        let Some(ttl) = self.shortest_lifetime(required) else {
+            return Ok(proof);
+        };
+        Ok(proof.with_lease(clock.clone(), ttl))
+    }
+
+    /// The shortest lifetime among `required`, or `None` when none of them
+    /// named one.
+    fn shortest_lifetime(&self, required: &[Cap]) -> Option<Duration> {
+        required
+            .iter()
+            .filter_map(|cap| self.expiries.get(cap).copied())
+            .min()
     }
 
     /// Every capability this set grants, in no particular order.

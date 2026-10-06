@@ -717,7 +717,11 @@ fn need_set_helpers_are_total() {
         chain: 2,
         domain: "x".into(),
     }]);
-    assert_eq!(one.needs()[0].chain(), 2);
+    assert_eq!(
+        one.needs()[0].chain(),
+        Some(2),
+        "a document need names the chain it came from"
+    );
     assert_eq!(one.needs()[0].action(), None);
 }
 

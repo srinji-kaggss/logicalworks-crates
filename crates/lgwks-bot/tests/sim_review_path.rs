@@ -2452,6 +2452,89 @@ fn a_renamed_repository_is_refused_naming_both() -> TestResult {
     Ok(())
 }
 
+/// A credential the receiver refuses stops the review with its repair, and
+/// publishes nothing (row 3 of #278 on the shipped review path).
+///
+/// Each seed draws the status the receiver refuses with — an expired token's
+/// `401`, a lost scope's `403`, an invisible resource's `404` — so the band is
+/// three refusals the adapter must each read as a credential, not one replayed.
+/// The run must end as `FlowError::Bot` carrying `CredentialRejected` with that
+/// status and the re-grant of the network authority, never as the generic
+/// domain failure a retry policy would repeat, and never with a create.
+#[test]
+fn a_refused_credential_stops_the_review_with_its_repair() -> TestResult {
+    use lgwks_bot::cap::Cap;
+    use lgwks_bot::error::BotError;
+    use lgwks_bot::script::FlowError;
+    use lgwks_bot::spec::NeedSet;
+
+    const REFUSALS: [u16; 3] = [401, 403, 404];
+    let band = sim::Band::new(40, 16);
+    let mut reached = std::collections::HashSet::new();
+    for index in band.seeds() {
+        let drawn = usize::try_from(sim::Rng::new(index).below(3))?;
+        let status = *REFUSALS
+            .get(drawn)
+            .ok_or("a refusal index drawn below the list's length")?;
+        let host = host()?;
+        let job = review_task()?;
+        let fake = FakeGh::install("credential-refused", HEAD)?;
+        fake.configure(Scenario::new(HEAD).deny_credential(status))?;
+        let report = host.block_on(&job, (gh_for(&fake, CAPTURE)?, request(7)?))?;
+        assert_eq!(
+            fake.creates()?,
+            0,
+            "seed {index} ({status}): a refused credential publishes nothing"
+        );
+        let failure = report.error().ok_or_else(|| {
+            format!(
+                "seed {index} ({status}): a refused credential is a run failure, not {:?}",
+                report.output()
+            )
+        })?;
+        let FlowError::Bot { ref source, .. } = *failure else {
+            let refusal = Err(format!(
+                "seed {index} ({status}): the verb's typed error, not {failure}"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_refused_credential_stops_the_review_with_its_repair: returning an error to the caller");
+            return refusal;
+        };
+        let BotError::CredentialRejected {
+            status: reported,
+            ref needs,
+            ..
+        } = **source
+        else {
+            let refusal =
+                Err(format!("seed {index} ({status}): CredentialRejected, not {source}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_refused_credential_stops_the_review_with_its_repair: returning an error to the caller");
+            return refusal;
+        };
+        assert_eq!(
+            reported, status,
+            "seed {index}: the rejection carries the status the receiver named"
+        );
+        assert_eq!(
+            needs,
+            &NeedSet::expired_credentials("gh", &[Cap::net()]),
+            "seed {index} ({status}): and the repair re-grants the network authority"
+        );
+        assert_eq!(
+            source.retry_class(),
+            lgwks_bot::RetryClass::Never,
+            "seed {index} ({status}): the same credential is never retried"
+        );
+        reached.insert(status);
+    }
+    assert_eq!(
+        reached.len(),
+        REFUSALS.len(),
+        "the band must reach every credential status, not one replayed: {reached:?}"
+    );
+    Ok(())
+}
+
 /// An untrusted build script in the changed-file inventory is never executed.
 ///
 /// The oracle is a file the inventory's patch text names: the fake emits a

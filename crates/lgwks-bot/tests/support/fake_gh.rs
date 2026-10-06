@@ -541,6 +541,14 @@ elif [ "$is_files" -eq 1 ]; then
   printf ']\n'
 else
   field snapshot_shape; shape=$val
+  case "$shape" in
+    denied-*)
+      # A credential the receiver no longer honours: the line `gh` prints for
+      # an expired or cancelled token, with the status the scenario named.
+      printf 'gh: Bad credentials (HTTP %s)\n' "${shape#denied-}" >&2
+      exit 1
+      ;;
+  esac
   if [ "$shape" = "moved" ]; then
     # GitHub's renamed-repository answer: a move object naming the canonical
     # location, which the adapter reports rather than silently following.
@@ -616,8 +624,9 @@ pub struct Scenario {
     /// document whose closing bracket was lost.
     pub reviews_shape: &'static str,
     /// What the pull-request read emits instead of a pull request: `""` for the
-    /// real object, or `moved` for a renamed-repository redirect naming the
-    /// canonical location.
+    /// real object, `moved` for a renamed-repository redirect naming the
+    /// canonical location, or `denied-<status>` for a receiver refusing the
+    /// credential with that status.
     pub snapshot_shape: &'static str,
     /// What the changed-file read emits: `""` for a real list, or `unavailable`
     /// for a server that declines to render the diff (a `406`).
@@ -785,6 +794,21 @@ impl Scenario {
     #[must_use]
     pub fn with_diff_bytes(mut self, bytes: u32) -> Self {
         self.diff_bytes = bytes;
+        self
+    }
+
+    /// The pull-request read refuses the credential `gh` holds with `status`:
+    /// `401` for an expired or cancelled token, `403` for one that lost the
+    /// scope, `404` for a resource it can no longer see. Any other status is
+    /// not a credential refusal and leaves the read answering normally.
+    #[must_use]
+    pub fn deny_credential(mut self, status: u16) -> Self {
+        self.snapshot_shape = match status {
+            401 => "denied-401",
+            403 => "denied-403",
+            404 => "denied-404",
+            _ => self.snapshot_shape,
+        };
         self
     }
 

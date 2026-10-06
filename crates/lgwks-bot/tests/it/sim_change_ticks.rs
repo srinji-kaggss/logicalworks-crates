@@ -537,6 +537,18 @@ band_family::band_family! {
     equivalence_band_07 => the_change_tick_and_the_digest_fire_on_the_same_ticks, 7;
 }
 
+/// Refuse a seed on which the two engines disagreed, emitting the refusal
+/// first so the scan lane's rule — every `return Err` is signalled — holds for
+/// the one place this family refuses.
+fn disagree(cause: String) -> TestResult {
+    let refusal: TestResult = Err(cause.into());
+    lgwks_std::trace::debug!(
+        error = ?refusal.as_ref().err(),
+        "change ticks: the two engines disagreed on a seed"
+    );
+    refusal
+}
+
 /// One seed, two engines, one sequence of movements.
 ///
 /// The property the whole file exists for: the revision seam is an optimisation,
@@ -553,19 +565,17 @@ fn the_change_tick_and_the_digest_fire_on_the_same_ticks(band: Band) -> TestResu
         let with_revisions = run(&plan, true)?;
         let by_value = run(&plan, false)?;
         if with_revisions.fired != by_value.fired {
-            return Err(format!(
+            return disagree(format!(
                 "seed {}: the change-tick engine fired {:?} and the \
                  value-comparison engine fired {:?} for the same movements",
                 sim.seed, with_revisions.fired, by_value.fired,
-            )
-            .into());
+            ));
         }
         if with_revisions.report != by_value.report {
-            return Err(format!(
+            return disagree(format!(
                 "seed {}: the two engines reported different rows: {:?} against {:?}",
                 sim.seed, with_revisions.report, by_value.report,
-            )
-            .into());
+            ));
         }
         // And the polls: the engines differ here by design, and the revision
         // engine may only poll *less*, never more. A revision engine that polls
@@ -573,12 +583,11 @@ fn the_change_tick_and_the_digest_fire_on_the_same_ticks(band: Band) -> TestResu
         let total_with: usize = with_revisions.polls.iter().sum();
         let total_without: usize = by_value.polls.iter().sum();
         if total_with > total_without {
-            return Err(format!(
+            return disagree(format!(
                 "seed {}: the change-tick engine polled {total_with} times and the \
                  value-comparison engine {total_without}, so the seam cost work",
                 sim.seed,
-            )
-            .into());
+            ));
         }
         record(sim, "rev", &with_revisions);
         record(sim, "val", &by_value);

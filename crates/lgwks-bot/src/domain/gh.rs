@@ -1937,7 +1937,59 @@ pub enum GhError {
     },
 }
 
+/// The capabilities a GitHub credential stands for: the network authority the
+/// token is presented over. One definition, so the need [`GhError::repair`]
+/// reports and the rejection a verb raises cannot name different re-grants.
+fn credential_caps() -> [Cap; 1] {
+    [Cap::net()]
+}
+
 impl GhError {
+    /// The repair this failure calls for, as a [`NeedSet`].
+    ///
+    /// `Some` for exactly the arm that is a credential problem —
+    /// [`GhError::Unauthorized`], which is where the client reported `401`,
+    /// `403` or a `404` the credential cannot see past — and `None` for every
+    /// other failure, because none of them is repaired by authority.
+    ///
+    /// This is the wiring that makes an upstream auth failure a *typed repair*
+    /// rather than a generic error: `401` arrives as a typed need set naming the
+    /// capabilities to re-grant, so a caller acts on it once instead of
+    /// discovering it from a status code and rebuilding the answer by hand. The
+    /// repair is never a retry — the same credential against the same receiver
+    /// gives the same status.
+    ///
+    /// [`NeedSet`]: crate::spec::NeedSet
+    #[must_use]
+    pub fn repair(&self) -> Option<crate::spec::NeedSet> {
+        match *self {
+            Self::Unauthorized { .. } => Some(crate::spec::NeedSet::expired_credentials(
+                "gh",
+                &credential_caps(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// This failure as the typed credential rejection a verb or a flow reports,
+    /// attributed to `domain`, when it is one.
+    ///
+    /// The one place the verb path ([`PrSnapshotSource`]) and the flow path
+    /// (`From<GhError> for FlowError`) turn a `401`/`403`/`404` into a
+    /// [`BotError::CredentialRejected`] carrying its repair, so neither can
+    /// flatten a permission loss into a generic domain failure that a retry
+    /// policy would then repeat.
+    fn credential_rejection(&self, domain: &str) -> Option<BotError> {
+        match *self {
+            Self::Unauthorized { status, .. } => Some(crate::cap::upstream_credential_rejection(
+                domain,
+                status,
+                &credential_caps(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Whether repeating this call could produce a different answer.
     ///
     /// The adapter does not decide that — a caller that is about to *publish*
@@ -2142,6 +2194,14 @@ impl From<GhError> for crate::script::FlowError {
     /// stays one, so a flow's retry decision still knows that the publication
     /// may have happened. This is the same mapping the verb path makes.
     fn from(source: GhError) -> Self {
+        // A refused credential is its own typed outcome on this path too, with
+        // the repair attached, rather than a `DomainError` a flow would retry.
+        if let Some(rejection) = source.credential_rejection("gh") {
+            return crate::script::FlowError::Bot {
+                at: std::sync::Arc::from(""),
+                source: Box::new(rejection),
+            };
+        }
         let certainty = match source {
             // The child started and did not settle: it may have reached
             // GitHub, so the effect is unsettled rather than undelivered. A
@@ -2335,10 +2395,13 @@ impl verb::Observe for PrSnapshotSource {
         call.0.check(self.required_caps())?;
         match self.gh.snapshot(&self.pull).await {
             Ok(snapshot) => Ok(snapshot),
-            Err(source) => Err(BotError::DomainError {
-                domain: self.domain_id().into(),
-                certainty: DispatchCertainty::NotDelivered,
-                cause: source.to_string(),
+            Err(source) => Err(match source.credential_rejection(self.domain_id()) {
+                Some(rejection) => rejection,
+                None => BotError::DomainError {
+                    domain: self.domain_id().into(),
+                    certainty: DispatchCertainty::NotDelivered,
+                    cause: source.to_string(),
+                },
             }),
         }
     }
