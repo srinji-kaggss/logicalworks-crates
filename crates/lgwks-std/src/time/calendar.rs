@@ -30,15 +30,6 @@ const EPOCH_WHOLE_ERAS: i64 = 4;
 /// Days left over after [`EPOCH_WHOLE_ERAS`]: `719_468 - 584_388 = 135_080`.
 const EPOCH_ERA_REMAINDER: i64 = 135_080;
 
-/// Truncating integer division that cannot trap.
-///
-/// `clippy::integer_division` forbids the bare `/` operator, and every call
-/// site divides by a non-zero constant, so the `None` arm of `checked_div` is
-/// unreachable and exists only to keep the function total.
-fn divide(numerator: i64, denominator: i64) -> i64 {
-    numerator.checked_div(denominator).unwrap_or(0)
-}
-
 /// Determines whether the given astronomical year index is a leap year (366 days).
 ///
 /// `year` is an astronomical year index: year `0` is 1 BCE, and negative values
@@ -54,9 +45,8 @@ pub fn is_leap(year: i64) -> bool {
 /// Returns the number of days in the specified month (1..=12) for a given year.
 ///
 /// Returns [`None`] when `month` is outside `1..=12`, so an out-of-range month
-/// is a value the caller must handle rather than a panic inside the library.
-/// Use this in preference to [`days_in_month`] whenever the month has not
-/// already been range-checked.
+/// is a value the caller must handle rather than a panic or a zero inside the
+/// library.
 #[must_use]
 pub fn try_days_in_month(year: i64, month: u32) -> Option<u32> {
     match month {
@@ -66,18 +56,6 @@ pub fn try_days_in_month(year: i64, month: u32) -> Option<u32> {
         2 => Some(28),
         _ => None,
     }
-}
-
-/// Returns the number of days in the specified month (1..=12) for a given year,
-/// or `0` when `month` is outside `1..=12`.
-///
-/// `0` is a sentinel, not a month length: a caller that uses the result as an
-/// inclusive upper bound for a day of month fails closed, because no day can
-/// satisfy `1..=0`. Callers that need to distinguish "empty month" from
-/// "invalid month" should use [`try_days_in_month`] instead.
-#[must_use]
-pub fn days_in_month(year: i64, month: u32) -> u32 {
-    try_days_in_month(year, month).unwrap_or(0)
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
@@ -109,27 +87,40 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     } else {
         month.saturating_add(9)
     };
+    // Every quotient below divides a non-negative numerator by a non-zero
+    // constant, where `div_euclid` and truncating division agree; the method
+    // form is what keeps the step total without a refusal arm.
     let day_of_year = month_prime
         .saturating_mul(153)
         .saturating_add(2)
-        .checked_div(5)
-        .unwrap_or(0)
+        .div_euclid(5)
         .saturating_add(day)
         .saturating_sub(1);
     let day_of_era = year_of_era
         .saturating_mul(365)
-        .saturating_add(year_of_era.checked_div(4).unwrap_or(0))
-        .saturating_sub(year_of_era.checked_div(100).unwrap_or(0))
+        .saturating_add(year_of_era.div_euclid(4))
+        .saturating_sub(year_of_era.div_euclid(100))
         .saturating_add(day_of_year);
     let days = era
         .saturating_mul(i128::from(DAYS_PER_ERA))
         .saturating_add(day_of_era)
         .saturating_sub(i128::from(EPOCH_ERA_OFFSET));
-    i64::try_from(days).unwrap_or(if days.is_negative() {
-        i64::MIN
-    } else {
-        i64::MAX
-    })
+    // The complete count is computed in full before this narrowing, so the
+    // only refusal left is a day count outside `i64`, and each side saturates
+    // at the bound it crossed rather than reporting a nearby date.
+    match i64::try_from(days) {
+        Ok(narrowed) => narrowed,
+        Err(_) => {
+            let bound = if days.is_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            };
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(days = ?days, bound = bound, "days_from_civil: a day count outside i64 saturates at the bound it crossed");
+            bound
+        }
+    }
 }
 
 /// Splits days-since-1970-01-01 into a 400-year era index and a `0..146_097`
@@ -167,23 +158,21 @@ fn shifted_to_era(days_since_epoch: i64) -> (i64, i64) {
 ///
 /// `day_of_era` is bounded by `146_096`, which is what keeps every intermediate
 /// here small: the year-of-era correction is `0..=399`, `era * 400` is a civil
-/// year, and `365 * year_of_era` is at most `145_635`. Every division is
-/// truncating on a non-negative numerator, matching `/` for the operands the
-/// algorithm can supply.
+/// year, and `365 * year_of_era` is at most `145_635`. Every `div_euclid` below
+/// divides a non-negative numerator by a non-zero constant, where flooring and
+/// truncating division agree.
 fn era_to_year(day_of_era: i64, era: i64) -> (i64, i64) {
-    let year_of_era = divide(
-        day_of_era
-            .saturating_sub(divide(day_of_era, 1_460))
-            .saturating_add(divide(day_of_era, 36_524))
-            .saturating_sub(divide(day_of_era, 146_096)),
-        365,
-    );
+    let year_of_era = day_of_era
+        .saturating_sub(day_of_era.div_euclid(1_460))
+        .saturating_add(day_of_era.div_euclid(36_524))
+        .saturating_sub(day_of_era.div_euclid(146_096))
+        .div_euclid(365);
     let computed_year = year_of_era.saturating_add(era.saturating_mul(400));
     let day_of_year = day_of_era.saturating_sub(
         year_of_era
             .saturating_mul(365)
-            .saturating_add(divide(year_of_era, 4))
-            .saturating_sub(divide(year_of_era, 100)),
+            .saturating_add(year_of_era.div_euclid(4))
+            .saturating_sub(year_of_era.div_euclid(100)),
     );
     (computed_year, day_of_year)
 }
@@ -191,14 +180,23 @@ fn era_to_year(day_of_era: i64, era: i64) -> (i64, i64) {
 /// Converts a March-based year and its `0..=365` day into a civil
 /// `(year, month, day)`.
 ///
-/// Returns `i64` components rather than the public `u32` ones so that the
-/// narrowing happens once, at the public boundary, where the range is known.
 /// `day_of_year` is `0..=365`, so `month_prime` is `0..=12`, the day of month
-/// is `1..=31`, and the month is `1..=12`.
-fn day_of_year_to_month_day(day_of_year: i64, computed_year: i64) -> (i64, i64, i64) {
-    let month_prime = divide(day_of_year.saturating_mul(5).saturating_add(2), 153);
+/// is `1..=31`, and the month is `1..=12`. The month and day are returned as
+/// the `u32` the public boundary names, computed in that domain from the
+/// start: every `div_euclid` divides a non-negative numerator by a non-zero
+/// constant, so nothing here needs a conversion or a refusal arm.
+fn day_of_year_to_month_day(day_of_year: u32, computed_year: i64) -> (i64, u32, u32) {
+    let month_prime = day_of_year
+        .saturating_mul(5)
+        .saturating_add(2)
+        .div_euclid(153);
     let computed_day = day_of_year
-        .saturating_sub(divide(month_prime.saturating_mul(153).saturating_add(2), 5))
+        .saturating_sub(
+            month_prime
+                .saturating_mul(153)
+                .saturating_add(2)
+                .div_euclid(5),
+        )
         .saturating_add(1);
     // Month 0 of the re-based year is March, so the last ten months wrap back
     // to the civil calendar.
@@ -215,6 +213,18 @@ fn day_of_year_to_month_day(day_of_year: i64, computed_year: i64) -> (i64, i64, 
     (final_year, computed_month, computed_day)
 }
 
+/// The era day offset `0..=146_096` as the `u32` the year pipeline divides in.
+///
+/// This is the one narrowing in the inverse conversion. `shifted_to_era` bounds
+/// the offset to `0..=146_096`, so the value is inside `u32` and its four low
+/// bytes are the value itself: reading them is total, where a checked
+/// conversion would carry a refusal arm for a bound the caller has already
+/// established, and where an `as` cast would make the bound invisible.
+fn era_day_offset(day_of_era: i64) -> u32 {
+    let bytes = day_of_era.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
 /// The proleptic Gregorian date for a count of days since 1970-01-01.
 ///
 /// The inverse of [`days_from_civil`]. Exact for every `i64` day count: the
@@ -229,13 +239,5 @@ fn day_of_year_to_month_day(day_of_year: i64, computed_year: i64) -> (i64, i64, 
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let (era, day_of_era) = shifted_to_era(days);
     let (computed_year, day_of_year) = era_to_year(day_of_era, era);
-    let (year, month, day) = day_of_year_to_month_day(day_of_year, computed_year);
-    // `month` is `1..=12` and `day` is `1..=31` by construction, so both
-    // narrowings are exact; the fallbacks are unreachable and exist only to
-    // keep the conversion explicit instead of an `as` cast.
-    (
-        year,
-        u32::try_from(month).unwrap_or(1),
-        u32::try_from(day).unwrap_or(1),
-    )
+    day_of_year_to_month_day(era_day_offset(day_of_year), computed_year)
 }

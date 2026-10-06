@@ -6,7 +6,7 @@
 
 use std::time::SystemTime;
 
-use super::calendar::{days_from_civil, days_in_month};
+use super::calendar::{days_from_civil, try_days_in_month};
 use super::error::{Field, ParseError};
 use super::format::from_unix_parts;
 
@@ -109,7 +109,18 @@ fn parse_month(bytes: &[u8]) -> Result<u32, ParseError> {
 /// Parses the 2-digit day of month for the given year and month.
 fn parse_day(bytes: &[u8], year: i64, month: u32) -> Result<u32, ParseError> {
     let day_val = parse_digit_field(bytes, 8, 2, Field::Day)?;
-    check_range(Field::Day, day_val, 1, days_in_month(year, month), 8)?;
+    // `parse_month` has already refused every month outside `1..=12`, so the
+    // calendar answers this one; the refusal below is what a caller sees if a
+    // future month ever falls outside it, and it names the month rather than
+    // reporting a zero-length month as a day bound.
+    let month_days = try_days_in_month(year, month).ok_or(ParseError::OutOfRange {
+        field: Field::Month,
+        value: month,
+        min: 1,
+        max: 12,
+        at: 5,
+    })?;
+    check_range(Field::Day, day_val, 1, month_days, 8)?;
     Ok(day_val)
 }
 

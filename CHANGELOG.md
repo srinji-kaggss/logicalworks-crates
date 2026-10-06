@@ -9,6 +9,43 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: the calendar divides where it is bounded (9-axis sweep)
+
+`time`'s conversions carried a `divide` helper whose `checked_div` refusal was
+answered with `0`, a sentinel narrower than any real quotient; a `days_in_month`
+that answered an out-of-range month with a zero month length; and three
+narrowings whose refusals were answered with `1`. None of them is reachable
+today, and each is a value a caller could not tell from a measurement.
+
+- **Every division is a `div_euclid`/`rem_euclid` over a non-negative numerator
+  and a non-zero constant**, which is what the module doc already claimed. The
+  `divide` helpers in `calendar` and `format` are gone, and the day-of-year
+  pipeline computes the month and day in the `u32` the public boundary names, so
+  `civil_from_days` narrows exactly once — on the era day offset, which
+  `shifted_to_era` bounds to `0..=146_096`.
+- **`days_in_month` is gone.** Its only caller was the parser, which now asks
+  `try_days_in_month` and propagates a typed `OutOfRange` naming the month; a
+  month length of `0` no longer stands in for "not a month".
+- **`days_from_civil` states its saturation.** A day count outside `i64`
+  saturates at the bound it crossed and emits a debug record, rather than
+  answering a narrowing refusal with whichever of `i64::MIN`/`i64::MAX` a
+  conditional picked.
+- **The RFC 3339 renderer is one integer domain.** Digits, two-digit pairs,
+  four-digit years and the time of day are all rendered from `i64` counts, so
+  the `u32`→`u8` and `i64`→`u32` narrowings are gone; one documented low-byte
+  read at the ASCII boundary is what remains. `from_unix_parts` carries a
+  nanosecond count into seconds with the euclid forms and widens a
+  non-negative second count by reinterpreting the same eight bytes.
+- **The deprecated lossy wrappers name their clamp.** `unix_parts_lossy` and
+  `from_unix_parts_lossy` still saturate exactly as documented, written as the
+  answer to a refusal; `from_unix_parts_lossy` now emits that loss as a debug
+  record so a caller that reaches for it by mistake can see it happened.
+
+Behaviour is unchanged for every value the RFC 3339 profile admits: 13
+`sim_time_profile` tests pass, including `seeded_calendar_model_replays_exactly`,
+`calendar_roundtrips_endpoints_neighbors_and_overflow_transition` and
+`t5_endpoints_are_exact_under_the_repaired_narrowing`.
+
 ### lgwks_std — the nine-axis sweep: the codec and policy primitives, one value per width (9-axis sweep)
 
 Every line of this crate now meets the nine axes and every rust-guard finding is
