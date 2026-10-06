@@ -41,6 +41,11 @@ use seed::{Rng, Trace};
 /// What every family returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// What a scenario step returns: the value it drew, or the refusal that stopped
+/// it. A draw this target cannot hold is a refusal, never a substitute count,
+/// because a scenario that silently measured zero would still record a trace.
+type Scenario<T> = Result<T, Box<dyn Error>>;
+
 /// Sources written per family.
 const SEEDS: u64 = 96;
 
@@ -96,21 +101,35 @@ fn seed_for(family: u64, index: u64) -> u64 {
 /// Rust statements that parse cleanly, so a mixed shape is not rejected whole.
 const CLEAN: [&str; 4] = ["let a = 1;", "let b: u32 = 2;", "return;", "let c = a + b;"];
 
-/// The source `rng` writes, and the shape it wrote.
-fn write_source(rng: &mut Rng) -> (String, Shape) {
-    let count = u32::try_from(Shape::ALL.len()).unwrap_or(1);
-    let shape = Shape::ALL
-        .get(usize::try_from(rng.below(count)).unwrap_or(0))
+/// One entry of `pool`, drawn from it.
+///
+/// The generator draws `u32` and a slice is indexed by `usize`, and `usize` is
+/// sixteen bits on the smallest target Rust supports, so the conversion is
+/// genuinely fallible. Every pool here holds a handful of entries, so a host
+/// that cannot hold the draw is reported rather than answered with the first
+/// entry — a family that silently drew `Shape::Balanced` ninety-six times would
+/// still record a trace and still pass.
+fn drawn<T: Copy>(pool: &[T], rng: &mut Rng) -> Scenario<T> {
+    let bound = u32::try_from(pool.len())?;
+    let at = usize::try_from(rng.below(bound))?;
+    pool.get(at)
         .copied()
-        .unwrap_or(Shape::Balanced);
+        .ok_or_else(|| format!("a draw from {} entries names none of them", pool.len()).into())
+}
+
+/// The source `rng` writes, and the shape it wrote.
+fn write_source(rng: &mut Rng) -> Scenario<(String, Shape)> {
+    let shape = drawn(&Shape::ALL, rng)?;
     // The nesting depth is drawn log-uniformly across the ceiling, not
     // uniformly: a uniform draw from 1 to 2048 puts fewer than one seed in 96
     // inside a depth of 16, so the family would have no accepting arm at all and
     // the smallest refusal it could reach would be a trivial one. A power of two
     // per draw puts five of twelve outcomes inside 16 and half past the depth
     // ceiling, so both arms are populated without either being a special case.
+    // The ceiling of 2048 is well inside sixteen bits, so the draw fits a
+    // `usize` on every target that can run this suite.
     let exponent = rng.between(0, 11);
-    let levels = usize::try_from(1_u32 << exponent).unwrap_or(1);
+    let levels = usize::try_from(1_u32 << exponent)?;
     let source = match shape {
         Shape::UnbalancedOpeners => format!("{}fn f() {{}}", "fn f() {".repeat(levels)),
         Shape::Balanced => format!(
@@ -124,11 +143,7 @@ fn write_source(rng: &mut Rng) -> (String, Shape) {
             for level in 0..levels {
                 source.push_str("fn f() {");
                 if level % 8 == 0 {
-                    let statement = CLEAN
-                        .get(usize::try_from(rng.below(4)).unwrap_or(0))
-                        .copied()
-                        .unwrap_or("");
-                    source.push_str(statement);
+                    source.push_str(drawn(&CLEAN, rng)?);
                 }
             }
             source.push('}');
@@ -136,7 +151,7 @@ fn write_source(rng: &mut Rng) -> (String, Shape) {
             source
         }
     };
-    (source, shape)
+    Ok((source, shape))
 }
 
 /// The name of the arm `try_parse` answered with, or `accepted`.
@@ -157,9 +172,9 @@ fn arm(answer: &Result<lgwks_ast::Parsed, ParseError>) -> String {
 }
 
 /// One seed's whole scenario, recorded.
-fn scenario(seed: u64) -> Trace {
+fn scenario(seed: u64) -> Scenario<Trace> {
     let mut rng = Rng::new(seed);
-    let (source, shape) = write_source(&mut rng);
+    let (source, shape) = write_source(&mut rng)?;
     let mut trace = Trace::new();
     trace.record(shape.name());
     trace.record_count("bytes", source.len());
@@ -181,7 +196,7 @@ fn scenario(seed: u64) -> Trace {
             trace.record_count("depth", metrics.max_depth);
         }
     }
-    trace
+    Ok(trace)
 }
 
 /// Runs `family` over [`SEEDS`] generated sources, handing each to `check`.
@@ -192,7 +207,7 @@ fn sweep(
     for index in 0..SEEDS {
         let seed = seed_for(family, index);
         let mut rng = Rng::new(seed);
-        let (source, shape) = write_source(&mut rng);
+        let (source, shape) = write_source(&mut rng)?;
         let answer = try_parse(&source, Language::Rust);
         check(seed, &source, shape, &answer).map_err(|error| format!("seed {seed:#x}: {error}"))?;
     }
@@ -315,7 +330,7 @@ fn a_source_past_the_depth_ceiling_is_refused_for_its_depth() -> TestResult {
         Ok(())
     })?;
     assert!(
-        refused >= SEEDS.checked_div(8).unwrap_or(0),
+        refused >= SEEDS.saturating_div(8),
         "only {refused} of {SEEDS} seeds produced a depth refusal; the generator is not nesting \
          past the ceiling often enough to test the bound"
     );
@@ -365,20 +380,21 @@ fn no_seed_reaches_an_unnameable_arm() -> TestResult {
 
 #[test]
 /// The same seed replays to the same trace hash.
-fn the_same_seed_replays_to_the_same_trace() {
+fn the_same_seed_replays_to_the_same_trace() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(6, index);
-        let first = scenario(seed);
+        let first = scenario(seed)?;
         assert!(
             !first.is_empty(),
             "seed {seed:#x}: the scenario recorded nothing"
         );
         assert_eq!(
             first.hash(),
-            scenario(seed).hash(),
+            scenario(seed)?.hash(),
             "seed {seed:#x}: the replay diverged"
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -392,10 +408,11 @@ fn the_same_seed_replays_to_the_same_trace() {
 /// checked: many distinct traces, and more than one arm among them. A generator
 /// that had stopped varying would collapse both.
 fn different_seeds_write_different_traces() -> TestResult {
-    let hashes: BTreeSet<u64> = (0..SEEDS)
-        .map(|index| scenario(seed_for(7, index)).hash())
-        .collect();
-    let distinct = u64::try_from(hashes.len()).unwrap_or(0);
+    let mut hashes: BTreeSet<u64> = BTreeSet::new();
+    for index in 0..SEEDS {
+        hashes.insert(scenario(seed_for(7, index))?.hash());
+    }
+    let distinct = u64::try_from(hashes.len())?;
     assert!(
         distinct.saturating_mul(2) >= SEEDS,
         "only {distinct} distinct traces from {SEEDS} seeds"
@@ -421,7 +438,7 @@ fn the_generated_trees_have_a_spread_of_depths() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(8, index);
         let mut rng = Rng::new(seed);
-        let (source, _) = write_source(&mut rng);
+        let (source, _) = write_source(&mut rng)?;
         let tree = lgwks_ast::parse(&source, Language::Rust);
         depths.insert(inspect_ast(&tree.root(), None).max_depth);
     }

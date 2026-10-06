@@ -36,6 +36,11 @@ use seed::{Rng, Trace};
 /// What every family returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// What a scenario step returns: the value it drew, or the refusal that stopped
+/// it. A draw this target cannot hold is reported rather than replaced by a
+/// count, because a source written from a substituted count is still a trace.
+type Scenario<T> = Result<T, Box<dyn Error>>;
+
 /// Sources written per family.
 const SEEDS: u64 = 64;
 
@@ -57,15 +62,31 @@ fn seed_for(family: u64, index: u64) -> u64 {
 /// Statements a mixed source interleaves, so the grammar has real work.
 const CLEAN: [&str; 4] = ["let a = 1;", "let b: u32 = 2;", "return;", "let c = a + b;"];
 
+/// A statement from [`CLEAN`], drawn from it.
+///
+/// The generator draws `u32` and this is a four-element table, so the draw is
+/// converted rather than assumed: a host whose `usize` cannot hold it is
+/// reported, because a mixed source written from a substituted statement is
+/// still a trace and would still replay.
+fn drawn_statement(rng: &mut Rng) -> Scenario<&'static str> {
+    let bound = u32::try_from(CLEAN.len())?;
+    let at = usize::try_from(rng.below(bound))?;
+    CLEAN
+        .get(at)
+        .copied()
+        .ok_or_else(|| format!("a draw from {} statements names none of them", CLEAN.len()).into())
+}
+
 /// A seeded source and the name of its shape.
 ///
 /// The nesting runs from 64 to 2 048 levels. Sixty-four is the floor because
 /// it is past a hundred parser operations for every shape — `fn f() {` is five
 /// tokens — so a zero deadline is always reached; the ceiling keeps one seed to
-/// 16 KiB.
-fn write_source(rng: &mut Rng) -> (String, &'static str) {
-    let levels = usize::try_from(1_u32 << rng.between(6, 11)).unwrap_or(64);
-    match rng.below(4) {
+/// 16 KiB. Both ends are inside sixteen bits, so the draw fits a `usize` on
+/// every target that can run this suite.
+fn write_source(rng: &mut Rng) -> Scenario<(String, &'static str)> {
+    let levels = usize::try_from(1_u32 << rng.between(6, 11))?;
+    Ok(match rng.below(4) {
         0 => (
             format!("{}fn f() {{}}", "fn f() {".repeat(levels)),
             "unbalanced-openers",
@@ -84,17 +105,13 @@ fn write_source(rng: &mut Rng) -> (String, &'static str) {
             for level in 0..levels {
                 source.push_str("fn f() {");
                 if level % 4 == 0 {
-                    let statement = CLEAN
-                        .get(usize::try_from(rng.below(4)).unwrap_or(0))
-                        .copied()
-                        .unwrap_or("");
-                    source.push_str(statement);
+                    source.push_str(drawn_statement(rng)?);
                 }
             }
             source.push_str(&"}".repeat(levels));
             (source, "mixed")
         }
-    }
+    })
 }
 
 /// The arm a checked parse answered with, plus the tree's shape when it built
@@ -126,9 +143,9 @@ fn on_a_fresh_thread(source: &str) -> Result<String, Box<dyn Error>> {
 
 /// One seed's whole scenario: stopped, then parsed again on this thread, then
 /// parsed under a deadline it cannot reach.
-fn scenario(seed: u64) -> Result<Trace, Box<dyn Error>> {
+fn scenario(seed: u64) -> Scenario<Trace> {
     let mut rng = Rng::new(seed);
-    let (source, shape) = write_source(&mut rng);
+    let (source, shape) = write_source(&mut rng)?;
     let mut trace = Trace::new();
     trace.record(shape);
     trace.record_count("bytes", source.len());
@@ -189,7 +206,7 @@ fn every_seed_is_stopped_then_parses_clean_on_the_same_thread() -> TestResult {
     for index in 0..SEEDS {
         let seed = seed_for(1, index);
         let mut rng = Rng::new(seed);
-        shapes.insert(write_source(&mut rng).1);
+        shapes.insert(write_source(&mut rng)?.1);
         scenario(seed).map_err(|error| format!("seed {seed:#x}: {error}"))?;
     }
     assert_eq!(
