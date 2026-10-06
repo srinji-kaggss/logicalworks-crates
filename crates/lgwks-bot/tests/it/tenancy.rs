@@ -899,3 +899,56 @@ fn every_tenant_of_a_fleet_is_admitted_at_each_declared_in_flight_tier() -> Test
     }
     Ok(())
 }
+
+/// PROBE (not for merge): attribute the neighbour's flood cost on the CI host.
+#[test]
+fn probe_neighbour_cost_attribution() -> TestResult {
+    let attacker = Tenant::new("attacker")?;
+    let neighbour = Tenant::new("neighbour")?;
+    let runtime = Runtime::new()?;
+    let mut walls: [Vec<Duration>; 5] = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for _ in 0..ROUNDS {
+        for (arm, slot) in walls.iter_mut().enumerate() {
+            let wall = runtime.block_on(probe_arm(&neighbour, &attacker, arm))?;
+            slot.push(wall);
+        }
+    }
+    let mut medians = Vec::new();
+    for slot in &mut walls {
+        medians.push(median(slot).ok_or("a round ran")?);
+    }
+    Err(format!(
+        "PROBE medians A(alone)={:?} B(tenanted flood)={:?} C(untenanted flood, second supervisor)={:?} D(tenanted flood, reaped before timer)={:?} F(untenanted spawn, same supervisor)={:?}",
+        medians.first(), medians.get(1), medians.get(2), medians.get(3), medians.get(4)
+    )
+    .into())
+}
+
+async fn probe_arm(neighbour: &Tenant, attacker: &Tenant, arm: usize) -> Result<Duration, String> {
+    let mut supervisor = Supervisor::with_tenancy(POOL, TenancyPolicy::new(half(), POOL));
+    let mut other = Supervisor::new(POOL);
+    let mut neighbour_time = Duration::ZERO;
+    for _ in 0..NEIGHBOUR_TASKS {
+        for _ in 0..FLOOD_PER_NEIGHBOUR {
+            match arm {
+                1 | 3 => admit(&mut supervisor, attacker, |_token| async {}).await?,
+                2 => {
+                    bounded("probe flood", other.spawn(|_token| async {})).await?;
+                }
+                4 => {
+                    bounded("probe flood", supervisor.spawn(|_token| async {})).await?;
+                }
+                _ => {}
+            }
+        }
+        if arm == 3 {
+            supervisor.reap();
+        }
+        let submitted = Instant::now();
+        admit(&mut supervisor, neighbour, |_token| neighbour_work()).await?;
+        neighbour_time = neighbour_time.saturating_add(submitted.elapsed());
+    }
+    drop(supervisor.shutdown().await);
+    drop(other.shutdown().await);
+    Ok(neighbour_time)
+}
