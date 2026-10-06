@@ -253,6 +253,52 @@ the one public field-width change is stated below.
 
 Tests: 201 pass (`nextest -p lgwks_std --all-features`, the leb128, hex, hash,
 encoding, wire, retry and time families).
+### `bench/ai-authoring` — the harness refuses a value no run produced
+
+Four fixtures in the AI-authoring benchmark resolved a missing value to a number
+and three recovered from a poisoned lock four different ways. The first kind is
+the one that matters: `Stage::run` read `combine`'s inputs and `publish`'s input
+as `0` when no earlier stage had produced them, so a pipeline that ran `combine`
+first published `0` — a number no stage ever produced, and a number a reader of
+the oracle would read as a real result.
+
+- **`combine` refuses without both of `a` and `b`, and `publish` refuses without
+  a `combine`**, returning `StageError::Stage { name }` and naming the missing
+  input through `diagnostic`. The variant's doc now says what it means: a stage
+  produced no value, whether because it was configured to fail or because an
+  input it requires was never produced. Its shape is unchanged — the `pipeline`
+  prompt freezes `PipelineError`, and the reference solutions in other
+  partitions match on it exhaustively.
+- **`StageState` holds one `StageValues` under one lock** rather than three
+  `Mutex<Option<u64>>`, so `combine` reads a pair from one instant of the run
+  instead of two.
+- **`World::unit` refuses an index past the world's width** with a diagnostic,
+  rather than running a body for a unit that does not exist; the body's counter
+  is refused too, where the old code silently skipped the count and let the
+  recovery clauses read a body run that never happened.
+- **`UnitStats::runs(index) -> Option<u32>`**: `None` is *no such unit*, which is
+  not the same answer as `Some(0)` — a unit that exists and has not run. The
+  `recovery` prompt's two frozen call sites are updated to match; this is a
+  harness-contract change, and it is the one caller outside the partition that
+  had to change with it.
+- **One `crate::lock` decides what a poisoned lock means** for the crate, and
+  `recovery` draws its delay from the same `planned_delay` the rest of the
+  harness uses, which makes its "one plan governs every instrument" doc true.
+- **The recovery oracle stops allocating a counter vector per index per poll**:
+  `interrupt_after` reads one snapshot through `UnitStats::total_runs`, and its
+  scratch directory name propagates the `SystemTime` error instead of defaulting
+  the timestamp to `0`.
+- **Deleted `recovery::Signal`**, a `pub` type with no caller in any partition,
+  oracle or API sheet, whose `wait` was an unbounded 1 ms poll loop.
+
+Verified end to end through the benchmark runner itself: `run.py --dry-run
+--apis new --tasks aggregate,pipeline,recovery --trials 1` builds each reference
+solution into a generated trial crate and passes every oracle (aggregate 6/6,
+recovery 5/5, pipeline 5/5), and `run.py --mutants` still fails the clauses it is
+built to fail (aggregate 2/6, pipeline 1/5, recovery 1/5). `cargo clippy
+-p ai_task_support --all-targets --locked` is clean with `-D warnings` on the
+default and `--no-default-features` lanes.
+
 ### `bench/std-measure` — a statistic that cannot be computed is absent, not zero
 
 The harness's percentile and mean reported `0` for two cases that are not zero:

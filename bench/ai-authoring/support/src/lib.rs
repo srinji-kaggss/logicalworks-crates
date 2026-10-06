@@ -21,8 +21,29 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+/// Locks `mutex`, recovering from poisoning.
+///
+/// Every `Mutex` in this crate guards either a copyable snapshot or a
+/// `StageValues`, and every write to one is a single whole-struct assignment:
+/// there is no path that leaves a guarded value half-updated, because the
+/// assignment either stores every field or stores none. Poisoning records that
+/// some thread panicked while holding the guard, not that the value became
+/// inconsistent, so taking the poisoned guard's inner value keeps the
+/// instrumentation reading what actually happened to the run rather than
+/// discarding every count after the first panic.
+///
+/// This is the one place in the crate that decides what a poisoned lock means,
+/// so [`recovery`](crate::recovery) uses it too instead of repeating the
+/// recovery per mutex.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// The `recovery` task's durable units and its effect ledger.
 ///
@@ -44,7 +65,11 @@ fn splitmix64(mut state: u64) -> u64 {
 }
 
 /// A delay in `1..=4 ms`, drawn from the seeded plan.
-fn planned_delay(seed: u64, key: u64) -> Duration {
+///
+/// One plan for every instrument in the harness, so a seed names one world
+/// across the `aggregate`, `pipeline` and `recovery` tasks rather than a world
+/// per module. `recovery` draws through this too, so its doc claim holds.
+pub(crate) fn planned_delay(seed: u64, key: u64) -> Duration {
     let draw = splitmix64(seed ^ splitmix64(key));
     Duration::from_millis(1 + (draw % 4))
 }
@@ -242,12 +267,16 @@ impl Fetcher {
         }
         self.counters.started.fetch_add(1, Ordering::AcqRel);
         let _live = FetchLiveGuard::enter(Arc::clone(&self.counters));
-        let delay = self
-            .delays
-            .get(&id)
-            .copied()
-            .or(self.uniform)
-            .unwrap_or_else(|| planned_delay(self.seed, u64::from(id)));
+        // Three delay tiers, most specific first: a per-id override, then the
+        // uniform default, then the seeded plan. Spelled out rather than
+        // chained so the precedence a run depends on is readable in one place.
+        let delay = match self.delays.get(&id).copied() {
+            Some(override_delay) => override_delay,
+            None => match self.uniform {
+                Some(uniform_delay) => uniform_delay,
+                None => planned_delay(self.seed, u64::from(id)),
+            },
+        };
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&id) {
             self.counters.failure_seen.store(true, Ordering::Release);
@@ -307,9 +336,10 @@ impl fmt::Display for StageName {
 /// Why a stage did not produce its artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageError {
-    /// The stage was configured to fail.
+    /// The stage produced no value: it was configured to fail, or an input it
+    /// requires was never produced.
     Stage {
-        /// The stage that failed.
+        /// The stage that produced no value.
         name: StageName,
     },
 }
@@ -405,6 +435,23 @@ impl From<Artifact> for Published {
     }
 }
 
+/// The values the pipeline threads between stages.
+///
+/// One struct under one lock rather than a lock per stage: `combine` needs
+/// `a` *and* `b`, and three separate locks let it read a pair from two different
+/// moments — a `fetch_a` that lands between the two reads is a pair no instant
+/// of the run ever held. Under one lock the pair is always one the run actually
+/// had.
+#[derive(Debug, Default)]
+struct StageValues {
+    /// The value `fetch_a` produced, once it has.
+    a: Option<u64>,
+    /// The value `fetch_b` produced, once it has.
+    b: Option<u64>,
+    /// The value `combine` produced, once it has.
+    combined: Option<u64>,
+}
+
 /// The counters and threaded values behind a [`Stage`].
 #[derive(Debug, Default)]
 struct StageState {
@@ -417,12 +464,8 @@ struct StageState {
     live: AtomicU32,
     /// High-water mark of `live`.
     max_live: AtomicU32,
-    /// The value `fetch_a` produced, once it has.
-    a: Mutex<Option<u64>>,
-    /// The value `fetch_b` produced, once it has.
-    b: Mutex<Option<u64>>,
-    /// The value `combine` produced, once it has.
-    combined: Mutex<Option<u64>>,
+    /// Every value a stage has produced, as one consistent set.
+    values: Mutex<StageValues>,
 }
 
 impl StageState {
@@ -449,19 +492,9 @@ impl StageState {
         counter.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Take the `a` lock, recovering from poisoning.
-    fn lock_a(&self) -> MutexGuard<'_, Option<u64>> {
-        self.a.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Take the `b` lock, recovering from poisoning.
-    fn lock_b(&self) -> MutexGuard<'_, Option<u64>> {
-        self.b.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Take the `combined` lock, recovering from poisoning.
-    fn lock_combined(&self) -> MutexGuard<'_, Option<u64>> {
-        self.combined.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Takes the one lock, recovering from poisoning as [`lock`] documents.
+    fn values(&self) -> MutexGuard<'_, StageValues> {
+        lock(&self.values)
     }
 }
 
@@ -546,40 +579,78 @@ impl Stage {
     ///
     /// # Errors
     ///
-    /// [`StageError::Stage`] when `name` is in the configured failure set.
+    /// [`StageError::Stage`] when `name` is in the configured failure set, and
+    /// when `name` requires an input no earlier run produced — `combine`
+    /// without both of `a` and `b`, or `publish` without a `combine`. A missing
+    /// input is refused rather than read as `0`, because a `0` here is an
+    /// artifact no stage ever produced and a pipeline that publishes it has
+    /// published a number the run never saw.
     pub async fn run(&self, name: StageName) -> Result<Artifact, StageError> {
         self.state.bump(name);
         let _live = StageLiveGuard::enter(Arc::clone(&self.state));
-        let delay = self
-            .delays
-            .get(&name)
-            .copied()
-            .unwrap_or_else(|| planned_delay(self.seed, name.plan_key()));
+        // Two delay tiers, most specific first: a per-stage override, then the
+        // seeded plan.
+        let delay = match self.delays.get(&name).copied() {
+            Some(override_delay) => override_delay,
+            None => planned_delay(self.seed, name.plan_key()),
+        };
         lgwks_bot::rt::time::sleep(delay).await;
         if self.failures.contains(&name) {
-            Err(StageError::Stage { name })
-        } else {
-            match name {
-                StageName::FetchA => {
-                    *self.state.lock_a() = Some(11);
-                    Ok(Artifact::new(11))
-                }
-                StageName::FetchB => {
-                    *self.state.lock_b() = Some(22);
-                    Ok(Artifact::new(22))
-                }
-                StageName::Combine => {
-                    let a = (*self.state.lock_a()).unwrap_or(0);
-                    let b = (*self.state.lock_b()).unwrap_or(0);
-                    let combined = a.saturating_add(b);
-                    *self.state.lock_combined() = Some(combined);
-                    Ok(Artifact::new(combined))
-                }
-                StageName::Publish => {
-                    let combined = (*self.state.lock_combined()).unwrap_or(0);
-                    Ok(Artifact::new(combined.saturating_mul(2)))
+            return Err(StageError::Stage { name });
+        }
+        match name {
+            StageName::FetchA => {
+                let mut values = self.state.values();
+                values.a = Some(11);
+                Ok(Artifact::new(11))
+            }
+            StageName::FetchB => {
+                let mut values = self.state.values();
+                values.b = Some(22);
+                Ok(Artifact::new(22))
+            }
+            StageName::Combine => {
+                let mut values = self.state.values();
+                // One lock for the pair, so the two inputs are always a pair
+                // some instant of this run actually held.
+                match (values.a, values.b) {
+                    (Some(a), Some(b)) => {
+                        let combined = a.saturating_add(b);
+                        values.combined = Some(combined);
+                        Ok(Artifact::new(combined))
+                    }
+                    (a, b) => {
+                        diagnostic(format_args!(
+                            "combine ran with a={} b={}: both fetch_a and fetch_b must \
+                             have produced a value first",
+                            described(a),
+                            described(b)
+                        ));
+                        Err(StageError::Stage { name })
+                    }
                 }
             }
+            StageName::Publish => match self.state.values().combined {
+                Some(combined) => Ok(Artifact::new(combined.saturating_mul(2))),
+                None => {
+                    diagnostic(format_args!(
+                        "publish ran with combined=none: combine must have produced a \
+                         value first"
+                    ));
+                    Err(StageError::Stage { name })
+                }
+            },
         }
+    }
+}
+
+/// Renders an optional stage value for a diagnostic line.
+///
+/// `None` is written as `none` rather than as `0`, so a diagnostic about a
+/// missing input never reads like a report of a zero-valued one.
+fn described(value: Option<u64>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "none".to_owned(),
     }
 }

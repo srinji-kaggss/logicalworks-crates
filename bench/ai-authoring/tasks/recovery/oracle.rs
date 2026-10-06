@@ -73,14 +73,12 @@ fn finished<F: std::future::Future<Output = Result<u64, RecoveryError>>>(
 /// file can never collide: the store a run leaves behind would otherwise be a
 /// second ledger this file does not own, and a later test would reopen it.
 fn scratch(tag: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let since_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let unique = format!(
-        "lgwks-recovery-{tag}-{}-{:?}-{:?}",
+        "lgwks-recovery-{tag}-{}-{:?}-{}",
         std::process::id(),
         std::thread::current().id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default()
+        since_epoch.as_nanos()
     );
     let dir = std::env::temp_dir().join(unique);
     std::fs::create_dir_all(&dir)?;
@@ -115,7 +113,10 @@ fn interrupt_after<F: std::future::Future>(
     after: u32,
 ) {
     lgwks_bot::block_on(std::future::poll_fn(|context| {
-        let recorded: u32 = (0..world.width()).map(|index| world.stats().runs(index)).sum();
+        // One snapshot per poll rather than one per index: this loop runs on
+        // every wake of the attempt it is interrupting, and each snapshot copies
+        // the whole counter vector.
+        let recorded = world.stats().total_runs();
         if recorded >= after {
             return std::task::Poll::Ready(());
         }
@@ -161,7 +162,7 @@ fn a_first_attempt_completes() -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..WIDTH {
         assert_eq!(
             world.stats().runs(index),
-            1,
+            Some(1),
             "unit {index} recorded exactly one body run"
         );
     }
@@ -185,7 +186,7 @@ fn a_resume_does_not_rerun_a_completed_unit() -> Result<(), Box<dyn std::error::
     // drop lands, and the contract never asks for one unit at a time. Each body
     // counted here wrote its record (the storage owner finishes a write its
     // waiter walked away from), so every one of them must replay below.
-    let recorded: u32 = (0..WIDTH).map(|index| world.stats().runs(index)).sum();
+    let recorded = world.stats().total_runs();
     assert!(
         recorded >= 2,
         "the interrupted attempt recorded at least two unit bodies, recorded {recorded}"
@@ -193,7 +194,12 @@ fn a_resume_does_not_rerun_a_completed_unit() -> Result<(), Box<dyn std::error::
 
     // The run the interrupted attempt left behind, over the same directory.
     let completed = (0..WIDTH)
-        .filter(|index| world.stats().runs(*index) > 0)
+        .filter(|index| {
+            world
+                .stats()
+                .runs(*index)
+                .is_some_and(|count| count > 0)
+        })
         .collect::<Vec<u32>>();
 
     let total = finished(recover(world.clone(), dir.clone(), LONG))?;
@@ -207,7 +213,7 @@ fn a_resume_does_not_rerun_a_completed_unit() -> Result<(), Box<dyn std::error::
     for index in completed {
         assert_eq!(
             world.stats().runs(index),
-            1,
+            Some(1),
             "unit {index} had already recorded, so the second attempt must not run it again"
         );
     }
