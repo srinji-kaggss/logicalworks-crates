@@ -130,6 +130,17 @@ jobs:
     name: Tests (lgwks-bot no default features, lgwks-std full)
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
+    # Two shards of each suite. Whole, the two runs were 664 s of tests on one
+    # runner's share of the machine, and the job's build took it past its
+    # 15-minute bound with every test passing (run 37530668988).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # As in the lgwks-bot full job: lints run once, in the Clippy job.
+      RUSTC_WORKSPACE_WRAPPER: ""
+      PARTITION: count:${{ matrix.shard }}/2
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -138,9 +149,9 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
       - name: Run lgwks-bot no-default-feature tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
       - name: Run lgwks-std full-feature tests
-        run: cargo nextest run -p lgwks_std --all-targets --locked --features full
+        run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   tests_bot_full:
     name: Tests (lgwks-bot full)
