@@ -18,13 +18,11 @@
 //! and no OS entropy: the same seed always produces the same document and the
 //! same trace.
 
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 
 use lgwks_deps::metadata::{self, DirectEdge, MetadataError};
 
-use crate::sim::Rng;
+use crate::sim::{Rng, Trace, receipt};
 
 /// What every generator and every test in this suite returns.
 ///
@@ -86,14 +84,6 @@ const SHARED_DIRS: [&str; 3] = ["/repo/shared", "/repo/common", "/repo/dup"];
 /// however long it is, so there is no offset table to materialise and no bound
 /// that a short document could reduce to zero.
 const CUT_SHARES: [usize; 7] = [1, 2, 3, 4, 5, 6, 7];
-
-/// A coin from a high bit, drawn from the shared generator.
-///
-/// A high bit rather than the low one: the shared LCG's low bit alternates every
-/// step, so a low-bit coin would phase-lock every set derived from it.
-fn coin(rng: &mut Rng) -> bool {
-    (rng.next_u64() >> 40) & 1 == 1
-}
 
 /// How many bytes an eighth of a document is, as the divisor the cut shares
 /// are measured against.
@@ -443,28 +433,28 @@ fn build_member(
     match dim {
         Dim::Kind => dep.kind = Some(*rng.pick_named("dependency kinds", &KINDS)?),
         Dim::Target => {
-            if coin(rng) {
+            if rng.coin() {
                 dep.selection.scope = Some("cfg(unix)".to_owned());
             }
         }
-        Dim::Optional => dep.optional = coin(rng),
-        Dim::DefaultFeatures => dep.selection.defaults = coin(rng),
+        Dim::Optional => dep.optional = rng.coin(),
+        Dim::DefaultFeatures => dep.selection.defaults = rng.coin(),
         Dim::Features => {
             dep.selection.enabled = ["a", "b", "c"]
                 .iter()
                 .copied()
-                .filter(|_| coin(rng))
+                .filter(|_| rng.coin())
                 .map(str::to_owned)
                 .collect();
         }
         Dim::Rename => {
-            if coin(rng) {
+            if rng.coin() {
                 dep.selection.alias = Some(format!("alias{index}"));
             }
         }
         Dim::Path => {
             dep.source = None;
-            if coin(rng) {
+            if rng.coin() {
                 let target = rng.pick_named("member names", names)?;
                 let path = format!("../{target}");
                 dep.name.clone_from(target);
@@ -519,7 +509,7 @@ fn workspace(seed: u64, allowed: &[Dim]) -> Outcome<Workspace> {
     let mut repositories = Vec::new();
     for slot in 0..count {
         let name = format!("m{slot}");
-        let repository = if coin(&mut rng) {
+        let repository = if rng.coin() {
             Some(format!("https://example.invalid/{name}"))
         } else {
             None
@@ -614,7 +604,7 @@ fn missing_manifest_scenario(seed: u64) -> Outcome<Scenario> {
 fn blank_identity_scenario(seed: u64) -> Outcome<Scenario> {
     let mut rng = Rng::new(seed);
     let mut built = workspace(seed, ALL_DIMS)?;
-    let blank_id = coin(&mut rng);
+    let blank_id = rng.coin();
     if let Some(pair) = built.plans.first_mut() {
         if blank_id {
             pair.0.id.clear();
@@ -807,16 +797,16 @@ fn sweep(count: u64, mut scenario: impl FnMut(u64) -> Outcome<Scenario>) -> Test
 
 /// Folds eight generated documents for a derived seed into one trace hash.
 fn trace(seed: u64) -> Outcome<u64> {
-    let mut hasher = DefaultHasher::new();
+    let mut trace = Trace::new();
     for step in 0..8_u64 {
         let derived = seed.wrapping_mul(8).wrapping_add(step);
         let scenario = valid_scenario(derived, ALL_DIMS)?;
-        scenario.document.hash(&mut hasher);
+        trace.record(&scenario.document);
         let observed = observe(metadata::parse(&scenario.document));
-        format!("{observed:?}").hash(&mut hasher);
+        trace.record(&format!("{observed:?}"));
         assert_model(derived, &scenario);
     }
-    Ok(hasher.finish())
+    Ok(receipt(&trace)?)
 }
 
 // ── Valid-workspace families ────────────────────────────────────────────────

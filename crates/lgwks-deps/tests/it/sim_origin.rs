@@ -6,9 +6,8 @@
 //! invariant under test is that an observed origin is admitted exactly when it
 //! equals the approved origin — never merely because it shares the class.
 
-use std::collections::hash_map::DefaultHasher;
+use crate::sim::{Trace, receipt};
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 
 use lgwks_deps::contract::Contract;
 use lgwks_deps::metadata::{self, DirectEdge};
@@ -79,10 +78,7 @@ struct OriginTables<'a> {
 /// Every draw for the case happens here so the run loop states one step rather
 /// than a chain, and so a refusal names the draw that refused.
 fn draw_case(rng: &mut Rng, tables: OriginTables<'_>) -> Result<OriginCase, Box<dyn Error>> {
-    let family = rng
-        .next_u64()
-        .checked_rem(FAMILIES)
-        .ok_or("the family count must divide the draw")?;
+    let family = rng.below(FAMILIES);
     let (approved, observed, edges) = match family {
         0 => {
             let approved = git_origin(rng, tables.repos, tables.revs)?;
@@ -133,9 +129,9 @@ fn git_origin(rng: &mut Rng, repos: &[&str], revs: &[&str]) -> Result<String, Em
 
 /// How many origin families the run draws between: a Git repository plus its
 /// admitted revision policy, a registry source, and an external path authority.
-/// Named so the modulus the family draw reduces by is one fact about the suite
+/// Named so the bound the family draw is taken below is one fact about the suite
 /// rather than a literal beside the arm it selects.
-const FAMILIES: u64 = 3;
+const FAMILIES: u32 = 3;
 
 /// Runs the whole family for `seed` and returns (trace hash, admitted, drift).
 fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
@@ -151,7 +147,7 @@ fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
     let paths = ["../vendor/engine", "../vendor/other"];
 
     let mut rng = Rng::new(seed);
-    let mut hasher = DefaultHasher::new();
+    let mut trace = Trace::new();
     let mut admitted = 0_usize;
     let mut drifted = 0_usize;
 
@@ -186,9 +182,9 @@ fn run(seed: u64) -> Result<(u64, usize, usize), Box<dyn Error>> {
         } else if code == 1 {
             drifted = drifted.saturating_add(1);
         }
-        code.hash(&mut hasher);
+        trace.record_number("code", code);
     }
-    Ok((hasher.finish(), admitted, drifted))
+    Ok((receipt(&trace)?, admitted, drifted))
 }
 
 #[test]

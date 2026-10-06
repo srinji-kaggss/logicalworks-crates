@@ -8,15 +8,14 @@
 //! policy dimension; an unconstrained (grandfathered) dimension never refuses;
 //! and widening a dimension never turns a refusal into an admission.
 
-use std::collections::hash_map::DefaultHasher;
+use crate::sim::{Trace, receipt};
 use std::error::Error;
 use std::fmt::Write as _;
-use std::hash::{Hash, Hasher};
 
 use crate::deps_sim;
 use lgwks_deps::declared_scope;
 
-use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, coin, edge, register};
+use deps_sim::{REGISTRY, Rng, TestResult, alias_line, code_for, edge, register};
 
 /// Counts of each verdict seen while folding a family into a trace hash.
 #[derive(Default)]
@@ -30,14 +29,14 @@ struct Tally {
 impl Tally {
     /// Assert the observed verdict against the model's expectation, then fold it
     /// into the tally and the trace hash.
-    fn record(&mut self, code: u8, expected: bool, context: &str, hasher: &mut DefaultHasher) {
+    fn record(&mut self, code: u8, expected: bool, context: &str, trace: &mut Trace) {
         assert_eq!(code, u8::from(!expected), "{context}");
         if code == 0 {
             self.admitted = self.admitted.saturating_add(1);
         } else {
             self.refused = self.refused.saturating_add(1);
         }
-        code.hash(hasher);
+        trace.record_number("code", code);
     }
 }
 
@@ -62,14 +61,14 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     // the two, and may carry the other as an explicit alias.
     let names = ["engine-core", "engine_core"];
     let mut rng = Rng::new(seed);
-    let mut hasher = DefaultHasher::new();
+    let mut trace = Trace::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
         let approved = rng.pick_named("identity names", &names)?;
         let observed = rng.pick_named("identity names", &names)?;
         let approved = *approved;
         let observed = *observed;
-        let alias: Option<&str> = if coin(&mut rng) {
+        let alias: Option<&str> = if rng.coin() {
             names.iter().copied().find(|name| *name != approved)
         } else {
             None
@@ -80,29 +79,21 @@ fn identity_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
             code,
             admits,
             &format!("seed {seed}: approved {approved} observed {observed} alias {alias:?}"),
-            &mut hasher,
+            &mut trace,
         );
     }
-    Ok((hasher.finish(), tally))
+    Ok((receipt(&trace)?, tally))
 }
 
 /// Runs one feature-policy family for `seed`: allowed set vs enabled set.
 fn feature_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let universe = ["a", "b", "c", "d"];
     let mut rng = Rng::new(seed);
-    let mut hasher = DefaultHasher::new();
+    let mut trace = Trace::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        let allowed: Vec<&str> = universe
-            .iter()
-            .copied()
-            .filter(|_| coin(&mut rng))
-            .collect();
-        let enabled: Vec<&str> = universe
-            .iter()
-            .copied()
-            .filter(|_| coin(&mut rng))
-            .collect();
+        let allowed: Vec<&str> = universe.iter().copied().filter(|_| rng.coin()).collect();
+        let enabled: Vec<&str> = universe.iter().copied().filter(|_| rng.coin()).collect();
         let constrained = !allowed.is_empty();
         let policy = if constrained {
             format!("features = \"{}\"\n", allowed.join(","))
@@ -117,10 +108,10 @@ fn feature_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
             code,
             expected,
             &format!("seed {seed}: allowed {allowed:?} enabled {enabled:?}"),
-            &mut hasher,
+            &mut trace,
         );
     }
-    Ok((hasher.finish(), tally))
+    Ok((receipt(&trace)?, tally))
 }
 
 /// One draw of the dimension family: toggles each authored bit independently
@@ -128,21 +119,21 @@ fn feature_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
 fn dimension_draw(
     seed: u64,
     rng: &mut Rng,
-    hasher: &mut DefaultHasher,
+    trace: &mut Trace,
     tally: &mut Tally,
 ) -> Result<(), Box<dyn Error>> {
     let targets = [None, Some("cfg(unix)")];
     // The edge's authored bits and the policy's authored bits are chosen
     // independently, so a mismatch is a real mismatch.
-    let def_edge = coin(rng);
-    let def_policy = coin(rng);
-    let def_value = coin(rng);
-    let opt_edge = coin(rng);
-    let opt_policy = coin(rng);
-    let opt_value = coin(rng);
+    let def_edge = rng.coin();
+    let def_policy = rng.coin();
+    let def_value = rng.coin();
+    let opt_edge = rng.coin();
+    let opt_policy = rng.coin();
+    let opt_value = rng.coin();
     let target_edge = *rng.pick_named("target scopes", &targets)?;
     let target_value = *rng.pick_named("target scopes", &targets)?;
-    let target_policy = coin(rng);
+    let target_policy = rng.coin();
     let mut policy = String::new();
     if def_policy {
         writeln!(policy, "uses_default_features = \"{def_value}\"")?;
@@ -173,7 +164,7 @@ fn dimension_draw(
         &format!(
             "seed {seed}: def {def_edge}/{def_policy}:{def_value} opt {opt_edge}/{opt_policy}:{opt_value} target {target_edge:?}/{target_policy}:{target_value:?}"
         ),
-        hasher,
+        trace,
     );
     Ok(())
 }
@@ -183,12 +174,12 @@ fn dimension_draw(
 /// grandfathered.
 fn dimension_family(seed: u64) -> Result<(u64, Tally), Box<dyn Error>> {
     let mut rng = Rng::new(seed);
-    let mut hasher = DefaultHasher::new();
+    let mut trace = Trace::new();
     let mut tally = Tally::default();
     for _ in 0..256 {
-        dimension_draw(seed, &mut rng, &mut hasher, &mut tally)?;
+        dimension_draw(seed, &mut rng, &mut trace, &mut tally)?;
     }
-    Ok((hasher.finish(), tally))
+    Ok((receipt(&trace)?, tally))
 }
 
 /// A seeded family: `(trace hash, tally)` for one seed.

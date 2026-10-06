@@ -25,12 +25,6 @@ pub fn alias_line(alias: Option<&str>) -> String {
     alias.map_or(String::new(), |value| format!("aliases = \"{value}\"\n"))
 }
 
-/// A coin from a high bit. The LCG's low bit alternates every step, so a
-/// low-bit coin would make every derived set phase-locked.
-pub fn coin(rng: &mut Rng) -> bool {
-    (rng.next_u64() >> 40) & 1 == 1
-}
-
 /// One edge with every authored dimension spelled out, through the parser.
 pub fn edge(
     package: &str,

@@ -12,14 +12,12 @@
 //! variant) fails the family that asked about it, naming the seed.
 
 use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 
 use lgwks_deps::contract::{Contract, ContractError};
 use lgwks_deps::invariants::{ErrorKind, Register};
 
-use crate::sim::Rng;
+use crate::sim::{Rng, Trace, receipt};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -59,7 +57,7 @@ const TIERS: [&str; 2] = ["boundary", "vendor"];
 const SEPARATORS: [&str; 3] = [", ", ",", " , "];
 
 /// The four declaration keys.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     Licences,
     Surfaces,
@@ -83,7 +81,7 @@ impl Key {
 }
 
 /// One `[policy]` block as the generator drew it.
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug)]
 struct Block {
     /// `accepted_licenses`, if declared.
     licences: Option<Vec<String>>,
@@ -164,7 +162,7 @@ impl Block {
 }
 
 /// What the parse must answer for a block.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     /// Parsed; the accepted licences read back exactly.
     Parsed(Option<Vec<String>>),
@@ -177,11 +175,6 @@ enum Verdict {
         present: &'static str,
         missing: &'static str,
     },
-}
-
-/// A coin.
-fn coin(rng: &mut Rng) -> bool {
-    rng.next_u64() & (1 << 40) != 0
 }
 
 /// Up to `counts`'s drawn number of distinct members of `pool`, in a drawn
@@ -219,9 +212,13 @@ fn shuffled_order(rng: &mut Rng, block: &Block) -> Vec<Key> {
 /// A valid block: every declared list is clean and a freeze names surfaces the
 /// block declares, whole.
 fn draw_block(rng: &mut Rng) -> Block {
-    let licences = coin(rng).then(|| draw_distinct(rng, &LICENCES, &[1, 2, 3, 4, 5]));
-    let surfaces = coin(rng).then(|| draw_distinct(rng, &SURFACES, &[1, 2, 3, 4, 5, 6]));
-    let (frozen, tier) = if coin(rng) {
+    let licences = rng
+        .coin()
+        .then(|| draw_distinct(rng, &LICENCES, &[1, 2, 3, 4, 5]));
+    let surfaces = rng
+        .coin()
+        .then(|| draw_distinct(rng, &SURFACES, &[1, 2, 3, 4, 5, 6]));
+    let (frozen, tier) = if rng.coin() {
         let pool: Vec<&str> = surfaces.as_ref().map_or_else(
             || SURFACES.to_vec(),
             |declared| declared.iter().map(String::as_str).collect(),
@@ -288,9 +285,10 @@ fn check(seed: u64, block: &Block, expected: &Verdict) -> Result<u64, Box<dyn Er
             Err(format!("seed {seed:#x}: {text:?} answered {got:?}, model {expected:?}").into());
         return refusal;
     }
-    let mut hasher = DefaultHasher::new();
-    (block, expected).hash(&mut hasher);
-    Ok(hasher.finish())
+    let mut trace = Trace::new();
+    trace.record(&text);
+    trace.record(&format!("{expected:?}"));
+    Ok(receipt(&trace)?)
 }
 
 /// The seeds of `family`.
@@ -460,7 +458,7 @@ fn an_empty_member_is_refused_at_its_line() -> TestResult {
     for key in [Key::Licences, Key::Surfaces, Key::Frozen] {
         let kinds = sweep(2, key, |rng, block| {
             if let Some(list) = block.list_mut(key) {
-                let at = if coin(rng) {
+                let at = if rng.coin() {
                     0
                 } else {
                     list.len().saturating_sub(1)
@@ -481,7 +479,7 @@ fn a_repeated_member_is_refused_at_its_line() -> TestResult {
             if let Some(list) = block.list_mut(key)
                 && let Some(repeated) = list.first().cloned()
             {
-                let at = if coin(rng) { list.len() } else { 1 };
+                let at = if rng.coin() { list.len() } else { 1 };
                 list.insert(at, repeated);
             }
         })?;
@@ -531,7 +529,7 @@ fn an_out_of_vocabulary_member_is_refused_at_its_line() -> TestResult {
 #[test]
 fn a_half_written_freeze_is_refused_naming_both_halves() -> TestResult {
     let kinds = sweep(5, Key::Frozen, |rng, block| {
-        if coin(rng) {
+        if rng.coin() {
             block.tier = None;
         } else {
             block.frozen = None;
@@ -591,12 +589,12 @@ fn key_order_never_changes_the_verdict() -> TestResult {
     for seed in seeds(8) {
         let mut rng = Rng::new(seed);
         let mut block = draw_block(&mut rng);
-        if coin(&mut rng)
+        if rng.coin()
             && let Some(list) = block.licences.as_mut()
         {
             list.push("MIT OR ISC".to_owned());
         }
-        if coin(&mut rng)
+        if rng.coin()
             && let Some(list) = block.surfaces.as_mut()
         {
             list.push("bad name".to_owned());
@@ -647,7 +645,7 @@ fn the_same_seed_replays_and_distinct_seeds_diverge() -> TestResult {
     let mut traces = BTreeSet::new();
     for seed in seeds(10) {
         let fault = |rng: &mut Rng, block: &mut Block| {
-            if coin(rng) {
+            if rng.coin() {
                 block.tier = None;
             }
         };
