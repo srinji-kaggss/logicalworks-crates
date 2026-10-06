@@ -167,14 +167,56 @@ fn copy_entry(entry: &std::fs::DirEntry, destination: &Path) -> Result<(), Box<d
 /// A distinguishable scratch name: wall-clock nanos plus a monotone sequence.
 /// A process id or a bare timestamp would be reused by the OS, so neither is an
 /// identity (INV-DEP-6).
-fn scratch_suffix() -> String {
+fn scratch_suffix() -> Result<String, Box<dyn Error>> {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // A clock that reports before the Unix epoch is refused rather than floored
+    // to the epoch: a scratch directory named for 1970 is a name this process
+    // cannot tell from any other process reading the same clock, which is the
+    // identity the suffix exists to provide.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
+        .map_err(|before_epoch| {
+            format!("the wall clock reads before the Unix epoch: {before_epoch}")
+        })?
+        .as_nanos();
     let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{nanos}-{sequence}")
+    Ok(format!("{nanos}-{sequence}"))
+}
+
+/// A scratch tree that is removed when the test finishes, panic or not.
+///
+/// The suffix makes the name unique per run, so no run can inherit another's
+/// records; the guard is what keeps the tree from outliving the run at all,
+/// which a leading `remove_dir_all` alone cannot do for a test that fails
+/// part way through.
+struct Scratch {
+    /// The absolute root the fixture was copied into.
+    root: PathBuf,
+}
+
+impl Scratch {
+    /// A fresh scratch tree under the build's own temporary directory.
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("cargo-metadata-{}", scratch_suffix()?));
+        Ok(Self { root })
+    }
+
+    /// The tree's root.
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // A scratch tree this run owns is this run's to remove; a removal that
+        // fails leaves the tree for the build's own temporary directory, and the
+        // suffix guarantees the next run cannot read it as its own. `Drop` has no
+        // channel to report a failure through, which is why the removal reports
+        // nothing rather than being skipped.
+        std::fs::remove_dir_all(&self.root).ok();
+    }
 }
 
 /// The retained capture carries no host path: the same `baseline.json` decodes
@@ -189,20 +231,17 @@ fn the_retained_metadata_is_host_independent() -> TestResult {
         "the retained baseline must carry no host path"
     );
 
-    let root =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("cargo-metadata-{}", scratch_suffix()));
-    if root.exists() {
-        std::fs::remove_dir_all(&root)?;
-    }
-    copy_fixture(&fixture(), &root)?;
+    let scratch = Scratch::new()?;
+    let root = scratch.root();
+    copy_fixture(&fixture(), root)?;
 
-    let retained = baseline_at(&root)?;
+    let retained = baseline_at(root)?;
     let manifest = root.join("Cargo.toml");
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
         .arg("--manifest-path")
         .arg(&manifest)
-        .current_dir(&root)
+        .current_dir(root)
         .output()?;
     assert!(
         output.status.success(),
@@ -214,6 +253,6 @@ fn the_retained_metadata_is_host_independent() -> TestResult {
         fresh, retained,
         "one retained baseline must decode identically at any absolute root"
     );
-    std::fs::remove_dir_all(&root)?;
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

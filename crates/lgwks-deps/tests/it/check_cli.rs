@@ -28,6 +28,21 @@ use lgwks_std::{hex, random};
 /// a test propagates its failure with `?` instead of aborting the run.
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The string a receipt field carries, or a refusal naming the field.
+///
+/// A receipt that omits a field is not a receipt whose field is empty. Every
+/// assertion below reads a field the receipt's identity is made of, so reading
+/// one as `""` would let the very drift these tests pin — a digest that stopped
+/// being reported — pass as an assertion about an empty string.
+fn receipt_str<'a>(
+    field: &'a lgwks_std::json::Value,
+    name: &str,
+) -> Result<&'a str, Box<dyn Error>> {
+    field
+        .as_str()
+        .ok_or_else(|| format!("the receipt carries no string {name:?}").into())
+}
+
 /// The fixture pair's root.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/contract-override")
@@ -697,26 +712,17 @@ fn the_json_receipt_has_stable_identity_fields() -> TestResult {
     assert_eq!(payload["subject"]["resolved"], true);
     assert_eq!(payload["subject"]["edges"], 0);
     assert!(
-        payload["contract"]["digest"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("fnv1a128:"),
+        receipt_str(&payload["contract"]["digest"], "contract digest")?.starts_with("fnv1a128:"),
         "the contract digest is present and stable: {}",
         payload["contract"]["digest"]
     );
     assert!(
-        payload["subject"]["digest"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with("fnv1a128:"),
+        receipt_str(&payload["subject"]["digest"], "subject digest")?.starts_with("fnv1a128:"),
         "the subject digest is present and stable: {}",
         payload["subject"]["digest"]
     );
     assert!(
-        payload["scope"]
-            .as_str()
-            .unwrap_or("")
-            .contains("no enforcer"),
+        receipt_str(&payload["scope"], "assurance scope")?.contains("no enforcer"),
         "the assurance scope travels with the receipt"
     );
 
@@ -754,10 +760,7 @@ fn the_receipt_changes_when_its_subject_changes() -> TestResult {
             &["check", "--contract", argument(register)?, "--json"],
         )?;
         let payload: lgwks_std::json::Value = lgwks_std::json::from_str(&outcome.stdout)?;
-        Ok(payload["contract"]["digest"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned())
+        Ok(receipt_str(&payload["contract"]["digest"], "contract digest")?.to_owned())
     };
 
     let first_digest = digest_of(&first)?;
@@ -928,15 +931,19 @@ fn ast_manifest_lock() -> &'static std::sync::Mutex<()> {
     &LOCK
 }
 
-/// Takes the tree lock, ignoring poisoning.
+/// Takes the tree lock, recovering from poisoning.
 ///
 /// A panic in one test must not make every later test in this file refuse to
-/// run: the tree is restored by the guard's own `Drop` whatever happens, so the
-/// panic carries no information the next test needs.
+/// run. The guarded state is a `()` that serialises the tree copy, and the
+/// copy is restored by its own guard's `Drop` however the holder died, so the
+/// poison flag carries no information the next holder needs: what it may not do
+/// is inherit the flag and refuse, because the state behind it is intact by
+/// construction.
 fn lock_tree() -> std::sync::MutexGuard<'static, ()> {
-    ast_manifest_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    match ast_manifest_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// Copies the repository's manifests into `scratch` and returns that tree's root.
