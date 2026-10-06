@@ -38,7 +38,9 @@ pub fn next_bytes(state: &mut u64, len: usize) -> Vec<u8> {
 /// sixteen bytes, a codec's input word — draw it here rather than converting a
 /// `Vec` whose length they already declared: the array is filled slot by slot,
 /// so there is no length conversion that can fail and no heap allocation for a
-/// width the caller wrote down.
+/// width the caller wrote down. Compiled with its only caller, the `random`
+/// family, so a build without that feature has no uncalled draw in it.
+#[cfg(feature = "random")]
 #[must_use]
 pub fn next_array<const LEN: usize>(state: &mut u64) -> [u8; LEN] {
     let mut drawn = [0_u8; LEN];
