@@ -27,7 +27,7 @@ pub const MAX_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// unattributable. The default is a field value rather than a substitution
 /// [`Builder::build`] makes for an absent setting, so the name is decided once at
 /// construction and every later read sees the same string.
-pub const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
+pub(crate) const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 
 /// Configures and builds an owned [`Runtime`].
 ///
@@ -35,7 +35,7 @@ pub const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 /// current-thread scheduler because WASM has no native worker-thread driver.
 /// Native defaults are discovered, never hardcoded: worker count follows
 /// [`std::thread::available_parallelism`] and the thread name is
-/// [`DEFAULT_THREAD_NAME`]. Setting either makes the native choice explicit.
+/// `"lgwks-bot"`. Setting either makes the native choice explicit.
 /// Explicit worker counts above [`MAX_WORKER_THREADS`] are rejected; a discovered
 /// count is capped at that value to keep resource use bounded.
 #[derive(Debug)]
@@ -44,7 +44,7 @@ pub struct Builder {
     /// because a runtime with no worker cannot make progress; `Option` because
     /// discovery, not a hardcoded constant, is the default.
     worker_threads: Option<NonZeroUsize>,
-    /// The complete OS thread name for native workers, [`DEFAULT_THREAD_NAME`]
+    /// The complete OS thread name for native workers, `"lgwks-bot"`
     /// until [`Builder::thread_name`] sets one. Ignored on WASM, which has no
     /// worker thread.
     thread_name: String,
@@ -58,7 +58,7 @@ pub struct Builder {
 
 impl Default for Builder {
     /// A builder with every knob at its declared default: the discovered worker
-    /// count, [`DEFAULT_THREAD_NAME`], and the engine's own blocking and stack
+    /// count, `"lgwks-bot"`, and the engine's own blocking and stack
     /// defaults. Written out rather than derived because `#[derive(Default)]`
     /// would leave `thread_name` empty, and an empty OS thread name is not a
     /// default a stack trace can be read from.
@@ -76,14 +76,12 @@ impl Builder {
     /// A builder using native defaults; WASM uses a current-thread scheduler.
     ///
     /// ```
-    /// use lgwks_bot::rt::runtime::{Builder, DEFAULT_THREAD_NAME};
+    /// use lgwks_bot::rt::runtime::Builder;
     ///
-    /// // Workers this crate starts are named for it until a caller says otherwise,
-    /// // so a thread in a stack trace is attributable with no configuration.
-    /// assert_eq!(DEFAULT_THREAD_NAME, "lgwks-bot");
-    ///
-    /// // A caller that wants its own name replaces it; both builders build through
-    /// // the same `build`.
+    /// // Workers this crate starts are named `lgwks-bot` until a caller says
+    /// // otherwise, so a thread in a stack trace is attributable with no
+    /// // configuration; a caller that wants its own name replaces it, and both
+    /// // builders build through the same `build`.
     /// let ours = Builder::new().thread_name("ingest");
     /// let theirs = Builder::new();
     /// assert!(
@@ -113,7 +111,7 @@ impl Builder {
 
     /// Set the complete OS thread name for native worker threads. Has no effect
     /// on WASM, which has no worker thread. The name replaces
-    /// [`DEFAULT_THREAD_NAME`]; there is no way back to an absent one, because
+    /// `"lgwks-bot"`; there is no way back to an absent one, because
     /// an unnamed native worker is not a state this crate is willing to build.
     #[must_use]
     pub fn thread_name(mut self, name: impl Into<String>) -> Self {
