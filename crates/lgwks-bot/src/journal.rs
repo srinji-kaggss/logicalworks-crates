@@ -86,6 +86,20 @@ pub(crate) mod frame;
 /// first would be two poison latches with two behaviours.
 pub(crate) mod owner;
 
+/// Continue-as-new: a sealed checkpoint and the successor opened from it.
+///
+/// Re-exported beside the two adapters because it is what a caller asks *of* an
+/// adapter rather than what an adapter is: the policy lives here, the file that
+/// can carry it out is `FileJournal`, and the trait's two continuation methods
+/// are what joins them.
+pub mod continuation;
+
+pub use continuation::{
+    CONTINUATION_WATERMARK_DENOMINATOR, CONTINUATION_WATERMARK_NUMERATOR, Continuation,
+    ContinuationPolicy, ContinuationWatermark, MAX_CHECKPOINT_SETTLED, MAX_CHECKPOINT_UNRESOLVED,
+    SealPause, SettledAttempt, UnresolvedAttempt, is_generation_path, successor_path,
+};
+
 /// The file-backed journal, re-exported from the private `file` module beside
 /// the in-memory one: the trait's second shipped adapter, and the one whose
 /// promises a process kill can check.
@@ -198,7 +212,18 @@ impl fmt::Display for DurabilityPromise {
 /// that diverged would agree on their sequence numbers. The head is a hash over
 /// every event up to and including this one, so a position is a commitment to
 /// the entire history behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    lgwks_std::wire::Archive,
+    lgwks_std::wire::Serialize,
+    lgwks_std::wire::Deserialize,
+)]
+#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
 pub struct JournalPosition {
     /// How many events are committed at or before this position. Zero is the
     /// genesis, which holds no events.
@@ -267,6 +292,16 @@ pub enum JournalLimitKind {
     Events,
     /// Encoded frame bytes admitted to the journal history.
     Bytes,
+    /// A continuation watermark at or past the ceiling it would be measured
+    /// against.
+    ContinuationWatermark,
+    /// Generations a chain of journals may hold, counted from the name a
+    /// continuation is derived from.
+    Generation,
+    /// Actions one sealed checkpoint may fold.
+    CheckpointActions,
+    /// Unresolved attempts one sealed checkpoint may carry.
+    CheckpointUnresolved,
 }
 
 impl EventKind {
@@ -559,6 +594,48 @@ pub enum JournalError {
     /// because a wrapped sequence would make two positions compare equal and
     /// defeat the guard the position exists to provide.
     Exhausted,
+    /// A sealed journal's successor is complete, so this journal is not the
+    /// authoritative one.
+    ///
+    /// The refusal carries where the authoritative journal is rather than a
+    /// rendered string, because the caller's whole next move is to open that path
+    /// and a caller that had to parse a message to learn it would be one message
+    /// away from opening the sealed predecessor and appending to it.
+    ///
+    /// This is never a fault and never a loss: the predecessor's committed history
+    /// is intact and readable, and the successor carries every attempt it left
+    /// unresolved.
+    Superseded {
+        /// Where the authoritative journal lives.
+        path: String,
+    },
+    /// An append names an attempt of an action the journal's chain already walked.
+    ///
+    /// Distinct from [`Self::OutOfOrder`] because it is a different fact. An
+    /// out-of-order append names a rung that cannot follow a rung the journal
+    /// holds *for that exact key*. This names an attempt number at or below the
+    /// one a continuation folded for its action, which is a replay of an attempt
+    /// the journal sealed: the key itself may never have been carried, because
+    /// the sealed history, not the checkpoint, is what remembers it. Collapsing
+    /// the two would report a replay of a sealed attempt as a ladder mistake on a
+    /// key the journal has never heard of.
+    AttemptAlreadyWalked {
+        /// The attempt the refused event was about.
+        key: Box<EffectKey>,
+        /// The latest attempt the journal's chain walked for that action.
+        latest: crate::effect::AttemptId,
+    },
+    /// A continuation was armed to stop at a boundary, and did.
+    ///
+    /// The fault-injection door a crash harness kills a process on. Nothing was
+    /// acknowledged and the journal will not append again, so a caller that sees
+    /// this reopens and reads the file back; a caller that was not expecting it
+    /// sees a continuation that did not happen rather than a journal that quietly
+    /// continued.
+    ContinuationPaused {
+        /// The boundary the continuation stopped at.
+        boundary: SealPause,
+    },
     /// Appending or opening would exceed a shipped journal's hard history cap.
     ///
     /// The refusal is non-destructive: committed and unresolved evidence is
@@ -692,6 +769,21 @@ impl fmt::Display for JournalError {
                 ),
             },
             Self::Exhausted => f.write_str("journal position exhausted"),
+            Self::Superseded { ref path } => write!(
+                f,
+                "this journal is sealed and its successor is authoritative; open {path}"
+            ),
+            Self::AttemptAlreadyWalked { ref key, latest } => write!(
+                f,
+                "{key} is an attempt at or below the latest this journal walked \
+                 for its action, which is {latest}; the sealed history already \
+                 records it"
+            ),
+            Self::ContinuationPaused { boundary } => write!(
+                f,
+                "the continuation was armed to stop at {boundary}, so no successor \
+                 was established"
+            ),
             Self::CapacityExceeded {
                 resource,
                 limit,
@@ -1002,6 +1094,57 @@ pub trait EffectJournal {
     fn reserve_handoff_capacity(&self, _rungs: u64) -> Result<(), JournalError> {
         Ok(())
     }
+
+    /// How much of each ceiling this journal has used, and whether it continues
+    /// past them at all.
+    ///
+    /// The question a caller asks before an append, and it is asked on the shipped
+    /// append path rather than by a caller a test wrote, because a lifecycle
+    /// policy nobody consults is a policy that does not exist (issue #267).
+    ///
+    /// The default measures the journal honestly and reports `continues() ==
+    /// false`, which leaves every adapter's behaviour exactly as it was: the
+    /// default is what the in-memory adapter and every external adapter want,
+    /// and a `FileJournal` opened for an unattended run is the one that answers
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::Storage`] when the store cannot be read for the counts.
+    fn continuation_watermark(&self) -> Result<ContinuationWatermark, JournalError> {
+        Ok(ContinuationWatermark::inert(
+            0,
+            u64::saturating_from(MAX_JOURNAL_EVENTS),
+            0,
+            MAX_JOURNAL_BYTES,
+        ))
+    }
+
+    /// Seal this journal at the watermark and hand back the successor opened from
+    /// the checkpoint this writes.
+    ///
+    /// `None` when this journal does not continue, which is the default and the
+    /// answer every adapter but the continuing file journal gives. A `Some` hands
+    /// the caller the authoritative journal: the predecessor is sealed, read-only
+    /// and still readable, and every append from here lands in the successor.
+    ///
+    /// The caller must adopt the returned journal whole — its tail, its ladder and
+    /// its carried state — rather than keeping the predecessor's own position,
+    /// because the successor's chain starts at the predecessor's tail and its
+    /// first frame is the seal frame. An append that kept the predecessor's fence
+    /// would be refused as a stale tail, which is the correct answer to a
+    /// question that must not be asked.
+    ///
+    /// # Errors
+    ///
+    /// sealed-handle refusals: [`JournalError::Superseded`] when
+    /// this journal is already sealed, [`JournalError::CapacityExceeded`] when
+    /// the carried state is past a declared bound, and the device's own errors
+    /// through [`JournalError::OutcomeUnknown`] when the bytes may be on the disk
+    /// under no acknowledgment.
+    fn continue_as_new(&mut self) -> Result<Option<Box<dyn EffectJournal>>, JournalError> {
+        Ok(None)
+    }
 }
 
 /// What is known about one attempt after replaying a journal.
@@ -1243,7 +1386,80 @@ impl Recovered {
 /// has to stay uncertain, and losing availability is the cheaper error.
 #[must_use]
 pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recovered {
+    recover_continued(None, events)
+}
+
+/// Fold a journal that may begin from a sealed checkpoint.
+///
+/// [`recover`] with the carried state of a successor folded in first, which is
+/// what makes the answer *the same* on both sides of a continuation: the
+/// predecessor reports an attempt from its own suffix, the successor reports it
+/// from the checkpoint that carried it, and a caller cannot tell which journal
+/// answered except by looking at the path.
+///
+/// Two things are seeded, and the difference matters. An **unresolved** attempt is
+/// seeded as its own key at its own rung, so it reads back exactly as uncertain as
+/// it was and the ladder refuses a resend. A **settled** attempt is seeded as the
+/// action's latest key, so the status and the verification a caller compares
+/// against survive the boundary; the older attempts that key stands for are not
+/// carried, and are refused instead — `AttemptId` is monotonic per action, so the
+/// folded record answers "was this walked?" without the checkpoint holding every
+/// attempt ever.
+///
+/// A seed whose rung or status this build does not name is **skipped**, and the
+/// successor's own open refuses the checkpoint rather than reading it. Reading an
+/// unknown rung as the foot of the ladder would make a sealed attempt replayable,
+/// and reading an unknown status as absent would make a verified attempt invisible.
+#[must_use]
+pub fn recover_continued<'a>(
+    base: Option<&Continuation>,
+    events: impl IntoIterator<Item = &'a EffectEvent>,
+) -> Recovered {
     let mut recovered = Recovered::default();
+    if let Some(checkpoint) = base {
+        for carried in checkpoint.settled() {
+            let (Some(status), Some(_rung)) = (carried.status(), carried.rung()) else {
+                continue;
+            };
+            seed(
+                &mut recovered,
+                carried.key(),
+                status,
+                carried.verification(),
+            );
+        }
+        for carried in checkpoint.unresolved() {
+            let Some(status) = carried.recovered_status() else {
+                continue;
+            };
+            seed(&mut recovered, carried.key(), status, None);
+        }
+    }
+    fold_events(&mut recovered, events);
+    recovered
+}
+
+/// Put one carried attempt into a fold, in the order the checkpoint lists them.
+fn seed(
+    recovered: &mut Recovered,
+    key: EffectKey,
+    status: AttemptStatus,
+    verification: Option<Verification>,
+) {
+    let index = recovered.attempts.len();
+    let mut attempt = Attempt::new(key, status);
+    attempt.verification = verification;
+    recovered.attempts.push(attempt);
+    recovered.transitions.push(vec![Transition {
+        from: None,
+        to: status,
+        position: index,
+    }]);
+    recovered.index.insert(key, index);
+}
+
+/// Fold events over a recovery, one at a time.
+fn fold_events<'a>(recovered: &mut Recovered, events: impl IntoIterator<Item = &'a EffectEvent>) {
     for (position, event) in events.into_iter().enumerate() {
         let status = match *event {
             EffectEvent::IntentAdmitted { .. } => AttemptStatus::Prepared,
@@ -1292,7 +1508,6 @@ pub fn recover<'a>(events: impl IntoIterator<Item = &'a EffectEvent>) -> Recover
             }
         }
     }
-    recovered
 }
 
 /// Where a recomputed chain stopped agreeing with what was recorded, or why it
@@ -1459,7 +1674,27 @@ fn check_append_order(
 /// [`ChainBreak`] naming the first entry whose recorded position is not the one
 /// its events produce.
 pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBreak> {
-    let mut position = JournalPosition::genesis();
+    verify_chain_from(JournalPosition::genesis(), entries)
+}
+
+/// [`verify_chain`] over a chain that starts at `base` rather than at the genesis.
+///
+/// A successor's history begins at its predecessor's chain head, not at the
+/// genesis: the seal frame it was opened from is not an event and is not in
+/// `committed_entries`, so folding from the genesis would report a disagreement at
+/// the very first entry. `base` is what the handle's
+/// [`FileJournal::base`](crate::journal::FileJournal::base) reports, which is the
+/// position its own scan already verified every frame against.
+///
+/// # Errors
+///
+/// [`ChainBreak`] naming the first entry whose recorded position is not the one
+/// its events produce.
+pub fn verify_chain_from(
+    base: JournalPosition,
+    entries: &[JournalEntry],
+) -> Result<JournalPosition, ChainBreak> {
+    let mut position = base;
     for entry in entries {
         let sequence = position.sequence().saturating_add(1);
         let head = match chain(position, entry.event()) {
@@ -1611,6 +1846,25 @@ impl EffectJournal for MemoryJournal {
         key: EffectKey,
     ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
         Ok(self.outcomes.get(&key).copied())
+    }
+
+    /// This journal's own counts against the shipped ceilings, reporting that it
+    /// does not continue.
+    ///
+    /// Measured rather than zeroed: an in-memory journal refuses at exactly the
+    /// same ceilings the file adapter does, so a caller that wants to know how
+    /// close it is is asking a real question and gets a real number. The
+    /// continuation answer is `false`, which is the whole reason an ephemeral
+    /// run behaves exactly as it did before continuation existed.
+    fn continuation_watermark(&self) -> Result<ContinuationWatermark, JournalError> {
+        let events = u64::saturating_from(self.committed.len());
+        let limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
+        Ok(ContinuationWatermark::inert(
+            events,
+            limit,
+            self.committed_bytes,
+            MAX_JOURNAL_BYTES,
+        ))
     }
 
     fn compare_and_append(

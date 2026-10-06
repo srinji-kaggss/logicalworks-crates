@@ -1409,6 +1409,42 @@ Each of these was a shipped defect. Treat the list as the spec.
   `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
   `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and
   `tests/it/sim_tenancy_model.rs` (seventeen properties over the whole seed space)
+- **INV-BOT-152** A continued journal loses nothing, duplicates nothing and has
+  one authority. A continuation is one sealed checkpoint frame written byte for
+  byte into the predecessor and its successor; the checkpoint carries one folded
+  record per action and every unresolved attempt in full, so an `OutcomeUnknown`
+  attempt is `OutcomeUnknown` in the successor until evidence settles it, and an
+  attempt the sealed history walked is refused, never re-admitted. Exactly one file
+  of a chain takes appends after a crash at any write or sync of the seal, and a
+  reopen through the original path reaches it. Each file is its own generation, the
+  same one its checkpoint names, and positions the successor acknowledged read back
+  from it. A checkpoint's two counts fit the one frame it is sealed in at their
+  widest records, so each bound refuses by its own name; a streaming `Replay` gives
+  both seal frames the open scan's dispositions, so every file of a chain streams
+  exactly its own events; and a cut after a seal is resolved against that seal.
+  **Not claimed:** retention of sealed predecessors (the host's), a
+  continuation carrying more than `MAX_CHECKPOINT_UNRESOLVED` unresolved attempts
+  (refused, not truncated), and power-loss durability of a directory entry on a
+  platform without a directory sync. · why: #267 · enforced by:
+  `tests/it/journal_continuation.rs`
+  (`a_kill_at_every_seal_boundary_leaves_exactly_one_authoritative_journal`,
+  `each_successor_is_the_next_generation_and_its_checkpoint_says_so`,
+  `an_unresolved_attempt_stays_unknown_across_a_continuation_and_settles_without_a_resend`,
+  `a_replayed_settled_attempt_is_refused_rather_than_admitted_again`),
+  `durable_dispatch::the_controller_continues_its_own_journal_on_the_shipped_append_path`,
+  `journal::file::tests::writing_a_successor_reports_the_directory_it_created`,
+  `journal::file::tests::a_lengthened_event_behind_a_carried_seal_is_refused_not_trimmed`,
+  `journal::continuation::tests::the_largest_checkpoint_the_counts_admit_fits_one_frame`,
+  `tests/it/sim_continuation.rs`, `tests/it/sim_continuation_seal.rs`
+  (`every_generation_streams_exactly_what_it_committed`,
+  `the_action_bound_admits_its_size_and_refuses_one_more_unwritten`,
+  `the_carry_bound_admits_its_size_and_refuses_one_more_unwritten`,
+  `a_seal_stopped_at_any_boundary_leaves_one_authority`,
+  `every_acknowledged_position_reads_back_after_a_reopen`,
+  `the_widest_carry_both_bounds_admit_is_sealed_twice`,
+  `a_lengthened_event_behind_a_carried_seal_is_refused_on_every_seed`), and
+  `examples/journal_continuation.rs`
+  (10,000,000 attempts against an oracle)
 - **INV-BOT-15** One owner serializes journal writes, and an ambiguous write is
   never reported as a clean failure. A capacity-one request slot preserves
   ordering; a `FileView` gives lock-free fence checks; and when a waiter is
@@ -1791,9 +1827,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `FileJournal::replay` streams frames from its own read-only descriptor,
   retaining at most one event, applies the same frame validation and event
   ceiling `open` does, and yields exactly the acknowledged history. The
-  materialized `events()` view and the stream agree on every seed. · why: #122
+  materialized `events()` view and the stream agree on every seed, and on every
+  file of a continued chain (INV-BOT-152). · why: #122
   item 2 · enforced by: `tests/it/sim_journal_liveness.rs`
-  (`streaming_replay_r00..r15`)
+  (`streaming_replay_r00..r15`) and
+  `tests/it/sim_continuation_seal.rs::every_generation_streams_exactly_what_it_committed`
 - **INV-BOT-41** A durable journal reserves room for the whole external handoff
   — intent, preparation and settlement — before the first rung is written, so
   it never leaves an attempt admitted and unable to settle. A journal with no

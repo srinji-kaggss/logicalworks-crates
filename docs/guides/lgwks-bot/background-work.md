@@ -288,7 +288,7 @@ being idle, not a way to cancel a running closure.
 
 The tick still bounds its own fan-out on both adapters, because the wave loop
 lives in the `observe_fold` system rather than in either entry point.
-`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1815`), and
+`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs.rs:1857`), and
 `observe_fold` polls sources in waves of that size. Chains beyond 32 are polled
 in additional waves, so the cap holds regardless of how many chains a spec
 declares.
