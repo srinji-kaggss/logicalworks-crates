@@ -42,6 +42,7 @@
 //! counting refusals would see a broken document rather than an attempt to widen
 //! authority.
 
+use crate::journal::frame::SaturatingFrom;
 use std::fmt;
 
 use super::{Coverage, MAX_FIELD_NAME_BYTES, Outcome, Provenance, Refusal, Source, Surface};
@@ -506,8 +507,8 @@ impl<'a> Reader<'a> {
                 // says, so it is refused before the value is sliced out of it.
                 let refusal = Err(Refusal::Limit {
                     what: "the length of a line in a plan",
-                    got: u64::try_from(taken).unwrap_or(u64::MAX),
-                    limit: u64::try_from(self.line_ceiling()).unwrap_or(u64::MAX),
+                    got: u64::saturating_from(taken),
+                    limit: u64::saturating_from(self.line_ceiling()),
                 });
                 lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "line: returning an error to the caller");
                 return refusal;

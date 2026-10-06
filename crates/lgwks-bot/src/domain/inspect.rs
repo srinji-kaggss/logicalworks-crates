@@ -291,7 +291,14 @@ impl verb::Observe for Subject {
 /// did not hand over.
 fn read_subject(path: &str, limit: usize) -> Result<String, BotError> {
     let metadata = std::fs::metadata(path).map_err(|error| io_error(path, error))?;
-    let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    // Saturation, and here the saturated value *is* the verdict rather than a
+    // stand-in for one: a length this host cannot address is larger than every
+    // budget it could be compared against, so the comparison below refuses it
+    // exactly as it refuses a held length that is over the limit.
+    let length = match usize::try_from(metadata.len()) {
+        Ok(addressable) => addressable,
+        Err(_wider_than_this_host_addresses) => usize::MAX,
+    };
     if length > limit {
         let refusal = Err(BotError::DomainError {
             domain: DOMAIN.into(),

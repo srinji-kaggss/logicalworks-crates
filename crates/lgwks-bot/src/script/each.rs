@@ -48,10 +48,15 @@ where
     Fut: Future<Output = Result<T, FlowError>>,
 {
     let here = scope.enter(step)?;
-    let width = limit
-        .unwrap_or_else(|| scope.policy().fan_out())
-        .get()
-        .min(MAX_IN_FLIGHT);
+    // An absent limit is the scope's own policy — the machine's core count under
+    // the declared ceiling — which is a decision about capacity rather than a
+    // value this call failed to produce. A caller's own limit is bounded by the
+    // same ceiling, so neither path can ask for more bodies than the crate runs.
+    let declared = match limit {
+        Some(caller_limit) => caller_limit,
+        None => scope.policy().fan_out(),
+    };
+    let width = declared.get().min(MAX_IN_FLIGHT);
     let wakes = Arc::new(Wakes::new(width));
     let wakers: Vec<Waker> = (0..width)
         .map(|position| {
@@ -243,9 +248,7 @@ impl Wakes {
     /// critical section here is a few plain writes that cannot be left half
     /// done, so a panic elsewhere is not a reason to deadlock the fan-out.
     fn lock(&self) -> MutexGuard<'_, WakeState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::journal::owner::lock(&self.state)
     }
 
     /// Record the waker of the task driving the fan-out.

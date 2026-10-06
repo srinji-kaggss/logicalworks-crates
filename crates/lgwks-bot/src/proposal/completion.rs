@@ -21,6 +21,7 @@
 //! constructed as [`Coverage::Complete`] from a claim alone. See
 //! [`Coverage::from_claim`].
 
+use crate::journal::frame::SaturatingFrom;
 use std::fmt;
 
 use super::{Intervention, Outcome, Provenance, Refusal};
@@ -221,8 +222,8 @@ impl Completion {
         if self.named.len() > MAX_EVIDENCE_REFS {
             let refusal = Err(Refusal::Limit {
                 what: "the number of evidence references a completion claim names",
-                got: u64::try_from(self.named.len()).unwrap_or(u64::MAX),
-                limit: u64::try_from(MAX_EVIDENCE_REFS).unwrap_or(u64::MAX),
+                got: u64::saturating_from(self.named.len()),
+                limit: u64::saturating_from(MAX_EVIDENCE_REFS),
             });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "admit: returning an error to the caller");
             return refusal;

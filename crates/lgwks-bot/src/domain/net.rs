@@ -54,15 +54,29 @@ pub struct Endpoint {
 ///
 /// `#[non_exhaustive]`: the reported shape grows with the domain, and a
 /// consumer that destructured this literally would break on each addition.
+///
+/// The three fields are one probe's reading, so all three are private behind
+/// accessors: a caller that could set `reachable` on a state the probe reported
+/// unreachable would be editing the observation rather than reading it, and
+/// `status_code: 0` is a fact about the endpoint rather than a value to choose.
+///
+/// ```
+/// use lgwks_bot::domain::net::NetState;
+///
+/// let answered = NetState::new(200, true, "ok");
+/// assert!(answered.reachable());
+/// assert_eq!(answered.status_code(), 200);
+/// assert_eq!(answered.body(), "ok");
+/// ```
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct NetState {
     /// HTTP status code of the last probe. `0` means no response was received:
     /// the endpoint was unreachable, which is distinct from any real status a
     /// server can return.
-    pub status_code: u16,
+    status_code: u16,
     /// Whether the endpoint is reachable.
-    pub reachable: bool,
+    reachable: bool,
     /// Response body, truncated to [`BODY_PREVIEW`] characters for observation.
     ///
     /// Read under the transport's byte ceiling, derived from [`BODY_PREVIEW`],
@@ -76,6 +90,33 @@ pub struct NetState {
 }
 
 impl NetState {
+    /// Build the reading a probe produced.
+    ///
+    /// The one constructor, because the fields are private: a probe's status,
+    /// reachability and preview are the same exchange, so a caller cannot hold
+    /// two halves of one that never happened.
+    #[must_use]
+    pub fn new(status_code: u16, reachable: bool, body: impl Into<String>) -> Self {
+        Self {
+            status_code,
+            reachable,
+            body: body.into(),
+        }
+    }
+
+    /// HTTP status code of the last probe, or `0` when the endpoint was
+    /// unreachable.
+    #[must_use]
+    pub const fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
+    /// Whether the last probe reached the endpoint.
+    #[must_use]
+    pub const fn reachable(&self) -> bool {
+        self.reachable
+    }
+
     /// Response body, at most [`BODY_PREVIEW`] characters of it.
     #[must_use]
     pub fn body(&self) -> &str {
@@ -128,21 +169,21 @@ impl verb::Observe for Endpoint {
         })?;
         let exchange = request.await;
         match exchange {
-            Ok(response) => Ok(NetState {
-                status_code: response.status,
-                reachable: true,
-                body: response.text_lossy().chars().take(BODY_PREVIEW).collect(),
-            }),
+            Ok(response) => Ok(NetState::new(
+                response.status,
+                true,
+                response
+                    .text_lossy()
+                    .chars()
+                    .take(BODY_PREVIEW)
+                    .collect::<String>(),
+            )),
             Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
                 domain: self.domain_id().into(),
                 certainty: DispatchCertainty::Refused,
                 cause: "invalid endpoint URL (absolute http(s) URI required)".into(),
             }),
-            Err(_) => Ok(NetState {
-                status_code: 0,
-                reachable: false,
-                body: String::new(),
-            }),
+            Err(_) => Ok(NetState::new(0, false, String::new())),
         }
     }
 
@@ -258,10 +299,10 @@ mod tests {
             Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
         )?;
         assert!(
-            state.reachable,
+            state.reachable(),
             "a loopback server that answered must report reachable"
         );
-        assert_eq!(state.status_code, 200);
+        assert_eq!(state.status_code(), 200);
         assert_eq!(state.body, "alive");
         lgwks_std::task::block_on(server)?;
         Ok(())
@@ -279,11 +320,12 @@ mod tests {
         let payload = "x".repeat(BODY_PREVIEW_BYTES.saturating_add(64));
         let state = poll_body(payload)?;
         assert!(
-            state.reachable,
+            state.reachable(),
             "a server that answered with a large body is reachable"
         );
         assert_eq!(
-            state.status_code, 200,
+            state.status_code(),
+            200,
             "the status survives the body being cut"
         );
         assert_eq!(
@@ -316,7 +358,7 @@ mod tests {
             Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
         )?;
         assert!(
-            state.reachable,
+            state.reachable(),
             "a server that answered with a huge body is reachable"
         );
         assert_eq!(
@@ -341,10 +383,10 @@ mod tests {
         let payload = "€".repeat(BODY_PREVIEW.saturating_add(1));
         let state = poll_body(payload)?;
         assert!(
-            state.reachable,
+            state.reachable(),
             "a multibyte body is still a reachable server"
         );
-        assert_eq!(state.status_code, 200);
+        assert_eq!(state.status_code(), 200);
         assert_eq!(
             state.body.chars().count(),
             BODY_PREVIEW,
@@ -387,10 +429,10 @@ mod tests {
             Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
         )?;
         assert!(
-            !state.reachable,
+            !state.reachable(),
             "a refused connection must report unreachable, not error"
         );
-        assert_eq!(state.status_code, 0);
+        assert_eq!(state.status_code(), 0);
         Ok(())
     }
 
@@ -415,13 +457,9 @@ mod tests {
             let held = Arc::clone(&gate);
             let job = lgwks_std::task::try_spawn_blocking(move || {
                 let (ref open, ref opened) = *held;
-                let mut is_open = open
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut is_open = crate::journal::owner::lock(open);
                 while !*is_open {
-                    is_open = opened
-                        .wait(is_open)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    is_open = crate::journal::owner::wait(opened, is_open);
                 }
             });
             match job {
@@ -462,9 +500,7 @@ mod tests {
 
         {
             let (ref open, ref opened) = *gate;
-            *open
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            *crate::journal::owner::lock(open) = true;
             opened.notify_all();
         }
         drop(lgwks_std::task::block_on(lgwks_std::task::join_all(parked)));
@@ -479,7 +515,7 @@ mod tests {
         ));
         let unreachable = answered
             .iter()
-            .filter(|outcome| matches!(outcome, Ok(state) if !state.reachable))
+            .filter(|outcome| matches!(outcome, Ok(state) if !state.reachable()))
             .count();
         assert_eq!(
             unreachable, OBSERVERS,

@@ -169,11 +169,10 @@ impl Gate {
     /// Recovering is right for the reason it is right in `journal::owner`: every arm
     /// of the critical section returns its result rather than panicking, so a poison
     /// is a bug in an unrelated task, and propagating it would let one panicking
-    /// body refuse every later admission in the run.
+    /// body refuse every later admission in the run. The recovery itself is that
+    /// module's one helper rather than a second copy here.
     fn lock(&self) -> MutexGuard<'_, Admission> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::journal::owner::lock(&self.inner)
     }
 }
 
