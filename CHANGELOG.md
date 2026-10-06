@@ -9,6 +9,35 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the nine-axis sweep: INV-CODEC-1 is one property with two facades (9-axis sweep)
+
+`json` and `ron` are two codecs over one `serde` surface, so the invariant
+INV-CODEC-1 states is one property, not two: an unescaped field is borrowed from
+the input and an escaped one is not. The assertion that proves it was written
+twice, once per codec, and the guard reads the two copies as the same block —
+which is the point: two copies of one property drift.
+
+- **The contract now lives in one test-only module.** Each codec contributes only
+  its own document and its own two entry points
+  (`serde_facade::json_borrow_contract`, `serde_facade::ron_borrow_contract`,
+  and the matching escaped-field halves); the borrow assertion, the
+  `Borrowed` fixture and the pointer-containment check are written once. Both
+  test names INV-CODEC-1 cites are kept, and each is now three lines that name
+  its codec's half.
+- **The round-trip fixture is named once per codec** (`POINT`), and each
+  malformed-document assertion carries its own fact, so the codec tests differ
+  only where the codecs do.
+- **`examples/digest_timing.rs` carries no sentinel.** The sample count is a
+  `usize` throughout, so neither the schedule's doubled total nor the warm-up
+  comparison needs a narrowing conversion; the crop index is an exact euclid
+  quotient; a batch too slow to record in a `u32` is a preemption and is dropped
+  rather than recorded as a maximum, which would have set the crop and kept
+  itself; and a run shorter than the crop keeps every sample.
+
+The dudect harness runs on the release build at 40,000 samples per class:
+`digest_eq t = 0.005` (no leak detected) against the `early_exit control
+t = 1962.447` (leak detected, as it must be). 67 codec, RON and JSON tests pass.
+
 ### lgwks_std — the nine-axis sweep: one poison recovery per lock shape, and a thread that is owned (9-axis sweep)
 
 - **`task`'s lock-poison recovery is written once per lock shape.** `lock`, `wait`
