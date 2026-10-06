@@ -215,21 +215,34 @@ fn a_non_yielding_callback_is_detected_from_outside_and_not_preempted() -> TestR
 
     // A sibling of the child's own: unrelated to the child's executor, alive
     // throughout, and never a member of anything the parent signals.
-    let mut sibling = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("echo $$ > {}; sleep 30", sibling_marker.display()))
-        .spawn()?;
+    //
+    // `exec`, so the pid it records is the `sleep` itself: a shell that forked
+    // its sleep left it running, orphaned and holding this test's output pipe,
+    // when the shell was killed, and nextest reported the test leaky.
+    let sibling = Reaped(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "echo $$ > {}; exec sleep 30",
+                sibling_marker.display()
+            ))
+            .spawn()?,
+    );
     let sibling_pid = read_pid(&sibling_marker);
 
-    let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args([TEST_NAME, "--exact", "--nocapture"])
-        .env(CHILD_ENV, "1")
-        .env("LGWKS_BOT_T03_MARKER", &marker)
-        .spawn()?;
+    // Owned by a guard, so an assertion that fails before the kill below still
+    // stops a child whose whole purpose is to spin for ever.
+    let mut child = Reaped(
+        std::process::Command::new(std::env::current_exe()?)
+            .args([TEST_NAME, "--exact", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("LGWKS_BOT_T03_MARKER", &marker)
+            .spawn()?,
+    );
 
     // Wait for the child to say it started, bounded.
     let started = wait_for(&marker, START_BUDGET);
-    let exited_early = child.try_wait()?;
+    let exited_early = child.0.try_wait()?;
 
     assert!(
         started,
@@ -245,7 +258,7 @@ fn a_non_yielding_callback_is_detected_from_outside_and_not_preempted() -> TestR
     // The outside clock. Nothing in the child can pause it, reach it, or be
     // scheduled around it, which is the whole reason it is a separate process.
     std::thread::park_timeout(DETECT_AFTER);
-    let still_running = child.try_wait()?;
+    let still_running = child.0.try_wait()?;
     assert!(
         still_running.is_none(),
         "the child ended on its own after {DETECT_AFTER:?}, so the callback yielded or \
@@ -253,8 +266,8 @@ fn a_non_yielding_callback_is_detected_from_outside_and_not_preempted() -> TestR
     );
 
     // Detection, then termination, both from outside.
-    child.kill()?;
-    let status = child.wait()?;
+    child.0.kill()?;
+    let status = child.0.wait()?;
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt as _;
@@ -274,13 +287,28 @@ fn a_non_yielding_callback_is_detected_from_outside_and_not_preempted() -> TestR
             "the sibling process {sibling_pid} was signalled while cleaning up a wedged child"
         );
     }
-    let _reaped = sibling.kill().and_then(|()| sibling.wait()).map(|_| ());
+    drop(sibling);
 
     // The load-bearing statement of scope. This test killed a process; it did not
     // stop a poll, and nothing in this crate can. A future reader who mistakes
     // this green run for a preemption guarantee is reading more than it proves.
     let _ = runtime;
     Ok(())
+}
+
+/// A process this test started, killed and reaped however the test ends.
+///
+/// A failed assertion unwinds past every explicit kill, and a `Child` dropped
+/// unkilled keeps running: the sibling for its whole `sleep`, the wedged child
+/// for ever. The kill after a reap answers "no such process", which is the
+/// stop it asked for, so both results are discarded.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _killed = self.0.kill();
+        let _reaped = self.0.wait();
+    }
 }
 
 /// A scratch directory named by wall-clock nanos and a monotone sequence.
