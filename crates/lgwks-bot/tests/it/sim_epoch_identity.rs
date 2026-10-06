@@ -113,10 +113,10 @@ const OTHER_DIGEST: &str = "ffeeddccbbaa9988776655443322110000112233445566778899
 fn field_tag(field: u32) -> &'static str {
     match usize::try_from(field) {
         Ok(index) => match FIELD_TAGS.get(index) {
-            Some(tag) => *tag,
+            Some(tag) => tag,
             None => unmapped(field, FIELD_TAGS.len()),
         },
-        Err(_too_wide) => outside(field, FIELD_TAGS.len()),
+        Err(_too_wide) => outside(FIELD_TAGS.len()),
     }
 }
 
@@ -129,12 +129,12 @@ fn field_tag(field: u32) -> &'static str {
 fn unmapped(field: u32, len: usize) -> &'static str {
     match u32::try_from(len) {
         Ok(index) if index == field => "unmapped-field",
-        _ => outside(field, len),
+        _ => outside(len),
     }
 }
 
 /// The tag for a field index this table could not hold at all.
-fn outside(field: u32, len: usize) -> &'static str {
+fn outside(len: usize) -> &'static str {
     match u32::try_from(len) {
         Ok(_) => "field-outside-the-table",
         // The table is wider than the field numbering can reach, so no field
@@ -149,10 +149,10 @@ fn outside(field: u32, len: usize) -> &'static str {
 fn field_refusal(field: u32) -> &'static str {
     match usize::try_from(field) {
         Ok(index) => match FIELD_REFUSALS.get(index) {
-            Some(tag) => *tag,
+            Some(tag) => tag,
             None => unmapped(field, FIELD_REFUSALS.len()),
         },
-        Err(_too_wide) => outside(field, FIELD_REFUSALS.len()),
+        Err(_too_wide) => outside(FIELD_REFUSALS.len()),
     }
 }
 

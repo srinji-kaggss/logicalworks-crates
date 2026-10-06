@@ -222,13 +222,13 @@ fn measure_thread_capacity() -> Option<u64> {
     if reached == 0 {
         return None;
     }
-    match u64::try_from(reached) {
-        Ok(reached) => Some(reached),
-        // A level this host cannot name as a `u64` is not one any tier here can
-        // reach, so the answer is "not measured" rather than the largest number
-        // there is, which would read as a ceiling nobody hit.
-        Err(_too_wide) => None,
-    }
+    // A level this host cannot name as a `u64` is not one any tier here can
+    // reach, so the answer is "not measured" rather than the largest number there
+    // is, which would read as a ceiling nobody hit.
+    let Ok(reached) = u64::try_from(reached) else {
+        return None;
+    };
+    Some(reached)
 }
 
 /// A soft resource limit `ulimit <flag>` reports, in the shell that inherits
