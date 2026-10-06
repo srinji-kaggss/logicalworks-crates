@@ -10,16 +10,18 @@ use lgwks_std::time::format::{from_unix_parts, to_rfc3339, unix_parts};
 use lgwks_std::time::{Field, FormatError, ParseError, UnixTimeError, parse_rfc3339};
 use seeded_sweep::{assert_same_seed_replays, fold, initial_trace, next_seed};
 
-/// Calls deprecated lossy endpoints from this downstream integration crate.
-#[expect(
-    deprecated,
-    reason = "exercise the explicitly lossy migration endpoints as a downstream caller"
-)]
-fn lossy_compatibility_values() -> (SystemTime, (i64, u32)) {
-    (
-        lgwks_std::time::format::from_unix_parts_lossy(i64::MAX, 1_000_000_000),
-        lgwks_std::time::format::unix_parts_lossy(UNIX_EPOCH),
-    )
+use crate::seeded_bytes::next_byte;
+
+/// The length of `month` in `year`, or `refused` when the calendar refuses it.
+///
+/// The callers walk a date they have already checked, so the calendar's answer
+/// is the one they advance by; `refused` is the degenerate length they use
+/// instead, and it is the length that arm already treats as a one-day month.
+fn month_length_or(year: i64, month: u32, refused: u32) -> u32 {
+    match try_days_in_month(year, month) {
+        Some(length) => length,
+        None => refused,
+    }
 }
 
 /// Counts a year length using the Gregorian divisibility rule directly.
@@ -63,7 +65,11 @@ fn reference_days_from_civil(year: i64, month: u32, day: u32) -> i128 {
 
 /// Advances a valid civil date by one day.
 fn next_date(year: i64, month: u32, day: u32) -> (i64, u32, u32) {
-    let month_length = try_days_in_month(year, month).unwrap_or(1);
+    // The caller walks from a date it has already checked, so the month length
+    // is the one the calendar states; a month the calendar refuses is the one
+    // day this advances to, which is the degenerate case the arm below already
+    // handles as a one-day month.
+    let month_length = month_length_or(year, month, 1);
     if day < month_length {
         (year, month, day.saturating_add(1))
     } else if month < 12 {
@@ -79,18 +85,10 @@ fn previous_date(year: i64, month: u32, day: u32) -> (i64, u32, u32) {
         (year, month, day.saturating_sub(1))
     } else if month > 1 {
         let prior_month = month.saturating_sub(1);
-        (
-            year,
-            prior_month,
-            try_days_in_month(year, prior_month).unwrap_or(1),
-        )
+        (year, prior_month, month_length_or(year, prior_month, 1))
     } else {
         let prior_year = year.saturating_sub(1);
-        (
-            prior_year,
-            12,
-            try_days_in_month(prior_year, 12).unwrap_or(31),
-        )
+        (prior_year, 12, month_length_or(prior_year, 12, 31))
     }
 }
 
@@ -240,18 +238,26 @@ fn checked_unix_conversion_never_substitutes_epoch() -> Result<(), UnixTimeError
 }
 
 #[test]
-/// Verifies legacy loss is reachable only through explicitly named APIs.
-fn lossy_compatibility_entry_points_are_explicit() {
-    let (epoch_fallback, epoch_parts) = lossy_compatibility_values();
-    assert_eq!(
-        epoch_fallback, UNIX_EPOCH,
-        "the explicitly lossy conversion keeps its documented epoch fallback"
+/// The checked conversions refuse exactly the two losses the deprecated lossy
+/// endpoints used to take silently: a value past the platform's range is
+/// refused rather than answered with the epoch, and an ordinary epoch reads back
+/// exactly rather than as a default.
+///
+/// This is the evidence the deprecated spellings existed to warn about, stated
+/// against the endpoints a caller is told to migrate to — and the deprecated
+/// endpoints themselves are not called here, because a test that has to suppress
+/// `deprecated` to reach the code it checks is no longer evidence about it.
+fn checked_conversions_refuse_where_the_lossy_ones_fell_back() -> Result<(), UnixTimeError> {
+    assert!(
+        from_unix_parts(i64::MAX, 1_000_000_000).is_err(),
+        "a conversion past the platform's range must be refused, not answered with the epoch"
     );
     assert_eq!(
-        epoch_parts,
+        unix_parts(UNIX_EPOCH)?,
         (0, 0),
-        "the explicitly lossy extraction preserves ordinary epoch values"
+        "the checked extraction reads the epoch exactly"
     );
+    Ok(())
 }
 
 #[test]
@@ -387,8 +393,8 @@ fn t5_endpoints_are_exact_under_the_repaired_narrowing() {
         146_096,
         146_097,
         365_242,
-        i64::MIN.checked_div_euclid(2).unwrap_or(i64::MIN),
-        i64::MAX.checked_div_euclid(2).unwrap_or(i64::MAX),
+        i64::MIN.div_euclid(2),
+        i64::MAX.div_euclid(2),
     ] {
         let (year, month, day) = civil_from_days(days);
         assert_eq!(
@@ -430,12 +436,8 @@ fn t5_overflow_transition_region_is_exact_or_declared_saturated() {
 
     // Beyond the endpoint the mathematical count is out of range, and only the
     // final narrowing may saturate — upwards, to exactly i64::MAX.
-    for step in 1_i64..8 {
-        let (year, month, day) = next_date(
-            25_252_734_927_768_524,
-            7,
-            27_u32.saturating_add(u32::try_from(step).unwrap_or(1)),
-        );
+    for step in 1_u32..8 {
+        let (year, month, day) = next_date(25_252_734_927_768_524, 7, 27_u32.saturating_add(step));
         let mathematical = reference_days_from_civil(year, month, day);
         assert!(
             mathematical > i128::from(boundary),
@@ -533,15 +535,20 @@ fn run_seeded_calendar_samples(seed: u64) -> u64 {
         );
         fold(&mut trace, u64::from_le_bytes(days.to_le_bytes()));
 
-        let year = i64::try_from(next_seed(&mut state).rem_euclid(800_001))
-            .unwrap_or(0)
-            .saturating_sub(400_000);
-        let month = u32::try_from(next_seed(&mut state).rem_euclid(12))
-            .unwrap_or(0)
+        // The civil date is drawn in the widths the calendar takes it in: the
+        // year from two bytes of one stream word, the month from a byte, and the
+        // day from a byte reduced by that month's length. Two bytes carry 65 536
+        // years around the epoch, which spans leap rules, century rules and
+        // whole 400-year cycles — the calendar's own periods — without a
+        // conversion between the stream's width and the year field's.
+        let word = next_seed(&mut state).to_le_bytes();
+        let year = i64::from(u16::from_le_bytes([word[0], word[1]])).saturating_sub(32_768);
+        let month = u32::from(next_byte(&mut state))
+            .rem_euclid(12)
             .saturating_add(1);
-        let month_days = try_days_in_month(year, month).unwrap_or(31);
-        let day = u32::try_from(next_seed(&mut state).rem_euclid(u64::from(month_days)))
-            .unwrap_or(0)
+        let month_days = month_length_or(year, month, 31);
+        let day = u32::from(next_byte(&mut state))
+            .rem_euclid(month_days)
             .saturating_add(1);
         let expected = reference_days_from_civil(year, month, day);
         let actual_days = days_from_civil(year, month, day);
@@ -556,7 +563,10 @@ fn run_seeded_calendar_samples(seed: u64) -> u64 {
             (year, month, day),
             "seeded valid civil date must round-trip through public calendar APIs"
         );
-        fold(&mut trace, u64::try_from(year).unwrap_or(0));
+        // The year is a signed calendar field, so it is folded as its own
+        // two's-complement bits rather than narrowed: a negative year and a
+        // positive one that shares its low bits must not fold alike.
+        fold(&mut trace, year.cast_unsigned());
         fold(&mut trace, u64::from(month));
         fold(&mut trace, u64::from(day));
     }

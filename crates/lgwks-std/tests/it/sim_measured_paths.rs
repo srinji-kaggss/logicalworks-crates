@@ -38,13 +38,21 @@ struct Percentiles {
 
 impl Percentiles {
     /// Times `iterations` calls of `work` and collects the samples.
-    fn measure(iterations: usize, mut work: impl FnMut(usize)) -> Self {
-        let mut samples = Vec::with_capacity(iterations);
-        for index in 0..iterations {
-            let start = Instant::now();
-            work(index);
-            samples.push(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
-        }
+    ///
+    /// The iteration count and the index handed to `work` are `u32`s, the width
+    /// every timed path takes its arguments in: a measurement that counts in one
+    /// width and reports in another needs a conversion per sample, and a
+    /// conversion per sample is a cost the measurement itself would be charging
+    /// the path it measures. The range's exact size hint sizes the collection in
+    /// one allocation.
+    fn measure(iterations: u32, mut work: impl FnMut(u32)) -> Self {
+        let samples: Vec<u64> = (0..iterations)
+            .map(|index| {
+                let start = Instant::now();
+                work(index);
+                nanos(start.elapsed())
+            })
+            .collect();
         Self { samples }
     }
 
@@ -53,20 +61,25 @@ impl Percentiles {
     /// The index is the nearest-rank percentile: with `n` samples the `p`
     /// percentile is the `ceil(p/100 * n)`-th smallest. Nearest-rank rather
     /// than an interpolating percentile because every sample here is a real
-    /// observed call, and an interpolated point is not one.
-    fn percentile(&self, percentile: u64) -> u64 {
-        if self.samples.is_empty() {
+    /// observed call, and an interpolated point is not one. The rank is
+    /// computed in the index width, where the sample count already lives.
+    fn percentile(&self, percentile: usize) -> u64 {
+        let count = self.samples.len();
+        if count == 0 {
             return 0;
         }
-        let count = u64::try_from(self.samples.len()).unwrap_or(u64::MAX);
         let rank = percentile.saturating_mul(count).div_ceil(100);
-        let rank = usize::try_from(rank).unwrap_or(usize::MAX);
-        let index = rank
-            .saturating_sub(1)
-            .min(self.samples.len().saturating_sub(1));
+        let index = rank.saturating_sub(1).min(count.saturating_sub(1));
         let mut sorted = self.samples.clone();
         sorted.sort_unstable();
-        sorted.get(index).copied().unwrap_or(0)
+        // The index is the nearest rank clamped to the last position, so it is a
+        // position this owns rather than an absent value.
+        sorted[index]
+    }
+
+    /// The largest sample, or zero when nothing was observed.
+    fn slowest(&self) -> u64 {
+        self.samples.iter().copied().fold(0, u64::max)
     }
 
     /// Returns the p50, p95 and p99 in nanoseconds.
@@ -84,10 +97,37 @@ impl Percentiles {
         if self.samples.is_empty() {
             return 0;
         }
-        let total: u128 = self.samples.iter().map(|value| u128::from(*value)).sum();
-        let count = u128::try_from(self.samples.len()).unwrap_or(u128::MAX);
-        u64::try_from(total.checked_div(count).unwrap_or(u128::MAX)).unwrap_or(u64::MAX)
+        // The sum is accumulated in `u128` so a long run of long calls cannot
+        // overflow, and both the sum and the count are folded in the same pass
+        // rather than converted from a `usize` this function never needed.
+        let (mut total, mut count) = (0_u128, 0_u128);
+        for sample in &self.samples {
+            total = total.saturating_add(u128::from(*sample));
+            count = count.saturating_add(1);
+        }
+        match u64::try_from(total.div_ceil(count)) {
+            Ok(mean) => mean,
+            // The mean of samples is at most the largest of them, so a mean past
+            // the trace word is the accumulator's arithmetic rather than a
+            // measurement, and the largest sample is the reading inside the word.
+            Err(_) => self.slowest(),
+        }
     }
+}
+
+/// An elapsed duration in nanoseconds.
+///
+/// `Duration::as_nanos` is a `u128` and the samples are a `u64`, so the
+/// conversion would need a checked narrowing at every sample. It is read as
+/// seconds and sub-second nanoseconds instead — both of which `Duration` reports
+/// in a width that fits — and combined with saturating arithmetic, so a call
+/// that somehow outlasted `u64::MAX` nanoseconds reads as the largest sample
+/// rather than as a wrapped one.
+fn nanos(elapsed: Duration) -> u64 {
+    elapsed
+        .as_secs()
+        .saturating_mul(1_000_000_000_u64)
+        .saturating_add(u64::from(elapsed.subsec_nanos()))
 }
 
 #[test]
@@ -102,14 +142,11 @@ fn retry_delay_latency_is_flat_across_the_attempt_range() {
     // is consumed below so the result is not discarded with `let _ =`.
     let mut small_total = Duration::ZERO;
     let small = Percentiles::measure(iterations, |index| {
-        small_total += policy.delay(
-            u32::try_from(index % 2).unwrap_or(0),
-            u64::try_from(index).unwrap_or(0),
-        );
+        small_total += policy.delay(index % 2, u64::from(index));
     });
     let mut large_total = Duration::ZERO;
     let large = Percentiles::measure(iterations, |index| {
-        large_total += policy.delay(u32::MAX, u64::try_from(index).unwrap_or(0));
+        large_total += policy.delay(u32::MAX, u64::from(index));
     });
     assert!(
         small_total > Duration::ZERO && large_total > Duration::ZERO,
@@ -143,13 +180,15 @@ fn glob_match_latency_is_linear_after_the_repair() {
     let long: String = format!("a/{}b7z", "x/".repeat(255));
     let iterations = 50_000;
 
-    let mut small_hits = 0_usize;
+    // The hit counts are `u32`s for the same reason the iteration count is: the
+    // counter and the count it is compared against are then the same width.
+    let mut small_hits = 0_u32;
     let small = Percentiles::measure(iterations, |_| {
-        small_hits += usize::from(pattern.is_match_with(&short, &mut scratch));
+        small_hits += u32::from(pattern.is_match_with(&short, &mut scratch));
     });
-    let mut large_hits = 0_usize;
+    let mut large_hits = 0_u32;
     let large = Percentiles::measure(iterations, |_| {
-        large_hits += usize::from(pattern.is_match_with(&long, &mut scratch));
+        large_hits += u32::from(pattern.is_match_with(&long, &mut scratch));
     });
     assert_eq!(
         small_hits, iterations,
@@ -190,12 +229,12 @@ fn checked_composition_latency_is_a_single_pass_over_its_components() {
     let left: Vec<f32> = (0_u16..128).map(f32::from).collect();
     let iterations = 20_000;
     let bounded = lgwks_std::similarity::BoundedJaccard::<u32>::new(64);
-    let mut verdicts = 0_usize;
+    let mut verdicts = 0_u32;
     let measured = Percentiles::measure(iterations, |index| {
-        let offset = u32::try_from(index % 8).unwrap_or(0);
-        verdicts += usize::from(policy.verdict(&left, &left).is_ok());
-        verdicts += usize::from(text.verdict("kitten", "sitting").is_ok());
-        verdicts += usize::from(CheckedSimilarity::try_score(&bounded, &[offset, 1], &[1]).is_ok());
+        let offset = index % 8;
+        verdicts += u32::from(policy.verdict(&left, &left).is_ok());
+        verdicts += u32::from(text.verdict("kitten", "sitting").is_ok());
+        verdicts += u32::from(CheckedSimilarity::try_score(&bounded, &[offset, 1], &[1]).is_ok());
     });
     assert_eq!(
         verdicts,
@@ -217,7 +256,7 @@ fn every_reported_percentile_is_ordered_and_bounded() {
     let policy = RetryPolicy::new(5, Duration::from_millis(1), Duration::from_secs(60));
     let mut total = Duration::ZERO;
     let measured = Percentiles::measure(10_000, |index| {
-        total += policy.delay(u32::try_from(index % 8).unwrap_or(0), 0);
+        total += policy.delay(index % 8, 0);
     });
     assert!(
         total > Duration::ZERO,
@@ -232,7 +271,7 @@ fn every_reported_percentile_is_ordered_and_bounded() {
         p95 <= p99,
         "p50/p95/p99 must be non-decreasing: {p50}/{p95}/{p99}"
     );
-    let slowest = measured.samples.iter().copied().max().unwrap_or(0);
+    let slowest = measured.slowest();
     assert!(
         p99 <= slowest,
         "the p99 cannot exceed the slowest observed sample: {p99} > {slowest}"

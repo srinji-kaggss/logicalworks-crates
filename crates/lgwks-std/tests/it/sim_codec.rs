@@ -460,7 +460,10 @@ fn trailing_content_after_a_document_is_refused_in_both_codecs() {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..24 {
-            let tail_len = below(&mut state, 8);
+            // The tail is at least one character: a document with nothing after
+            // it has no trailing content to refuse, so a zero-length draw would
+            // be asserting a refusal of a document that is complete.
+            let tail_len = below(&mut state, 8).saturating_add(1);
             let tail = next_text(&mut state, tail_len);
             let json_text = format!(r#"{{"value":"x"}}{tail}"#);
             assert!(

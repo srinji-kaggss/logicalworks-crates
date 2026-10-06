@@ -635,6 +635,52 @@ Behaviour is unchanged for every reachable case: every table the suites draw fro
 is a non-empty constant or a slice whose emptiness the caller already tested.
 The new arms are what an emptied fixture table *means*, and each is reachable
 only by editing a fixture.
+### lgwks_std — the test sweep's own fixtures, held to the same contract (9-axis sweep)
+
+Every rust-guard finding in `crates/lgwks-std/tests/` is fixed at its cause. No
+library behaviour changed; the traces every seeded family folds differ, because
+the byte stream they draw from does.
+
+- **The seeded stream is finalised.** `seeded_sweep::next_seed` was an
+  unfinalised linear-congruential step, which has period `2**k` in its low `k`
+  bits: `next_byte` therefore repeated one 256-byte block for ever, and a 4 KiB
+  payload in the hex, LEB128 and UUID families was sixteen copies of it. It is
+  now `xorshift64*`, the standard remedy. Measured on this host: the old low byte
+  covered 160 of 256 values in 256 draws — the period exactly — while the
+  finalised one covers 249 of 256 in 1024 draws with chi-square 260.5 at 255
+  degrees of freedom (5% critical 293), and 1024 whole draws are 1024 distinct
+  words. Two new tests hold both facts.
+- **One lock-poison recovery per file.** The six `PoisonError::into_inner`
+  closures in the pool fixture's `Gate`/`Release` become one `guard()` that
+  takes the `LockResult` `Mutex::lock()` and `Condvar::wait()` both return, and
+  the file's own tests replace the `allow(dead_code)` that hid half of it.
+- **No fixture is silenced.** All seven `#![allow(dead_code)]` suppressions in
+  `tests/support/` are deleted and each fixture carries its own tests instead, so
+  no binary's unused half is hidden.
+- **A missing measurement is named.** `consumer_probe::MISSING_MEASUREMENT`
+  replaces an inline `u64::MAX`, and the shared-policy tiers now refuse a tier
+  whose resident-size figure is absent rather than reading it as a reported zero.
+- **Every draw is made in the width it is used in.** Widths were narrowed at
+  every site with `try_from(..).unwrap_or(..)`: an identifier's sixteen bytes are
+  drawn into an array rather than converted from a `Vec`, LEB128 group numbers
+  are counted in the width a shift amount takes, the measurement harness counts in
+  the width its paths take their arguments in, and the tenant weights, retry
+  attempts, set members, alphabet letters and calendar fields are values their own
+  tables or byte windows name. Each site's replacement is a total expression:
+  `as` is `as_conversions = forbid`, `From<usize>` for `u64` does not exist, and
+  a sentinel for a value is a value the fixture invented.
+- **A missing score is not a score of -1.0.** The evidence contract compares a
+  verdict's score through one helper that names a withdrawal, propagates the
+  checked scorer's own refusal with `?`, and reports a panicked prober as the
+  largest possible disagreement rather than as a count of zero.
+- **The deprecated lossy time endpoints are no longer called.** A test that has
+  to suppress `deprecated` to reach the code it checks is no longer evidence
+  about it; the refusal the lossy spellings warned about is now asserted against
+  the endpoints a caller migrates to.
+- Two cases asserted what their own generator could produce and then deny — a
+  hex payload rendering two spellings with no letter in it, and a document with
+  no trailing content being refused for having some. Each now draws or states the
+  case it means.
 
 ### lgwks_bot — `Supervisor::wait_idle`: the drain no longer pays a timer tick (#269)
 

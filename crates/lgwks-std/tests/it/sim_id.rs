@@ -24,7 +24,7 @@ use crate::seeded_sweep;
 
 use lgwks_std::id::{ParseError, Uuid};
 
-use seeded_bytes::{below, fold_bytes, fold_refusal, next_bytes, reference_nibble};
+use seeded_bytes::{below, fold_bytes, fold_refusal, next_array, reference_nibble};
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
     initial_trace,
@@ -46,27 +46,47 @@ const GROUP_STARTS: [usize; 5] = [0, 9, 14, 19, 24];
 /// Renders 16 bytes as the canonical hyphenated lowercase form, computed from
 /// the documented layout rather than by asking the shipped `Display`.
 fn reference_render(bytes: &[u8; 16]) -> String {
-    let mut rendered = String::new();
+    let mut rendered = String::with_capacity(CANONICAL_LEN);
+    let mut cursor = 0_usize;
     for (index, &(_, byte_width)) in GROUPS.iter().enumerate() {
         if index > 0 {
             rendered.push('-');
         }
-        let start = GROUPS
-            .iter()
-            .take(index)
-            .map(|&(_, bytes)| bytes)
-            .sum::<usize>();
+        // The group is read through `into_iter().flatten()`, which yields the
+        // bytes or nothing: a group the layout table points past the end of a
+        // sixteen-byte value is a table that no longer describes this renderer,
+        // and an empty group says so rather than rendering a fallback digit.
         for byte in bytes
-            .get(start..start.saturating_add(byte_width))
-            .unwrap_or(&[])
+            .get(cursor..cursor.saturating_add(byte_width))
+            .into_iter()
+            .flatten()
         {
-            let high = u32::from(byte >> 4);
-            let low = u32::from(byte & 0x0f);
-            rendered.push(char::from_digit(high, 16).unwrap_or('?'));
-            rendered.push(char::from_digit(low, 16).unwrap_or('?'));
+            rendered.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+            rendered.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
         }
+        cursor = cursor.saturating_add(byte_width);
     }
     rendered
+}
+
+/// The lowercase hex alphabet, indexed by nibble: the table is the documented
+/// rendering rather than a call into the shipped `Display`, so this reference
+/// cannot agree with it by construction.
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// The trace arm for a parsed value that reports no version at all, kept
+/// distinct from version zero so the two cannot fold alike.
+const NO_VERSION_ARM: u64 = 0;
+
+/// The trace arm for a version the parser reported.
+///
+/// A `u8` widens to the trace word without a checked conversion, which is why
+/// the arms are `u64` rather than the width the version nibble is read at.
+fn version_arm(value: &Uuid) -> u64 {
+    match value.version() {
+        Some(version) => u64::from(version).saturating_add(1),
+        None => NO_VERSION_ARM,
+    }
 }
 
 /// The character offset at which each group's hex begins, from the byte widths
@@ -92,7 +112,7 @@ fn reference_group_starts() -> [usize; 5] {
 
 /// The version nibble a raw value reports under the RFC variant rule.
 fn reference_version(bytes: &[u8; 16]) -> Option<u8> {
-    let eighth = bytes.get(8).copied().unwrap_or(0);
+    let eighth = bytes[8];
     if eighth & 0xc0 == 0x80 {
         bytes.get(6).map(|byte| byte >> 4)
     } else {
@@ -192,9 +212,7 @@ enum Reference {
 
 /// The canonical form for arbitrary drawn bytes.
 fn draw_canonical(state: &mut u64) -> String {
-    let bytes = next_bytes(state, 16);
-    let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
-    reference_render(&raw)
+    reference_render(&next_array::<16>(state))
 }
 
 /// Runs the seeded parse/render sweep and returns its trace.
@@ -203,8 +221,7 @@ fn id_trace(seed: u64) -> u64 {
     let mut trace = initial_trace();
 
     for _ in 0..64 {
-        let bytes = next_bytes(&mut state, 16);
-        let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
+        let raw = next_array::<16>(&mut state);
         let rendered = reference_render(&raw);
 
         assert_eq!(
@@ -226,14 +243,14 @@ fn id_trace(seed: u64) -> u64 {
 
         fold_bytes(&mut trace, &raw);
         fold_bytes(&mut trace, rendered.as_bytes());
-        fold_usize(
-            &mut trace,
-            usize::from(
-                parsed
-                    .as_ref()
-                    .map_or(0, |value| value.version().unwrap_or(0)),
-            ),
-        );
+        // The parse was asserted to agree with the drawn bytes above, so the
+        // refusal arm is unreachable here; it still folds, because a fold that
+        // assumed the assertion would be a fold of the assertion.
+        let version = match parsed.as_ref() {
+            Ok(value) => version_arm(value),
+            Err(_) => NO_VERSION_ARM,
+        };
+        fold(&mut trace, version);
     }
     trace
 }
@@ -246,8 +263,7 @@ fn arbitrary_bytes_round_trip_through_parse_and_display() -> Result<(), ParseErr
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..64 {
-            let bytes = next_bytes(&mut state, 16);
-            let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
+            let raw = next_array::<16>(&mut state);
             let rendered = reference_render(&raw);
 
             let parsed = Uuid::parse(&rendered)?;
@@ -351,14 +367,11 @@ fn parsing_preserves_version_and_variant_bits_a_generator_would_have_stamped() {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..32 {
-            let mut bytes = next_bytes(&mut state, 16);
-            if let Some(slot) = bytes.get_mut(6) {
-                *slot = (*slot & 0x0f) | 0x40;
-            }
-            if let Some(slot) = bytes.get_mut(8) {
-                *slot = (*slot & 0x3f) | 0x80;
-            }
-            let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
+            // The masks are stamped on the drawn array itself, so there is no
+            // length conversion between the draw and the bytes that carry them.
+            let mut raw = next_array::<16>(&mut state);
+            raw[6] = (raw[6] & 0x0f) | 0x40;
+            raw[8] = (raw[8] & 0x3f) | 0x80;
             let rendered = reference_render(&raw);
 
             let Ok(parsed) = Uuid::parse(&rendered) else {
@@ -386,8 +399,7 @@ fn the_reported_version_follows_the_variant_rule_of_the_drawn_bits() {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for _ in 0..48 {
-            let bytes = next_bytes(&mut state, 16);
-            let raw = <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or([0u8; 16]);
+            let raw = next_array::<16>(&mut state);
             let Ok(parsed) = Uuid::parse(&reference_render(&raw)) else {
                 continue;
             };
@@ -427,7 +439,9 @@ fn malformed_hex_reports_both_the_group_start_and_the_character_offset()
             if !corrupt_position(&mut corrupted, position, alien) {
                 continue;
             }
-            let corrupted = String::from_utf8(corrupted).unwrap_or_default();
+            let corrupted = String::from_utf8(corrupted).map_err(|error| {
+                format!("seed {seed}: a corrupted identifier left ASCII: {error}")
+            })?;
 
             match reference_parse(&corrupted) {
                 Err(Reference::NotDigit { group_at, at }) => assert_eq!(
@@ -493,7 +507,11 @@ fn a_wrong_length_is_refused_before_anything_is_parsed() {
                 CANONICAL_LEN.saturating_sub(1),
                 CANONICAL_LEN.saturating_sub(35),
             ] {
-                let shortened = rendered.get(..len).unwrap_or("").to_owned();
+                assert!(
+                    rendered.is_char_boundary(len),
+                    "seed {seed}: the canonical form is ASCII, so offset {len} is a boundary"
+                );
+                let shortened = rendered[..len].to_owned();
                 assert_eq!(
                     shortened.chars().count(),
                     len,
@@ -513,7 +531,7 @@ fn a_wrong_length_is_refused_before_anything_is_parsed() {
 /// Each of the four separators is required: removing one hyphen makes the text
 /// 35 characters, and moving one off its own position makes a 36-character text
 /// refuse with the separator's offset.
-fn every_separator_position_is_required() {
+fn every_separator_position_is_required() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
         let mut state = seed;
         for hyphen_at in [8, 13, 18, 23] {
@@ -522,7 +540,8 @@ fn every_separator_position_is_required() {
             if let Some(slot) = moved.get_mut(hyphen_at) {
                 *slot = b'0';
             }
-            let moved = String::from_utf8(moved).unwrap_or_default();
+            let moved = String::from_utf8(moved)
+                .map_err(|error| format!("seed {seed}: moving a separator left ASCII: {error}"))?;
             assert_eq!(
                 Uuid::parse(&moved),
                 Err(ParseError::MissingHyphen { at: hyphen_at }),
@@ -530,6 +549,7 @@ fn every_separator_position_is_required() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
@@ -570,7 +590,11 @@ fn every_truncation_of_a_canonical_form_is_refused() {
         for _ in 0..8 {
             let rendered = draw_canonical(&mut state);
             for cut in 0..CANONICAL_LEN {
-                let prefix = rendered.get(..cut).unwrap_or("");
+                assert!(
+                    rendered.is_char_boundary(cut),
+                    "seed {seed}: the canonical form is ASCII, so offset {cut} is a boundary"
+                );
+                let prefix = &rendered[..cut];
                 assert_eq!(
                     Uuid::parse(prefix),
                     Err(ParseError::WrongLength { len: cut, at: cut }),
@@ -653,12 +677,21 @@ fn a_multi_byte_character_in_a_group_is_refused_at_its_own_offset()
             // that scalar occupies the *hex span* it takes is taken off the tail,
             // so the text is still exactly 36 bytes and the refusal can only be
             // about the character rather than about the length.
-            let head = rendered.get(..position).unwrap_or("");
             let alien_len = alien.len_utf8();
             let tail_start = position.saturating_add(alien_len);
             let tail_len = CANONICAL_LEN.saturating_sub(tail_start);
-            let tail = rendered.get(tail_start..tail_start.saturating_add(tail_len));
-            let corrupted = format!("{head}{alien}{}", tail.unwrap_or(""));
+            // The head ends where the alien begins and the tail starts where the
+            // alien ends, both of which the layout puts inside an ASCII
+            // rendering at a hex character; the assertions below re-check the
+            // width, and this one checks that the split is on a boundary.
+            assert!(
+                rendered.is_char_boundary(position) && rendered.is_char_boundary(tail_start),
+                "seed {seed}: the replacement at {position} must land on ASCII boundaries of the \
+                 canonical form"
+            );
+            let head = &rendered[..position];
+            let tail = &rendered[tail_start..tail_start.saturating_add(tail_len)];
+            let corrupted = format!("{head}{alien}{tail}");
             assert_eq!(
                 corrupted.len(),
                 CANONICAL_LEN,
@@ -687,7 +720,8 @@ fn a_multi_byte_character_in_a_group_is_refused_at_its_own_offset()
 #[test]
 /// A refusal arm and both of its coordinates are folded into the trace, so a
 /// family that reached one arm for every corruption would still diverge here.
-fn refusals_fold_their_arm_and_both_of_their_coordinates() {
+fn refusals_fold_their_arm_and_both_of_their_coordinates() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut trace = initial_trace();
     for seed in SWEEP_SEEDS {
         let mut state = seed;
@@ -699,7 +733,9 @@ fn refusals_fold_their_arm_and_both_of_their_coordinates() {
             if !corrupt_position(&mut corrupted, position, alien) {
                 continue;
             }
-            let corrupted = String::from_utf8(corrupted).unwrap_or_default();
+            let corrupted = String::from_utf8(corrupted).map_err(|error| {
+                format!("seed {seed}: a corrupted identifier left ASCII: {error}")
+            })?;
             match Uuid::parse(&corrupted) {
                 Ok(value) => fold_usize(&mut trace, value.to_string().len()),
                 Err(ParseError::NotHexDigit { group_at, at }) => {
@@ -719,6 +755,7 @@ fn refusals_fold_their_arm_and_both_of_their_coordinates() {
         initial_trace(),
         "the refusal family must fold at least one observation"
     );
+    Ok(())
 }
 
 #[test]
@@ -748,7 +785,7 @@ fn two_seeds_draw_two_different_identifiers() {
         "the two sweep seeds drew the same canonical form"
     );
     let mut trace = initial_trace();
-    fold(&mut trace, u64::try_from(left.len()).unwrap_or(0));
+    fold_usize(&mut trace, left.len());
     fold_bytes(&mut trace, left.as_bytes());
     assert_ne!(
         trace,

@@ -38,11 +38,18 @@ mod sim {
     use lgwks_std::random::{self, EntropyError};
 
     use crate::seeded_sweep::{
-        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
+        SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize,
+        initial_trace, next_index,
     };
 
     /// The concurrency tiers the drawers drive.
     const TIERS: [usize; 4] = [100, 1_000, 10_000, 100_000];
+
+    /// How many drawn bytes one sentinel byte is expected to survive in.
+    const SENTINELS_PER_BYTE: usize = 256;
+
+    /// The slack the sentinel budget allows on top of twice its expectation.
+    const SENTINEL_BUDGET_SLACK: usize = 8;
 
     /// The tier this host is required to reach in full.
     ///
@@ -104,8 +111,14 @@ mod sim {
     /// is a floor and the assertion is a smoke check, which is why the
     /// completeness claims are made on the two long draws.
     fn sentinel_budget(length: usize) -> usize {
-        let expected = length.checked_div(256).unwrap_or(0);
-        expected.saturating_mul(2).saturating_add(8)
+        // Twice the expected whole number of sentinel bytes, plus a constant. The
+        // expectation is one byte in 256, and a length below 256 has no whole
+        // one: its quotient is zero there, so the constant alone is the floor a
+        // short draw is held to, which is what the note above says the budget is.
+        length
+            .div_euclid(SENTINELS_PER_BYTE)
+            .saturating_mul(2)
+            .saturating_add(SENTINEL_BUDGET_SLACK)
     }
 
     /// The traceable shape of one sweep.
@@ -163,7 +176,7 @@ mod sim {
             // a draw of two or more can answer the question.
             .saturating_add(usize::from(length > 1 && distinct.len() == 1));
         trace.trace = trace.trace.wrapping_mul(FNV_PRIME);
-        fold(&mut trace.trace, u64::try_from(length).unwrap_or(u64::MAX));
+        fold_usize(&mut trace.trace, length);
     }
 
     /// Draws one buffer of `length` bytes and records what came back.
@@ -191,22 +204,18 @@ mod sim {
             ..SweepTrace::default()
         };
         let mut order = LENGTHS;
-        let mut state = seed | 1;
+        // The shuffle draws through the crate's one seeded stream, in the index
+        // width it indexes in, so a pick is one of the positions this loop is
+        // permuting rather than a narrowed copy of one.
+        let mut state = seed;
         for index in (1..order.len()).rev() {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            let span = u64::try_from(index.saturating_add(1)).unwrap_or(1);
-            let pick = state.checked_rem(span).unwrap_or(0);
-            order.swap(index, usize::try_from(pick).unwrap_or(0));
+            let pick = next_index(&mut state).rem_euclid(index.saturating_add(1));
+            order.swap(index, pick);
         }
         for length in order {
             let outcome = draw(&mut trace, length);
-            fold(
-                &mut trace.trace,
-                u64::try_from(refusal_text(&outcome).len()).unwrap_or(u64::MAX),
-            );
-            fold(&mut trace.trace, u64::try_from(length).unwrap_or(u64::MAX));
+            fold_usize(&mut trace.trace, refusal_text(&outcome).len());
+            fold_usize(&mut trace.trace, length);
         }
         trace
     }
@@ -250,7 +259,13 @@ mod sim {
                 });
             match started {
                 Ok(joined) => {
-                    let (filled, buf) = joined.join().unwrap_or((false, [0u8; DRAW_BYTES]));
+                    // A worker that panicked reports a draw that wrote nothing,
+                    // which is the arm this family measures: the sentinel count
+                    // for a draw that never filled its buffer is every byte.
+                    let (filled, buf) = match joined.join() {
+                        Ok(drawn) => drawn,
+                        Err(_) => (false, [SENTINEL; DRAW_BYTES]),
+                    };
                     if filled {
                         survivors = survivors.saturating_add(usize::from(buf.contains(&SENTINEL)));
                     } else {
@@ -304,7 +319,7 @@ mod sim {
                 trace.untouched_draws, trace.draws
             );
             for length in LENGTHS {
-                let worst = trace.worst_sentinels.get(&length).copied().unwrap_or(0);
+                let worst = trace.worst_sentinels[&length];
                 assert!(
                     worst <= sentinel_budget(length),
                     "seed {seed:#018x}: a {length}-byte draw left {worst} sentinel bytes, \
@@ -360,7 +375,7 @@ mod sim {
                 "a {length}-byte draw must hand back {length} bytes; refusal: {}",
                 refusal_text(&outcome)
             );
-            let worst = trace.worst_sentinels.get(&length).copied().unwrap_or(0);
+            let worst = trace.worst_sentinels[&length];
             assert!(
                 worst <= sentinel_budget(length),
                 "a {length}-byte draw left {worst} sentinel bytes, above the {} a whole draw \
@@ -503,29 +518,32 @@ mod sim {
     }
 
     #[test]
-    fn no_seeded_generator_predicts_a_draw() {
+    fn no_seeded_generator_predicts_a_draw() -> Result<(), EntropyError> {
         // INV-RANDOM-ONE-SOURCE, observed from outside: a build whose entropy
         // had been replaced by a seeded userspace generator would let the
-        // test's own generator predict it. Two whole bytes per draw, so the
-        // chance of a hit across 100 draws is about 1.5e-4 and one hit names a
-        // substituted source immediately.
+        // test's own generator predict it, so the generator fills each
+        // sixteen-byte draw from two whole words, the way such a substitute
+        // would. A true source matches one draw by chance with probability
+        // 2^-128, so across 100 draws a hit is never noise and always names a
+        // substituted source. (Two-byte draws matched by chance once in about
+        // 650 runs, which a gate that runs every PR on several lanes reaches.)
+        // A refused draw fails the test rather than shrinking it.
         let mut generator = crate::rng::Rng::new(SWEEP_SEEDS[0]);
         let mut predicted = 0usize;
-        let mut drawn = 0usize;
         for _ in 0..100 {
-            let Ok(pair) = random::bytes::<2>() else {
-                continue;
-            };
-            drawn = drawn.saturating_add(1);
-            let first = u8::try_from(generator.next().checked_rem(256).unwrap_or(0)).unwrap_or(0);
-            let second = u8::try_from(generator.next().checked_rem(256).unwrap_or(0)).unwrap_or(0);
-            predicted = predicted.saturating_add(usize::from(pair == [first, second]));
+            let block = random::bytes::<16>()?;
+            let mut guess = [0u8; 16];
+            let (low, high) = guess.split_at_mut(8);
+            low.copy_from_slice(&generator.next().to_le_bytes());
+            high.copy_from_slice(&generator.next().to_le_bytes());
+            predicted = predicted.saturating_add(usize::from(block == guess));
         }
         assert_eq!(
             predicted, 0,
-            "a seeded generator predicted {predicted} of {drawn} two-byte draws; the entropy \
+            "a seeded generator predicted {predicted} of 100 sixteen-byte draws; the entropy \
              source is not the OS CSPRNG it claims to be"
         );
+        Ok(())
     }
 
     #[test]
