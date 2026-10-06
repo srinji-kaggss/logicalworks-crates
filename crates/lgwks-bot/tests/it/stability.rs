@@ -250,7 +250,7 @@ fn tally(polls: impl IntoIterator<Item = Polled>) -> Result<(u32, u32), Box<dyn 
 #[test]
 fn a_store_being_rewritten_is_pending_until_it_settles() -> TestResult {
     let mut live = LiveStore::new("concurrent-write", Protocol::Rewrite)?;
-    let readings = live.sweep_until(PENDING_BUDGET, Until::PendingAndSettled)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::PendingAndSettled)?;
     for polled in &readings {
         if let Polled::Settled(ref raw) = *polled {
             // Whatever settled is a state the file actually held. A value the
@@ -291,10 +291,10 @@ fn a_store_being_rewritten_is_pending_until_it_settles() -> TestResult {
 #[test]
 fn a_query_over_a_moving_store_is_pending_too() -> TestResult {
     let mut live = LiveStore::new("concurrent-query", Protocol::Rewrite)?;
-    let mut readings = Vec::new();
-    for _ in 0..300 {
-        readings.push(lgwks_std::task::block_on(query_once(&live.store))?);
-    }
+    // A budget, like every other sweep here: a fixed 300 queries is a rate the
+    // host decides, and on a loaded host 300 queries can all land between two
+    // writes of a starved writer.
+    let readings = live.sweep_until(PENDING_BUDGET, Verb::Query, Until::Pending)?;
     live.quiesce();
     let (_, pending) = tally(readings)?;
     assert!(
@@ -370,13 +370,17 @@ impl LiveStore {
     fn sweep_until(
         &self,
         budget: std::time::Duration,
+        verb: Verb,
         until: Until,
     ) -> Result<Vec<Polled>, Box<dyn Error>> {
         let started = std::time::Instant::now();
         let mut readings = Vec::new();
         let (mut pending, mut settled) = (false, false);
         while started.elapsed() < budget {
-            let polled = lgwks_std::task::block_on(poll_once(&self.store))?;
+            let polled = match verb {
+                Verb::Observe => lgwks_std::task::block_on(poll_once(&self.store))?,
+                Verb::Query => lgwks_std::task::block_on(query_once(&self.store))?,
+            };
             pending |= matches!(polled, Polled::Pending(_));
             settled |= matches!(polled, Polled::Settled(_));
             readings.push(polled);
@@ -421,6 +425,15 @@ impl LiveStore {
     fn writer_id(&self) -> u32 {
         self.writer.id()
     }
+}
+
+/// Which shipped verb a sweep reads the store through.
+#[derive(Clone, Copy)]
+enum Verb {
+    /// `Observe::poll`, the path a tick takes.
+    Observe,
+    /// `Query::query`, the same reader asked for a value.
+    Query,
 }
 
 /// What a sweep has to have seen before it stops early.
@@ -498,7 +511,7 @@ fn a_dropped_store_takes_its_writer_with_it() -> TestResult {
 #[test]
 fn an_unsettled_reading_names_its_reads_and_its_axis() -> TestResult {
     let mut live = LiveStore::new("named-refusal", Protocol::Rewrite)?;
-    let readings = live.sweep_until(PENDING_BUDGET, Until::Pending)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::Pending)?;
     let mut named = 0u32;
     for polled in &readings {
         let Polled::Pending(ref failure) = *polled else {
@@ -586,7 +599,7 @@ fn an_unsettled_reading_is_pending_rather_than_a_committed_change() -> TestResul
     // refusal the bot would have been given. A second pass would be a second
     // chance at the same race, which is how a test that depends on a writer's
     // timing turns into a test that depends on how loaded the host is.
-    let readings = live.sweep_until(PENDING_BUDGET, Until::Pending)?;
+    let readings = live.sweep_until(PENDING_BUDGET, Verb::Observe, Until::Pending)?;
     let recovered = live.settle(SETTLE_WINDOW)?;
     live.quiesce();
 
