@@ -404,7 +404,7 @@ fn await_marker(marker: &std::path::Path) -> TestResult {
 /// do, the current owner's committed history is exactly what it left, and the
 /// released worker cannot commit anything the current owner does not see.
 #[test]
-fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize() -> TestResult {
+fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16() -> TestResult {
     if std::env::var_os(OWNER_ENV).is_some() {
         return match std::env::var(OWNER_MODE).ok().as_deref() {
             Some(RETURNING) => returning_worker_body(),
@@ -419,7 +419,7 @@ fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize() -> Test
     let settled_path = dir.join("settled");
     let parked_path = dir.join("parked");
 
-    let row = "an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize";
+    let row = "an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16";
     let mut probe = spawn_old_worker(
         row,
         "probe",

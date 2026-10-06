@@ -1365,8 +1365,8 @@ fn event_bot(domain: &'static str) -> Result<EventRig, Box<dyn Error>> {
 /// derives the same one and retires. A bot that keyed dedup on the payload would
 /// fire the first and silently drop the second.
 #[test]
-fn identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not() -> TestResult
-{
+fn identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not_t09()
+-> TestResult {
     let mut rig = event_bot("test::t09_feed")?;
 
     // Event 1 over payload 7, then event 2 over the *same* payload.

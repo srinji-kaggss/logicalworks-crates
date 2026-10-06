@@ -321,7 +321,7 @@ fn both_runs_with(native: Bot, json: &str, grants: &GrantSet) -> TestResult<(Run
 // ── T25: native and materialized traces agree ──────────────────────────────
 
 #[test]
-fn one_chain_traces_match() -> TestResult<()> {
+fn one_chain_traces_match_t25() -> TestResult<()> {
     let native = native_one(3, |_: &u16| true, Page::new("a"))?;
     let (native_run, made_run) = both_runs(
         native,
