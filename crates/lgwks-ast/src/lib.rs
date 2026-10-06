@@ -2076,7 +2076,9 @@ mod tests {
     fn nanos_per(nodes: usize) -> Result<u128, Box<dyn std::error::Error>> {
         let divisor = u128::try_from(nodes)?;
         if divisor == 0 {
-            return Err("a per-node cost over no nodes is not a cost".into());
+            let refusal = Err("a per-node cost over no nodes is not a cost".into());
+            tracing::debug!(error = ?refusal.as_ref().err(), "nanos_per: returning an error to the caller");
+            return refusal;
         }
         Ok(divisor)
     }

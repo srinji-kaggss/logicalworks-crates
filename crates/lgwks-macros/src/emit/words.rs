@@ -80,8 +80,6 @@ pub(super) fn run_call<'line>(
     let Some(args_group) = group(args).filter(|_| is_parens(args)) else {
         return Ok(None);
     };
-    // The callee path is every token read above, and the call consumed the
-    // argument group as well, so what is left is what follows it.
     // The walk above left `rest` on the argument group, so the call consumed that
     // group too and what follows the call is what is past it.
     let after_args = after(rest, 1);

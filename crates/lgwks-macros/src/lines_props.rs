@@ -203,11 +203,13 @@ fn misalignment_property(
             (true, false) => match line.text.strip_prefix("  ") {
                 Some(shifted) => shifted.to_owned(),
                 None => {
-                    return Err(TestCaseError::fail(format!(
+                    let refusal = Err(TestCaseError::fail(format!(
                         "line {} is `{}`, which carries no two-column indent to move it by",
                         moved.saturating_add(1),
                         line.text
                     )));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "moving a line: returning an error to the caller");
+                    return refusal;
                 }
             },
             (false, _) => line.text.clone(),

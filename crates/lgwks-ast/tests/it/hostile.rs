@@ -574,19 +574,25 @@ mod markdown {
         let lines = rng.between(1, 24);
         let mut source = String::new();
         for _ in 0..lines {
-            let indent = usize::try_from(rng.between(0, 24))?;
-            source.push_str(&"  ".repeat(indent));
-            let count = u32::try_from(FRAGMENTS.len())?;
-            let at = usize::try_from(rng.below(count))?;
-            let fragment = FRAGMENTS
-                .get(at)
-                .copied()
-                .ok_or("a draw from the fragment table names none of it")?;
-            let count = usize::try_from(rng.between(1, 40))?;
-            source.push_str(&fragment.repeat(count));
-            source.push_str("x\n");
+            seeded_line(&mut rng, &mut source)?;
         }
         Ok(source)
+    }
+
+    /// One seeded line of a mix: an indent, then a fragment repeated, then `x`.
+    fn seeded_line(rng: &mut Rng, source: &mut String) -> Built<()> {
+        let indent = usize::try_from(rng.between(0, 24))?;
+        source.push_str(&"  ".repeat(indent));
+        let count = u32::try_from(FRAGMENTS.len())?;
+        let at = usize::try_from(rng.below(count))?;
+        let fragment = FRAGMENTS
+            .get(at)
+            .copied()
+            .ok_or("a draw from the fragment table names none of it")?;
+        let count = usize::try_from(rng.between(1, 40))?;
+        source.push_str(&fragment.repeat(count));
+        source.push_str("x\n");
+        Ok(())
     }
 
     /// One markdown source the guard is proved against.
@@ -668,7 +674,10 @@ mod markdown {
                 // releases it rather than leaving a process behind the run.
                 let _killed = child.kill();
                 let _reaped = child.wait();
-                return Err(format!("case {index} did not answer within {CHILD_BUDGET:?}").into());
+                let refusal =
+                    Err(format!("case {index} did not answer within {CHILD_BUDGET:?}").into());
+                tracing::debug!(error = ?refusal.as_ref().err(), "hostile case: returning an error to the caller");
+                return refusal;
             }
             // A park, not a spin: the budget is seconds and the poll interval is
             // milliseconds, so the cost of noticing an answer is bounded and a

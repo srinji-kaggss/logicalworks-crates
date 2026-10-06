@@ -213,9 +213,11 @@ fn share_milli(part: u128, whole: u128) -> Option<u128> {
 /// that came out at zero.
 fn percentile(samples: &[u128], percent: u128) -> Result<u128, String> {
     if samples.is_empty() {
-        return Err(format!(
+        let refusal = Err(format!(
             "a percentile over no samples is not a measurement; {percent}th asked for one"
         ));
+        tracing::debug!(error = ?refusal.as_ref().err(), "percentile: returning an error to the caller");
+        return refusal;
     }
     let last = samples.len().saturating_sub(1);
     // The rank is computed in the arithmetic's width and clamped into the list,
@@ -240,6 +242,18 @@ fn percentile(samples: &[u128], percent: u128) -> Result<u128, String> {
     })
 }
 
+/// The median and the 99th percentile of `samples`, which it sorts first.
+///
+/// `percentile` reads ranks off sorted input, so the sort lives here, beside
+/// the only reads, rather than at each caller: a caller that skipped it got a
+/// rank over measurement order, which is an arbitrary sample, not a percentile.
+fn spread(samples: &mut [u128]) -> Result<(u128, u128), String> {
+    samples.sort_unstable();
+    let p50 = percentile(samples, 50)?;
+    let p99 = percentile(samples, 99)?;
+    Ok((p50, p99))
+}
+
 /// This grammar's row in the shape table.
 fn shape_of(language: Language) -> Result<&'static Shape, String> {
     SHAPES
@@ -262,10 +276,12 @@ fn shape_of(language: Language) -> Result<&'static Shape, String> {
 fn levels_for(shape: &Shape, bytes: usize) -> Result<usize, String> {
     let level = shape.nest_open.len().saturating_add(shape.nest_close.len());
     if level == 0 {
-        return Err(format!(
+        let refusal = Err(format!(
             "the shape for `{}` has no nesting fragment, so it nests nothing",
             shape.name
         ));
+        tracing::debug!(error = ?refusal.as_ref().err(), "levels_for: returning an error to the caller");
+        return refusal;
     }
     // `integer_division` is forbidden, so this is the checked division. The
     // divisor is a nesting fragment's length and cannot be zero — the empty
@@ -443,16 +459,18 @@ fn measure(
         // measurement rather than a measurement of zero.
         let outcome = outcome
             .ok_or_else(|| format!("{kind}: no round of `{}` was measured", language.name()))?;
+        let bytes = width_of(source.len())?;
+        let (checked_p50, checked_p99) = spread(&mut checked_samples)?;
         return Ok(Measured {
             grammar: language.name(),
             kind: kind.to_owned(),
-            bytes: width_of(source.len())?,
+            bytes,
             parse_p50: 0,
             parse_p99: 0,
             walk_p50: 0,
             walk_p99: 0,
-            checked_p50: percentile(&checked_samples, 50)?,
-            checked_p99: percentile(&checked_samples, 99)?,
+            checked_p50,
+            checked_p99,
             outcome,
             nodes: 0,
             depth: 0,
@@ -480,22 +498,23 @@ fn measure(
         parse_samples.push(started.elapsed().as_nanos());
     }
     drop(tree);
-    parse_samples.sort_unstable();
-    walk_samples.sort_unstable();
-    checked_samples.sort_unstable();
 
     let outcome =
         outcome.ok_or_else(|| format!("{kind}: no round of `{}` was measured", language.name()))?;
+    let bytes = width_of(source.len())?;
+    let (parse_p50, parse_p99) = spread(&mut parse_samples)?;
+    let (walk_p50, walk_p99) = spread(&mut walk_samples)?;
+    let (checked_p50, checked_p99) = spread(&mut checked_samples)?;
     Ok(Measured {
         grammar: language.name(),
         kind: kind.to_owned(),
-        bytes: width_of(source.len())?,
-        parse_p50: percentile(&parse_samples, 50)?,
-        parse_p99: percentile(&parse_samples, 99)?,
-        walk_p50: percentile(&walk_samples, 50)?,
-        walk_p99: percentile(&walk_samples, 99)?,
-        checked_p50: percentile(&checked_samples, 50)?,
-        checked_p99: percentile(&checked_samples, 99)?,
+        bytes,
+        parse_p50,
+        parse_p99,
+        walk_p50,
+        walk_p99,
+        checked_p50,
+        checked_p99,
         outcome,
         nodes: observed.nodes,
         depth: observed.max_depth,
@@ -534,11 +553,19 @@ fn measured_line(row: &Measured) -> String {
 /// through `getrusage`, which needs an FFI leaf this crate may not author, so
 /// the answer there is `None` and the peak comes from `/usr/bin/time -l` around
 /// the process instead (`scripts/measure-ast-budget.sh`).
-fn peak_rss_bytes() -> Option<usize> {
+///
+/// `VmHWM` is published in kibibytes (`VmHWM:   12345 kB`), so the figure is
+/// scaled to the bytes the column is named for; a line in any other unit is not
+/// a reading this function knows how to scale, and answers `None`.
+fn peak_rss_bytes() -> Option<u128> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status.lines().find_map(|line| {
-        let rest = line.strip_prefix("VmHWM:")?;
-        rest.split_whitespace().next()?.parse::<usize>().ok()
+        let mut fields = line.strip_prefix("VmHWM:")?.split_whitespace();
+        let kibibytes = fields.next()?.parse::<u128>().ok()?;
+        match fields.next() {
+            Some("kB") => kibibytes.checked_mul(1024),
+            _ => None,
+        }
     })
 }
 
@@ -649,7 +676,11 @@ fn measure_tier(
                 Ok(Ok(report)) => reports.push(report),
                 // A worker's own refusal names the shortfall it hit rather than
                 // reporting a tier row over fewer parses than it admitted.
-                Ok(Err(refusal)) => return Err(refusal),
+                Ok(Err(shortfall)) => {
+                    let refusal = Err(shortfall);
+                    tracing::debug!(error = ?refusal.as_ref().err(), "tier: returning a worker's refusal to the caller");
+                    return refusal;
+                }
                 // A panicking worker reports zero, and the count check below
                 // turns that into a refusal naming the shortfall rather than a
                 // tier that silently measured fewer parses than it admitted.
@@ -674,7 +705,7 @@ fn measure_tier(
         .iter()
         .fold(0_u64, |total, row| total.saturating_add(row.refused));
     let mut samples: Vec<u128> = reports.iter().flat_map(|row| row.samples.clone()).collect();
-    samples.sort_unstable();
+    let (p50, p99) = spread(&mut samples)?;
     // The slowest parse observed is read off the sorted list rather than
     // defaulted: a tier whose workers admitted nothing is already refused by
     // `all_admitted`, so the list is never empty here.
@@ -682,12 +713,13 @@ fn measure_tier(
         .last()
         .copied()
         .ok_or("every admitted parse reported no elapsed time")?;
+    let bytes = width_of(source.len())?;
     Ok(TierRow {
         level: assigned,
-        bytes: width_of(source.len())?,
+        bytes,
         workers,
-        p50: percentile(&samples, 50)?,
-        p99: percentile(&samples, 99)?,
+        p50,
+        p99,
         max,
         refused,
         wall_ns,
@@ -871,7 +903,10 @@ fn run(options: &Options) -> Result<(), String> {
         grammars: 0,
         outcomes: BTreeMap::new(),
     };
-    emit(&mut out, &format!("peak_rss_bytes\t{:?}", peak_rss_bytes()))?;
+    emit(
+        &mut out,
+        &format!("peak_rss_bytes\t{}", column(peak_rss_bytes())),
+    )?;
     if !options.tiers.is_empty() {
         emit(&mut out, TIER_HEADER)?;
     }
@@ -956,7 +991,10 @@ fn finish(out: &mut impl Write, options: &Options, tally: &Tally) -> Result<(), 
         for (outcome, count) in &tally.outcomes {
             emit(out, &format!("outcomes\t{outcome}\t{count}"))?;
         }
-        emit(out, &format!("peak_rss_bytes_end\t{:?}", peak_rss_bytes()))
+        emit(
+            out,
+            &format!("peak_rss_bytes_end\t{}", column(peak_rss_bytes())),
+        )
     }
 }
 
