@@ -148,9 +148,8 @@ fn run_until_killed(sim: &mut sim::Sim, dir: &Path) -> Result<Vec<Tenant>, Box<d
                 sim.rng().below(u32::try_from(open.len())?),
             )?)
             .ok_or("a tenant with appends left is drawn while one exists")?;
-        let (Some(tenant), Some(journal)) = (tenants.get_mut(pick), journals.get_mut(pick)) else {
-            return Err("every tenant has a journal".into());
-        };
+        let tenant = tenants.get_mut(pick).ok_or("the drawn tenant exists")?;
+        let journal = journals.get_mut(pick).ok_or("every tenant has a journal")?;
         acknowledge(tenant, journal)?;
         sim.trace.record_number("append-tenant", pick);
     }
