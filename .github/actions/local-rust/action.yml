@@ -22,6 +22,12 @@ inputs:
       is two cold workspace builds with the machine's profiles.
     required: false
     default: "40"
+  cache-gib:
+    description: >
+      Ceiling of the machine-wide compile cache every instance shares. sccache
+      evicts least-recently-used entries past it.
+    required: false
+    default: "40"
   tmp-gib:
     description: >
       Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
@@ -106,6 +112,51 @@ runs:
         fi
         echo "TMPDIR=${tmp}" >> "${GITHUB_ENV}"
         echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
+    # One compile cache for every instance on the machine. The instances build
+    # the same dependency graph in the same feature sets, each into its own
+    # target directory, so without it a cold instance compiles what another
+    # instance compiled a minute earlier: the first run after the target
+    # layout changed had six instances compile every dependency at once, and
+    # four jobs reached their timeouts still compiling (run 37607930551).
+    #
+    # The server is the CI's own, on its own port and directory, so the cache
+    # an interactive build uses is neither read nor evicted by CI. It is
+    # started outside the runner's orphan-process cleanup: a job's processes
+    # are killed when it ends, and a server killed while another instance's
+    # build is talking to it fails that build. The machine's cargo
+    # configuration documents `RUSTC_WRAPPER` in the environment as the way to
+    # add the cache without editing it; the cache changes no compiler output,
+    # only whether a unit is compiled again. Workspace members build
+    # incrementally and pass through it uncached.
+    - name: Shared compile cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v sccache >/dev/null; then
+          echo "::warning::sccache is not installed: each instance compiles every dependency itself"
+          exit 0
+        fi
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        export SCCACHE_DIR="${root}/sccache"
+        export SCCACHE_CACHE_SIZE="${{ inputs.cache-gib }}G"
+        export SCCACHE_SERVER_PORT=4227
+        export SCCACHE_IDLE_TIMEOUT=3600
+        mkdir -p "${SCCACHE_DIR}"
+        if ! sccache --show-stats >/dev/null 2>&1; then
+          # An instance racing this one to start the server leaves one of the
+          # two unable to bind the port; the other's server serves both.
+          RUNNER_TRACKING_ID=0 sccache --start-server >/dev/null 2>&1 || true
+        fi
+        if sccache --show-stats >/dev/null 2>&1; then
+          {
+            echo "SCCACHE_DIR=${SCCACHE_DIR}"
+            echo "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}"
+            echo "RUSTC_WRAPPER=sccache"
+          } >> "${GITHUB_ENV}"
+          sccache --show-stats | awk '/Cache location|Cache size|Max cache size|Cache hits rate/'
+        else
+          echo "::warning::the sccache server on port ${SCCACHE_SERVER_PORT} did not start: each instance compiles every dependency itself"
+        fi
     # The runner instances share this machine's cores. A test job that took
     # every core, beside three others doing the same, put the load average at
     # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
