@@ -156,6 +156,72 @@ impl<I: IntoIterator> FanOut<I> {
         Fut: Future<Output = Result<T, E>>,
     {
         let scope = Scope::root(Tenant::new(TENANT).map_err(FanOutError::Flow)?);
+        self.drive(&scope, "run", body).await
+    }
+
+    /// Run `body` once per item under `scope`, and return the values in input
+    /// order.
+    ///
+    /// The scoped form of [`run`](Self::run): the items run in scopes descended
+    /// from `scope` — `<step>#i`, exactly as [`each`] names them — so every
+    /// body reads the caller's [`Tenant`] from its own scope, keys its steps
+    /// with it, and shares the caller's clock, policy and stop. A fan-out an
+    /// `acme` flow runs is then `acme`'s work in every record it writes, rather
+    /// than work under the standalone [`run`](Self::run)'s reserved tenant.
+    /// Cancelling `scope` stops the fan-out, and the first `Err` any body
+    /// returns still stops it as [`FanOutError::Item`].
+    ///
+    /// ```
+    /// use lgwks_bot::script::{FanOut, Scope, Tenant};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let scope = Scope::root(Tenant::new("acme")?);
+    /// let doubled = match lgwks_bot::block_on(
+    ///     FanOut::new(1_u32..=8).at_most(4).run_in(&scope, "doubled", |id| async move {
+    ///         Ok::<u32, String>(id.saturating_mul(2))
+    ///     }),
+    /// ) {
+    ///     Ok(values) => values,
+    ///     Err(error) => return Err(format!("the scoped fan-out failed: {error}").into()),
+    /// };
+    /// assert_eq!(
+    ///     doubled,
+    ///     vec![2, 4, 6, 8, 10, 12, 14, 16],
+    ///     "every item ran under the caller's scope"
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`run`](Self::run), plus whatever [`Scope::enter`] refuses for `step`.
+    pub async fn run_in<T, E, F, Fut>(
+        self,
+        scope: &Scope,
+        step: &str,
+        body: F,
+    ) -> Result<Vec<T>, FanOutError<E>>
+    where
+        F: Fn(I::Item) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        self.drive(scope, step, body).await
+    }
+
+    /// The one driver behind [`run`](Self::run) and
+    /// [`run_in`](Self::run_in): [`each`] over `(index, item)` pairs under
+    /// `scope`, keeping the first error the bodies return.
+    async fn drive<T, E, F, Fut>(
+        self,
+        scope: &Scope,
+        step: &str,
+        body: F,
+    ) -> Result<Vec<T>, FanOutError<E>>
+    where
+        F: Fn(I::Item) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
         let limit = match self.limit {
             Some(written) => Some(at_most(written).map_err(FanOutError::Flow)?),
             None => None,
@@ -163,8 +229,8 @@ impl<I: IntoIterator> FanOut<I> {
         let first: Arc<Mutex<Option<(usize, E)>>> = Arc::new(Mutex::new(None));
         let body = &body;
         let work = each(
-            &scope,
-            "run",
+            scope,
+            step,
             limit,
             self.items.into_iter().enumerate(),
             |_step, (index, item)| {
@@ -182,7 +248,7 @@ impl<I: IntoIterator> FanOut<I> {
             },
         );
         let outcome = match self.deadline {
-            Some(deadline) => within(&scope, "deadline", deadline, work).await,
+            Some(deadline) => within(scope, "deadline", deadline, work).await,
             None => work.await,
         };
         match outcome {
