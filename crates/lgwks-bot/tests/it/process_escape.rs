@@ -320,7 +320,7 @@ fn a_leader_that_exits_on_its_own_does_not_claim_the_tree_it_left() -> TestResul
 /// signalled anything would fail the `leader is gone` assertion instead, so
 /// neither failure mode is silent.
 #[test]
-fn cleanup_never_signals_a_process_outside_the_supervisors_group() -> TestResult {
+fn cleanup_never_signals_a_process_outside_the_supervisors_group_t21() -> TestResult {
     let dir = Scratch::new("unrelated")?;
     let sibling_file = dir.path().join("sibling.pid");
     let leader_file = dir.path().join("leader.pid");

@@ -67,7 +67,7 @@ fn refused(name: &str, dependency: &str, code: &str, symbol: &str, main: &str) -
 const PROCESS_FEATURES: &str = ", features = [\"process\"]";
 
 #[test]
-fn public_process_description_rejects_direct_execution() -> TestResult {
+fn public_process_description_rejects_direct_execution_t22() -> TestResult {
     refused(
         "t22-process-probe",
         PROCESS_FEATURES,

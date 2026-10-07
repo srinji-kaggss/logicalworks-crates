@@ -7,7 +7,7 @@
 //! | `same_key_with_a_different_payload_is_a_typed_conflict` | T30 | a different digest under one key is `RequestError::Conflict` naming both digests, and no body runs |
 //! | `distinct_request_keys_are_distinct_runs` | T30 | two keys over one host never collapse into one run |
 //! | `two_tenants_never_share_a_request_run` | T30 | one key, two tenants over one store file: two runs, each attributed to its owner |
-//! | `a_dropped_client_leaves_the_request_in_flight_for_a_later_client` | T17 | a dropped waiter leaves a durable receipt and no terminal; a later client reattaches and gets the uncertainty and the run to settle |
+//! | `a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17` | T17 | a dropped waiter leaves a durable receipt and no terminal; a later client reattaches and gets the uncertainty and the run to settle |
 //! | `a_malformed_request_key_is_refused` | T30 | a key outside the identifier set is a typed refusal at construction |
 //! | `a_submission_without_a_store_is_refused` | T30 | a durable submission with nowhere to record refuses rather than degrading |
 //! | `a_repaired_request_is_settled_and_reattaches` | T30/T23 | a blocked request records no verdict; the repair that unblocks it records one, so the key reattaches, from a reopened store too |
@@ -229,7 +229,7 @@ fn two_tenants_never_share_a_request_run() -> TestResult {
 /// A dropped waiter leaves a durable receipt and no terminal; a later client
 /// reattaches and gets the uncertainty and the run to settle.
 #[test]
-fn a_dropped_client_leaves_the_request_in_flight_for_a_later_client() -> TestResult {
+fn a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17() -> TestResult {
     let scratch = Scratch::new("req-inflight")?;
     let host = stored_host("acme", scratch.path())?;
     let recorded = Arc::new(AtomicBool::new(false));

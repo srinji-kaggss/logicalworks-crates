@@ -138,7 +138,7 @@ async fn spawned_descendant(
 }
 
 #[test]
-fn zero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+fn zero_exit_does_not_fabricate_tree_cleanup_t19() -> Result<(), Box<dyn std::error::Error>> {
     let dir = Scratch::new("zero")?;
     let child_file = dir.path().join("child.pid");
     let runtime = Runtime::new()?;
@@ -190,7 +190,7 @@ fn nonzero_exit_does_not_fabricate_tree_cleanup() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn cancellation_before_manager_task_poll_keeps_descendant_owned()
+fn cancellation_before_manager_task_poll_keeps_descendant_owned_t20()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = Scratch::new("pre-poll")?;
     let child_file = dir.path().join("child.pid");
