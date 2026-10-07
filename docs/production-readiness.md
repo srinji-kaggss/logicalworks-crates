@@ -700,11 +700,24 @@ and, racing, `concurrent_writers_of_one_key_commit_exactly_once_per_tenant`);
 request keys (`request_key::two_tenants_never_share_a_request_run`); forced
 refreshes (`observe_refresh`), the journal at scale
 (`journal_scale::concurrent_tenant_appends_scale_with_isolation`), clocks
-(`sim_clock_wiring`) and inspection (`inspect_wiring`).
+(`sim_clock_wiring`) and inspection (`inspect_wiring`). Two tenants through one
+journal directory under a mid-run kill are `sim_tenant_journal_kill`
+(`kill_band_00..07`, 1,000 seeds). The kill lands between appends, tears the
+in-flight frame at a seeded byte, or loses only its acknowledgment. After the
+restart each tenant holds exactly its acknowledged prefix plus a landed frame,
+never the other tenant's keys. The retry at the tail the controller saw lands a
+torn append and is refused for a landed one, so every interrupted effect is
+present exactly once. Capacity is admitted per tenant by
+`Supervisor::with_tenancy` (INV-BOT-151; `tenancy::a_noisy_tenant_cannot_starve_a_quiet_one`,
+`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
+`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
 
-*Not covered:* the same two tenants through one shared durable journal under a
-mid-run kill, and any quota or noisy-neighbour measurement. Isolation of identity
-and data is tested; isolation of *capacity* is not.
+*Not covered:* the kill is a cut of the file a real writer produced, not a
+`SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
+journal for real). A `script::Scope`'s tenant does not reach any admission,
+because `each` and `FanOut` drive their bodies on the awaiting task and take no
+permit. Tenant admission bounds who is admitted, not the CPU an admitted body
+burns.
 
 ### 4.9 Performance — fastest correct implementation
 
