@@ -375,10 +375,9 @@ not add machines. Two measured facts set the layout:
 
 So: lanes that build one feature set share one job (the lane table's
 `group`); a job that only reads a result reads it from the job that produced
-it; each instance keeps one target directory for every job it runs, and the
-instances share one compile cache, keyed with their target directories
-stripped, so a dependency one instance compiled is not compiled again by
-another; and every job's temporary files are on an APFS RAM disk, the
+it; every job that builds is pinned to one instance, which keeps one target
+directory for it, so a run after the first finds its dependencies built; and
+every job's temporary files are on an APFS RAM disk, the
 filesystem of the machine's own disk, so the move changes how fast a sync is
 and nothing a test observes.
 
@@ -409,3 +408,4 @@ live changed. The Linux container gets the same with a tmpfs `/tmp`.
 | 37579691890 | 3c008cbf | 35 jobs, per-job targets, SSD temp | 21.4 min | 7,500 | pass |
 | 37607930551 | 3f331527 | 14 jobs, per-instance targets (cold), HFS+ RAM temp | cancelled | — | fail: six instances compiled every dependency at once; four jobs timed out compiling |
 | 37613720499 | 3a2a855f | + one shared sccache, server on a job's RAM disk | cancelled | — | fail: the next job ejected the server's temp dir; HFS+ decomposed names broke two walk simulations |
+| 37616318637 | 4993b33d | + APFS RAM temp, sccache with every target as a base directory | cancelled | — | fail: five jobs timed out compiling at load 70-85; jobs landed on instances cold for their feature sets, and sccache hit 0 of 195 Rust compiles across target directories, so it was removed and jobs pinned |

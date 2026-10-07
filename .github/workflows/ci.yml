@@ -20,6 +20,15 @@ on:
 # job (the lane table's `group`), and only the two check-row jobs and the
 # acceptance receipt wait on another job: each of them reads a result instead of
 # building one.
+#
+# Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-6`,
+# runner labels). An instance keeps one target directory and one container
+# target volume; a job free to land on any instance found that instance cold
+# for its feature sets, so each of the six had to build every job's sets before
+# any run was warm, and the first two runs on this layout spent their budgets
+# compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
+# an instance only ever holds its own jobs' builds, and the second run is warm.
+# The jobs that build nothing run anywhere.
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -49,7 +58,7 @@ jobs:
   # lanes that need the workspace built run after the shard that built it.
   build:
     name: Build, gate and workspace tests
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-3' || 'lwc-4' }}"]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -201,7 +210,7 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-5' || 'lwc-6' }}"]
     timeout-minutes: 15
     # Two shards of one nextest run, covering the suite exactly once between
     # them. The lgwks-std full suite and the saturation tiers build the same
@@ -283,7 +292,7 @@ jobs:
   # narrow feature sets of the two crates, so they share one job's target.
   tests_nodefault:
     name: Tests (lgwks-bot no default features, lgwks-std per feature)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
     timeout-minutes: 15
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -327,7 +336,7 @@ jobs:
   # target volume.
   tests_linux:
     name: Tests (Linux container)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-3' || 'lwc-4' }}"]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -348,7 +357,7 @@ jobs:
   # target; the release gates run last, on the build the scan step left.
   clippy:
     name: Clippy, docs and release gates
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -433,7 +442,7 @@ jobs:
   # nested build over the same dependency graph, so one target serves them.
   feature-matrix:
     name: Feature, target and storefront matrix
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -550,7 +559,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        os: [[self-hosted, macOS, ARM64, lwc], windows-latest]
+        os: [[self-hosted, macOS, ARM64, lwc, lwc-5], windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
