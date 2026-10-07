@@ -210,11 +210,16 @@ fn cancel_case(sim: &mut sim::Sim, reached: &mut Reached) -> TestResult {
                 counts.refused = counts.refused.saturating_add(1);
             }
             other => {
-                return Err(format!(
+                let refusal: TestResult = Err(format!(
                     "flow {index} ended {other:?} under a cancel: {:?}",
                     report.error()
                 )
                 .into());
+                lgwks_std::trace::debug!(
+                    error = ?refusal.as_ref().err(),
+                    "cancel_case: returning an error to the caller"
+                );
+                return refusal;
             }
         }
     }
