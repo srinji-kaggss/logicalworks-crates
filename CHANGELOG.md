@@ -37,8 +37,9 @@ ureq bounds a lookup by running it on a detached OS thread, and did so for every
 request, including one whose host is an IP literal and needs no lookup. Each
 `http::get` to `127.0.0.1` therefore paid a thread start and left a thread it
 never joined. A hop to an IP literal now sets no resolve timeout, so ureq parses
-it on the calling thread; a host name keeps the bound, and the agent is built
-per hop because a redirect can move a call from a literal to a name. Measured by
+it on the calling thread; a host name keeps the bound. The agent is kept across
+redirect hops and rebuilt only when a hop crosses between a literal and a name,
+so a same-origin redirect still reuses its pooled connection. Measured by
 `tests/http_alloc.rs`'s interleaved loopback probe on macOS arm64 (501 pairs):
 client p50/p95/p99 104/116/129 us before and 84/92/99 us after, against a bare
 exchange's 68/75/81 us; the probe's 1,000-request concurrency sweep took the
@@ -54,13 +55,17 @@ but only at the top level. An exempt function nested inside a production
 function left the walk's state alone, so its chains were reported against the
 enclosing function's line. The exempt function now marks the walk skipped until
 it ends, and a production function nested inside a test is still inspected
-under its own line. A new seeded family, `tests/it/sim_scan_detectors.rs`, found
-this. It generates whole files of `allow` lists, `?` statements and documented
-functions, and holds ALLOW-SILENCE, `long-try-chain` and `tautological-doc` to an
-independent model, matching line, rule and evidence text, across 1,024 mixed
-files and 28 property families: permutation, line shifts, 64 concurrent tenants,
-torn input, and disk against text. With the old walk,
-`a_test_function_nested_in_production_code_is_exempt` fails on its first seeds.
+under its own line. A trait's default method is now walked as a function too:
+a top-level one was never judged, and one nested in a production function was
+charged to that function's line. A new seeded family,
+`tests/it/sim_scan_detectors.rs`, found the first defect, and its adversarial
+review found the second. It generates whole files of `allow` lists, `?`
+statements, nested functions and traits, and documented functions, and holds
+ALLOW-SILENCE, `long-try-chain` and `tautological-doc` to a model written from
+each rule's documented contract rather than from the scanner's code, matching
+line, rule and evidence text, across 1,024 mixed files and 29 property families:
+permutation, line shifts, 64 concurrent tenants, torn input, and disk against
+text. With the old walk, all eight mixed bands fail.
 
 ### lgwks_std — a predicate walk with per-entry `lstat` (#343)
 

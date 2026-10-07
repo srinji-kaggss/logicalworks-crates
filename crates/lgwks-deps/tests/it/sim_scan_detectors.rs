@@ -398,16 +398,20 @@ enum Shape {
     NestedFn,
     /// A `#[test]` function nested in the body.
     NestedTest,
+    /// A trait nested in the body, whose default method is judged under its
+    /// own line.
+    NestedTrait,
 }
 
 /// Every shape, for a draw.
-const SHAPES: [Shape; 6] = [
+const SHAPES: [Shape; 7] = [
     Shape::Call,
     Shape::Let,
     Shape::If,
     Shape::Closure,
     Shape::NestedFn,
     Shape::NestedTest,
+    Shape::NestedTrait,
 ];
 
 /// The innermost function a statement is judged in.
@@ -497,7 +501,48 @@ fn statement(
             );
             block.line("    }");
         }
+        Shape::NestedTrait => {
+            block.line(format!("    trait Inner{ordinal} {{"));
+            let fn_offset = block.line(format!("    fn inner_{ordinal}() {{"));
+            inner(
+                rng,
+                block,
+                Scope {
+                    fn_offset,
+                    exempt: false,
+                },
+                most,
+            );
+            block.line("    }");
+            block.line("    }");
+        }
     }
+}
+
+/// A top-level trait whose one default method holds one to five statements
+/// drawn from `shapes`. A default method's body is code like any other
+/// function's, so it is judged under its own line.
+fn trait_block(rng: &mut Rng, index: u32, shapes: &[Shape], most: u32) -> Drawn<Block> {
+    let mut block = Block::default();
+    block.line(format!("trait Chain{index} {{"));
+    let fn_offset = block.line(format!("fn chain_{index}() {{"));
+    for ordinal in 0..rng.between(1, 5) {
+        let shape = *rng.pick_named("shapes", shapes)?;
+        statement(
+            rng,
+            &mut block,
+            Scope {
+                fn_offset,
+                exempt: false,
+            },
+            shape,
+            ordinal,
+            most,
+        );
+    }
+    block.line("}");
+    block.line("}");
+    Ok(block)
 }
 
 /// A function of one to five statements drawn from `shapes`, each holding at
@@ -1075,6 +1120,28 @@ fn a_production_function_nested_in_a_test_is_inspected() -> TestResult {
         })
     })?;
     assert!(swept_tally(&swept, CHAIN) > 0, "the nested function fired");
+    Ok(())
+}
+
+/// A trait's default method is judged like a free function, at the top level
+/// and nested in a body; before the walk visited trait items, a top-level
+/// default method was never judged and a nested one was charged to the
+/// function around it.
+#[test]
+fn a_trait_default_method_is_judged_like_any_function() -> TestResult {
+    let swept = sweep(0xc4a1_0009, |rng| {
+        several(rng, |rng, index| {
+            if rng.coin() {
+                trait_block(rng, index, &[Shape::Call, Shape::If, Shape::Closure], 7)
+            } else {
+                chain_block(rng, index, false, &[Shape::Call, Shape::NestedTrait], 7)
+            }
+        })
+    })?;
+    assert!(
+        swept_tally(&swept, CHAIN) > 0,
+        "a default method's chain fired"
+    );
     Ok(())
 }
 

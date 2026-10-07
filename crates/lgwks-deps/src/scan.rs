@@ -1945,6 +1945,16 @@ impl<'ast> Visit<'ast> for TryChainWalker<'_> {
         self.exit_function(previous);
     }
 
+    /// A trait's default method is a function body like any other. Without
+    /// this, a top-level default method was walked with no enclosing function
+    /// and never judged, and one nested in a production function was charged
+    /// to that function's line.
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        let previous = self.enter_function(&node.attrs, &node.sig);
+        visit::visit_trait_item_fn(self, node);
+        self.exit_function(previous);
+    }
+
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         self.inspect_statement(node);
         visit::visit_stmt(self, node);

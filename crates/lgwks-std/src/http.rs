@@ -1347,6 +1347,11 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
     validate_url(url)?;
     let limit = redirect_limit(options)?;
     let origin = origin_of(url);
+    // The agent is kept across hops so a redirect to the same origin can reuse
+    // its pooled connection, and rebuilt only when a hop crosses between an IP
+    // literal and a name: only a name's lookup needs the resolve bound.
+    let literal = host_is_literal(url);
+    let mut current = (literal, agent(options, literal));
     let mut target = url.to_owned();
     let mut method = method;
     let mut chain = vec![sanitized_target(url)];
@@ -1377,10 +1382,11 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
                         .iter()
                         .any(|credential| header.0.eq_ignore_ascii_case(credential)))
         });
-        // One agent per hop: a redirect can move the call from an IP literal
-        // to a name, and only a name's lookup needs the resolve bound.
-        let agent = agent(options, host_is_literal(&target));
-        let response = send_hop(&agent, &target, method, headers, remaining)?;
+        let literal = host_is_literal(&target);
+        if literal != current.0 {
+            current = (literal, agent(options, literal));
+        }
+        let response = send_hop(&current.1, &target, method, headers, remaining)?;
         // No-follow returns whatever came back, redirect or not, unread.
         if limit == 0 {
             return response_of(response, options, chain);
