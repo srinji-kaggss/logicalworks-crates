@@ -88,6 +88,19 @@ for suite in "${suites[@]}"; do
 done
 
 script="set -euo pipefail
+# A job killed mid-unpack (a timeout on a transition run) leaves a package
+# directory with no `.cargo-ok`, and the next unpack of that package fails
+# with `File exists` (run 37673046041: tree-sitter-nix). Cargo never repairs
+# one, so this removes the partials before anything builds: a directory with
+# its `.cargo-ok` is a complete unpack and is kept, anything else under the
+# sources is re-unpacked from the cached `.crate` file.
+for sources in /usr/local/cargo/registry/src/*/; do
+    [ -d \"\${sources}\" ] || continue
+    find \"\${sources}\" -mindepth 1 -maxdepth 1 -type d ! -exec test -e '{}/.cargo-ok' ';' -print | while IFS= read -r partial; do
+        echo \"linux-container-tests: removing partial unpack \${partial}\"
+        rm -rf \"\${partial}\"
+    done
+done
 if [ \"\$(/opt/tools/cargo-nextest --version 2>/dev/null | awk 'NR==1 {print \$2}')\" != '${nextest}' ]; then
     curl -fsSL 'https://get.nexte.st/${nextest}/${nextest_platform}' | tar -xz -C /opt/tools
 fi
