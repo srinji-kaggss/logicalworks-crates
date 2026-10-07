@@ -34,18 +34,18 @@ lto = true
 
 # Tests run optimized. The simulation suites are CPU-bound, and at opt-level 0
 # `sim_scale` on 4 threads took 39.9 s (114 s CPU) against 12.1 s (19.5 s CPU)
-# at opt-level 1, for 7.6 s more compile (measured 2026-09-30). Opt-level 2 was
-# measured 2026-10-07 and halves the heaviest sims again for a 63 s full-workspace
-# rebuild: the 5,000-tenant provision sim 67.9 s to 34.3 s, the tenant replay
-# family ~20 s to ~17 s each, at the same seeds and assertions. Compile speed
-# stopped being the binding constraint once every CI instance kept a warm target
-# directory (a warm rebuild after touching every source is 7 s); suite wall time
-# is, so the profile spends compile to buy it. `debug-assertions` and
-# `overflow-checks` are separate settings and stay on, so every assertion and
-# overflow trap still fires. `build`, `check` and `clippy` use `dev` and are
-# unchanged.
+# at opt-level 1, for 7.6 s more compile (measured 2026-09-30). Opt-level 2
+# halved the heaviest sims again (the 5,000-tenant provision sim 67.9 s to
+# 34.3 s), and opt-level 3 nearly halves them once more (34.3 s to 21.5 s, the
+# tenant replay family with it), at the same seeds and assertions (measured
+# 2026-10-07). Compile speed stopped being the binding constraint once every
+# CI instance kept a warm target directory (a warm rebuild after touching every
+# source is seconds); suite wall time is, so the profile spends compile to buy
+# it. `debug-assertions` and `overflow-checks` are separate settings and stay
+# on, so every assertion and overflow trap still fires. `build`, `check` and
+# `clippy` use `dev` and are unchanged.
 [profile.test]
-opt-level = 2
+opt-level = 3
 # Line tables, not full debuginfo. A backtrace or a debugger still names the
 # function, file and line; what goes is variable and type information. CI's
 # bot shards each spent 152 s of a 233 s job compiling and linking test
