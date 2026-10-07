@@ -9,6 +9,25 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — a predicate walk with per-entry `lstat` (#343)
+
+A caller that wanted to skip `.git` or `target` had to walk them and filter
+afterwards, paying every read and every budget charge, and then stat each kept
+path a second time to learn its size or mtime.
+
+- **lgwks_std** — additive, under `fs` (no new feature, no dependency):
+  `fs::walk_dir_entries` and `fs::walk_dir_entries_tolerant` take a predicate
+  `FnMut(&Path, FileKind) -> Descend`; `Descend::{Enter, Skip, Stop}` decides
+  per admitted entry whether the walk goes below it. A skipped subtree is never
+  listed, charged or omitted; a stop is reported by the new
+  `WalkReport::stopped`. Each `fs::WalkEntry` carries the walk's own `lstat`
+  (`kind`, `metadata`) and `relative_path` beside `path`. INV-FS-7.
+- `fs::FileKind` now lives in `fs` (always on); `fs::capability::FileKind` is a
+  re-export of the same type, so existing code compiles unchanged.
+- `WalkReport` gained a defaulted parameter, `WalkReport<E = PathBuf>`; every
+  existing path walk returns `WalkReport<PathBuf>` as before. The path walks run
+  the same engine with an always-enter predicate and stat nothing new.
+
 ### Tests
 
 - **lgwks_std's simulation fixtures draw `seeded::Seeded`.** `tests/support/rng.rs`

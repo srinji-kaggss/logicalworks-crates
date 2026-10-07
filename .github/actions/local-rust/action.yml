@@ -1,0 +1,101 @@
+name: Local Rust toolchain
+description: >
+  Prepares a job on the self-hosted macOS runners (Director, 2026-10-04: CI runs
+  on the local runner). The toolchain comes from rust-toolchain.toml and is
+  checked against the pin, without touching the host's rustup default, which
+  other projects on this machine rely on. The machine's own cargo
+  configuration ($CARGO_HOME/config.toml) is deliberately left in force: the
+  Director ruled on 2026-10-06 that CI builds with every optimisation it
+  declares.
+inputs:
+  toolchain:
+    description: The toolchain the gate pins; the step fails when rust-toolchain.toml resolves to another.
+    required: true
+  nextest:
+    description: Whether the job runs cargo-nextest, which must then be on PATH.
+    required: false
+    default: "false"
+  min-free-gib:
+    description: >
+      Free space the volume must keep. Below it, this job's build output is
+      cleaned before the job builds, so a full disk fails no job. The default
+      is two cold workspace builds with the machine's profiles.
+    required: false
+    default: "40"
+runs:
+  using: composite
+  steps:
+    # One target directory per runner instance and job, kept across runs,
+    # outside the checkout that actions/checkout cleans. It is never shared
+    # between instances: each instance checks out into its own directory, and
+    # cargo fingerprints a workspace member by its path *relative to the
+    # workspace*, so a build made in r2's checkout reads as fresh in r5's. The
+    # binary then carries r2's `env!("CARGO_MANIFEST_DIR")` — r5's lgwks-std
+    # shard built probes against r2's sources and failed when r2's checkout
+    # moved (run 37513781767) — and source mtimes from another checkout can
+    # pass a build of one commit off as a build of another. The shards of one
+    # job on one instance share it, and two runs of one job on one instance
+    # wait on cargo's lock rather than racing.
+    - name: Persistent target directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/${GITHUB_JOB}"
+        mkdir -p "${target}"
+        echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
+        free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
+        if [ "${free_kib}" -lt "$(( ${{ inputs.min-free-gib }} * 1024 * 1024 ))" ]; then
+          echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
+          cargo clean --target-dir "${target}"
+        fi
+    # The runner instances share this machine's cores. A test job that took
+    # every core, beside three others doing the same, put the load average at
+    # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
+    # Each job gets its share: twice the cores divided by the runner instances.
+    # A test body mostly waits (on a child process, a pipe, a file sync), so one
+    # thread per core left cores idle — 2,791 bot tests took 605 s at two
+    # threads beside five busy jobs — while every job taking every core was the
+    # 60-70 load. Twice the share keeps the machine near one runnable thread
+    # per core when every instance is busy.
+    - name: Test threads for this runner's share of the machine
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+        threads=$(( 2 * cores / (runners > 0 ? runners : 1) ))
+        threads=$(( threads > 1 ? threads : 2 ))
+        echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
+        echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
+    # rustup has no lock, and parallel jobs that each ran `rustup toolchain
+    # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
+    # toolchain is only installed when the pinned one is not already active.
+    - name: Toolchain matches the pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        active="$(rustc --version 2>/dev/null || true)"
+        case "${active}" in
+          "rustc ${{ inputs.toolchain }} "*) ;;
+          *) rustup toolchain install; active="$(rustc --version)" ;;
+        esac
+        echo "${active}"
+        case "${active}" in
+          "rustc ${{ inputs.toolchain }} "*) ;;
+          *) echo "::error::rust-toolchain.toml resolves to '${active}', the gate pins ${{ inputs.toolchain }}"; exit 1 ;;
+        esac
+        # The version string is not enough: another installation (Homebrew's,
+        # say) can print the same version while ignoring rust-toolchain.toml and
+        # carrying no cross-target std. The rustc on PATH must be the one rustup
+        # resolves for this checkout.
+        pinned="$(dirname "$(dirname "$(rustup which rustc)")")"
+        sysroot="$(rustc --print sysroot)"
+        if [ "${sysroot}" != "${pinned}" ]; then
+          echo "::error::rustc on PATH ($(command -v rustc), sysroot ${sysroot}) is not rustup's ${pinned}"
+          exit 1
+        fi
+    - name: nextest is installed
+      if: inputs.nextest == 'true'
+      shell: bash
+      run: cargo nextest --version

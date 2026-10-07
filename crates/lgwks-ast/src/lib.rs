@@ -2035,21 +2035,45 @@ mod tests {
         // benchmark. A regression to index-addressed children would multiply
         // the wide case by the width ratio (16x here) and fail by an order of
         // magnitude rather than by a hair.
+        //
+        // Each width is walked in `ROUNDS` windows interleaved with the others
+        // and judged at its median, because one window is one draw of the host:
+        // in the Linux container leg at a load of 60-100 a single 1,024-node
+        // walk took 764 ns per node against 23 at another width (run
+        // 37534417610). A descheduled window then moves nothing unless it lands
+        // in most rounds of one width.
         const WIDTHS: [usize; 4] = [1_024, 2_048, 4_096, 16_384];
-        let mut per_node_nanos = Vec::with_capacity(WIDTHS.len());
-        for width in WIDTHS {
-            let source = "(".repeat(width);
-            let parsed = parse(&source, Language::Rust);
-            let root = parsed.root();
+        const ROUNDS: usize = 9;
+        let sources = WIDTHS.map(|width| "(".repeat(width));
+        let parsed = sources
+            .iter()
+            .map(|source| parse(source, Language::Rust))
+            .collect::<Vec<_>>();
+        let roots = parsed.iter().map(Parsed::root).collect::<Vec<_>>();
+        let mut divisors = Vec::with_capacity(roots.len());
+        for root in &roots {
             // The root counts as a node, so the model never reports zero and the
             // divisor below is a count rather than a stand-in for one.
-            let nodes = positional_walk(&root).0.max(1);
-            let started = std::time::Instant::now();
-            let metrics = inspect_ast(&root, None);
-            let elapsed = started.elapsed().as_nanos();
-            assert_eq!(metrics.nodes, nodes, "the model and the walk disagree");
-            per_node_nanos.push(elapsed.saturating_div(nanos_per(nodes)?));
+            let nodes = positional_walk(root).0.max(1);
+            divisors.push((nodes, nanos_per(nodes)?));
         }
+        let mut windows = [[0_u128; WIDTHS.len()]; ROUNDS];
+        for round in &mut windows {
+            for ((window, root), &(nodes, divisor)) in round.iter_mut().zip(&roots).zip(&divisors) {
+                let started = std::time::Instant::now();
+                let metrics = inspect_ast(root, None);
+                let elapsed = started.elapsed().as_nanos();
+                assert_eq!(metrics.nodes, nodes, "the model and the walk disagree");
+                *window = elapsed.saturating_div(divisor);
+            }
+        }
+        let per_node_nanos: Vec<u128> = (0..WIDTHS.len())
+            .map(|width| {
+                let mut rounds = windows.map(|round| round[width]);
+                rounds.sort_unstable();
+                rounds[ROUNDS >> 1]
+            })
+            .collect();
         let cheapest = per_node_nanos
             .iter()
             .copied()

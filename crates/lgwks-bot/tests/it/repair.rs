@@ -2,16 +2,16 @@
 //!
 //! | Test | What it pins |
 //! |---|---|
-//! | `a_run_short_of_authority_is_blocked_naming_every_need` | T23: four missing capabilities come back as one complete shortfall, with a ticket naming exactly them, and nothing after the blocked step ran |
+//! | `a_run_short_of_authority_is_blocked_naming_every_need_t23` | T23: four missing capabilities come back as one complete shortfall, with a ticket naming exactly them, and nothing after the blocked step ran |
 //! | `a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis` | T23: the analysis body is polled once across both attempts; the publication polls once, after the repair |
 //! | `a_repair_widens_one_run_and_not_the_host` | T23: the repair's authority is this run's, and the host's own grant is unchanged afterwards |
 //! | `the_same_ticket_delivered_twice_applies_once` | T24: the second delivery is refused and nothing repeats |
-//! | `a_ticket_from_an_older_epoch_is_refused_as_stale` | T24: an old ticket cannot re-apply authority the run has moved past |
+//! | `a_ticket_from_an_older_epoch_is_refused_as_stale_t24` | T24: an old ticket cannot re-apply authority the run has moved past |
 //! | `a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged` | T24: a grant that does not cover the ticket's needs runs no step, charges no budget and moves no epoch |
 //! | `an_over_wide_grant_is_refused_rather_than_narrowed` | T24: a grant reaching past the ticket is refused, and names what it reached for |
 //! | `a_custom_capability_outside_the_ticket_is_refused` | T24: the over-wide check sees every capability in the grant, not a candidate list, so a custom name cannot ride a repair into the run |
 //! | `a_host_without_a_ledger_refuses_every_repair` | T24: nothing to decide a repair against is a refusal, not an unchecked application |
-//! | `the_root_budget_stays_charged_across_repair_and_resume` | T13: a repair consumes the root budget rather than resetting it, and a spent budget refuses at a finite attempt |
+//! | `the_root_budget_stays_charged_across_repair_and_resume_t13` | T13: a repair consumes the root budget rather than resetting it, and a spent budget refuses at a finite attempt |
 //! | `a_denied_repair_costs_nothing` | T13/T24: no budget, no epoch, no step — the run's ledger is byte-identical |
 //! | `a_blocked_run_leaves_its_finished_analysis_recorded` | T23: the store holds the analysis, so the repair's replay rests on bytes rather than on the counter alone |
 //!
@@ -123,7 +123,7 @@ const ALL_FOUR_NAMES: [&str; 4] = [Cap::NET, Cap::FS, Cap::SYS, Cap::NOTIFY];
 /// T23: several missing capabilities come back as one complete shortfall, with a
 /// ticket naming exactly them, and nothing after the blocked step ran.
 #[test]
-fn a_run_short_of_authority_is_blocked_naming_every_need() -> TestResult {
+fn a_run_short_of_authority_is_blocked_naming_every_need_t23() -> TestResult {
     let case = blocked("needs", all_four())?;
 
     assert_eq!(
@@ -347,7 +347,7 @@ fn the_same_ticket_delivered_twice_applies_once() -> TestResult {
 
 /// T24: a ticket from an older epoch cannot re-apply authority.
 #[test]
-fn a_ticket_from_an_older_epoch_is_refused_as_stale() -> TestResult {
+fn a_ticket_from_an_older_epoch_is_refused_as_stale_t24() -> TestResult {
     let answered_case = answered(
         blocked("stale", shared::default_needs())?,
         &[Cap::new(Cap::NET)],
@@ -539,7 +539,7 @@ fn a_host_without_a_ledger_refuses_every_repair() -> TestResult {
 
 /// T13: the root budget is charged by a repair and never refilled by one.
 #[test]
-fn the_root_budget_stays_charged_across_repair_and_resume() -> TestResult {
+fn the_root_budget_stays_charged_across_repair_and_resume_t13() -> TestResult {
     let scratch = Scratch::new("budget")?;
     // Three attempts is the whole budget: one blocked run, one repair, and one
     // spare, so a fourth attempt is the one the budget refuses.

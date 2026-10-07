@@ -56,14 +56,13 @@ fn seeds() -> impl Iterator<Item = u64> {
     (0..BAND_COUNT).map(|index| BAND_FIRST.saturating_add(index))
 }
 
-/// How long a running loop is given to act on an advance before the drain.
+/// How long a loop may take to end on its budget before the run is drained.
 ///
-/// Real time, and an order of magnitude above the one-millisecond poll the
-/// virtual-clock bound is observed on, so a loop that *is* going to stop on its
-/// budget has stopped by the time this elapses. It bounds the observation, not
-/// the outcome: a loop that never stops on its budget is caught by the drain's
-/// own report rather than by this wait running long.
-const SETTLE_WAIT: Duration = Duration::from_millis(20);
+/// A ceiling on a failure, never a wait the passing case spends: a loop whose
+/// budget is exhausted ends at its next clock poll and `wait_idle` returns then.
+/// Only a loop that never reads its budget reaches this, and the drain then
+/// reports it as not succeeded, which is the defect the family catches.
+const STOP_CEILING: Duration = Duration::from_secs(30);
 
 /// Iterations the control scenario's loop runs before its budget stops it.
 ///
@@ -356,42 +355,27 @@ async fn run_repeating(
         }
     };
 
-    // Give the loop a bounded, real moment to act on its budget before the
-    // drain. A fixed real wait rather than a busy spin: the loop re-reads the
-    // clock on a one-millisecond poll, so a wait an order of magnitude above
-    // that is enough for it to settle, and it costs one sleep rather than
-    // thousands of wakeups. The wait is a *floor* on observation, never a
-    // substitute for it — a loop that ignored its budget would simply be
-    // reported as not stopped by the drain below, which is the failure this
-    // test exists to catch.
-    // Joined rather than driven separately: `block_on` inside a future that is
-    // itself already being driven is a refused nesting, so the settle and the
-    // drain are one `join!` on the caller's runtime.
-    // The settle does two things: it delivers the advance, and it releases a
-    // scenario whose clock never moves. A frozen clock cannot exhaust a
-    // duration — that is the property the control asserts — so a loop waiting on
-    // such a budget waits forever unless something stops it. The drain is that
-    // something, and the settle exists only to give the advance time to land
-    // *before* the drain arrives, so which of the two ends the run is the fact
-    // under test rather than a race.
-    // Settle fully **before** the drain. `shutdown` cancels first, so a drain
-    // racing the settle reports whichever of the two the executor reached
-    // first — and which one that is has nothing to do with the clock under test.
-    // Settling first makes the budget the thing that ends the run, which is the
-    // claim the family is making.
+    // Deliver the advance (or, for the wall twin, nothing: its clock moves by
+    // itself), then wait for the loop to end **on its own** before the drain.
+    // `shutdown` cancels first, so a drain that arrives before the loop has read
+    // its exhausted budget reports a cancel, and which of the two the executor
+    // reached first has nothing to do with the clock under test. A fixed settle
+    // after the advance was that race: under a CI load of 90 the advance landed
+    // after the settle had already elapsed (seed 51), and the drain beat the
+    // loop's one-millisecond clock poll. `wait_idle` is the loop's own end, so the
+    // budget is what ends the run on every host; [`STOP_CEILING`] bounds only the
+    // failure in which the loop never reads its budget, which then reaches the
+    // drain and is reported as not succeeded.
     match how {
-        SpendsHow::Advanced => {
-            let _ = lgwks_bot::join!(advance, lgwks_bot::rt::time::sleep(SETTLE_WAIT));
-        }
-        SpendsHow::Waited => {
-            // The wall twin spends its budget the only way a wall clock can:
-            // by waiting for it. A margin over the budget so the timer has
-            // definitely fired rather than being merely about to.
-            lgwks_bot::rt::time::sleep(plan.budget.saturating_add(SETTLE_WAIT)).await;
-            record_verdict(&advance_verdict, "waited");
-        }
-        SpendsHow::Unmoved => lgwks_bot::rt::time::sleep(SETTLE_WAIT).await,
+        SpendsHow::Advanced => advance.await,
+        SpendsHow::Waited => record_verdict(&advance_verdict, "waited"),
+        SpendsHow::Unmoved => {}
     }
+    let ended = match lgwks_bot::rt::time::timeout(STOP_CEILING, supervisor.wait_idle()).await {
+        Ok(_joined) => "on-its-own",
+        Err(_elapsed) => "at-the-ceiling",
+    };
+    observe(&mut trace, "loop-ended", ended);
     let report = supervisor.shutdown().await;
 
     // What the clock did is recorded before what the run decided, so the trace

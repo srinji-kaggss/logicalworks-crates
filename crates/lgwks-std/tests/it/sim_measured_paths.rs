@@ -154,13 +154,21 @@ fn retry_delay_latency_is_flat_across_the_attempt_range() {
     );
     let (small_p50, small_p95, small_p99) = small.summary();
     let (large_p50, large_p95, large_p99) = large.summary();
-    // The measurement is reported in the failure message so a run that drifts
-    // still tells a reader what it saw.
+    // The bound is on the median and the 99th percentile, not the mean: at
+    // 200,000 samples a percentile is stable, while one call the scheduler
+    // descheduled for milliseconds moves a mean by tens of nanoseconds — a CI
+    // run at load 90 failed this on the mean with both arms at 41/42/42 ns.
+    // A form that walked the product would cost the attempt count in steps and
+    // misses both bounds by orders of magnitude. The measurement is reported in
+    // the failure message so a run that drifts still tells a reader what it saw.
     assert!(
-        large.mean() <= small.mean().saturating_mul(4).saturating_add(50),
+        large_p50 <= small_p50.saturating_mul(4).saturating_add(50)
+            && large_p99 <= small_p99.saturating_mul(4).saturating_add(50),
         "attempt u32::MAX must cost about the same as attempt 0: \
          p50/p95/p99 {small_p50}/{small_p95}/{small_p99}ns vs \
-         {large_p50}/{large_p95}/{large_p99}ns"
+         {large_p50}/{large_p95}/{large_p99}ns (means {}ns vs {}ns)",
+        small.mean(),
+        large.mean()
     );
 }
 

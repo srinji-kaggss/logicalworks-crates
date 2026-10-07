@@ -10,6 +10,12 @@
 //! which is why the path is written out rather than linked: an intra-doc link
 //! from this always-on module to a default-off one resolves in one feature set
 //! and dangles in every other, and this module is on in all of them.
+//!
+//! [`walk_dir_entries`] is the same walk for a caller that must not descend
+//! everywhere and needs more than a path: a predicate decides per entry whether
+//! to [`Descend::Enter`], [`Descend::Skip`] its subtree unread, or
+//! [`Descend::Stop`], and each [`WalkEntry`] carries the `lstat` the walk
+//! classified it by and its path relative to the root (INV-FS-7).
 
 /// Handle-relative filesystem access, for trees that are being rewritten while
 /// you read them. Unix-only; other targets report
@@ -84,25 +90,170 @@ pub struct WalkOmission {
     pub error: io::Error,
 }
 
+/// What a filesystem object is, stated from its own `lstat` and never by
+/// following it.
+///
+/// One type for both walkers: the path walk's predicate receives it, and
+/// `fs::capability::Dir::kind` returns it (re-exported there as
+/// `fs::capability::FileKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FileKind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Directory,
+    /// A symbolic link. Its target is not resolved by the classification.
+    Symlink,
+    /// A named pipe.
+    Fifo,
+    /// A character device.
+    CharDevice,
+    /// A block device.
+    BlockDevice,
+    /// A socket.
+    Socket,
+    /// A type this platform's file-type bits do not name. Network and
+    /// synthetic filesystems produce it, and reporting a guess would be worse
+    /// than reporting the uncertainty.
+    Unknown,
+}
+
+impl FileKind {
+    /// The kind `file_type` names. A symlink is checked first, so a link to a
+    /// directory is a `Symlink` and never a `Directory`.
+    fn of(file_type: fs::FileType) -> Self {
+        if file_type.is_symlink() {
+            return Self::Symlink;
+        }
+        if file_type.is_dir() {
+            return Self::Directory;
+        }
+        if file_type.is_file() {
+            return Self::File;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt as _;
+            if file_type.is_fifo() {
+                return Self::Fifo;
+            }
+            if file_type.is_char_device() {
+                return Self::CharDevice;
+            }
+            if file_type.is_block_device() {
+                return Self::BlockDevice;
+            }
+            if file_type.is_socket() {
+                return Self::Socket;
+            }
+        }
+        Self::Unknown
+    }
+}
+
+/// What a walk predicate answers for one admitted entry.
+///
+/// The entry the predicate was asked about is recorded under every answer;
+/// the answer governs only what comes after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Descend {
+    /// Record the entry and, when it is a directory the policy may descend
+    /// into, walk it.
+    Enter,
+    /// Record the entry and never read below it: a skipped directory is not
+    /// listed, stated, charged to a budget or reported as an omission.
+    Skip,
+    /// Record the entry and end the walk: no further entry is listed, stated
+    /// or offered to the predicate.
+    Stop,
+}
+
+/// One entry a [`walk_dir_entries`] walk admitted, with the `lstat` the walk
+/// classified it by.
+///
+/// The metadata is the walk's own observation, read once from the directory
+/// entry without following a final symlink: holding it costs the caller no
+/// second stat, and it is a snapshot that does not change if the file does.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WalkEntry {
+    /// Absolute logical path, rooted at the canonicalized walk root.
+    path: PathBuf,
+    /// The kind the metadata names.
+    kind: FileKind,
+    /// The entry's own `lstat`.
+    metadata: fs::Metadata,
+    /// Components of the canonicalized root that lead `path`.
+    root_components: usize,
+}
+
+impl WalkEntry {
+    /// The absolute logical path, rooted at the canonicalized walk root. An
+    /// entry reached through a followed in-root symlink keeps the link's name
+    /// in its path (INV-FS-5).
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The same path relative to the canonicalized walk root: joining it onto
+    /// that root gives [`WalkEntry::path`] back. Never empty, because the root
+    /// itself is not an entry.
+    #[must_use]
+    pub fn relative_path(&self) -> &Path {
+        let mut below_root = self.path.components();
+        for _ in 0..self.root_components {
+            below_root.next();
+        }
+        below_root.as_path()
+    }
+
+    /// The kind the walk classified the entry as, from its own `lstat`.
+    #[must_use]
+    pub fn kind(&self) -> FileKind {
+        self.kind
+    }
+
+    /// The entry's `lstat`: file type, size, permissions, modification time,
+    /// and on Unix (through `std::os::unix::fs::MetadataExt`) mode, inode and
+    /// device. A symlink's metadata describes the link, not its target.
+    #[must_use]
+    pub fn metadata(&self) -> &fs::Metadata {
+        &self.metadata
+    }
+
+    /// Transfers the absolute path without cloning it.
+    #[must_use]
+    pub fn into_path(self) -> PathBuf {
+        self.path
+    }
+}
+
 /// What a tolerant walk saw: every admitted entry plus every place it came
 /// back short.
 ///
 /// A report retains entries, omissions and the policy scope under which the
 /// walk ran. Completeness never needs to be inferred from the entry list.
+/// `E` is [`PathBuf`] for the path walks and [`WalkEntry`] for
+/// [`walk_dir_entries_tolerant`].
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct WalkReport {
+pub struct WalkReport<E = PathBuf> {
     /// Every entry the policy admitted, in walk order.
-    entries: Vec<PathBuf>,
+    entries: Vec<E>,
     /// Every place the walk came back short, in walk order.
     omissions: Vec<WalkOmission>,
     /// Whether an applied depth, symlink, or resource policy excluded work.
     policy: WalkPolicy,
     /// Whether a resource budget stopped the walk before its policy scope ended.
     budget_exhausted: bool,
+    /// Whether the caller's predicate answered [`Descend::Stop`].
+    stopped: bool,
 }
 
-impl WalkReport {
+impl<E> WalkReport<E> {
     /// Creates a result container for the configured walk policy.
     fn new(options: &WalkOptions) -> Self {
         Self {
@@ -114,13 +265,25 @@ impl WalkReport {
                 sort_alphabetically: options.sort_alphabetically,
             },
             budget_exhausted: false,
+            stopped: false,
         }
     }
 
     /// Every entry the policy admitted, in walk order.
     #[must_use]
-    pub fn entries(&self) -> &[PathBuf] {
+    pub fn entries(&self) -> &[E] {
         &self.entries
+    }
+
+    /// Whether the caller's predicate ended the walk with [`Descend::Stop`].
+    ///
+    /// A stop, like a skipped subtree, is the caller's own policy and is not
+    /// an omission: [`WalkReport::is_complete_within_policy`] does not count
+    /// it, and this is how a reader tells the walk ended early by request. The
+    /// path walks never stop.
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.stopped
     }
 
     /// Every place the walk came back short, in walk order.
@@ -157,7 +320,7 @@ impl WalkReport {
 
     /// Transfers the owned entries and omissions without cloning paths or errors.
     #[must_use]
-    pub fn into_parts(self) -> (Vec<PathBuf>, Vec<WalkOmission>) {
+    pub fn into_parts(self) -> (Vec<E>, Vec<WalkOmission>) {
         (self.entries, self.omissions)
     }
 }
@@ -291,32 +454,100 @@ enum WalkMode {
     Tolerant,
 }
 
+/// What the engine records for one admitted entry, and the one read that
+/// classifies it.
+///
+/// This is how the path walks and the metadata walk stay one traversal: a
+/// path record classifies from the directory entry's file type, which most
+/// platforms answer from the listing itself, and a [`WalkEntry`] classifies
+/// from one `lstat` it then keeps. Neither reads an entry twice.
+trait Record: Sized {
+    /// What classifying one entry reads.
+    type Stat;
+    /// Reads `entry`'s classification without following a final symlink.
+    fn stat(entry: &DirEntry) -> io::Result<Self::Stat>;
+    /// The file type the read established.
+    fn file_type(stat: &Self::Stat) -> fs::FileType;
+    /// The record kept for an admitted entry.
+    fn record(path: PathBuf, kind: FileKind, stat: Self::Stat, root_components: usize) -> Self;
+}
+
+impl Record for PathBuf {
+    type Stat = fs::FileType;
+
+    fn stat(entry: &DirEntry) -> io::Result<fs::FileType> {
+        entry.file_type()
+    }
+
+    fn file_type(stat: &fs::FileType) -> fs::FileType {
+        *stat
+    }
+
+    fn record(path: PathBuf, _kind: FileKind, _stat: fs::FileType, _root: usize) -> Self {
+        path
+    }
+}
+
+impl Record for WalkEntry {
+    type Stat = fs::Metadata;
+
+    fn stat(entry: &DirEntry) -> io::Result<fs::Metadata> {
+        // `DirEntry::metadata` does not traverse a final symlink on any
+        // platform std supports: it is the entry's own `lstat`.
+        entry.metadata()
+    }
+
+    fn file_type(stat: &fs::Metadata) -> fs::FileType {
+        stat.file_type()
+    }
+
+    fn record(path: PathBuf, kind: FileKind, stat: fs::Metadata, root_components: usize) -> Self {
+        Self {
+            path,
+            kind,
+            metadata: stat,
+            root_components,
+        }
+    }
+}
+
+/// The predicate the path walks run under: every entry is entered.
+fn enter_everything(_path: &Path, _kind: FileKind) -> Descend {
+    Descend::Enter
+}
+
 /// Everything one walk call shares, threaded through the recursion.
 ///
 /// A single context is what keeps the engine's functions under the argument
 /// limit as modes and omission sinks join the traversal state: each function
 /// takes the path it acts on, its depth, and the walk it belongs to.
-struct WalkContext<'a> {
+struct WalkContext<'a, E, P> {
     /// The resolved root directory used by best-effort path checks.
     canonical_root: &'a Path,
+    /// Components of `canonical_root`, so a record can name its relative path.
+    root_components: usize,
     /// Depth bound, symlink policy and ordering.
     options: &'a WalkOptions,
     /// Whether the first omission refuses or is recorded.
     mode: WalkMode,
     /// Entries admitted so far, in walk order.
-    out: &'a mut Vec<PathBuf>,
+    out: &'a mut Vec<E>,
     /// Omissions recorded so far, in walk order.
     omissions: &'a mut Vec<WalkOmission>,
     /// Canonical directories already entered, for loop termination.
     visited: &'a mut HashSet<PathBuf>,
     /// Optional producer ceilings; absent only for legacy materializers.
     limits: Option<&'a WalkLimits>,
+    /// The caller's per-entry decision.
+    prune: P,
     /// Number of directory entries observed so far.
     entries_seen: usize,
     /// Cumulative path-byte charge.
     path_bytes_seen: usize,
     /// Set when tolerant traversal returns a budget-limited prefix.
     budget_exhausted: bool,
+    /// Set when the predicate answered [`Descend::Stop`].
+    stopped: bool,
 }
 
 /// Recursively walks `root` according to `options`, returning all matching entries.
@@ -372,7 +603,13 @@ struct WalkContext<'a> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn walk_dir(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<Vec<PathBuf>> {
-    let report = run_walk(root.as_ref(), options, WalkMode::Strict, None)?;
+    let report = run_walk(
+        root.as_ref(),
+        options,
+        WalkMode::Strict,
+        None,
+        enter_everything,
+    )?;
     Ok(report.into_parts().0)
 }
 
@@ -386,7 +623,13 @@ pub fn walk_dir(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<Vec
 /// tolerance covers coverage loss inside the tree, not failure to resolve
 /// the tree's root path.
 pub fn walk_dir_tolerant(root: impl AsRef<Path>, options: &WalkOptions) -> io::Result<WalkReport> {
-    run_walk(root.as_ref(), options, WalkMode::Tolerant, None)
+    run_walk(
+        root.as_ref(),
+        options,
+        WalkMode::Tolerant,
+        None,
+        enter_everything,
+    )
 }
 
 /// Walks with strict refusal and explicit producer and path-retention ceilings.
@@ -401,7 +644,13 @@ pub fn walk_dir_bounded(
     options: &WalkOptions,
     limits: &WalkLimits,
 ) -> io::Result<Vec<PathBuf>> {
-    let report = run_walk(root.as_ref(), options, WalkMode::Strict, Some(limits))?;
+    let report = run_walk(
+        root.as_ref(),
+        options,
+        WalkMode::Strict,
+        Some(limits),
+        enter_everything,
+    )?;
     Ok(report.into_parts().0)
 }
 
@@ -415,16 +664,106 @@ pub fn walk_dir_tolerant_bounded(
     options: &WalkOptions,
     limits: &WalkLimits,
 ) -> io::Result<WalkReport> {
-    run_walk(root.as_ref(), options, WalkMode::Tolerant, Some(limits))
+    run_walk(
+        root.as_ref(),
+        options,
+        WalkMode::Tolerant,
+        Some(limits),
+        enter_everything,
+    )
 }
 
-/// Runs both report modes through the same traversal engine.
-fn run_walk(
+/// Walks strictly, asking `prune` about every admitted entry and returning
+/// each with the `lstat` the walk classified it by.
+///
+/// This is [`walk_dir`] (or, with `limits`, [`walk_dir_bounded`]) with two
+/// additions, and nothing else changes: the same depth and symlink policy, the
+/// same refusals and the same budget charges. With a predicate that always
+/// answers [`Descend::Enter`] it admits exactly the paths [`walk_dir`] returns.
+///
+/// - `prune` is called once per admitted entry, in walk order, with the entry's
+///   absolute logical path and the [`FileKind`] of its own `lstat`, before the
+///   walk goes below it. [`Descend::Skip`] on a directory means it is never
+///   listed: nothing under it is read, charged to `limits`, or reported. An
+///   in-root symlink is offered after its target is resolved (resolution is
+///   how the policy decides whether a link is listed at all), and a skipped
+///   link is not followed. Entries outside the policy — beyond the depth bound,
+///   or links leaving the root — are never offered.
+/// - Each [`WalkEntry`] carries that one `lstat` and its path relative to the
+///   canonicalized root, so neither needs a second stat or a strip. Reading the
+///   `lstat` is the one cost the path walks do not pay; an entry the walk
+///   lists but cannot `lstat` is an [`OmissionStage::EntryType`] refusal.
+///
+/// ```rust
+/// use lgwks_std::fs::{walk_dir_entries, Descend, FileKind, WalkOptions};
+///
+/// let entries = walk_dir_entries(".", &WalkOptions::default(), None, |path, kind| {
+///     if kind == FileKind::Directory && path.file_name() == Some(".git".as_ref()) {
+///         Descend::Skip
+///     } else {
+///         Descend::Enter
+///     }
+/// })?;
+/// for entry in &entries {
+///     assert!(entry.path().ends_with(entry.relative_path()));
+///     assert_eq!(entry.kind() == FileKind::Directory, entry.metadata().is_dir());
+/// }
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// The first omission, as [`walk_dir`] reports it: an `io::Error` whose source
+/// is a [`WalkFailure`] naming the path and stage. An unresolvable root is
+/// always refused.
+pub fn walk_dir_entries<P>(
+    root: impl AsRef<Path>,
+    options: &WalkOptions,
+    limits: Option<&WalkLimits>,
+    prune: P,
+) -> io::Result<Vec<WalkEntry>>
+where
+    P: FnMut(&Path, FileKind) -> Descend,
+{
+    let report = run_walk(root.as_ref(), options, WalkMode::Strict, limits, prune)?;
+    Ok(report.into_parts().0)
+}
+
+/// Walks tolerantly, asking `prune` about every admitted entry and returning
+/// each with the `lstat` the walk classified it by.
+///
+/// [`walk_dir_entries`] with omissions reported rather than refused, exactly as
+/// [`walk_dir_tolerant`] (or, with `limits`, [`walk_dir_tolerant_bounded`])
+/// reports them. A skipped subtree is never read, so nothing inside it can be
+/// an omission; [`WalkReport::stopped`] says whether `prune` ended the walk.
+///
+/// # Errors
+///
+/// An unresolvable root; every other shortfall is an omission in the report.
+pub fn walk_dir_entries_tolerant<P>(
+    root: impl AsRef<Path>,
+    options: &WalkOptions,
+    limits: Option<&WalkLimits>,
+    prune: P,
+) -> io::Result<WalkReport<WalkEntry>>
+where
+    P: FnMut(&Path, FileKind) -> Descend,
+{
+    run_walk(root.as_ref(), options, WalkMode::Tolerant, limits, prune)
+}
+
+/// Runs every entry point through the same traversal engine.
+fn run_walk<E, P>(
     root: &Path,
     options: &WalkOptions,
     mode: WalkMode,
     limits: Option<&WalkLimits>,
-) -> io::Result<WalkReport> {
+    prune: P,
+) -> io::Result<WalkReport<E>>
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
     let canonical_root = root.canonicalize().map_err(|source| {
         let kind = source.kind();
         io::Error::new(
@@ -440,18 +779,22 @@ fn run_walk(
     let mut visited = HashSet::new();
     let mut ctx = WalkContext {
         canonical_root: &canonical_root,
+        root_components: canonical_root.components().count(),
         options,
         mode,
         out: &mut report.entries,
         omissions: &mut report.omissions,
         visited: &mut visited,
         limits,
+        prune,
         entries_seen: 0,
         path_bytes_seen: 0,
         budget_exhausted: false,
+        stopped: false,
     };
     walk_recursive(root, &canonical_root, 0, &mut ctx)?;
     report.budget_exhausted = ctx.budget_exhausted;
+    report.stopped = ctx.stopped;
     Ok(report)
 }
 
@@ -461,7 +804,7 @@ fn run_walk(
 /// The two arms are the whole of the strict/tolerant contract. Every
 /// omission in the engine passes through here, so no new omission site can
 /// silently pick a mode: it states one by calling this.
-fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
+fn omit<E, P>(ctx: &mut WalkContext<'_, E, P>, omission: WalkOmission) -> io::Result<()> {
     if ctx.mode == WalkMode::Strict {
         let kind = omission.error.kind();
         let refusal = Err(io::Error::new(
@@ -487,8 +830,8 @@ fn omit(ctx: &mut WalkContext<'_>, omission: WalkOmission) -> io::Result<()> {
 }
 
 /// Charges an observed path and entry before the directory list retains it.
-fn charge_entry(
-    ctx: &mut WalkContext<'_>,
+fn charge_entry<E, P>(
+    ctx: &mut WalkContext<'_, E, P>,
     path: &Path,
     directory_entries: usize,
 ) -> io::Result<bool> {
@@ -544,11 +887,11 @@ fn track_canonical_visit(dir: &Path, visited_canonical: &mut HashSet<PathBuf>) -
 /// Sorting by filename makes output deterministic across filesystems. With
 /// limits present, entry count, per-directory width and cumulative path bytes
 /// are charged before each `DirEntry` is retained.
-fn read_sorted_entries(
+fn read_sorted_entries<E, P>(
     dir: &Path,
     logical_dir: &Path,
     sort_alphabetically: bool,
-    ctx: &mut WalkContext<'_>,
+    ctx: &mut WalkContext<'_, E, P>,
 ) -> io::Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
     for item in fs::read_dir(dir)? {
@@ -629,12 +972,16 @@ fn resolve_symlink(
 /// Kept separate from the symlink path so the two ways of descending are
 /// readable side by side; `depth` is the depth of `path` itself, and
 /// `walk_recursive` is what bounds it against `options.max_depth`.
-fn handle_directory_entry(
+fn handle_directory_entry<E, P>(
     path: &Path,
     logical_path: &Path,
     depth: usize,
-    ctx: &mut WalkContext<'_>,
-) -> io::Result<()> {
+    ctx: &mut WalkContext<'_, E, P>,
+) -> io::Result<()>
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
     walk_recursive(path, logical_path, depth, ctx)
 }
 
@@ -644,12 +991,16 @@ fn handle_directory_entry(
 /// target stays within the root policy, so enabling the option widens the walk to
 /// links within the root and never to the rest of the filesystem. `depth` is
 /// the link's own depth, so a chain of links cannot buy extra levels.
-fn handle_symlink_entry(
+fn handle_symlink_entry<E, P>(
     target_dir: Option<PathBuf>,
     logical_path: &Path,
     depth: usize,
-    ctx: &mut WalkContext<'_>,
-) -> io::Result<()> {
+    ctx: &mut WalkContext<'_, E, P>,
+) -> io::Result<()>
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
     if ctx.options.follow_symlinks
         && let Some(target_dir) = target_dir
     {
@@ -658,25 +1009,58 @@ fn handle_symlink_entry(
     Ok(())
 }
 
+/// Offers one admitted entry to the caller's predicate and records it.
+///
+/// The entry is recorded under every answer; the answer is whether the walk
+/// may go below it. A stop is latched on the context, which every loop in the
+/// engine checks before it reads anything further.
+fn admit<E, P>(
+    ctx: &mut WalkContext<'_, E, P>,
+    logical_path: PathBuf,
+    kind: FileKind,
+    stat: E::Stat,
+) -> bool
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
+    let decision = (ctx.prune)(&logical_path, kind);
+    ctx.out
+        .push(E::record(logical_path, kind, stat, ctx.root_components));
+    match decision {
+        Descend::Enter => true,
+        Descend::Skip => false,
+        Descend::Stop => {
+            ctx.stopped = true;
+            false
+        }
+    }
+}
+
 /// Classifies one directory entry and records it under the walk's policy.
 ///
 /// Directories are recorded and then descended into, symlinks are recorded and
-/// possibly followed, and regular files are recorded. An entry whose file type
-/// cannot be read is an omission under both modes — refused by strict,
-/// reported by tolerant — never a silent skip: the walk observed a name it
-/// cannot classify, and guessing "file" would misreport a directory the walk
-/// then fails to descend into.
-fn process_entry(
+/// possibly followed, and regular files are recorded; the caller's predicate
+/// decides, per admitted entry, whether the walk goes below it. An entry whose
+/// file type cannot be read is an omission under both modes — refused by
+/// strict, reported by tolerant — never a silent skip: the walk observed a
+/// name it cannot classify, and guessing "file" would misreport a directory
+/// the walk then fails to descend into.
+fn process_entry<E, P>(
     entry: DirEntry,
     dir: &Path,
     logical_dir: &Path,
     current_depth: usize,
-    ctx: &mut WalkContext<'_>,
-) -> io::Result<()> {
+    ctx: &mut WalkContext<'_, E, P>,
+) -> io::Result<()>
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
     let path = entry.path();
     let logical_path = logical_dir.join(entry.file_name());
-    let file_type = match entry.file_type() {
-        Ok(file_type) => file_type,
+    let stat = match E::stat(&entry) {
+        Ok(stat) => stat,
         Err(error) => {
             return omit(
                 ctx,
@@ -688,6 +1072,8 @@ fn process_entry(
             );
         }
     };
+    let file_type = E::file_type(&stat);
+    let kind = FileKind::of(file_type);
 
     // One level deeper than the directory being read. `current_depth` is
     // already bounded by `options.max_depth` when the walk recurses, and a
@@ -695,8 +1081,9 @@ fn process_entry(
     // saturate.
     let next_depth = current_depth.saturating_add(1);
     if file_type.is_dir() {
-        ctx.out.push(logical_path.clone());
-        handle_directory_entry(&path, &logical_path, next_depth, ctx)?;
+        if admit(ctx, logical_path.clone(), kind, stat) {
+            handle_directory_entry(&path, &logical_path, next_depth, ctx)?;
+        }
     } else if file_type.is_symlink() {
         let resolution = match resolve_symlink(dir, &path, ctx.canonical_root) {
             Ok(resolution) => resolution,
@@ -712,12 +1099,13 @@ fn process_entry(
                 return Ok(());
             }
         };
-        if resolution.within_root {
-            ctx.out.push(logical_path.clone());
+        // A link outside the root is a policy exclusion: never listed, never
+        // offered to the predicate, and its `directory` is `None`.
+        if resolution.within_root && admit(ctx, logical_path.clone(), kind, stat) {
+            handle_symlink_entry(resolution.directory, &logical_path, next_depth, ctx)?;
         }
-        handle_symlink_entry(resolution.directory, &logical_path, next_depth, ctx)?;
     } else {
-        ctx.out.push(logical_path);
+        admit(ctx, logical_path, kind, stat);
     }
     Ok(())
 }
@@ -765,13 +1153,17 @@ fn check_directory_path(dir: &Path, canonical_root: &Path) -> io::Result<PathBuf
 /// swap forth and back inside the window, or replacement at the same path,
 /// remains invisible. A handle-relative platform API is required to close
 /// that threat model; the public contract says trusted-tree listing.
-fn walk_recursive(
+fn walk_recursive<E, P>(
     dir: &Path,
     logical_dir: &Path,
     current_depth: usize,
-    ctx: &mut WalkContext<'_>,
-) -> io::Result<()> {
-    if current_depth > ctx.options.max_depth || ctx.budget_exhausted {
+    ctx: &mut WalkContext<'_, E, P>,
+) -> io::Result<()>
+where
+    E: Record,
+    P: FnMut(&Path, FileKind) -> Descend,
+{
+    if current_depth > ctx.options.max_depth || ctx.budget_exhausted || ctx.stopped {
         return Ok(());
     }
     if !track_canonical_visit(dir, ctx.visited) {
@@ -816,7 +1208,7 @@ fn walk_recursive(
     };
     let budget_reached_during_listing = ctx.budget_exhausted;
     for entry in listed {
-        if ctx.budget_exhausted && !budget_reached_during_listing {
+        if ctx.stopped || (ctx.budget_exhausted && !budget_reached_during_listing) {
             break;
         }
         process_entry(entry, dir, logical_dir, current_depth, ctx)?;
@@ -1433,6 +1825,242 @@ mod tests {
             std::io::ErrorKind::NotFound
         );
         assert!(!report.is_complete());
+        Ok(())
+    }
+
+    // ── INV-FS-7: the predicate walk and its per-entry lstat ───────────────
+
+    /// The predicate every unpruned walk here runs under.
+    fn enter(_path: &Path, _kind: FileKind) -> Descend {
+        Descend::Enter
+    }
+
+    /// `tmp_tree`'s `a` directory, canonicalized: the root these tests walk.
+    fn tree_root(tmp: &tempfile::TempDir) -> std::io::Result<PathBuf> {
+        tmp.path().join("a").canonicalize()
+    }
+
+    #[test]
+    fn entering_everything_admits_exactly_the_path_walk() -> std::io::Result<()> {
+        let tmp = tmp_tree()?;
+        let root = tree_root(&tmp)?;
+        let paths = walk_dir(&root, &WalkOptions::default())?;
+        let entries = walk_dir_entries(&root, &WalkOptions::default(), None, enter)?;
+        let entry_paths: Vec<PathBuf> = entries.into_iter().map(WalkEntry::into_path).collect();
+        assert_eq!(
+            entry_paths, paths,
+            "an always-enter predicate must admit the path walk's entries in its order"
+        );
+        let report = walk_dir_entries_tolerant(&root, &WalkOptions::default(), None, enter)?;
+        assert!(
+            report.is_complete() && !report.stopped(),
+            "a clean always-enter walk is complete and was not stopped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_skipped_directory_is_listed_but_never_read() -> std::io::Result<()> {
+        let tmp = tmp_tree()?;
+        let root = tree_root(&tmp)?;
+        let skip_b = |path: &Path, _kind: FileKind| {
+            if path.ends_with("b") {
+                Descend::Skip
+            } else {
+                Descend::Enter
+            }
+        };
+        let entries = walk_dir_entries(&root, &WalkOptions::default(), None, skip_b)?;
+        let relative: Vec<&Path> = entries.iter().map(WalkEntry::relative_path).collect();
+        assert_eq!(
+            relative,
+            [Path::new("b"), Path::new("f.txt")],
+            "the skipped directory is recorded and nothing below it is"
+        );
+        // Two entries fit a two-entry budget only if `b`'s three descendants
+        // were never listed: a listed entry is charged before it is kept.
+        let limits = WalkLimits::new(2, 2, 4_096, 0);
+        let bounded = walk_dir_entries(&root, &WalkOptions::default(), Some(&limits), skip_b)?;
+        assert_eq!(
+            bounded.len(),
+            2,
+            "the skipped subtree charged nothing to the budget"
+        );
+        assert!(
+            walk_dir_entries(&root, &WalkOptions::default(), Some(&limits), enter).is_err(),
+            "the same budget refuses the unpruned walk, so the bound is tight"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stop_records_its_entry_and_ends_the_walk() -> std::io::Result<()> {
+        let tmp = tmp_tree()?;
+        let root = tree_root(&tmp)?;
+        let mut offered = 0_usize;
+        let report =
+            walk_dir_entries_tolerant(&root, &WalkOptions::default(), None, |_path, _kind| {
+                offered = offered.saturating_add(1);
+                Descend::Stop
+            })?;
+        assert_eq!(offered, 1, "nothing is offered after a stop");
+        let relative: Vec<&Path> = report
+            .entries()
+            .iter()
+            .map(WalkEntry::relative_path)
+            .collect();
+        assert_eq!(
+            relative,
+            [Path::new("b")],
+            "the stopping entry is recorded and nothing after it"
+        );
+        assert!(report.stopped(), "the report says the predicate stopped it");
+        assert!(
+            report.is_complete_within_policy(),
+            "a requested stop is the caller's policy, not an omission"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relative_path_joins_back_onto_the_canonical_root() -> std::io::Result<()> {
+        let tmp = tmp_tree()?;
+        let root = tree_root(&tmp)?;
+        let entries = walk_dir_entries(tmp.path().join("a"), &WalkOptions::default(), None, enter)?;
+        assert_eq!(entries.len(), 5, "a holds five entries");
+        for entry in &entries {
+            let relative = entry.relative_path();
+            assert!(
+                relative.is_relative() && relative.components().count() >= 1,
+                "{} is not a non-empty relative path",
+                relative.display()
+            );
+            assert_eq!(
+                root.join(relative),
+                entry.path(),
+                "the relative path joins back onto the canonical root"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_metadata_is_the_walks_snapshot_not_a_later_stat() -> std::io::Result<()> {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir()?;
+        let file = tmp.path().join("grows");
+        stdfs::write(&file, b"abc")?;
+        let entries = walk_dir_entries(tmp.path(), &WalkOptions::default(), None, enter)?;
+        stdfs::OpenOptions::new()
+            .append(true)
+            .open(&file)?
+            .write_all(b"defgh")?;
+        let entry = entries
+            .first()
+            .ok_or_else(|| io::Error::other("the walk lost the one file"))?;
+        assert_eq!(
+            entry.metadata().len(),
+            3,
+            "the entry carries the size the walk read, not one read on access"
+        );
+        assert_eq!(
+            stdfs::symlink_metadata(&file)?.len(),
+            8,
+            "the file really did grow afterwards"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_entry_carries_the_lstat_of_a_symlink_not_its_target() -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir()?;
+        stdfs::write(tmp.path().join("target.txt"), b"target bytes")?;
+        std::os::unix::fs::symlink("target.txt", tmp.path().join("link"))?;
+        let entries = walk_dir_entries(tmp.path(), &WalkOptions::default(), None, enter)?;
+        let link = entries
+            .iter()
+            .find(|entry| entry.relative_path() == Path::new("link"))
+            .ok_or_else(|| io::Error::other("the in-root link was not admitted"))?;
+        assert_eq!(
+            link.kind(),
+            FileKind::Symlink,
+            "a link is classified as one"
+        );
+        assert!(
+            link.metadata().file_type().is_symlink(),
+            "the metadata is the link's own lstat"
+        );
+        assert_eq!(
+            link.metadata().ino(),
+            stdfs::symlink_metadata(tmp.path().join("link"))?.ino(),
+            "the inode is the link's"
+        );
+        assert_ne!(
+            link.metadata().ino(),
+            stdfs::metadata(tmp.path().join("target.txt"))?.ino(),
+            "the inode is not the target's"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_socket_is_classified_as_a_socket() -> std::io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let _listener = std::os::unix::net::UnixListener::bind(tmp.path().join("sock"))?;
+        let entries = walk_dir_entries(tmp.path(), &WalkOptions::default(), None, enter)?;
+        let kinds: Vec<FileKind> = entries.iter().map(WalkEntry::kind).collect();
+        assert_eq!(
+            kinds,
+            [FileKind::Socket],
+            "a socket is named, not guessed as a file"
+        );
+        Ok(())
+    }
+
+    /// A directory the walk may list but not search: its names are readable
+    /// and its entries cannot be stated.
+    #[test]
+    #[cfg(unix)]
+    fn an_entry_the_walk_cannot_lstat_is_an_entry_type_omission() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir()?;
+        let listed = tmp.path().join("listed");
+        stdfs::create_dir(&listed)?;
+        stdfs::write(listed.join("inside"), b"")?;
+        stdfs::set_permissions(&listed, stdfs::Permissions::from_mode(0o444))?;
+        let inert = stdfs::symlink_metadata(listed.join("inside")).is_ok();
+        let report = walk_dir_entries_tolerant(tmp.path(), &WalkOptions::default(), None, enter);
+        let strict = walk_dir_entries(tmp.path(), &WalkOptions::default(), None, enter);
+        stdfs::set_permissions(&listed, stdfs::Permissions::from_mode(0o755))?;
+        if inert {
+            return Ok(());
+        }
+        let report = report?;
+        let omitted: Vec<(&Path, OmissionStage)> = report
+            .omissions()
+            .iter()
+            .map(|omission| (omission.path.as_path(), omission.stage))
+            .collect();
+        let inside = tmp.path().canonicalize()?.join("listed/inside");
+        assert_eq!(
+            omitted,
+            [(inside.as_path(), OmissionStage::EntryType)],
+            "a name the walk listed but could not lstat is an omission, never dropped"
+        );
+        let error = strict
+            .err()
+            .ok_or_else(|| io::Error::other("strict accepted an entry it could not lstat"))?;
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<WalkFailure>())
+                .map(WalkFailure::stage),
+            Some(OmissionStage::EntryType),
+            "strict refuses at the entry-type stage"
+        );
         Ok(())
     }
 }

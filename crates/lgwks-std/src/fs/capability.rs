@@ -170,30 +170,11 @@ impl Listing {
     }
 }
 
-/// What an entry's name denotes, stated without following it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FileKind {
-    /// A regular file.
-    File,
-    /// A directory, safe to descend into with [`self::Dir::open_subdir`].
-    Directory,
-    /// A symbolic link. Its target is not resolved by `kind`.
-    Symlink,
-    /// A named pipe.
-    Fifo,
-    /// A character device.
-    CharDevice,
-    /// A block device.
-    BlockDevice,
-    /// A socket.
-    Socket,
-    /// Something the platform's `d_type` does not name. `kind` on the entry is
-    /// how to learn more; a `d_type` of `DT_UNKNOWN` is common on network and
-    /// synthetic filesystems, and reporting a guess would be worse than
-    /// reporting the uncertainty.
-    Unknown,
-}
+/// What an entry's name denotes, stated without following it. The same type
+/// the path walk's predicate receives, so a kind read through a [`Dir`] and one
+/// read by `walk_dir_entries` compare directly. A [`FileKind::Directory`] is
+/// safe to descend into with [`self::Dir::open_subdir`].
+pub use super::FileKind;
 
 /// Flags for [`Dir::open_entry`], mirroring the subset of `openat(2)` this
 /// crate exposes.

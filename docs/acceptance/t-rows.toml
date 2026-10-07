@@ -42,7 +42,7 @@ row = "Compile-fail source/condition/action mismatch and cross-schema result bin
 state = "exercised"
 gap = ""
 tests = [
-  "it::t02_compile_surface::a_source_condition_action_mismatch_is_refused",
+  "it::t02_compile_surface::a_source_condition_action_mismatch_is_refused_t02",
   "it::t02_compile_surface::a_cross_schema_result_binding_is_refused",
   "it::t02_compile_surface::a_correct_local_borrowed_non_send_consumer_compiles",
   "it::t02_compile_surface::a_local_borrowed_non_send_body_runs_on_the_host",
@@ -83,7 +83,7 @@ row = "Large outputs, full stderr and slow stdout consumer stay within declared 
 state = "exercised"
 gap = ""
 tests = [
-  "it::sys_process_binding::a_flooding_child_against_a_slow_reader_stays_within_its_ceiling",
+  "it::sys_process_binding::a_flooding_child_against_a_slow_reader_stays_within_its_ceiling_t05",
   "it::sys_process_binding::a_chatty_child_is_drained_and_truncated_within_its_ceiling",
   "it::sys_process_binding::a_framed_record_cut_off_mid_frame_is_a_typed_refusal",
   "it::sys_process_binding::a_capture_ceiling_ends_the_framed_read_rather_than_the_child",
@@ -145,7 +145,7 @@ row = "Identical event payloads with different event IDs both execute; duplicate
 state = "exercised"
 gap = ""
 tests = [
-  "it::observe_refresh::identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not",
+  "it::observe_refresh::identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not_t09",
   "it::observe_refresh::an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired",
   "it::durable_dispatch::two_equal_payloads_with_distinct_event_ids_are_two_events",
   "it::sim_observe_refresh::event_identities_band_14",
@@ -212,10 +212,10 @@ row = "Permanent policy refusal plus repeated NotApplied does not yield unlimite
 state = "exercised"
 gap = ""
 tests = [
-  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention",
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_t29",
   "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_across_runs",
   "it::proposal::a_ledger_of_distinct_failures_reaches_its_own_intervention",
-  "it::repair::the_root_budget_stays_charged_across_repair_and_resume",
+  "it::repair::the_root_budget_stays_charged_across_repair_and_resume_t13",
   "it::repair::a_denied_repair_costs_nothing",
   "it::sim_repair::a_spent_budget_refuses_every_later_attempt",
 ]
@@ -227,7 +227,7 @@ row = "Crash before intent ack, after ack before dispatch, after dispatch before
 state = "present"
 gap = "Four of the five named boundaries are covered; the crash before intent ack (nothing committed) has no named test of its own."
 tests = [
-  "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared",
+  "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14",
   "it::durable_crash_observation::a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
   "it::durable_crash_observation::a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome",
   "it::durable_crash_observation::a_kill_during_recovery_leaves_the_journal_exactly_as_it_was",
@@ -243,6 +243,7 @@ row = "Definition/input/order/schema drift during replay returns a typed incompa
 state = "exercised"
 gap = ""
 tests = [
+  "it::sim_replay_drift::every_axis_is_distinguishable_band_11_t15",
   "it::sim_replay_drift::drift_kinds_are_refused_typed_band_00",
   "it::sim_replay_drift::every_axis_is_refused_with_its_exact_drift_band_20",
   "it::sim_replay_drift::compatible_resume_replays_without_a_new_request_band_04",
@@ -258,7 +259,7 @@ row = "Old worker returns after owner-epoch takeover; its receipt cannot authori
 state = "exercised"
 gap = ""
 tests = [
-  "it::owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize",
+  "it::owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16",
   "it::owner_epoch_takeover::a_warrant_from_the_previous_generation_is_superseded",
   "it::owner_epoch_takeover::the_current_generation_may_still_settle_its_own_attempt",
   "it::owner_epoch_takeover::a_generation_and_a_tail_are_two_fences_and_both_answer",
@@ -273,7 +274,7 @@ row = "Drop a scoped waiter during an effect, then drain the still-owning host; 
 state = "present"
 gap = "Dropping the client and holding the uncertain attempt are named; no named test asserts that uncertainty and cleanup are reported as two independent facts from the same drained host."
 tests = [
-  "it::request_key::a_dropped_client_leaves_the_request_in_flight_for_a_later_client",
+  "it::request_key::a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17",
   "it::request_key::a_host_stop_mid_run_leaves_the_request_resumable",
   "it::durable_dispatch::a_restart_holds_an_uncertain_attempt_rather_than_resending_it",
   "it::sim_journal::recover_uncertain_r00",
@@ -287,7 +288,7 @@ row = "Readiness failure, duplicate readiness, stale generation and failure afte
 state = "exercised"
 gap = ""
 tests = [
-  "it::ready::a_failure_before_ready_reaches_the_dependant_and_the_report",
+  "it::ready::a_failure_before_ready_reaches_the_dependant_and_the_report_t18",
   "it::ready::a_duplicate_ready_signal_is_refused_and_releases_nothing",
   "it::ready::a_stale_generation_is_refused_and_releases_nothing",
   "it::ready::a_failure_after_ready_cancels_every_dependant_still_running",
@@ -304,7 +305,7 @@ row = "`sh -c 'sleep 60 & exit 0'`: parent exit is not reported as complete tree
 state = "exercised"
 gap = ""
 tests = [
-  "it::process_ownership::zero_exit_does_not_fabricate_tree_cleanup",
+  "it::process_ownership::zero_exit_does_not_fabricate_tree_cleanup_t19",
   "it::process_ownership::nonzero_exit_does_not_fabricate_tree_cleanup",
   "it::sys_process_binding::a_zero_exit_reaps_a_living_descendant_before_claiming_cleanup",
   "it::rt_process::a_non_zero_exit_is_reported_failed_with_its_status",
@@ -317,7 +318,7 @@ row = "Abort/drop before manager future's first poll; spawned descendants remain
 state = "exercised"
 gap = ""
 tests = [
-  "it::process_ownership::cancellation_before_manager_task_poll_keeps_descendant_owned",
+  "it::process_ownership::cancellation_before_manager_task_poll_keeps_descendant_owned_t20",
   "it::process_ownership::cancel_before_spawn_process_refuses_without_starting_the_command",
   "it::sys_process_binding::a_cancelled_supervisor_refuses_before_starting_anything",
 ]
@@ -329,7 +330,7 @@ row = "Signalling failure, PID/group reuse and child escape attempts cannot kill
 state = "present"
 gap = "Signalling only into the supervised group and a session escape captured and stopped by pid are named; no named test exercises PID or process-group reuse, and the row is not executed per backend (containment is Unix-only)."
 tests = [
-  "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group",
+  "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group_t21",
   "it::process_escape::a_session_escape_is_captured_and_stopped_by_pid",
   "it::process_escape::shutdown_reports_every_draining_cleanup_rather_than_aborting_it",
   "it::gh_binding::a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code",
@@ -342,7 +343,7 @@ row = "External consumer cannot execute a public process description via `spawn`
 state = "exercised"
 gap = ""
 tests = [
-  "it::t22_process_surface::public_process_description_rejects_direct_execution",
+  "it::t22_process_surface::public_process_description_rejects_direct_execution_t22",
   "it::t22_process_surface::a_process_description_cannot_report_a_status",
   "it::t22_process_surface::a_process_description_cannot_produce_output",
   "it::t22_process_surface::a_process_description_exposes_no_mutable_engine_handle",
@@ -359,7 +360,7 @@ row = "Multiple missing permissions/adapters/inputs yield one complete presently
 state = "exercised"
 gap = ""
 tests = [
-  "it::repair::a_run_short_of_authority_is_blocked_naming_every_need",
+  "it::repair::a_run_short_of_authority_is_blocked_naming_every_need_t23",
   "it::repair::a_repair_widens_one_run_and_not_the_host",
   "it::repair::a_custom_capability_outside_the_ticket_is_refused",
   "it::repair::a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis",
@@ -375,7 +376,7 @@ row = "Same repair ticket delivered twice, stale repair epoch and denied repair 
 state = "exercised"
 gap = ""
 tests = [
-  "it::repair::a_ticket_from_an_older_epoch_is_refused_as_stale",
+  "it::repair::a_ticket_from_an_older_epoch_is_refused_as_stale_t24",
   "it::repair::a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged",
   "it::repair::an_over_wide_grant_is_refused_rather_than_narrowed",
   "it::sim_repair::a_bounded_sweep_repairs_every_ticket_once",
@@ -389,7 +390,7 @@ row = "Native task and supported wire form produce the same normalized operation
 state = "exercised"
 gap = ""
 tests = [
-  "it::spec_materialize::one_chain_traces_match",
+  "it::spec_materialize::one_chain_traces_match_t25",
   "it::spec_materialize::two_entries_in_one_chain_trace_in_declaration_order",
   "it::sim_spec_materialize::spec_replay_0000",
   "it::sim_spec_materialize::spec_replay_0001",
@@ -422,7 +423,7 @@ row = "Context reset preserves completed work, user corrections, Unknown effects
 state = "exercised"
 gap = ""
 tests = [
-  "it::proposal::a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence",
+  "it::proposal::a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27",
   "it::proposal::a_truncated_payload_never_becomes_a_full_coverage_claim",
 ]
 
@@ -452,7 +453,7 @@ row = "Repeated unchanged failure reaches finite typed intervention, not infinit
 state = "exercised"
 gap = ""
 tests = [
-  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention",
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_t29",
   "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_across_runs",
   "it::proposal::new_evidence_does_not_erase_root_spend",
   "it::proposal::a_plan_budget_bounds_repair_across_runs",
@@ -482,7 +483,7 @@ state = "present"
 gap = "Untrusted PR, rename, unavailable diff, both diff ceilings and build-script execution are named; pagination of a list endpoint has no named test."
 tests = [
   "sim_review_path::an_untrusted_build_script_is_never_executed",
-  "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed",
+  "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed_t31",
   "sim_review_path::a_renamed_repository_is_refused_naming_both",
   "it::pr_review_journey::a_renamed_repository_is_refused_and_never_silently_re_pointed",
   "sim_review_path::an_unavailable_diff_publishes_nothing",
@@ -501,7 +502,7 @@ row = "Head advances between analysis and publication; report reviewed A/current
 state = "exercised"
 gap = ""
 tests = [
-  "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing",
+  "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing_t32",
   "sim_review_path::head_moved_between_snapshot_and_publish_r32",
   "sim_review_path::a_publication_is_pinned_to_the_read_commit",
 ]
@@ -513,7 +514,7 @@ row = "Provider accepts review but response is lost; reconciliation finds and ve
 state = "exercised"
 gap = ""
 tests = [
-  "it::pr_review_journey::a_lost_response_is_reconciled_by_reading_back_and_never_reposted",
+  "it::pr_review_journey::a_lost_response_is_reconciled_by_reading_back_and_never_reposted_t33",
   "it::pr_review_journey::a_partial_submission_is_reconciled_as_partial_and_never_reposted",
   "it::pr_review_journey::a_pending_draft_is_reconciled_as_a_draft_and_never_reposted",
   "it::pr_review_journey::a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost",
@@ -529,7 +530,7 @@ row = "Real readback proves exact IDs/state/subject/payload; lost read permissio
 state = "exercised"
 gap = ""
 tests = [
-  "it::pr_review_journey::a_lost_read_permission_reports_unverified_and_retains_the_review_id",
+  "it::pr_review_journey::a_lost_read_permission_reports_unverified_and_retains_the_review_id_t34",
   "sim_review_path::an_unverified_effect_retains_its_review_id",
   "sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
   "it::gh_binding::a_record_still_being_appended_is_not_read_back",
@@ -542,7 +543,7 @@ row = "Process exit zero with invalid result, model says done without evidence, 
 state = "exercised"
 gap = ""
 tests = [
-  "it::proposal::the_three_untrue_successes_report_distinct_outcomes",
+  "it::proposal::the_three_untrue_successes_report_distinct_outcomes_t35",
   "it::sys_process_binding::exit_zero_is_reported_as_zero_not_success",
   "it::rt_process::a_command_that_exits_zero_is_reported_completed",
   "it::pr_review_journey::a_non_zero_exit_is_not_a_published_review",

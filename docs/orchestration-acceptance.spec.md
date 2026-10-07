@@ -17,7 +17,7 @@ Candidate regressions now exist near T07, T09–T12, T14, T19 and T20, in
 `crates/lgwks-bot/tests/it/process_ownership.rs`, and the design they enforce is
 described in [effect-kernel.md](effect-kernel.md). **T22 additionally has
 candidate tests** in `crates/lgwks-bot/tests/it/t22_process_surface.rs`
-(`public_process_description_rejects_direct_execution`,
+(`public_process_description_rejects_direct_execution_t22`,
 `the_guaranteed_task_set_does_not_expose_detach_all` and
 `supervisor_is_the_sanctioned_process_runner`). Those are unit and
 integration journeys against the public surface. They are not this

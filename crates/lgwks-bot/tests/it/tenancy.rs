@@ -420,21 +420,42 @@ fn an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput() -> TestR
         baseline_walls.push(baseline_wall);
         attacked_walls.push(attacked_wall);
     }
+    // Each attacked round is judged against the baseline round run beside it,
+    // and the verdict is the median of those paired ratios. Two arms' medians
+    // taken separately measure the host as much as the arms: on a runner whose
+    // load moves within seconds, the baseline's own rounds spread from 2.0 ms to
+    // 6.5 ms (run 37530668988), three times the 10% under test. A pair shares
+    // its moment of the host, so the ratio cancels what the moment adds, and the
+    // median of 41 ratios is decided by the rounds where the host held still.
+    // Per mille, in integers: this workspace forbids the float casts a ratio of
+    // durations would take.
+    let mut ratios: Vec<u128> = baseline_walls
+        .iter()
+        .zip(&attacked_walls)
+        .map(|(baseline, attacked)| {
+            attacked
+                .as_nanos()
+                .saturating_mul(1_000)
+                .checked_div(baseline.as_nanos())
+        })
+        .collect::<Option<_>>()
+        .ok_or("a baseline round that took no time has no ratio")?;
+    ratios.sort_unstable();
+    let ratio = ratios
+        .get(ratios.len() >> 1)
+        .copied()
+        .ok_or("a paired round ran")?;
     let baseline_median = median(&mut baseline_walls).ok_or("a baseline round ran")?;
     let attacked_median = median(&mut attacked_walls).ok_or("an attacked round ran")?;
 
     // The spec's bound: the neighbour's throughput under the flood is within 10%
     // of its throughput alone.
-    let budget = baseline_median
-        .checked_div(10)
-        .ok_or("a tenth of the baseline wall time")?;
-    let ceiling = baseline_median.saturating_add(budget);
     assert!(
-        attacked_median <= ceiling,
-        "the neighbour's admission time under a fail-at-once flood was {attacked_median:?} \
-         at the median of {ROUNDS} rounds, more than 10% over its {baseline_median:?} \
-         median alone (ceiling {ceiling:?}; baseline rounds {baseline_walls:?}, attacked \
-         rounds {attacked_walls:?})"
+        ratio <= 1_100,
+        "the neighbour's admission time under a fail-at-once flood was {ratio}\u{2030} of \
+         its time alone at the median of {ROUNDS} paired rounds, more than 10% over \
+         (arm medians {attacked_median:?} attacked, {baseline_median:?} alone; paired \
+         ratios {ratios:?})"
     );
     Ok(())
 }
