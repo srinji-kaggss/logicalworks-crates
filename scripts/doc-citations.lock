@@ -12,12 +12,12 @@ crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registere
 crates/lgwks-ast/src/lib.rs:3440	let mut covered: Vec<&str> = Vec::new();
 crates/lgwks-ast/src/lib.rs:3445	assert_eq!(
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
-crates/lgwks-bot/src/cap.rs:55	pub const NET: &str = "bot.net";
-crates/lgwks-bot/src/cap.rs:66	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
-crates/lgwks-bot/src/cap.rs:204	pub struct Deficit {
-crates/lgwks-bot/src/cap.rs:290	pub fn to_grant_set(&self) -> GrantSet {
-crates/lgwks-bot/src/cap.rs:391	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
-crates/lgwks-bot/src/cap.rs:489	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
+crates/lgwks-bot/src/cap.rs:56	pub const NET: &str = "bot.net";
+crates/lgwks-bot/src/cap.rs:67	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
+crates/lgwks-bot/src/cap.rs:205	pub struct Deficit {
+crates/lgwks-bot/src/cap.rs:291	pub fn to_grant_set(&self) -> GrantSet {
+crates/lgwks-bot/src/cap.rs:406	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
+crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs.rs:1428	struct TickError(Option<BotError>);
 crates/lgwks-bot/src/ecs.rs:1970	/// chain's before committing anything.

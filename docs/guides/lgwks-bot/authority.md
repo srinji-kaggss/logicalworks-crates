@@ -34,7 +34,7 @@ before it ever ticks. The same gate runs on both terminal builder calls
 `assemble`.
 
 **One refusal carries every unmet requirement.** `BotError::CapabilityDenied`
-holds a `Deficit` (`crates/lgwks-bot/src/cap.rs:204`) — the whole difference
+holds a `Deficit` (`crates/lgwks-bot/src/cap.rs:205`) — the whole difference
 between what the bot requires and what it was granted — rather than the first
 element of it. The shape matters more than it looks: a check that returns one
 missing capability at a time makes admission a loop where each pass reveals one
@@ -50,7 +50,7 @@ single requirement list, and `GrantSet::uncovered`
 
 A `Deficit` already names every capability that would close it, so the caller
 does not translate a diagnostic into a repair by hand:
-`Deficit::to_grant_set` (`crates/lgwks-bot/src/cap.rs:290`) returns exactly the
+`Deficit::to_grant_set` (`crates/lgwks-bot/src/cap.rs:291`) returns exactly the
 set that closes the shortfall. `GrantSet::grant`
 (`crates/lgwks-bot/src/gate.rs:59`) is consuming and de-duplicating, so folding
 it into a set the caller already holds is `held.grant(..)` per element and
@@ -67,7 +67,7 @@ true.
 
 `GrantSet::issue` (`crates/lgwks-bot/src/gate.rs:131`) is the only path that
 constructs an `Auth`. Its constructor is crate-private
-(`crates/lgwks-bot/src/cap.rs:391`), and `Auth` is not `Serialize`, so authority
+(`crates/lgwks-bot/src/cap.rs:406`), and `Auth` is not `Serialize`, so authority
 cannot round-trip through JSON.
 
 Each verb takes an `(Auth, input)` tuple. `poll`, `execute_action`, and `query`
@@ -76,7 +76,7 @@ does not, because it takes no `Auth` at all: it is a boolean over already-observ
 state with no side effect to gate.
 
 Coverage is exact set membership, not subsumption
-(`crates/lgwks-bot/src/cap.rs:489`). A proof scoped to `bot.fs` presented to a
+(`crates/lgwks-bot/src/cap.rs:526`). A proof scoped to `bot.fs` presented to a
 source requiring `bot.net` is denied. A proof covering nothing authorizes
 nothing. Both cases have tests in `crates/lgwks-bot/src/spec.rs`
 (`wrong_scope_proof_is_denied_confused_deputy`, `call_with_empty_proof_is_denied_at_the_callee`).
@@ -185,7 +185,7 @@ rather than a repair, and it is not made here.
 
 ## Capability names
 
-Four capabilities ship (`crates/lgwks-bot/src/cap.rs:55`):
+Four capabilities ship (`crates/lgwks-bot/src/cap.rs:56`):
 
 | Constant | Name | Used for |
 |---|---|---|
@@ -195,7 +195,7 @@ Four capabilities ship (`crates/lgwks-bot/src/cap.rs:55`):
 | `Cap::NOTIFY` | `bot.notify` | Slack, email, webhook push |
 
 `GrantSet::all_shipped()` grants all four. `Cap::new` accepts any name
-(`crates/lgwks-bot/src/cap.rs:66`), because custom capabilities are data-driven:
+(`crates/lgwks-bot/src/cap.rs:67`), because custom capabilities are data-driven:
 `Cap::new("your.domain.cap")` is a valid capability that nothing grants unless
 you grant it. Enforcement is equality at the gate, so a misspelled name is simply
 a capability that never matches, not an error at construction.
