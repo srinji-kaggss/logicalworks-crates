@@ -49,7 +49,7 @@ use std::time::Duration;
 use crate::seed::Rng;
 use lgwks_ast::{
     Language, MAX_AST_DEPTH, MAX_AST_NODES, MAX_SOURCE_BYTES, ParseError, inspect_ast, parse,
-    try_parse,
+    try_parse, try_parse_within,
 };
 
 /// What every family returns.
@@ -231,7 +231,22 @@ fn every_adversarial_shape_answers_typed() -> TestResult {
             let Some(source) = shape.source.as_deref() else {
                 continue;
             };
-            let answer = try_parse(source, language);
+            // The byte-ceiling tiling asks whether a 2 MiB source *can* be
+            // parsed, which is a question about the grammar and the bounds,
+            // not about how fast the host parses. On the host clock's 10 s
+            // deadline a loaded CI runner answered it with timeouts (run
+            // 37651284179: 1 accepted, 6 "refused for syntax"), and a timeout
+            // counted as a syntax refusal. `Duration::MAX` is a deadline past
+            // what the clock can represent, which never arrives, so the tiling
+            // runs to completion however loaded the host is while the byte,
+            // node, depth and markdown guards stay enforced. Every other shape
+            // keeps the production deadline: their timeouts are meaningful
+            // typed answers, asserted only as typed, never counted.
+            let answer = if shape.name == "tiled-to-the-byte-ceiling" {
+                try_parse_within(source, language, std::time::Duration::MAX)
+            } else {
+                try_parse(source, language)
+            };
             match answer {
                 Ok(tree) => {
                     // An adversarial *shape* is not the same thing as invalid
@@ -273,7 +288,18 @@ fn every_adversarial_shape_answers_typed() -> TestResult {
                         // three expressions and a syntax error, which says
                         // nothing about a bound. Counted rather than asserted,
                         // so the assertion at the end can read how many grammars
-                        // tile cleanly rather than this one guessing.
+                        // tile cleanly rather than this one guessing. A timeout
+                        // here is not a syntax refusal at all: the tiling runs
+                        // under a deadline that never arrives, so one means the
+                        // clock contract broke rather than the grammar, and it
+                        // fails distinctly instead of joining the count.
+                        assert!(
+                            !matches!(error, ParseError::TimedOut { .. }),
+                            "{} {}: the byte-ceiling tiling timed out under a deadline that never \
+                             arrives; the clock contract broke, not the grammar",
+                            language.name(),
+                            shape.name
+                        );
                         tilings_refused_for_syntax = tilings_refused_for_syntax.saturating_add(1);
                     }
                 }
