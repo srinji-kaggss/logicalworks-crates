@@ -225,12 +225,12 @@ fn journey(seed: u64) -> u64 {
         }
         Scenario::ParkedThenShutdown => {
             assert_eq!(block_on(spawn_blocking_on(&pool, || 5u32)), 5);
-            // The pause is load-bearing: it lets the thread reach its park, so
-            // the broadcast is what releases it rather than a running job
-            // finishing. This is the sanctioned synchronous wait, in place of
-            // the banned `thread::sleep` — releasing a parked thread is what is
-            // under test, so the wait is the subject.
-            thread::park_timeout(Duration::from_millis(30));
+            // The wait is load-bearing: the thread must reach its park, so the
+            // broadcast is what releases it rather than a running job
+            // finishing. It waits for that state rather than for a guessed
+            // length of time: a fixed 30 ms pause cost 1.5 s a sweep and still
+            // only made the park likely.
+            wait_until_parked(&pool, seed);
             let began = Instant::now();
             let report = pool.shutdown(WAKE_BOUND.saturating_add(BLOCKING_KEEP_ALIVE));
             let waited = began.elapsed();
@@ -332,6 +332,30 @@ fn wait_until_empty(pool: &Arc<Pool>, seed: u64) {
          {CYCLE_KEEP_ALIVE:?} keep-alive",
         state.live,
         IDLE_POLLS
+    );
+}
+
+/// Wait until the pool's one thread has parked, or fail naming the seed.
+///
+/// `idle` is counted under the pool's lock by the thread itself as it commits to
+/// its park, and the condvar wait releases that lock atomically, so a reading of
+/// one under the lock means the thread is parked or about to be and a later
+/// broadcast is what must wake it. Bounded like [`wait_until_empty`], so a
+/// thread that never parks fails with a message instead of hanging the sweep.
+fn wait_until_parked(pool: &Arc<Pool>, seed: u64) {
+    for _ in 0..IDLE_POLLS {
+        if lock(&pool.state).idle == 1 {
+            return;
+        }
+        thread::park_timeout(Duration::from_millis(1));
+    }
+    let state = lock(&pool.state);
+    assert!(
+        state.idle == 1,
+        "seed {seed:#x}: the pool's thread never parked after its job: {} idle, {} live after \
+         {IDLE_POLLS} polls",
+        state.idle,
+        state.live
     );
 }
 

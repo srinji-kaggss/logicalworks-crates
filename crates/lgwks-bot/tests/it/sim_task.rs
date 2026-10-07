@@ -45,6 +45,16 @@ use sim::Rng;
 /// A test's result: an error fails it with the error's text.
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The clock every host in this file measures its deadlines on.
+///
+/// Virtual, and moved only by an overrunning body (see `descend`), so a seeded
+/// overrun reaches its deadline in one arithmetic step on every host however
+/// loaded, and the replay compares what the tree did rather than when a real
+/// timer happened to fire.
+fn virtual_clock() -> lgwks_bot::clock::Clock {
+    lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO)
+}
+
 /// A task behind a reference count, so one tree can name its own children.
 type Shared<F> = Rc<Task<F>>;
 
@@ -394,7 +404,30 @@ where
             match fault {
                 Fault::Overrun => {
                     // A body that never returns, which the host's deadline
-                    // ends. Nothing below this level is ever entered.
+                    // ends. Nothing below this level is ever entered. It
+                    // first moves the host's virtual clock past the longest
+                    // deadline any host accepts, so the deadline is reached
+                    // by the body's own overrun and never by how long the
+                    // machine took to fire a timer: every family here used to
+                    // wait 60-400 ms of real time per overrun.
+                    //
+                    // Not when the tree already raised a stop. In real time the
+                    // stop wakes every waiting step the moment it is raised, and
+                    // the deadline is still hundreds of milliseconds away, so a
+                    // stopped run never sees its deadline pass. Moving the clock
+                    // anyway would put both facts in front of the next poll at
+                    // once — an order real time never produces.
+                    let stopped = ctx.observed.applied.borrow().contains(&Event::Cancel);
+                    if !stopped {
+                        ctx.host
+                            .clock()
+                            .advance(lgwks_bot::task::MAX_TASK_DEADLINE)
+                            .map_err(|error| {
+                                FlowError::failed(format!(
+                                    "the host's clock refused the overrun: {error:?}"
+                                ))
+                            })?;
+                    }
                     std::future::pending::<()>().await;
                     return Ok(0);
                 }
@@ -440,6 +473,7 @@ fn permits_conserve(band: Band) -> TestResult {
         let host = Host::builder("acme")?
             .max_concurrent_tasks(NonZeroUsize::new(ceiling).ok_or("a ceiling of one")?)
             .default_deadline(std::time::Duration::from_millis(400))
+            .clock(virtual_clock())
             .build()?;
         let observed = Rc::new(Observed::default());
         let tree = build(&host, &plan, Rc::clone(&observed))?;
@@ -489,9 +523,11 @@ fn disposition_matches_the_fault(band: Band) -> TestResult {
         }
         let host = Host::builder("acme")?
             .max_concurrent_tasks(NonZeroUsize::new(2).ok_or("a ceiling")?)
-            // A real, small deadline. The overrun is a body that never returns,
-            // so this fires rather than the body finishing first.
+            // A small deadline on the host's virtual clock. The overrun is a body
+            // that moves the clock past every deadline and never returns, so this
+            // fires rather than the body finishing first.
             .default_deadline(std::time::Duration::from_millis(60))
+            .clock(virtual_clock())
             .build()?;
         let observed = Rc::new(Observed::default());
         let tree = build(&host, &plan, Rc::clone(&observed))?;
@@ -600,6 +636,7 @@ fn provision_and_observe(plan: &Plan, index: u32) -> Result<Vec<(String, String)
     let host = Host::builder(&name)?
         .max_concurrent_tasks(NonZeroUsize::new(1).ok_or("a ceiling")?)
         .default_deadline(std::time::Duration::from_millis(400))
+        .clock(virtual_clock())
         .build()?;
     let observed = Rc::new(Observed::default());
     let tree = build(&host, plan, Rc::clone(&observed))?;
@@ -645,6 +682,7 @@ fn keys_never_collide_across_tenants(band: Band) -> TestResult {
         let host = Host::builder(name)?
             .max_concurrent_tasks(NonZeroUsize::new(1).ok_or("a ceiling")?)
             .default_deadline(std::time::Duration::from_millis(400))
+            .clock(virtual_clock())
             .build()?;
         let again = Rc::new(Observed::default());
         let tree = build(&host, &plan, Rc::clone(&again))?;
@@ -678,6 +716,7 @@ fn ceiling_binds_the_peak(band: Band) -> TestResult {
         let host = Host::builder("acme")?
             .max_concurrent_tasks(NonZeroUsize::new(ceiling).ok_or("a ceiling")?)
             .default_deadline(std::time::Duration::from_millis(400))
+            .clock(virtual_clock())
             .build()?;
 
         // Several runs of the same tree, each a top-level run. They are driven one
@@ -743,6 +782,7 @@ fn the_same_seed_replays(band: Band) -> TestResult {
         let host = Host::builder("acme")?
             .max_concurrent_tasks(NonZeroUsize::new(2).ok_or("a ceiling")?)
             .default_deadline(std::time::Duration::from_millis(80))
+            .clock(virtual_clock())
             .build()?;
         let observed = Rc::new(Observed::default());
         let tree = build(&host, &plan, Rc::clone(&observed))?;

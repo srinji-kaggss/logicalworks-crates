@@ -29,10 +29,16 @@ on:
 # compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
 # an instance only ever holds its own jobs' builds, and the second run is warm.
 # The jobs that build nothing run anywhere. Eleven instances, one per job
-# that builds, except lwc-11, which carries the bot suite's third shard beside
-# its own 21 s matrix: with six, a warm run's jobs queued behind one another
-# and the run took 601 s although no job took more than 450 s (run 37619560219
+# that builds: with six, a warm run's jobs queued behind one another and the
+# run took 601 s although no job took more than 450 s (run 37619560219
 # attempt 2).
+#
+# Each feature set is compiled by exactly one job. A suite split into shards
+# across jobs compiled the same set once per shard, at the same time: on run
+# 37630747929, a change to lgwks-bot's source had three bot-full shards and
+# two workspace shards each compiling for 4-9 minutes at a load near 150,
+# while every shard's tests took 66-150 s. A suite now runs in one job, with
+# the test threads of the shards it replaced (`test-share`).
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -61,13 +67,9 @@ jobs:
   # shard instead of holding a runner instance for a job of their own, and the
   # lanes that need the workspace built run after the shard that built it.
   build:
-    name: Build, gate and workspace tests
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-3' || 'lwc-4' }}"]
+    name: Build and workspace tests
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
@@ -75,7 +77,6 @@ jobs:
       # the lint pass here only adds to the compile that gates the run. Empty
       # is "no wrapper" to cargo, and the compiled code is identical.
       RUSTC_WORKSPACE_WRAPPER: ""
-      PARTITION: count:${{ matrix.shard }}/2
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -83,41 +84,80 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
+          test-share: "8"
+      - name: Build all workspace targets
+        run: cargo test --workspace --all-targets --locked --no-run
+      - name: Run all workspace tests
+        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
+      # The two evidence lanes print the result their check rows below expose.
+      # Each writes its own report, and the check row reads that report rather
+      # than building the workspace a second time to produce it again: the
+      # simulation listing alone compiles every test binary, which as a job of
+      # its own cost 364 s on run 37579691890 and 6 s here.
+      - name: Deterministic simulation evidence
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          python3 scripts/ci_local.py --lane simulation-evidence | tee gate-evidence/simulation-evidence.txt
+      - name: Debug doctor end-to-end journey
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          python3 scripts/ci_local.py --lane debug-e2e | tee gate-evidence/debug-e2e.txt
+      - name: Upload gate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-evidence
+          path: gate-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Doc tests
+        run: cargo test --workspace --doc --locked
+      - name: Run package smoke test
+        run: ./scripts/lgwks-std-package-smoke.sh
+
+
+  # The checks that read the tree rather than test it, in a job of their own:
+  # none builds the workspace's tests, so they need not wait on that compile,
+  # and the job that compiles it need not wait on them.
+  gate:
+    name: Gate checks
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-4]
+    timeout-minutes: 15
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
       - name: Verify lockfile is up-to-date
-        if: matrix.shard == 1
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
           { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; } &&
           for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path "${f%.lock}.toml" >/dev/null; then echo "stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml" >&2; exit 1; fi; done
       - name: Check formatting
-        if: matrix.shard == 1
         run: cargo fmt --all -- --check
       - name: Enforce dependency edge ownership
-        if: matrix.shard == 1
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
       - name: Verify invariant enforcement references resolve
-        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane invariants
       - name: Audit std-first and lgwks_std-first
-        if: matrix.shard == 1
         # The manifest gate above sees every authored edge. This reads the
         # source for the two failures a manifest cannot show: a `use` no
         # manifest declares, and a capability hand-rolled beside the
         # `lgwks_std` module that already provides it.
         run: python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py
       - name: Forbid unwrap outside tests
-        if: matrix.shard == 1
         # Safety bar: library code fails loud with typed errors or named
         # expects, never bare unwrap. Doc examples count as shipped surface.
         run: python3 scripts/ci_local.py --lane unwrap-scan
       - name: Validate the dependency contract alignment
-        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane contract-drift
       - name: Requirements sentences unedited without supersession
-        if: matrix.shard == 1
         run: python3 scripts/check-requirements.py
       - name: llms.txt matches the documentation index
-        if: matrix.shard == 1
         # `llms.txt` is generated from the README's own tables by
         # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
         # differs, so the index cannot drift from the documents it points at: a
@@ -130,7 +170,6 @@ jobs:
           python3 scripts/gen-llms-txt.py
           git diff --exit-code -- llms.txt
       - name: Documentation citations resolve
-        if: matrix.shard == 1
         # The guides cite `path:NNN` for each factual claim, and every merge
         # moves the lines under them. A rotted citation is invisible: the page
         # still reads as sourced, and a reader who checks one and finds
@@ -140,44 +179,7 @@ jobs:
         # repository; the script names that exemption rather than guessing.
         run: python3 scripts/check-doc-citations.py
       - name: Root README quickstart matches its compiled example
-        if: matrix.shard == 1
         run: python3 scripts/ci_local.py --lane readme-quickstart
-      - name: Build all workspace targets
-        if: matrix.shard == 1
-        run: cargo test --workspace --all-targets --locked --no-run
-      - name: Run all workspace tests
-        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
-      # The two evidence lanes print the result their check rows below expose.
-      # Each writes its own report, and the check row reads that report rather
-      # than building the workspace a second time to produce it again: the
-      # simulation listing alone compiles every test binary, which as a job of
-      # its own cost 364 s on run 37579691890 and 6 s here.
-      - name: Deterministic simulation evidence
-        if: matrix.shard == 1
-        run: |
-          set -euo pipefail
-          mkdir -p gate-evidence
-          python3 scripts/ci_local.py --lane simulation-evidence | tee gate-evidence/simulation-evidence.txt
-      - name: Debug doctor end-to-end journey
-        if: matrix.shard == 1
-        run: |
-          set -euo pipefail
-          mkdir -p gate-evidence
-          python3 scripts/ci_local.py --lane debug-e2e | tee gate-evidence/debug-e2e.txt
-      - name: Upload gate evidence
-        if: matrix.shard == 1
-        uses: actions/upload-artifact@v4
-        with:
-          name: gate-evidence
-          path: gate-evidence/
-          if-no-files-found: error
-          retention-days: 7
-      - name: Doc tests
-        if: matrix.shard == 2
-        run: cargo test --workspace --doc --locked
-      - name: Run package smoke test
-        if: matrix.shard == 2
-        run: ./scripts/lgwks-std-package-smoke.sh
 
   # The two results the checks list names on every pull request. Each reads the
   # report its lane wrote in the job above and passes only on that lane's own
@@ -214,18 +216,9 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-5' || matrix.shard == 2 && 'lwc-6' || 'lwc-11' }}"]
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
     timeout-minutes: 15
-    # Three shards of one nextest run, covering the suite exactly once between
-    # them. The lgwks-std full suite and the saturation tiers build the same
-    # feature set, so each rides on its own shard (1 and 2) and the third
-    # carries only its share of the bot suite. Two shards set the run's wall at
-    # 491-497 s on run 37624988459 #2, every other job ending by 291 s; the
-    # third runs on lwc-11, whose own job (the bot and ast matrix) takes 21 s.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
+    # One job, so the full feature set is compiled once (see the header).
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -236,9 +229,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
+          test-share: "8"
       - name: Run lgwks-bot async runner tests
-        env:
-          PARTITION: count:${{ matrix.shard }}/3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
       # the acceptance job can build one receipt from the suite's own output.
@@ -252,19 +244,35 @@ jobs:
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: lgwks-bot-junit-${{ matrix.shard }}
+          name: lgwks-bot-junit
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
       - name: Run lgwks-std full-feature tests
-        if: matrix.shard == 1
         run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
+
+  # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a real
+  # process boundary) in a job of their own, beside the suite rather than after
+  # it: the 10,000 tier alone is 50,000 process starts and about two minutes.
+  # It compiles only lgwks-bot and this one test binary.
+  tests_bot_saturation:
+    name: Saturation tiers (lgwks-bot full)
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
+    timeout-minutes: 15
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          nextest: "true"
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
       - name: Run lgwks-bot saturation tiers
-        if: matrix.shard == 2
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
 
   acceptance_receipts:

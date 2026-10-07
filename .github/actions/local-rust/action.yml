@@ -22,6 +22,15 @@ inputs:
       is two cold workspace builds with the machine's profiles.
     required: false
     default: "40"
+  test-share:
+    description: >
+      This job's share of the machine's cores for test threads, in thirds: the
+      threads are share × cores ÷ 3 ÷ runner instances, at least two. The
+      default, 3, is one instance's even share three times over (see the step).
+      A job that runs a whole suite the shards of several jobs used to split
+      names the shares of the jobs it replaced.
+    required: false
+    default: "3"
   tmp-gib:
     description: >
       Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
@@ -134,7 +143,7 @@ runs:
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
         runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
         cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-        threads=$(( 3 * cores / (runners > 0 ? runners : 1) ))
+        threads=$(( ${{ inputs.test-share }} * cores / (runners > 0 ? runners : 1) ))
         threads=$(( threads > 1 ? threads : 2 ))
         echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
         echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
