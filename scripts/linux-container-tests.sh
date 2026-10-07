@@ -56,7 +56,11 @@ fi
 # The engine is named by its socket rather than by the current Docker context:
 # a context is per-user client state that another tool can switch, and a run
 # whose engine depended on it found none at all (run 37619560219 attempt 2).
+# The CLI is OrbStack's own, from its app bundle: the runners' PATH reached a
+# `docker` only through Homebrew's Docker formula, which is removed with the
+# rest of Docker (run 37623747480: `docker: command not found`).
 if [ "$(uname -s)" = Darwin ]; then
+    export PATH="/Applications/OrbStack.app/Contents/MacOS/xbin:${HOME}/.orbstack/bin:${PATH}"
     export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
     if ! engine="$(docker info --format '{{.OperatingSystem}}' 2>&1)" || [ "${engine}" != OrbStack ]; then
         echo "linux-container-tests: no OrbStack engine at ${DOCKER_HOST}: ${engine}" >&2
