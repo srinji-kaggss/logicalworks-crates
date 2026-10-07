@@ -77,6 +77,16 @@ runs:
     # with SIGKILL, and the page cache survives that), so no assertion depends
     # on the device the bytes reach, and production code keeps `sync_all`.
     #
+    # The disk is APFS, the filesystem of the machine's own disk, so moving the
+    # temporary files changes how fast a sync is and nothing else. HFS+ was
+    # tried first and changed what the tests observed: it stores names
+    # decomposed, so a directory walk reported `e\u{301}1` for a file created
+    # as `\u{e9}1` and the path-byte budgets the walk simulations model no
+    # longer matched (run 37613720499), and it stamps modification times to the
+    # second, which hid a torn read from the stable-read protocol until it was
+    # fixed in `lgwks_bot::stability`. APFS preserves names as written and
+    # keeps nanosecond times; on a RAM store 500 `F_FULLFSYNC` calls take 0.1 s.
+    #
     # The disk is detached and recreated at every job start: a RAM disk keeps
     # each page it ever wrote until it is detached, so recreating it is what
     # bounds its memory to one job's temporary files and leaves nothing of the
@@ -88,11 +98,10 @@ runs:
         set -euo pipefail
         owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
         label="lwc-tmp-${owner}"
+        # Ejecting the volume detaches its APFS container and the RAM store
+        # beneath it, which is what returns the memory.
         if [ -d "/Volumes/${label}" ]; then
-          device="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Device Node/ {print $2}')"
-          if [ -n "${device}" ]; then
-            diskutil eject force "${device}" >/dev/null || echo "::warning::could not eject ${device} (${label})"
-          fi
+          diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
         fi
         tmp=""
         if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
@@ -100,8 +109,10 @@ runs:
           # `diskutil image` is the current interface; `hdiutil` is the one a
           # macOS before it has, and prints the device the same way.
           device="$({ diskutil image attach --noMount "ram://${sectors}" 2>/dev/null || hdiutil attach -nomount "ram://${sectors}" 2>/dev/null; } | awk 'NR==1 {print $1}')"
-          if [ -n "${device}" ] && diskutil erasevolume HFS+ "${label}" "${device}" >/dev/null; then
-            tmp="$(diskutil info "${device}" | awk -F': *' '/Mount Point/ {print $2}')"
+          # The volume is a new device inside the container made on the RAM
+          # store, so its mount point is read from the volume, not the store.
+          if [ -n "${device}" ] && diskutil erasevolume APFS "${label}" "${device}" >/dev/null; then
+            tmp="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Mount Point/ {print $2}')"
           fi
         fi
         if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
@@ -140,14 +151,28 @@ runs:
         dir="${root}/sccache"
         port=4227
         mkdir -p "${dir}"
+        # Every instance's target directory is a base directory, so a
+        # dependency compiled into one instance's directory is the same cache
+        # entry as that dependency compiled into another's: the instances'
+        # compiler arguments differ only in that prefix, and every new target
+        # directory missed without it.
+        basedirs=""
+        for target in "${root}"/target/*/shared; do
+          [ -d "${target}" ] && basedirs="${basedirs:+${basedirs}:}${target}"
+        done
         # Probe the port, not the server: any sccache client call starts a
         # server when none answers, and one started that way belongs to this
         # job, carries its defaults instead of this configuration, and is
         # killed with the job.
         if ! nc -z 127.0.0.1 "${port}" 2>/dev/null; then
           # An instance racing this one to start the server leaves one of the
-          # two unable to bind the port; the other's server serves both.
-          env RUNNER_TRACKING_ID=0 SCCACHE_DIR="${dir}" SCCACHE_CACHE_SIZE="${{ inputs.cache-gib }}G" \
+          # two unable to bind the port; the other's server serves both. The
+          # server outlives this job, so its temporary directory is its own
+          # rather than this job's RAM disk, which the next job on this
+          # instance ejects (run 37613720499: `Failed to create temp dir`).
+          mkdir -p "${dir}/tmp"
+          env RUNNER_TRACKING_ID=0 TMPDIR="${dir}/tmp" SCCACHE_DIR="${dir}" \
+            SCCACHE_CACHE_SIZE="${{ inputs.cache-gib }}G" SCCACHE_BASEDIRS="${basedirs}" \
             SCCACHE_SERVER_PORT="${port}" SCCACHE_IDLE_TIMEOUT=3600 \
             sccache --start-server >/dev/null 2>&1 || true
         fi
@@ -157,7 +182,7 @@ runs:
             echo "SCCACHE_SERVER_PORT=${port}"
             echo "RUSTC_WRAPPER=sccache"
           } >> "${GITHUB_ENV}"
-          SCCACHE_SERVER_PORT="${port}" sccache --show-stats | awk '/Cache location|Cache size|Max cache size|Cache hits rate/'
+          SCCACHE_SERVER_PORT="${port}" sccache --show-stats | awk '/Cache location|Base directories|Cache size|Max cache size|Cache hits rate/'
         else
           echo "::warning::no sccache server answers on port ${port}: each instance compiles every dependency itself"
         fi
