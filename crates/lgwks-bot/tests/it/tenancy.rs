@@ -18,27 +18,18 @@
 #![cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "script"))]
 
 use std::error::Error;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::supervise::{ShutdownReport, SpawnRefused, Supervisor};
-use lgwks_bot::rt::sync::CancellationToken;
-use lgwks_bot::rt::sync::Notify;
 use lgwks_bot::rt::tenancy::TenancyPolicy;
 use lgwks_bot::rt::time::sleep;
 use lgwks_bot::script::Tenant;
 
-/// A count wide enough to compare against a `Stats` counter.
-///
-/// The counters this file compares against are `u64`. A count that cannot be
-/// widened is refused rather than replaced by a ceiling, because a substituted
-/// number is one a comparison could pass against.
-fn wide(count: usize) -> Result<u64, String> {
-    u64::try_from(count)
-        .map_err(|refusal| format!("{count} does not widen to a counter: {refusal}"))
-}
+use crate::tenancy_harness::{
+    Gate, admit, bounded, neighbour_work, percentile, submit_parked, wide,
+};
 
 /// What a test reports when its precondition did not hold.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -56,51 +47,6 @@ const BUDGET: Duration = Duration::from_secs(20);
 /// completions are spread over real time and its admission is a distribution
 /// rather than a single instant.
 const QUIET_HOLD: Duration = Duration::from_millis(2);
-
-/// A gate the loud tenant's bodies park on, opened by the test at a chosen
-/// moment. Controlled completion: the bodies are known admitted and parked until
-/// `release`, so the loud tenant's occupancy is created rather than raced.
-#[derive(Clone)]
-struct Gate {
-    /// Opens every parked and future body.
-    open: Arc<Notify>,
-    /// How many bodies have actually parked, for the test's precondition.
-    parked: Arc<AtomicUsize>,
-}
-
-impl Gate {
-    /// A gate nothing has entered yet.
-    fn new() -> Self {
-        Self {
-            open: Arc::new(Notify::new()),
-            parked: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// A body that parks here until the gate is opened.
-    async fn wait(&self) {
-        self.parked.fetch_add(1, Ordering::SeqCst);
-        self.open.notified().await;
-    }
-
-    /// How many bodies are parked right now.
-    fn parked(&self) -> usize {
-        self.parked.load(Ordering::SeqCst)
-    }
-
-    /// Open the gate for every parked and future body.
-    fn release(&self) {
-        self.open.notify_waiters();
-    }
-
-    /// Complete exactly one parked body: the controlled completion a parked
-    /// loud submission is waiting for. `notify_one` wakes one waiter, or stores
-    /// the wake for the next body to park, so no completion is lost to a race
-    /// between the release and the park.
-    fn release_one(&self) {
-        self.open.notify_one();
-    }
-}
 
 /// Wait until `predicate` holds, or the budget runs out. A bounded poll, so a
 /// defect that stops bodies from parking is a failure rather than a hang.
@@ -127,23 +73,6 @@ async fn until(budget: Duration, mut predicate: impl FnMut() -> bool) -> Result<
 fn quiet_ceiling() -> Result<Duration, std::num::TryFromIntError> {
     let count = u32::try_from(QUIET_TASKS)?;
     Ok(QUIET_HOLD.saturating_mul(count))
-}
-
-/// The `n`-th percentile of a latency sample, nearest-rank. Every sample is a
-/// real admission wait, so the percentile of admission waits is itself one of
-/// them. `div_ceil`, not `/`, which this workspace forbids.
-fn percentile(samples: &[Duration], nth: usize) -> Duration {
-    if samples.is_empty() {
-        return Duration::ZERO;
-    }
-    let mut sorted: Vec<Duration> = samples.to_vec();
-    sorted.sort_unstable();
-    let rank = nth.saturating_mul(sorted.len()).div_ceil(100);
-    let index = rank.saturating_sub(1).min(sorted.len().saturating_sub(1));
-    match sorted.get(index).copied() {
-        Some(measured) => measured,
-        None => Duration::ZERO,
-    }
 }
 
 /// The noisy-neighbour sweep: the loud tenant saturates its own share and parks,
@@ -491,35 +420,6 @@ async fn neighbour_arm(
     Ok((neighbour_time, supervisor.shutdown().await))
 }
 
-/// Submit one body for `tenant` inside [`FLOOD_BOUND`], naming the tenant
-/// when the submission is refused.
-async fn admit<F, Fut>(supervisor: &mut Supervisor, tenant: &Tenant, body: F) -> Result<(), String>
-where
-    F: FnOnce(CancellationToken) -> Fut,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    let admitted = bounded(
-        "one tenant's submission",
-        supervisor.spawn_for(tenant, body),
-    )
-    .await?;
-    admitted.map_err(|refusal| format!("{tenant} was refused: {refusal}"))
-}
-
-/// The neighbour's measured body: a fixed amount of arithmetic, identical in
-/// both arms, sunk into [`CONSUMED`] so the optimiser cannot remove it.
-async fn neighbour_work() {
-    let mut accumulator: u64 = 0;
-    for step in 0..2_000_u64 {
-        accumulator = accumulator.wrapping_add(step.wrapping_mul(2_654_435_761));
-    }
-    let sunk = match usize::try_from(std::hint::black_box(accumulator)) {
-        Ok(as_index) => as_index,
-        Err(_) => usize::MAX,
-    };
-    CONSUMED.fetch_add(sunk, Ordering::Relaxed);
-}
-
 /// Half the pool: the per-tenant ceiling both tests hand out, and the share one
 /// noisy tenant may hold.
 fn half() -> usize {
@@ -541,11 +441,6 @@ const ROUNDS: usize = 41;
 /// volume, eight thousand spawns per round.
 const FLOOD_PER_NEIGHBOUR: usize = 4;
 
-/// Where the neighbour's arithmetic is sunk, so the optimiser cannot remove the
-/// work the two runs are being compared on. Wrapping add is used throughout so
-/// no run panics on overflow.
-static CONSUMED: AtomicUsize = AtomicUsize::new(0);
-
 /// How many tasks the loud tenant submits in the flood.
 ///
 /// The issue's number, not a pilot: a tenant that submits ten thousand tasks is
@@ -561,7 +456,8 @@ const QUIET_FLOOD_TOTAL: usize = 100;
 /// Non-zero, so a loud submission past the loud tenant's ceiling *parks* in its
 /// own queue rather than being refused — the queue is what the issue's flood
 /// exercises. Admission takes `&mut Supervisor`, so the loop that submits is the
-/// only caller; a parked loud submission is resolved by [`submit_loud`], which
+/// only caller; a parked loud submission is resolved by
+/// [`submit_parked`](crate::tenancy_harness::submit_parked), which
 /// completes exactly one held loud body while the submission waits. One loud
 /// submission is parked at a time, so a bound of eight is never reached and the
 /// flood is never refused.
@@ -573,60 +469,6 @@ const FLOOD_QUEUE: usize = 8;
 /// `spawn_for` in the flood loop is awaited inside it, so a wedged admission is a
 /// named failure rather than a hung suite.
 const FLOOD_BOUND: Duration = Duration::from_millis(2_000);
-
-/// Await one submission inside [`FLOOD_BOUND`], naming where it was awaited.
-///
-/// Every `spawn_for` in the flood goes through this. A wedged admission -- a
-/// contended arrival that parks and no admitted task ever resolves it -- is
-/// otherwise indistinguishable from a slow host, and the first version of this
-/// file proved it: twelve minutes, every worker parked, nothing runnable, and
-/// nothing to say so.
-async fn bounded<F>(where_awaited: &str, submission: F) -> Result<F::Output, String>
-where
-    F: std::future::Future,
-{
-    match lgwks_bot::rt::time::timeout(FLOOD_BOUND, submission).await {
-        Ok(value) => Ok(value),
-        Err(_) => Err(format!(
-            "{where_awaited} never resolved within {FLOOD_BOUND:?}: a contended \
-             submission parked and nothing returned a permit to it"
-        )),
-    }
-}
-
-/// Submit one loud body, completing one held loud body if the submission parks.
-///
-/// The submission is polled first, so it registers in the loud tenant's queue
-/// before anything is released; only a submission that is still pending after
-/// that poll triggers its one controlled completion. The completed body returns
-/// its permit to the round, the round grants it to the loud tenant's waiter, and
-/// the waiter's wake re-polls this future. A submission that never resolves after
-/// its completion is a lost wakeup in the round, and [`bounded`] names it.
-async fn submit_loud(
-    supervisor: &mut Supervisor,
-    loud: &Tenant,
-    gate: &Gate,
-) -> Result<Result<(), SpawnRefused>, String> {
-    let body_gate = gate.clone();
-    let mut submission = std::pin::pin!(
-        supervisor.spawn_for(loud, move |_token| async move { body_gate.wait().await })
-    );
-    let mut released = false;
-    bounded(
-        "a parked loud submission after one controlled completion",
-        std::future::poll_fn(|context| {
-            if let std::task::Poll::Ready(outcome) = submission.as_mut().poll(context) {
-                return std::task::Poll::Ready(outcome);
-            }
-            if !released {
-                released = true;
-                gate.release_one();
-            }
-            std::task::Poll::Pending
-        }),
-    )
-    .await
-}
 
 /// The `n`-th percentile with a floor, for a ratio against a measured baseline.
 ///
@@ -654,7 +496,8 @@ fn percentile_over(
 ///
 /// The loud tenant takes its whole ceiling with bodies that hold their permits
 /// until released, then submits ten thousand more. Every one of those lands past
-/// its ceiling and parks in the loud tenant's own queue; [`submit_loud`] then
+/// its ceiling and parks in the loud tenant's own queue;
+/// [`submit_parked`](crate::tenancy_harness::submit_parked) then
 /// completes exactly one held loud body, and the round hands the freed permit to
 /// that parked submission. Completions are controlled, never slept for, and the
 /// loud tenant sits at its ceiling for the entire flood. Between batches the
@@ -663,7 +506,7 @@ fn percentile_over(
 /// What would fail:
 /// - a quiet admission that waited on the loud tenant's queue never resolves,
 ///   because nothing completes loud work while the quiet submission is awaited,
-///   and [`bounded`] fails the test after two seconds instead of hanging;
+///   and the wedge bound fails the test after two seconds instead of hanging;
 /// - a lost wakeup in the round leaves a parked loud submission unresolved
 ///   after its one completion, and is named the same way;
 /// - the loud tenant holding more than its ceiling, or being refused while its
@@ -719,6 +562,7 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
         for _ in 0..half {
             let gate_for_task = gate.clone();
             let taken = bounded(
+                FLOOD_BOUND,
                 "saturating the loud tenant",
                 supervisor.spawn_for(
                     &loud,
@@ -744,7 +588,7 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
                     break;
                 }
                 submitted = submitted.saturating_add(1);
-                match submit_loud(&mut supervisor, &loud, &gate).await? {
+                match submit_parked(&mut supervisor, &loud, &gate).await? {
                     Ok(()) => admitted = admitted.saturating_add(1),
                     Err(SpawnRefused::TenantAtCapacity { ref tenant, .. }) => {
                         assert_eq!(
@@ -769,6 +613,7 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
             if quiet_waits.len() < QUIET_FLOOD_TOTAL {
                 let started = Instant::now();
                 let admitted_quiet = bounded(
+                    FLOOD_BOUND,
                     "submitting the quiet tenant",
                     supervisor.spawn_for(&quiet, |_token| async move {
                         sleep(QUIET_HOLD).await;
@@ -844,6 +689,24 @@ fn a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another() -> TestResul
     let flood_p99 = percentile(&quiet_waits, 99);
     let floor = QUIET_HOLD;
     let ceiling_p99 = percentile_over(&quiet_waits, 99, base_p99, floor);
+    // The measured line the readiness section quotes: per-mille in integers,
+    // this workspace forbids the float casts a ratio of durations would take.
+    let ratio_per_mille = match flood_p99
+        .as_nanos()
+        .saturating_mul(1_000)
+        .checked_div(base_p99.as_nanos().max(1))
+    {
+        Some(ratio) => ratio,
+        None => return Err("the flood p99 has no ratio against the baseline".into()),
+    };
+    let mut line = std::io::stdout().lock();
+    let _written = writeln!(
+        line,
+        "noisy-neighbour 10k-flood: quiet alone p50 {base_p50:?} p99 {base_p99:?}, under flood \
+         p50 {flood_p50:?} p99 {flood_p99:?} (ratio {ratio_per_mille}\u{2030} of alone, bound \
+         2000\u{2030}); loud in-flight peak {peak} of {half}, refusals tenant {refused_tenant} \
+         supervisor {refused_supervisor}",
+    );
     assert!(
         flood_p99 <= ceiling_p99,
         "the quiet tenant's p99 admission wait under a {submitted}-submission flood \
