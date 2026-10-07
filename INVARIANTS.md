@@ -2688,7 +2688,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   own name. A file the scanner cannot parse is a refusal, not a pass. · why: the
   name appeared in `scan.rs`'s module doc while 433 findings sat in shipped source
   and no lane ran it — the invariant was advertised and unenforced · enforced by:
-  the `scan` lane, which exits 2 on any finding
+  the `scan` lane, which exits 2 on any finding; the detectors themselves are
+  held to an independent model by `crates/lgwks-deps/tests/it/sim_scan_detectors.rs`
+  (generated files, every finding's line, rule and evidence text)
 
 ## Open questions for the Director
 

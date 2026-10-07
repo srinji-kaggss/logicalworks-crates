@@ -1859,9 +1859,12 @@ impl TryChainWalker<'_> {
     /// Marks the start of a function body and returns the state it displaced,
     /// for [`Self::exit_function`] to restore.
     ///
-    /// An exempt function answers `None` and leaves the current state alone, so
-    /// statements inside it keep the enclosing function's coordinates rather
-    /// than being attributed to a function that is never inspected. The
+    /// The innermost function decides. An exempt one marks the walk skipped
+    /// until it ends, so none of its statements is inspected even when it is
+    /// nested in a production function; a production function nested in an
+    /// exempt one is inspected under its own line. Before this, an exempt
+    /// function left the state alone, so a `#[test]` nested in production code
+    /// had its chains reported against the enclosing function's line. The
     /// displaced line stays the `Option` it is — `None` means there was no
     /// enclosing function — so a top-level statement is not attributed to a
     /// function that does not exist.
@@ -1869,28 +1872,25 @@ impl TryChainWalker<'_> {
         &mut self,
         attrs: &[syn::Attribute],
         sig: &syn::Signature,
-    ) -> Option<(Option<usize>, bool)> {
-        if is_test_or_helper_attr(attrs) {
-            return None;
-        }
-        let line_number = sig.ident.span().start().line;
+    ) -> (Option<usize>, bool) {
         // The displaced state is the pair as it is, including "no enclosing
         // function": flattening that into a number would need a sentinel this
         // walk could then mistake for a line.
         let previous = (self.current_fn_line, self.current_fn_skipped);
-        self.current_fn_line = Some(line_number);
-        self.current_fn_skipped = false;
-        Some(previous)
+        if is_test_or_helper_attr(attrs) {
+            self.current_fn_skipped = true;
+        } else {
+            self.current_fn_line = Some(sig.ident.span().start().line);
+            self.current_fn_skipped = false;
+        }
+        previous
     }
 
     /// Restores the state [`Self::enter_function`] displaced. "No enclosing
     /// function" is a value of its own rather than a flattened sentinel, so a
     /// nested function cannot leave the outer one reporting its line.
-    fn exit_function(&mut self, previous: Option<(Option<usize>, bool)>) {
-        if let Some((line_number, allowed)) = previous {
-            self.current_fn_line = line_number;
-            self.current_fn_skipped = allowed;
-        }
+    const fn exit_function(&mut self, previous: (Option<usize>, bool)) {
+        (self.current_fn_line, self.current_fn_skipped) = previous;
     }
 
     /// Reports a finding when one statement carries more than

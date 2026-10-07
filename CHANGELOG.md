@@ -25,9 +25,42 @@ change since 1.1.0 is inside its tests).
   `EnvDelta::Clear` on the non-exhaustive `EnvDelta` (#337). **Behaviour
   change** a caller will see: a `Host::run` still queued for a permit when
   `Host::cancel` fires is always `Refused`, never `Cancelled` (#278 row 7).
-- **lgwks_deps 3.0.1** — fix: a declared `A/B` licence is read as `A OR B`
+- **lgwks_deps 3.0.1** — fixes: a declared `A/B` licence is read as `A OR B`
   (#354), so a package written in Cargo's deprecated spelling passes against its
-  SPDX approval; every alternative is still judged.
+  SPDX approval, and every alternative is still judged. The scan's
+  `long-try-chain` rule no longer charges a `#[test]` function nested in
+  production code to the function around it.
+
+### lgwks_std — a request to an IP address starts no thread
+
+ureq bounds a lookup by running it on a detached OS thread, and did so for every
+request, including one whose host is an IP literal and needs no lookup. Each
+`http::get` to `127.0.0.1` therefore paid a thread start and left a thread it
+never joined. A hop to an IP literal now sets no resolve timeout, so ureq parses
+it on the calling thread; a host name keeps the bound, and the agent is built
+per hop because a redirect can move a call from a literal to a name. Measured by
+`tests/http_alloc.rs`'s interleaved loopback probe on macOS arm64 (501 pairs):
+client p50/p95/p99 104/116/129 us before and 84/92/99 us after, against a bare
+exchange's 68/75/81 us; the probe's 1,000-request concurrency sweep took the
+whole test from 7.7 s to 1.0 s. On a loaded Linux runner the client median had
+reached 119 us against a bare 11 us and failed the probe's 8x bound on main.
+**Not claimed:** a call with `Options::deadline` set still starts the thread,
+because ureq times the resolve phase against the hop's global timeout.
+
+### lgwks_deps — the innermost function decides `long-try-chain`
+
+The rule exempts test functions (`#[test]`, `#[tokio::test]`, any `#[test_*]`),
+but only at the top level. An exempt function nested inside a production
+function left the walk's state alone, so its chains were reported against the
+enclosing function's line. The exempt function now marks the walk skipped until
+it ends, and a production function nested inside a test is still inspected
+under its own line. A new seeded family, `tests/it/sim_scan_detectors.rs`, found
+this. It generates whole files of `allow` lists, `?` statements and documented
+functions, and holds ALLOW-SILENCE, `long-try-chain` and `tautological-doc` to an
+independent model, matching line, rule and evidence text, across 1,024 mixed
+files and 28 property families: permutation, line shifts, 64 concurrent tenants,
+torn input, and disk against text. With the old walk,
+`a_test_function_nested_in_production_code_is_exempt` fails on its first seeds.
 
 ### lgwks_std — a predicate walk with per-entry `lstat` (#343)
 
