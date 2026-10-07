@@ -120,12 +120,13 @@ runs:
     # The runner instances share this machine's cores. A test job that took
     # every core, beside three others doing the same, put the load average at
     # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
-    # Each job gets its share: twice the cores divided by the runner instances.
-    # A test body mostly waits (on a child process, a pipe, a file sync), so one
-    # thread per core left cores idle — 2,791 bot tests took 605 s at two
-    # threads beside five busy jobs — while every job taking every core was the
-    # 60-70 load. Twice the share keeps the machine near one runnable thread
-    # per core when every instance is busy.
+    # Each job gets its share: three times the cores divided by the runner
+    # instances. A test body mostly waits (on a child process, a pipe, a file
+    # sync), so one thread per core left cores idle — 2,791 bot tests took 605 s
+    # at two threads beside five busy jobs — while every job taking every core
+    # was the 60-70 load. Three times, not two, because only seven of the eleven
+    # instances run test suites; the other four check, lint or time, and at
+    # twice the share each suite would get the two threads measured above.
     - name: Test threads for this runner's share of the machine
       shell: bash
       run: |
@@ -133,7 +134,7 @@ runs:
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
         runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
         cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-        threads=$(( 2 * cores / (runners > 0 ? runners : 1) ))
+        threads=$(( 3 * cores / (runners > 0 ? runners : 1) ))
         threads=$(( threads > 1 ? threads : 2 ))
         echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
         echo "${cores} cores, ${runners} runner instances: ${threads} test threads"

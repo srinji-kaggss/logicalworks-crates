@@ -409,3 +409,5 @@ live changed. The Linux container gets the same with a tmpfs `/tmp`.
 | 37607930551 | 3f331527 | 14 jobs, per-instance targets (cold), HFS+ RAM temp | cancelled | — | fail: six instances compiled every dependency at once; four jobs timed out compiling |
 | 37613720499 | 3a2a855f | + one shared sccache, server on a job's RAM disk | cancelled | — | fail: the next job ejected the server's temp dir; HFS+ decomposed names broke two walk simulations |
 | 37616318637 | 4993b33d | + APFS RAM temp, sccache with every target as a base directory | cancelled | — | fail: five jobs timed out compiling at load 70-85; jobs landed on instances cold for their feature sets, and sccache hit 0 of 195 Rust compiles across target directories, so it was removed and jobs pinned |
+| 37619560219 #1 | 7b48f3f1 | 14 jobs pinned to 6 instances (cold per instance), APFS RAM temp | 20.5 min | 5,879 | fail: the feature matrix reached its timeout compiling |
+| 37619560219 #2 | 7b48f3f1 | same commit, warm | 10.0 min | 2,470 | fail: both Linux jobs found no engine through the Docker context; the no-default job queued 259 s behind another on its instance |

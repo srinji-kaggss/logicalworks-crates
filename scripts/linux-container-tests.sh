@@ -53,10 +53,14 @@ if [ -f "${cargo_home}/config.toml" ]; then
     config_mount=(--volume "${cargo_home}/config.toml:/usr/local/cargo/config.toml:ro")
 fi
 
+# The engine is named by its socket rather than by the current Docker context:
+# a context is per-user client state that another tool can switch, and a run
+# whose engine depended on it found none at all (run 37619560219 attempt 2).
 if [ "$(uname -s)" = Darwin ]; then
-    engine="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
-    if [ "${engine}" != OrbStack ]; then
-        echo "linux-container-tests: the container engine is '${engine:-unreachable}', not OrbStack; start OrbStack (\`orb start\`) and select its context (\`docker context use orbstack\`)" >&2
+    export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
+    if ! engine="$(docker info --format '{{.OperatingSystem}}' 2>&1)" || [ "${engine}" != OrbStack ]; then
+        echo "linux-container-tests: no OrbStack engine at ${DOCKER_HOST}: ${engine}" >&2
+        echo "linux-container-tests: start OrbStack (\`orb start\`); the Linux leg runs on OrbStack only" >&2
         exit 2
     fi
 fi

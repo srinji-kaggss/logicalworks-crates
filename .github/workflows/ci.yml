@@ -21,14 +21,17 @@ on:
 # acceptance receipt wait on another job: each of them reads a result instead of
 # building one.
 #
-# Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-6`,
+# Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-11`,
 # runner labels). An instance keeps one target directory and one container
 # target volume; a job free to land on any instance found that instance cold
 # for its feature sets, so each of the six had to build every job's sets before
 # any run was warm, and the first two runs on this layout spent their budgets
 # compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
 # an instance only ever holds its own jobs' builds, and the second run is warm.
-# The jobs that build nothing run anywhere.
+# The jobs that build nothing run anywhere. Eleven instances, one per job
+# that builds: with six, a warm run's jobs queued behind one another and the
+# run took 601 s although no job took more than 450 s (run 37619560219
+# attempt 2).
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -292,7 +295,7 @@ jobs:
   # narrow feature sets of the two crates, so they share one job's target.
   tests_nodefault:
     name: Tests (lgwks-bot no default features, lgwks-std per feature)
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
     timeout-minutes: 15
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -336,7 +339,7 @@ jobs:
   # target volume.
   tests_linux:
     name: Tests (Linux container)
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-3' || 'lwc-4' }}"]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -358,7 +361,7 @@ jobs:
   clippy:
     name: Clippy, docs and release gates
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -432,10 +435,6 @@ jobs:
         # compile off Apple targets. Build with the declared set so an
         # unbuildable declaration fails here instead of on docs.rs.
         run: python3 scripts/ci_local.py --lane docsrs-metadata
-      - name: Digest constant-time equality (dudect)
-        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
-      - name: Async fairness gate and concurrency ladder
-        run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
 
   # Every compile-only matrix: feature sets, targets, grammars, the Metal
   # storefronts and the standalone consumer packages. Each is `cargo check` or a
@@ -443,7 +442,7 @@ jobs:
   feature-matrix:
     name: Feature, target and storefront matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -477,6 +476,61 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
+      - name: Check lgwks-std across the declared target matrix
+        # `cargo check --target <t>` for every declared target and crate. The
+        # script installs the target with rustup first, requires the Rust-only
+        # surface everywhere, and records with its exact error any check this
+        # runner has no C toolchain to reach.
+        run: ./scripts/check-target-matrix.sh
+      - name: Check normal GPUI renderer feature
+        # The fixture is its own workspace, so by default it builds into its
+        # own target directory and compiles the GPUI stack a second time.
+        # Pointing it at the directory the first check just filled reuses
+        # every unit whose features match.
+        run: >
+          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
+          cargo check --locked
+          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --target-dir "${CARGO_TARGET_DIR:-target}"
+          --no-default-features --features gpui --example gpui
+      - name: Check Candle Metal storefront features
+        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
+      # Standalone consumer packages, one cargo build per storefront family.
+      - name: Build storefront consumers
+        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
+
+  # The two release-build timing gates, apart from the lints: each measures
+  # wall time, and a measurement taken beside a clippy pass on the same
+  # instance measures the clippy pass.
+  timing_gates:
+    name: Timing gates (dudect, async fairness)
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+      - name: Digest constant-time equality (dudect)
+        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
+      - name: Async fairness gate and concurrency ladder
+        run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
+
+  # The lgwks-bot and lgwks-ast compile matrices and the grammar execution, apart
+  # from the lgwks-std, lgwks-deps and target matrices: together the two halves
+  # were the longest job of a warm run (450 s, run 37619560219 attempt 2), and
+  # neither half builds what the other does.
+  feature-matrix-bot-ast:
+    name: Feature matrix (lgwks-bot, lgwks-ast)
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-11]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -530,28 +584,6 @@ jobs:
             --features lang-bash,lang-c,lang-cpp,lang-csharp,lang-css,lang-dart,lang-elixir,lang-go,lang-haskell,lang-hcl,lang-html,lang-java,lang-javascript,lang-json,lang-kotlin,lang-lua,lang-md,lang-nix,lang-php,lang-python,lang-ruby,lang-rust,lang-scala,lang-solidity,lang-swift,lang-tsx,lang-typescript,lang-yaml
           execute cargo test --locked -p lgwks_ast --lib --all-features
           exit "$failed"
-      - name: Check lgwks-std across the declared target matrix
-        # `cargo check --target <t>` for every declared target and crate. The
-        # script installs the target with rustup first, requires the Rust-only
-        # surface everywhere, and records with its exact error any check this
-        # runner has no C toolchain to reach.
-        run: ./scripts/check-target-matrix.sh
-      - name: Check normal GPUI renderer feature
-        # The fixture is its own workspace, so by default it builds into its
-        # own target directory and compiles the GPUI stack a second time.
-        # Pointing it at the directory the first check just filled reuses
-        # every unit whose features match.
-        run: >
-          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
-          cargo check --locked
-          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
-          --target-dir "${CARGO_TARGET_DIR:-target}"
-          --no-default-features --features gpui --example gpui
-      - name: Check Candle Metal storefront features
-        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
-      # Standalone consumer packages, one cargo build per storefront family.
-      - name: Build storefront consumers
-        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
 
   appcui-native:
     name: AppCUI native storefront
