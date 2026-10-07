@@ -1053,9 +1053,14 @@ Each of these was a shipped defect. Treat the list as the spec.
   and Persian digits, a decimal comma and a grouping space are refused. The one
   reader that leaves the process, `ps -o lstart` behind `identify_process`, prints
   in its caller's language and zone, so `run_ps` pins `TZ=UTC0` and `LC_ALL=C`.
-  A JSON number this crate wrote reads back as the same bits: `serde_json`'s
-  default fast path read some exact decimals one ULP off, so it is built with
-  `float_roundtrip`. **Not claimed:** a locale the host lacks is not exercised,
+  The in-process readers consult no locale, so the child-locale re-run is a
+  regression guard for them, not a discriminating test; it discriminates the
+  `ps` pin.
+  A JSON or RON number this crate wrote reads back as the same bits, for every
+  finite `f64` (drawn as raw bits, subnormals and both zeros included):
+  `serde_json`'s default fast path read some exact decimals one ULP off, so it is
+  built with `float_roundtrip`, and the sweep fails on its first seeds without
+  it. **Not claimed:** a locale the host lacks is not exercised,
   because libc falls back to `C` for it. · why: #278 row 4 · enforced by:
   `tests/it/sim_locale.rs` (`locale_band_00..07`,
   `the_whole_sweep_replays_in_one_process`,
@@ -1841,8 +1846,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/it/sim_cancel_under_load.rs` (`cancel_band_00..07`: 1,000 flows per
   seed over 1,000 seeds, cancelled at a seeded driver poll; every flow reports,
   the host's counters agree with the reports, no body outlives the call or
-  starts after the stop, and each band replays to one trace hash — all eight
-  fail on the replay with the post-stop refusal removed)
+  starts after the stop (each body reads the stop on its first poll), every
+  admitted flow and every `Cancelled` one started its body, and each band
+  replays to one trace hash — all eight fail on their first sweep, at the
+  `Cancelled` oracle, with the post-stop refusal removed)
 - **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
   so no executor thread ever waits inside a flush. The whole ordered step — the
   in-memory checks, the length fence, the write, the `sync_all` and the fold into

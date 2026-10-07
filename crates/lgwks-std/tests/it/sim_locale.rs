@@ -203,25 +203,36 @@ fn locale_case(seed: u64, trace: &mut u64) -> TestResult {
 }
 
 /// The JSON and RON number readers: a dyadic fraction with one exact decimal
-/// spelling round-trips to its bits, a whole `i64` round-trips, and a localized
-/// spelling is not a number.
+/// spelling and an arbitrary finite `f64` (any sign, subnormals included, drawn
+/// as raw bits) each round-trip to their bits, a whole `i64` round-trips, and a
+/// localized spelling is not a number.
 #[cfg(any(feature = "json", feature = "ron"))]
 fn numbers(seed: u64, rng: &mut Seeded, trace: &mut u64) -> TestResult {
     let numerator = i32::from_le_bytes(rng.next_u64().to_le_bytes()[..4].try_into()?);
     let shift = u32::try_from(rng.below(11)?)?;
     let denominator = f64::from(1_u16.checked_shl(shift).ok_or("the shift fits")?);
-    let value = f64::from(numerator) / denominator;
+    let dyadic = f64::from(numerator) / denominator;
+    // A non-finite draw keeps its sign and mantissa with the exponent cleared,
+    // which is a finite subnormal or zero, so every draw is a number JSON holds.
+    let raw = f64::from_bits(rng.next_u64());
+    let any = if raw.is_finite() {
+        raw
+    } else {
+        f64::from_bits(raw.to_bits() & !0x7FF0_0000_0000_0000)
+    };
     let whole = i64::from_le_bytes(rng.next_u64().to_le_bytes());
     #[cfg(feature = "json")]
     {
-        let text = lgwks_std::json::to_string(&value)?;
-        let back: f64 = lgwks_std::json::from_str(&text)?;
-        assert_eq!(
-            back.to_bits(),
-            value.to_bits(),
-            "seed {seed:#018x}: JSON {text} did not read back as {value}"
-        );
-        fold_text(trace, &text);
+        for value in [dyadic, any] {
+            let text = lgwks_std::json::to_string(&value)?;
+            let back: f64 = lgwks_std::json::from_str(&text)?;
+            assert_eq!(
+                back.to_bits(),
+                value.to_bits(),
+                "seed {seed:#018x}: JSON {text} did not read back as {value}"
+            );
+            fold_text(trace, &text);
+        }
         let text = lgwks_std::json::to_string(&whole)?;
         let back: i64 = lgwks_std::json::from_str(&text)?;
         assert_eq!(back, whole, "seed {seed:#018x}: JSON {text} lost its value");
@@ -235,14 +246,16 @@ fn numbers(seed: u64, rng: &mut Seeded, trace: &mut u64) -> TestResult {
     }
     #[cfg(feature = "ron")]
     {
-        let text = lgwks_std::ron::to_string(&value)?;
-        let back: f64 = lgwks_std::ron::from_str(&text)?;
-        assert_eq!(
-            back.to_bits(),
-            value.to_bits(),
-            "seed {seed:#018x}: RON {text} did not read back as {value}"
-        );
-        fold_text(trace, &text);
+        for value in [dyadic, any] {
+            let text = lgwks_std::ron::to_string(&value)?;
+            let back: f64 = lgwks_std::ron::from_str(&text)?;
+            assert_eq!(
+                back.to_bits(),
+                value.to_bits(),
+                "seed {seed:#018x}: RON {text} did not read back as {value}"
+            );
+            fold_text(trace, &text);
+        }
         let text = lgwks_std::ron::to_string(&whole)?;
         let back: i64 = lgwks_std::ron::from_str(&text)?;
         assert_eq!(back, whole, "seed {seed:#018x}: RON {text} lost its value");

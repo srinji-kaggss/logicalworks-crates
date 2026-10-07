@@ -70,7 +70,20 @@ read every tenant's signing key (logical_ci#84).
 - **lgwks_std — a JSON number reads back as the bits that wrote it.**
   `serde_json`'s default parser read some exact decimals one ULP off
   (`997272.1318359375` came back as the next float up); `lgwks_std` now builds
-  it with `float_roundtrip`, which adds no crate. Found by the locale sweep below.
+  it with `float_roundtrip`, which adds no crate. Found by the locale sweep below,
+  which draws an arbitrary finite `f64` as raw bits (subnormals included) on
+  every seed and fails on its first seeds without the feature. Parse cost with
+  the feature on was not measured here.
+- **lgwks_deps — a declared `A/B` licence is read as `A OR B` (#354).** Cargo
+  documents `/` in `license` as the deprecated spelling of `OR`, and crates.io
+  still serves packages written that way (`foundationdb` 0.11 declares
+  `MIT/Apache-2.0`). `lgwks-deps check` read the slash literally: one unknown
+  identifier, and a drift from an approval recorded as `MIT OR Apache-2.0`. Both
+  licence checks now read the declared side as the `OR` expression, so that
+  package passes against its SPDX approval. Every alternative is still judged:
+  `GPL-3.0/MIT` with only `MIT` accepted is still refused naming `GPL-3.0`. The
+  register itself stays SPDX and its parser still refuses a slash
+  (INV-DEP-16).
 
 ### Tests
 

@@ -401,7 +401,7 @@ The state of that, honestly:
 | A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
 | Clock skew between two hosts | ❌ | no coverage |
 | A credential expired mid-run | ✅ tested | `GrantSet::grant_expiring` + `Auth::check`: a lapsed proof is `BotError::CredentialExpired` (`Refused`, `RetryClass::Never`), an upstream 401/403/404 is `BotError::CredentialRejected` carrying a `NeedSet` repair (`cap::is_credential_status`, `GhError::repair`), wired through `PrSnapshotSource::poll` and every `gh` flow; `tests/it/credential.rs` spends a real credential's life on a real wall clock over a real file, `gh_binding.rs` and `sim_review_path.rs` drive a real `gh` child refusing the token, `tests/it/sim_credential.rs` sweeps 1,024 seeds |
-| The locale changed a date or number format | ✅ tested | every `lgwks_std` reader of human text (RFC 3339, hex, percent, JSON/RON numbers) answers the same under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP` in their own time zones and refuses Arabic-Indic and Persian digits, a decimal comma and a grouping space; the one reader that leaves the process, `ps -o lstart`, is pinned to `TZ=UTC0 LC_ALL=C`. `tests/it/sim_locale.rs` sweeps 1,000 seeds in-process and re-runs the sweep and a process-start read in a child under each locale (INV-STD-LOCALE-1); removing the `ps` pin fails it |
+| The locale changed a date or number format | ✅ tested (macOS) | every `lgwks_std` reader of human text (RFC 3339, hex, percent, JSON/RON numbers) answers the same under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP` in their own time zones and refuses Arabic-Indic and Persian digits, a decimal comma and a grouping space; the one reader that leaves the process, `ps -o lstart`, is pinned to `TZ=UTC0 LC_ALL=C`. `tests/it/sim_locale.rs` sweeps 1,000 seeds in-process and re-runs the sweep and a process-start read in a child under each locale (INV-STD-LOCALE-1); removing the `ps` pin fails it. The in-process readers consult no locale, so for them the child re-run guards against a future libc call rather than discriminating one; a host without these locales (the Linux container) falls back to `C` and passes without exercising them |
 | Two operators edited one record | ❌ | no coverage |
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |
 | Accessibility tree mutated during a read | ❌ | no coverage |
@@ -701,7 +701,7 @@ request keys (`request_key::two_tenants_never_share_a_request_run`); forced
 refreshes (`observe_refresh`), the journal at scale
 (`journal_scale::concurrent_tenant_appends_scale_with_isolation`), clocks
 (`sim_clock_wiring`) and inspection (`inspect_wiring`). Two tenants through one
-journal directory under a mid-run kill are `sim_tenant_journal_kill`
+journal directory, each in its own journal file, under a mid-run kill are `sim_tenant_journal_kill`
 (`kill_band_00..07`, 1,000 seeds). The kill lands between appends, tears the
 in-flight frame at a seeded byte, or loses only its acknowledgment. After the
 restart each tenant holds exactly its acknowledged prefix plus a landed frame,
@@ -712,7 +712,9 @@ present exactly once. Capacity is admitted per tenant by
 `a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
 `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
 
-*Not covered:* the kill is a cut of the file a real writer produced, not a
+*Not covered:* two tenants appending to one journal *file*; each tenant owns its
+own file, so the run proves the kill and the restart keep each file's prefix,
+not that a shared file separates tenants. The kill is a cut of the file a real writer produced, not a
 `SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
 journal for real). A `script::Scope`'s tenant does not reach any admission,
 because `each` and `FanOut` drive their bodies on the awaiting task and take no

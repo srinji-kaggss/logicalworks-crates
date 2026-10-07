@@ -12,7 +12,12 @@
 //! - every flow produced a report, and its disposition is `Succeeded`,
 //!   `Cancelled` or `Refused`, never a failure the cancel was turned into;
 //! - a `Succeeded` flow ran every step and returned its own input;
-//! - a `Refused` flow's body never started, and no body starts after the stop;
+//! - a `Refused` flow's body never started, and no body starts after the stop
+//!   (each body reads the driver's stop flag on its first poll and counts a
+//!   late start);
+//! - every admitted flow started its body, and so did every `Cancelled` one: a
+//!   run admitted and then refused entry at its first step is the defect below,
+//!   and this oracle sees it whatever order the stop's wakes arrived in;
 //! - a run still queued at the stop is `Refused` whatever order the stop's
 //!   wakes arrive in: a permit a stopped run releases is not an admission for a
 //!   queued one. Before that rule a queued run polled after a release was
@@ -143,16 +148,23 @@ fn cancel_case(sim: &mut sim::Sim, reached: &mut Reached) -> TestResult {
     let completed = flags();
     let work = {
         let live = Arc::clone(&live);
+        let stopped = Arc::clone(&stopped);
+        let late = Arc::clone(&late);
         let started = Arc::clone(&started);
         let completed = Arc::clone(&completed);
         task(
             "cancellable",
             move |scope: Scope, (index, steps): (usize, u32)| {
                 let live = Arc::clone(&live);
+                let stopped = Arc::clone(&stopped);
+                let late = Arc::clone(&late);
                 let started = Arc::clone(&started);
                 let completed = Arc::clone(&completed);
                 async move {
                     let _live = Live::enter(&live);
+                    if stopped.load(Ordering::Relaxed) {
+                        late.fetch_add(1, Ordering::Relaxed);
+                    }
                     set(&started, index);
                     for _ in 0..steps {
                         scope.checkpoint()?;
@@ -200,6 +212,10 @@ fn cancel_case(sim: &mut sim::Sim, reached: &mut Reached) -> TestResult {
                 counts.succeeded = counts.succeeded.saturating_add(1);
             }
             Disposition::Cancelled => {
+                assert!(
+                    flag(&started, index),
+                    "a cancelled flow {index} was admitted, so its body started"
+                );
                 counts.cancelled = counts.cancelled.saturating_add(1);
             }
             Disposition::Refused => {
@@ -233,6 +249,12 @@ fn cancel_case(sim: &mut sim::Sim, reached: &mut Reached) -> TestResult {
         admission.refused(),
         u64::try_from(counts.refused)?,
         "the host's refusals are the refused reports"
+    );
+    let bodies = (0..FLOWS).filter(|&index| flag(&started, index)).count();
+    assert_eq!(
+        admission.admitted(),
+        u64::try_from(bodies)?,
+        "every admitted flow started its body, and no other did"
     );
     assert_eq!(live.load(Ordering::Relaxed), 0, "no body outlives the call");
     assert_eq!(

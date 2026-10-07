@@ -234,6 +234,12 @@ fn the_public_pool_journey_configures_drains_joins_and_then_refuses() {
     }
     let report = shutdown_blocking_pool(TOO_SHORT);
     let first_drained = matches!(report, PoolShutdown::Drained { .. });
+    // The threads the first shutdown left accounted as live; nothing starts a
+    // thread between the two shutdowns, so the second must join at least these.
+    let left_running = match report {
+        PoolShutdown::DeadlineExceeded { running, .. } => running,
+        _ => 0,
+    };
     if gated == 0 {
         // An idle pool has no work to wait for, but it does have the threads
         // the burst left parked: the shutdown wakes them to leave and joins
@@ -243,7 +249,11 @@ fn the_public_pool_journey_configures_drains_joins_and_then_refuses() {
         // journey this branch had never run, and it asserted zero threads.
         assert!(
             matches!(report, PoolShutdown::Drained { threads } if threads <= ceiling)
-                || matches!(report, PoolShutdown::DeadlineExceeded { queued: 0, .. }),
+                || matches!(
+                    report,
+                    PoolShutdown::DeadlineExceeded { joined, running, queued: 0 }
+                        if running > 0 && joined.saturating_add(running) <= ceiling
+                ),
             "seed {seed:#x}: an idle pool joins its parked threads and has no job to report, \
              got {report:?}"
         );
@@ -277,6 +287,12 @@ fn the_public_pool_journey_configures_drains_joins_and_then_refuses() {
             assert_eq!(
                 threads, 0,
                 "seed {seed:#x}: the first shutdown drained the idle pool, so nothing is left"
+            );
+        } else {
+            assert!(
+                threads >= left_running,
+                "seed {seed:#x}: the deadline left {left_running} threads live and the \
+                 drain joined only {threads}"
             );
         }
     }

@@ -10,7 +10,7 @@
 //! neither an `allow` nor tests of its own: the families that draw from it are
 //! its tests.
 
-use crate::seeded_sweep::{fold, fold_usize, next_index, next_seed};
+use crate::seeded_sweep::{fold, fold_usize, next_seed};
 use lgwks_std::seeded::Seeded;
 
 /// The printable ASCII alphabet a text-shaped payload is drawn from.
@@ -76,15 +76,20 @@ pub fn repeated(byte: u8, len: usize) -> Vec<u8> {
     vec![byte; len]
 }
 
-/// An index in `0..bound`, drawn from the sweep stream rooted at `state`.
+/// An index in `0..bound`, drawn without bias from `state`.
 ///
-/// The whole word is drawn and reduced by the bound, so a bound wider than one
-/// byte of the stream still gets a whole-word draw. A zero bound has no entry
+/// `Seeded::below` rejects the residues a plain `word % bound` over-represents,
+/// so every index is equally likely at every bound. A zero bound has no entry
 /// to name and yields `0`; every caller indexes a table whose length it has
 /// already checked, so an empty table is not a case this draws for.
 #[must_use]
 pub fn below(state: &mut Seeded, bound: usize) -> usize {
-    next_index(state).rem_euclid(bound.max(1))
+    // The bound is at least one, so the draw is never refused, and the index
+    // is below a `usize`, so it converts back: the `0` arm is a bound of one.
+    match u64::try_from(bound.max(1)).map(|wide| state.below(wide).map(usize::try_from)) {
+        Ok(Ok(Ok(index))) => index,
+        Ok(Ok(Err(_)) | Err(_)) | Err(_) => 0,
+    }
 }
 
 /// Folds every byte of `bytes` into the running trace.
