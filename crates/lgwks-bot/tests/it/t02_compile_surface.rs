@@ -5,7 +5,7 @@
 //! | Test | What it pins |
 //! |---|---|
 //! | `a_correct_local_borrowed_non_send_consumer_compiles` | the probe harness can compile a valid consumer, so a negative probe cannot be a missing-dependency failure in disguise |
-//! | `a_source_condition_action_mismatch_is_refused` | the typed chain builder refuses a condition/action that do not read the source's output |
+//! | `a_source_condition_action_mismatch_is_refused_t02` | the typed chain builder refuses a condition/action that do not read the source's output |
 //! | `a_cross_schema_result_binding_is_refused` | binding a `Report<T>` from one schema into a `Report<U>` is a type error |
 //! | `a_local_borrowed_non_send_body_runs_on_the_host` | an `Rc<RefCell<_>>`-holding body over a borrowed `&[u8]`, with an await in the middle, compiles and runs |
 //!
@@ -132,7 +132,7 @@ fn a_correct_local_borrowed_non_send_consumer_compiles() -> TestResult {
 /// A source/condition/action type mismatch in the typed chain builder is a
 /// compile error, not a downcast miss at tick time.
 #[test]
-fn a_source_condition_action_mismatch_is_refused() -> TestResult {
+fn a_source_condition_action_mismatch_is_refused_t02() -> TestResult {
     let output = compile_probe("t02-chain-mismatch", "", MISMATCHED_CHAIN)?;
     // The condition reads `String` while the source yields `u32`, so the
     // `Evaluate<S::Output>` bound is unsatisfied: E0277 naming the trait.

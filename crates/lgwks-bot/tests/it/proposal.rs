@@ -3,10 +3,10 @@
 //! | Row | Claim | Falsifier below |
 //! |---|---|---|
 //! | T26 | malformed output and instruction injection cannot change trusted intent, install tools or obtain credentials; sandbox-escape refusals stay observable | `a_malformed_payload_never_becomes_work`, `an_injected_instruction_is_refused_by_name`, `a_tool_install_is_refused_and_the_surface_is_unchanged`, `a_credential_read_is_refused`, `a_sandbox_escape_stays_an_observable_refusal`, `an_unknown_operation_is_refused_whatever_asked_for_it` |
-//! | T27 | a context reset preserves completed work, corrections, Unknown effects and evidence; truncated data never becomes a full-coverage claim | `a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`, `a_truncated_payload_never_becomes_a_full_coverage_claim`, `a_checkpoint_round_trips_through_the_run_store` |
+//! | T27 | a context reset preserves completed work, corrections, Unknown effects and evidence; truncated data never becomes a full-coverage claim | `a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27`, `a_truncated_payload_never_becomes_a_full_coverage_claim`, `a_checkpoint_round_trips_through_the_run_store` |
 //! | T28 | parallel workers cannot read another tenant's same-digest artifact; conflicting writes are serialized while independent reads progress | `two_tenants_on_one_digest_stay_isolated`, `conflicting_writes_to_one_key_are_serialized_and_idempotent`, `reads_progress_while_a_write_is_in_flight` |
-//! | T29 | repeated unchanged failure reaches finite typed intervention; new evidence is recorded and does not erase root spend | `repeated_unchanged_failure_reaches_a_finite_intervention`, `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`, `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`, `a_plan_budget_bounds_repair_across_runs` |
-//! | T35 | exit-zero-with-invalid-result, done-without-evidence and draft-ok-publish-failed report distinct true outcomes | `the_three_untrue_successes_report_distinct_outcomes` |
+//! | T29 | repeated unchanged failure reaches finite typed intervention; new evidence is recorded and does not erase root spend | `repeated_unchanged_failure_reaches_a_finite_intervention_t29`, `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`, `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`, `a_plan_budget_bounds_repair_across_runs` |
+//! | T35 | exit-zero-with-invalid-result, done-without-evidence and draft-ok-publish-failed report distinct true outcomes | `the_three_untrue_successes_report_distinct_outcomes_t35` |
 //!
 //! Every row also has at least one falsifier below that drives a real
 //! `Host::run` whose task body calls `script::admit`, because a capability
@@ -335,7 +335,7 @@ fn a_refusal_is_attributable_to_its_exact_bytes() -> TestResult {
 // the `ephemeral` feature provides; without it every such run is refused.
 #[cfg(feature = "ephemeral")]
 #[test]
-fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence() -> TestResult {
+fn a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27() -> TestResult {
     // The one scratch directory the durable families share: named by random
     // bytes rather than a reused pid, and removed when the guard drops.
     let scratch = crate::scratch::Scratch::new("proposal-t27-reset")?;
@@ -864,7 +864,7 @@ fn an_oversized_artifact_is_refused_and_the_store_is_unchanged() -> TestResult {
 /// Repeated unchanged failure reaches a finite typed intervention, and never an
 /// unbounded stream of repairs.
 #[test]
-fn repeated_unchanged_failure_reaches_a_finite_intervention() -> TestResult {
+fn repeated_unchanged_failure_reaches_a_finite_intervention_t29() -> TestResult {
     let limits = LedgerLimits::new(3, 8);
     let mut ledger = RepairLedger::new(limits, provenance(b"op=read-report"));
 
@@ -1013,7 +1013,7 @@ fn a_plan_budget_bounds_repair() -> TestResult {
 /// The row's three arms report three distinct outcomes, and none of them is
 /// success.
 #[test]
-fn the_three_untrue_successes_report_distinct_outcomes() -> TestResult {
+fn the_three_untrue_successes_report_distinct_outcomes_t35() -> TestResult {
     let surface = surface()?;
     let decoder = decoder();
 

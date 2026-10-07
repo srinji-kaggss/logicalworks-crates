@@ -1114,7 +1114,7 @@ band_family::band_family! {
     tenants_drift_independently_band_08 => tenants_drift_independently, 8;
     tenants_drift_independently_band_09 => tenants_drift_independently, 9;
     tenants_drift_independently_band_10 => tenants_drift_independently, 10;
-    every_axis_is_distinguishable_band_11 => every_axis_is_distinguishable, 11;
+    every_axis_is_distinguishable_band_11_t15 => every_axis_is_distinguishable, 11;
     a_refusal_leaves_the_store_byte_identical_band_12 => a_refusal_leaves_the_store_byte_identical, 12;
     a_refusal_leaves_the_store_byte_identical_band_13 => a_refusal_leaves_the_store_byte_identical, 13;
     a_pre_version_store_is_refused_naming_both_versions_band_16 => a_pre_version_store_is_refused_naming_both_versions, 16;

@@ -39,6 +39,7 @@ mod sim_descendants;
 mod sim_encoding;
 mod sim_fs_capability;
 mod sim_fs_walk;
+mod sim_fs_walk_prune;
 mod sim_glob_sweep;
 mod sim_hash;
 mod sim_hex;

@@ -9,6 +9,38 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — a predicate walk with per-entry `lstat` (#343)
+
+A caller that wanted to skip `.git` or `target` had to walk them and filter
+afterwards, paying every read and every budget charge, and then stat each kept
+path a second time to learn its size or mtime.
+
+- **lgwks_std** — additive, under `fs` (no new feature, no dependency):
+  `fs::walk_dir_entries` and `fs::walk_dir_entries_tolerant` take a predicate
+  `FnMut(&Path, FileKind) -> Descend`; `Descend::{Enter, Skip, Stop}` decides
+  per admitted entry whether the walk goes below it. A skipped subtree is never
+  listed, charged or omitted; a stop is reported by the new
+  `WalkReport::stopped`. Each `fs::WalkEntry` carries the walk's own `lstat`
+  (`kind`, `metadata`) and `relative_path` beside `path`. INV-FS-7.
+- `fs::FileKind` now lives in `fs` (always on); `fs::capability::FileKind` is a
+  re-export of the same type, so existing code compiles unchanged.
+- `WalkReport` gained a defaulted parameter, `WalkReport<E = PathBuf>`; every
+  existing path walk returns `WalkReport<PathBuf>` as before. The path walks run
+  the same engine with an always-enter predicate and stat nothing new.
+
+### lgwks_std — the HTTP latency probe measures the client, not the host
+
+- `tests/http_alloc.rs` held the loopback p99 under a fixed 50 ms, a number
+  that measures the machine: with six CI runners on one host it read 198 ms
+  with nothing wrong in the read path. The probe now pairs each request with a
+  bare loopback exchange against the same server, interleaved and alternating
+  which goes first, and holds the client's median within 8x the bare median
+  and its p99 under the larger of 50 ms and 8x the bare p99 (measured ratios
+  1.6 and 2.1). A 40 ms per-request stall now fails the median bound (47,008
+  us against 8 x 190 us), where the old 50 ms ceiling passed it. The probe
+  writes its measurements through a locked stdout and propagates a write
+  error instead of `println!`.
+
 ### lgwks_bot — a supervised child can start from an empty environment (#337)
 
 A supervised child inherited the supervisor's whole environment, less whatever

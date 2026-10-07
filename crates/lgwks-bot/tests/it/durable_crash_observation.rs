@@ -409,13 +409,13 @@ const PROBE_RUNG_ENV: &str = "LGWKS_PROBE_RUNG";
 /// this one, which kills the same child one rung later and gets the opposite
 /// answer — so this is not a blanket "everything recovers as Prepared".
 #[test]
-fn a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared() -> TestResult {
+fn a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14() -> TestResult {
     if dispatch_to_boundary_probe()? {
         return Ok(());
     }
     let dir = scratch_dir("ack-before-dispatch")?;
     let (journal_path, _guard) = spawn_boundary_probe(
-        "a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared",
+        "a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14",
         &dir,
         ProbeRungs::AckBeforeDispatch,
     )?;
