@@ -1042,6 +1042,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   `rfc_year_boundaries_refuse_extended_output_without_clamping`,
   `calendar_roundtrips_endpoints_neighbors_and_overflow_transition`) and
   `time::parse::tests::conversion_seam_preserves_platform_range_failure`
+- **INV-STD-LOCALE-1** A reader of human text answers the same under every
+  locale and time zone, and refuses another locale's spelling rather than
+  guessing it. RFC 3339, hex, percent escapes and JSON/RON numbers read through
+  no libc formatting, so `LC_ALL`, `LANG` and `TZ` cannot reach them; Arabic-Indic
+  and Persian digits, a decimal comma and a grouping space are refused. The one
+  reader that leaves the process, `ps -o lstart` behind `identify_process`, prints
+  in its caller's language and zone, so `run_ps` pins `TZ=UTC0` and `LC_ALL=C`.
+  A JSON number this crate wrote reads back as the same bits: `serde_json`'s
+  default fast path read some exact decimals one ULP off, so it is built with
+  `float_roundtrip`. **Not claimed:** a locale the host lacks is not exercised,
+  because libc falls back to `C` for it. · why: #278 row 4 · enforced by:
+  `tests/it/sim_locale.rs` (`locale_band_00..07`,
+  `the_whole_sweep_replays_in_one_process`,
+  `the_sweep_reads_the_same_under_every_locale`,
+  `a_process_start_is_read_in_this_process`,
+  `a_process_start_reads_the_same_under_every_locale`, which fails with the
+  `run_ps` pin removed)
 - **INV-STD-HTTP-1** HTTP failures retain a machine-readable class and observed
   stage; a body or EOF-probe timeout is never EOF, preview completion, or proof
   of no effect. Response header bytes and multiplicity survive, while the

@@ -401,7 +401,7 @@ The state of that, honestly:
 | A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
 | Clock skew between two hosts | ❌ | no coverage |
 | A credential expired mid-run | ✅ tested | `GrantSet::grant_expiring` + `Auth::check`: a lapsed proof is `BotError::CredentialExpired` (`Refused`, `RetryClass::Never`), an upstream 401/403/404 is `BotError::CredentialRejected` carrying a `NeedSet` repair (`cap::is_credential_status`, `GhError::repair`), wired through `PrSnapshotSource::poll` and every `gh` flow; `tests/it/credential.rs` spends a real credential's life on a real wall clock over a real file, `gh_binding.rs` and `sim_review_path.rs` drive a real `gh` child refusing the token, `tests/it/sim_credential.rs` sweeps 1,024 seeds |
-| The locale changed a date or number format | ❌ | no coverage |
+| The locale changed a date or number format | ✅ tested | every `lgwks_std` reader of human text (RFC 3339, hex, percent, JSON/RON numbers) answers the same under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP` in their own time zones and refuses Arabic-Indic and Persian digits, a decimal comma and a grouping space; the one reader that leaves the process, `ps -o lstart`, is pinned to `TZ=UTC0 LC_ALL=C`. `tests/it/sim_locale.rs` sweeps 1,000 seeds in-process and re-runs the sweep and a process-start read in a child under each locale (INV-STD-LOCALE-1); removing the `ps` pin fails it |
 | Two operators edited one record | ❌ | no coverage |
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |
 | Accessibility tree mutated during a read | ❌ | no coverage |
@@ -852,8 +852,8 @@ To change the verdict, in the order that matters:
    stopped and observed gone on Unix (#263, INV-BOT-112); it still has no
    Windows or orphan-adoption half. The difference they measure — "the bot
    survives its own machine dying" — is still open.
-2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, torn reads,
-   clock skew, credential expiry, locale, concurrent editors, selector drift.
+2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, clock skew,
+   concurrent editors, selector drift, a mutating accessibility tree.
    This is the long pole and the reason RPA is hard.
 3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
    and 7.6x the allocations per task (#269).

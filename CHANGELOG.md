@@ -9,6 +9,22 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### Fixed
+
+- **lgwks_std — a JSON number reads back as the bits that wrote it.**
+  `serde_json`'s default parser read some exact decimals one ULP off
+  (`997272.1318359375` came back as the next float up); `lgwks_std` now builds
+  it with `float_roundtrip`, which adds no crate. Found by the locale sweep below.
+
+### Tests
+
+- **lgwks_std — readers of human text are locale-independent (#278 row 4,
+  INV-STD-LOCALE-1).** `tests/it/sim_locale.rs` sweeps 1,000 seeds through
+  RFC 3339, hex, percent and JSON/RON numbers, refuses Arabic-Indic and Persian
+  digits and a decimal comma, and re-runs the sweep and a process-start read in
+  child processes under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP`. Removing
+  `run_ps`'s `TZ=UTC0 LC_ALL=C` pin fails it.
+
 ## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
 
 ### Upgrading
