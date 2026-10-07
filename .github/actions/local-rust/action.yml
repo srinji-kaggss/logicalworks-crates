@@ -137,25 +137,29 @@ runs:
           exit 0
         fi
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
-        export SCCACHE_DIR="${root}/sccache"
-        export SCCACHE_CACHE_SIZE="${{ inputs.cache-gib }}G"
-        export SCCACHE_SERVER_PORT=4227
-        export SCCACHE_IDLE_TIMEOUT=3600
-        mkdir -p "${SCCACHE_DIR}"
-        if ! sccache --show-stats >/dev/null 2>&1; then
+        dir="${root}/sccache"
+        port=4227
+        mkdir -p "${dir}"
+        # Probe the port, not the server: any sccache client call starts a
+        # server when none answers, and one started that way belongs to this
+        # job, carries its defaults instead of this configuration, and is
+        # killed with the job.
+        if ! nc -z 127.0.0.1 "${port}" 2>/dev/null; then
           # An instance racing this one to start the server leaves one of the
           # two unable to bind the port; the other's server serves both.
-          RUNNER_TRACKING_ID=0 sccache --start-server >/dev/null 2>&1 || true
+          env RUNNER_TRACKING_ID=0 SCCACHE_DIR="${dir}" SCCACHE_CACHE_SIZE="${{ inputs.cache-gib }}G" \
+            SCCACHE_SERVER_PORT="${port}" SCCACHE_IDLE_TIMEOUT=3600 \
+            sccache --start-server >/dev/null 2>&1 || true
         fi
-        if sccache --show-stats >/dev/null 2>&1; then
+        if nc -z 127.0.0.1 "${port}" 2>/dev/null; then
           {
-            echo "SCCACHE_DIR=${SCCACHE_DIR}"
-            echo "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}"
+            echo "SCCACHE_DIR=${dir}"
+            echo "SCCACHE_SERVER_PORT=${port}"
             echo "RUSTC_WRAPPER=sccache"
           } >> "${GITHUB_ENV}"
-          sccache --show-stats | awk '/Cache location|Cache size|Max cache size|Cache hits rate/'
+          SCCACHE_SERVER_PORT="${port}" sccache --show-stats | awk '/Cache location|Cache size|Max cache size|Cache hits rate/'
         else
-          echo "::warning::the sccache server on port ${SCCACHE_SERVER_PORT} did not start: each instance compiles every dependency itself"
+          echo "::warning::no sccache server answers on port ${port}: each instance compiles every dependency itself"
         fi
     # The runner instances share this machine's cores. A test job that took
     # every core, beside three others doing the same, put the load average at
