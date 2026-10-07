@@ -28,7 +28,7 @@ on:
 # any run was warm, and the first two runs on this layout spent their budgets
 # compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
 # an instance only ever holds its own jobs' builds, and the second run is warm.
-# The jobs that build nothing run anywhere. Eleven instances, one per job
+# The jobs that build nothing run anywhere. Thirteen instances, one per job
 # that builds: with six, a warm run's jobs queued behind one another and the
 # run took 601 s although no job took more than 450 s (run 37619560219
 # attempt 2).
@@ -60,6 +60,18 @@ concurrency:
 # from a cache built with the old one (#272). Change both together.
 env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # The machine's cargo configuration declares `incremental = true` for `dev`,
+  # which `test` inherits, and a target directory on these runners is kept
+  # across runs, so a rebuild after a one-file change should reuse the rest.
+  # It did not: with the runner's environment, cargo wrote no incremental
+  # session at all, and every target directory's `incremental/` was empty, so
+  # every warm run recompiled each changed crate and its dependents from
+  # nothing (5m40s for the workspace's tests on run 37633462471). Measured on
+  # this machine, 2026-10-07: the same `cargo test --no-run` writes sessions
+  # without `CI=true` in its environment and none with it, which every Actions
+  # job has. This restores the declared setting; it changes how much is
+  # recompiled, not what is built.
+  CARGO_INCREMENTAL: "1"
 
 jobs:
   # The gate lanes and the workspace suite, in two shards of one nextest run.
@@ -244,7 +256,7 @@ jobs:
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: lgwks-bot-junit
+          name: lgwks-bot-junit-full
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
@@ -371,7 +383,7 @@ jobs:
   # rustdoc compile the same dependency graph as `cargo check`, so they share a
   # target; the release gates run last, on the build the scan step left.
   clippy:
-    name: Clippy, docs and release gates
+    name: Clippy and scan
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
     timeout-minutes: 15
     steps:
@@ -416,6 +428,21 @@ jobs:
         run: >
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features --features process -- -D warnings
+
+
+  # The documentation lanes, apart from the lints: rustdoc builds its own
+  # output for each feature set, and beside clippy the two made one 513 s job
+  # (run 37633462471) whose halves share nothing but the checkout.
+  docs:
+    name: Docs and release gates
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-12]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
@@ -452,7 +479,7 @@ jobs:
   # storefronts and the standalone consumer packages. Each is `cargo check` or a
   # nested build over the same dependency graph, so one target serves them.
   feature-matrix:
-    name: Feature, target and storefront matrix
+    name: lgwks-std feature matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 15
     steps:
@@ -480,6 +507,22 @@ jobs:
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+
+
+  # The lgwks-deps storefronts, the target matrix and the standalone consumers,
+  # apart from the lgwks-std feature matrix: the two share no feature set, and
+  # as one job they took 454 s (run 37633462471).
+  storefront-matrix:
+    name: Target and storefront matrix
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          nextest: "true"
       - name: Check lgwks-deps
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
