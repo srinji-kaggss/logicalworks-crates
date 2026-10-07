@@ -9,6 +9,26 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+## [lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1] - 2026-10-07
+
+### Upgrading
+
+Two minor bumps and a patch; nothing a 2.1.0 or 3.0.0 caller wrote stops
+compiling. `lgwks_ast` and `lgwks_macros` are unchanged (`lgwks_ast`'s only
+change since 1.1.0 is inside its tests).
+
+- **lgwks_std 2.2.0** — additive: the predicate walk `fs::walk_dir_entries`
+  (#343), and `WalkReport` gains a defaulted type parameter. `serde_json` is
+  built with `float_roundtrip`, so a JSON number reads back as the bits that
+  wrote it.
+- **lgwks_bot 2.2.0** — additive: `ProcessSpec::env_clear` and
+  `EnvDelta::Clear` on the non-exhaustive `EnvDelta` (#337). **Behaviour
+  change** a caller will see: a `Host::run` still queued for a permit when
+  `Host::cancel` fires is always `Refused`, never `Cancelled` (#278 row 7).
+- **lgwks_deps 3.0.1** — fix: a declared `A/B` licence is read as `A OR B`
+  (#354), so a package written in Cargo's deprecated spelling passes against its
+  SPDX approval; every alternative is still judged.
+
 ### lgwks_std — a predicate walk with per-entry `lstat` (#343)
 
 A caller that wanted to skip `.git` or `target` had to walk them and filter
