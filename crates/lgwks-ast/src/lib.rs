@@ -2045,11 +2045,17 @@ mod tests {
         // magnitude rather than by a hair.
         //
         // Each width is walked in `ROUNDS` windows interleaved with the others
-        // and judged at its median, because one window is one draw of the host:
-        // in the Linux container leg at a load of 60-100 a single 1,024-node
-        // walk took 764 ns per node against 23 at another width (run
-        // 37534417610). A descheduled window then moves nothing unless it lands
-        // in most rounds of one width.
+        // and judged at its minimum, because descheduling noise is one-sided:
+        // a descheduled window can only inflate a width's cost, never deflate
+        // it, so the minimum is the width's cost with the host's interference
+        // removed. The median was tried first and failed on a loaded CI
+        // runner (run 37635420955): five of nine 1,024-node windows caught a
+        // deschedule, each a tens-of-microseconds window where one preemption
+        // multiplies the reading a hundredfold, and the median moved 6.5x
+        // while no width scaled. A regression to index-addressed children
+        // would multiply the wide case by the width ratio (16x here) at every
+        // window including the minimum, and still fail the 4x bound by an
+        // order of magnitude rather than by a hair.
         const WIDTHS: [usize; 4] = [1_024, 2_048, 4_096, 16_384];
         const ROUNDS: usize = 9;
         let sources = WIDTHS.map(|width| "(".repeat(width));
@@ -2075,13 +2081,15 @@ mod tests {
                 *window = elapsed.saturating_div(divisor);
             }
         }
-        let per_node_nanos: Vec<u128> = (0..WIDTHS.len())
-            .map(|width| {
-                let mut rounds = windows.map(|round| round[width]);
-                rounds.sort_unstable();
-                rounds[ROUNDS >> 1]
-            })
-            .collect();
+        let mut per_node_nanos = Vec::with_capacity(WIDTHS.len());
+        for width in 0..WIDTHS.len() {
+            let cheapest_window = windows
+                .iter()
+                .map(|round| round[width])
+                .min()
+                .ok_or("nine rounds produced no window for a width")?;
+            per_node_nanos.push(cheapest_window);
+        }
         let cheapest = per_node_nanos
             .iter()
             .copied()
