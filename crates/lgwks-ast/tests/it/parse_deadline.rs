@@ -7,29 +7,24 @@
 //! which is slower on every host this suite runs on. Go is a default grammar, so
 //! this runs in the default-feature build the gate's test lane uses.
 //!
-//! What is asserted is the issue's acceptance item, in its own terms: an input
-//! that takes longer than the deadline when unbounded answers
-//! [`ParseError::TimedOut`] within the deadline plus one progress interval, and
-//! the thread is free for the next parse, which the test proves by parsing
-//! again on the same thread.
+//! What is asserted here, on the host's real clock, is that an input that takes
+//! longer than the deadline when unbounded answers [`ParseError::TimedOut`]
+//! naming that deadline, and that the thread is free for the next parse, which
+//! the test proves by parsing again on the same thread. *When* the parse stops
+//! is proved on a clock the proof drives (`deadline_tests` in `src/lib.rs`):
+//! exactly at the first progress check past the deadline. Timed on the host's
+//! clock that claim measured the scheduler, and a loaded runner answered a
+//! 100 ms deadline after 392 ms although the parser had stopped on time.
 
 #![cfg(feature = "lang-go")]
 
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use lgwks_ast::{Language, MAX_SOURCE_BYTES, ParseError, try_parse, try_parse_within};
 
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// The longest a stopped parse may run past its deadline before this counts as
-/// not having stopped it.
-///
-/// The parser checks every hundred operations, which is microseconds; the
-/// margin is for the host, not the parser: a loaded CI runner can deschedule the
-/// thread between the check that breaks and the return.
-const OVERSHOOT: Duration = Duration::from_millis(250);
 
 /// The rig's Go `longline` shape at the byte ceiling.
 fn go_longline() -> String {
@@ -66,9 +61,7 @@ fn a_slow_parse_is_stopped_at_its_deadline_and_the_thread_parses_again() -> Test
         Duration::from_millis(50),
         Duration::from_millis(100),
     ] {
-        let started = Instant::now();
         let refusal = try_parse_within(&source, Language::Go, deadline);
-        let elapsed = started.elapsed();
         match refusal {
             Err(ParseError::TimedOut { language, after }) => {
                 assert_eq!(language, "go", "the refusal names the grammar");
@@ -80,11 +73,6 @@ fn a_slow_parse_is_stopped_at_its_deadline_and_the_thread_parses_again() -> Test
                 );
             }
         }
-        assert!(
-            elapsed <= deadline.saturating_add(OVERSHOOT),
-            "a {deadline:?} deadline returned after {elapsed:?}"
-        );
-
         // The same thread, straight away: a stopped parse leaves its parser
         // holding state for a resume, and a cached parser that kept it would
         // hand this source a continuation of the one above.
