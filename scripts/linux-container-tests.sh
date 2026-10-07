@@ -10,6 +10,12 @@
 # target volume, so CI can run the suites side by side without one waiting on
 # another's build lock.
 #
+# The container engine on macOS is OrbStack (Director, 2026-10-07): Docker
+# Desktop is not installed on the CI machine, and the script refuses any other
+# engine there rather than run the Linux leg on whichever one `docker` happens
+# to reach. OrbStack serves the Docker API, so the commands below are the
+# Docker CLI's. On Linux the engine is the host's own.
+#
 # The image is the repository's pinned toolchain (`rust-toolchain.toml`) and
 # nextest is the version the host runs, so the two legs differ only in the OS.
 # Build output, the registry and the nextest binary live in named volumes, so a
@@ -47,6 +53,14 @@ if [ -f "${cargo_home}/config.toml" ]; then
     config_mount=(--volume "${cargo_home}/config.toml:/usr/local/cargo/config.toml:ro")
 fi
 
+if [ "$(uname -s)" = Darwin ]; then
+    engine="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
+    if [ "${engine}" != OrbStack ]; then
+        echo "linux-container-tests: the container engine is '${engine:-unreachable}', not OrbStack; start OrbStack (\`orb start\`) and select its context (\`docker context use orbstack\`)" >&2
+        exit 2
+    fi
+fi
+
 suites=("$@")
 if [ "${#suites[@]}" -eq 0 ]; then
     suites=(workspace bot-full appcui)
@@ -77,7 +91,7 @@ rustc --version
 $(printf '%s\n' "${commands[@]}")"
 
 # The target volume belongs to one runner. Every runner on this machine talks
-# to the same Docker daemon, so a volume named only by its suites was shared by
+# to the same OrbStack engine, so a volume named only by its suites was shared by
 # every concurrent run of that suite: one run relinked a test binary while
 # another was executing it, and nextest's exec failed with `No such file or
 # directory` partway through the bot-full suite. A runner runs one job at a
