@@ -51,6 +51,18 @@ mod probe {
     /// near 270 KB whether the body is 3 KB or 3 MB.
     const SLACK: u64 = 524_288;
 
+    /// The tail ceiling a quiet host is held to, in microseconds.
+    const LATENCY_FLOOR_US: u64 = 50_000;
+
+    /// How many bare loopback exchanges one client request may cost.
+    ///
+    /// Measured, not guessed: at load 75 the client's p50/p99 were 97/207 us
+    /// against a bare exchange's 61/99 us on the same interleaved schedule, a
+    /// ratio of 1.6 at the median and 2.1 at the tail, so 8 leaves four times
+    /// that while a fixed 40 ms per-request stall still fails the median by
+    /// two orders of magnitude.
+    const LATENCY_RATIO: u64 = 8;
+
     /// The manifest of the throwaway probe crate.
     fn manifest() -> String {
         format!(
@@ -208,9 +220,23 @@ mod probe {
             p50 <= p95 && p95 <= p99,
             "percentiles must be ordered: p50={p50} p95={p95} p99={p99}\n{stdout}"
         );
+        // A wall-clock number alone measures the host, not the client: six
+        // runners on one machine put this p99 at 198 ms with nothing wrong in
+        // the read path. The bare exchange runs interleaved against the same
+        // server, so it pays the same host, and the client is held to a
+        // multiple of it. The median catches a fixed per-request delay on any
+        // host; the tail keeps the quiet-host ceiling and scales past it only
+        // by what a bare exchange could do at the same moment.
+        let bare_p50 = get("bare-p50")?;
+        let bare_p99 = get("bare-p99")?;
         assert!(
-            p99 < 50_000,
-            "the loopback p99 must be under 50 ms: {p99} us\n{stdout}"
+            p50 <= bare_p50.saturating_mul(LATENCY_RATIO),
+            "the client's median must stay within {LATENCY_RATIO}x a bare exchange: {p50} us > {LATENCY_RATIO} x {bare_p50} us\n{stdout}"
+        );
+        let tail = LATENCY_FLOOR_US.max(bare_p99.saturating_mul(LATENCY_RATIO));
+        assert!(
+            p99 <= tail,
+            "the loopback p99 must be under {tail} us (the larger of {LATENCY_FLOOR_US} us and {LATENCY_RATIO}x the bare p99 of {bare_p99} us): {p99} us\n{stdout}"
         );
         Ok(())
     }
@@ -396,6 +422,13 @@ impl ServerPool {
     }
 }
 
+/// Write one labelled measurement through a locked stdout, reporting a closed
+/// or failed pipe to the caller rather than losing the line.
+fn report(label: &str, value: impl std::fmt::Display) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{label} {value}")
+}
+
 /// Measure one exchange: body length, retained bytes, peak bytes, retained
 /// header bytes.
 struct Measured {
@@ -449,11 +482,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .body_policy(BodyPolicy::Whole);
         let measured = measure(&url, &options)?;
         let _ = server.join();
-        println!("exact-body-len {}", measured.body_len);
-        println!("exact-retained {}", measured.retained);
-        println!("exact-peak {}", measured.peak);
-        println!("exact-header-bytes {}", measured.header_bytes);
-        println!("exact-complete {}", u8::from(measured.cut == 0));
+        report("exact-body-len", measured.body_len)?;
+        report("exact-retained", measured.retained)?;
+        report("exact-peak", measured.peak)?;
+        report("exact-header-bytes", measured.header_bytes)?;
+        report("exact-complete", u8::from(measured.cut == 0))?;
     }
 
     // A preview of a body far past the ceiling: thousands of times the ceiling.
@@ -468,10 +501,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .body_policy(BodyPolicy::Preview);
         let measured = measure(&url, &options)?;
         let _ = server.join();
-        println!("cut-body-len {}", measured.body_len);
-        println!("cut-retained {}", measured.retained);
-        println!("cut-peak {}", measured.peak);
-        println!("cut-truncation {}", measured.cut);
+        report("cut-body-len", measured.body_len)?;
+        report("cut-retained", measured.retained)?;
+        report("cut-peak", measured.peak)?;
+        report("cut-truncation", measured.cut)?;
     }
 
     // The eager stand-in: reserve the declared length and drain the reader.
@@ -483,8 +516,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut body = Vec::with_capacity(CUT_BODY);
         cursor.read_to_end(&mut body)?;
         let peak = peak_now().saturating_sub(baseline);
-        println!("eager-peak {peak}");
-        println!("eager-len {}", body.len());
+        report("eager-peak", peak)?;
+        report("eager-len", body.len())?;
     }
 
     // Concurrency saturation: peak heap and error count at two levels.
@@ -523,12 +556,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
         let peak = peak_now().saturating_sub(baseline);
-        println!("concurrency-{level}-errors {}", errors.load(Ordering::SeqCst));
-        println!("concurrency-{level}-peak {peak}");
+        report(&format!("concurrency-{level}-errors"), errors.load(Ordering::SeqCst))?;
+        report(&format!("concurrency-{level}-peak"), peak)?;
         pool.stop();
     }
 
-    // Latency percentiles on the real path.
+    // Latency percentiles on the real path, each request paired with a bare
+    // loopback exchange against the same server so both see the same host.
     {
         let count = 501_usize;
         let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0")?);
@@ -537,25 +571,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pool = start_pool(std::sync::Arc::clone(&listener), reply, 4);
         let url = format!("http://127.0.0.1:{port}/");
         let options = Options::default().max_body_bytes(64);
-        let mut samples: Vec<u128> = Vec::with_capacity(count);
-        for _ in 0..count {
-            let started = std::time::Instant::now();
-            let _ = http::get_with(&url, &options)?;
-            samples.push(started.elapsed().as_micros());
+        let mut client: Vec<u128> = Vec::with_capacity(count);
+        let mut bare: Vec<u128> = Vec::with_capacity(count);
+        for round in 0..count {
+            // Alternate which of the pair goes first, so neither is always the
+            // one that meets a server worker still finishing the last answer.
+            let first = round % 2;
+            for leg in [first, 1 - first] {
+                let started = std::time::Instant::now();
+                if leg == 0 {
+                    drop(http::get_with(&url, &options)?);
+                    client.push(started.elapsed().as_micros());
+                } else {
+                    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+                    stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+                    let mut answer = Vec::with_capacity(256);
+                    stream.read_to_end(&mut answer)?;
+                    bare.push(started.elapsed().as_micros());
+                }
+            }
         }
-        samples.sort_unstable();
-        let pick = |quantile: usize| -> u128 {
+        for (label, samples) in [("latency", &mut client), ("bare", &mut bare)] {
+            samples.sort_unstable();
             let last = samples.len().saturating_sub(1);
-            let index = last
-                .saturating_mul(quantile)
-                .checked_div(100)
-                .unwrap_or(0)
-                .min(last);
-            samples[index]
-        };
-        println!("latency-p50 {}", pick(50));
-        println!("latency-p95 {}", pick(95));
-        println!("latency-p99 {}", pick(99));
+            for quantile in [50_usize, 95, 99] {
+                let index = (last * quantile / 100).min(last);
+                let sample = samples.get(index).copied().ok_or("no latency sample")?;
+                report(&format!("{label}-p{quantile}"), sample)?;
+            }
+        }
         pool.stop();
     }
 

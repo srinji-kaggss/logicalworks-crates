@@ -9,6 +9,19 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_std — the HTTP latency probe measures the client, not the host
+
+- `tests/http_alloc.rs` held the loopback p99 under a fixed 50 ms, a number
+  that measures the machine: with six CI runners on one host it read 198 ms
+  with nothing wrong in the read path. The probe now pairs each request with a
+  bare loopback exchange against the same server, interleaved and alternating
+  which goes first, and holds the client's median within 8x the bare median
+  and its p99 under the larger of 50 ms and 8x the bare p99 (measured ratios
+  1.6 and 2.1). A 40 ms per-request stall now fails the median bound (47,008
+  us against 8 x 190 us), where the old 50 ms ceiling passed it. The probe
+  writes its measurements through a locked stdout and propagates a write
+  error instead of `println!`.
+
 ## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
 
 ### Upgrading
