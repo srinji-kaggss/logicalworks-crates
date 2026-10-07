@@ -655,12 +655,24 @@ pub fn validate_url(url: &str) -> Result<(), Error> {
 /// `Authorization` and `Cookie` on a redirect and forwards every other header,
 /// so an `X-Api-Key` sent to one origin used to reach any origin it redirected
 /// to.
-fn agent(options: &Options) -> ureq::Agent {
+///
+/// `literal` is whether the hop's host is an IP address. ureq enforces a
+/// resolve timeout by starting a detached OS thread for the lookup on every
+/// request, and it does so for an IP literal too, whose lookup is a parse and
+/// cannot block. Each call to `127.0.0.1` therefore paid a thread start and
+/// left a thread it never joined: the client's loopback p50 was 119 us against
+/// a bare exchange's 11 us on a Linux runner. A literal hop sets no resolve
+/// timeout, so ureq resolves it on the calling thread; a name keeps the bound,
+/// because a lookup that hangs is what the bound is for. **Not claimed:** a
+/// caller that sets [`Options::deadline`] gives each hop a global timeout, and
+/// ureq times the resolve phase against it, so a literal hop under a deadline
+/// still starts that thread.
+fn agent(options: &Options, literal: bool) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         // Do not also set ureq's global timeout: when it equals the phase
         // limits, its earlier absolute deadline masks the typed phase timeout.
         .timeout_global(None)
-        .timeout_resolve(Some(options.timeout))
+        .timeout_resolve((!literal).then_some(options.timeout))
         .timeout_connect(Some(options.timeout))
         .timeout_send_request(Some(options.timeout))
         .timeout_send_body(Some(options.timeout))
@@ -1153,6 +1165,27 @@ fn origin_of(target: &str) -> Option<Origin> {
     })
 }
 
+/// Whether `target`'s host is an IP address, which resolves without a lookup.
+///
+/// An IPv6 literal is read inside its brackets. A zoned IPv6 literal, an
+/// `IPvFuture` and a target whose authority cannot be read answer `false`, so
+/// they keep the resolve bound: misreading a name as a literal would drop the
+/// bound from a lookup that can hang, and misreading a literal as a name costs
+/// only the thread this exists to save.
+fn host_is_literal(target: &str) -> bool {
+    UriAbsoluteStr::new(target)
+        .ok()
+        .and_then(|target| target.authority_components())
+        .is_some_and(|authority| {
+            let host = authority.host();
+            let address = match host.strip_prefix('[') {
+                Some(bracketed) => bracketed.strip_suffix(']'),
+                None => Some(host),
+            };
+            address.is_some_and(|address| address.parse::<std::net::IpAddr>().is_ok())
+        })
+}
+
 /// Resolve a `Location` value against the target that returned it.
 ///
 /// The resolved target must itself be an absolute http(s) URI, and its
@@ -1313,8 +1346,12 @@ fn send_hop<'headers>(
 fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response, Error> {
     validate_url(url)?;
     let limit = redirect_limit(options)?;
-    let agent = agent(options);
     let origin = origin_of(url);
+    // The agent is kept across hops so a redirect to the same origin can reuse
+    // its pooled connection, and rebuilt only when a hop crosses between an IP
+    // literal and a name: only a name's lookup needs the resolve bound.
+    let literal = host_is_literal(url);
+    let mut current = (literal, agent(options, literal));
     let mut target = url.to_owned();
     let mut method = method;
     let mut chain = vec![sanitized_target(url)];
@@ -1345,7 +1382,11 @@ fn exchange(url: &str, method: Method<'_>, options: &Options) -> Result<Response
                         .iter()
                         .any(|credential| header.0.eq_ignore_ascii_case(credential)))
         });
-        let response = send_hop(&agent, &target, method, headers, remaining)?;
+        let literal = host_is_literal(&target);
+        if literal != current.0 {
+            current = (literal, agent(options, literal));
+        }
+        let response = send_hop(&current.1, &target, method, headers, remaining)?;
         // No-follow returns whatever came back, redirect or not, unread.
         if limit == 0 {
             return response_of(response, options, chain);
@@ -2077,6 +2118,32 @@ mod tests {
             Ok(heads)
         })?;
         Ok((port, handle))
+    }
+
+    /// Only a host that is an IP address drops the resolve bound. A name, a
+    /// name that begins like an address, a zoned or future IPv6 form and an
+    /// unreadable target all keep it, because only a real literal's lookup
+    /// cannot block.
+    #[test]
+    fn only_an_ip_literal_host_drops_the_resolve_bound() {
+        for literal in [
+            "http://127.0.0.1/",
+            "http://127.0.0.1:8080/path?query",
+            "https://[::1]:443/",
+            "http://[2001:db8::1]/",
+        ] {
+            assert!(host_is_literal(literal), "{literal} names an address");
+        }
+        for name in [
+            "http://localhost/",
+            "https://example.com/",
+            "http://127.0.0.1.example/",
+            "http://[fe80::1%25en0]/",
+            "http://[v1.fe]/",
+            "not a url",
+        ] {
+            assert!(!host_is_literal(name), "{name} keeps the resolve bound");
+        }
     }
 
     /// A hop to another origin carries none of the caller's headers: not the
