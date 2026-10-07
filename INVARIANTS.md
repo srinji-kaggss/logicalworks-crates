@@ -1275,6 +1275,36 @@ Each of these was a shipped defect. Treat the list as the spec.
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
 
+- **INV-FS-7** A predicate walk (`fs::walk_dir_entries`,
+  `fs::walk_dir_entries_tolerant`) runs the one walk engine and offers each
+  admitted entry once, in walk order, to the caller's
+  `FnMut(&Path, FileKind) -> Descend`. Every offered entry is recorded;
+  `Descend::Skip` withholds the subtree below it, which is never listed,
+  never charged to `WalkLimits` and never reported as an omission;
+  `Descend::Stop` records the entry, reads nothing further, and is reported by
+  `WalkReport::stopped` as caller policy, not an omission. Each `WalkEntry`
+  carries the one `lstat` the walk read for it (no second stat; a link's own
+  metadata, never its target's), and its `relative_path` joins back onto the
+  canonical root to give its `path`. An always-enter predicate admits, omits,
+  refuses and charges exactly what the path walk does (INV-FS-2, INV-FS-5).
+  · why: #343 · enforced by:
+  `lgwks_std::fs::tests::a_skipped_directory_is_listed_but_never_read`,
+  `lgwks_std::fs::tests::stop_records_its_entry_and_ends_the_walk`,
+  `lgwks_std::fs::tests::an_entry_carries_the_lstat_of_a_symlink_not_its_target`,
+  `lgwks_std::fs::tests::relative_path_joins_back_onto_the_canonical_root`,
+  `tests/it/sim_fs_walk_prune.rs` (`sim_a_pruned_subtree_is_never_read`,
+  `sim_a_pruned_subtree_charges_no_budget`,
+  `sim_stop_ends_the_walk_at_the_chosen_entry`,
+  `sim_every_entry_carries_its_own_lstat`,
+  `sim_relative_paths_join_back_to_the_absolute_path`,
+  `sim_an_always_enter_walk_is_the_path_walk`,
+  `sim_the_same_seed_replays_to_the_same_trace_hash`)
+
+  Known limit, stated rather than left to be discovered: the metadata walk
+  `lstat`s every entry, so a name in a directory the process may list but not
+  search (`r` without `x`) is an `EntryType` omission there, where the path
+  walk's `d_type` may still classify it.
+
 - **INV-TASK-POOL-1** The blocking pool's ceiling is decided once and its
   threads all have an owner. `configure_blocking_pool` fixes the ceiling
   before the pool first runs, arbitrated by the pool's own creation, so a
