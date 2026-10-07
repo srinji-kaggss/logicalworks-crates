@@ -99,7 +99,13 @@ to the manifest without adding a bullet fails that job.
 All version bumps land in a single commit: the `[package] version` fields,
 their `[workspace.dependencies]` requirements in the root `Cargo.toml`, the
 version table in the root `README.md`, and `Cargo.lock` (`cargo update
---workspace`). The `CHANGELOG.md` entry follows, per crate, and records the
+--workspace`). The nested workspaces under `bench/` and
+`crates/lgwks-deps/tests/fixtures/` keep their own `Cargo.lock`, each pinning
+the moved crates by path, and CI checks them `--locked`: a bump that leaves one
+behind fails there (the GPUI Windows job refused the storefront fixture's lock
+on the 2.2.0 train). Move each one in the same commit, and prove it with
+`cargo metadata --locked --offline --manifest-path <dir>/Cargo.toml`, which
+refuses a stale lock without compiling. The `CHANGELOG.md` entry follows, per crate, and records the
 behavioural changes a consumer will encounter, not only the signatures.
 
 Version position: every crate is at `1.x` since 2026-10-04, so semantic
