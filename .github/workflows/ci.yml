@@ -8,10 +8,18 @@ on:
     branches: [main]
   pull_request:
 
-# No job waits on another. `needs: [build]` made every job queue behind the
-# 1.5-minute gate job, which gated nothing: a failing gate step still fails the
-# run with every other job running beside it. The run's wall clock is its
-# slowest job.
+# WORKFLOW.md §12 is this workflow's specification: the nine axes it is held
+# to, the budget, and the measurements behind the layout below.
+#
+# The layout is set by one fact: every self-hosted job runs on one machine (15
+# cores, six runner instances). A run's wall clock is its job-seconds divided by
+# six, plus whatever waits in the queue, so the layout minimises duplicated work
+# rather than maximising the number of jobs. 35 jobs, each compiling its own copy
+# of the workspace, put 7,500 job-seconds through six instances and took
+# 21.4 minutes (run 37579691890). Lanes that build the same feature set share a
+# job (the lane table's `group`), and only the two check-row jobs and the
+# acceptance receipt wait on another job: each of them reads a result instead of
+# building one.
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -35,63 +43,14 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  # The gate lanes and the workspace suite, in two shards of one nextest run.
+  # The fast lanes (seconds each, most of them reading files) ride on the first
+  # shard instead of holding a runner instance for a job of their own, and the
+  # lanes that need the workspace built run after the shard that built it.
   build:
-    name: Build + gate
+    name: Build, gate and workspace tests
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Verify lockfile is up-to-date
-        run: >
-          cargo metadata --locked --format-version 1 >/dev/null ||
-          { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; } &&
-          for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path "${f%.lock}.toml" >/dev/null; then echo "stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml" >&2; exit 1; fi; done
-      - name: Enforce dependency edge ownership
-        run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
-      - name: Verify invariant enforcement references resolve
-        run: python3 scripts/ci_local.py --lane invariants
-      - name: Audit std-first and lgwks_std-first
-        # The manifest gate above sees every authored edge. This reads the
-        # source for the two failures a manifest cannot show: a `use` no
-        # manifest declares, and a capability hand-rolled beside the
-        # `lgwks_std` module that already provides it.
-        run: python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py
-      - name: Forbid unwrap outside tests
-        # Safety bar: library code fails loud with typed errors or named
-        # expects, never bare unwrap. Doc examples count as shipped surface.
-        run: python3 scripts/ci_local.py --lane unwrap-scan
-      - name: Build all workspace targets
-        run: cargo test --workspace --all-targets --locked --no-run
-
-  fmt:
-    name: Format
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  # The three test suites run as three jobs, not three steps of one. Each spends
-  # about three minutes running tests (the `sim_scale` tiers alone sum to
-  # ~620 s of test time in every suite), so in one job they queued behind each
-  # other for ~12 minutes. Side by side, the run is as long as its slowest
-  # suite. Every command is unchanged; only where it runs moved.
-  tests:
-    name: Tests
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
-    # Two shards of one nextest run: `--partition count:N/2` splits the suite by
-    # test, so the shards cover it exactly once between them. The suite was 269 s
-    # of a 308 s job; halved, the job is as long as one shard plus its build.
     strategy:
       fail-fast: false
       matrix:
@@ -99,46 +58,9 @@ jobs:
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
-      # through clippy-driver so a plain local build enforces them; repeating the
-      # lint pass in each test shard only adds to the compile that gates the run.
-      # Empty is "no wrapper" to cargo, and the compiled code is identical.
-      RUSTC_WORKSPACE_WRAPPER: ""
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Run all workspace tests
-        env:
-          PARTITION: count:${{ matrix.shard }}/2
-        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
-      # The three checks below are not part of the partitioned suite; they run
-      # once, on the first shard, rather than once per shard.
-      - name: Deterministic simulation evidence
-        if: matrix.shard == 1
-        run: python3 scripts/ci_local.py --lane simulation-evidence
-      - name: Doc tests
-        if: matrix.shard == 1
-        run: cargo test --workspace --doc --locked
-      - name: Debug doctor end-to-end journey
-        if: matrix.shard == 1
-        run: python3 scripts/ci_local.py --lane debug-e2e
-
-  tests_nodefault:
-    name: Tests (lgwks-bot no default features, lgwks-std full)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
-    # Two shards of each suite. Whole, the two runs were 664 s of tests on one
-    # runner's share of the machine, and the job's build took it past its
-    # 15-minute bound with every test passing (run 37530668988).
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    env:
-      # As in the lgwks-bot full job: lints run once, in the Clippy job.
+      # through clippy-driver so a plain local build enforces them; repeating
+      # the lint pass here only adds to the compile that gates the run. Empty
+      # is "no wrapper" to cargo, and the compiled code is identical.
       RUSTC_WORKSPACE_WRAPPER: ""
       PARTITION: count:${{ matrix.shard }}/2
     steps:
@@ -148,27 +70,148 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-      - name: Run lgwks-bot no-default-feature tests
-        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
-      - name: Run lgwks-std full-feature tests
-        run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
+      - name: Verify lockfile is up-to-date
+        if: matrix.shard == 1
+        run: >
+          cargo metadata --locked --format-version 1 >/dev/null ||
+          { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; } &&
+          for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path "${f%.lock}.toml" >/dev/null; then echo "stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml" >&2; exit 1; fi; done
+      - name: Check formatting
+        if: matrix.shard == 1
+        run: cargo fmt --all -- --check
+      - name: Enforce dependency edge ownership
+        if: matrix.shard == 1
+        run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
+      - name: Verify invariant enforcement references resolve
+        if: matrix.shard == 1
+        run: python3 scripts/ci_local.py --lane invariants
+      - name: Audit std-first and lgwks_std-first
+        if: matrix.shard == 1
+        # The manifest gate above sees every authored edge. This reads the
+        # source for the two failures a manifest cannot show: a `use` no
+        # manifest declares, and a capability hand-rolled beside the
+        # `lgwks_std` module that already provides it.
+        run: python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py
+      - name: Forbid unwrap outside tests
+        if: matrix.shard == 1
+        # Safety bar: library code fails loud with typed errors or named
+        # expects, never bare unwrap. Doc examples count as shipped surface.
+        run: python3 scripts/ci_local.py --lane unwrap-scan
+      - name: Validate the dependency contract alignment
+        if: matrix.shard == 1
+        run: python3 scripts/ci_local.py --lane contract-drift
+      - name: Requirements sentences unedited without supersession
+        if: matrix.shard == 1
+        run: python3 scripts/check-requirements.py
+      - name: llms.txt matches the documentation index
+        if: matrix.shard == 1
+        # `llms.txt` is generated from the README's own tables by
+        # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
+        # differs, so the index cannot drift from the documents it points at: a
+        # stale index is worse than none, because an agent trusts it and stops
+        # looking. The script also fails when a document in `docs/` is missing
+        # from the table, so a new document cannot be invisible to every reader
+        # that arrives through this file.
+        run: |
+          set -eu
+          python3 scripts/gen-llms-txt.py
+          git diff --exit-code -- llms.txt
+      - name: Documentation citations resolve
+        if: matrix.shard == 1
+        # The guides cite `path:NNN` for each factual claim, and every merge
+        # moves the lines under them. A rotted citation is invisible: the page
+        # still reads as sourced, and a reader who checks one and finds
+        # something unrelated stops trusting the rest. This checks the part
+        # that is not a judgement call — the file exists, and the line exists
+        # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
+        # repository; the script names that exemption rather than guessing.
+        run: python3 scripts/check-doc-citations.py
+      - name: Root README quickstart matches its compiled example
+        if: matrix.shard == 1
+        run: python3 scripts/ci_local.py --lane readme-quickstart
+      - name: Build all workspace targets
+        if: matrix.shard == 1
+        run: cargo test --workspace --all-targets --locked --no-run
+      - name: Run all workspace tests
+        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
+      # The two evidence lanes print the result their check rows below expose.
+      # Each writes its own report, and the check row reads that report rather
+      # than building the workspace a second time to produce it again: the
+      # simulation listing alone compiles every test binary, which as a job of
+      # its own cost 364 s on run 37579691890 and 6 s here.
+      - name: Deterministic simulation evidence
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          python3 scripts/ci_local.py --lane simulation-evidence | tee gate-evidence/simulation-evidence.txt
+      - name: Debug doctor end-to-end journey
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          mkdir -p gate-evidence
+          python3 scripts/ci_local.py --lane debug-e2e | tee gate-evidence/debug-e2e.txt
+      - name: Upload gate evidence
+        if: matrix.shard == 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-evidence
+          path: gate-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Doc tests
+        if: matrix.shard == 2
+        run: cargo test --workspace --doc --locked
+      - name: Run package smoke test
+        if: matrix.shard == 2
+        run: ./scripts/lgwks-std-package-smoke.sh
+
+  # The two results the checks list names on every pull request. Each reads the
+  # report its lane wrote in the job above and passes only on that lane's own
+  # pass line, so the row is exactly the lane's verdict on this commit.
+  simulation_evidence:
+    name: successful simulation result
+    needs: build
+    runs-on: [self-hosted, macOS, ARM64, lwc]
+    timeout-minutes: 5
+    steps:
+      - name: Download gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: gate-evidence
+          path: gate-evidence
+      - name: Check successful simulation result
+        run: |
+          cat gate-evidence/simulation-evidence.txt && grep -q '^<== simulation-evidence: pass' gate-evidence/simulation-evidence.txt
+
+  debug_e2e:
+    name: successful end-to-end journey result
+    needs: build
+    runs-on: [self-hosted, macOS, ARM64, lwc]
+    timeout-minutes: 5
+    steps:
+      - name: Download gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: gate-evidence
+          path: gate-evidence
+      - name: Check successful end-to-end journey result
+        run: |
+          cat gate-evidence/debug-e2e.txt && grep -q '^<== debug-e2e: pass' gate-evidence/debug-e2e.txt
 
   tests_bot_full:
-    name: Tests (lgwks-bot full)
+    name: Tests (lgwks-bot full, lgwks-std full)
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
-    # Four shards of one nextest run (542 s of a 571 s job), covering the suite
-    # exactly once between them.
+    # Two shards of one nextest run, covering the suite exactly once between
+    # them. The lgwks-std full suite and the saturation tiers build the same
+    # feature set, so each rides on one shard.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
     env:
-      # The Clippy job is where lints run, with `-D warnings`, over the same
-      # workspace. `.cargo/config.toml` also routes every workspace compile
-      # through clippy-driver so a plain local build enforces them; repeating the
-      # lint pass in each test shard only adds to the compile that gates the run.
-      # Empty is "no wrapper" to cargo, and the compiled code is identical.
+      # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
@@ -179,13 +222,13 @@ jobs:
           nextest: "true"
       - name: Run lgwks-bot async runner tests
         env:
-          PARTITION: count:${{ matrix.shard }}/4
+          PARTITION: count:${{ matrix.shard }}/2
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
       # the acceptance job can build one receipt from the suite's own output.
       # Writing the report costs the run nothing: the `ci` profile only adds a
-      # serialiser. Each shard uploads into its own directory, because all four
-      # reports are called junit.xml and four artifacts with one path collide on
+      # serialiser. Each shard uploads into its own directory, because both
+      # reports are called junit.xml and two artifacts with one path collide on
       # download. nextest keeps its store under the workspace's own `target/`
       # whatever CARGO_TARGET_DIR says, so the report is read from there; a
       # shard that wrote none fails here rather than leaving the receipt job to
@@ -197,34 +240,22 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
-
-  # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
-  # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
-  # backend execute here, in a container on the same machine, with the same
-  # cargo configuration. One job per suite, each with its own target volume.
-  tests_linux:
-    name: Tests (Linux container)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [workspace, bot-full, appcui]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Run the workspace and lgwks-bot full suites on Linux
-        run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
+      - name: Run lgwks-std full-feature tests
+        if: matrix.shard == 1
+        run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
+      # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
+      # out of the partitioned suite: in a shard they set the run's wall (481 s
+      # on run 37205854158, test phase 229 s against 61-63 s for the other three
+      # shards).
+      - name: Run lgwks-bot saturation tiers
+        if: matrix.shard == 2
+        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
 
   acceptance_receipts:
-    # The receipt, built from the four JUnit reports the shards already wrote.
-    # No Rust toolchain and no cargo build: this job runs a Python script over
-    # four XML files, so it costs seconds rather than adding a second execution
-    # of the 215 tests the shards already ran between them.
+    # The receipt, built from the JUnit reports the shards already wrote. No
+    # Rust toolchain and no cargo build: this job runs a Python script over two
+    # XML files, so it costs seconds rather than adding a second execution of
+    # the tests the shards already ran between them.
     name: Acceptance receipts
     needs: tests_bot_full
     runs-on: [self-hosted, macOS, ARM64, lwc]
@@ -247,19 +278,15 @@ jobs:
           path: acceptance-artifact/
           retention-days: 30
 
-  tests_bot_saturation:
-    # The saturation tiers (100, 1,000 and 10,000 concurrent runs) in a job of
-    # their own: in a shard they set the run's wall (481 s on run 37205854158,
-    # test phase 229 s against 61-63 s for the other three shards).
-    name: Tests (lgwks-bot saturation)
+  # Every lgwks-std feature alone, executed (one nextest run per feature with
+  # nothing else on, #276), beside the lgwks-bot no-default suite. Both build
+  # narrow feature sets of the two crates, so they share one job's target.
+  tests_nodefault:
+    name: Tests (lgwks-bot no default features, lgwks-std per feature)
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 15
     env:
-      # The Clippy job is where lints run, with `-D warnings`, over the same
-      # workspace. `.cargo/config.toml` also routes every workspace compile
-      # through clippy-driver so a plain local build enforces them; repeating the
-      # lint pass in each test shard only adds to the compile that gates the run.
-      # Empty is "no wrapper" to cargo, and the compiled code is identical.
+      # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
@@ -268,60 +295,44 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-      - name: Run lgwks-bot saturation tiers
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
+      - name: Run lgwks-bot no-default-feature tests
+        run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
+      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features core
+          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
+          cargo nextest run --locked -p lgwks_std --no-default-features --features random
+          cargo nextest run --locked -p lgwks_std --no-default-features --features http
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
+          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
+          cargo nextest run --locked -p lgwks_std --no-default-features --features json
+          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
+      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
-  bench_fairness:
-    # Its own job: it builds a separate workspace root in release, and run after
-    # the bot suite in one job it added that build to the slowest job's wall.
-    name: Async fairness gate
+  # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
+  # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
+  # backend execute here, in a container on the same machine, with the same
+  # cargo configuration. The workspace suite is one job; the lgwks-bot full
+  # suite and the AppCUI storefront share the other, each pair with its own
+  # target volume.
+  tests_linux:
+    name: Tests (Linux container)
     runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Async fairness gate and concurrency ladder
-        run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
-
-  digest_timing:
-    # Its own job: a release build of lgwks_std alone, and a timing statistic is
-    # only meaningful on a runner not also compiling the rest of the workspace.
-    name: Digest timing
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Digest constant-time equality (dudect)
-        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
-
-  storefront_consumers:
-    # Standalone consumer packages, one cargo build per storefront family.
-    # Their own job so the Tests job is not held by nested builds that
-    # serialize on one target-directory lock.
-    name: Storefront consumers
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Build storefront consumers
-        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
-
-  simulation_evidence:
-    name: successful simulation result
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 10
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [workspace, bot-full appcui]
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -329,26 +340,16 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-      - name: Check successful simulation result
-        run: python3 scripts/ci_local.py --lane simulation-evidence
+      - name: Run the workspace and lgwks-bot full suites on Linux
+        run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
 
-  debug_e2e:
-    name: successful end-to-end journey result
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Check successful end-to-end journey result
-        run: python3 scripts/ci_local.py --lane debug-e2e
-
+  # Lints, the rustdoc lanes and the two release-build gates. Clippy and
+  # rustdoc compile the same dependency graph as `cargo check`, so they share a
+  # target; the release gates run last, on the build the scan step left.
   clippy:
-    name: Clippy
+    name: Clippy, docs and release gates
     runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -365,7 +366,7 @@ jobs:
         run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
-        # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
+        # toolchain and is checked by its own lane in the matrix job).
         run: >
           cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml
           --all-targets --all-features -- -D warnings &&
@@ -391,20 +392,9 @@ jobs:
         run: >
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features --features process -- -D warnings
-
-  docs:
-    name: Docs
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
-        # toolchain and is covered by the gpui-macos job, not ubuntu lanes).
+        # toolchain and is checked by its own lane in the matrix job).
         # `scripts/doc-lanes.sh` holds the commands and the reason for each
         # lane, so this job and a contributor run the same four of them.
         run: ./scripts/doc-lanes.sh all-features
@@ -433,34 +423,16 @@ jobs:
         # compile off Apple targets. Build with the declared set so an
         # unbuildable declaration fails here instead of on docs.rs.
         run: python3 scripts/ci_local.py --lane docsrs-metadata
-      - name: llms.txt matches the documentation index
-        # `llms.txt` is generated from the README's own tables by
-        # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
-        # differs, so the index cannot drift from the documents it points at: a
-        # stale index is worse than none, because an agent trusts it and stops
-        # looking. The script also fails when a document in `docs/` is missing
-        # from the table, so a new document cannot be invisible to every reader
-        # that arrives through this file.
-        run: |
-          set -eu
-          python3 scripts/gen-llms-txt.py
-          git diff --exit-code -- llms.txt
-      - name: Documentation citations resolve
-        # The guides cite `path:NNN` for each factual claim, and every merge
-        # moves the lines under them. A rotted citation is invisible: the page
-        # still reads as sourced, and a reader who checks one and finds
-        # something unrelated stops trusting the rest. This checks the part
-        # that is not a judgement call — the file exists, and the line exists
-        # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
-        # repository; the script names that exemption rather than guessing.
-        run: python3 scripts/check-doc-citations.py
-      - name: Root README quickstart matches its compiled example
-        run: python3 scripts/ci_local.py --lane readme-quickstart
-  # The storefront checks run beside the bot and ast matrices below rather than
-  # before them: one job was 5.4 minutes of `cargo check` in series, the
-  # longest in the run once the test suites were split.
-  feature-matrix-std-deps:
-    name: lgwks-std and lgwks-deps feature matrix
+      - name: Digest constant-time equality (dudect)
+        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
+      - name: Async fairness gate and concurrency ladder
+        run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
+
+  # Every compile-only matrix: feature sets, targets, grammars, the Metal
+  # storefronts and the standalone consumer packages. Each is `cargo check` or a
+  # nested build over the same dependency graph, so one target serves them.
+  feature-matrix:
+    name: Feature, target and storefront matrix
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 20
     steps:
@@ -469,6 +441,7 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
+          nextest: "true"
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
@@ -495,100 +468,6 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
-
-  # Every lgwks-std feature alone, executed: one nextest run per feature with
-  # nothing else on. Three shards in parallel, because the twelve runs as one
-  # step took 228 s and put the feature-matrix job at 303 s. (#276)
-  std-per-feature-a:
-    name: lgwks-std per-feature tests (a)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features core
-          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
-          cargo nextest run --locked -p lgwks_std --no-default-features --features random
-          cargo nextest run --locked -p lgwks_std --no-default-features --features http
-
-  std-per-feature-b:
-    name: lgwks-std per-feature tests (b)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
-          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
-          cargo nextest run --locked -p lgwks_std --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
-
-  std-per-feature-c:
-    name: lgwks-std per-feature tests (c)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --no-default-features --features process
-
-  # Its own job so the matrix runs beside the check jobs instead of after them:
-  # twelve feature sets plus eight targets is several minutes of `cargo check`,
-  # and adding it to the feature-matrix job would have put it on the critical
-  # path of the whole run.
-  target-matrix:
-    name: Target matrix
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Check lgwks-std across the declared target matrix
-        # `cargo check --target <t>` for every declared target and crate. The
-        # script installs the target with rustup first, requires the Rust-only
-        # surface everywhere, and records with its exact error any check this
-        # runner has no C toolchain to reach.
-        run: ./scripts/check-target-matrix.sh
-
-  feature-matrix:
-    name: lgwks-bot and lgwks-ast feature matrix
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    # 30 minutes covered the check lanes only; the grammar matrix below builds
-    # and runs 31 test configurations, so the budget matches the work.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -642,6 +521,28 @@ jobs:
             --features lang-bash,lang-c,lang-cpp,lang-csharp,lang-css,lang-dart,lang-elixir,lang-go,lang-haskell,lang-hcl,lang-html,lang-java,lang-javascript,lang-json,lang-kotlin,lang-lua,lang-md,lang-nix,lang-php,lang-python,lang-ruby,lang-rust,lang-scala,lang-solidity,lang-swift,lang-tsx,lang-typescript,lang-yaml
           execute cargo test --locked -p lgwks_ast --lib --all-features
           exit "$failed"
+      - name: Check lgwks-std across the declared target matrix
+        # `cargo check --target <t>` for every declared target and crate. The
+        # script installs the target with rustup first, requires the Rust-only
+        # surface everywhere, and records with its exact error any check this
+        # runner has no C toolchain to reach.
+        run: ./scripts/check-target-matrix.sh
+      - name: Check normal GPUI renderer feature
+        # The fixture is its own workspace, so by default it builds into its
+        # own target directory and compiles the GPUI stack a second time.
+        # Pointing it at the directory the first check just filled reuses
+        # every unit whose features match.
+        run: >
+          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
+          cargo check --locked
+          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
+          --target-dir "${CARGO_TARGET_DIR:-target}"
+          --no-default-features --features gpui --example gpui
+      - name: Check Candle Metal storefront features
+        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
+      # Standalone consumer packages, one cargo build per storefront family.
+      - name: Build storefront consumers
+        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
 
   appcui-native:
     name: AppCUI native storefront
@@ -696,61 +597,3 @@ jobs:
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
           --target-dir target
           --no-default-features --features gpui --example gpui
-
-  gpui-macos:
-    name: GPUI macOS renderer
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Check normal GPUI renderer feature
-        # The fixture is its own workspace, so by default it builds into its
-        # own target directory and compiles the GPUI stack a second time.
-        # Pointing it at the directory the first check just filled reuses
-        # every unit whose features match.
-        run: >
-          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
-          cargo check --locked
-          --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
-          --target-dir "${CARGO_TARGET_DIR:-target}"
-          --no-default-features --features gpui --example gpui
-
-  candle-macos:
-    name: Candle ML storefront (Metal)
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Check Candle Metal storefront features
-        run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
-
-  contract-drift:
-    name: lgwks-std contract drift checks
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate the dependency contract alignment
-        run: python3 scripts/ci_local.py --lane contract-drift
-      - name: Requirements sentences unedited without supersession
-        run: python3 scripts/check-requirements.py
-  package-smoke:
-    name: lgwks-std package smoke-test
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-      - name: Run package smoke test
-        run: ./scripts/lgwks-std-package-smoke.sh

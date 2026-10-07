@@ -87,7 +87,17 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
 # a killed descendant stays a zombie that `kill(pid, 0)` still reports present.
+#
+# `/tmp` is a tmpfs, for the reason the macOS jobs keep theirs on a RAM disk
+# (WORKFLOW.md §12): the durable-store tests `fsync` every record, and in the
+# VM each one reaches the host's disk through the virtual block device. No test
+# simulates power loss, so no assertion depends on where the bytes land.
+# Docker's tmpfs default is `noexec`; the suites execute scripts they write
+# there (the fake `gh`), so the mount says `exec`. The size is a ceiling, not a
+# reservation: a tmpfs holds only what is written to it, and it dies with the
+# container.
 exec docker run --rm --init \
+    --tmpfs /tmp:rw,exec,nosuid,size=3g \
     --volume "${root}:/src" \
     --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \

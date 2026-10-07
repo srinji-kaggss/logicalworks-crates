@@ -40,7 +40,9 @@
 #             executes groups concurrently, each in its own target directory,
 #             and a group's lanes in the order listed here, so later lanes reuse
 #             what earlier ones built. A lane with no group builds nothing.
-#             CI ignores the field: every CI job is its own machine.
+#             CI follows the same idea at job granularity (WORKFLOW.md §12):
+#             every CI job shares one machine, so lanes that build one feature
+#             set run in one job rather than each compiling it again.
 
 [toolchain]
 rust = "1.99.0"
@@ -146,8 +148,8 @@ id = "tests-bot-nodefault"
 group = "bot-nodefault"
 surfaces = "local ci"
 required = true
-# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
-# whole suite.
+# CI runs it whole, beside the lgwks-std per-feature lanes; PARTITION=count:N/M
+# shards it again if that job grows past its budget.
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot no-default-feature tests"
 
@@ -156,8 +158,8 @@ id = "tests-std-full"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
-# whole suite.
+# CI runs it whole, on the first lgwks-bot full shard, which builds the same
+# feature set.
 command = "cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-std full-feature tests"
 
@@ -166,7 +168,7 @@ id = "tests-bot-full"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# CI runs this as four shards by setting PARTITION=count:N/4; unset, it is the
+# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
 # whole suite less the saturation tiers, which `tests-bot-saturation` runs. Left
 # in, the three tiers (100, 1,000 and 10,000 concurrent runs) land in one shard:
 # on run 37205854158 that shard's test phase took 229 s against 61-63 s for the
@@ -178,7 +180,7 @@ ci_step = "Run lgwks-bot async runner tests"
 id = "acceptance-receipts"
 surfaces = "ci"
 required = true
-# The receipt, built from the four JUnit reports the lgwks-bot shards already
+# The receipt, built from the two JUnit reports the lgwks-bot shards already
 # wrote. It reads XML and records into SQLite, so the job needs no Rust
 # toolchain and no build -- it costs seconds, and it does not run the suite a
 # second time.
@@ -261,16 +263,19 @@ ci_step = "Debug doctor end-to-end journey"
 id = "simulation-evidence-check"
 surfaces = "ci"
 required = true
-command = "python3 scripts/ci_local.py --lane simulation-evidence"
+# The check row reads the report `simulation-evidence` wrote in the workspace
+# job and passes only on that lane's own pass line; rebuilding the workspace to
+# list it a second time cost a runner 364 s per run (run 37579691890).
+command = "cat gate-evidence/simulation-evidence.txt && grep -q '^<== simulation-evidence: pass' gate-evidence/simulation-evidence.txt"
 ci_step = "Check successful simulation result"
-needs = ["bin:cargo-nextest"]
 reason = "dedicated PR check row whose job name exposes the successful simulation result"
 
 [[lane]]
 id = "debug-e2e-check"
 surfaces = "ci"
 required = true
-command = "python3 scripts/ci_local.py --lane debug-e2e"
+# As above: the row reads the report `debug-e2e` wrote in the workspace job.
+command = "cat gate-evidence/debug-e2e.txt && grep -q '^<== debug-e2e: pass' gate-evidence/debug-e2e.txt"
 ci_step = "Check successful end-to-end journey result"
 reason = "dedicated PR check row whose job name exposes the successful end-to-end journey result"
 

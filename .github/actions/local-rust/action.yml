@@ -6,7 +6,7 @@ description: >
   other projects on this machine rely on. The machine's own cargo
   configuration ($CARGO_HOME/config.toml) is deliberately left in force: the
   Director ruled on 2026-10-06 that CI builds with every optimisation it
-  declares.
+  declares. WORKFLOW.md §12 is the specification this action implements.
 inputs:
   toolchain:
     description: The toolchain the gate pins; the step fails when rust-toolchain.toml resolves to another.
@@ -17,30 +17,43 @@ inputs:
     default: "false"
   min-free-gib:
     description: >
-      Free space the volume must keep. Below it, this job's build output is
+      Free space the volume must keep. Below it, this runner's build output is
       cleaned before the job builds, so a full disk fails no job. The default
       is two cold workspace builds with the machine's profiles.
     required: false
     default: "40"
+  tmp-gib:
+    description: >
+      Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
+      takes memory only for the pages written to it, and it is recreated at
+      every job start, so this bounds one job's temporary files rather than
+      reserving memory. Zero keeps temporary files on disk.
+    required: false
+    default: "4"
 runs:
   using: composite
   steps:
-    # One target directory per runner instance and job, kept across runs,
-    # outside the checkout that actions/checkout cleans. It is never shared
-    # between instances: each instance checks out into its own directory, and
-    # cargo fingerprints a workspace member by its path *relative to the
-    # workspace*, so a build made in r2's checkout reads as fresh in r5's. The
-    # binary then carries r2's `env!("CARGO_MANIFEST_DIR")` — r5's lgwks-std
-    # shard built probes against r2's sources and failed when r2's checkout
-    # moved (run 37513781767) — and source mtimes from another checkout can
-    # pass a build of one commit off as a build of another. The shards of one
-    # job on one instance share it, and two runs of one job on one instance
-    # wait on cargo's lock rather than racing.
+    # One target directory per runner instance, kept across runs, outside the
+    # checkout that actions/checkout cleans. It is never shared between
+    # instances: each instance checks out into its own directory, and cargo
+    # fingerprints a workspace member by its path *relative to the workspace*,
+    # so a build made in r2's checkout reads as fresh in r5's. The binary then
+    # carries r2's `env!("CARGO_MANIFEST_DIR")` — r5's lgwks-std shard built
+    # probes against r2's sources and failed when r2's checkout moved (run
+    # 37513781767) — and source mtimes from another checkout can pass a build
+    # of one commit off as a build of another.
+    #
+    # It is shared by every job the instance runs. An instance runs one job at
+    # a time, so the directory has one writer, and a feature set is a distinct
+    # unit hash, so jobs that build different feature sets keep both. One
+    # directory per job instead held 25 copies of the dependency graph per
+    # instance (206 GiB on 2026-10-07) and left each copy warm only for the job
+    # that happened to land on that instance last.
     - name: Persistent target directory
       shell: bash
       run: |
         set -euo pipefail
-        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/${GITHUB_JOB}"
+        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/shared"
         mkdir -p "${target}"
         echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
@@ -48,6 +61,51 @@ runs:
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
           cargo clean --target-dir "${target}"
         fi
+    # Temporary files on a RAM disk owned by this runner instance. Rust's
+    # `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS, which flushes the
+    # whole device's cache and serialises against every other flush on it, so
+    # six instances' durable-store tests queued behind one another's syncs:
+    # the full workspace suite took 385 s with its temporary files on the SSD
+    # and 116.5 s with them on a RAM disk, on an idle machine, 5,430 tests
+    # passing both times. No test simulates power loss (a crash test kills
+    # with SIGKILL, and the page cache survives that), so no assertion depends
+    # on the device the bytes reach, and production code keeps `sync_all`.
+    #
+    # The disk is detached and recreated at every job start: a RAM disk keeps
+    # each page it ever wrote until it is detached, so recreating it is what
+    # bounds its memory to one job's temporary files and leaves nothing of the
+    # previous job behind. A machine where the disk cannot be made keeps its
+    # temporary files on disk, with a warning naming the cost.
+    - name: Temporary files on a RAM disk
+      shell: bash
+      run: |
+        set -euo pipefail
+        owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+        label="lwc-tmp-${owner}"
+        if [ -d "/Volumes/${label}" ]; then
+          device="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Device Node/ {print $2}')"
+          if [ -n "${device}" ]; then
+            diskutil eject force "${device}" >/dev/null || echo "::warning::could not eject ${device} (${label})"
+          fi
+        fi
+        tmp=""
+        if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
+          sectors=$(( ${{ inputs.tmp-gib }} * 1024 * 1024 * 2 ))
+          # `diskutil image` is the current interface; `hdiutil` is the one a
+          # macOS before it has, and prints the device the same way.
+          device="$({ diskutil image attach --noMount "ram://${sectors}" 2>/dev/null || hdiutil attach -nomount "ram://${sectors}" 2>/dev/null; } | awk 'NR==1 {print $1}')"
+          if [ -n "${device}" ] && diskutil erasevolume HFS+ "${label}" "${device}" >/dev/null; then
+            tmp="$(diskutil info "${device}" | awk -F': *' '/Mount Point/ {print $2}')"
+          fi
+        fi
+        if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
+          tmp="${RUNNER_TEMP}/lwc-tmp"
+          echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
+          mkdir -p "${tmp}"
+          find "${tmp}" -mindepth 1 -delete
+        fi
+        echo "TMPDIR=${tmp}" >> "${GITHUB_ENV}"
+        echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
     # The runner instances share this machine's cores. A test job that took
     # every core, beside three others doing the same, put the load average at
     # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
