@@ -309,6 +309,20 @@ jobs:
       # shards).
       - name: Run lgwks-bot saturation tiers
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
+      # One lgwks-std per-feature shard rides here, not on the matrix
+      # instance: twelve serial feature compiles on one instance starved the
+      # drain-grace test on another (run 37678318088), and this instance's own
+      # work is process spawns, not compiles, so a compile-bound shard fits
+      # beside it. Same opt-level-0 reasoning as its siblings below.
+      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. No
@@ -544,15 +558,6 @@ jobs:
           cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
           cargo nextest run --locked -p lgwks_std --no-default-features --features json
           cargo nextest run --locked -p lgwks_std --no-default-features --features ron
-      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
-        env:
-          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
 
   # The lgwks-deps storefronts, the target matrix and the standalone consumers,
