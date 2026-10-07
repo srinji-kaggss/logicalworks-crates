@@ -1,7 +1,7 @@
 [package]
 name = "lgwks_std"
 description = "Everyday Rust primitives with no async runtime required: codecs, timestamps, ids, hashing, regex, JSON/RON/wire, HTTP, and default structured-debugging install. One audited stack per feature — a stack is not always one crate (json is serde + serde_json, ron is serde + ron, http is ureq + iri-string)."
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -74,7 +74,10 @@ blake3 = { version = "1.8", default-features = false, optional = true }
 regex = { version = "1.13", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+# `float_roundtrip` adds no crate: without it the parser takes a fast path that
+# reads some exact decimals one ULP off (`997272.1318359375` read back as the
+# next float up), so a value this crate wrote did not read back as itself.
+serde_json = { version = "1", features = ["float_roundtrip"], optional = true }
 ron = { version = "0.12", optional = true }
 getrandom = { version = "0.4", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }

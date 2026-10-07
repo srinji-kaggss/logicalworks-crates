@@ -40,6 +40,12 @@
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
 //! `broken_intra_doc_links` deny; see the workspace root `Cargo.toml`.
+/// The crate under its published name inside its own unit tests, so a test
+/// fixture shared with the integration tests (`tests/support/`) names one path
+/// (`lgwks_std::…`) in both.
+#[cfg(test)]
+extern crate self as lgwks_std;
+
 ///
 /// Single-import encoding primitives: base64 and percent-encoding.
 pub mod encoding;

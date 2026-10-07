@@ -135,6 +135,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `lgwks_deps::tests::a_register_without_surfaces_keeps_no_closed_set`,
   `lgwks_deps::tests::the_freeze_is_declared_by_the_register`,
   `lgwks_deps::tests::an_accepted_term_does_not_accept_its_prefix_extension`,
+  `lgwks_deps::tests::a_slash_license_matches_its_spdx_or_approval`,
+  `lgwks_deps::tests::a_slash_license_still_rejects_an_unaccepted_alternative`
+  (a declared licence's deprecated Cargo `/` is read as `OR`; the register
+  stays SPDX),
   `tests/it/contract_schema_compat.rs`
   (`a_policy_list_is_refused_whole_on_a_bad_member`,
   `a_half_written_freeze_is_refused`)
@@ -1042,6 +1046,28 @@ Each of these was a shipped defect. Treat the list as the spec.
   `rfc_year_boundaries_refuse_extended_output_without_clamping`,
   `calendar_roundtrips_endpoints_neighbors_and_overflow_transition`) and
   `time::parse::tests::conversion_seam_preserves_platform_range_failure`
+- **INV-STD-LOCALE-1** A reader of human text answers the same under every
+  locale and time zone, and refuses another locale's spelling rather than
+  guessing it. RFC 3339, hex, percent escapes and JSON/RON numbers read through
+  no libc formatting, so `LC_ALL`, `LANG` and `TZ` cannot reach them; Arabic-Indic
+  and Persian digits, a decimal comma and a grouping space are refused. The one
+  reader that leaves the process, `ps -o lstart` behind `identify_process`, prints
+  in its caller's language and zone, so `run_ps` pins `TZ=UTC0` and `LC_ALL=C`.
+  The in-process readers consult no locale, so the child-locale re-run is a
+  regression guard for them, not a discriminating test; it discriminates the
+  `ps` pin.
+  A JSON or RON number this crate wrote reads back as the same bits, for every
+  finite `f64` (drawn as raw bits, subnormals and both zeros included):
+  `serde_json`'s default fast path read some exact decimals one ULP off, so it is
+  built with `float_roundtrip`, and the sweep fails on its first seeds without
+  it. **Not claimed:** a locale the host lacks is not exercised,
+  because libc falls back to `C` for it. · why: #278 row 4 · enforced by:
+  `tests/it/sim_locale.rs` (`locale_band_00..07`,
+  `the_whole_sweep_replays_in_one_process`,
+  `the_sweep_reads_the_same_under_every_locale`,
+  `a_process_start_is_read_in_this_process`,
+  `a_process_start_reads_the_same_under_every_locale`, which fails with the
+  `run_ps` pin removed)
 - **INV-STD-HTTP-1** HTTP failures retain a machine-readable class and observed
   stage; a body or EOF-probe timeout is never EOF, preview completion, or proof
   of no effect. Response header bytes and multiplicity survive, while the
@@ -1730,6 +1756,28 @@ Each of these was a shipped defect. Treat the list as the spec.
   `tests/it/sys_process_binding.rs` (including
   `concurrent_calls_on_one_process_share_its_ceiling`), `tests/it/sim_process.rs`,
   `tests/it/sys_process_portable.rs` (non-Unix), and `rt::supervise::tests`
+- **INV-BOT-159** A supervised child's environment is the in-order fold of its
+  spec's deltas, and `ProcessSpec::env_clear` makes it an allowlist. The deltas
+  (`EnvDelta::Set`, `Remove`, `Clear`) are applied in the order they were
+  recorded, so a `Clear` drops every variable the supervisor would pass down
+  **and** every delta recorded before it, and the child's whole environment is
+  the assignments made after the last `Clear`: a secret, a token or a database
+  path in the supervisor's environment reaches an untrusted command only when
+  the caller names it again. `Clear` is applied by `ProcessSpec::configure`, the
+  one place both `Supervisor::spawn_process` and `run_process` build a command,
+  so there is no spawn path that skips it. A program named without a directory is
+  looked up in the `PATH` the child receives, which after a clear that sets none
+  is the platform's default search, not the supervisor's. **Not claimed:**
+  containment. A cleared child can still read any file its user can; the
+  after-fork, before-exec hook #337 also asks for (Landlock, `sandbox_init`)
+  needs `unsafe`, which this crate forbids. · why: #337, logical_ci#84 (a lane
+  read every tenant's signing key) · enforced by: `tests/it/sim_process_env.rs`
+  (`fold_band_00..03`, which draws ordered `env`/`env_remove`/`env_clear` lists
+  and compares the real `/usr/bin/env` child against the fold, swept twice for
+  one trace hash; `a_hundred_cleared_tenants_never_cross`,
+  `a_thousand_cleared_tenants_never_cross`,
+  `ten_thousand_cleared_tenants_never_cross`), all seven of which fail with the
+  `Clear` arm removed from `configure`
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
@@ -1785,11 +1833,23 @@ Each of these was a shipped defect. Treat the list as the spec.
   completes at an admission ceiling of one, while sibling top-level runs each
   take their own permit and stay bounded. Waiting for a permit is cancellable by
   the host's stop and charged to the run's deadline; a run the host refuses
-  before admission is `Refused`, never `Cancelled` or `Failed`. The step trail
+  before admission is `Refused`, never `Cancelled` or `Failed`. A permit a
+  queued run acquires after the stop is handed back and the run is `Refused`:
+  the stop's wakes reach the queued runs in an order the channel under the
+  token does not fix, so admitting whichever was polled after a release would
+  count a run that never ran as admitted, charge its root budget, and decide
+  `Cancelled` versus `Refused` by that order. The step trail
   is a bounded ring whose overflow is counted and never changes the
   disposition, output or located error, and every report says no external
-  effect is known. · why: #87 step 1 (T01–T04, T36) · enforced by:
-  `tests/it/task_front_door.rs` and `tests/it/sim_task.rs`
+  effect is known. · why: #87 step 1 (T01–T04, T36), #278 row 7 · enforced by:
+  `tests/it/task_front_door.rs`, `tests/it/sim_task.rs` and
+  `tests/it/sim_cancel_under_load.rs` (`cancel_band_00..07`: 1,000 flows per
+  seed over 1,000 seeds, cancelled at a seeded driver poll; every flow reports,
+  the host's counters agree with the reports, no body outlives the call or
+  starts after the stop (each body reads the stop on its first poll), every
+  admitted flow and every `Cancelled` one started its body, and each band
+  replays to one trace hash — all eight fail on their first sweep, at the
+  `Cancelled` oracle, with the post-stop refusal removed)
 - **INV-BOT-50** A durable record reaches the disk on a thread of the store's own,
   so no executor thread ever waits inside a flush. The whole ordered step — the
   in-memory checks, the length fence, the write, the `sync_all` and the fold into

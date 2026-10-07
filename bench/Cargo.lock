@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "lgwks_deps",
  "lgwks_std",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "bevy_ecs",
  "lgwks_std",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",

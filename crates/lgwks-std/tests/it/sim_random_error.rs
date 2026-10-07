@@ -39,7 +39,7 @@ mod sim {
 
     use crate::seeded_sweep::{
         SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize,
-        initial_trace, next_index,
+        initial_trace, next_index, seeded_stream,
     };
 
     /// The concurrency tiers the drawers drive.
@@ -207,7 +207,7 @@ mod sim {
         // The shuffle draws through the crate's one seeded stream, in the index
         // width it indexes in, so a pick is one of the positions this loop is
         // permuting rather than a narrowed copy of one.
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for index in (1..order.len()).rev() {
             let pick = next_index(&mut state).rem_euclid(index.saturating_add(1));
             order.swap(index, pick);

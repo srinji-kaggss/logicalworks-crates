@@ -9,6 +9,26 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+## [lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1] - 2026-10-07
+
+### Upgrading
+
+Two minor bumps and a patch; nothing a 2.1.0 or 3.0.0 caller wrote stops
+compiling. `lgwks_ast` and `lgwks_macros` are unchanged (`lgwks_ast`'s only
+change since 1.1.0 is inside its tests).
+
+- **lgwks_std 2.2.0** — additive: the predicate walk `fs::walk_dir_entries`
+  (#343), and `WalkReport` gains a defaulted type parameter. `serde_json` is
+  built with `float_roundtrip`, so a JSON number reads back as the bits that
+  wrote it.
+- **lgwks_bot 2.2.0** — additive: `ProcessSpec::env_clear` and
+  `EnvDelta::Clear` on the non-exhaustive `EnvDelta` (#337). **Behaviour
+  change** a caller will see: a `Host::run` still queued for a permit when
+  `Host::cancel` fires is always `Refused`, never `Cancelled` (#278 row 7).
+- **lgwks_deps 3.0.1** — fix: a declared `A/B` licence is read as `A OR B`
+  (#354), so a package written in Cargo's deprecated spelling passes against its
+  SPDX approval; every alternative is still judged.
+
 ### lgwks_std — a predicate walk with per-entry `lstat` (#343)
 
 A caller that wanted to skip `.git` or `target` had to walk them and filter
@@ -27,6 +47,77 @@ path a second time to learn its size or mtime.
 - `WalkReport` gained a defaulted parameter, `WalkReport<E = PathBuf>`; every
   existing path walk returns `WalkReport<PathBuf>` as before. The path walks run
   the same engine with an always-enter predicate and stat nothing new.
+
+### lgwks_std — the HTTP latency probe measures the client, not the host
+
+- `tests/http_alloc.rs` held the loopback p99 under a fixed 50 ms, a number
+  that measures the machine: with six CI runners on one host it read 198 ms
+  with nothing wrong in the read path. The probe now pairs each request with a
+  bare loopback exchange against the same server, interleaved and alternating
+  which goes first, and holds the client's median within 8x the bare median
+  and its p99 under the larger of 50 ms and 8x the bare p99 (measured ratios
+  1.6 and 2.1). A 40 ms per-request stall now fails the median bound (47,008
+  us against 8 x 190 us), where the old 50 ms ceiling passed it. The probe
+  writes its measurements through a locked stdout and propagates a write
+  error instead of `println!`.
+
+### lgwks_bot — a supervised child can start from an empty environment (#337)
+
+A supervised child inherited the supervisor's whole environment, less whatever
+the caller remembered to `env_remove` one name at a time. A CI lane run this way
+read every tenant's signing key (logical_ci#84).
+
+- **lgwks_bot** — `ProcessSpec::env_clear` and the `EnvDelta::Clear` variant
+  (`EnvDelta` is non-exhaustive). Deltas apply in recorded order, so the child's
+  environment is exactly what is set after the last clear (INV-BOT-159).
+- Not in this change: the after-fork containment hook #337 also asks for needs
+  `unsafe`, which the crate forbids.
+
+### Tests
+
+- **lgwks_std's simulation fixtures draw `seeded::Seeded`.** `tests/support/rng.rs`
+  and `tests/support/seeded_sweep.rs` carried a private xorshift64* generator, a
+  second meaning for every seed; both now draw the crate's own `Seeded`
+  (INV-STD-SEEDED-1), the stream every other crate's simulations draw, so one
+  seed names one stream across the estate. `Rng::below` is now unbiased and
+  answers a zero bound without moving the stream. The new draws reached an idle
+  pool journey in `sim_task_pool_public` that the old stream never drew, whose
+  assertion contradicted `PoolShutdown::Drained`'s contract (it counts the idle
+  threads a shutdown joins); the assertion now states the contract.
+
+### Fixed
+
+- **lgwks_std — a JSON number reads back as the bits that wrote it.**
+  `serde_json`'s default parser read some exact decimals one ULP off
+  (`997272.1318359375` came back as the next float up); `lgwks_std` now builds
+  it with `float_roundtrip`, which adds no crate. Found by the locale sweep below,
+  which draws an arbitrary finite `f64` as raw bits (subnormals included) on
+  every seed and fails on its first seeds without the feature. Parse cost with
+  the feature on was not measured here.
+- **lgwks_deps — a declared `A/B` licence is read as `A OR B` (#354).** Cargo
+  documents `/` in `license` as the deprecated spelling of `OR`, and crates.io
+  still serves packages written that way (`foundationdb` 0.11 declares
+  `MIT/Apache-2.0`). `lgwks-deps check` read the slash literally: one unknown
+  identifier, and a drift from an approval recorded as `MIT OR Apache-2.0`. Both
+  licence checks now read the declared side as the `OR` expression, so that
+  package passes against its SPDX approval. Every alternative is still judged:
+  `GPL-3.0/MIT` with only `MIT` accepted is still refused naming `GPL-3.0`. The
+  register itself stays SPDX and its parser still refuses a slash
+  (INV-DEP-16).
+
+### Tests
+
+- **lgwks_std — readers of human text are locale-independent (#278 row 4,
+  INV-STD-LOCALE-1).** `tests/it/sim_locale.rs` sweeps 1,000 seeds through
+  RFC 3339, hex, percent and JSON/RON numbers, refuses Arabic-Indic and Persian
+  digits and a decimal comma, and re-runs the sweep and a process-start read in
+  child processes under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP`. Removing
+  `run_ps`'s `TZ=UTC0 LC_ALL=C` pin fails it.
+
+### lgwks_bot — a run still queued when the host stops is refused, whatever the wake order (#278 row 7)
+
+- **Behaviour change:** a `Host::run` waiting for a permit when `Host::cancel` fires is now always `Disposition::Refused`. Before, a waiter that got a permit released by a stopped run before it observed the stop was counted as admitted, charged its root budget, and reported `Cancelled` without running. Which waiters that happened to depended on the wake order of the channel under the cancellation token, so one schedule could report a run either way. A permit acquired after the stop is now handed back (INV-BOT-20).
+- Tests: `tests/it/sim_cancel_under_load.rs`, 1,000 flows cancelled at a seeded point over 1,000 seeds, each band replayed for one trace hash.
 
 ## [lgwks_std 2.1.0 / lgwks_bot 2.1.0] - 2026-10-06
 

@@ -24,7 +24,9 @@ use crate::seeded_sweep;
 use lgwks_std::json;
 use lgwks_std::ron::{self, FromSliceError};
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{below, fold_bytes, next_byte, next_text};
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
@@ -66,7 +68,7 @@ struct Borrowed<'a> {
 
 /// A seeded [`Shape`] whose strings are drawn from printable ASCII, so no field
 /// needs escaping unless the family deliberately asks for it.
-fn draw_shape(state: &mut u64) -> Shape {
+fn draw_shape(state: &mut Seeded) -> Shape {
     let name_len = below(state, 12);
     let name = next_text(state, name_len);
     let tag_len = below(state, 8);
@@ -111,7 +113,7 @@ fn borrowed_from(buffer: &[u8], borrowed: &str) -> bool {
 
 /// Runs the seeded round-trip sweep over both codecs and returns its trace.
 fn codec_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..24 {
@@ -153,7 +155,7 @@ fn codec_trace(seed: u64) -> u64 {
 /// field type the drawn shape carries survives its own serialization.
 fn a_seeded_value_round_trips_through_json_text() -> Result<(), json::Error> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let value = draw_shape(&mut state);
             let text = json::to_string(&value)?;
@@ -177,7 +179,7 @@ fn a_seeded_value_round_trips_through_json_text() -> Result<(), json::Error> {
 /// same fact for both codecs and is checked for both here.
 fn a_seeded_value_round_trips_through_ron_text() -> Result<(), ron::Error> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let value = draw_shape(&mut state);
             let text = ron::to_string(&value)?;
@@ -278,7 +280,7 @@ fn sweep_borrowed_field(
     door: Door,
     what: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     for _ in 0..48 {
         let value_len = below(&mut state, 16);
         let value = next_text(&mut state, value_len);
@@ -335,7 +337,7 @@ fn an_unescaped_ron_field_borrows_from_the_supplied_input() -> Result<(), Box<dy
 /// is how a caller learns to ask for an owned `String` instead.
 fn an_escaped_field_is_refused_as_a_borrow_in_both_codecs() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             // A raw string cannot end in a backslash, so the escaped-quote case is
             // written as a normal literal with its own escaping. The four are the
@@ -366,7 +368,7 @@ fn an_escaped_field_is_refused_as_a_borrow_in_both_codecs() {
 /// whether the caller asked for a borrow or for ownership.
 fn a_malformed_document_is_refused_by_both_the_borrowing_and_owned_paths() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let truncated = below(&mut state, 24);
             let text = format!(r#"{{"value":"{}"#, "x".repeat(truncated));
@@ -390,7 +392,7 @@ fn a_malformed_document_is_refused_by_both_the_borrowing_and_owned_paths() {
 /// a caller can tell "this is not text" from "this is not valid RON".
 fn a_non_utf8_slice_is_refused_as_a_transport_fault() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let prefix = below(&mut state, 4);
             let mut bytes = vec![b'('; prefix];
@@ -427,7 +429,7 @@ fn a_non_utf8_slice_is_refused_as_a_transport_fault() -> Result<(), Box<dyn std:
 fn a_non_utf8_json_slice_is_refused_with_a_document_location()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let mut bytes = vec![b'{'; below(&mut state, 4)];
             bytes.extend_from_slice(&[0xff]);
@@ -458,7 +460,7 @@ fn a_non_utf8_json_slice_is_refused_with_a_document_location()
 /// forgery as the document alone.
 fn trailing_content_after_a_document_is_refused_in_both_codecs() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             // The tail is at least one character: a document with nothing after
             // it has no trailing content to refuse, so a zero-length draw would
@@ -484,7 +486,7 @@ fn trailing_content_after_a_document_is_refused_in_both_codecs() {
 /// was, so a caller can point at it rather than at the whole document.
 fn a_syntax_error_keeps_its_source_location() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let pad_len = below(&mut state, 4);
             let pad = next_text(&mut state, pad_len);
@@ -553,7 +555,7 @@ fn each_codec_renders_its_own_documented_shape() -> Result<(), Box<dyn std::erro
 /// documented not to have.
 fn a_value_tree_round_trips_the_drawn_value() -> Result<(), json::Error> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let value = draw_shape(&mut state);
             let tree = json::to_value(&value)?;
@@ -639,7 +641,7 @@ fn multi_byte_text_round_trips_through_both_codecs() -> Result<(), Box<dyn std::
 /// handle the empty nested case rather than assuming it has a field.
 fn a_shape_with_empty_collections_still_round_trips() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let mut value = draw_shape(&mut state);
             value.items.clear();
@@ -671,8 +673,8 @@ fn distinct_codec_seeds_diverge_in_their_trace() {
 /// Two seeds draw two different values, so the round-trip family is not one
 /// value checked repeatedly.
 fn two_seeds_draw_two_different_values() {
-    let mut first = SWEEP_SEEDS[0];
-    let mut second = SWEEP_SEEDS[1];
+    let mut first = seeded_stream(SWEEP_SEEDS[0]);
+    let mut second = seeded_stream(SWEEP_SEEDS[1]);
     let left = draw_shape(&mut first);
     let right = draw_shape(&mut second);
     assert_ne!(left, right, "the two sweep seeds drew the same value");

@@ -37,6 +37,7 @@
 use super::{Admitted, PoolState, Refused, Woken};
 use super::{rng, seeded_sweep};
 use rng::Rng;
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
     initial_trace, next_seed,
@@ -471,7 +472,7 @@ fn sim_every_admitted_job_runs_once_under_every_interleaving() {
     // `SWEEP_SEEDS` is a non-empty const array, so its first seed is a value
     // the pattern binds rather than one an `Option` could withhold.
     let [first_seed, ..] = SWEEP_SEEDS;
-    let mut state = first_seed;
+    let mut state = seeded_stream(first_seed);
     for _ in 0..SEEDS {
         sweep(next_seed(&mut state));
     }

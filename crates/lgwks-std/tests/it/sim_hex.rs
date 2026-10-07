@@ -19,6 +19,7 @@ use lgwks_std::hex::{DecodeError, decode, decode_into, encode};
 use seeded_bytes::{
     below, fold_bytes, fold_refusal, next_byte, next_bytes, next_text, reference_nibble, repeated,
 };
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
@@ -143,7 +144,7 @@ fn corrupt_at(text: &mut [u8], position: usize, alien: u8) -> bool {
 
 /// Runs the seeded round-trip, refusal and boundary sweep and returns its trace.
 fn hex_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..96 {
@@ -192,7 +193,7 @@ fn hex_trace(seed: u64) -> u64 {
 /// rendered text must be what the reference transcoder renders.
 fn a_seeded_payload_round_trips_through_encode_and_decode() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..64 {
             let length = below(&mut state, 48);
             let payload = next_bytes(&mut state, length);
@@ -225,7 +226,7 @@ fn a_seeded_payload_round_trips_through_encode_and_decode() -> Result<(), Decode
 /// buffer of the right width is admitted.
 fn decode_into_requires_the_exact_destination_length() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let length = below(&mut state, 40);
             let payload = next_bytes(&mut state, length);
@@ -268,7 +269,7 @@ fn decode_into_requires_the_exact_destination_length() -> Result<(), DecodeError
 /// an alien character, and the sentinel destination is compared afterwards.
 fn a_refused_decode_into_never_writes_a_prefix_of_the_destination() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let length = below(&mut state, 16);
             let payload = next_bytes(&mut state, length);
@@ -298,7 +299,7 @@ fn a_refused_decode_into_never_writes_a_prefix_of_the_destination() {
 /// *first* one that is named rather than any later one.
 fn a_non_digit_is_reported_at_its_first_exact_offset() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let length = below(&mut state, 12);
             let payload = next_bytes(&mut state, length);
@@ -335,7 +336,7 @@ fn a_non_digit_is_reported_at_its_first_exact_offset() -> Result<(), DecodeError
 /// width still reports the odd length.
 fn an_odd_length_is_refused_before_any_destination_width_check() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let odd = below(&mut state, 24) | 1;
             let text = next_text(&mut state, odd);
@@ -418,7 +419,7 @@ fn the_empty_and_single_byte_payloads_are_exact_endpoints() -> Result<(), Decode
 /// into either sentinel destination.
 fn uppercase_and_lowercase_spellings_decode_to_the_same_bytes() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let span = below(&mut state, 24).saturating_add(1);
             // The case needs a payload that renders two spellings, which means a
@@ -468,7 +469,7 @@ fn uppercase_and_lowercase_spellings_decode_to_the_same_bytes() -> Result<(), De
 fn refusals_report_their_arm_and_both_of_their_offsets() -> Result<(), DecodeError> {
     let mut trace = initial_trace();
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let length = below(&mut state, 10);
             let payload = next_bytes(&mut state, length);
@@ -504,7 +505,7 @@ fn refusals_report_their_arm_and_both_of_their_offsets() -> Result<(), DecodeErr
 /// payload and a set-bit payload are not the same case.
 fn constant_payloads_are_exact_at_every_boundary_length() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for length in BOUNDARY_LENGTHS {
             let fill = next_byte(&mut state);
             let payload = repeated(fill, length);
@@ -529,7 +530,7 @@ fn constant_payloads_are_exact_at_every_boundary_length() -> Result<(), DecodeEr
 /// every strict prefix is either an odd-length refusal or a shorter value.
 fn every_truncated_prefix_is_refused_or_is_a_shorter_value() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let payload = next_bytes(&mut state, 8);
             let encoded = encode(&payload);
@@ -563,7 +564,7 @@ fn every_truncated_prefix_is_refused_or_is_a_shorter_value() -> Result<(), Decod
 /// The wide boundary is a real payload and not a short one wearing its name: it
 /// renders as twice its length and decodes back into the drawn bytes.
 fn the_wide_payload_boundary_is_exercised_at_its_declared_length() -> Result<(), DecodeError> {
-    let mut state = SWEEP_SEEDS[0];
+    let mut state = seeded_stream(SWEEP_SEEDS[0]);
     let payload = next_bytes(&mut state, WIDE_PAYLOAD_BYTES);
     let encoded = encode(&payload);
     assert_eq!(
@@ -619,8 +620,8 @@ fn distinct_hex_seeds_diverge_in_their_trace() {
 /// A second seed's stream produces a different payload at the same requested
 /// length, so the round-trip family is not one payload checked repeatedly.
 fn a_seed_draws_a_different_payload_at_the_same_length() {
-    let mut first = SWEEP_SEEDS[0];
-    let mut second = SWEEP_SEEDS[1];
+    let mut first = seeded_stream(SWEEP_SEEDS[0]);
+    let mut second = seeded_stream(SWEEP_SEEDS[1]);
     let length = 32;
     let left = next_bytes(&mut first, length);
     let right = next_bytes(&mut second, length);

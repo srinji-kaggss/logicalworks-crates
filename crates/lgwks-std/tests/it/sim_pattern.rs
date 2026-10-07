@@ -27,7 +27,9 @@ use lgwks_std::pattern::{
     BoundedRegex, PatternConfig, PatternError, PatternErrorKind, PatternRunError, Regex,
 };
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{below, fold_bytes, next_byte, next_text};
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
@@ -50,7 +52,7 @@ fn config(input_limit: usize, output_limit: usize) -> PatternConfig {
 
 /// A seeded haystack of `length` bytes drawn from a small alphabet, so
 /// catastrophic backtracking has something to be catastrophic over.
-fn draw_haystack(state: &mut u64, length: usize) -> String {
+fn draw_haystack(state: &mut Seeded, length: usize) -> String {
     let alphabet = "aaaab";
     (0..length)
         .map(|_| {
@@ -66,7 +68,7 @@ fn draw_haystack(state: &mut u64, length: usize) -> String {
 /// The pair is drawn once here rather than in each family: four families want
 /// the same shape of case, and a draw written four times is four draws that can
 /// drift apart without anything noticing.
-fn draw_case(state: &mut u64) -> (&'static str, String) {
+fn draw_case(state: &mut Seeded) -> (&'static str, String) {
     let pattern = PATTERNS[below(state, PATTERNS.len())];
     let length = below(state, 64);
     let haystack = draw_haystack(state, length);
@@ -84,7 +86,7 @@ fn bounded_regex(pattern: &str, config: PatternConfig) -> Result<BoundedRegex, P
 
 /// Runs the seeded bounded-versus-unbounded sweep and returns its trace.
 fn pattern_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..32 {
@@ -118,7 +120,7 @@ fn pattern_trace(seed: u64) -> u64 {
 /// the ceiling costs a refusal rather than a different answer.
 fn a_bounded_match_agrees_with_the_unbounded_engine() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let (pattern, haystack) = draw_case(&mut state);
 
@@ -147,7 +149,7 @@ fn a_bounded_match_agrees_with_the_unbounded_engine() -> Result<(), Box<dyn std:
 fn an_input_past_the_ceiling_is_refused_by_every_operation()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let over = INPUT_LIMIT.saturating_add(1 + below(&mut state, 64));
             let haystack = draw_haystack(&mut state, over);
@@ -206,7 +208,7 @@ fn an_input_past_the_ceiling_is_refused_by_every_operation()
 /// `limit` would make the declared number a lie.
 fn the_input_ceiling_admits_its_own_boundary_and_refuses_one_byte_past()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut boundary_state = SWEEP_SEEDS[0];
+    let mut boundary_state = seeded_stream(SWEEP_SEEDS[0]);
     let at_limit = draw_haystack(&mut boundary_state, INPUT_LIMIT);
     let bounded = bounded_regex("a", config(INPUT_LIMIT, INPUT_LIMIT * 2))?;
     assert_eq!(
@@ -239,7 +241,7 @@ fn the_input_ceiling_admits_its_own_boundary_and_refuses_one_byte_past()
 fn an_amplifying_replacement_is_refused_before_the_append() -> Result<(), Box<dyn std::error::Error>>
 {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let matches = below(&mut state, 16) + 1;
             let haystack = "a".repeat(matches);
@@ -298,7 +300,7 @@ fn a_refused_replacement_returns_no_prefix() -> Result<(), Box<dyn std::error::E
 fn a_bounded_replacement_expands_exactly_like_the_engine() -> Result<(), Box<dyn std::error::Error>>
 {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let (pattern, haystack) = draw_case(&mut state);
             let template_len = below(&mut state, 6);
@@ -328,7 +330,7 @@ fn a_bounded_replacement_expands_exactly_like_the_engine() -> Result<(), Box<dyn
 fn a_bounded_find_all_yields_the_engines_spans_in_order() -> Result<(), Box<dyn std::error::Error>>
 {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let (pattern, haystack) = draw_case(&mut state);
 
@@ -363,7 +365,7 @@ fn a_bounded_find_all_yields_the_engines_spans_in_order() -> Result<(), Box<dyn 
 /// would get.
 fn a_bounded_split_yields_the_engines_pieces() -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let (pattern, haystack) = draw_case(&mut state);
 
@@ -391,7 +393,7 @@ fn a_bounded_split_yields_the_engines_pieces() -> Result<(), Box<dyn std::error:
 fn a_bounded_capture_agrees_with_the_engines_group_by_group()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for length in 0..8_usize {
             let haystack = draw_haystack(&mut state, length);
             let pattern = r"(a)?(b)?";
@@ -521,7 +523,7 @@ fn a_refusals_escape_the_pattern_text() -> Result<(), Box<dyn std::error::Error>
 fn a_hostile_haystack_is_answered_under_a_backtracking_pattern()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..8 {
             let length = below(&mut state, INPUT_LIMIT);
             // Many `a`s and one `b`: the shape that defeats a naive backtracker.
@@ -624,8 +626,8 @@ fn distinct_pattern_seeds_diverge_in_their_trace() {
 /// Two seeds draw two different haystacks, so the semantic-agreement family is
 /// not one haystack checked repeatedly.
 fn two_seeds_draw_two_different_haystacks() {
-    let mut first = SWEEP_SEEDS[0];
-    let mut second = SWEEP_SEEDS[1];
+    let mut first = seeded_stream(SWEEP_SEEDS[0]);
+    let mut second = seeded_stream(SWEEP_SEEDS[1]);
     let left = draw_haystack(&mut first, 64);
     let right = draw_haystack(&mut second, 64);
     assert_ne!(left, right, "the two sweep seeds drew the same haystack");

@@ -2608,7 +2608,20 @@ impl Host {
             .token
             .run_until_cancelled(Semaphore::acquire_owned(Arc::clone(&self.inner.admission)));
         match crate::rt::time::timeout(remaining, waiting).await {
-            Ok(Some(Ok(permit))) => Ok(Permit::Held(permit)),
+            Ok(Some(Ok(permit))) if !self.inner.token.is_cancelled() => Ok(Permit::Held(permit)),
+            // A permit acquired after the stop is not an admission. The stop
+            // ends the runs in flight, their permits go to the queued waiters in
+            // release order, and a waiter polled before it observes the stop
+            // finds a permit already assigned to it. Admitting it would count a
+            // run that never ran as admitted, charge its root budget, and report
+            // it `Cancelled` when its scope refuses entry. Which waiters get
+            // there first is decided by the order the stop's wakes arrive in,
+            // which the channel under the token does not fix, so the same
+            // schedule could report the same run either way. Dropping the permit
+            // hands it back and the run is `Refused`, whatever that order was.
+            Ok(Some(Ok(_after_the_stop))) => Err(AdmissionFailure::Refused(Refused {
+                at: Arc::from(task.as_str()),
+            })),
             // The semaphore is closed only if a `Host` closed it, and it never
             // does. Typed rather than panicked because the invariant that makes
             // this unreachable is a claim, not a proof, and a budget that is

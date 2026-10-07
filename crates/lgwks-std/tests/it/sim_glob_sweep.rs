@@ -15,6 +15,7 @@ use lgwks_std::glob::{GlobDialect, GlobPattern, GlobScratch, PatternError, match
 
 use crate::seeded_sweep;
 
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, initial_trace,
     next_seed,
@@ -207,7 +208,7 @@ fn reference_matches(tokens: &[RefToken], path: &[char]) -> bool {
 
 /// Runs the seeded sweep and returns its deterministic trace.
 fn run_seeded_sweep(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     let alphabets = ["ab/", "ab/?", "ab/éঈ😀", ".-_", "xyz/[]"];

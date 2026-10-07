@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::seeded_sweep;
 
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_nanos,
     initial_trace, next_index, next_seed,
@@ -51,7 +52,7 @@ fn reference_delay_nanos(base_nanos: u128, cap_nanos: u128, attempt: u32, entrop
 
 /// Runs the seeded sweep and returns its deterministic trace.
 fn run_seeded_sweep(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     let bases = [

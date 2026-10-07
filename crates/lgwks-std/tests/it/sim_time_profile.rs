@@ -11,6 +11,7 @@ use lgwks_std::time::{Field, FormatError, ParseError, UnixTimeError, parse_rfc33
 use seeded_sweep::{assert_same_seed_replays, fold, initial_trace, next_seed};
 
 use crate::seeded_bytes::next_byte;
+use seeded_sweep::seeded_stream;
 
 /// The length of `month` in `year`, or `refused` when the calendar refuses it.
 ///
@@ -517,7 +518,7 @@ fn t5_gregorian_and_leap_day_boundaries_match_the_wide_reference() {
 
 /// Runs seeded day and civil-date samples and returns their deterministic trace.
 fn run_seeded_calendar_samples(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
     for _ in 0..10_000 {
         let day_seed = next_seed(&mut state);

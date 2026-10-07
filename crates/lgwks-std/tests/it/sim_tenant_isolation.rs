@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use crate::seeded_sweep;
 
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_nanos,
     fold_usize, initial_trace, next_index, next_seed,
@@ -376,7 +377,7 @@ fn the_tenant_sweep_binds_each_tenants_policy_to_its_own_answers() {
 /// must produce the same trace.
 fn seeded_run(seed: u64, tenants: &[TenantPolicy]) -> u64 {
     let mut trace = initial_trace();
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     for _ in 0..64 {
         // The tenant is drawn in the index width the table is indexed in, so a
         // draw names a tenant rather than a narrowed position of one.

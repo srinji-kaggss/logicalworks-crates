@@ -401,12 +401,12 @@ The state of that, honestly:
 | A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
 | Clock skew between two hosts | ❌ | no coverage |
 | A credential expired mid-run | ✅ tested | `GrantSet::grant_expiring` + `Auth::check`: a lapsed proof is `BotError::CredentialExpired` (`Refused`, `RetryClass::Never`), an upstream 401/403/404 is `BotError::CredentialRejected` carrying a `NeedSet` repair (`cap::is_credential_status`, `GhError::repair`), wired through `PrSnapshotSource::poll` and every `gh` flow; `tests/it/credential.rs` spends a real credential's life on a real wall clock over a real file, `gh_binding.rs` and `sim_review_path.rs` drive a real `gh` child refusing the token, `tests/it/sim_credential.rs` sweeps 1,024 seeds |
-| The locale changed a date or number format | ❌ | no coverage |
+| The locale changed a date or number format | ✅ tested (macOS) | every `lgwks_std` reader of human text (RFC 3339, hex, percent, JSON/RON numbers) answers the same under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP` in their own time zones and refuses Arabic-Indic and Persian digits, a decimal comma and a grouping space; the one reader that leaves the process, `ps -o lstart`, is pinned to `TZ=UTC0 LC_ALL=C`. `tests/it/sim_locale.rs` sweeps 1,000 seeds in-process and re-runs the sweep and a process-start read in a child under each locale (INV-STD-LOCALE-1); removing the `ps` pin fails it. The in-process readers consult no locale, so for them the child re-run guards against a future libc call rather than discriminating one; a host without these locales (the Linux container) falls back to `C` and passes without exercising them |
 | Two operators edited one record | ❌ | no coverage |
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |
 | Accessibility tree mutated during a read | ❌ | no coverage |
 | A non-idempotent effect was sent twice by a retrying proxy | ⚠️ designed | the journal ladder refuses a second `OutcomeObserved` with different evidence; untested against a real retrying proxy |
-| The user cancelled halfway through | ⚠️ | `CancellationToken` and `JoinSet` discipline are required; no end-to-end cancellation-under-load journey |
+| The user cancelled halfway through | ⚠️ partly | `tests/it/sim_cancel_under_load.rs` stops a real `Host` with 1,000 flows in flight at a seeded point, over 1,000 seeds. Every flow reports `Succeeded`, `Cancelled` or `Refused`; the host's admitted and refused counts agree with the reports; no body outlives the call or starts after the stop; every permit returns. A run still queued at the stop is `Refused` whatever order the stop's wakes arrive in (INV-BOT-20). Before that rule the same seed did not replay. Supervised processes under a stop are `process_escape` (INV-BOT-156), at tens of processes rather than 1,000 |
 
 The rows marked ❌ are not oversights to be fixed in an afternoon each. They are
 the reason the commercial RPA vendors have large QA organisations. Closing the
@@ -700,11 +700,26 @@ and, racing, `concurrent_writers_of_one_key_commit_exactly_once_per_tenant`);
 request keys (`request_key::two_tenants_never_share_a_request_run`); forced
 refreshes (`observe_refresh`), the journal at scale
 (`journal_scale::concurrent_tenant_appends_scale_with_isolation`), clocks
-(`sim_clock_wiring`) and inspection (`inspect_wiring`).
+(`sim_clock_wiring`) and inspection (`inspect_wiring`). Two tenants through one
+journal directory, each in its own journal file, under a mid-run kill are `sim_tenant_journal_kill`
+(`kill_band_00..07`, 1,000 seeds). The kill lands between appends, tears the
+in-flight frame at a seeded byte, or loses only its acknowledgment. After the
+restart each tenant holds exactly its acknowledged prefix plus a landed frame,
+never the other tenant's keys. The retry at the tail the controller saw lands a
+torn append and is refused for a landed one, so every interrupted effect is
+present exactly once. Capacity is admitted per tenant by
+`Supervisor::with_tenancy` (INV-BOT-151; `tenancy::a_noisy_tenant_cannot_starve_a_quiet_one`,
+`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
+`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
 
-*Not covered:* the same two tenants through one shared durable journal under a
-mid-run kill, and any quota or noisy-neighbour measurement. Isolation of identity
-and data is tested; isolation of *capacity* is not.
+*Not covered:* two tenants appending to one journal *file*; each tenant owns its
+own file, so the run proves the kill and the restart keep each file's prefix,
+not that a shared file separates tenants. The kill is a cut of the file a real writer produced, not a
+`SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
+journal for real). A `script::Scope`'s tenant does not reach any admission,
+because `each` and `FanOut` drive their bodies on the awaiting task and take no
+permit. Tenant admission bounds who is admitted, not the CPU an admitted body
+burns.
 
 ### 4.9 Performance — fastest correct implementation
 
@@ -852,8 +867,8 @@ To change the verdict, in the order that matters:
    stopped and observed gone on Unix (#263, INV-BOT-112); it still has no
    Windows or orphan-adoption half. The difference they measure — "the bot
    survives its own machine dying" — is still open.
-2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, torn reads,
-   clock skew, credential expiry, locale, concurrent editors, selector drift.
+2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, clock skew,
+   concurrent editors, selector drift, a mutating accessibility tree.
    This is the long pole and the reason RPA is hard.
 3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
    and 7.6x the allocations per task (#269).
