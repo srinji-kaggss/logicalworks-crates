@@ -38,6 +38,7 @@ use std::error::Error;
 use std::ops::Range;
 
 use lgwks_deps::scan::{ScanError, scan_path, scan_source};
+use lgwks_std::{hex, random};
 
 use crate::sim::{Rng, Trace, receipt};
 
@@ -1504,10 +1505,13 @@ fn a_malformed_file_is_refused_with_its_path() -> TestResult {
 #[test]
 fn scan_path_reads_what_scan_source_reads() -> TestResult {
     let directory = std::env::temp_dir();
+    // A drawn nonce, not the process id: the OS reuses ids, and several
+    // checkouts on one host share this directory.
+    let nonce = hex::encode(random::bytes::<8>()?);
     for index in 0..64_u64 {
         let seed = mixed_seed(index ^ 0xd15c);
         let file = mixed_file(seed)?;
-        let path = directory.join(format!("lgwks-sim-scan-{}-{seed:x}.rs", std::process::id()));
+        let path = directory.join(format!("lgwks-sim-scan-{nonce}-{seed:x}.rs"));
         std::fs::write(&path, &file.source)?;
         let from_disk = scan_path(&path);
         std::fs::remove_file(&path)?;
@@ -1521,7 +1525,7 @@ fn scan_path_reads_what_scan_source_reads() -> TestResult {
             "seed {seed:#x}: disk and text differ"
         );
     }
-    let missing = directory.join(format!("lgwks-sim-scan-{}-missing.rs", std::process::id()));
+    let missing = directory.join(format!("lgwks-sim-scan-{nonce}-missing.rs"));
     assert!(
         matches!(scan_path(&missing), Err(ScanError::Unparseable { .. })),
         "a missing file is refused"
