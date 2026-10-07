@@ -97,7 +97,7 @@ propose growing it into a fourth surface.
 | Property | State | Evidence on `977c79d4` |
 |---|---|---|
 | 28 declared grammars, default 7 | exercised | `DECLARED_GRAMMARS: usize = 28` (`crates/lgwks-ast/src/lib.rs`) with a fixture table asserted to cover every declared grammar; `default =` in `Cargo.toml` lists 7 `lang-*` |
-| Every declared grammar accepts its valid fixture and refuses its malformed one without a recovery node | exercised | The `GrammarFixture` table and its completeness assertion (`crates/lgwks-ast/src/lib.rs:3437-3432`) |
+| Every declared grammar accepts its valid fixture and refuses its malformed one without a recovery node | exercised | The `GrammarFixture` table and its completeness assertion (`crates/lgwks-ast/src/lib.rs:3445-3440`) |
 | Depth-bounded traversal, typed diagnostics with spans | exercised | Retained repair; see the crate's own tests |
 | **Not claimed here** | — | In-process bot code inspection is [#150](https://github.com/srinji-kaggss/logicalworks-crates/issues/150)'s, and parser/detection/inspection semantics are [#165](https://github.com/srinji-kaggss/logicalworks-crates/issues/165)'s. **Neither is verified by this matrix.** |
 
