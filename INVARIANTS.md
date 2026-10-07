@@ -135,6 +135,10 @@ the same PR as any Director correction or incident fix. Long-form: `AGENTS.md`,
   `lgwks_deps::tests::a_register_without_surfaces_keeps_no_closed_set`,
   `lgwks_deps::tests::the_freeze_is_declared_by_the_register`,
   `lgwks_deps::tests::an_accepted_term_does_not_accept_its_prefix_extension`,
+  `lgwks_deps::tests::a_slash_license_matches_its_spdx_or_approval`,
+  `lgwks_deps::tests::a_slash_license_still_rejects_an_unaccepted_alternative`
+  (a declared licence's deprecated Cargo `/` is read as `OR`; the register
+  stays SPDX),
   `tests/it/contract_schema_compat.rs`
   (`a_policy_list_is_refused_whole_on_a_bad_member`,
   `a_half_written_freeze_is_refused`)
