@@ -406,7 +406,7 @@ The state of that, honestly:
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |
 | Accessibility tree mutated during a read | ❌ | no coverage |
 | A non-idempotent effect was sent twice by a retrying proxy | ⚠️ designed | the journal ladder refuses a second `OutcomeObserved` with different evidence; untested against a real retrying proxy |
-| The user cancelled halfway through | ⚠️ | `CancellationToken` and `JoinSet` discipline are required; no end-to-end cancellation-under-load journey |
+| The user cancelled halfway through | ⚠️ partly | `tests/it/sim_cancel_under_load.rs` stops a real `Host` with 1,000 flows in flight at a seeded point, over 1,000 seeds. Every flow reports `Succeeded`, `Cancelled` or `Refused`; the host's admitted and refused counts agree with the reports; no body outlives the call or starts after the stop; every permit returns. A run still queued at the stop is `Refused` whatever order the stop's wakes arrive in (INV-BOT-20). Before that rule the same seed did not replay. Supervised processes under a stop are `process_escape` (INV-BOT-156), at tens of processes rather than 1,000 |
 
 The rows marked ❌ are not oversights to be fixed in an afternoon each. They are
 the reason the commercial RPA vendors have large QA organisations. Closing the

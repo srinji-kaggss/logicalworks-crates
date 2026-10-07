@@ -166,6 +166,7 @@ mod rt_runtime_stack;
 mod script_flow;
 mod script_refusals;
 mod session;
+mod sim_cancel_under_load;
 mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;
