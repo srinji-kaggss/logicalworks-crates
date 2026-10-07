@@ -41,9 +41,13 @@ inputs:
       linker processes: CARGO_BUILD_JOBS is share × cores ÷ runner instances,
       at least one. The machine's own cargo configuration caps jobs at four,
       which thirteen concurrent jobs turned into 52 compiler processes on 15
-      cores and 24 GiB of RAM (run 37654108625: 35 GiB of swap used). Warm
-      compiles take seconds, so no job needs four slots; the jobs that compile
-      the most name share 2, the rest share 1.
+      cores and 24 GiB of RAM (run 37654108625: 35 GiB of swap used). One
+      opt-level-3 rustc holds ~0.9 GiB, so two slots per job is 26 of them
+      plus the linkers, and run 37675264254 died six jobs at once with swap at
+      96%. Every job runs at one slot: warm compiles take seconds either way,
+      transitions take longer but survive instead of dying. The six compiler
+      jobs carry 30-minute timeouts for exactly those transitions; warm runs
+      are still held to 5 minutes by measurement, not by the timeout.
     required: false
     default: "1"
   tmp-gib:
