@@ -760,21 +760,26 @@ superlinear term. `Auth::check` was quadratic in the capability count and is now
 unnoticed later:**
 
 1. The rig withdraws `rt`. It measures the **synchronous** `Bot::tick` adapter.
-   The async runtime is measured separately, by `bench/async/`
-   ([`../bench/async/README.md`](../bench/async/README.md)), against pinned raw
-   Tokio doing identical work behind a fairness gate that aborts on any
-   work-count mismatch, in the required `bench-async-fairness` lane:
+    The async runtime is measured separately, by `bench/async/`
+    ([`../bench/async/README.md`](../bench/async/README.md)), against pinned raw
+    Tokio doing identical work behind a fairness gate that aborts on any
+    work-count mismatch, in the required `bench-async-fairness` lane (15 paired
+    rounds, Apple M5 Pro, load average 9.33):
 
-   | scenario | tasks | bound | facade / raw p50 | 95% CI |
-   |---|---:|---:|---:|---|
-   | `quiet-async-bot` | 256 | 8 | 5.25x | [3.33, 5.62] |
-   | `at-capacity` | 512 | 4 | 2.47x | [1.97, 2.94] |
-   | `high-fanout` | 2,048 | 32 | 2.21x | [1.98, 2.26] |
-   | `single-permit` | 512 | 1 | 1.37x | [1.28, 1.63] |
+    | scenario | tasks | bound | facade / raw p50 | 95% CI |
+    |---|---:|---:|---:|---|
+    | `quiet-async-bot` | 256 | 8 | 4.49x | [2.41, 5.03] |
+    | `at-capacity` | 512 | 4 | 1.95x | [1.86, 2.31] |
+    | `high-fanout` | 2,048 | 32 | 1.53x | [1.44, 1.58] |
+    | `single-permit` | 512 | 1 | 1.36x | [1.25, 1.40] |
 
-   and 15.33 allocations per task against raw Tokio's 2.02 (7.6x). This is a
-   closed-loop measurement at one bound per scenario; the open-loop saturation
-   curve is #269.
+    and 3.71 allocations per task against raw Tokio's 2.02 (the attribution run
+    itemises 3.61, cut from 15.33 by removing an eagerly-built `watch` channel
+    per cancellation token and a 100 ms timer armed on every uncontended spawn;
+    the ≤ 2x-at-p99 latency target is not met and the remainder is work, not
+    allocation — see §4.2). This is a closed-loop measurement at one bound per
+    scenario; the open-loop saturation curve, the six-bound knees, the million
+    concurrently admitted tasks and the overload recovery are §4.2 (#269).
 2. The comparator is a hand-rolled loop in the same process. There is no
    measurement against UiPath, n8n, Node-RED or Temporal. Such a measurement
    would be a category error dressed as a result, and this document does not
@@ -870,8 +875,8 @@ To change the verdict, in the order that matters:
 2. **Close the Generalized rows marked ❌ in §4.4.** Focus steal, clock skew,
    concurrent editors, selector drift, a mutating accessibility tree.
    This is the long pole and the reason RPA is hard.
-3. **Cut the async facade's cost.** §4.9 measures it at 1.37x–5.25x raw Tokio
-   and 7.6x the allocations per task (#269).
+3. **Cut the async facade's cost.** §4.9 measures it at 1.36x–4.49x raw Tokio
+    and 3.61 allocations per task against raw Tokio's 2.02 (#269).
 4. **Multi-tenant negative tests.** §4.8.
 5. **Hyperscale, on the profile the estate names.** §4.2 has the saturation
    curve, the declared knees, a million concurrent tasks and the recovery

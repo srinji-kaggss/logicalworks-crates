@@ -235,6 +235,30 @@ repository cannot host — `unsafe` is denied by the crate's lint contract and a
 `bevy_ecs` edge in `bench/` is a dependency the register does not carry — so it
 is reported as measured rather than guessed.
 
+### Which sources use which change-detection path
+
+#279 asks for change ticks where the source reports its own revision, with the
+digest path kept for sources that cannot, and for the record of which uses
+which. The seam is `Observe::revision() -> Option<u64>`
+(`crates/lgwks-bot/src/spec.rs:618`):
+
+- A source that reports `Some(revision)` takes the **change-tick path**: the
+  substrate compares the reported revision against the one it committed with
+  the value it holds and **skips the poll entirely** when they agree. The rig's
+  own source reports the value `tick / period` as its revision
+  (`bench/src/main.rs:119`), so the quiet-tick poll cost in the profile above
+  is measured on this path.
+- A source that reports `None` takes the **value-compare path**: the substrate
+  polls, and the source compares the fresh value against the held one inside
+  its own poll (`poll_any`), where the output type is still concrete and the
+  comparison costs no boxing. That is the path **every shipped source** takes
+  today, so a domain that reports no revision is polled exactly as before: it
+  loses nothing and gains nothing from the change ticks.
+
+The deprecated `Observe::fingerprint` seam is unused and is neither path: it
+was read beside the poll rather than in place of one, which is why it was
+removed instead of kept as the digest leg.
+
 ## Method
 
 ### The baseline is the null hypothesis, not a strawman
@@ -262,7 +286,9 @@ gated on effects alone, and `fanout-1x64` reported a **2937x** ratio. The cause
 was in the baseline: it returned `entries` as an integer rather than looping
 over them, so it produced the correct effect count while doing none of the work.
 The gate passed, because effect counts were all it looked at. With evaluations
-counted, the same scenario measures 72.38x — a factor of 41 of pure artifact,
+counted, the same scenario measured 72.38x on the pre-durable-record tree
+(2 578.12x on the current one, where every effect writes its record) — a factor
+of 41 of pure artifact in either era,
 which is what an unguarded benchmark of this kind produces.
 
 This is recorded rather than quietly fixed because the failure mode is the
@@ -290,47 +316,66 @@ checked for self-consistency; this one can be checked against arithmetic.
 
 ## What the numbers say
 
-### Cost is almost entirely in the poll, not the decision
+The analysis below is read off the current tree's table above, not the
+pre-durable-record run: on this tree a quiet tick costs 3 720.9–4 909.2 ns,
+and the effect-heavy scenarios cost 66 270.8–138 037.7 ns. The section after
+the table ("What the two changes bought") keeps the old run's figures for the
+before/after comparison and is marked as such; nothing there is restated here
+as a current cost.
+
+### Cost is in the act, not the poll
 
 `poll-only-64x100` polls 64 sources and detects change with **no entries to
-walk**: 2 540.0 ns/tick. `steady-64x100` adds a full
-`(condition, action)` entry to every chain: 2 582.1 ns/tick.
+walk**: 3 720.9 ns/tick. `steady-64x100` adds a full
+`(condition, action)` entry to every chain: 4 909.2 ns/tick, only **1.32x**
+the poll-only cost.
 
-Adding the entire decision-and-effect layer to 64 chains costs **42.1 ns/tick —
-1.6%** of the total. Roughly **98% of a tick is the poll and change-detection
-phase**, before the bot has decided anything. An optimisation aimed at the
-condition or the action is aimed at the wrong 1.6%.
+The per-stage profile above says where the rest is: on `steady-64x100` the
+effect path (`act` — ledger, warrant and journal record) is 54.1% of the
+tick and poll plus change detection (`poll` + `fingerprint` + `compare`) is
+34.9%. On `poll-only-64x100`, which fires nothing, `act` is still 40.7% —
+the act stage's own walk with nothing selected — against 45.6% for poll plus
+change detection. On the effect-heavy scenarios `act` is 75–98% of the tick.
+The old file's "98% of a tick is poll and change detection" was true of a
+tree in which effects wrote no record; on this tree an optimisation aimed at
+anything but the effect path is aimed at the smaller share.
 
-### Change detection pays, and the gap widened
+### Change detection still pays, and the gap widened further
 
-`steady-64x100` (one change per 100 ticks) costs 2 582.1 ns/tick.
-`churn-64x1` (every source moves every tick) costs 10 931.6 ns/tick. Making the
-workload change 100x more often costs **4.23x** more time.
+`steady-64x100` (one change per 100 ticks) costs 4 909.2 ns/tick.
+`churn-64x1` (every source moves every tick) costs 138 037.7 ns/tick. Making
+the workload change 100x more often costs **28.1x** more time, against 4.23x
+in the previous record and 1.95x in the one before it.
 
-This ratio moved. In the previous record it was 1.95x, because a quiet tick and
-a churning tick cost about the same: the poll happened either way and the
-decision layer was a small part of the total. Both changes measured in the
-section below made a quiet tick cheaper without making a churning one cheaper,
-so a workload that never goes quiet now pays about four times what a quiet one
-does. The change-detection saving is real and it is bounded, and it is larger
-than the phrase "change-triggered" suggested when this document was first
-written.
+The widening is the same two changes compounding: each made a quiet tick
+cheaper — first the digest that skipped polls, now the change ticks plus
+`PollScratch` and the durable record that moved the remaining cost into the
+effect — without making a churning tick cheaper. A workload that never goes
+quiet now pays about twenty-eight times what a quiet one does, and nearly all
+of that multiple is the per-effect record, not the per-source poll.
 
-### Cost is linear in sources
+### Cost is linear in sources only at equal effect rates
 
-`wide-256x10` runs 256 sources at 49.7 ns per source-tick; `steady-64x100` runs
-64 sources at 40.3 ns per source-tick. The baseline is likewise flat at ~0.5 ns
-per source-tick across 64, 256 and the poll-only shape. There is no superlinear
-term in source count to find. The gap between the two bot figures is the fixed
-per-tick cost spread over four times as many sources, not a second-order term.
+`wide-256x10` runs 256 sources at 258.9 ns per source-tick; `steady-64x100`
+runs 64 sources at 76.7 ns per source-tick; `poll-only-64x100` at 58.1 ns.
+The baseline is flat at ~0.5 ns per source-tick across all three shapes, so
+there is no superlinear term in the work itself. The bot figures differ
+because the effect rate differs: `wide-256x10` fires roughly 25.6 effects per
+tick, `steady-64x100` about 0.64, and each effect carries the record the
+profile attributes to `act`. Per source, the poll is linear; per effect, the
+record dominates.
 
 ### Per-entry walk cost
 
-`fanout-1x64` walks 64 entries on one source every tick: 2 329.5 ns/tick, or
-**~36.4 ns per entry walked** (condition plus action plus ledger). The
-`churn-64x1` delta implies ~131.1 ns per walked entry. A decided effect
-therefore costs somewhere between 36 and 131 ns depending on how much of the
-tick the source moved, against ~0.5 ns for the same decision in the baseline.
+`fanout-1x64` walks 64 entries on one source every tick: 116 680.7 ns/tick,
+or **~1 823 ns per entry walked** (condition plus action plus ledger, warrant
+and record). The `churn-64x1` marginal cost is ~2 080 ns per walked entry.
+A decided effect therefore costs on the order of two microseconds, against
+~0.5–0.8 ns for the same decision in the baseline. The two-microsecond figure
+is the ledger write, the warrant and the durable record a dispatched effect
+is written through — the T4/T6 guarantees itemised in "What the multiplier
+buys" — not the condition evaluation, which the profile measures at 498 ns
+for all 64 entries of `fanout-1x64`.
 
 ### Admission is free
 
