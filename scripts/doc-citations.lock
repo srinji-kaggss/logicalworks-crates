@@ -6,11 +6,11 @@
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.
-Cargo.toml:131	print_stderr = "forbid"
-Cargo.toml:132	print_stdout = "forbid"
+Cargo.toml:137	print_stderr = "forbid"
+Cargo.toml:138	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
-crates/lgwks-ast/src/lib.rs:3429	assert_eq!(
-crates/lgwks-ast/src/lib.rs:3432	"the fixture table must cover every grammar the manifest declares"
+crates/lgwks-ast/src/lib.rs:3440	let mut covered: Vec<&str> = Vec::new();
+crates/lgwks-ast/src/lib.rs:3445	assert_eq!(
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:55	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:66	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
@@ -21,19 +21,19 @@ crates/lgwks-bot/src/cap.rs:489	pub fn check(&self, required: &[Cap]) -> Result<
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs.rs:1428	struct TickError(Option<BotError>);
 crates/lgwks-bot/src/ecs.rs:1970	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs.rs:4088	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs.rs:4167	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs.rs:4502	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:4668	*slot = Some(value);
-crates/lgwks-bot/src/ecs.rs:4780	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:4943	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs.rs:5055	*failure = Some(error);
-crates/lgwks-bot/src/ecs.rs:5455	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5507	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs.rs:5629	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:6933	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:7132	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs.rs:7152	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs.rs:4095	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs.rs:4174	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs.rs:4509	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs.rs:4675	*slot = Some(value);
+crates/lgwks-bot/src/ecs.rs:4787	fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs.rs:4950	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs.rs:5062	*failure = Some(error);
+crates/lgwks-bot/src/ecs.rs:5462	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:5514	// borrow of the plan would outlive the schedule that wrote it. An empty
+crates/lgwks-bot/src/ecs.rs:5636	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs.rs:6940	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs.rs:7139	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs.rs:7159	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/error.rs:186	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {

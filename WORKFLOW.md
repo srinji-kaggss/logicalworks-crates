@@ -43,17 +43,19 @@ test listing and also counts source-visible `#[test]` attributes under
 least half deterministic simulation. `debug-e2e` drives the public
 `lgwks-deps debug` command through its JSON success path and a fail-closed
 manifest fixture, and prints the successful end-to-end journey result CI must
-show. CI also runs those two lanes as dedicated PR check jobs named
-`successful simulation result` and `successful end-to-end journey result`, so
-the checks list exposes the result without requiring a reader to open the
-aggregate `Tests` log.
+show. CI runs both lanes in the workspace job and exposes each verdict as its
+own PR check row, `successful simulation result` and `successful end-to-end
+journey result`, so the checks list shows the result without requiring a reader
+to open the aggregate log. A check row reads the report its lane wrote and
+passes only on that lane's own pass line; it does not build the workspace again.
 
-Hosted Actions executes on this account and is the CI surface: the workflow
-routes to `ubuntu-latest`, `macos-14`, and `windows-latest`, with `macos-14`
-reserved for the Metal storefronts. `check-gate-parity.py` refuses a required
-lane with no matching CI step, a CI gate step no lane claims, a substituted
-command, and a toolchain pin that drifted. It does not police runner labels;
-the OS matrix is a coverage decision, not a routing accident.
+CI runs on the self-hosted macOS arm64 runners on this machine (Director,
+2026-10-04), with the Linux suites in a container on the same machine and the
+Windows legs of the AppCUI and GPUI storefronts on hosted `windows-latest`.
+§12 is the CI's specification. `check-gate-parity.py` refuses a required lane
+with no matching CI step, a CI gate step no lane claims, a substituted command,
+and a toolchain pin that drifted. It does not police runner labels; the OS
+matrix is a coverage decision, not a routing accident.
 
 ---
 
@@ -300,12 +302,11 @@ yourself blocked, and writing a paragraph about how you respect the rule.
 
 | Repo | Gate script | Runner | Workflow |
 |---|---|---|---|
-| `logicalworks-crates` | `scripts/ci-local.sh` | hosted Actions: `ubuntu-latest`, `macos-14`, `windows-latest` | `.github/workflows/ci.yml`, `runs-on: ${{ matrix.os }}` for the three-OS matrix |
+| `logicalworks-crates` | `scripts/ci-local.sh` | six self-hosted instances on this Mac (`[self-hosted, macOS, ARM64, lwc]`), a Linux container on the same machine, hosted `windows-latest` for the Windows legs | `.github/workflows/ci.yml`, specified by §12 |
 
-Hosted Actions executes on this account and is the CI surface. `macos-14` is
-reserved for the two Metal storefronts; everything else runs on
-`ubuntu-latest`, and the AppCUI matrix spans all three. Keep the OS matrix:
-collapsing it onto one machine is a coverage loss, not a hardening step.
+Every self-hosted job runs on one machine, so the OS matrix is kept by the
+Linux container and the hosted Windows legs rather than by more machines. Keep
+it: dropping a leg is a coverage loss, not a speed-up.
 
 Linux is the correct rung wherever a test is `#![cfg(target_os = "linux")]` and
 installs a seccomp filter. On a non-Linux host such a test compiles to nothing
@@ -326,3 +327,119 @@ solved.
 **After verification and before delivery**, run
 `wwfd state sync <repo> --task '<task>'` to record genuine state before closing
 or opening a PR. No claim of green completion without a sync receipt.
+
+---
+
+## 12. CI: the specification
+
+`.github/workflows/ci.yml` and `.github/actions/local-rust/action.yml` implement
+this section. A change to either is held to it, and a number below is replaced
+only by a newer measurement of the same thing, with its run id.
+
+### The budget
+
+| Measure | Bound | Source |
+|---|---|---|
+| Wall clock of a warm run | ≤ 5 min | the contract's gate budget (2026-09-30), the tightest of the Director's three statements (5, 6 and 7 min) |
+| Wall clock of a cold run | ≤ 10 min | Director: "10 MINUTES COLD" |
+| Outcome | every lane passes | Director: "U CANNOT CLAIM SPEED OF CODE IF UR FUCKING CI DOESNT PASS" |
+
+*Wall clock* is the run's first job start to its last job end, read from the
+Actions API (`jobs[].started_at`, `jobs[].completed_at`), queueing included.
+*Warm* means each runner instance's target directory holds an earlier commit's
+build; *cold* means it holds nothing (the cargo registry stays). A bound is met
+by a run that passes; a red run's wall clock is not evidence of anything.
+
+### What sets the wall clock
+
+Every self-hosted job runs on one machine: 15 cores (5 performance, 10
+efficiency), 24 GiB, thirteen runner instances. A run's wall clock is therefore
+its job-seconds divided by thirteen plus what waits in the queue, and adding
+jobs does not add machines. Three measured facts set the layout:
+
+1. **Duplicated work, not parallelism, was the cost.** Run 37579691890 (main,
+   3c008cbf) ran 35 jobs, 7,500 job-seconds, in 21.4 min. Each job compiled
+   the workspace into a target directory of its own (25 directories per
+   instance, 206 GiB), and the test suites ran in 20 configurations whose
+   once-each minimum is 1,131 test-seconds against the 17,010 they took
+   contended. The job that existed only to list the simulation tests compiled
+   every test binary for 364 s; the same listing took 6 s in the job that had
+   just built them.
+2. **`sync_all` is device-wide on macOS.** Rust's `File::sync_all` is
+   `fcntl(F_FULLFSYNC)`, which flushes the whole SSD's cache and serialises
+   against every other flush on the device. The durable-store tests sync every
+   record, so six instances' suites queued on one another's flushes. On an
+   idle machine the full workspace suite (5,430 tests) took **385 s** with its
+   temporary files on the SSD and **116.5 s** with them on a RAM disk, every
+   test passing both times, peak RSS 484 MB.
+3. **Memory, not cores, is the binding constraint.** Thirteen jobs each
+   compiling with four slots is 52 compiler processes plus ~50 test threads on
+   24 GiB. Run 37654108625 (warm, green) left **35 GiB of swap used** with
+   1.3 billion page reactivations outstanding afterwards; a hashing unit test
+   that takes one second idle took 138 s, the dudect example 47 s idle and
+   458 s in the run, the workspace suite 116.5 s idle and 390 s in the run.
+   Warm compiles take seconds, so compiler slots are capped at a share that
+   sums near the machine (`build-share`), test threads likewise
+   (`test-share`: nodefault 6, bot-full 8, workspace 4, the rest 1-2), and the
+   suites' CPU is bought down rather than scheduled: `[profile.test]`
+   opt-level 2 halves the heaviest sims (the 5,000-tenant provision 67.9 s to
+   34.3 s at the same seeds), and the frame search hashes once per candidate
+   length instead of twice.
+
+So: lanes that build one feature set share one job (the lane table's
+`group`); a job that only reads a result reads it from the job that produced
+it; every job that builds is pinned to one instance, which keeps one target
+directory for it, so a run after the first finds its dependencies built; and
+every job's temporary files are on an APFS RAM disk, the
+filesystem of the machine's own disk, so the move changes how fast a sync is
+and nothing a test observes.
+
+**Why the RAM disk changes no assertion.** No test simulates power loss. The
+crash tests kill with `SIGKILL`, and a killed process's written pages survive
+in the page cache, so what a reopen reads is the same whichever device holds
+the file. Production code keeps `sync_all`; only where the test's scratch files
+live changed. The Linux container gets the same with a tmpfs `/tmp`.
+
+### The nine axes
+
+| Axis | Requirement on the CI | Evidence |
+|---|---|---|
+| Frontier | The layout beats each alternative it was measured against. 35 single-lane jobs with per-job targets: 21.4 min. Hosted runners: refused by the Director (2026-10-04, CI runs on the local runner). One orchestrator job running the whole lane table: loses the per-job rows and isolates nothing. Sharding one suite across instances of one machine: recompiles it per shard and adds no cores. | the run table below |
+| Hyperscale | Every resource the run takes is bounded. Self-hosted jobs in flight ≤ the thirteen instances; nextest threads per job = share × cores ÷ instances (workspace 6, bot-full 8, no-default 6, matrix 3, rest 1-2); compiler slots one per job; a RAM disk ≤ `tmp-gib` (4 GiB) per instance and only the pages written; a container tmpfs ≤ 3 GiB; every job has `timeout-minutes`; every test has nextest's `slow-timeout` with `terminate-after`. Nothing grows with the number of runs except the target directories, which are cleaned below `min-free-gib`. | `action.yml`, `.config/nextest.toml` |
+| Idiomatic | One definition of the gate: `scripts/gate-lanes.toml`. CI steps carry the lane commands verbatim and `check-gate-parity.py` refuses drift. Standard actions only; no wrapper that hides a command. | `python3 scripts/check-gate-parity.py` |
+| Generalized | Every lane runs on every pull request: every feature set, the 8-target matrix, WASI, all 28 grammars, macOS, Linux and Windows. A layout change moves steps between jobs and never drops one; the parity check proves each CI lane still has its step. | parity: 58 lanes, 49 shared |
+| Decoupled | No job waits on another except three readers (the two check rows and the acceptance receipt), each of which reads a file another job wrote and builds nothing. A lane's command does not depend on which job runs it. | `needs:` appears three times |
+| Ephemeral | A job leaves nothing that changes the next one's result. The RAM disk is detached and recreated at every job start; the container's tmpfs dies with the container; artifacts expire (7 and 30 days). The per-instance target directory is the only state that crosses runs, and it is a cache: deleting it costs a cold build and never changes an outcome. | `action.yml` |
+| Portable | macOS arm64 natively, Linux aarch64 in a container with `--init` as PID 1, Windows on hosted runners for the two storefronts that have a Windows backend, and `cargo check` across the declared target matrix. A host without a RAM disk keeps its temporary files on disk and says so in a warning. | `scripts/linux-container-tests.sh`, `scripts/check-target-matrix.sh` |
+| Multi-tenant | Runs of different pull requests share the machine and never a writer: each instance has its own target directory, RAM disk and container target volume, and an instance runs one job at a time. Concurrent runs of one pull request supersede rather than race. | `concurrency:` in `ci.yml` |
+| Fastest | Warm ≤ 5 min and cold ≤ 10 min, measured on passing runs and reported as below. | the run table below |
+
+### Runs
+
+| Run | Commit | Layout | Wall clock | Job-seconds | Result |
+|---|---|---|---|---|---|
+| 37579691890 | 3c008cbf | 35 jobs, per-job targets, SSD temp | 21.4 min | 7,500 | pass |
+| 37607930551 | 3f331527 | 14 jobs, per-instance targets (cold), HFS+ RAM temp | cancelled | — | fail: six instances compiled every dependency at once; four jobs timed out compiling |
+| 37613720499 | 3a2a855f | + one shared sccache, server on a job's RAM disk | cancelled | — | fail: the next job ejected the server's temp dir; HFS+ decomposed names broke two walk simulations |
+| 37616318637 | 4993b33d | + APFS RAM temp, sccache with every target as a base directory | cancelled | — | fail: five jobs timed out compiling at load 70-85; jobs landed on instances cold for their feature sets, and sccache hit 0 of 195 Rust compiles across target directories, so it was removed and jobs pinned |
+| 37619560219 #1 | 7b48f3f1 | 14 jobs pinned to 6 instances (cold per instance), APFS RAM temp | 20.5 min | 5,879 | fail: the feature matrix reached its timeout compiling |
+| 37619560219 #2 | 7b48f3f1 | same commit, warm | 10.0 min | 2,470 | fail: both Linux jobs found no engine through the Docker context; the no-default job queued 259 s behind another on its instance |
+| 37624988459 #1 | b9eadc91 | 11 instances, one per building job; Linux leg on OrbStack | 17.2 min | — | fail: both bot-full shards reached their 15 min timeout at load 100+, beside the 10,000-run saturation tier's 50,000 process starts |
+| 37624988459 #2 | b9eadc91 | same commit, warm | 8.5 min | 2,729 | fail: a 100 ms parse deadline measured 392 ms on the host clock (fixed: proved on a driven clock); every other job passed by 291 s, the two bot-full shards at 491-497 s |
+| 37630747929 | 99670c70 | bot-full in three shards; deadlines and stalls on the seeded clock | 13.0 min | 5,473 | fail: four doc citations into ecs.rs moved with the source; five jobs compiled the same feature sets at once, 4-9 min each, while their tests took 66-150 s |
+| 37633462471 | 436b9c9e | one job per feature set; gate checks apart from the workspace build | 9.0 min | 3,508 | fail: the acceptance job's artifact pattern missed the unsharded name; the workspace build took 5m40s because the runners' `CI=true` turns incremental compilation off |
+| 37635420955 | 89ba090b | + walk-complexity bound judged at the min window | fail | — | fail: two timing flakes under load (walk median 6.5x, hostile byte-ceiling tiling on a 10 s host deadline); fixed, not weakened |
+| 37650313690 | 627e4629 | + doc-citation re-anchor | cancelled | — | superseded by 37651284179 |
+| 37651284179 | 627e4629 | same commit | 10.3 min | — | fail: hostile byte-ceiling tiling timed out at 88 s under load (fixed: tile past any deadline); every other job green |
+| 37654108625 | 6d792999 | + hostile tiling fix; thirteen instances | 10.2 min | 4,807 | **pass.** Six jobs over the 5 min budget: nodefault 605 s, docs 517 s, storefront 494 s, timing 492 s (dudect 458 s), build 488 s, bot-full 378 s. Step logs show warm compiles finishing in seconds and suites inflated 3-10x: the machine is swapping, not compiling (35 GiB swap used). The fix is §12 fact 3 above, not another layout |
+| 37661085639 | f34c581d | + build/test shares, test opt-level 2, frame one-hash, merged doc lanes (transition run: every instance rebuilt at the new profile) | cancelled (15 min timeouts on build, nodefault) | — | **not a verdict on the layout.** Transition walls paid the rebuild storm (build's full-workspace rebuild 638 s on two slots; nodefault's serial feature rebuilds). What it proved warm and fast: gate 279 s → 112 s, the workspace test step 390 s → 165 s, merged doc lanes passing. Timeouts move 15 → 20 min (hang bound, not budget) so a transition run survives its rebuilds |
+| 37663658069 | f380fb4a | + 20 min hang bounds (warm: opt-2 everywhere) | 8.7 min | — | **pass.** Down from 10.2: saturation 221→121 s, clippy 211→122 s, gate 279→188 s, timing 492→343 s, storefront 494→342 s, docs 517→365 s, bot-full 378→348 s. Six jobs still over budget: nodefault 518 s (bot suite 355→161 s; the 12 per-feature suites are compile-bound at opt-2), build 505 s, docs 365 s, bot-full 348 s, timing 343 s (dudect still 1M samples), storefront 342 s (GPUI check 174 s). Next: per-feature suites move to the feature-matrix job at opt-0, dudect to 250k samples |
+| 37666041415 | 40a3175d | + shard fusion, dudect 250k, thread bumps | fail | — | fail: bot-full at ten threads broke INV-BOT-156's drain test (two cleanups Aborted past the grace under the process-table storm). Reverted to eight. Lesson recorded in the step comment |
+| 37668304200 | a2b50ff6 | + bot-full back to eight (warm; shards cold at opt-0 on lwc-2) | 9.4 min | — | **pass.** Timing 343→237 s (dudect 250k), nodefault 518→220 s (bot-only), storefront 342→300 s, gate 225 s; but stdmatrix 129→561 s (12 cold opt-0 compiles serialized under the storm, starving bot-full 348→483 s and docs 365→501 s), build 505→488 s. Shard-c proves the mechanism: 42 s uncontended against 214 s for shard-b. Next: test opt-level 3 (provision sim 34.3→21.5 s same seeds) |
+| 37669895633 | e0ace416 | + test opt-level 3 (transition: every instance rebuilt) | fail + timeout | — | fail: the S4 scaling test read 6.5x growth on an unchanged path — 200k-call trials at opt-0 span ~14 ms and every one of five caught the storm (fixed: 50k calls, fastest of nine, same bound and verdict); build timed out on the 808 s opt-3 full rebuild. What it proved: workspace tests 265→195 s, bot-full suite through in one piece at opt-3. Timeouts hold at 20 min |
+| 37673046041 | 57aad743 | + S4 fastest-of-nine (warm) | fail | — | fail: the drain test again (at eight threads — the storm, not the bump), and Linux-workspace on a stale partial unpack a timeout-killed job left in the shared registry volume (`File exists`, tree-sitter-nix). The script now removes partials before building. stdmatrix green with the S4 fix; nodefault 220 s holds |
+| 37675264254 | 448127f0 | + registry pre-flight (no source change: fully warm) | fail | — | fail: six jobs died within 30 s of each other at ~15 min with swap at 96% (37 GB of 39 GB). One opt-3 rustc holds ~0.9 GiB; two slots per job plus the linkers overflowed 24 GiB. Test binaries are light (the 5,000-tenant sim peaks at 6 MB). Fix: one compiler slot per job everywhere, 30-minute timeouts on the six compiler jobs for transitions |
+| 37678318088 | 4f800797 | + one slot per job (warm) | 6.7 min wall, fail | — | fail: only bot-full, on the drain test again. Everything else under budget or at it: build 279 s, docs 296 s, storefront 240 s, timing 204 s, nodefault 199 s, gate 190 s; stdmatrix 399 s (twelve serial compiles on one slot starve others). Fix: shard-c rides the saturation instance, whose work is spawns rather than compiles |
+| 37679490381 | 306a1632 | + shard-c to saturation (warm; shard-c cold on lwc-6) | 7.0 min, pass | — | **pass.** Saturation 168→418 s on shard-c's cold compiles, docs 296→412 s and build 279→352 s on the storm. Lesson: every added cold compile taxes the whole run, not its job. Fix: suite thread shares cut ~40% (oversubscription past ~1.5x slows more than it buys) |
+| 37680643459 | 1628b64d | + thread cuts (warm, no rebuilds) | 8.7 min, pass | — | **pass.** The cuts slowed every suite 20-30%: the suites are throughput-bound, not contention-bound, so the shares are restored. Standing: green at ~7 min warm; the remaining gap is total suite CPU (~6,000 s) against fifteen cores, not scheduling |
+| 37681940177 | d601807f | + shares restored (warm) | 7.3 min, pass | — | **pass, all 19 green including the drain.** Standing after ten commits: 21.4 min → ~7 min warm green. The warm wall moves ±100 s run to run on identical code (storm composition, start temperature); the floor is total suite CPU (~6,000 s) ÷ fifteen cores ≈ 400 s. Sub-300 needs coverage cuts or hardware — Director's call |

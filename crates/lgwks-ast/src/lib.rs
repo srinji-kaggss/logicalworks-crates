@@ -1268,7 +1268,7 @@ fn parse_tree(
                     entry.insert(fresh?)
                 }
             };
-            run_parser(parser, code, name, deadline)
+            run_parser(parser, code, name, deadline, &mut Instant::now)
         }
         Err(busy) => {
             tracing::debug!(
@@ -1276,7 +1276,7 @@ fn parse_tree(
                 "parse_tree: the parser cache is in use; parsing on a fresh parser"
             );
             let fresh = new_parser(grammar, name);
-            run_parser(&mut fresh?, code, name, deadline)
+            run_parser(&mut fresh?, code, name, deadline, &mut Instant::now)
         }
     })
 }
@@ -1300,6 +1300,13 @@ fn new_parser(grammar: &TSLanguage, name: &'static str) -> Result<tree_sitter::P
 /// Run one parse of `code` on `parser`, asking at every progress check whether
 /// `deadline` has passed.
 ///
+/// `clock` is read once when the parse starts and once at every progress check;
+/// the callers pass `Instant::now`. It is an argument so the stopping rule can be
+/// proved on a clock the proof controls: on the host's clock, how long a stopped
+/// parse took measures the scheduler as much as the parser, and a 100 ms
+/// deadline answered after 392 ms on a loaded CI runner although the parser
+/// stopped at its first check past the deadline.
+///
 /// The parser is reset before and after. Before, because a parser from the
 /// cache may hold state from whatever ran on it last; after, because a stopped
 /// parse keeps its partial state *for resuming*, and a cached parser that kept
@@ -1310,14 +1317,15 @@ fn run_parser(
     code: &str,
     name: &'static str,
     deadline: Duration,
+    clock: &mut impl FnMut() -> Instant,
 ) -> Result<tree_sitter::Tree, ParseError> {
     parser.reset();
     // `None` is a deadline past what the clock can represent, which never
     // arrives: the parse runs to completion, as it would with no bound at all.
-    let stop_at = Instant::now().checked_add(deadline);
+    let stop_at = clock().checked_add(deadline);
     let mut expired = false;
     let mut progress = |_: &tree_sitter::ParseState| {
-        if stop_at.is_some_and(|at| Instant::now() >= at) {
+        if stop_at.is_some_and(|at| clock() >= at) {
             expired = true;
             ControlFlow::Break(())
         } else {
@@ -2037,11 +2045,17 @@ mod tests {
         // magnitude rather than by a hair.
         //
         // Each width is walked in `ROUNDS` windows interleaved with the others
-        // and judged at its median, because one window is one draw of the host:
-        // in the Linux container leg at a load of 60-100 a single 1,024-node
-        // walk took 764 ns per node against 23 at another width (run
-        // 37534417610). A descheduled window then moves nothing unless it lands
-        // in most rounds of one width.
+        // and judged at its minimum, because descheduling noise is one-sided:
+        // a descheduled window can only inflate a width's cost, never deflate
+        // it, so the minimum is the width's cost with the host's interference
+        // removed. The median was tried first and failed on a loaded CI
+        // runner (run 37635420955): five of nine 1,024-node windows caught a
+        // deschedule, each a tens-of-microseconds window where one preemption
+        // multiplies the reading a hundredfold, and the median moved 6.5x
+        // while no width scaled. A regression to index-addressed children
+        // would multiply the wide case by the width ratio (16x here) at every
+        // window including the minimum, and still fail the 4x bound by an
+        // order of magnitude rather than by a hair.
         const WIDTHS: [usize; 4] = [1_024, 2_048, 4_096, 16_384];
         const ROUNDS: usize = 9;
         let sources = WIDTHS.map(|width| "(".repeat(width));
@@ -2067,13 +2081,15 @@ mod tests {
                 *window = elapsed.saturating_div(divisor);
             }
         }
-        let per_node_nanos: Vec<u128> = (0..WIDTHS.len())
-            .map(|width| {
-                let mut rounds = windows.map(|round| round[width]);
-                rounds.sort_unstable();
-                rounds[ROUNDS >> 1]
-            })
-            .collect();
+        let mut per_node_nanos = Vec::with_capacity(WIDTHS.len());
+        for width in 0..WIDTHS.len() {
+            let cheapest_window = windows
+                .iter()
+                .map(|round| round[width])
+                .min()
+                .ok_or("nine rounds produced no window for a width")?;
+            per_node_nanos.push(cheapest_window);
+        }
         let cheapest = per_node_nanos
             .iter()
             .copied()
@@ -3450,5 +3466,92 @@ mod feature_matrix_tests {
             FIXTURES.len(),
             "`full` compiles every declared grammar, so every one must have a fixture row"
         );
+    }
+}
+
+/// The deadline's stopping rule, on a clock the test drives.
+#[cfg(all(test, feature = "lang-go"))]
+mod deadline_tests {
+    use super::{Duration, Instant, LanguageExt, ParseError, run_parser};
+
+    /// A source the Go grammar needs many thousands of progress checks to parse:
+    /// its own valid source tiled to the byte ceiling with the newlines removed.
+    fn go_longline() -> String {
+        let fragment = "package main\n\nfunc main() {}\n";
+        let mut source = String::with_capacity(super::MAX_SOURCE_BYTES);
+        while source.len().saturating_add(fragment.len()) <= super::MAX_SOURCE_BYTES {
+            source.push_str(fragment);
+        }
+        source.replace('\n', "")
+    }
+
+    /// A parse is stopped at the first progress check that reads the deadline or
+    /// later, never one check after, and the next parse on the same parser runs
+    /// to completion.
+    ///
+    /// The clock moves one millisecond per reading, so a deadline of `d` ms is
+    /// crossed on the `d`-th progress check: the parse must have read the clock
+    /// exactly `d + 1` times, the start included. Exact, whatever the host is
+    /// doing, which is what a bound on the host's own clock could not be.
+    #[test]
+    fn a_parse_stops_at_the_first_check_past_its_deadline() -> Result<(), String> {
+        let grammar: super::TSLanguage = super::SupportLang::Go.get_ts_language();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&grammar)
+            .map_err(|error| error.to_string())?;
+        let source = go_longline();
+        let origin = Instant::now();
+        for millis in [1_u64, 25, 50, 100, 1_000] {
+            let mut readings = 0_u64;
+            let mut now = origin;
+            let mut overflowed = false;
+            let mut clock = || {
+                let reading = now;
+                match now.checked_add(Duration::from_millis(1)) {
+                    Some(next) => now = next,
+                    None => overflowed = true,
+                }
+                readings = readings.saturating_add(1);
+                reading
+            };
+            let deadline = Duration::from_millis(millis);
+            let outcome = run_parser(&mut parser, &source, "go", deadline, &mut clock);
+            match outcome {
+                Err(ParseError::TimedOut { language, after }) => {
+                    assert_eq!(language, "go", "the refusal names the grammar");
+                    assert_eq!(after, deadline, "and the deadline it applied");
+                }
+                other => {
+                    return Err(format!(
+                        "{deadline:?}: a parse longer than its deadline must be stopped, got {:?}",
+                        other.err()
+                    ));
+                }
+            }
+            assert!(
+                !overflowed,
+                "the test clock ran past what an Instant can hold"
+            );
+            assert_eq!(
+                readings,
+                millis.saturating_add(1),
+                "a {millis} ms deadline must stop the parse on its {millis}th check, \
+                 not before and not after"
+            );
+            let next = run_parser(
+                &mut parser,
+                "package main\n\nfunc main() {}\n",
+                "go",
+                Duration::MAX,
+                &mut Instant::now,
+            );
+            assert!(
+                next.is_ok(),
+                "the parser must start the next source clean after a stop, got {:?}",
+                next.err()
+            );
+        }
+        Ok(())
     }
 }

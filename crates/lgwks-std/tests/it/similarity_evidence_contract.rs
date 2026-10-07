@@ -410,8 +410,15 @@ fn budget_refusal_precedes_amplification_and_is_measurable() {
     // (CI saw "1ns -> 3ns" on an unchanged path). Each size takes the fastest of
     // `TRIALS` loops of `REPEATS` calls, so one preemption cannot be read as
     // growth, and every loop runs long enough for the timer to resolve it.
-    const REPEATS: u64 = 200_000;
-    const TRIALS: usize = 5;
+    // Nine short trials beat five long ones: at opt-level 0 a 200k-call trial
+    // spans ~14 ms, and under a loaded host every one of five such windows
+    // catches a deschedule (run 37669895633 read 6.5x growth on an unchanged
+    // path), while a 50k-call trial spans ~3.5 ms and the fastest of nine
+    // still finds the path's own cost. 50k calls at ~70 ns is 3.5 ms, 87,500
+    // timer ticks, so the loop stays resolved; the sizes, the bound and the
+    // verdict logic are unchanged.
+    const REPEATS: u64 = 50_000;
+    const TRIALS: usize = 9;
     /// The member every position of the over-budget set carries.
     const FILLER_MEMBER: u32 = 0x5EED;
     let scorer = BoundedJaccard::<u32>::new(16);

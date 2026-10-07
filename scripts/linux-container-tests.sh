@@ -10,6 +10,12 @@
 # target volume, so CI can run the suites side by side without one waiting on
 # another's build lock.
 #
+# The container engine on macOS is OrbStack (Director, 2026-10-07): Docker
+# Desktop is not installed on the CI machine, and the script refuses any other
+# engine there rather than run the Linux leg on whichever one `docker` happens
+# to reach. OrbStack serves the Docker API, so the commands below are the
+# Docker CLI's. On Linux the engine is the host's own.
+#
 # The image is the repository's pinned toolchain (`rust-toolchain.toml`) and
 # nextest is the version the host runs, so the two legs differ only in the OS.
 # Build output, the registry and the nextest binary live in named volumes, so a
@@ -47,6 +53,22 @@ if [ -f "${cargo_home}/config.toml" ]; then
     config_mount=(--volume "${cargo_home}/config.toml:/usr/local/cargo/config.toml:ro")
 fi
 
+# The engine is named by its socket rather than by the current Docker context:
+# a context is per-user client state that another tool can switch, and a run
+# whose engine depended on it found none at all (run 37619560219 attempt 2).
+# The CLI is OrbStack's own, from its app bundle: the runners' PATH reached a
+# `docker` only through Homebrew's Docker formula, which is removed with the
+# rest of Docker (run 37623747480: `docker: command not found`).
+if [ "$(uname -s)" = Darwin ]; then
+    export PATH="/Applications/OrbStack.app/Contents/MacOS/xbin:${HOME}/.orbstack/bin:${PATH}"
+    export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
+    if ! engine="$(docker info --format '{{.OperatingSystem}}' 2>&1)" || [ "${engine}" != OrbStack ]; then
+        echo "linux-container-tests: no OrbStack engine at ${DOCKER_HOST}: ${engine}" >&2
+        echo "linux-container-tests: start OrbStack (\`orb start\`); the Linux leg runs on OrbStack only" >&2
+        exit 2
+    fi
+fi
+
 suites=("$@")
 if [ "${#suites[@]}" -eq 0 ]; then
     suites=(workspace bot-full appcui)
@@ -66,6 +88,19 @@ for suite in "${suites[@]}"; do
 done
 
 script="set -euo pipefail
+# A job killed mid-unpack (a timeout on a transition run) leaves a package
+# directory with no `.cargo-ok`, and the next unpack of that package fails
+# with `File exists` (run 37673046041: tree-sitter-nix). Cargo never repairs
+# one, so this removes the partials before anything builds: a directory with
+# its `.cargo-ok` is a complete unpack and is kept, anything else under the
+# sources is re-unpacked from the cached `.crate` file.
+for sources in /usr/local/cargo/registry/src/*/; do
+    [ -d \"\${sources}\" ] || continue
+    find \"\${sources}\" -mindepth 1 -maxdepth 1 -type d ! -exec test -e '{}/.cargo-ok' ';' -print | while IFS= read -r partial; do
+        echo \"linux-container-tests: removing partial unpack \${partial}\"
+        rm -rf \"\${partial}\"
+    done
+done
 if [ \"\$(/opt/tools/cargo-nextest --version 2>/dev/null | awk 'NR==1 {print \$2}')\" != '${nextest}' ]; then
     curl -fsSL 'https://get.nexte.st/${nextest}/${nextest_platform}' | tar -xz -C /opt/tools
 fi
@@ -77,7 +112,7 @@ rustc --version
 $(printf '%s\n' "${commands[@]}")"
 
 # The target volume belongs to one runner. Every runner on this machine talks
-# to the same Docker daemon, so a volume named only by its suites was shared by
+# to the same OrbStack engine, so a volume named only by its suites was shared by
 # every concurrent run of that suite: one run relinked a test binary while
 # another was executing it, and nextest's exec failed with `No such file or
 # directory` partway through the bot-full suite. A runner runs one job at a
@@ -87,7 +122,17 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
 # a killed descendant stays a zombie that `kill(pid, 0)` still reports present.
+#
+# `/tmp` is a tmpfs, for the reason the macOS jobs keep theirs on a RAM disk
+# (WORKFLOW.md §12): the durable-store tests `fsync` every record, and in the
+# VM each one reaches the host's disk through the virtual block device. No test
+# simulates power loss, so no assertion depends on where the bytes land.
+# Docker's tmpfs default is `noexec`; the suites execute scripts they write
+# there (the fake `gh`), so the mount says `exec`. The size is a ceiling, not a
+# reservation: a tmpfs holds only what is written to it, and it dies with the
+# container.
 exec docker run --rm --init \
+    --tmpfs /tmp:rw,exec,nosuid,size=3g \
     --volume "${root}:/src" \
     --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \

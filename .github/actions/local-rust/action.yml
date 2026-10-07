@@ -6,7 +6,7 @@ description: >
   other projects on this machine rely on. The machine's own cargo
   configuration ($CARGO_HOME/config.toml) is deliberately left in force: the
   Director ruled on 2026-10-06 that CI builds with every optimisation it
-  declares.
+  declares. WORKFLOW.md §12 is the specification this action implements.
 inputs:
   toolchain:
     description: The toolchain the gate pins; the step fails when rust-toolchain.toml resolves to another.
@@ -17,30 +17,74 @@ inputs:
     default: "false"
   min-free-gib:
     description: >
-      Free space the volume must keep. Below it, this job's build output is
+      Free space the volume must keep. Below it, this runner's build output is
       cleaned before the job builds, so a full disk fails no job. The default
       is two cold workspace builds with the machine's profiles.
     required: false
     default: "40"
+  test-share:
+    description: >
+      This job's share of the machine's cores for test threads, in thirds: the
+      threads are share × cores ÷ 3 ÷ runner instances, at least two. The
+      default, 2, is two thirds of one instance's even share (see the step). A
+      job that runs a whole suite the shards of several jobs used to split
+      names the shares of the jobs it replaced. The shares are budgeted against
+      fifteen cores and 24 GiB of RAM: run 37654108625 left 35 GiB of swap used
+      with every job at the old default, and a hashing unit test that takes one
+      second idle took 138 s swapping, so the sum of shares across the run must
+      stay near the machine rather than per job. The suite shares sum past
+      the cores but the suites are throughput-bound: cutting them ~40% (run
+      37680643459) slowed every suite 20-30%, so they are restored
+      (workspace 6, bot-full 8, no-default 6, matrix 3).
+    required: false
+    default: "2"
+  build-share:
+    description: >
+      This job's share of the machine's cores for concurrent compiler and
+      linker processes: CARGO_BUILD_JOBS is share × cores ÷ runner instances,
+      at least one. The machine's own cargo configuration caps jobs at four,
+      which thirteen concurrent jobs turned into 52 compiler processes on 15
+      cores and 24 GiB of RAM (run 37654108625: 35 GiB of swap used). One
+      opt-level-3 rustc holds ~0.9 GiB, so two slots per job is 26 of them
+      plus the linkers, and run 37675264254 died six jobs at once with swap at
+      96%. Every job runs at one slot: warm compiles take seconds either way,
+      transitions take longer but survive instead of dying. The six compiler
+      jobs carry 30-minute timeouts for exactly those transitions; warm runs
+      are still held to 5 minutes by measurement, not by the timeout.
+    required: false
+    default: "1"
+  tmp-gib:
+    description: >
+      Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
+      takes memory only for the pages written to it, and it is recreated at
+      every job start, so this bounds one job's temporary files rather than
+      reserving memory. Zero keeps temporary files on disk.
+    required: false
+    default: "4"
 runs:
   using: composite
   steps:
-    # One target directory per runner instance and job, kept across runs,
-    # outside the checkout that actions/checkout cleans. It is never shared
-    # between instances: each instance checks out into its own directory, and
-    # cargo fingerprints a workspace member by its path *relative to the
-    # workspace*, so a build made in r2's checkout reads as fresh in r5's. The
-    # binary then carries r2's `env!("CARGO_MANIFEST_DIR")` — r5's lgwks-std
-    # shard built probes against r2's sources and failed when r2's checkout
-    # moved (run 37513781767) — and source mtimes from another checkout can
-    # pass a build of one commit off as a build of another. The shards of one
-    # job on one instance share it, and two runs of one job on one instance
-    # wait on cargo's lock rather than racing.
+    # One target directory per runner instance, kept across runs, outside the
+    # checkout that actions/checkout cleans. It is never shared between
+    # instances: each instance checks out into its own directory, and cargo
+    # fingerprints a workspace member by its path *relative to the workspace*,
+    # so a build made in r2's checkout reads as fresh in r5's. The binary then
+    # carries r2's `env!("CARGO_MANIFEST_DIR")` — r5's lgwks-std shard built
+    # probes against r2's sources and failed when r2's checkout moved (run
+    # 37513781767) — and source mtimes from another checkout can pass a build
+    # of one commit off as a build of another.
+    #
+    # It is shared by every job the instance runs. An instance runs one job at
+    # a time, so the directory has one writer, and a feature set is a distinct
+    # unit hash, so jobs that build different feature sets keep both. One
+    # directory per job instead held 25 copies of the dependency graph per
+    # instance (206 GiB on 2026-10-07) and left each copy warm only for the job
+    # that happened to land on that instance last.
     - name: Persistent target directory
       shell: bash
       run: |
         set -euo pipefail
-        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/${GITHUB_JOB}"
+        target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/shared"
         mkdir -p "${target}"
         echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
@@ -48,15 +92,70 @@ runs:
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
           cargo clean --target-dir "${target}"
         fi
-    # The runner instances share this machine's cores. A test job that took
-    # every core, beside three others doing the same, put the load average at
-    # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
-    # Each job gets its share: twice the cores divided by the runner instances.
-    # A test body mostly waits (on a child process, a pipe, a file sync), so one
-    # thread per core left cores idle — 2,791 bot tests took 605 s at two
-    # threads beside five busy jobs — while every job taking every core was the
-    # 60-70 load. Twice the share keeps the machine near one runnable thread
-    # per core when every instance is busy.
+    # Temporary files on a RAM disk owned by this runner instance. Rust's
+    # `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS, which flushes the
+    # whole device's cache and serialises against every other flush on it, so
+    # six instances' durable-store tests queued behind one another's syncs:
+    # the full workspace suite took 385 s with its temporary files on the SSD
+    # and 116.5 s with them on a RAM disk, on an idle machine, 5,430 tests
+    # passing both times. No test simulates power loss (a crash test kills
+    # with SIGKILL, and the page cache survives that), so no assertion depends
+    # on the device the bytes reach, and production code keeps `sync_all`.
+    #
+    # The disk is APFS, the filesystem of the machine's own disk, so moving the
+    # temporary files changes how fast a sync is and nothing else. HFS+ was
+    # tried first and changed what the tests observed: it stores names
+    # decomposed, so a directory walk reported `e\u{301}1` for a file created
+    # as `\u{e9}1` and the path-byte budgets the walk simulations model no
+    # longer matched (run 37613720499), and it stamps modification times to the
+    # second, which hid a torn read from the stable-read protocol until it was
+    # fixed in `lgwks_bot::stability`. APFS preserves names as written and
+    # keeps nanosecond times; on a RAM store 500 `F_FULLFSYNC` calls take 0.1 s.
+    #
+    # The disk is detached and recreated at every job start: a RAM disk keeps
+    # each page it ever wrote until it is detached, so recreating it is what
+    # bounds its memory to one job's temporary files and leaves nothing of the
+    # previous job behind. A machine where the disk cannot be made keeps its
+    # temporary files on disk, with a warning naming the cost.
+    - name: Temporary files on a RAM disk
+      shell: bash
+      run: |
+        set -euo pipefail
+        owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+        label="lwc-tmp-${owner}"
+        # Ejecting the volume detaches its APFS container and the RAM store
+        # beneath it, which is what returns the memory.
+        if [ -d "/Volumes/${label}" ]; then
+          diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
+        fi
+        tmp=""
+        if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
+          sectors=$(( ${{ inputs.tmp-gib }} * 1024 * 1024 * 2 ))
+          # `diskutil image` is the current interface; `hdiutil` is the one a
+          # macOS before it has, and prints the device the same way.
+          device="$({ diskutil image attach --noMount "ram://${sectors}" 2>/dev/null || hdiutil attach -nomount "ram://${sectors}" 2>/dev/null; } | awk 'NR==1 {print $1}')"
+          # The volume is a new device inside the container made on the RAM
+          # store, so its mount point is read from the volume, not the store.
+          if [ -n "${device}" ] && diskutil erasevolume APFS "${label}" "${device}" >/dev/null; then
+            tmp="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Mount Point/ {print $2}')"
+          fi
+        fi
+        if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
+          tmp="${RUNNER_TEMP}/lwc-tmp"
+          echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
+          mkdir -p "${tmp}"
+          find "${tmp}" -mindepth 1 -delete
+        fi
+        echo "TMPDIR=${tmp}" >> "${GITHUB_ENV}"
+        echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
+    # The runner instances share this machine's cores and its 24 GiB of RAM.
+    # A test job that took every core, beside others doing the same, put the
+    # load average at 60-70 on 15 cores, and timing-bounded tests then measured
+    # the scheduler. Worse, thirteen jobs each compiling with four slots turned
+    # into 52 compiler processes and left 35 GiB of swap used (run 37654108625),
+    # where a one-second hashing test took 138 s. Each job gets its share of
+    # both: test threads below, compiler slots in the next step, each budgeted
+    # so the sums across the run stay near the machine.
     - name: Test threads for this runner's share of the machine
       shell: bash
       run: |
@@ -64,10 +163,24 @@ runs:
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
         runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
         cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-        threads=$(( 2 * cores / (runners > 0 ? runners : 1) ))
+        threads=$(( ${{ inputs.test-share }} * cores / (runners > 0 ? runners : 1) ))
         threads=$(( threads > 1 ? threads : 2 ))
         echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
         echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
+    # Compiler and linker slots for the same share. Warm compiles take seconds,
+    # so this caps the thundering herd rather than sizing any one build: every
+    # job compiling at once is what swapped, not any job compiling slowly.
+    - name: Compiler slots for this runner's share of the machine
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+        slots=$(( ${{ inputs.build-share }} * cores / (runners > 0 ? runners : 1) ))
+        slots=$(( slots > 0 ? slots : 1 ))
+        echo "CARGO_BUILD_JOBS=${slots}" >> "${GITHUB_ENV}"
+        echo "${cores} cores, ${runners} runner instances: ${slots} compiler slots"
     # rustup has no lock, and parallel jobs that each ran `rustup toolchain
     # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
     # toolchain is only installed when the pinned one is not already active.

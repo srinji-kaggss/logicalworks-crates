@@ -533,7 +533,7 @@ def parse_junit(path: Path) -> dict[str, tuple[str, float]]:
 def merge_junit(paths: list[Path]) -> dict[str, tuple[str, float]]:
     """Every shard's results in one map, with a duplicate named rather than merged.
 
-    The four shards partition one suite, so a name appearing twice means the
+    The shards partition one suite, so a name appearing twice means the
     partitioning is wrong -- and silently keeping the first would make the
     receipt describe a run that could not have happened.
     """
@@ -916,7 +916,7 @@ class GeneratorRegression(unittest.TestCase):
             read_run(self.connection, "rev-absent")
         self.assertIn("rev-absent", str(caught.exception))
 
-    # ── the CI path: reading what four shards already ran ──
+    # ── the CI path: reading what the shards already ran ──
 
     def write_junit(self, name: str, cases: list[tuple[str, str]]) -> Path:
         path = Path(self._tmp.name) / name
@@ -1126,7 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.from_junit:
-            # The CI path: the tests already ran, once, across four shards. This
+            # The CI path: the tests already ran, once, across the shards. This
             # job records what they reported rather than running them again, so
             # the receipt costs seconds and the suite is not executed twice.
             paths = [Path(entry) for entry in args.from_junit]

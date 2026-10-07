@@ -162,6 +162,13 @@ pub struct Reading {
     modified: Option<SystemTime>,
     /// The digest of `bytes`.
     digest: Digest,
+    /// Whether the read itself saw the subject move while it was reading.
+    ///
+    /// A fact about one read rather than about a pair: a read whose subject
+    /// grew, shrank or was modified between its first and last byte returned a
+    /// state the subject may never have held, and agreeing with another such
+    /// read proves nothing about it.
+    torn: bool,
 }
 
 impl Reading {
@@ -179,6 +186,7 @@ impl Reading {
             reported: None,
             modified: None,
             digest,
+            torn: false,
         }
     }
 
@@ -220,17 +228,19 @@ impl Reading {
         self.digest
     }
 
-    /// Whether the read returned as many bytes as the subject reported.
+    /// Whether the read returned as many bytes as the subject reported, and
+    /// the subject did not move while it was read.
     ///
-    /// Always `true` for a reading with no reported length: a subject that
-    /// reports nothing cannot contradict itself.
+    /// `true` for a reading with no reported length that no read saw move: a
+    /// subject that reports nothing cannot contradict itself.
     #[must_use]
     pub fn is_whole(&self) -> bool {
         // Compared in `u64`, the subject's own width: a read whose length does
         // not fit one cannot equal any length the subject reported.
-        self.reported.is_none_or(|reported| {
-            u64::try_from(self.bytes.len()).is_ok_and(|read| read == reported)
-        })
+        !self.torn
+            && self.reported.is_none_or(|reported| {
+                u64::try_from(self.bytes.len()).is_ok_and(|read| read == reported)
+            })
     }
 
     /// Which axis moved between this reading and `other`, or `None` when the
@@ -464,22 +474,89 @@ pub async fn read_stable_file(path: &Path) -> Result<Reading, ReadFailure> {
     lgwks_std::task::spawn_blocking(move || settle_file(&owned)).await
 }
 
+/// How many bytes one `read` call asks a file for.
+const READ_CHUNK: usize = 65_536;
+
 /// One pass: the bytes, and the metadata the subject reported with them.
+///
+/// The subject is opened once, and its metadata is taken from that handle both
+/// before and after the bytes are read, so every fact in the reading is about
+/// the one file the bytes came from: a writer that renames a new file over the
+/// path mid-read leaves this handle on the old file, whose bytes it did hold.
+///
+/// A read that is not one `read` call can straddle a rewrite in place: the
+/// first call returns the old document up to its end, the writer truncates and
+/// writes a longer one, and the next call returns the new document's tail. The
+/// result is a state the file never held, as long as the new document, and on
+/// a filesystem that stamps modification times to the second (HFS+, a macOS
+/// RAM disk) its length and time match a stat taken afterwards. Two reads that
+/// straddle the same way then agreed, and the pair was admitted. A run of this
+/// crate's suite with its temporary files on a RAM disk found exactly that:
+/// `{"revision":1}"note":"rewritten"}`, two documents' bytes spliced. So a
+/// read that saw the subject's end move, or whose length or time moved between
+/// the two stats, is torn, whatever another read agrees with.
 fn read_file(path: &Path) -> Result<Reading, ReadFailure> {
-    let bytes = std::fs::read(path)?;
-    // The stat is taken *after* the read, so a writer that appends between the
-    // two is reported as a reading shorter than the subject now claims rather
-    // than as a length that happened to match. That direction is the safe one:
-    // it refuses the pair instead of admitting it.
-    let metadata = std::fs::metadata(path)?;
+    let mut file = std::fs::File::open(path)?;
+    let before = file.metadata()?;
+    let (bytes, grew) = read_to_end_watching(&mut file)?;
+    let after = file.metadata()?;
     let mut reading = Reading::of_bytes(bytes);
-    reading.reported = Some(metadata.len());
+    reading.reported = Some(after.len());
     // A platform that keeps no modification time reports `Unsupported` here, and
     // the reading carries that absence rather than a stand-in instant: both
     // passes then carry the same `None`, so the length and the digest decide,
     // and no reading ever claims a time the filesystem did not state.
-    reading.modified = metadata.modified().ok();
+    reading.modified = after.modified().ok();
+    reading.torn =
+        grew || before.len() != after.len() || before.modified().ok() != reading.modified;
     Ok(reading)
+}
+
+/// Read `source` to its end, and say whether its end moved while it was read.
+///
+/// A regular file returns fewer bytes than a `read` asked for only at its end,
+/// so a short read followed by one that returned more bytes saw the end of the
+/// file move: the file grew between the two calls. A full read followed by more
+/// is an ordinary file larger than one chunk.
+///
+/// The check is the safe direction on a filesystem that returns short reads
+/// mid-file: such a read is refused as torn and the pass is taken again, never
+/// admitted.
+fn read_to_end_watching(source: &mut impl io::Read) -> io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0_u8; READ_CHUNK];
+    let mut came_up_short = false;
+    let mut grew = false;
+    loop {
+        let count = match source.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let refusal = Err(error);
+                lgwks_std::trace::debug!(
+                    error = ?refusal.as_ref().err(),
+                    "read_to_end_watching: returning an error to the caller"
+                );
+                return refusal;
+            }
+        };
+        if count == 0 {
+            return Ok((bytes, grew));
+        }
+        grew = grew || came_up_short;
+        came_up_short = count < chunk.len();
+        let Some(read) = chunk.get(..count) else {
+            let refusal = Err(io::Error::other(
+                "a read reported more bytes than the buffer it was given holds",
+            ));
+            lgwks_std::trace::debug!(
+                error = ?refusal.as_ref().err(),
+                "read_to_end_watching: returning an error to the caller"
+            );
+            return refusal;
+        };
+        bytes.extend_from_slice(read);
+    }
 }
 
 /// The stable-read loop over one path, called from inside the blocking task.
@@ -489,7 +566,11 @@ fn settle_file(path: &Path) -> Result<Reading, ReadFailure> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Drift, MAX_STABILITY_READS, ReadFailure, Reading, read_stable, read_stable_file};
+    use super::{
+        Drift, MAX_STABILITY_READS, READ_CHUNK, ReadFailure, Reading, read_stable,
+        read_stable_file, read_to_end_watching,
+    };
+    use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -713,6 +794,78 @@ mod tests {
             "owned_dir: returning an error to the caller"
         );
         refusal
+    }
+
+    /// A source that hands over one scripted piece per `read` call, the way a
+    /// file being rewritten hands a reader the old document and then the new
+    /// one's tail.
+    struct Pieces(VecDeque<Vec<u8>>);
+
+    impl std::io::Read for Pieces {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let Some(piece) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            let Some(target) = buffer.get_mut(..piece.len()) else {
+                let refusal = Err(std::io::Error::other(
+                    "a scripted piece is larger than the read",
+                ));
+                lgwks_std::trace::debug!(
+                    error = ?refusal.as_ref().err(),
+                    "Pieces::read: returning an error to the caller"
+                );
+                return refusal;
+            };
+            target.copy_from_slice(&piece);
+            Ok(piece.len())
+        }
+    }
+
+    /// The splice a RAM-disk run found: a read that reached the old document's
+    /// end, then got the new document's tail, saw the file grow, and is torn
+    /// although its length matches the new document's.
+    #[test]
+    fn a_read_whose_end_moved_is_torn() -> TestResult {
+        let before = b"{\"revision\":1}".to_vec();
+        let tail = b"\"note\":\"rewritten\"}".to_vec();
+        let mut spliced = Pieces(VecDeque::from([before, tail]));
+        let (bytes, grew) = read_to_end_watching(&mut spliced)?;
+        assert_eq!(
+            bytes, b"{\"revision\":1}\"note\":\"rewritten\"}",
+            "the reader returns what it was handed"
+        );
+        assert!(grew, "a short read followed by more bytes saw the end move");
+
+        let mut whole = Pieces(VecDeque::from([b"{\"revision\":2}".to_vec()]));
+        let (_, grew) = read_to_end_watching(&mut whole)?;
+        assert!(!grew, "one short read to the end is a whole file");
+
+        let mut large = Pieces(VecDeque::from([vec![b'a'; READ_CHUNK], vec![b'b'; 7]]));
+        let (bytes, grew) = read_to_end_watching(&mut large)?;
+        assert!(
+            !grew,
+            "a full read followed by more is a file larger than a chunk"
+        );
+        assert_eq!(
+            bytes.len(),
+            READ_CHUNK.saturating_add(7),
+            "every byte is kept"
+        );
+        Ok(())
+    }
+
+    /// A torn reading never agrees, even with an identical one: two reads that
+    /// straddled the same rewrite the same way are the same splice twice.
+    #[test]
+    fn a_torn_reading_agrees_with_nothing() {
+        let mut torn = Reading::of_subject(b"spliced".to_vec(), 7, stamp());
+        torn.torn = true;
+        assert!(!torn.is_whole(), "a torn reading is not whole");
+        assert_eq!(
+            torn.agrees_with(&torn),
+            Some(Drift::Truncated),
+            "two identical splices are not a settled subject"
+        );
     }
 
     /// The real file path, against a real file.

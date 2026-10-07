@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::Poll;
 use std::time::Instant;
 
+use lgwks_bot::clock::Clock;
 use lgwks_bot::script::{FlowError, Scope, remember};
 use lgwks_bot::task::{Host, RunStore, Task, task};
 
@@ -357,6 +358,47 @@ pub fn overrunning_task(
     )
 }
 
+/// [`overrunning_task`] on a clock the caller drives.
+///
+/// After the first step records, the body moves `clock` on by `overrun` and
+/// then waits for something that never arrives. A host measuring its deadline on
+/// that clock therefore sees the run overrun by exactly `overrun` past where it
+/// started, whatever the machine is doing: the overrun is a seeded fact rather
+/// than however long the host's scheduler took to fire a real timer. The name is
+/// [`overrunning_task`]'s, so a reattach finds the declaration the overrun
+/// recorded.
+///
+/// # Errors
+///
+/// [`FlowError::InvalidName`] for the fixed name. The body fails with
+/// [`FlowError::failed`] if `clock` refuses the advance (a wall clock, or one
+/// carried past its ceiling), so a misbuilt fixture is a failed run rather than
+/// a body that waits forever.
+pub fn overrunning_task_on(
+    runs: FirstStepRuns,
+    clock: Clock,
+    overrun: std::time::Duration,
+) -> Result<Task<impl Fn(Scope, u32) -> BodyFuture>, FlowError> {
+    let counter = runs.0;
+    task(
+        "overrunning",
+        move |scope: Scope, value: u32| -> BodyFuture {
+            let first_step = counted_first_step(scope, &counter, value);
+            let clock = clock.clone();
+            Box::pin(async move {
+                let first = first_step.await?;
+                clock.advance(overrun).map_err(|error| {
+                    FlowError::failed(format!(
+                        "the test clock refused to advance by {overrun:?}: {error:?}"
+                    ))
+                })?;
+                std::future::pending::<()>().await;
+                Ok(first)
+            })
+        },
+    )
+}
+
 /// A host for `tenant` over the store at `path`, with the deadline `budget`.
 ///
 /// Separate from [`stored_host`] because a deadline is part of what a request's
@@ -374,6 +416,28 @@ pub fn host_with_deadline(
 ) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?
         .default_deadline(budget)
+        .run_store(dir)?
+        .build()?)
+}
+
+/// [`host_with_deadline`] measuring its deadline on `clock`.
+///
+/// The same declared budget on a timeline the caller drives, so a seeded sweep
+/// can draw any budget up to the crate ceiling and overrun it exactly, at no
+/// real cost.
+///
+/// # Errors
+///
+/// The tenant validation, the store open or the host build.
+pub fn host_with_deadline_on(
+    tenant: &str,
+    dir: &Path,
+    budget: std::time::Duration,
+    clock: Clock,
+) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder(tenant)?
+        .default_deadline(budget)
+        .clock(clock)
         .run_store(dir)?
         .build()?)
 }

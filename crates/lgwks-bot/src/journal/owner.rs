@@ -1321,8 +1321,13 @@ mod tests {
     /// How many awaited round trips the race gets to land in.
     const ROUND_TRIPS: u64 = 200_000;
 
-    /// How long the round trips may take before a parked one is called a hang.
-    /// Measured at a few seconds for the whole sweep; a lost wakeup never ends.
+    /// How long one round trip may make no progress before it is called a hang.
+    ///
+    /// A bound on progress, not on the sweep: a lost wakeup stops the counter for
+    /// ever, while a slow host only slows it. The sweep takes a few seconds on an
+    /// idle machine and took more than 60 s beside ten CI jobs on the same cores
+    /// (run 37623747480: 73,968 round trips done, every one answered), and a
+    /// bound on the whole sweep reported that as a parked poll.
     const PATIENCE: Duration = Duration::from_secs(60);
 
     /// An answer the owner publishes while the awaiting poll is between "the slot
@@ -1367,17 +1372,25 @@ mod tests {
         });
 
         let (ref state, ref changed) = *progress;
-        let (held, waited) =
-            wait_timeout_while(changed, lock(state), PATIENCE, |progress| !progress.1);
-        let (completed, done) = *held;
-        drop(held);
-        if waited.timed_out() && !done {
-            return Err(format!(
-                "round trip {completed} of {ROUND_TRIPS} parked for {PATIENCE:?}: the owner \
-                 published an answer whose poll had not yet registered a waker, so nothing \
-                 woke it"
-            )
-            .into());
+        let mut seen = 0_u64;
+        loop {
+            let (held, waited) = wait_timeout_while(changed, lock(state), PATIENCE, |progress| {
+                !progress.1 && progress.0 == seen
+            });
+            let (completed, done) = *held;
+            drop(held);
+            if done {
+                break;
+            }
+            if waited.timed_out() && completed == seen {
+                return Err(format!(
+                    "round trip {completed} of {ROUND_TRIPS} parked for {PATIENCE:?}: the owner \
+                     published an answer whose poll had not yet registered a waker, so nothing \
+                     woke it"
+                )
+                .into());
+            }
+            seen = completed;
         }
         lgwks_std::task::block_on(driver)?;
         std::fs::remove_file(&path)?;

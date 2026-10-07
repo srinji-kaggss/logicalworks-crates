@@ -400,20 +400,26 @@ where
         ) else {
             continue;
         };
-        if authenticates(previous, payload, stored) {
+        // One hash per candidate length: the head this payload implies both
+        // authenticates the stored head behind it and seeds the chain search
+        // after it, so hashing once to compare and again to seed doubles the
+        // noise-case cost (64 KiB of candidates hashing ~32 KiB each) for the
+        // same answer. A payload with no head is neither.
+        let Some(implied) = head_of(previous, payload) else {
+            continue;
+        };
+        if implied.as_bytes().as_slice() == stored {
             return true;
         }
         // The payload may be whole behind a damaged stored head: the frame after it,
         // if there is one, still chains from the head this payload implies.
-        if let Some(implied) = head_of(previous, payload)
-            && frame_chains_from(
-                suffix,
-                len.saturating_add(HEAD_BYTES),
-                &implied,
-                max_frame_bytes,
-                &authenticates,
-            )
-        {
+        if frame_chains_from(
+            suffix,
+            len.saturating_add(HEAD_BYTES),
+            &implied,
+            max_frame_bytes,
+            &authenticates,
+        ) {
             return true;
         }
     }
