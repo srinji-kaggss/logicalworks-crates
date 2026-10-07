@@ -76,12 +76,20 @@ export PATH=/opt/tools:\$PATH
 rustc --version
 $(printf '%s\n' "${commands[@]}")"
 
+# The target volume belongs to one runner. Every runner on this machine talks
+# to the same Docker daemon, so a volume named only by its suites was shared by
+# every concurrent run of that suite: one run relinked a test binary while
+# another was executing it, and nextest's exec failed with `No such file or
+# directory` partway through the bot-full suite. A runner runs one job at a
+# time, so its own volume has one writer. Outside CI the owner is `local`.
+target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
 # a killed descendant stays a zombie that `kill(pid, 0)` still reports present.
 exec docker run --rm --init \
     --volume "${root}:/src" \
-    --volume "lwc-ci-linux-target-$(IFS=-; echo "${suites[*]}"):/target" \
+    --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
     ${config_mount[@]+"${config_mount[@]}"} \

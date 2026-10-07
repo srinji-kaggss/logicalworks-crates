@@ -1682,6 +1682,7 @@ mod tests {
     struct Gate {
         open: Mutex<bool>,
         opened: std::sync::Condvar,
+        entered: std::sync::Condvar,
         inside: AtomicUsize,
         peak: AtomicUsize,
     }
@@ -1694,11 +1695,30 @@ mod tests {
                 .saturating_add(1);
             self.peak.fetch_max(now, AtomicOrdering::SeqCst);
             let mut open = lock(&self.open);
+            // Announced under the lock the waiter checks `inside` under, so an
+            // entry between its check and its wait is never missed.
+            self.entered.notify_all();
             while !*open {
                 open = wait(&self.opened, open);
             }
             drop(open);
             self.inside.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+
+        /// Waits until `floor` jobs are inside the gate at once, or `budget`
+        /// has passed, and returns how many are inside. The wait ends on the
+        /// condition, so a slow host costs wall time and never the verdict.
+        fn await_inside(&self, floor: usize, budget: Duration) -> usize {
+            let started = Instant::now();
+            let mut open = lock(&self.open);
+            loop {
+                let inside = self.inside.load(AtomicOrdering::SeqCst);
+                let left = budget.saturating_sub(started.elapsed());
+                if inside >= floor || left.is_zero() {
+                    return inside;
+                }
+                open = wait_timeout(&self.entered, open, left).0;
+            }
         }
 
         fn release(&self) {
@@ -1719,8 +1739,11 @@ mod tests {
                     index
                 })?);
             }
-            // Let the pool fill every thread it may before the gate opens.
-            thread::park_timeout(Duration::from_millis(200));
+            // The pool must reach `floor` jobs at once before the gate opens.
+            // A fixed pause asserted the host's thread-start speed instead: at
+            // load 145 only 42 threads had started inside 200 ms.
+            let floor = jobs.min(MAX_BLOCKING_THREADS).min(64);
+            gate.await_inside(floor, Duration::from_secs(60));
             gate.release();
             let output = block_on(join_all(handles));
             assert_eq!(output, (0..jobs).collect::<Vec<_>>(), "{jobs} jobs");
@@ -1730,7 +1753,7 @@ mod tests {
                 "{jobs} jobs: {peak} ran at once, over the ceiling"
             );
             assert!(
-                peak >= jobs.min(MAX_BLOCKING_THREADS).min(64),
+                peak >= floor,
                 "{jobs} jobs: only {peak} ran at once; the pool is not running in parallel"
             );
         }
