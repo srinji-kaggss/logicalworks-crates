@@ -232,13 +232,16 @@ group = "std-full"
 surfaces = "local ci"
 required = true
 # #275: Welch's t over `Digest` equality, a digest against an equal copy and
-# against one differing in its first byte, 1,000,000 samples per class on the
-# release build. It fails when |t| >= 4.5 (dudect's threshold), and also when
+# against one differing in its first byte, 250,000 samples per class on the
+# release build (down from the harness's 1,000,000 default: the wall is linear
+# in samples while t scales with its square root, so the early-exit control
+# still reads t in the thousands and a sub-1% leak still reads past the
+# threshold). It fails when |t| >= 4.5 (dudect's threshold), and also when
 # the early-exit negative control is NOT detected, because a harness that
 # cannot see a leak proves nothing. Locally this is aarch64-apple-darwin; the CI
 # job is x86_64-unknown-linux-gnu, so the two targets the issue names are both
 # measured on every change.
-command = "cargo run --release --locked -p lgwks_std --features hash --example digest_timing"
+command = "cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000"
 ci_step = "Digest constant-time equality (dudect)"
 
 [[lane]]

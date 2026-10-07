@@ -104,7 +104,7 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "4"
+          test-share: "6"
           build-share: "2"
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
@@ -250,7 +250,7 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "8"
+          test-share: "10"
           build-share: "2"
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
@@ -326,11 +326,13 @@ jobs:
           path: acceptance-artifact/
           retention-days: 30
 
-  # Every lgwks-std feature alone, executed (one nextest run per feature with
-  # nothing else on, #276), beside the lgwks-bot no-default suite. Both build
-  # narrow feature sets of the two crates, so they share one job's target.
+  # The lgwks-bot suite at no default features, in a job of its own. The
+  # lgwks-std per-feature suites live in the feature-matrix job below: they
+  # build narrow feature sets of lgwks-std, as its checks do, so they share
+  # that job's target rather than this one's, and this job holds the one suite
+  # whose threads it sizes for.
   tests_nodefault:
-    name: Tests (lgwks-bot no default features, lgwks-std per feature)
+    name: Tests (lgwks-bot no default features)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
     timeout-minutes: 20
     env:
@@ -347,27 +349,6 @@ jobs:
           build-share: "2"
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
-      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features core
-          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
-          cargo nextest run --locked -p lgwks_std --no-default-features --features random
-          cargo nextest run --locked -p lgwks_std --no-default-features --features http
-      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
-          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
-          cargo nextest run --locked -p lgwks_std --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
-      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
   # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
@@ -494,8 +475,10 @@ jobs:
   # Every compile-only matrix: feature sets, targets, grammars, the Metal
   # storefronts and the standalone consumer packages. Each is `cargo check` or a
   # nested build over the same dependency graph, so one target serves them.
+  # The lgwks-std per-feature EXECUTION lanes live here too, beside the checks
+  # of the same feature sets (#276): one job per feature set, still.
   feature-matrix:
-    name: lgwks-std feature matrix
+    name: lgwks-std feature matrix and per-feature tests
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 20
     steps:
@@ -505,6 +488,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
+          test-share: "3"
+          build-share: "2"
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
@@ -523,6 +508,40 @@ jobs:
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+      # Every lgwks-std feature alone, executed (one nextest run per feature
+      # with nothing else on, #276). These suites are compile-bound and tiny:
+      # each builds lgwks-std once under one feature and runs a few hundred
+      # unit tests, so they compile at opt-level 0 — the workspace default of
+      # opt-level 2 spends ~25 s compiling what runs for seconds, and the
+      # assertions, overflows and debuginfo settings are unchanged, so the
+      # same tests prove the same things sooner.
+      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features core
+          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
+          cargo nextest run --locked -p lgwks_std --no-default-features --features random
+          cargo nextest run --locked -p lgwks_std --no-default-features --features http
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
+          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
+          cargo nextest run --locked -p lgwks_std --no-default-features --features json
+          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
+      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --no-default-features --features process
 
 
   # The lgwks-deps storefronts, the target matrix and the standalone consumers,
@@ -585,7 +604,14 @@ jobs:
         with:
           toolchain: "1.99.0"
       - name: Digest constant-time equality (dudect)
-        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing
+        # 250,000 samples per class, not the harness's 1,000,000 default: the
+        # wall is linear in samples (47 s idle at 1M, ~12 s at 250k) while the
+        # power stays far above any exploitable leak. t scales with √N: the
+        # early-exit control reads t ≈ 10,000 at 1M, ≈ 5,000 at 250k, still
+        # four orders past the 4.5 threshold, and a 0.5%-of-mean leak reads
+        # t ≈ 8 at 250k against the same threshold. The threshold, the
+        # batching, the cropping and the control are untouched.
+        run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000
       - name: Async fairness gate and concurrency ladder
         run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
 
