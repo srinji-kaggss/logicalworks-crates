@@ -268,7 +268,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   already-released readiness resolves without spending its budget. Admission is
   charged **before** a slot is taken against `MAX_DEPENDANTS`, so a refused
   admission leaves capacity exactly as it was. · why: #87 T18 / LC-09 · enforced
-  by: `tests/it/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report`,
+  by: `tests/it/ready.rs` (`a_failure_before_ready_reaches_the_dependant_and_the_report_t18`,
   `a_duplicate_ready_signal_is_refused_and_releases_nothing`,
   `a_stale_generation_is_refused_and_releases_nothing`,
   `a_restarted_service_arms_a_new_readiness`,
@@ -314,7 +314,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   disagree about what the run was missing, and a task that reaches in its *first*
   step may still declare at its admission boundary with `Task::requiring` and be
   refused before anything runs. · why: #87 step 3 (T23) · enforced by:
-  `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need_t23`,
   `a_blocked_run_leaves_its_finished_analysis_recorded`,
   `a_host_without_a_ledger_refuses_every_repair`,
   `the_journey_declares_no_admission_boundary_needs`)
@@ -344,7 +344,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   nothing, mints no epoch and leaves the ledger byte-identical. · why: #87 step 3
   (T24) · enforced by: `tests/it/repair.rs`
   (`the_same_ticket_delivered_twice_applies_once`,
-  `a_ticket_from_an_older_epoch_is_refused_as_stale`,
+  `a_ticket_from_an_older_epoch_is_refused_as_stale_t24`,
   `a_denied_repair_costs_nothing`) and
   `tests/it/sim_repair.rs::seeded_orders_reach_the_same_state_band_*`
 - **INV-BOT-35** A run's root budget is carried in its own ledger, is charged by
@@ -358,7 +358,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   than resetting it (T13). Two tenants over one directory keep separate ledgers,
   separate run ids and separate epochs, and one tenant's ticket is refused by the
   other tenant's host. · why: #87 step 3 (T13, T24) · enforced by:
-  `tests/it/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume`) and
+  `tests/it/repair.rs` (`the_root_budget_stays_charged_across_repair_and_resume_t13`) and
   `tests/it/sim_repair.rs` (`seeded_orders_reach_the_same_state_band_*`,
   `tenants_keep_their_own_tickets_and_budgets_band_*`,
   `saturation_applies_each_ticket_once_band_*`,
@@ -416,7 +416,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   the one-need case is the only width where the ticket's grant is exactly the run's
   authority · enforced by: `tests/it/sim_repair.rs`
   (`the_step_that_reaches_is_the_step_that_blocks`, `a_wide_need_set_costs_one_analysis`)
-  and `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need`,
+  and `tests/it/repair.rs` (`a_run_short_of_authority_is_blocked_naming_every_need_t23`,
   `the_journey_declares_no_admission_boundary_needs`)
 
 - **INV-BOT-1** Journal before acknowledge: a live settlement is journaled before it is
@@ -554,7 +554,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   so the deadline-bounded variant is the control that distinguishes a concurrent
   drain from a sequential one. · why: #87 acceptance row T05 (LC-02/11) ·
   enforced by: `tests/it/sys_process_binding.rs`
-  (`a_flooding_child_against_a_slow_reader_stays_within_its_ceiling`,
+  (`a_flooding_child_against_a_slow_reader_stays_within_its_ceiling_t05`,
   `a_flooding_child_is_drained_while_it_runs_not_after_it_exits`) and
   `tests/it/sim_process_output.rs` (`a_seeded_flood_stays_bounded_on_one_worker_band_00`,
   `a_seeded_flood_stays_bounded_on_one_worker_band_01`)
@@ -589,7 +589,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   which this crate does not have. · why: #87 acceptance row T21 (LC-10), #263 ·
   enforced by: `tests/it/process_escape.rs`
   (`a_session_escape_is_captured_and_stopped_by_pid`,
-  `cleanup_never_signals_a_process_outside_the_supervisors_group`),
+  `cleanup_never_signals_a_process_outside_the_supervisors_group_t21`),
   `rt::supervise::tests` (`a_descendant_that_keeps_running_is_named_in_the_receipt`,
   `a_captured_pid_that_had_ended_is_not_reported_as_a_survivor`,
   `a_captured_pid_is_signalled_once_and_not_once_per_observation`,
@@ -764,7 +764,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   longer owns, because nothing revokes an open descriptor. · why: T16 ·
   enforced by:
   `tests/it/owner_epoch_takeover.rs`
-  (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize`,
+  (`an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16`,
   `a_warrant_from_the_previous_generation_is_superseded`,
   `a_generation_the_broker_never_issued_is_not_a_supersession`,
   `a_generation_and_a_tail_are_two_fences_and_both_answer`,
@@ -814,7 +814,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   The ladder makes the duplicate settlement unrepresentable rather than merely
   discouraged. · why: T14 · enforced by:
   `tests/it/durable_crash_observation.rs`
-  (`a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared`,
+  (`a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14`,
   `a_kill_after_the_response_and_before_the_receipt_recovers_the_outcome`,
   `a_kill_during_recovery_leaves_the_journal_exactly_as_it_was`,
   and the pre-existing `a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt`)
@@ -1274,6 +1274,36 @@ Each of these was a shipped defect. Treat the list as the spec.
   syscall that lists a descriptor, the BSDs expose no equivalent, and calling
   `readdir(3)` would need `unsafe` under `unsafe_code = forbid`. It reports
   `Unsupported` elsewhere. Every other `Dir` operation is `*at(2)` and portable.
+
+- **INV-FS-7** A predicate walk (`fs::walk_dir_entries`,
+  `fs::walk_dir_entries_tolerant`) runs the one walk engine and offers each
+  admitted entry once, in walk order, to the caller's
+  `FnMut(&Path, FileKind) -> Descend`. Every offered entry is recorded;
+  `Descend::Skip` withholds the subtree below it, which is never listed,
+  never charged to `WalkLimits` and never reported as an omission;
+  `Descend::Stop` records the entry, reads nothing further, and is reported by
+  `WalkReport::stopped` as caller policy, not an omission. Each `WalkEntry`
+  carries the one `lstat` the walk read for it (no second stat; a link's own
+  metadata, never its target's), and its `relative_path` joins back onto the
+  canonical root to give its `path`. An always-enter predicate admits, omits,
+  refuses and charges exactly what the path walk does (INV-FS-2, INV-FS-5).
+  · why: #343 · enforced by:
+  `lgwks_std::fs::tests::a_skipped_directory_is_listed_but_never_read`,
+  `lgwks_std::fs::tests::stop_records_its_entry_and_ends_the_walk`,
+  `lgwks_std::fs::tests::an_entry_carries_the_lstat_of_a_symlink_not_its_target`,
+  `lgwks_std::fs::tests::relative_path_joins_back_onto_the_canonical_root`,
+  `tests/it/sim_fs_walk_prune.rs` (`sim_a_pruned_subtree_is_never_read`,
+  `sim_a_pruned_subtree_charges_no_budget`,
+  `sim_stop_ends_the_walk_at_the_chosen_entry`,
+  `sim_every_entry_carries_its_own_lstat`,
+  `sim_relative_paths_join_back_to_the_absolute_path`,
+  `sim_an_always_enter_walk_is_the_path_walk`,
+  `sim_the_same_seed_replays_to_the_same_trace_hash`)
+
+  Known limit, stated rather than left to be discovered: the metadata walk
+  `lstat`s every entry, so a name in a directory the process may list but not
+  search (`r` without `x`) is an `EntryType` omission there, where the path
+  walk's `d_type` may still classify it.
 
 - **INV-TASK-POOL-1** The blocking pool's ceiling is decided once and its
   threads all have an owner. `configure_blocking_pool` fixes the ceiling
@@ -1979,7 +2009,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   not drive a dropped non-`Send` body in the background; what survives is the
   durable record, which is what a resume needs. · why: #87 step 7 (T17) ·
   enforced by: `tests/it/request_key.rs`
-  (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client`,
+  (`a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17`,
   `a_host_stop_mid_run_leaves_the_request_resumable`) and
   `tests/it/sim_request_key.rs` (`drop_and_reattach`,
   `host_stops_never_poison_a_key_band_00..03`).
@@ -2024,7 +2054,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_failed_run_is_the_requests_recorded_outcome`,
   `an_expired_deadline_is_the_requests_recorded_outcome`,
   `a_store_that_refuses_the_terminal_write_reports_the_refusal`,
-  `a_dropped_client_leaves_the_request_in_flight_for_a_later_client`) and
+  `a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17`) and
   `tests/it/sim_request_key.rs` (`host_stops_never_poison_a_key_band_00..03`,
   `same_seed_replays_host_stops_band_00..03`,
   `expired_deadlines_are_recorded_band_16..23`,
@@ -2143,9 +2173,9 @@ Each of these was a shipped defect. Treat the list as the spec.
   feature refuses every call with `GhError::NoRunner` and returns no snapshot,
   review list or review id at all. · why: #151, #87 step 6 (PR-06, PR-07,
   PR-09) · enforced by:
-  `tests/it/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted`,
+  `tests/it/pr_review_journey.rs` (`a_lost_response_is_reconciled_by_reading_back_and_never_reposted_t33`,
   `a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost`,
-  `a_moved_head_is_a_typed_refusal_and_publishes_nothing`,
+  `a_moved_head_is_a_typed_refusal_and_publishes_nothing_t32`,
   `a_review_is_published_at_the_pinned_head_and_verified_by_a_separate_read`,
   `a_non_zero_exit_is_not_a_published_review`,
   `a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled`,
@@ -2214,7 +2244,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   among the other's. · why: #87 step 3 (T09, DX-07) · enforced by:
   `tests/it/observe_refresh.rs`
   (`an_intermediate_value_is_reported_as_superseded_rather_than_fired_or_retired`,
-  `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not`)
+  `identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not_t09`)
   and `tests/it/sim_observe_refresh.rs` (`event_identities_are_per_event` and
   `tenants_never_cross`, swept over bands 14–17 and 10–13 by the shared
   `band_family!` declaration, and
@@ -2332,10 +2362,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_diff_past_the_file_ceiling_is_an_incomplete_coverage`,
   `a_diff_past_the_byte_ceiling_is_an_incomplete_coverage`,
   `a_renamed_repository_is_refused_and_never_silently_re_pointed`,
-  `an_untrusted_build_script_in_the_diff_is_never_executed`,
+  `an_untrusted_build_script_in_the_diff_is_never_executed_t31`,
   `a_pending_draft_is_reconciled_as_a_draft_and_never_reposted`,
   `a_partial_submission_is_reconciled_as_partial_and_never_reposted`,
-  `a_lost_read_permission_reports_unverified_and_retains_the_review_id`),
+  `a_lost_read_permission_reports_unverified_and_retains_the_review_id_t34`),
   `tests/it/gh_binding.rs`
   (`a_renamed_repository_is_a_typed_move_naming_both_names`,
   `a_permission_refusal_is_a_typed_unauthorized_not_a_transport_failure`,
@@ -2473,7 +2503,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   task body on the run path, so the three outcomes reach a caller through the run
   that produced them rather than through a call only a test made. · why: #87
   T27/T35 · enforced by: `tests/it/proposal.rs`
-  (`the_three_untrue_successes_report_distinct_outcomes`,
+  (`the_three_untrue_successes_report_distinct_outcomes_t35`,
   `an_abandoned_run_is_not_a_finished_one`,
   `an_over_long_evidence_claim_is_refused_whole`,
   `a_truncated_payload_never_becomes_a_full_coverage_claim`,
@@ -2503,7 +2533,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   payload. A resumed run reads it back from a *reopened* store through
   `RunStore::lookup`, not from the handle that wrote it. · why: #87 T27 ·
   enforced by: `tests/it/proposal.rs`
-  (`a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence`,
+  (`a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27`,
   `a_checkpoint_round_trips_through_the_run_store`,
   `a_checkpoint_refuses_to_grow_past_its_ceiling`,
   `a_resumed_run_reads_back_the_refusal_the_first_run_recorded`)
@@ -2553,7 +2583,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   unchanged failure to count. The lock is held across the charge, the decode and
   the ledger update and never across an `.await`. · why: #87 T29 · enforced
   by: `tests/it/proposal.rs`
-  (`repeated_unchanged_failure_reaches_a_finite_intervention`,
+  (`repeated_unchanged_failure_reaches_a_finite_intervention_t29`,
   `a_ledger_of_distinct_failures_reaches_its_own_intervention`,
   `new_evidence_does_not_erase_root_spend`, `a_plan_budget_bounds_repair`,
   `repeated_unchanged_failure_reaches_a_finite_intervention_across_runs`,

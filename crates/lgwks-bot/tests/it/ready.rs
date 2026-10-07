@@ -8,7 +8,7 @@
 //!
 //! | Test | What it pins |
 //! |---|---|
-//! | `a_failure_before_ready_reaches_the_dependant_and_the_report` | a service that never becomes ready fails the dependant at its own path, and the caller's `Report` carries it |
+//! | `a_failure_before_ready_reaches_the_dependant_and_the_report_t18` | a service that never becomes ready fails the dependant at its own path, and the caller's `Report` carries it |
 //! | `a_duplicate_ready_signal_is_refused_and_releases_nothing` | a second release is a typed refusal, not a second release |
 //! | `a_stale_generation_is_refused_and_releases_nothing` | an older instance cannot release dependants onto a newer one, and a foreign generation is a *different* refusal |
 //! | `a_restarted_service_arms_a_new_readiness` | the restart shape end to end |
@@ -180,7 +180,7 @@ const DEPENDANTS: usize = 3;
 /// A service that fails before it is ready fails the dependant at its own path,
 /// and the caller's `Report` carries that failure with the service's reason.
 #[test]
-fn a_failure_before_ready_reaches_the_dependant_and_the_report() -> TestResult {
+fn a_failure_before_ready_reaches_the_dependant_and_the_report_t18() -> TestResult {
     let scope = scope_of("acme")?;
     let readiness: Named = Readiness::new("db")?;
     let host = Host::builder("acme")?.build()?;
@@ -203,7 +203,7 @@ fn a_failure_before_ready_reaches_the_dependant_and_the_report() -> TestResult {
     );
     let Some(reported) = report.error() else {
         let refusal = Err("a failed report must carry the error that failed it".into());
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_failure_before_ready_reaches_the_dependant_and_the_report: returning an error to the caller");
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_failure_before_ready_reaches_the_dependant_and_the_report_t18: returning an error to the caller");
         return refusal;
     };
     let error = reported.to_string();

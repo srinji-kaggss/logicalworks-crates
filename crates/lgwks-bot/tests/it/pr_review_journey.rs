@@ -317,7 +317,7 @@ fn a_failed_analysis_publishes_nothing() -> TestResult {
 // ── The lost response ───────────────────────────────────────────────────────
 
 #[test]
-fn a_lost_response_is_reconciled_by_reading_back_and_never_reposted() -> TestResult {
+fn a_lost_response_is_reconciled_by_reading_back_and_never_reposted_t33() -> TestResult {
     let fake = FakeGh::install("lost", HEAD)?;
     // The create applies the review and then drops its response, so the effect
     // landed and the caller cannot learn that from the create call.
@@ -430,7 +430,7 @@ fn a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled() -
 // ── The moved subject ───────────────────────────────────────────────────────
 
 #[test]
-fn a_moved_head_is_a_typed_refusal_and_publishes_nothing() -> TestResult {
+fn a_moved_head_is_a_typed_refusal_and_publishes_nothing_t32() -> TestResult {
     let fake = FakeGh::install("moved", HEAD)?;
     // `head_after_first` makes the fake report HEAD on its first read and
     // MOVED_HEAD on every read after it — a push landing between the snapshot
@@ -701,7 +701,7 @@ fn a_renamed_repository_is_refused_and_never_silently_re_pointed() -> TestResult
 /// the inventory as data, so the marker is untouched; a run that executed the
 /// patch would trip the same oracle.
 #[test]
-fn an_untrusted_build_script_in_the_diff_is_never_executed() -> TestResult {
+fn an_untrusted_build_script_in_the_diff_is_never_executed_t31() -> TestResult {
     let fake = FakeGh::install("build-script", HEAD)?;
     fake.configure(Scenario::new(HEAD).hostile_build_script())?;
     // The marker lives inside the fixture's own directory and is named in the
@@ -804,7 +804,7 @@ fn a_partial_submission_is_reconciled_as_partial_and_never_reposted() -> TestRes
 /// A publication whose read-back lost permission is Unverified, with the
 /// applied review id retained — never a clean failure and never a second write.
 #[test]
-fn a_lost_read_permission_reports_unverified_and_retains_the_review_id() -> TestResult {
+fn a_lost_read_permission_reports_unverified_and_retains_the_review_id_t34() -> TestResult {
     let fake = FakeGh::install("read-denied", HEAD)?;
     // The create is accepted and returns an id; the review read is then denied
     // with a `403`, which the adapter reports as a typed permission failure.

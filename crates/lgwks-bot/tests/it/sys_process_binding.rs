@@ -230,7 +230,7 @@ fn a_chatty_child_is_drained_and_truncated_within_its_ceiling() -> TestResult {
 /// a ceiling that leaked would grow here, and a reader that stopped draining at
 /// the ceiling would deadlock this test rather than pass it.
 #[test]
-fn a_flooding_child_against_a_slow_reader_stays_within_its_ceiling() -> TestResult {
+fn a_flooding_child_against_a_slow_reader_stays_within_its_ceiling_t05() -> TestResult {
     // Eight mebibytes on each stream. Far past the ceiling (so truncation is
     // certain rather than incidental) and far past any pipe buffer (so the child
     // blocks unless the reader keeps draining while it runs).
