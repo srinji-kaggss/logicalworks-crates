@@ -32,7 +32,10 @@ inputs:
       fifteen cores and 24 GiB of RAM: run 37654108625 left 35 GiB of swap used
       with every job at the old default, and a hashing unit test that takes one
       second idle took 138 s swapping, so the sum of shares across the run must
-      stay near the machine rather than per job.
+      stay near the machine rather than per job. Oversubscription past ~1.5x
+      slows every suite more than the extra threads buy (run 37679490381 at
+      ~40 test threads: the wall was contention, not CPU), so the suite shares
+      sum near the cores: workspace 4, bot-full 6, no-default 4, matrix 2.
     required: false
     default: "2"
   build-share:
