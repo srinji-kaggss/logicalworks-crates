@@ -39,6 +39,14 @@ on:
 # two workspace shards each compiling for 4-9 minutes at a load near 150,
 # while every shard's tests took 66-150 s. A suite now runs in one job, with
 # the test threads of the shards it replaced (`test-share`).
+#
+# Every self-hosted job's timeout is 20 minutes. That is a hang bound, not the
+# budget: the budget is 5 min warm, enforced by measurement (WORKFLOW.md §12).
+# A toolchain or profile change rebuilds every instance at once — the opt-level
+# 2 transition run paid a 638 s full-workspace rebuild on two compiler slots —
+# and a transition run must survive that to leave every instance warm. Hung
+# tests are still bounded inside the suite by nextest's `slow-timeout` with
+# `terminate-after`.
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -81,7 +89,7 @@ jobs:
   build:
     name: Build and workspace tests
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
@@ -136,7 +144,7 @@ jobs:
   gate:
     name: Gate checks
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-4]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -230,7 +238,7 @@ jobs:
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
-    timeout-minutes: 15
+    timeout-minutes: 20
     # One job, so the full feature set is compiled once (see the header).
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -272,7 +280,7 @@ jobs:
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -324,7 +332,7 @@ jobs:
   tests_nodefault:
     name: Tests (lgwks-bot no default features, lgwks-std per feature)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -391,7 +399,7 @@ jobs:
   clippy:
     name: Clippy and scan
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -443,7 +451,7 @@ jobs:
   docs:
     name: Docs and release gates
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-12]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -489,7 +497,7 @@ jobs:
   feature-matrix:
     name: lgwks-std feature matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -523,7 +531,7 @@ jobs:
   storefront-matrix:
     name: Target and storefront matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -569,7 +577,7 @@ jobs:
   timing_gates:
     name: Timing gates (dudect, async fairness)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -588,7 +596,7 @@ jobs:
   feature-matrix-bot-ast:
     name: Feature matrix (lgwks-bot, lgwks-ast)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-11]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
