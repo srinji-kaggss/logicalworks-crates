@@ -11,6 +11,7 @@
 //! its tests.
 
 use crate::seeded_sweep::{fold, fold_usize, next_index, next_seed};
+use lgwks_std::seeded::Seeded;
 
 /// The printable ASCII alphabet a text-shaped payload is drawn from.
 const TEXT_ALPHABET: &[u8] =
@@ -22,13 +23,13 @@ const TEXT_ALPHABET: &[u8] =
 /// `x % 256` names and one instruction rather than a checked conversion: the
 /// stream's low byte is exactly as good as any other byte of it.
 #[must_use]
-pub fn next_byte(state: &mut u64) -> u8 {
+pub fn next_byte(state: &mut Seeded) -> u8 {
     next_seed(state).to_le_bytes()[0]
 }
 
 /// `len` bytes drawn from the sweep stream rooted at `state`.
 #[must_use]
-pub fn next_bytes(state: &mut u64, len: usize) -> Vec<u8> {
+pub fn next_bytes(state: &mut Seeded, len: usize) -> Vec<u8> {
     (0..len).map(|_| next_byte(state)).collect()
 }
 
@@ -42,7 +43,7 @@ pub fn next_bytes(state: &mut u64, len: usize) -> Vec<u8> {
 /// family, so a build without that feature has no uncalled draw in it.
 #[cfg(feature = "random")]
 #[must_use]
-pub fn next_array<const LEN: usize>(state: &mut u64) -> [u8; LEN] {
+pub fn next_array<const LEN: usize>(state: &mut Seeded) -> [u8; LEN] {
     let mut drawn = [0_u8; LEN];
     for slot in drawn.iter_mut() {
         *slot = next_byte(state);
@@ -59,7 +60,7 @@ pub fn next_array<const LEN: usize>(state: &mut u64) -> [u8; LEN] {
 /// mapping of [`crate::seeded_sweep::next_seed`] applied one byte at a time and
 /// is enough for a payload a family asserts a contract about.
 #[must_use]
-pub fn next_text(state: &mut u64, len: usize) -> String {
+pub fn next_text(state: &mut Seeded, len: usize) -> String {
     (0..len)
         .map(|_| {
             let offset = usize::from(next_byte(state)).rem_euclid(TEXT_ALPHABET.len());
@@ -82,7 +83,7 @@ pub fn repeated(byte: u8, len: usize) -> Vec<u8> {
 /// to name and yields `0`; every caller indexes a table whose length it has
 /// already checked, so an empty table is not a case this draws for.
 #[must_use]
-pub fn below(state: &mut u64, bound: usize) -> usize {
+pub fn below(state: &mut Seeded, bound: usize) -> usize {
     next_index(state).rem_euclid(bound.max(1))
 }
 

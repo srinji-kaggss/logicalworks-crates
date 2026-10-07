@@ -22,7 +22,9 @@ use lgwks_std::leb128::{
     encode_u32, encode_u64,
 };
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{below, fold_bytes, fold_refusal, next_byte, next_bytes};
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
     initial_trace, next_seed,
@@ -30,7 +32,7 @@ use seeded_sweep::{
 
 /// Draws a byte and reinterprets it as a signed `i8`, so a seeded value spans
 /// the whole signed range rather than only its lower half.
-fn next_signed_byte(state: &mut u64) -> i8 {
+fn next_signed_byte(state: &mut Seeded) -> i8 {
     let raw = next_byte(state);
     i8::from_ne_bytes([raw])
 }
@@ -318,7 +320,7 @@ macro_rules! agree_narrow_signed {
 /// Runs the seeded round-trip and refusal sweep over all four codecs and
 /// returns its trace.
 fn leb128_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..48 {
@@ -399,7 +401,7 @@ fn leb128_trace(seed: u64) -> u64 {
 /// decoder, and the rendered bytes are what the reference model accepts.
 fn a_seeded_unsigned_value_round_trips_at_both_widths() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             // The narrow value is drawn in the narrow width and the wide value
             // is that same number widened, so both round-trips are exercised at
@@ -447,7 +449,7 @@ fn a_seeded_unsigned_value_round_trips_at_both_widths() -> Result<(), DecodeErro
 /// first.
 fn a_seeded_signed_value_round_trips_at_both_widths() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             // The narrow value is drawn in the narrow width and the wide value
             // is that same number widened, sign included, so both round-trips
@@ -581,7 +583,7 @@ fn every_boundary_value_is_encoded_minimally() -> Result<(), DecodeError> {
 /// length of its own encoding, and never inspects what follows.
 fn trailing_bytes_are_left_to_the_caller() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let byte = next_byte(&mut state);
             let value = u64::from(byte).saturating_mul(2_654_435_761);
@@ -616,7 +618,7 @@ fn trailing_bytes_are_left_to_the_caller() -> Result<(), DecodeError> {
 }
 
 /// Returns `encoded` preceded by a few junk bytes, drawn from the sweep.
-fn trailer_prefixed(state: &mut u64, encoded: &[u8]) -> Vec<u8> {
+fn trailer_prefixed(state: &mut Seeded, encoded: &[u8]) -> Vec<u8> {
     let lead = below(state, 5);
     let mut prefixed = next_bytes(state, lead);
     prefixed.extend_from_slice(encoded);
@@ -630,7 +632,7 @@ fn trailer_prefixed(state: &mut u64, encoded: &[u8]) -> Vec<u8> {
 /// arm for all of them would be conflating.
 fn a_redundant_padding_group_is_refused_as_non_minimal() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let payload = next_byte(&mut state) % 0x7f;
             let mut over_padded = vec![payload | 0x80];
@@ -676,7 +678,7 @@ fn a_redundant_padding_group_is_refused_as_non_minimal() -> Result<(), DecodeErr
 /// arms are told apart.
 fn an_unterminated_run_is_refused_as_truncated_at_its_own_length() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for length in 0..9_usize {
             let filler = next_byte(&mut state) | 0x80;
             let run = vec![filler; length];
@@ -702,7 +704,7 @@ fn an_unterminated_run_is_refused_as_truncated_at_its_own_length() {
 /// contract rather than a detail of the shift.
 fn an_over_wide_run_is_refused_as_overflow_at_its_own_group() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let filler = next_byte(&mut state) | 0x80;
             let length = 4 + below(&mut state, 9);
@@ -776,7 +778,7 @@ fn the_target_width_decides_where_a_run_stops_being_valid() {
 /// terminator is a truncated run.
 fn every_truncation_of_an_encoding_is_refused() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let value = u64::from(next_byte(&mut state))
                 .saturating_mul(2_654_435_761)
@@ -806,7 +808,7 @@ fn every_truncation_of_an_encoding_is_refused() -> Result<(), DecodeError> {
 /// the model's verdict agrees with the shipped one at each of them.
 fn every_single_byte_corruption_is_refused_or_changes_the_value() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let value = u64::from(next_byte(&mut state))
                 .saturating_mul(2_654_435_761)
@@ -896,7 +898,7 @@ fn the_endpoints_are_exact_at_both_widths() -> Result<(), DecodeError> {
 fn refusals_fold_their_arm_and_their_offset() {
     let mut trace = initial_trace();
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let length = below(&mut state, 12);
             let run = next_bytes(&mut state, length);
@@ -939,7 +941,7 @@ fn distinct_leb128_seeds_diverge_in_their_trace() {
 /// buffer gets them in order.
 fn the_encoder_appends_to_the_buffer_it_is_given() -> Result<(), DecodeError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         let mut stream = Vec::new();
         let mut values = Vec::new();
         for _ in 0..12 {

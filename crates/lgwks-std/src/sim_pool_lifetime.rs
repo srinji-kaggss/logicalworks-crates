@@ -63,6 +63,7 @@ use super::{
 };
 use gate::{Gate, Release};
 use rng::Rng;
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_usize,
     initial_trace, next_seed,
@@ -646,7 +647,7 @@ fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
     // `SWEEP_SEEDS` is a non-empty const array, so its first seed is a value
     // the pattern binds rather than one an `Option` could withhold.
     let [first_seed, ..] = SWEEP_SEEDS;
-    let mut state = first_seed;
+    let mut state = seeded_stream(first_seed);
     for _ in 0..SEEDS {
         journey(next_seed(&mut state));
     }
@@ -655,7 +656,7 @@ fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
 #[test]
 fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
     let [first_seed, ..] = SWEEP_SEEDS;
-    let mut state = first_seed;
+    let mut state = seeded_stream(first_seed);
     for _ in 0..SEEDS {
         cycles(next_seed(&mut state));
     }

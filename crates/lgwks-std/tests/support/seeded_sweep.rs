@@ -10,6 +10,8 @@
 //! binary uses a different subset of it, and a fixture that is only correct
 //! where its unused half is silenced is a fixture nobody has read.
 
+use lgwks_std::seeded::Seeded;
+
 /// The seeds the sweep families replay.
 ///
 /// Each is named rather than generated so a failure names the exact seed that
@@ -27,29 +29,22 @@ const FNV_PRIME: u64 = 1_099_511_628_211;
 /// The offset basis for [`fold`]: the 64-bit FNV-1a offset basis.
 const FNV_BASIS: u64 = 14_695_981_039_346_656_037;
 
-/// Advances a deterministic xorshift64* stream.
+/// The stream `seed` names: the crate's own [`Seeded`], the estate's one
+/// deterministic stream (INV-STD-SEEDED-1).
 ///
-/// One `u64` of state drives every case in a sweep, so one seed reproduces the
-/// whole run rather than only the cases it happens to name.
-///
-/// The finalising multiply is load-bearing rather than decorative. A
-/// linear-congruential step has period `2**k` in its low `k` bits, so a family
-/// drawing one byte per word out of an unfinalised stream saw the same 256
-/// bytes repeat for ever: a 4 KiB payload was sixteen copies of one block, and
-/// every wide-boundary case was a repeat of a narrow one. `xorshift64*` is the
-/// standard remedy — it moves the weakness out of the word's low bits, so one
-/// byte of a word is one byte of the stream's entropy.
-///
-/// The state must be non-zero: the all-zero word is xorshift's fixed point, and
-/// every named seed is non-zero while xorshift's steps are invertible, so a
-/// stream cannot reach it from one that is not.
-pub fn next_seed(state: &mut u64) -> u64 {
-    let mut word = *state;
-    word ^= word >> 12;
-    word ^= word << 25;
-    word ^= word >> 27;
-    *state = word;
-    word.wrapping_mul(0x2545_f491_4f6c_dd1d)
+/// One stream drives every case in a sweep, so one seed reproduces the whole
+/// run rather than only the cases it happens to name, and the same seed draws
+/// the same words in every crate's simulations. The fixture once advanced a
+/// private xorshift64* word of its own; a second generator gave every seed a
+/// second meaning.
+#[must_use]
+pub fn seeded_stream(seed: u64) -> Seeded {
+    Seeded::from_seed(seed)
+}
+
+/// The next word of a sweep's stream.
+pub fn next_seed(state: &mut Seeded) -> u64 {
+    state.next_u64()
 }
 
 /// One word of the stream read at the platform's index width.
@@ -62,7 +57,7 @@ pub fn next_seed(state: &mut u64) -> u64 {
 /// address rather than dropping them, because a truncated draw is a different
 /// stream and the trace is a property of the seed rather than of the platform.
 #[must_use]
-pub fn next_index(state: &mut u64) -> usize {
+pub fn next_index(state: &mut Seeded) -> usize {
     let mut folded = 0_usize;
     for byte in next_seed(state).to_le_bytes() {
         folded = folded.wrapping_mul(31).wrapping_add(usize::from(byte));
@@ -184,14 +179,14 @@ mod tests {
     use super::{
         FNV_BASIS, SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold,
         fold_nanos, fold_score, fold_usize, initial_trace, nanos_of, next_index, next_seed,
-        word_of,
+        seeded_stream, word_of,
     };
 
     /// A stand-in family: it makes every draw this module offers, so the stream
     /// is observed rather than assumed, and it reads its seed so the replay
     /// oracle has something to hold.
     fn draws(seed: u64) -> u64 {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         let mut trace = initial_trace();
         for _ in 0..64 {
             fold(&mut trace, next_seed(&mut state));
@@ -217,12 +212,12 @@ mod tests {
     }
 
     #[test]
-    /// The defect the finaliser prevents, observed at the byte a family draws.
+    /// The low byte of a word is the stream's entropy, not a short cycle.
     fn sim_the_low_byte_of_the_stream_has_no_period_of_its_own_width() {
-        // An unfinalised linear-congruential step has period 256 in its low 8
-        // bits, so `bytes[i]` equals `bytes[i + 256]` for ever and a 4 KiB
-        // payload drawn one byte per word was sixteen copies of one block.
-        let mut state = SWEEP_SEEDS[0];
+        // A generator whose low 8 bits cycle every 256 draws (an unfinalised
+        // linear-congruential step) made a 4 KiB payload drawn one byte per
+        // word sixteen copies of one block.
+        let mut state = seeded_stream(SWEEP_SEEDS[0]);
         let bytes: Vec<u8> = (0..1_024)
             .map(|_| next_seed(&mut state).to_le_bytes()[0])
             .collect();
@@ -236,7 +231,7 @@ mod tests {
     #[test]
     /// A thousand draws of one seed are a thousand different words.
     fn sim_a_thousand_draws_are_a_thousand_distinct_words() {
-        let mut state = SWEEP_SEEDS[0];
+        let mut state = seeded_stream(SWEEP_SEEDS[0]);
         let mut words = BTreeSet::new();
         for _ in 0..1_024 {
             words.insert(next_seed(&mut state));

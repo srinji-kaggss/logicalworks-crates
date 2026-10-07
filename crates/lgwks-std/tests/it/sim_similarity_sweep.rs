@@ -12,6 +12,7 @@ use lgwks_std::similarity::{
 use crate::seeded_sweep;
 
 use crate::seeded_bytes::next_byte;
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold, fold_score,
     fold_usize, initial_trace, next_index, next_seed,
@@ -32,7 +33,7 @@ const NO_NAMED_MAPPING_ARM: u64 = u64::MAX.saturating_sub(1);
 /// `seed` selects every vector, text, set and path below, so one number
 /// reproduces the whole run.
 fn run_seeded_sweep(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
     let cosine = Cosine::new();
     let edit = EditDistance::new(6);

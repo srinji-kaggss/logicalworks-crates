@@ -4,8 +4,8 @@
 //! path beside its `seed_helpers.rs`, as `lgwks_ast` includes them: one
 //! xoshiro stream and one FNV-1a receipt for every crate above `lgwks_bot`, so
 //! a seed and a hash mean the same thing in each. `lgwks_std` sits below
-//! `lgwks_bot` and keeps its own generator in `tests/support/rng.rs`, because a
-//! crate's tests do not reach up into a crate that depends on it. This
+//! `lgwks_bot`, and its tests do not reach up into a crate that depends on it;
+//! they draw the same stream from `lgwks_std::seeded::Seeded` directly. This
 //! file adds only what the policy families need on top: a draw from a named
 //! table, and a receipt that refuses a run that recorded nothing.
 

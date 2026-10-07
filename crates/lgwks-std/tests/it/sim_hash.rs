@@ -22,7 +22,9 @@ use crate::seeded_sweep;
 
 use lgwks_std::hash::{Digest, DigestParseError, Hasher, blake3, keyed};
 
+use lgwks_std::seeded::Seeded;
 use seeded_bytes::{below, fold_bytes, next_byte, next_bytes, repeated};
+use seeded_sweep::seeded_stream;
 use seeded_sweep::{
     SWEEP_SEEDS, assert_distinct_seeds_diverge, assert_same_seed_replays, fold_usize, initial_trace,
 };
@@ -49,7 +51,7 @@ const BOUNDARY_LENGTHS: [usize; 6] = [0, 1, 2, 63, 64, WIDE_MESSAGE_BYTES];
 
 /// Splits `message` into chunks of the drawn sizes, always advancing at least
 /// one byte so the split always terminates.
-fn seeded_chunks(state: &mut u64, message: &[u8]) -> Vec<Vec<u8>> {
+fn seeded_chunks(state: &mut Seeded, message: &[u8]) -> Vec<Vec<u8>> {
     if message.is_empty() {
         return Vec::new();
     }
@@ -74,7 +76,7 @@ fn joined(chunks: &[Vec<u8>]) -> Vec<u8> {
 
 /// Runs the seeded determinism and chunking sweep and returns its trace.
 fn hash_trace(seed: u64) -> u64 {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut trace = initial_trace();
 
     for _ in 0..48 {
@@ -120,7 +122,7 @@ fn hash_trace(seed: u64) -> u64 {
 /// boundary length — determinism is the whole of INV-STD-HASH-1.
 fn the_same_bytes_always_produce_the_same_digest() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for length in BOUNDARY_LENGTHS {
             let message = next_bytes(&mut state, length);
             let first = blake3(&message);
@@ -145,7 +147,7 @@ fn the_same_bytes_always_produce_the_same_digest() {
 /// the cases.
 fn incremental_hashing_equals_one_shot_at_every_seeded_chunking() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..64 {
             let length = below(&mut state, 80);
             let message = next_bytes(&mut state, length);
@@ -182,7 +184,7 @@ fn incremental_hashing_equals_one_shot_at_every_seeded_chunking() {
 /// length where a trailing byte fits.
 fn a_trailing_byte_changes_the_digest() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let length = below(&mut state, 64);
             let mut message = next_bytes(&mut state, length);
@@ -203,7 +205,7 @@ fn a_trailing_byte_changes_the_digest() {
 /// prefix.
 fn a_single_bit_change_changes_the_digest() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let length = below(&mut state, 32) + 1;
             let mut message = next_bytes(&mut state, length);
@@ -230,7 +232,7 @@ fn a_single_bit_change_changes_the_digest() {
 /// are *supposed* to agree, and the boundary is stated rather than assumed.
 fn unframed_splits_conflate_where_framed_splits_do_not() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..24 {
             let head_len = below(&mut state, 6).saturating_add(1);
             let head = next_bytes(&mut state, head_len);
@@ -311,7 +313,7 @@ fn unframed_splits_conflate_where_framed_splits_do_not() {
 /// part — no more and no less.
 fn a_framed_feed_equals_the_digest_of_its_documented_prefix() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let first_len = below(&mut state, 12);
             let first = next_bytes(&mut state, first_len);
@@ -381,7 +383,7 @@ fn an_empty_framed_part_is_distinct_from_no_part() {
 /// that does not change the answer would prove nothing.
 fn a_keyed_digest_depends_on_the_key_and_the_message() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let message_len = below(&mut state, 40);
             let message = next_bytes(&mut state, message_len);
@@ -427,7 +429,7 @@ fn a_keyed_digest_depends_on_the_key_and_the_message() {
 /// lose the value.
 fn the_hex_form_round_trips_at_both_cases() -> Result<(), DigestParseError> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..48 {
             let message_len = below(&mut state, 40);
             let digest = blake3(&next_bytes(&mut state, message_len));
@@ -486,7 +488,7 @@ fn parse_arm(error: &DigestParseError) -> u8 {
 fn a_digest_hex_of_the_wrong_length_is_refused_on_its_length()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..16 {
             let hex = blake3(&next_bytes(&mut state, 8)).to_hex();
             // A prefix can only be shorter, so the over-long case is built by
@@ -535,7 +537,7 @@ fn a_digest_hex_of_the_wrong_length_is_refused_on_its_length()
 fn a_digest_hex_with_a_bad_character_is_refused_as_a_hex_refusal()
 -> Result<(), Box<dyn std::error::Error>> {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let hex = blake3(&next_bytes(&mut state, 8)).to_hex();
             let position = below(&mut state, 64);
@@ -606,7 +608,7 @@ fn the_empty_message_is_hashed_as_a_message() {
 /// The wide boundary is a real message: 8 KiB hashes, and a one-byte change at
 /// its far end still changes the digest.
 fn the_wide_boundary_is_hashed_at_its_declared_length() {
-    let mut state = SWEEP_SEEDS[0];
+    let mut state = seeded_stream(SWEEP_SEEDS[0]);
     let message = next_bytes(&mut state, WIDE_MESSAGE_BYTES);
     let original = blake3(&message);
     assert_eq!(
@@ -689,8 +691,8 @@ fn distinct_hash_seeds_diverge_in_their_trace() {
 /// Two seeds draw two different messages, so the determinism family is not one
 /// message hashed repeatedly.
 fn two_seeds_draw_two_different_messages() {
-    let mut first = SWEEP_SEEDS[0];
-    let mut second = SWEEP_SEEDS[1];
+    let mut first = seeded_stream(SWEEP_SEEDS[0]);
+    let mut second = seeded_stream(SWEEP_SEEDS[1]);
     let left = next_bytes(&mut first, 48);
     let right = next_bytes(&mut second, 48);
     assert_ne!(left, right, "the two sweep seeds drew the same message");
@@ -708,7 +710,7 @@ fn two_seeds_draw_two_different_messages() {
 /// Seeded digests every `ct_eq` family compares: one per boundary length and
 /// 32 drawn messages, each paired with a byte-equal copy built from its bytes.
 fn ct_eq_pairs(seed: u64) -> Vec<(Digest, Digest)> {
-    let mut state = seed;
+    let mut state = seeded_stream(seed);
     let mut pairs = Vec::new();
     for length in BOUNDARY_LENGTHS {
         let digest = blake3(&next_bytes(&mut state, length));
@@ -768,7 +770,7 @@ fn ct_eq_is_reflexive_and_symmetric() {
 /// position of the 32 bytes is skipped by the constant-time comparison.
 fn ct_eq_sees_a_flip_at_every_seeded_position() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for (digest, _) in ct_eq_pairs(seed) {
             for _ in 0..64 {
                 let byte = below(&mut state, 32);
@@ -838,7 +840,7 @@ fn a_digest_parsed_from_its_hex_is_ct_eq() -> Result<(), DigestParseError> {
 /// across the key that a tenant's records are bound to.
 fn ct_eq_separates_keys_over_one_message() {
     for seed in SWEEP_SEEDS {
-        let mut state = seed;
+        let mut state = seeded_stream(seed);
         for _ in 0..32 {
             let length = below(&mut state, 96);
             let message = next_bytes(&mut state, length);
