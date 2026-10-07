@@ -250,7 +250,11 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "10"
+          # Eight is the share this suite was green at: ten threads failed the
+          # drain-grace test (`shutdown_reports_every_draining_cleanup_...`,
+          # INV-BOT-156) under the run's process-table storm — the grace is
+          # calibrated for loaded, not oversubscribed, hosts.
+          test-share: "8"
           build-share: "2"
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
