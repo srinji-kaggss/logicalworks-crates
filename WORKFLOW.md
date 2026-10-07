@@ -353,9 +353,9 @@ by a run that passes; a red run's wall clock is not evidence of anything.
 ### What sets the wall clock
 
 Every self-hosted job runs on one machine: 15 cores (5 performance, 10
-efficiency), 24 GiB, six runner instances. A run's wall clock is therefore its
-job-seconds divided by six plus what waits in the queue, and adding jobs does
-not add machines. Two measured facts set the layout:
+efficiency), 24 GiB, thirteen runner instances. A run's wall clock is therefore
+its job-seconds divided by thirteen plus what waits in the queue, and adding
+jobs does not add machines. Three measured facts set the layout:
 
 1. **Duplicated work, not parallelism, was the cost.** Run 37579691890 (main,
    3c008cbf) ran 35 jobs, 7,500 job-seconds, in 21.4 min. Each job compiled
@@ -372,6 +372,19 @@ not add machines. Two measured facts set the layout:
    idle machine the full workspace suite (5,430 tests) took **385 s** with its
    temporary files on the SSD and **116.5 s** with them on a RAM disk, every
    test passing both times, peak RSS 484 MB.
+3. **Memory, not cores, is the binding constraint.** Thirteen jobs each
+   compiling with four slots is 52 compiler processes plus ~50 test threads on
+   24 GiB. Run 37654108625 (warm, green) left **35 GiB of swap used** with
+   1.3 billion page reactivations outstanding afterwards; a hashing unit test
+   that takes one second idle took 138 s, the dudect example 47 s idle and
+   458 s in the run, the workspace suite 116.5 s idle and 390 s in the run.
+   Warm compiles take seconds, so compiler slots are capped at a share that
+   sums near the machine (`build-share`), test threads likewise
+   (`test-share`: nodefault 6, bot-full 8, workspace 4, the rest 1-2), and the
+   suites' CPU is bought down rather than scheduled: `[profile.test]`
+   opt-level 2 halves the heaviest sims (the 5,000-tenant provision 67.9 s to
+   34.3 s at the same seeds), and the frame search hashes once per candidate
+   length instead of twice.
 
 So: lanes that build one feature set share one job (the lane table's
 `group`); a job that only reads a result reads it from the job that produced
@@ -392,7 +405,7 @@ live changed. The Linux container gets the same with a tmpfs `/tmp`.
 | Axis | Requirement on the CI | Evidence |
 |---|---|---|
 | Frontier | The layout beats each alternative it was measured against. 35 single-lane jobs with per-job targets: 21.4 min. Hosted runners: refused by the Director (2026-10-04, CI runs on the local runner). One orchestrator job running the whole lane table: loses the per-job rows and isolates nothing. Sharding one suite across instances of one machine: recompiles it per shard and adds no cores. | the run table below |
-| Hyperscale | Every resource the run takes is bounded. Self-hosted jobs in flight ≤ the six instances; nextest threads per job = 2 × cores ÷ instances; a RAM disk ≤ `tmp-gib` (4 GiB) per instance and only the pages written; a container tmpfs ≤ 3 GiB; every job has `timeout-minutes`; every test has nextest's `slow-timeout` with `terminate-after`. Nothing grows with the number of runs except the target directories, which are cleaned below `min-free-gib`. | `action.yml`, `.config/nextest.toml` |
+| Hyperscale | Every resource the run takes is bounded. Self-hosted jobs in flight ≤ the thirteen instances; nextest threads per job = share × cores ÷ instances (nodefault 6, bot-full 8, workspace 4, rest 1-2, sum near the machine); compiler slots likewise (`build-share`: the heavy compilers 2, the rest 1); a RAM disk ≤ `tmp-gib` (4 GiB) per instance and only the pages written; a container tmpfs ≤ 3 GiB; every job has `timeout-minutes`; every test has nextest's `slow-timeout` with `terminate-after`. Nothing grows with the number of runs except the target directories, which are cleaned below `min-free-gib`. | `action.yml`, `.config/nextest.toml` |
 | Idiomatic | One definition of the gate: `scripts/gate-lanes.toml`. CI steps carry the lane commands verbatim and `check-gate-parity.py` refuses drift. Standard actions only; no wrapper that hides a command. | `python3 scripts/check-gate-parity.py` |
 | Generalized | Every lane runs on every pull request: every feature set, the 8-target matrix, WASI, all 28 grammars, macOS, Linux and Windows. A layout change moves steps between jobs and never drops one; the parity check proves each CI lane still has its step. | parity: 58 lanes, 49 shared |
 | Decoupled | No job waits on another except three readers (the two check rows and the acceptance receipt), each of which reads a file another job wrote and builds nothing. A lane's command does not depend on which job runs it. | `needs:` appears three times |
@@ -415,3 +428,7 @@ live changed. The Linux container gets the same with a tmpfs `/tmp`.
 | 37624988459 #2 | b9eadc91 | same commit, warm | 8.5 min | 2,729 | fail: a 100 ms parse deadline measured 392 ms on the host clock (fixed: proved on a driven clock); every other job passed by 291 s, the two bot-full shards at 491-497 s |
 | 37630747929 | 99670c70 | bot-full in three shards; deadlines and stalls on the seeded clock | 13.0 min | 5,473 | fail: four doc citations into ecs.rs moved with the source; five jobs compiled the same feature sets at once, 4-9 min each, while their tests took 66-150 s |
 | 37633462471 | 436b9c9e | one job per feature set; gate checks apart from the workspace build | 9.0 min | 3,508 | fail: the acceptance job's artifact pattern missed the unsharded name; the workspace build took 5m40s because the runners' `CI=true` turns incremental compilation off |
+| 37635420955 | 89ba090b | + walk-complexity bound judged at the min window | fail | — | fail: two timing flakes under load (walk median 6.5x, hostile byte-ceiling tiling on a 10 s host deadline); fixed, not weakened |
+| 37650313690 | 627e4629 | + doc-citation re-anchor | cancelled | — | superseded by 37651284179 |
+| 37651284179 | 627e4629 | same commit | 10.3 min | — | fail: hostile byte-ceiling tiling timed out at 88 s under load (fixed: tile past any deadline); every other job green |
+| 37654108625 | 6d792999 | + hostile tiling fix; thirteen instances | 10.2 min | 4,807 | **pass.** Six jobs over the 5 min budget: nodefault 605 s, docs 517 s, storefront 494 s, timing 492 s (dudect 458 s), build 488 s, bot-full 378 s. Step logs show warm compiles finishing in seconds and suites inflated 3-10x: the machine is swapping, not compiling (35 GiB swap used). The fix is §12 fact 3 above, not another layout |

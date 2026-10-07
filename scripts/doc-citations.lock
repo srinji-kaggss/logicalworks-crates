@@ -6,8 +6,8 @@
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.
-Cargo.toml:131	print_stderr = "forbid"
-Cargo.toml:132	print_stdout = "forbid"
+Cargo.toml:137	print_stderr = "forbid"
+Cargo.toml:138	print_stdout = "forbid"
 crates/lgwks-ast/src/lib.rs:54	//! point for anything else is a caller-registered parser. [`CustomLang`] is
 crates/lgwks-ast/src/lib.rs:3440	let mut covered: Vec<&str> = Vec::new();
 crates/lgwks-ast/src/lib.rs:3445	assert_eq!(

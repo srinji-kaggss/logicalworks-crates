@@ -26,11 +26,26 @@ inputs:
     description: >
       This job's share of the machine's cores for test threads, in thirds: the
       threads are share × cores ÷ 3 ÷ runner instances, at least two. The
-      default, 3, is one instance's even share three times over (see the step).
-      A job that runs a whole suite the shards of several jobs used to split
-      names the shares of the jobs it replaced.
+      default, 2, is two thirds of one instance's even share (see the step). A
+      job that runs a whole suite the shards of several jobs used to split
+      names the shares of the jobs it replaced. The shares are budgeted against
+      fifteen cores and 24 GiB of RAM: run 37654108625 left 35 GiB of swap used
+      with every job at the old default, and a hashing unit test that takes one
+      second idle took 138 s swapping, so the sum of shares across the run must
+      stay near the machine rather than per job.
     required: false
-    default: "3"
+    default: "2"
+  build-share:
+    description: >
+      This job's share of the machine's cores for concurrent compiler and
+      linker processes: CARGO_BUILD_JOBS is share × cores ÷ runner instances,
+      at least one. The machine's own cargo configuration caps jobs at four,
+      which thirteen concurrent jobs turned into 52 compiler processes on 15
+      cores and 24 GiB of RAM (run 37654108625: 35 GiB of swap used). Warm
+      compiles take seconds, so no job needs four slots; the jobs that compile
+      the most name share 2, the rest share 1.
+    required: false
+    default: "1"
   tmp-gib:
     description: >
       Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
@@ -126,16 +141,14 @@ runs:
         fi
         echo "TMPDIR=${tmp}" >> "${GITHUB_ENV}"
         echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
-    # The runner instances share this machine's cores. A test job that took
-    # every core, beside three others doing the same, put the load average at
-    # 60-70 on 15 cores, and timing-bounded tests then measured the scheduler.
-    # Each job gets its share: three times the cores divided by the runner
-    # instances. A test body mostly waits (on a child process, a pipe, a file
-    # sync), so one thread per core left cores idle — 2,791 bot tests took 605 s
-    # at two threads beside five busy jobs — while every job taking every core
-    # was the 60-70 load. Three times, not two, because only seven of the eleven
-    # instances run test suites; the other four check, lint or time, and at
-    # twice the share each suite would get the two threads measured above.
+    # The runner instances share this machine's cores and its 24 GiB of RAM.
+    # A test job that took every core, beside others doing the same, put the
+    # load average at 60-70 on 15 cores, and timing-bounded tests then measured
+    # the scheduler. Worse, thirteen jobs each compiling with four slots turned
+    # into 52 compiler processes and left 35 GiB of swap used (run 37654108625),
+    # where a one-second hashing test took 138 s. Each job gets its share of
+    # both: test threads below, compiler slots in the next step, each budgeted
+    # so the sums across the run stay near the machine.
     - name: Test threads for this runner's share of the machine
       shell: bash
       run: |
@@ -147,6 +160,20 @@ runs:
         threads=$(( threads > 1 ? threads : 2 ))
         echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
         echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
+    # Compiler and linker slots for the same share. Warm compiles take seconds,
+    # so this caps the thundering herd rather than sizing any one build: every
+    # job compiling at once is what swapped, not any job compiling slowly.
+    - name: Compiler slots for this runner's share of the machine
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+        slots=$(( ${{ inputs.build-share }} * cores / (runners > 0 ? runners : 1) ))
+        slots=$(( slots > 0 ? slots : 1 ))
+        echo "CARGO_BUILD_JOBS=${slots}" >> "${GITHUB_ENV}"
+        echo "${cores} cores, ${runners} runner instances: ${slots} compiler slots"
     # rustup has no lock, and parallel jobs that each ran `rustup toolchain
     # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
     # toolchain is only installed when the pinned one is not already active.

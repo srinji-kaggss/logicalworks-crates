@@ -37,33 +37,32 @@ doc() {
 # and still breaks for every consumer: `trace` (default-on) linked to `json`
 # (default-off), and the repository did not see it.
 #
-# `lgwks_deps` is built with `--features tokio-full` rather than
-# `--all-features`, because `gpui` pulls `objc2`, which refuses to compile off
-# Apple targets. The gpui renderer is covered by the gpui-macos CI job instead.
+# The three workspace crates go in ONE invocation: `--all-features` enables
+# every feature of each selected package, so each crate's docs resolve exactly
+# as in three separate calls, while the shared dependency graph builds once.
+# `lgwks_deps` stays its own call: it is built with `--features tokio-full`
+# rather than `--all-features`, because `gpui` pulls `objc2`, which refuses to
+# compile off Apple targets.
 lane_all_features() {
-  doc -p lgwks_std --all-features
-  doc -p lgwks_bot --all-features
-  doc -p lgwks_ast --all-features
+  doc -p lgwks_std -p lgwks_bot -p lgwks_ast --all-features
   doc -p lgwks_deps --features tokio-full
 }
 
 # No features on, per crate. The other boundary: this lane does not compile the
 # module that holds such a link at all, which is why it and the default lane are
-# both needed. `retry` linked to `random` and only this lane could see it.
+# both needed. `retry` linked to `random` and only this lane could see it. One
+# invocation for the same reason as the all-features lane: `--no-default-features`
+# disables the defaults of each selected package identically.
 lane_no_default_features() {
-  doc --manifest-path crates/lgwks-std/Cargo.toml --no-default-features
-  doc --manifest-path crates/lgwks-bot/Cargo.toml --no-default-features
-  doc --manifest-path crates/lgwks-ast/Cargo.toml --no-default-features
+  doc -p lgwks_std -p lgwks_bot -p lgwks_ast --no-default-features
 }
 
 # The set `cargo add lgwks_std` actually hands a consumer, which neither lane
 # above builds: `--all-features` resolves a link into a gated module, and
-# `--no-default-features` omits the module that holds it. A break here is one
-# every consumer sees and the repository does not.
+# `--no-default-features` omits the module holding the link, so a default-on
+# to default-off link is invisible to both. One invocation, as above.
 lane_default() {
-  doc -p lgwks_std
-  doc -p lgwks_bot
-  doc -p lgwks_ast
+  doc -p lgwks_std -p lgwks_bot -p lgwks_ast
 }
 
 # Each feature alone. This is the general case the two boundary lanes cannot
