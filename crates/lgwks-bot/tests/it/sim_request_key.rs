@@ -57,8 +57,8 @@ use lgwks_bot::task::{
 
 use request::{
     BodyFuture, FirstStepRuns, counting_task, distinct_runs, drop_after_first_step, host_on,
-    host_with_deadline, hosts_over, overrunning_task, parking_task, stop_mid_run, stored_host,
-    two_step_task,
+    host_with_deadline_on, hosts_over, overrunning_task_on, parking_task, stop_mid_run,
+    stored_host, two_step_task,
 };
 use shared::{Summary, peak_rss_mib};
 
@@ -516,25 +516,28 @@ fn host_stops_never_poison_a_key(band: Band) -> TestResult {
 /// every drawn request in the state this family is about: progress committed,
 /// then the deadline ends it.
 ///
-/// Wide of that floor on purpose. The budget is charged against the wall clock
-/// and the first durable step is three `fsync`-ed records before the body starts
-/// waiting, so on a machine already running dozens of sibling test binaries those
-/// records can outlast a tight budget — and the sweep would then be measuring the
-/// scheduler instead of the classification. A few hundred milliseconds is still
-/// far below the crate default this family is contrasted with, so an overrun is
-/// always the *drawn* budget firing and never a host abandoning a step that was
-/// about to finish.
-const MIN_DEADLINE_MILLIS: u32 = 250;
+/// One millisecond is safe because the budget is measured on the host's virtual
+/// clock, which moves only when the body moves it: the first step's `fsync`-ed
+/// records take no logical time however long the disk takes, so even the
+/// tightest budget is reached only by the overrun the seed drew.
+const MIN_DEADLINE_MILLIS: u32 = 1;
 
-/// The longest budget a deadline sweep draws, in milliseconds.
+/// The longest budget a deadline sweep draws, in milliseconds: the crate's own
+/// ceiling ([`lgwks_bot::task::MAX_TASK_DEADLINE`], a day).
 ///
-/// Well clear of the floor so the sweep covers a range rather than one number,
-/// and below any budget that would let a parked body finish — which it never
-/// does, because the body waits on something that never arrives.
-const MAX_DEADLINE_MILLIS: u32 = 1_500;
+/// On the wall clock this family was held to 1.5 s, and a band of it spent
+/// twenty seconds waiting. On the virtual clock a day costs what a millisecond
+/// does, so the sweep covers every budget a host accepts.
+const MAX_DEADLINE_MILLIS: u32 = 86_400_000;
+
+/// The longest a drawn overrun goes past its budget, in milliseconds.
+///
+/// Zero included: the clock reaching the deadline *exactly* is the boundary,
+/// and it must already be an overrun.
+const MAX_OVERRUN_MILLIS: u32 = 60_000;
 
 /// How many requests one seeded deadline sweep drives.
-const MAX_DEADLINE_REQUESTS: u32 = 2;
+const MAX_DEADLINE_REQUESTS: u32 = 4;
 
 /// One request of the deadline sweep: overrun a drawn budget, then reattach to the recorded verdict.
 fn deadline_request(
@@ -548,17 +551,19 @@ fn deadline_request(
     let millis = sim_run
         .rng()
         .between(MIN_DEADLINE_MILLIS, MAX_DEADLINE_MILLIS);
+    let past = sim_run.rng().between(0, MAX_OVERRUN_MILLIS);
     let payload = sim_run.rng().between(0, 1000);
     let key = RequestKey::new(&format!("deadline-{tenant}-{index}"))?;
+    let budget = std::time::Duration::from_millis(u64::from(millis));
+    let overrun = budget.saturating_add(std::time::Duration::from_millis(u64::from(past)));
 
     // A fresh host per request, because the declared budget is part of what
-    // the request is and a host carries one budget for its whole life.
-    let host = host_with_deadline(
-        tenant,
-        scratch.path(),
-        std::time::Duration::from_millis(u64::from(millis)),
-    )?;
-    let work = overrunning_task(runs.clone())?;
+    // the request is and a host carries one budget for its whole life. Its
+    // clock is virtual and starts at zero, and only the body moves it: by the
+    // drawn budget plus the drawn overrun, once its first step has recorded.
+    let clock = lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO);
+    let host = host_with_deadline_on(tenant, scratch.path(), budget, clock.clone())?;
+    let work = overrunning_task_on(runs.clone(), clock, overrun)?;
 
     let first = lgwks_bot::block_on(host.submit(&key, &work, payload))?;
     let disposition = first
@@ -569,11 +574,14 @@ fn deadline_request(
         disposition,
         Disposition::DeadlineExceeded,
         "a body waiting on something that never arrives outruns its declared budget \
-         ({millis}ms for {tenant}/{index}); got {disposition}"
+         ({millis}ms, overrun by {past}ms, for {tenant}/{index}); got {disposition}"
     );
     sim_run
         .trace
         .record_number("budget-millis", u64::from(millis));
+    sim_run
+        .trace
+        .record_number("overrun-millis", u64::from(past));
     sim_run.trace.record(&format!("overran {disposition}"));
 
     // A fresh host over the same store file — a new *host*, which is what a
@@ -584,10 +592,11 @@ fn deadline_request(
     // the body overrun for thirty seconds and report a fresh `Executed`
     // rather than reattaching to the recorded verdict. That is the defect
     // this assertion exists to catch, not a nuisance to work around.
-    let reopened = host_with_deadline(
+    let reopened = host_with_deadline_on(
         tenant,
         scratch.path(),
-        std::time::Duration::from_millis(u64::from(millis)),
+        budget,
+        lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO),
     )?;
     let seen = lgwks_bot::block_on(reopened.submit(&key, &work, payload))?;
     let recorded = match seen {

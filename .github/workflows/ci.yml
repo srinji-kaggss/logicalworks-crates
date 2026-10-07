@@ -29,8 +29,9 @@ on:
 # compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
 # an instance only ever holds its own jobs' builds, and the second run is warm.
 # The jobs that build nothing run anywhere. Eleven instances, one per job
-# that builds: with six, a warm run's jobs queued behind one another and the
-# run took 601 s although no job took more than 450 s (run 37619560219
+# that builds, except lwc-11, which carries the bot suite's third shard beside
+# its own 21 s matrix: with six, a warm run's jobs queued behind one another
+# and the run took 601 s although no job took more than 450 s (run 37619560219
 # attempt 2).
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
@@ -213,15 +214,18 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-5' || 'lwc-6' }}"]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.shard == 1 && 'lwc-5' || matrix.shard == 2 && 'lwc-6' || 'lwc-11' }}"]
     timeout-minutes: 15
-    # Two shards of one nextest run, covering the suite exactly once between
+    # Three shards of one nextest run, covering the suite exactly once between
     # them. The lgwks-std full suite and the saturation tiers build the same
-    # feature set, so each rides on one shard.
+    # feature set, so each rides on its own shard (1 and 2) and the third
+    # carries only its share of the bot suite. Two shards set the run's wall at
+    # 491-497 s on run 37624988459 #2, every other job ending by 291 s; the
+    # third runs on lwc-11, whose own job (the bot and ast matrix) takes 21 s.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -234,7 +238,7 @@ jobs:
           nextest: "true"
       - name: Run lgwks-bot async runner tests
         env:
-          PARTITION: count:${{ matrix.shard }}/2
+          PARTITION: count:${{ matrix.shard }}/3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
       # the acceptance job can build one receipt from the suite's own output.

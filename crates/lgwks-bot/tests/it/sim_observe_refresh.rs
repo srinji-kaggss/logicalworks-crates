@@ -1293,14 +1293,19 @@ fn pace_plan(rng: &mut Rng, ticks: u32) -> Result<PacePlan, Box<dyn std::error::
 
 /// A tenant whose sources' paces are the plan's, under a short poll deadline.
 ///
-/// The deadline is short because the simulation must run hundreds of seeds: a
-/// source that never resolves costs exactly this budget on every tick it is
-/// wedged, so a realistic 30-second default would turn a 64-seed band into
-/// minutes of real waiting. What the family observes does not depend on the
-/// number — every assertion is about *which* chain was reported and whether the
-/// others still committed — and the deadline is declared rather than faked, so
-/// the same machinery under test is the one `Bot::tick` runs in production.
-const SIM_DEADLINE: std::time::Duration = std::time::Duration::from_millis(40);
+/// A wedged source costs exactly this budget, in real time, on every tick it is
+/// wedged: the poll deadline is a real-time watchdog by design (see
+/// `bounded_wave`), so a realistic 30-second default would turn a band into
+/// minutes of waiting. What the family observes does not depend on the number —
+/// every assertion is about *which* chain was reported and whether the others
+/// still committed — and the deadline is declared rather than faked, so the same
+/// machinery under test is the one `Bot::tick` runs in production.
+///
+/// One millisecond rather than more because nothing here races it: a source
+/// that is not wedged answers on its first turn, and a first turn is always
+/// polled however early the wave's reaper fires. At 40 ms the stall families
+/// spent ~12 s a band waiting.
+const SIM_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Build one tenant's bot over [`MAX_CHAINS`] paced sources.
 ///

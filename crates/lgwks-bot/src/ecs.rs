@@ -2440,7 +2440,14 @@ impl WavePoll<'_> {
     ) -> Poll<Result<Option<Erased>, BotError>> {
         {
             let mut state = lock(&self.watchdog.state);
-            if state.expired {
+            // Only a poll that has already been turned can be cut off here. The
+            // reaper is another thread, so a wave whose first wedged poll armed
+            // it can expire before the executor reaches a sibling's first turn;
+            // refusing that sibling unpolled would report a source that answers
+            // at once as stalled, on nothing but how the host scheduled two
+            // threads. Its first turn polls it, and a poll still pending after
+            // that turn is cut off below.
+            if state.expired && self.installed {
                 return Poll::Ready(self.stalled(deadline));
             }
             // Whether the installed waker is one the executor will recognise. A
