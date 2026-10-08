@@ -97,6 +97,10 @@ mod liveness_fixtures;
 #[path = "../support/scratch.rs"]
 mod scratch;
 
+#[cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "script"))]
+#[path = "../support/tenancy_harness.rs"]
+mod tenancy_harness;
+
 #[path = "../sim/mod.rs"]
 mod sim;
 
@@ -130,6 +134,7 @@ mod ambiguous_commit;
 mod authority;
 mod cas;
 mod credential;
+mod dist_lease;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -177,10 +182,12 @@ mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;
 mod sim_clock_wiring;
+mod sim_confinement;
 mod sim_continuation;
 mod sim_continuation_seal;
 mod sim_credential;
 mod sim_dispatch;
+mod sim_dist_lease;
 mod sim_epoch_identity;
 mod sim_group_commit;
 mod sim_inspect;
@@ -218,7 +225,9 @@ mod sim_task_axes;
 mod sim_task_resume;
 mod sim_tenancy;
 mod sim_tenancy_model;
+mod sim_tenancy_scope;
 mod sim_tenant_journal_kill;
+mod sim_tenant_store;
 mod skew;
 mod spec_materialize;
 mod stability;
@@ -232,4 +241,6 @@ mod task_front_door;
 mod task_million;
 mod task_resume;
 mod tenancy;
+mod tenancy_scale;
+mod tenant_store;
 mod wrong_identity_evidence;

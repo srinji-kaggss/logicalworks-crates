@@ -518,11 +518,34 @@ const OTHER_SUBJECTS: [&str; 5] = [
 /// work and design targets — so every mention in it is a claim about the field
 /// rather than about this crate's shipped surface, and the phrases that would
 /// qualify them are not denials of a shipped operation.
-const NOT_AUTHORITY_CLAIMS: [(&str, &str); 1] = [(
-    "docs/frontier.md",
-    "the state-of-the-art survey: its mentions are published research and design \
-     targets, not statements about this crate's shipped authority",
-)];
+///
+/// The three `dist_lease` entries are the same bargain for a different reason:
+/// coordination-lease fencing (`LeaseAuthority::acquire`/`revoke` move the
+/// epoch past outstanding leases; proved by
+/// `dist_lease::a_revoked_lease_grants_nothing`) is a different subject from
+/// `GrantSet` capability lifetime, which has no `revoke` and is what this scan
+/// protects. A mention there claims supersession of a coordination lease, not
+/// revocation of a capability.
+const NOT_AUTHORITY_CLAIMS: [(&str, &str); 4] = [
+    (
+        "docs/frontier.md",
+        "the state-of-the-art survey: its mentions are published research and design \
+         targets, not statements about this crate's shipped authority",
+    ),
+    (
+        "crates/lgwks-bot/src/dist_lease.rs",
+        "coordination-lease fencing with an explicit tested supersede operation, \
+         not GrantSet capability revocation",
+    ),
+    (
+        "crates/lgwks-bot/tests/it/dist_lease.rs",
+        "the behavioral proof of the lease fencing above, not a capability claim",
+    ),
+    (
+        "crates/lgwks-bot/tests/it/sim_dist_lease.rs",
+        "the simulation proof of the lease fencing above, not a capability claim",
+    ),
+];
 
 /// File extensions the scan reads. A revocation claim is prose or code; a
 /// lockfile or an image is neither.

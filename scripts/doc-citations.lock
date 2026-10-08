@@ -55,22 +55,22 @@ crates/lgwks-bot/src/rt/mod.rs:86	//! This is not a scheduler with realtime guar
 crates/lgwks-bot/src/rt/mod.rs:106	/// engine's `task_local!` needs only the `rt` feature this module already
 crates/lgwks-bot/src/rt/mod.rs:117	#[cfg(feature = "io")]
 crates/lgwks-bot/src/rt/process.rs:64	Capture(NonZeroUsize),
-crates/lgwks-bot/src/rt/process.rs:516	pub struct ProcessRun {
-crates/lgwks-bot/src/rt/process.rs:1161	pub enum ProcessRunError {
+crates/lgwks-bot/src/rt/process.rs:710	pub struct ProcessRun {
+crates/lgwks-bot/src/rt/process.rs:1355	pub enum ProcessRunError {
 crates/lgwks-bot/src/rt/runtime.rs:176	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
 crates/lgwks-bot/src/rt/runtime.rs:179	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:57	//! cannot be written without a [`Budget`]. Every iteration races the
 crates/lgwks-bot/src/rt/supervise.rs:92	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:211	/// otherwise never make, which is why it is not larger.
-crates/lgwks-bot/src/rt/supervise.rs:227	/// longer than the budget overruns it by one iteration. Cancellation is not
-crates/lgwks-bot/src/rt/supervise.rs:1881	/// long enough on one worker and far too short on several, and the failure is
-crates/lgwks-bot/src/rt/supervise.rs:2038	pub fn new(max_in_flight: usize) -> Self {
-crates/lgwks-bot/src/rt/supervise.rs:2549	/// # Why the description is borrowed
-crates/lgwks-bot/src/rt/supervise.rs:2612	pub async fn spawn_process_identified(
-crates/lgwks-bot/src/rt/supervise.rs:2834	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
-crates/lgwks-bot/src/rt/supervise.rs:5203	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:5312	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:217	/// otherwise never make, which is why it is not larger.
+crates/lgwks-bot/src/rt/supervise.rs:233	/// longer than the budget overruns it by one iteration. Cancellation is not
+crates/lgwks-bot/src/rt/supervise.rs:2006	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:2163	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise.rs:2710	/// # Why the description is borrowed
+crates/lgwks-bot/src/rt/supervise.rs:2773	pub async fn spawn_process_identified(
+crates/lgwks-bot/src/rt/supervise.rs:3017	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+crates/lgwks-bot/src/rt/supervise.rs:5751	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:5860	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
@@ -104,7 +104,7 @@ crates/lgwks-bot/src/session.rs:4243	/// The one place a session reads a termina
 crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:797	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
-crates/lgwks-deps/src/lib.rs:88	pub mod scan;
-crates/lgwks-std/src/process.rs:1241	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
+crates/lgwks-deps/src/lib.rs:85	pub mod scan;
+crates/lgwks-std/src/process.rs:1287	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task.rs:419	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 docs/guidance-runner-spec.md:193	`review`.

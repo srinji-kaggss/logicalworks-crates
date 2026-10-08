@@ -588,9 +588,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `LeaderExited` — INV-BOT-158), so
   "nothing survived" and "nothing was looked at" never read alike. **Not
   claimed:** a descendant forked after the last capture that left the group in
-  the same window, or one orphaned to init before the cleanup ran; closing those
-  needs a kernel-level owner (a cgroup v2 `cgroup.kill`, a Windows job object),
-  which this crate does not have. · why: #87 acceptance row T21 (LC-10), #263 ·
+  the same window. On Linux the tree's cgroup v2 scope is killed first
+  (`CgroupKill`) and captured descendants re-parented to the supervisor are
+  killed and reaped by pid (`SubreaperAdoption`); the receipt names which
+  owner ran. A Windows job object is still pending (#263). · why: #87 acceptance row T21 (LC-10), #263 ·
   enforced by: `tests/it/process_escape.rs`
   (`a_session_escape_is_captured_and_stopped_by_pid`,
   `cleanup_never_signals_a_process_outside_the_supervisors_group_t21`),
@@ -601,8 +602,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_truncated_capture_is_reported_as_a_prefix_and_not_as_the_tree`,
   `sim_a_seeded_drain_reaches_the_models_receipt`,
   `sim_every_receipt_arm_is_reachable_in_the_family`,
-  `sim_distinct_seeds_drive_distinct_drains`), and lgwks_std's
-  `tests/it/sim_descendants.rs`
+  `sim_distinct_seeds_drive_distinct_drains`), lgwks_std's
+  `tests/it/sim_descendants.rs`, `tests/it/sim_kernel_owners.rs`
+  (`strongest_ranks_kernel_owners_above_table_readings`,
+  `an_adopted_orphan_is_named_by_its_adoption`), and
+  `tests/it/sim_confinement.rs`
+  (`a_cgroup_scope_kills_a_setsid_escapee_where_the_mount_allows`)
 - **INV-BOT-157** A supervisor killed outright leaves a record its successor can
   reap by, and the reap signals only the process the record names.
   `Supervisor::spawn_process_identified` returns, beside the task id, the
