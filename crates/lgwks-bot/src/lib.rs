@@ -178,6 +178,9 @@ pub mod domain {
 /// this is one clock reached two ways and never two clocks: `rt::clock` is the
 /// path a caller who has the async surface already writes.
 pub mod clock;
+/// The cross-host lease with fencing epochs, the bounded dispatch queue, and
+/// the coordinator that commits every dispatch row before the lane starts.
+pub mod dist_lease;
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
 /// implementation, not a second way to run a bot.
 mod ecs;
@@ -387,6 +390,9 @@ pub mod stability;
 /// `each`, `within` and `retry` and inherits their bounds.
 #[cfg(feature = "script")]
 pub mod task;
+/// The estate-owned durable keyed store behind multi-tenant run records:
+/// tenant policies, run rows and lane rows with per-tenant keyed reads.
+pub mod tenant_store;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
 pub mod verb;
 
