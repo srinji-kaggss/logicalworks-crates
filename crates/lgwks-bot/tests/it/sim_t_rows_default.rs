@@ -470,6 +470,44 @@ fn tickets_apply_once_for_every_seed_t24() -> TestResult {
 
 // ── T27 ─────────────────────────────────────────────────────────────────────
 
+/// T27 sweep: a torn archive is refused at every cut point, for every seed.
+///
+/// Beside the round-trip sweep: that one proves whole records survive, this
+/// one proves partial records never decode into partial checkpoints that
+/// could read as full coverage. Eight cuts per seed, from a single byte to
+/// all but one.
+#[test]
+fn torn_records_are_refused_at_every_cut_for_every_seed_t27() -> TestResult {
+    check_deterministic(|_pass| {
+        let mut trace = Vec::new();
+        for seed in 0..SEEDS_PER_SWEEP {
+            let mut checkpoint = Checkpoint::new();
+            checkpoint.complete(&format!("step-{seed}"))?;
+            checkpoint.correct(CorrectionKind::Refusal, &format!("refusal-{seed}"))?;
+            checkpoint.observe_effect(&format!("effect-{seed}"), EffectNoteKind::Unknown)?;
+            checkpoint.record_evidence(&format!("evidence-{seed}"))?;
+            let bytes = checkpoint.to_record()?;
+            let cuts = 8_usize;
+            for cut in 0..cuts {
+                // Ceiling division, the estate's sanctioned integer division:
+                // eight distinct cut points strictly inside the record.
+                let at = bytes.len().saturating_mul(cut).div_ceil(cuts + 1);
+                let torn = Checkpoint::from_record(&bytes[..at.min(bytes.len())]);
+                assert!(
+                    torn.is_err() || at == bytes.len(),
+                    "seed {seed} cut {at}: a torn record is refused, never partially decoded"
+                );
+            }
+            // The whole record still decodes: the cuts refused nothing real.
+            let back = Checkpoint::from_record(&bytes)?;
+            assert!(back.completed(&format!("step-{seed}")));
+            trace.push(format!("{seed}:{cuts}-cuts-refused"));
+        }
+        Ok(trace)
+    })?;
+    Ok(())
+}
+
 /// T27 sweep: seed-built checkpoints round-trip exact.
 #[test]
 fn checkpoints_round_trip_for_every_seed_t27() -> TestResult {

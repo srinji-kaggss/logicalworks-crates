@@ -442,6 +442,7 @@ tests = [
   "it::proposal::a_truncated_payload_never_becomes_a_full_coverage_claim",
   "it::t_rows_default::a_checkpoint_round_trip_preserves_work_corrections_unknowns_and_evidence_t27",
   "it::sim_t_rows_default::checkpoints_round_trip_for_every_seed_t27",
+  "it::sim_t_rows_default::torn_records_are_refused_at_every_cut_for_every_seed_t27",
 ]
 
 [[row]]
