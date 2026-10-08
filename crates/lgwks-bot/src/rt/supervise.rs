@@ -1191,7 +1191,9 @@ mod tenancy_support {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
+    use std::time::Instant;
 
     use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -1208,6 +1210,21 @@ mod tenancy_support {
         permits: Arc<Semaphore>,
         /// The pure round scheduler, and through it every parked waiter.
         round: std::sync::Mutex<DeficitRoundRobin<Arc<WaitSlot>>>,
+        /// Cumulative wall time spent inside [`TenancyShell::admit`] and
+        /// [`TenancyShell::try_admit`], in nanoseconds: the scheduler lock plus
+        /// the round and the pump, which is #351's admission side of a
+        /// neighbour's admission wait. Releases take the same lock from the
+        /// completing task and are counted separately, so a submitter's own
+        /// admission time reads without the completions landing beside it.
+        admit_nanos: AtomicU64,
+        /// How many arrival decisions `admit_nanos` covers.
+        admit_ops: AtomicU64,
+        /// Cumulative wall time spent inside [`TenancyShell::release`], in
+        /// nanoseconds: the same lock and round, taken from the completing
+        /// task rather than the submitter.
+        release_nanos: AtomicU64,
+        /// How many releases `release_nanos` covers.
+        release_ops: AtomicU64,
     }
 
     /// One parked admission: where a waiter learns that a permit is coming.
@@ -1439,7 +1456,32 @@ mod tenancy_support {
             Self {
                 permits,
                 round: std::sync::Mutex::new(DeficitRoundRobin::new(policy)),
+                admit_nanos: AtomicU64::new(0),
+                admit_ops: AtomicU64::new(0),
+                release_nanos: AtomicU64::new(0),
+                release_ops: AtomicU64::new(0),
             }
+        }
+
+        /// Run one lock-hold decision, charging its wall time to `ops` and
+        /// `nanos`.
+        ///
+        /// The two reads of the clock cost tens of nanoseconds and are symmetric
+        /// across tenants, so a comparison of two arms' counters measures the
+        /// decisions rather than the clock.
+        fn timed<T>(&self, ops: &AtomicU64, nanos: &AtomicU64, decision: impl FnOnce() -> T) -> T {
+            let started = Instant::now();
+            let outcome = decision();
+            // A saturating read: the only input that does not fit is a decision
+            // longer than 584 years, which pins the counter rather than wrapping
+            // it, the same way the crate's counters saturate rather than wrap.
+            let mut elapsed = u64::MAX;
+            if let Ok(fits) = u64::try_from(started.elapsed().as_nanos()) {
+                elapsed = fits;
+            }
+            ops.fetch_add(1, Ordering::Relaxed);
+            nanos.fetch_add(elapsed, Ordering::Relaxed);
+            outcome
         }
 
         /// Take the lock. A poisoned lock still guards a consistent value: every
@@ -1467,27 +1509,29 @@ mod tenancy_support {
         /// receiver is `self: &Arc<Self>` because an admitted lease has to keep
         /// the shell alive for as long as it holds the permit.
         pub(super) fn admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            let slot = WaitSlot::fresh();
-            let mut round = self.lock();
-            let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
-            match outcome {
-                Arrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
-                Arrival::Queued => {
-                    // An arrival that could not take a permit may still be
-                    // servable right now — the ring may have drained between its
-                    // check and this one — so the round is pumped before the
-                    // caller parks. A pump that grants to this very waiter wakes
-                    // it, and the caller's poll collects the permit.
-                    self.pump(&mut round, None);
-                    Admission::Queued(WaitPermit::new(
-                        Arc::clone(&slot),
-                        Arc::clone(self),
-                        tenant.clone(),
-                    ))
+            self.timed(&self.admit_ops, &self.admit_nanos, || {
+                let slot = WaitSlot::fresh();
+                let mut round = self.lock();
+                let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
+                match outcome {
+                    Arrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
+                    Arrival::Queued => {
+                        // An arrival that could not take a permit may still be
+                        // servable right now — the ring may have drained between its
+                        // check and this one — so the round is pumped before the
+                        // caller parks. A pump that grants to this very waiter wakes
+                        // it, and the caller's poll collects the permit.
+                        self.pump(&mut round, None);
+                        Admission::Queued(WaitPermit::new(
+                            Arc::clone(&slot),
+                            Arc::clone(self),
+                            tenant.clone(),
+                        ))
+                    }
+                    Arrival::Refused { limit } => Admission::Refused { limit },
+                    Arrival::SupervisorFull { limit } => Admission::SupervisorQueueFull { limit },
                 }
-                Arrival::Refused { limit } => Admission::Refused { limit },
-                Arrival::SupervisorFull { limit } => Admission::SupervisorQueueFull { limit },
-            }
+            })
         }
 
         /// Admit one arrival for `tenant` that refuses rather than waits.
@@ -1496,14 +1540,18 @@ mod tenancy_support {
         /// that keeps hammering a full supervisor accumulates no waiters. The
         /// refusal path has to cost nothing as well as say so.
         pub(super) fn try_admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            let mut round = self.lock();
-            let outcome = round.try_arrive(tenant, || self.take_from_pool());
-            match outcome {
-                TryArrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
-                TryArrival::Contended => Admission::Refused {
-                    limit: round.policy().queue_per_tenant(),
-                },
-            }
+            self.timed(&self.admit_ops, &self.admit_nanos, || {
+                let mut round = self.lock();
+                let outcome = round.try_arrive(tenant, || self.take_from_pool());
+                match outcome {
+                    TryArrival::Immediate(permit) => {
+                        Admission::Admitted(self.lease(permit, tenant))
+                    }
+                    TryArrival::Contended => Admission::Refused {
+                        limit: round.policy().queue_per_tenant(),
+                    },
+                }
+            })
         }
 
         /// One of this supervisor's in-flight admissions ended, carrying its
@@ -1514,9 +1562,11 @@ mod tenancy_support {
         /// straight to the next eligible waiter rather than returning it to a
         /// pool for the next arrival to win.
         pub(super) fn release(&self, tenant: &Tenant, permit: OwnedSemaphorePermit) {
-            let mut round = self.lock();
-            round.note_release(tenant);
-            self.pump(&mut round, Some(permit));
+            self.timed(&self.release_ops, &self.release_nanos, || {
+                let mut round = self.lock();
+                round.note_release(tenant);
+                self.pump(&mut round, Some(permit));
+            });
         }
 
         /// Hand permits to eligible tenants until none can take one.
@@ -1605,6 +1655,23 @@ mod tenancy_support {
         pub(super) fn counts_of(&self, tenant: &Tenant) -> (usize, usize) {
             let round = self.lock();
             (round.in_flight_of(tenant), round.queued_of(tenant))
+        }
+
+        /// Cumulative admission-side decisions and their wall time: `(admit_ops,
+        /// admit_nanos)` over [`TenancyShell::admit`] and
+        /// [`TenancyShell::try_admit`], `(release_ops, release_nanos)` over
+        /// [`TenancyShell::release`], all in nanoseconds.
+        ///
+        /// Read from the counters [`TenancyShell::timed`] charges, so the report
+        /// cannot disagree with the decisions it measured (INV-BOT-31's rule,
+        /// applied to the admission-cost axis).
+        pub(super) fn decision_cost(&self) -> (u64, u64, u64, u64) {
+            (
+                self.admit_ops.load(Ordering::Relaxed),
+                self.admit_nanos.load(Ordering::Relaxed),
+                self.release_ops.load(Ordering::Relaxed),
+                self.release_nanos.load(Ordering::Relaxed),
+            )
         }
 
         /// How many of `tenant`'s waiting admissions this shell still holds, live or
@@ -1701,6 +1768,44 @@ mod tenancy_support {
                 shell.retained_waiters(&tenant),
                 staying.len(),
                 "the round retains exactly the waiter still owned"
+            );
+            Ok(())
+        }
+
+        /// Every admit, non-blocking admit and release charges exactly one
+        /// admission-side decision, so the counters a neighbour's split is read
+        /// from count the decisions the round actually took.
+        #[test]
+        fn each_admission_path_charges_one_decision() -> Result<(), Box<dyn Error>> {
+            use super::Admission;
+
+            let shell = Arc::new(TenancyShell::new(
+                Arc::new(Semaphore::new(1)),
+                TenancyPolicy::new(1, 4),
+            ));
+            let tenant = Tenant::new("metered")?;
+            assert_eq!(
+                shell.decision_cost().0,
+                0,
+                "a fresh shell has taken no decisions"
+            );
+            let admitted = match shell.admit(&tenant) {
+                Admission::Admitted(lease) => Some(lease),
+                Admission::Queued(_)
+                | Admission::Refused { .. }
+                | Admission::SupervisorQueueFull { .. } => None,
+            };
+            let lease = admitted.ok_or("the pool's one permit admits at once")?;
+            let (arrivals, _, releases, _) = shell.decision_cost();
+            assert_eq!(arrivals, 1, "one arrival is one arrival decision");
+            assert_eq!(releases, 0, "nothing has been released yet");
+            drop(lease);
+            let (arrivals, admit_nanos, releases, release_nanos) = shell.decision_cost();
+            assert_eq!(arrivals, 1, "the release takes no arrival decision");
+            assert_eq!(releases, 1, "the lease's release is the release decision");
+            assert!(
+                admit_nanos > 0 && release_nanos > 0,
+                "both halves charged the time they held the lock"
             );
             Ok(())
         }
@@ -2490,6 +2595,42 @@ impl Supervisor {
         self.tenancy
             .as_ref()
             .map_or((0, 0), |shell| shell.counts_of(tenant))
+    }
+
+    /// Cumulative admission-side cost of this supervisor's tenancy round.
+    ///
+    /// `(admit_ops, admit_nanos, release_ops, release_nanos)`: how many
+    /// lock-hold arrival decisions the round has taken and their cumulative
+    /// wall time in nanoseconds, beside how many releases completing tasks
+    /// took through the same lock and theirs. The arrival half is the
+    /// scheduler lock plus the round and the pump (#351's admission side); a
+    /// tenanted admission's reap, its task spawn, and the executor's own polls
+    /// are outside the counters, so the remainder of a measured admission wait
+    /// is the scheduling share. `(0, 0, 0, 0)` for a supervisor built without
+    /// a [`TenancyPolicy`], which takes no round decisions at all.
+    ///
+    /// ```
+    /// use lgwks_bot::rt::supervise::Supervisor;
+    /// use lgwks_bot::rt::tenancy::TenancyPolicy;
+    /// use lgwks_bot::script::Tenant;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let quiet = Tenant::new("quiet")?;
+    /// let mut supervisor = Supervisor::with_tenancy(4, TenancyPolicy::new(2, 8));
+    /// supervisor
+    ///     .spawn_for(&quiet, |_token| async { /* one unit of work */ })
+    ///     .await?;
+    /// let (arrivals, _, _, _) = supervisor.admission_cost();
+    /// assert!(arrivals >= 1, "one admission took at least one arrival decision");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "script")]
+    #[must_use]
+    pub fn admission_cost(&self) -> (u64, u64, u64, u64) {
+        self.tenancy
+            .as_ref()
+            .map_or((0, 0, 0, 0), |shell| shell.decision_cost())
     }
 
     /// How many tenants currently hold at least one waiting admission.

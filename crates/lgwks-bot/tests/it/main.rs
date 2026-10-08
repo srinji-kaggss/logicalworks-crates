@@ -97,6 +97,10 @@ mod liveness_fixtures;
 #[path = "../support/scratch.rs"]
 mod scratch;
 
+#[cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "script"))]
+#[path = "../support/tenancy_harness.rs"]
+mod tenancy_harness;
+
 #[path = "../sim/mod.rs"]
 mod sim;
 
@@ -213,6 +217,7 @@ mod sim_task_axes;
 mod sim_task_resume;
 mod sim_tenancy;
 mod sim_tenancy_model;
+mod sim_tenancy_scope;
 mod sim_tenant_journal_kill;
 mod sim_tenant_store;
 mod spec_materialize;
@@ -227,5 +232,6 @@ mod task_front_door;
 mod task_million;
 mod task_resume;
 mod tenancy;
+mod tenancy_scale;
 mod tenant_store;
 mod wrong_identity_evidence;

@@ -88,6 +88,11 @@ fn tenant_lifecycle(store: &TenantStore, tenant_no: usize) -> Result<(), String>
         .finish_run(&run, "GO", &moment(tenant_no), "record", "seal")
         .map_err(map)?;
     if !finished {
+        lgwks_std::trace::warn!(
+            tenant = %tenant,
+            run = %run,
+            "tenant_store it: a run its coordinator finished reads as already closed"
+        );
         return Err(format!(
             "{tenant}: a run its coordinator finished reads as already closed"
         ));

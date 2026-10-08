@@ -243,6 +243,7 @@ loop stops without waiting on a body that will never observe the cancellation.
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
 | Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version =0.5.1 per `contract/APPROVED.toml` |
+| Detached ed25519 seals that verify offline from the public key | `lgwks_std::sign` | `sign` (ed25519-dalek, alloc-only, no rand_core) |
 
 Three behaviours are worth knowing before you depend on them, and each is
 documented where it applies. `online` is feature-gated and is not part of

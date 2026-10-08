@@ -545,7 +545,8 @@ impl RunRow {
         }
     }
 
-    /// The run id.
+    /// The identifier the coordinator passed at begin: the row key every lane
+    /// and close of this run is folded under, so one run's history is one key.
     #[must_use]
     pub fn run_id(&self) -> &str {
         &self.run_id
@@ -591,7 +592,8 @@ impl RunRow {
             .and_then(|close| close.record.as_deref())
     }
 
-    /// The seal, if the run sealed one.
+    /// The closer's sealed record, when the run closed with one: `None` while
+    /// the run is open and when the closer sealed nothing (an abandonment).
     #[must_use]
     pub fn seal(&self) -> Option<&str> {
         self.close.as_ref().and_then(|close| close.seal.as_deref())
@@ -666,7 +668,8 @@ impl OpenRun {
         }
     }
 
-    /// The run id.
+    /// The run this claim is fenced to: every lane step checks the authority's
+    /// epoch for this id before it commits, and a stale one is refused.
     #[must_use]
     pub fn run_id(&self) -> &str {
         &self.run_id
@@ -895,7 +898,15 @@ fn lane_ready(
 ) -> Result<(), TenantStoreError> {
     let slot = match entry.lanes.get(lane) {
         Some(slot) => slot,
-        None => return Err(lane_lost(run_id, lane, step)),
+        None => {
+            lgwks_std::trace::warn!(
+                run_id,
+                lane,
+                step,
+                "tenant_store: lane step refused: the lane row is gone"
+            );
+            return Err(lane_lost(run_id, lane, step));
+        }
     };
     if ready(&slot.state) {
         Ok(())
@@ -1037,6 +1048,11 @@ impl TenantStore {
                     let holder = format!("{}-{seq}", now_nanos());
                     if let Err(error) = claim.write_all(holder.as_bytes()) {
                         drop(std::fs::remove_file(&path));
+                        lgwks_std::trace::warn!(
+                            path = %path.display(),
+                            %error,
+                            "tenant_store: lock claim write refused; released the claim"
+                        );
                         return Err(TenantStoreError::storage(error));
                     }
                     return Ok(LockGuard { path });
@@ -1045,6 +1061,11 @@ impl TenantStore {
                     if lock_is_stale(&path)? {
                         drop(std::fs::remove_file(&path));
                     } else if waited_slices >= slices {
+                        lgwks_std::trace::warn!(
+                            path = %path.display(),
+                            waited_slices,
+                            "tenant_store: lock stayed held past the busy bound; refusing as busy"
+                        );
                         return Err(TenantStoreError::Busy {
                             waited: started.elapsed(),
                         });
@@ -1055,7 +1076,14 @@ impl TenantStore {
                         waited_slices = waited_slices.saturating_add(1);
                     }
                 }
-                Err(error) => return Err(TenantStoreError::storage(error)),
+                Err(error) => {
+                    lgwks_std::trace::warn!(
+                        path = %path.display(),
+                        %error,
+                        "tenant_store: lock claim refused by the device"
+                    );
+                    return Err(TenantStoreError::storage(error));
+                }
             }
         }
     }
@@ -1132,6 +1160,10 @@ impl TenantStore {
     ) -> Result<T, TenantStoreError> {
         self.transact(|index| {
             let Some(entry) = index.runs.get(run_id) else {
+                lgwks_std::trace::warn!(
+                    run_id,
+                    "tenant_store: row-addressed update refused: the run was never begun"
+                );
                 return Err(unknown_run(run_id));
             };
             update(entry)
@@ -1155,6 +1187,10 @@ impl TenantStore {
     ) -> Result<T, TenantStoreError> {
         self.observe(|index| {
             let Some(entry) = index.runs.get(run_id) else {
+                lgwks_std::trace::warn!(
+                    run_id,
+                    "tenant_store: row-addressed read refused: the run was never begun"
+                );
                 return Err(unknown_run(run_id));
             };
             read(entry)
@@ -1178,6 +1214,10 @@ impl TenantStore {
     ) -> Result<(), TenantStoreError> {
         self.transact(|index| {
             if index.policies.contains_key(tenant) {
+                lgwks_std::trace::warn!(
+                    tenant,
+                    "tenant_store: policy init refused: the tenant already has one"
+                );
                 return Err(TenantStoreError::AlreadyInitialised {
                     tenant: tenant.to_owned(),
                 });
@@ -1219,6 +1259,10 @@ impl TenantStore {
     pub fn begin_run(&self, run: &RunStart<'_>, lanes: &[&str]) -> Result<(), TenantStoreError> {
         self.transact(|index| {
             if index.runs.contains_key(run.run_id) {
+                lgwks_std::trace::warn!(
+                    run = run.run_id,
+                    "tenant_store: begin refused: the run id is already begun"
+                );
                 return Err(TenantStoreError::DuplicateRun {
                     run: run.run_id.to_owned(),
                 });
@@ -1481,7 +1525,14 @@ fn lock_is_stale(path: &Path) -> Result<bool, TenantStoreError> {
     let modified = match std::fs::metadata(path).and_then(|meta| meta.modified()) {
         Ok(modified) => modified,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(TenantStoreError::storage(error)),
+        Err(error) => {
+            lgwks_std::trace::warn!(
+                path = %path.display(),
+                %error,
+                "tenant_store: lock age unreadable; refusing rather than guessing stale"
+            );
+            return Err(TenantStoreError::storage(error));
+        }
     };
     match modified.elapsed() {
         Ok(age) => Ok(age > STALE_LOCK_AFTER),
@@ -1834,11 +1885,25 @@ fn decode_stored(payload: &[u8], at: u64) -> Result<Stored, TenantStoreError> {
     const ARCHIVE_ALIGN: usize = 16;
     let corrupt = || TenantStoreError::Corrupt { at };
     if payload.as_ptr().align_offset(ARCHIVE_ALIGN) == 0 {
-        from_bytes::<Stored, WireError>(payload).map_err(|_| corrupt())
+        from_bytes::<Stored, WireError>(payload).map_err(|error| {
+            lgwks_std::trace::warn!(
+                at,
+                %error,
+                "tenant_store: stored payload failed to decode; refusing frame as corrupt"
+            );
+            corrupt()
+        })
     } else {
         let mut copy: AlignedVec = AlignedVec::with_capacity(payload.len());
         copy.extend_from_slice(payload);
-        from_bytes::<Stored, WireError>(&copy).map_err(|_| corrupt())
+        from_bytes::<Stored, WireError>(&copy).map_err(|error| {
+            lgwks_std::trace::warn!(
+                at,
+                %error,
+                "tenant_store: realigned payload failed to decode; refusing frame as corrupt"
+            );
+            corrupt()
+        })
     }
 }
 
@@ -1852,7 +1917,15 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, TenantStore
             Ok(0) => return Ok(false),
             Ok(read) => filled = filled.saturating_add(read),
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(cause) => return Err(TenantStoreError::storage(cause)),
+            Err(cause) => {
+                lgwks_std::trace::warn!(
+                    filled,
+                    wanted = buf.len(),
+                    %cause,
+                    "tenant_store: frame read refused by the device mid-frame"
+                );
+                return Err(TenantStoreError::storage(cause));
+            }
         }
     }
     Ok(true)
@@ -1902,6 +1975,12 @@ fn next_frame(
     }
     let declared = frame::declared_length(&prefix);
     if !frame::is_possible_length(declared, MAX_FRAME_BYTES) {
+        lgwks_std::trace::warn!(
+            at,
+            declared,
+            limit = MAX_FRAME_BYTES,
+            "tenant_store: frame refused: the declared length is one this store never writes"
+        );
         return Err(corrupt());
     }
     let mut payload = vec![0u8; declared];
@@ -1914,9 +1993,18 @@ fn next_frame(
     }
     let stored = decode_stored(&payload, at)?;
     if !is_known_kind(stored.kind) {
+        lgwks_std::trace::warn!(
+            at,
+            kind = stored.kind,
+            "tenant_store: frame refused: unknown record kind in acknowledged bytes"
+        );
         return Err(corrupt());
     }
     if Stored::head_from(&stored, previous, &payload) != Digest::from_bytes(head) {
+        lgwks_std::trace::warn!(
+            at,
+            "tenant_store: frame refused: the chain head does not follow the previous one"
+        );
         return Err(corrupt());
     }
     Ok(Some(Framed {
@@ -1931,9 +2019,15 @@ fn next_frame(
 /// their data was never theirs, which is what makes someone delete the file.
 fn check_header(header: &[u8; HEADER_LEN]) -> Result<(), TenantStoreError> {
     if header[..VERSION_BYTE] != STORE_MAGIC[..VERSION_BYTE] {
+        lgwks_std::trace::warn!("tenant_store: open refused: the file magic is not a tenant store");
         return Err(TenantStoreError::NotAStore);
     }
     if header[VERSION_BYTE] != STORE_FORMAT {
+        lgwks_std::trace::warn!(
+            found = header[VERSION_BYTE],
+            expected = STORE_FORMAT,
+            "tenant_store: open refused: foreign store format version"
+        );
         return Err(TenantStoreError::FormatVersion {
             found: header[VERSION_BYTE],
             expected: STORE_FORMAT,
@@ -1979,6 +2073,7 @@ fn full_replay(file: &mut File, index: &mut Index) -> Result<(), TenantStoreErro
         .map_err(TenantStoreError::storage)?;
     let mut header = [0u8; HEADER_LEN];
     if !read_full(file, &mut header)? {
+        lgwks_std::trace::warn!("tenant_store: replay refused: the file holds no whole header");
         return Err(TenantStoreError::NotAStore);
     }
     check_header(&header)?;
@@ -1998,7 +2093,14 @@ fn full_replay(file: &mut File, index: &mut Index) -> Result<(), TenantStoreErro
 fn frame_len_of(stored: &Stored, at: u64) -> Result<u64, TenantStoreError> {
     let payload = to_bytes::<WireError>(stored)
         .map(|bytes| bytes.as_ref().to_vec())
-        .map_err(|_| TenantStoreError::Corrupt { at })?;
+        .map_err(|error| {
+            lgwks_std::trace::warn!(
+                at,
+                %error,
+                "tenant_store: frame length unaccountable: the record no longer archives"
+            );
+            TenantStoreError::Corrupt { at }
+        })?;
     Ok(frame::framed_len(payload.len()))
 }
 

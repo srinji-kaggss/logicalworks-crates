@@ -739,15 +739,56 @@ present exactly once. Capacity is admitted per tenant by
 `Supervisor::with_tenancy` (INV-BOT-151; `tenancy::a_noisy_tenant_cannot_starve_a_quiet_one`,
 `a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
 `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
+A `Scope`'s tenant reaches every body under `each`, `retry` and
+`FanOut::run_in` (`sim_tenancy_scope`: two tenants key the same path
+differently, every retry attempt shares one tenant and key, `run_in` enters
+the caller's step, clock and stop; the standalone `FanOut::run` keeps its
+reserved tenant). `each` and `FanOut` still take no permit — tenant admission
+bounds who is admitted, not the CPU an admitted body burns — so a scope's
+tenant reaches item scopes, not admission.
+
+Measured on one macOS arm64 host (15 cores, shared with other work) and one
+Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
+
+- **Noisy neighbour** (A 10,000 slow tasks, B 100 × ~2 ms, limit 64):
+  quiet p99 under the flood is 11.375 µs (macOS) / 5.5 µs (Linux) against
+  3.828 ms / 3.084 ms alone — ratios 2‰ / 1‰ against the 2000‰ bound. The
+  alone-side p99 in both runs is one slow baseline admission (host noise on a
+  shared machine), not the flood: the medians are 583 ns alone vs 1.5 µs under
+  the flood (macOS), sub-microsecond apart in absolute terms.
+- **5,000 tenants provisioned** (`tenancy_scale`, every admission inside a 5 s
+  progress bound, 0 refusals, every task terminal):
+
+  | tier | macOS p50 / p99 / max | macOS peak RSS | Linux p50 / p99 / max | Linux peak RSS |
+  |---|---:|---:|---:|---:|
+  | 100 | 9.9 µs / 37.4 µs / 339 µs | 6,592 KiB | 7.0 µs / 120.2 µs / 1.91 ms | 9,536 KiB |
+  | 1,000 | 7.9 µs / 34.1 µs / 83 µs | 8,128 KiB | 6.9 µs / 80.5 µs / 785 µs | 11,792 KiB |
+  | 10,000 | 0.54 µs / 16.0 µs / 34 µs | 16,544 KiB | 0.63 µs / 10.1 µs / 707 µs | 19,060 KiB |
+  | 100,000 | 0.46 µs / 14.6 µs / 148 µs | 97,744 KiB | 0.71 µs / 12.2 µs / 693 µs | 100,368 KiB |
+
+  The 100,000 tier holds 100,000 parked tasks (5,000 tenants × 20): ~1 KiB of
+  peak RSS per in-flight task on both hosts.
+- **Adversarial split** (#351, `tenancy_scale::the_floods_cost_is_scheduling_not_admission`,
+  41 interleaved rounds × 2,000 neighbour tasks, bound unchanged at 10%): the
+  mean arrival-decision cost (lock + round, `Supervisor::admission_cost`) is
+  569 ns alone vs 583 ns attacked (macOS) and 189 ns vs 195 ns (Linux) —
+  decision-mean ratios 1024‰ / 1031‰, inside the envelope on both hosts, so
+  there is no admission-side cost to fix. The remainder is stated separately:
+  arrival decisions are ~29% of a neighbour submission on macOS (8–12% on
+  Linux, where the clock read is cheaper); the rest is the task spawn, the
+  bounded reap and the executor's polls beside the flood's completions. Wall
+  ratios 989‰ / 692‰ — the attacked arm measured faster on both hosts, which
+  is scheduling noise, not isolation.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
 own file, so the run proves the kill and the restart keep each file's prefix,
 not that a shared file separates tenants. The kill is a cut of the file a real writer produced, not a
 `SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
-journal for real). A `script::Scope`'s tenant does not reach any admission,
-because `each` and `FanOut` drive their bodies on the awaiting task and take no
-permit. Tenant admission bounds who is admitted, not the CPU an admitted body
-burns.
+journal for real). The 11.2% neighbour gap was seen only on GitHub's x86_64
+runners and is still unreproduced anywhere else: arm64 Linux (container and
+dedicated cores) and arm64 macOS show no gap, and the split above attributes
+the measured difference to scheduling. An x86_64 4-vCPU host with the split
+instrumentation is the run that would confirm or refute the SMT hypothesis.
 
 ### 4.9 Performance — fastest correct implementation
 

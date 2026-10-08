@@ -216,6 +216,38 @@ fn check_tenant(
     Ok(())
 }
 
+/// Check one closer's answer against the model: a commit must match the
+/// model's openness, a lost run must be modeled closed, and any other refusal
+/// is fenced with its seed, run and operation attached.
+///
+/// One definition for the finish and abandon closers, so a refusal the store
+/// never modeled is named once rather than once per closer.
+fn check_close(
+    outcome: Result<bool, TenantStoreError>,
+    open: bool,
+    seed: u64,
+    run: &str,
+    op: &'static str,
+) -> TestResult<()> {
+    match outcome {
+        Ok(closed) => assert_eq!(closed, open, "seed {seed}: {op} must match the model"),
+        Err(TenantStoreError::NoSuchRun { .. }) => {
+            assert!(!open, "seed {seed}: a refused {op} must be modeled")
+        }
+        Err(other) => {
+            lgwks_std::trace::warn!(
+                seed,
+                run = %run,
+                op,
+                %other,
+                "sim_tenant_store: a close fenced with an unexpected refusal"
+            );
+            return Err(format!("seed {seed}: {op} refused: {other}").into());
+        }
+    }
+    Ok(())
+}
+
 /// The store's finish of one run: the verdict the seed drew, committed when
 /// the run is open and refused exactly as the model predicts.
 fn close_finished(
@@ -235,13 +267,13 @@ fn close_finished(
             verdict: VERDICTS[picked].to_owned(),
         },
     )?;
-    match store.finish_run(run, VERDICTS[picked], &finished, "record", "seal") {
-        Ok(closed) => assert_eq!(closed, open, "seed {seed}: finish must match the model"),
-        Err(TenantStoreError::NoSuchRun { .. }) => {
-            assert!(!open, "seed {seed}: a refused finish must be modeled")
-        }
-        Err(other) => return Err(format!("seed {seed}: finish refused: {other}").into()),
-    }
+    check_close(
+        store.finish_run(run, VERDICTS[picked], &finished, "record", "seal"),
+        open,
+        seed,
+        run,
+        "finish",
+    )?;
     observe(hasher, "finish", &format!("{run}/{open}"));
     Ok(())
 }
@@ -257,13 +289,7 @@ fn close_abandoned(
 ) -> TestResult {
     let done = next_moment(&mut *model);
     let open = abandon_model(&mut *model, run)?;
-    match store.abandon(run, &done) {
-        Ok(closed) => assert_eq!(closed, open, "seed {seed}: abandon must match the model"),
-        Err(TenantStoreError::NoSuchRun { .. }) => {
-            assert!(!open, "seed {seed}: a refused abandon must be modeled")
-        }
-        Err(other) => return Err(format!("seed {seed}: abandon refused: {other}").into()),
-    }
+    check_close(store.abandon(run, &done), open, seed, run, "abandon")?;
     observe(hasher, "abandon", &format!("{run}/{open}"));
     Ok(())
 }
@@ -290,7 +316,15 @@ fn run_seed(seed: u64) -> TestResult<String> {
                 Err(TenantStoreError::AlreadyInitialised { .. }) => {
                     assert!(done, "seed {seed}: a refused init must be modeled")
                 }
-                Err(other) => return Err(format!("seed {seed}: init refused: {other}").into()),
+                Err(other) => {
+                    lgwks_std::trace::warn!(
+                        seed,
+                        tenant,
+                        %other,
+                        "sim_tenant_store: init fenced with an unexpected refusal"
+                    );
+                    return Err(format!("seed {seed}: init refused: {other}").into());
+                }
             }
             observe(&mut hasher, "init", &format!("{tenant}/{done}"));
         } else if choice < 38 {
@@ -324,7 +358,15 @@ fn run_seed(seed: u64) -> TestResult<String> {
                 Err(TenantStoreError::DuplicateRun { .. }) => {
                     assert!(duplicate, "seed {seed}: a refused begin must be modeled")
                 }
-                Err(other) => return Err(format!("seed {seed}: begin refused: {other}").into()),
+                Err(other) => {
+                    lgwks_std::trace::warn!(
+                        seed,
+                        run = %run,
+                        %other,
+                        "sim_tenant_store: begin fenced with an unexpected refusal"
+                    );
+                    return Err(format!("seed {seed}: begin refused: {other}").into());
+                }
             }
             observe(&mut hasher, "begin", &format!("{run}/{duplicate}"));
             check_tenant(&store, &model, tenant_no, &mut hasher)?;
@@ -338,7 +380,16 @@ fn run_seed(seed: u64) -> TestResult<String> {
                 Err(TenantStoreError::LaneLost { .. } | TenantStoreError::NoSuchRun { .. }) => {
                     assert!(!outcome, "seed {seed}: a refused dispatch must be modeled")
                 }
-                Err(other) => return Err(format!("seed {seed}: dispatch refused: {other}").into()),
+                Err(other) => {
+                    lgwks_std::trace::warn!(
+                        seed,
+                        run = %run,
+                        lane,
+                        %other,
+                        "sim_tenant_store: dispatch fenced with an unexpected refusal"
+                    );
+                    return Err(format!("seed {seed}: dispatch refused: {other}").into());
+                }
             }
             observe(&mut hasher, "dispatch", &format!("{run}/{lane}/{outcome}"));
             check_tenant(&store, &model, model_tenant(&model, &run)?, &mut hasher)?;
@@ -357,7 +408,16 @@ fn run_seed(seed: u64) -> TestResult<String> {
                 Err(TenantStoreError::LaneLost { .. } | TenantStoreError::NoSuchRun { .. }) => {
                     assert!(!done, "seed {seed}: a refused end must be modeled")
                 }
-                Err(other) => return Err(format!("seed {seed}: end refused: {other}").into()),
+                Err(other) => {
+                    lgwks_std::trace::warn!(
+                        seed,
+                        run = %run,
+                        lane,
+                        %other,
+                        "sim_tenant_store: end fenced with an unexpected refusal"
+                    );
+                    return Err(format!("seed {seed}: end refused: {other}").into());
+                }
             }
             observe(&mut hasher, "end", &format!("{run}/{lane}/{done}"));
             check_tenant(&store, &model, model_tenant(&model, &run)?, &mut hasher)?;
@@ -456,6 +516,12 @@ fn end_model_lane(model: &mut Model, run: &str, lane: usize, outcome: &str) -> T
         .get_mut(run)
         .ok_or_else(|| format!("the model lost {run}"))?;
     let Some(slot) = held.lanes.get_mut(lane) else {
+        lgwks_std::trace::warn!(
+            run = %run,
+            lane,
+            outcome,
+            "sim_tenant_store: the model lost the lane an end records"
+        );
         return Err(format!("the model lost lane {lane} of {run}").into());
     };
     *slot = ModelLane::Ended {
