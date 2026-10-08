@@ -118,13 +118,19 @@ use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 use lgwks_deps::tokio::task::Id;
 
 #[cfg(all(unix, feature = "process"))]
-use lgwks_deps::tokio::process::{ChildStderr, ChildStdout, Command};
+use lgwks_deps::tokio::process::{ChildStderr, ChildStdout};
 
 /// Re-exported so a consumer reading a [`Containment`] report needs one import,
 /// not two: the mechanism is named by the estate's process primitives and read
 /// off this crate's receipt.
 #[cfg(feature = "process")]
 pub use lgwks_std::process::ContainmentMechanism;
+
+/// The Linux kernel owners one cleanup may call on, beside the group and the
+/// capture. Gated to the only target that has them; every use site is gated
+/// the same way, so a build elsewhere never names them.
+#[cfg(all(target_os = "linux", feature = "process"))]
+use lgwks_std::process::CgroupScope;
 
 /// A process started by [`Supervisor::spawn_process_identified`]: the task that
 /// owns it and the identity of the process leading its group.
@@ -530,8 +536,11 @@ pub enum TaskOutcome {
 ///   platform's init and no longer names the leader, so no walk from the leader
 ///   can reach it.
 ///
-/// Closing either needs a kernel-level owner — a cgroup v2 `cgroup.kill`, or a
-/// Windows job object — which this crate does not have.
+/// Closing the first on Linux is the tree's cgroup v2 scope, killed before the
+/// rounds below; closing the second is the subreaper flag, which re-parents
+/// the orphan to the supervisor so the post-reap pass can attribute, signal
+/// and reap it by pid. A Windows job object would close both there, and is
+/// still pending (#263).
 ///
 /// `tests/it/process_escape.rs` exercises a real `setsid` escape and states
 /// this boundary against a live process.
@@ -703,6 +712,17 @@ impl Containment {
             self.note(ResidualRisk::CaptureTruncated);
         }
         self.captured = self.captured.max(set.pids.len());
+    }
+
+    /// Record that a kernel-level owner stopped the tree.
+    ///
+    /// The same strongest-wins merge as [`Self::record_capture`]: a cgroup
+    /// kill or a subreaper adoption that ran beside the capture rounds is what
+    /// the receipt names, because "the kernel owned the membership" is a
+    /// stronger claim than "a snapshot named these pids".
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn record_owner(&mut self, mechanism: ContainmentMechanism) {
+        self.mechanism = self.mechanism.strongest(mechanism);
     }
 
     /// Record that a signal reached one captured pid.
@@ -2660,6 +2680,17 @@ impl Supervisor {
         // the task is aborted before its first poll, this guard still owns the
         // cleanup fallback for a process that native spawning already started.
         let task = self.allocate_task_id();
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let scope = scope_tree(group_id);
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let group = ProcessGroup::of_scoped(
+            group_id,
+            task,
+            permit,
+            Arc::clone(&self.cleanup_owners),
+            scope,
+        );
+        #[cfg(all(unix, not(target_os = "linux"), feature = "process"))]
         let group = ProcessGroup::of(group_id, task, permit, Arc::clone(&self.cleanup_owners));
         let live = LiveProcess::enter(&self.cleanup_owners);
         let read = read(group_id)?;
@@ -2829,6 +2860,17 @@ impl Supervisor {
             }
         };
         let task = self.allocate_task_id();
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let scope = scope_tree(group_id);
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let group = ProcessGroup::of_scoped(
+            group_id,
+            task,
+            lease,
+            Arc::clone(&self.cleanup_owners),
+            scope,
+        );
+        #[cfg(all(unix, not(target_os = "linux"), feature = "process"))]
         let group = ProcessGroup::of(group_id, task, lease, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
         let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
@@ -3744,8 +3786,8 @@ impl Drop for Supervisor {
 /// Build the private engine command for `spec` and start the child.
 ///
 /// The one constructor both [`Supervisor::spawn_process`] and
-/// [`Supervisor::run_process`] call, so the group, the reaping and the
-/// configured streams cannot drift between them.
+/// [`Supervisor::run_process`] call, so the group, the confinement, the
+/// reaping and the configured streams cannot drift between them.
 ///
 /// The engine's `Command` describes the child — program, arguments,
 /// environment, streams and the new process group — and the standard library
@@ -3755,9 +3797,13 @@ impl Drop for Supervisor {
 /// engine already built rather than through the banned call. What the engine's
 /// child added beyond the std one — async pipes, a kill when the handle is
 /// dropped, and reaping an orphan — [`OwnedChild`] provides.
+///
+/// A confined spec replaces the program with the platform's sandbox wrapper
+/// (see [`ProcessSpec::command`](crate::rt::process::ProcessSpec::command)),
+/// so the group below still leads the wrapper and through it the target.
 #[cfg(all(unix, feature = "process"))]
 fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
-    let mut command = Command::new(spec.program());
+    let mut command = spec.command()?;
     spec.configure(&mut command)?;
     // The group kill reaches what the child spawned; `OwnedChild`'s drop-time
     // kill reaches the direct child on the paths where no group kill ran.
@@ -3767,7 +3813,148 @@ fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     // and a group leader's group id is its own pid, which `process_group(0)`
     // arranged above. A refusal here drops — and so kills — the child.
     let group = child.group()?;
+    // The sweep's exclusion first: from here until the driver reaps or parks
+    // the leader, its pid is somebody's answer rather than an adoptee.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    track_leader(group);
+    // A start is the second moment adopted zombies are collected, beside the
+    // confirmation pass: a supervisor that only ever starts children still
+    // releases the adoptees its earlier trees stranded.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    let _collected = sweep_adopted();
     Ok((child, group))
+}
+
+/// How many tree scopes this process has named, disambiguating reused pids.
+///
+/// A scope name carries its leader's pid, and pids are reused: the counter
+/// keeps two trees from sharing a scope name when the second leader inherits
+/// the first's number.
+#[cfg(all(target_os = "linux", feature = "process"))]
+static SCOPE_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The subreaper flag, enabled once per process before the first spawn.
+///
+/// Process-wide by kernel design: every supervisor in this process shares the
+/// adoptees, which is why the cleanup intersects them with each tree's own
+/// capture rather than trusting parenthood alone.
+#[cfg(all(target_os = "linux", feature = "process"))]
+static SUBREAPER_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Pids of supervised leaders this process started and has not yet reaped.
+///
+/// The subreaper flag adopts every orphan into this process, and an adopted
+/// zombie holds its pid — where `kill -0` still reports it present — until
+/// somebody waits on it. The sweep below is that somebody for the adoptees,
+/// and this set is what keeps it from waiting on a leader whose driver still
+/// owns the exit: a pid leaves the set when its driver reaps or parks it, so
+/// a collected pid is never a driver's answer.
+#[cfg(all(target_os = "linux", feature = "process"))]
+static LIVE_LEADERS: std::sync::Mutex<std::collections::BTreeSet<i32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Mark `pid` as a supervised leader whose exit its driver still owns.
+///
+/// Called with the pid [`start`] just returned, before any task can observe
+/// the child: from here until the untrack, the sweep treats the pid as
+/// somebody's answer rather than an adoptee.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn track_leader(pid: i32) {
+    if pid > 0 {
+        let _present = crate::journal::owner::lock(&LIVE_LEADERS).insert(pid);
+    }
+}
+
+/// Release `pid`: its driver reaped or parked it, so the sweep must not wait
+/// on it — and a later adoptee under a reused number starts unattributed.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn untrack_leader(pid: i32) {
+    let _removed = crate::journal::owner::lock(&LIVE_LEADERS).remove(&pid);
+}
+
+/// Reap every zombie child no driver owns.
+///
+/// Adopted orphans land in this process whether or not any guard captured
+/// them — a tree whose leader exited before any capture still orphans its
+/// tree here — and a zombie holds its pid, where `kill -0` keeps reporting it
+/// present, until it is waited on. This collects them: `waitpid` with `NOHANG`
+/// only collects the already-dead, so live children are untouched, and leaders
+/// and parked orphans are excluded by number, so no driver's exit is stolen.
+/// Returns how many zombies were collected.
+///
+/// Best effort like every reap here: an unreadable child list collects
+/// nothing, and a refused wait stops the pass rather than the cleanup.
+///
+/// **Residual:** a host-spawned child that is a zombie at a sweep moment is
+/// collected too, and its owner's later `wait` reports it reaped rather than
+/// collecting it itself. Live host children are never touched, and hosts that
+/// wait promptly never notice; the edge is inherent to the process-wide
+/// subreaper flag, whose adoptees would otherwise strand every tree's zombies
+/// here.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn sweep_adopted() -> usize {
+    let children = match lgwks_std::process::own_children() {
+        Ok(children) => children,
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, "sweep: the child list was unreadable; adopted zombies wait for the next sweep");
+            return 0;
+        }
+    };
+    if children.is_empty() {
+        return 0;
+    }
+    let live = crate::journal::owner::lock(&LIVE_LEADERS).clone();
+    let parked: std::collections::BTreeSet<i32> = crate::journal::owner::lock(&ORPHANS)
+        .iter()
+        .filter_map(|orphan| i32::try_from(orphan.id()).ok())
+        .collect();
+    let zombies: Vec<i32> = children
+        .into_iter()
+        .filter(|pid| !live.contains(pid) && !parked.contains(pid))
+        .collect();
+    if zombies.is_empty() {
+        return 0;
+    }
+    match lgwks_std::process::reap_descendants(&zombies) {
+        Ok(reaped) => reaped.len(),
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, "sweep: the adoption reap was refused; adopted zombies wait for the next sweep");
+            0
+        }
+    }
+}
+
+/// Scope the just-spawned leader `pid` to its own cgroup, best effort.
+///
+/// `None` — an uncreatable mount, a refused attach — is the supervisor's cue
+/// to run its capture rounds without the kernel owner, not a spawn failure:
+/// containment degrades to the group and the capture, and the receipt names
+/// the weaker mechanism rather than failing a start that succeeded. The
+/// subreaper flag is enabled beside it, so an orphan the rounds never named
+/// is still adopted by this process instead of init.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn scope_tree(pid: i32) -> Option<CgroupScope> {
+    SUBREAPER_ONCE.call_once(|| {
+        if let Err(error) = lgwks_std::process::enable_child_subreaper() {
+            lgwks_std::trace::debug!(%error, "start: the subreaper flag was refused; orphans re-parent to init");
+        }
+    });
+    if pid <= 0 {
+        return None;
+    }
+    let id = SCOPE_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scope = match CgroupScope::create(&format!("lgwks-{pid}-{id}")) {
+        Ok(scope) => scope,
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, pid, "start: no cgroup scope; the capture rounds own this tree");
+            return None;
+        }
+    };
+    if let Err(error) = scope.add(pid) {
+        lgwks_std::trace::debug!(%error, pid, "start: the leader left before its scope attach; the capture rounds own this tree");
+        return None;
+    }
+    Some(scope)
 }
 
 /// How often a child that has been signalled is checked for its exit while it
@@ -3866,6 +4053,10 @@ impl OwnedChild {
             if let Some(status) = inner.try_wait()? {
                 self.inner = None;
                 reap_orphans();
+                #[cfg(all(target_os = "linux", feature = "process"))]
+                if let Ok(pid) = i32::try_from(self.pid) {
+                    untrack_leader(pid);
+                }
                 return Ok(status);
             }
             crate::rt::time::sleep(REAP_POLL).await;
@@ -3889,6 +4080,12 @@ impl Drop for OwnedChild {
             crate::journal::owner::lock(&ORPHANS).push(inner);
         }
         reap_orphans();
+        // Parked or reaped: either way no driver owns this exit any more, so
+        // the sweep must not mistake the number for an adoptee either.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        if let Ok(pid) = i32::try_from(self.pid) {
+            untrack_leader(pid);
+        }
     }
 }
 
@@ -3941,6 +4138,13 @@ struct ProcessGroup<'ops> {
     /// again **only** because the observation proved it alive, which is the same
     /// rule the group follows for its own id.
     signalled_pids: std::collections::BTreeSet<i32>,
+    /// The tree's cgroup v2 scope, when the mount allowed one.
+    ///
+    /// Killed first on every cleanup path, observed empty to earn the receipt,
+    /// and removed when the guard drops. `None` where no child cgroup was
+    /// creatable, where the capture rounds own the tree alone.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    cgroup: Option<CgroupScope>,
     /// The process-group signalling boundary, injectable for regression tests.
     signaller: &'ops dyn GroupSignaller,
     /// Non-mutating group existence boundary, injectable for regression tests.
@@ -4708,10 +4912,30 @@ impl<'ops> ProcessGroup<'ops> {
             group_absent: false,
             containment: Containment::default(),
             signalled_pids: std::collections::BTreeSet::new(),
+            #[cfg(all(target_os = "linux", feature = "process"))]
+            cgroup: None,
             signaller: &NATIVE_GROUP_SIGNALLER,
             observer: &NATIVE_GROUP_OBSERVER,
             capture: &NATIVE_DESCENDANT_CAPTURE,
         }
+    }
+
+    /// The guard over process group `group`, armed, owning `scope`.
+    ///
+    /// The scoped form of [`Self::of`]: the same guard, plus the cgroup the
+    /// spawn attached the leader to. Every cleanup path kills the scope first
+    /// and observes it empty to earn the receipt.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn of_scoped(
+        group: i32,
+        task: TaskId,
+        lease: Lease,
+        owners: Arc<CleanupOwners>,
+        scope: Option<CgroupScope>,
+    ) -> ProcessGroup<'static> {
+        let mut guard = Self::of(group, task, lease, owners);
+        guard.cgroup = scope;
+        guard
     }
 
     /// Capture the tree, signal the group and every captured pid, and observe
@@ -4747,6 +4971,13 @@ impl<'ops> ProcessGroup<'ops> {
         if self.group <= 0 {
             return CleanupReceipt::CleanupFailed;
         }
+        // The kernel owner first: one `cgroup.kill` write stops every member
+        // the scope holds — including a `setsid` escapee — atomically, with no
+        // fork race for them. What it could not hold (a descendant forked
+        // before the attach) the capture rounds below still cover, and the
+        // receipt names which owner ran.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        self.kill_scope();
         for round in 0..CONTAINMENT_ROUNDS {
             let tree = self.read_tree();
             if matches!(self.signal_group(), GroupSignal::Refused) {
@@ -4764,6 +4995,27 @@ impl<'ops> ProcessGroup<'ops> {
             }
         }
         self.receipt()
+    }
+
+    /// Send SIGKILL to the scope's members through `cgroup.kill`.
+    ///
+    /// Best effort and first: a refused write leaves the scope untouched and
+    /// the capture rounds own the tree, while a delivered one is what the
+    /// receipt names. Never a failure — containment degrades, it does not
+    /// refuse.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn kill_scope(&mut self) {
+        let Some(scope) = self.cgroup.as_ref() else {
+            return;
+        };
+        match scope.kill() {
+            Ok(()) => self
+                .containment
+                .record_owner(ContainmentMechanism::CgroupKill),
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, task = ?self.task, "cleanup: the scope kill was refused; the capture rounds own this tree");
+            }
+        }
     }
 
     /// Read the leader's descendants now, folding them into this report.
@@ -4930,6 +5182,25 @@ impl<'ops> ProcessGroup<'ops> {
         if !self.leader_reaped || self.group <= 0 {
             return CleanupReceipt::CleanupFailed;
         }
+        // Adopted orphans first: a descendant whose parent died before the
+        // cleanup was re-parented to this process by the subreaper flag, so it
+        // is killed and reaped here rather than left for init. Only pids the
+        // capture named while the leader lived are touched — an unreaped child
+        // keeps its pid unreissued, so each one is provably still the process
+        // this tree started.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        self.adopt_orphans();
+        // Stranded adoptees of earlier trees — orphans adopted after their own
+        // guard's pass — are collected here rather than left as rows `kill -0`
+        // still reports present.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let _collected = sweep_adopted();
+        // The scope's own confirmation before the rounds: an empty member
+        // list is the kernel's evidence that nothing of the tree is left, and
+        // a non-empty one joins the survivors the rounds observe, so an early
+        // return below never claims a tree whose scope still holds members.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        self.confirm_scope();
         for round in 0..CONTAINMENT_ROUNDS {
             if matches!(self.observer.exists(self.group), Ok(false)) {
                 self.group_absent = true;
@@ -4946,6 +5217,125 @@ impl<'ops> ProcessGroup<'ops> {
             }
         }
         self.receipt()
+    }
+
+    /// Kill and reap the captured descendants this process adopted.
+    ///
+    /// One pass, bounded by the signalled set: orphans adopted after this
+    /// call are not in it, and the receipt's rounds — not another pass — are
+    /// what bound the work. A pid adopted here was captured while the leader
+    /// lived and is an unreaped child now, so the signal cannot reach a
+    /// stranger and the reap cannot steal a live leader's exit.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn adopt_orphans(&mut self) {
+        let adopted = self.signal_adopted();
+        if adopted.is_empty() {
+            return;
+        }
+        match lgwks_std::process::reap_descendants(&adopted) {
+            Ok(reaped) => {
+                let reaped: std::collections::BTreeSet<i32> = reaped.into_iter().collect();
+                let still: Vec<i32> = adopted
+                    .into_iter()
+                    .filter(|pid| !reaped.contains(pid))
+                    .collect();
+                self.observe_running(&still);
+            }
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, task = ?self.task, "confirm: the adoption reap was refused; the observation below owns these pids");
+                self.observe_running(&adopted);
+            }
+        }
+    }
+
+    /// Signal the adopted orphans without observing them.
+    ///
+    /// The drop-time half of [`Self::adopt_orphans`]: no observation follows,
+    /// because a dropped guard has no report to carry one, so every adopted
+    /// pid is signalled once and reaped once, best effort. The same
+    /// attribution rule applies — captured while the leader lived, an unreaped
+    /// child now — so no stranger is reachable.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn kill_adopted(&mut self) {
+        let adopted = self.signal_adopted();
+        if adopted.is_empty() {
+            return;
+        }
+        let _reaped = lgwks_std::process::reap_descendants(&adopted);
+    }
+
+    /// Signal the adopted descendants and name the owner that stopped them.
+    ///
+    /// The one signal these two paths share: which signalled pids this process
+    /// adopted, each signalled once, and the subreaper adoption recorded as
+    /// the mechanism. Returns the adopted pids for the caller to reap or
+    /// observe; empty when nothing was adopted, so both callers stop there.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn signal_adopted(&mut self) -> Vec<i32> {
+        let adopted = self.adopted_signalled();
+        if adopted.is_empty() {
+            return adopted;
+        }
+        self.containment
+            .record_owner(ContainmentMechanism::SubreaperAdoption);
+        for pid in &adopted {
+            if self.capture.signal(*pid).is_ok() {
+                self.containment.record_signal();
+            }
+        }
+        adopted
+    }
+
+    /// Which signalled pids are currently children of this process.
+    ///
+    /// The one attribution query both adoption paths share: a pid that is
+    /// both captured and adopted is provably still the same process, because
+    /// the OS cannot reissue the pid of a child nobody reaped. Unreadable is
+    /// empty rather than an error, because both callers degrade to the rounds
+    /// rather than refusing.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn adopted_signalled(&self) -> Vec<i32> {
+        if self.signalled_pids.is_empty() {
+            return Vec::new();
+        }
+        let candidates: Vec<i32> = self.signalled_pids.iter().copied().collect();
+        match lgwks_std::process::adopted_descendants(&candidates) {
+            Ok(adopted) => adopted.into_iter().collect(),
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, task = ?self.task, "cleanup: the adoption check was unreadable; the rounds own these pids");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Fold the scope's member list into the survivor report.
+    ///
+    /// Read before the absence rounds, so they observe what the kernel still
+    /// holds: an empty scope confirms what the rounds are about to check, and
+    /// a non-empty one is unioned with the survivors rather than replacing
+    /// them, because the two readers — the kernel's membership and the table
+    /// observation — answer different questions and neither absorbs the other.
+    /// An unreadable scope leaves the rounds' answer standing.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    fn confirm_scope(&mut self) {
+        let Some(scope) = self.cgroup.as_ref() else {
+            return;
+        };
+        let members = match scope.members() {
+            Ok(members) => members,
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, task = ?self.task, "confirm: the scope member list was unreadable; the rounds own this tree");
+                return;
+            }
+        };
+        if members.is_empty() {
+            return;
+        }
+        let mut survivors: std::collections::BTreeSet<i32> =
+            self.containment.survivors.iter().copied().collect();
+        survivors.extend(members);
+        let survivors: Vec<i32> = survivors.into_iter().collect();
+        self.containment.record_survivors(&survivors);
     }
 
     /// Signal the whole group and every captured pid as a drop-time fallback.
@@ -4988,6 +5378,20 @@ impl<'ops> ProcessGroup<'ops> {
                 GroupSignal::Refused => break,
             }
         }
+        // The kernel owners, best effort and synchronous like the rest of this
+        // path: the scope kill stops the members the capture above could not
+        // name, and adopted orphans are signalled by pid. Neither allocates a
+        // task or awaits, so neither can be refused by a runtime that is
+        // already unwinding.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        self.kill_scope();
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        self.kill_adopted();
+        // Stranded adoptees, best effort and synchronous like the rest of this
+        // path: a dropped guard cannot await, but it can wait on what is
+        // already dead.
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let _collected = sweep_adopted();
     }
 
     /// What this cleanup read, signalled, and could not account for.
@@ -5038,6 +5442,9 @@ impl Drop for ProcessGroup<'_> {
                     .register(self.task, self.group, permit, self.containment.clone());
             }
         }
+        // The cgroup scope, if any, drops with the guard: its members were
+        // killed by the paths above, and the retained obligation the permit
+        // transfers to probes the group, never the directory.
     }
 }
 
@@ -5596,6 +6003,8 @@ mod tests {
             group_absent: false,
             containment: Containment::default(),
             signalled_pids: std::collections::BTreeSet::new(),
+            #[cfg(all(target_os = "linux", feature = "process"))]
+            cgroup: None,
             signaller: seams.signaller,
             observer: seams.observer,
             capture: seams.capture,
