@@ -69,8 +69,8 @@ crates/lgwks-bot/src/rt/supervise.rs:2163	pub fn new(max_in_flight: usize) -> Se
 crates/lgwks-bot/src/rt/supervise.rs:2710	/// # Why the description is borrowed
 crates/lgwks-bot/src/rt/supervise.rs:2773	pub async fn spawn_process_identified(
 crates/lgwks-bot/src/rt/supervise.rs:3017	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
-crates/lgwks-bot/src/rt/supervise.rs:5840	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise.rs:5949	mod tests {
+crates/lgwks-bot/src/rt/supervise.rs:5844	token.run_until_cancelled(body(iterations)),
+crates/lgwks-bot/src/rt/supervise.rs:5953	mod tests {
 crates/lgwks-bot/src/rt/task.rs:170	where
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {

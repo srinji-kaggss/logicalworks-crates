@@ -4121,15 +4121,19 @@ fn sweep_adopted() -> usize {
 /// The confirming half of [`sweep_adopted`]: a signalled process dies on the
 /// kernel's schedule, and a single nonblocking reap attempted before the death
 /// lands leaves a zombie no later pass collects. This waits for the deaths,
-/// bounded (400 × 5 ms like the async adoption reap), so the cleanup that
-/// observes a tree takes its stranded adoptees with it rather than leaving
-/// them `kill -0`-present behind it. Async like the rest of the cleanup path,
-/// so the wait parks on the runtime clock instead of blocking its thread;
-/// only ever waits on processes that are already children of this process.
+/// bounded to 10 × 5 ms: a death lands in milliseconds, while a live adoptee
+/// — a long-sleeping escapee the cleanup's own kill is still delivering —
+/// never vanishes on its own, and waiting out the adoption bound here would
+/// blow the shutdown grace a draining cleanup is owed (the drain test shuts
+/// 32 trees at once against 50 ms). Past the bound whatever remains is the
+/// observation rounds' to report, not this sweep's to wait away. Async like
+/// the rest of the cleanup path, so the wait parks on the runtime clock
+/// instead of blocking its thread; only ever waits on processes that are
+/// already children of this process.
 #[cfg(all(target_os = "linux", feature = "process"))]
 async fn sweep_adopted_confirmed() -> usize {
     let mut collected = 0usize;
-    for _ in 0..400 {
+    for _ in 0..10 {
         if unclaimed_children().is_empty() {
             break;
         }
