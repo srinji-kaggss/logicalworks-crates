@@ -104,6 +104,9 @@ mod tenancy_harness;
 #[path = "../sim/mod.rs"]
 mod sim;
 
+#[path = "../support/sweep.rs"]
+mod sweep_fixtures;
+
 /// This test binary re-invoked to run the one test named `test` as a probe child.
 ///
 /// One builder for every kill and crash probe, so the executable and the
@@ -129,6 +132,7 @@ fn probe_test(module: &str, test: &str) -> String {
 
 mod ambiguous_commit;
 mod authority;
+mod cas;
 mod credential;
 mod dist_lease;
 mod durable_crash_group_commit;
@@ -164,6 +168,7 @@ mod registry;
 mod repair;
 mod request_key;
 mod resume_liveness;
+mod retry_proxy;
 mod rt_async_tier;
 mod rt_process;
 mod rt_process_files;
@@ -172,6 +177,7 @@ mod script_flow;
 mod script_refusals;
 mod session;
 mod sim_cancel_under_load;
+mod sim_cas;
 mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;
@@ -200,10 +206,12 @@ mod sim_ready;
 mod sim_repair;
 mod sim_replay_drift;
 mod sim_request_key;
+mod sim_retry_proxy;
 mod sim_review_pr;
 mod sim_run_boundaries;
 mod sim_scale;
 mod sim_script;
+mod sim_skew;
 mod sim_source_matrix;
 mod sim_spec_materialize;
 mod sim_stability;
@@ -220,6 +228,7 @@ mod sim_tenancy_model;
 mod sim_tenancy_scope;
 mod sim_tenant_journal_kill;
 mod sim_tenant_store;
+mod skew;
 mod spec_materialize;
 mod stability;
 mod store_read_failure;

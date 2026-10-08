@@ -313,6 +313,26 @@ pub enum BotError {
         /// What a caller must re-grant for the call to be worth making again.
         needs: crate::spec::NeedSet,
     },
+    /// Two editors wrote one record and this write lost (issue #278, row 5).
+    ///
+    /// The expected-version precondition an [`Execute`](crate::verb::Execute)
+    /// writer of shared records carries: `expected` is the version the write
+    /// saw, `found` is the version the store holds, and the two together are
+    /// the whole fact a loser needs to re-read and try again. Recorded where
+    /// the write was refused (the store's conflict log), never retried
+    /// blindly: the same expectation against the same record gives the same
+    /// refusal, so a retry without a re-read spends an attempt to learn
+    /// nothing. `Refused` and so [`RetryClass::Never`].
+    Conflict {
+        /// The domain that refused the write (e.g. `"cas::store"`).
+        domain: String,
+        /// The record the write named.
+        record: String,
+        /// The version the write expected.
+        expected: u64,
+        /// The version the store holds.
+        found: u64,
+    },
     /// A domain action failed at runtime.
     ///
     /// Carries [`DispatchCertainty`] rather than leaving a consumer to infer
@@ -954,6 +974,10 @@ impl BotError {
             Self::CredentialExpired { .. } | Self::CredentialRejected { .. } => {
                 DispatchCertainty::Refused
             }
+            // A lost write changed nothing: the winner's value stands and the
+            // loser holds both versions, so the same expectation refused again
+            // is the same refusal rather than a second attempt at the effect.
+            Self::Conflict { .. } => DispatchCertainty::Refused,
             _ => DispatchCertainty::Refused,
         }
     }
@@ -1466,6 +1490,18 @@ impl fmt::Display for BotError {
                 f,
                 "{} was refused by its upstream with HTTP {status}: {needs}",
                 Escaped(domain)
+            ),
+            Self::Conflict {
+                ref domain,
+                ref record,
+                expected,
+                found,
+            } => write!(
+                f,
+                "{} refused a write to record {}: expected version {expected}, found \
+                 version {found}; re-read the record and name the version found",
+                Escaped(domain),
+                Escaped(record)
             ),
             Self::UnstableObservation {
                 ref domain,

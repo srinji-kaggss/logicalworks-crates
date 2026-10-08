@@ -140,6 +140,13 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub mod broker;
 /// Capability tokens and sealed authority proofs.
 pub mod cap;
+/// Versioned shared records: compare-and-set writes for concurrent editors.
+///
+/// [`CasWrite`](crate::cas::CasWrite) applies a write only when the record still
+/// holds the version the writer saw; a late write is the typed
+/// [`BotError::Conflict`] outcome — recorded in the
+/// store's bounded conflict log, never retried blindly (issue #278, row 5).
+pub mod cas;
 pub mod domain {
     //! Shipped automation domains.
     //!
@@ -204,6 +211,15 @@ pub mod error;
 pub mod frontier;
 /// Grant sets: build-time admission and per-tick proof minting.
 pub mod gate;
+/// One effect per key: POST through a retrying proxy without sending twice.
+///
+/// [`IdempotentPost`](crate::idempotent::IdempotentPost) carries the
+/// caller-generated `Idempotency-Key` every attempt of one operation reuses,
+/// so a proxy that duplicates and replays requests still delivers exactly one
+/// effect. Wired rather than offered: an upstream credential refusal on this
+/// path is the credential row's typed repair, and the row's tests stand a
+/// real duplicating proxy in front of the adapter (issue #278, row 6).
+pub mod idempotent;
 /// Typed in-process structural code inspection (R8, feature `inspect`).
 ///
 /// Check risky code over its structure without executing it: parse the subject
@@ -343,6 +359,15 @@ pub mod script;
 pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
 pub mod session;
+/// Cross-host time: monotonic deadlines, wall timestamps, and the skew bound.
+///
+/// [`SkewBound`](crate::skew::SkewBound) is how far two honest clocks may disagree;
+/// [`MonoDeadline`](crate::skew::MonoDeadline) and [`WallStamp`](crate::skew::WallStamp) keep
+/// the deadline a lease carries apart from the timestamp a record shows. Wired
+/// rather than offered: [`Auth::check_remote`] judges
+/// a proof minted on one clock against a foreign reading within the bound
+/// (issue #278, row 2).
+pub mod skew;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
