@@ -478,7 +478,7 @@ impl ProcessSpec {
     /// so neither can run a child unconfined.
     pub(crate) fn command(&self) -> io::Result<Command> {
         match self.confinement {
-            Confinement::None => Ok(Command::new(&self.program)),
+            Confinement::None => Ok(Command::new(self.resolved_program())),
             Confinement::SandboxProfile(ref profile) => {
                 profile.validate()?;
                 #[cfg(target_os = "macos")]
@@ -494,6 +494,39 @@ impl ProcessSpec {
                 }
             }
         }
+    }
+
+    /// The program the engine command spawns: resolved against the child's
+    /// `PATH` when it names no directory.
+    ///
+    /// `std` spawns through `posix_spawn` only when the program already holds
+    /// a `/`; a bare name with a pinned `PATH` (see [`Self::env`]) falls back
+    /// to `fork` + `execvp`, which copies the supervisor's page tables and
+    /// runs every allocator's at-fork handlers on each spawn. Resolving here
+    /// keeps the fast path for the exact case production callers hit, while
+    /// every ambiguous case stays bare and takes the old path unchanged.
+    ///
+    /// The lookup folds the spec's own deltas over the inherited `PATH`, in
+    /// order, so the search sees what the child will see (INV-BOT-159): after
+    /// a `Clear` that sets no `PATH`, or a `Remove`, the path is unknown and
+    /// the program stays bare for the platform's default search. Entries keep
+    /// `execvp` semantics: absent entries, directories, and files without any
+    /// execute bit are skipped; an empty entry means the child's working
+    /// directory. A candidate that is executable but carries no `#!` line and
+    /// no ELF magic is left bare, because `execvp` would run it through the
+    /// shell (`ENOEXEC` fallback) and a resolved path would fail instead.
+    ///
+    /// Stated differences from the fork path: the `+x`-bit check is the
+    /// caller's readability rule, so a superuser whose kernel would execute a
+    /// bit-less file still takes the fork path for it; and the directory walk
+    /// happens before the fork rather than after, so a `PATH` entry replaced
+    /// in between resolves to the earlier file.
+    pub(crate) fn resolved_program(&self) -> PathBuf {
+        #[cfg(unix)]
+        if let Some(resolved) = resolve_on_path(&self.program, &self.env, self.cwd.as_deref()) {
+            return resolved;
+        }
+        PathBuf::from(&self.program)
     }
 
     /// Configure the private engine command owned by the supervisor.
@@ -543,6 +576,128 @@ impl ProcessSpec {
             None => self.stderr.into_stdio(),
         });
         Ok(())
+    }
+}
+
+/// How many `PATH` entries [`resolve_on_path`] walks before giving up.
+///
+/// A `PATH` is caller data of unbounded length; the walk is a spawn input and
+/// is bounded like every other one. Past the cap the program stays bare and
+/// the spawn takes the fork path, exactly as before this resolution existed.
+#[cfg(unix)]
+const MAX_PATH_ENTRIES: usize = 128;
+
+/// Resolve `program` against `path` the way `execvp` would, or `None`.
+///
+/// `None` means "spawn it bare": the name holds a `/`, the path is unknown,
+/// nothing executable was found, or the only executable needs the shell
+/// fallback. Every `None` takes the pre-existing fork path, so resolution can
+/// only add the fast path, never change what runs.
+#[cfg(unix)]
+fn resolve_on_path(program: &OsStr, deltas: &[EnvDelta], cwd: Option<&Path>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    if program.as_bytes().contains(&b'/') {
+        return None;
+    }
+    let path = effective_path(deltas)?;
+    let base = match cwd {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    let mut entries = 0usize;
+    for entry in path.as_bytes().split(|byte| *byte == b':') {
+        entries = entries.saturating_add(1);
+        if entries > MAX_PATH_ENTRIES {
+            return None;
+        }
+        let dir = if entry.is_empty() {
+            base.clone()
+        } else {
+            base.join(OsStr::from_bytes(entry))
+        };
+        let candidate = dir.join(program);
+        let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if metadata.file_type().is_dir() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        match probe_executable(&candidate) {
+            Executable::Direct => return Some(candidate),
+            // An entry that fails is skipped: the search moves on.
+            Executable::Unreadable => continue,
+            // Executable but not directly so: `execvp` would run it through
+            // the shell. Leaving the program bare preserves that fallback.
+            Executable::NeedsShell => return None,
+        }
+    }
+    None
+}
+
+/// The `PATH` the child will see: the inherited one folded through `deltas`.
+///
+/// `Clear` drops the inherited path and everything before it; a later `Set`
+/// rebuilds it. `None` is "unknown": cleared-and-unset, removed, or never
+/// inherited. Callers leave the program bare then, for the platform default.
+#[cfg(unix)]
+fn effective_path(deltas: &[EnvDelta]) -> Option<OsString> {
+    let mut path = std::env::var_os("PATH");
+    for delta in deltas {
+        match *delta {
+            EnvDelta::Set { ref key, ref value } if key.as_os_str() == "PATH" => {
+                path = Some(value.as_os_str().to_os_string());
+            }
+            EnvDelta::Remove { ref key } if key.as_os_str() == "PATH" => {
+                path = None;
+            }
+            EnvDelta::Clear => {
+                path = None;
+            }
+            EnvDelta::Set { .. } | EnvDelta::Remove { .. } => {}
+        }
+    }
+    path
+}
+
+/// What probing one `PATH` candidate found.
+#[cfg(unix)]
+enum Executable {
+    /// A `#!` script or ELF binary: the kernel runs it directly.
+    Direct,
+    /// Could not be opened or read: an entry that fails, skipped like one.
+    Unreadable,
+    /// Executable but leaning on `execvp`'s shell fallback: resolve to bare.
+    NeedsShell,
+}
+
+/// Whether the kernel can execute `candidate` without a shell: a `#!` script
+/// or an ELF binary. Anything else leans on `execvp`'s `ENOEXEC` fallback, so
+/// it resolves to "leave it bare". An unreadable file is skipped the same
+/// way an entry that fails is skipped.
+#[cfg(unix)]
+fn probe_executable(candidate: &Path) -> Executable {
+    use std::io::Read as _;
+    let mut head = [0u8; 4];
+    let mut file = match std::fs::File::open(candidate) {
+        Ok(file) => file,
+        Err(error) => {
+            lgwks_std::trace::debug!(
+                path = ?candidate,
+                error = %error,
+                "resolve_on_path skipped a candidate it could not open"
+            );
+            return Executable::Unreadable;
+        }
+    };
+    // A short or failed read is damage, not an executable: skip the entry.
+    if file.read_exact(&mut head).is_err() {
+        return Executable::Unreadable;
+    }
+    if head.starts_with(b"#!") || head.starts_with(b"\x7fELF") {
+        Executable::Direct
+    } else {
+        Executable::NeedsShell
     }
 }
 
@@ -1394,5 +1549,177 @@ impl std::error::Error for ProcessRunError {
             Self::Refused => None,
             Self::NotStarted { ref source } | Self::AfterStart { ref source } => Some(source),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod resolution_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// A scratch `PATH` entry owned by one test: a directory of fixture
+    /// programs under the system temp dir, removed afterwards.
+    struct Fixture {
+        dir: PathBuf,
+    }
+
+    impl Fixture {
+        fn named(body: &str, executable: bool) -> io::Result<Self> {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = std::env::temp_dir().join(format!(
+                "lgwks-resolve-{}-{}",
+                std::process::id(),
+                FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir)?;
+            for (name, mode) in [("witness", 0o755), ("plain", 0o644)] {
+                let at = dir.join(name);
+                std::fs::write(&at, body)?;
+                if executable || name == "witness" {
+                    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode))?;
+                }
+            }
+            Ok(Self { dir })
+        }
+
+        fn path_value(&self) -> OsString {
+            self.dir.as_os_str().to_os_string()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.dir) {
+                lgwks_std::trace::debug!(
+                    path = ?self.dir,
+                    error = %error,
+                    "resolution_tests fixture left its scratch dir behind"
+                );
+            }
+        }
+    }
+
+    fn spec_with_path(program: &str, path: &OsStr) -> ProcessSpec {
+        let mut spec = ProcessSpec::new(program);
+        spec.env("PATH", path);
+        spec
+    }
+
+    #[test]
+    fn a_bare_name_resolves_to_the_entry_holding_a_shebang_script() -> io::Result<()> {
+        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let spec = spec_with_path("witness", &fixture.path_value());
+        assert_eq!(spec.resolved_program(), fixture.dir.join("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_name_holding_a_slash_is_never_rewritten() -> io::Result<()> {
+        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let spelled = fixture.dir.join("witness");
+        let Some(spelled_str) = spelled.to_str() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "temp dir is not UTF-8",
+            ));
+        };
+        let spec = spec_with_path(spelled_str, &fixture.path_value());
+        assert_eq!(spec.resolved_program(), spelled);
+        Ok(())
+    }
+
+    #[test]
+    fn a_name_found_nowhere_stays_bare_for_the_platform_default() -> io::Result<()> {
+        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let spec = spec_with_path("no-such-program-lgwks", &fixture.path_value());
+        assert_eq!(
+            spec.resolved_program(),
+            PathBuf::from("no-such-program-lgwks")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_clear_that_sets_no_path_stays_bare_despite_the_inherited_path() {
+        let mut spec = ProcessSpec::new("sh");
+        spec.env_clear();
+        assert_eq!(spec.resolved_program(), PathBuf::from("sh"));
+    }
+
+    #[test]
+    fn a_removed_path_stays_bare() -> io::Result<()> {
+        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let mut spec = spec_with_path("witness", &fixture.path_value());
+        spec.env_remove("PATH");
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_shebang_less_script_stays_bare_to_keep_the_shell_fallback() -> io::Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "lgwks-resolve-noshebang-{}-{}",
+            std::process::id(),
+            FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let at = dir.join("witness");
+        std::fs::write(&at, "exit 0\n")?;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755))?;
+        let spec = spec_with_path("witness", dir.as_os_str());
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            lgwks_std::trace::debug!(
+                path = ?dir,
+                error = %error,
+                "resolution_tests fixture left its scratch dir behind"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn directories_and_bit_less_files_are_skipped_for_a_later_entry() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let first = Fixture::named("#!/bin/sh\nexit 0\n", false)?;
+        // A directory named `witness` with the execute bit: skipped, not run.
+        let decoy = first.dir.join("witness");
+        if std::fs::remove_file(&decoy).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "fixture witness file missing before the decoy replaces it",
+            ));
+        }
+        std::fs::create_dir_all(&decoy)?;
+        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755))?;
+        let second = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let mut combined = first.path_value();
+        combined.push(":");
+        combined.push(second.path_value());
+        let spec = spec_with_path("witness", &combined);
+        assert_eq!(spec.resolved_program(), second.dir.join("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_entry_searches_the_spec_working_directory() -> io::Result<()> {
+        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let mut spec = ProcessSpec::new("witness");
+        spec.current_dir(&fixture.dir);
+        spec.env("PATH", "");
+        assert_eq!(spec.resolved_program(), fixture.dir.join("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_bare_program_with_no_path_arm_holds_no_slash() {
+        // Negative control: without the `Set PATH` arm the same name stays
+        // bare, so every positive assertion above exercises the new code.
+        let spec = ProcessSpec::new("witness");
+        assert!(!spec.resolved_program().to_string_lossy().contains('/'));
     }
 }
