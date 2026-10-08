@@ -1824,7 +1824,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   (`racing_writers_produce_one_winner_and_typed_conflicts`, sixteen real
   threads on a real file;
   `the_execute_path_reports_a_typed_conflict_that_survives_reopen`, asserting
-  `RetryClass::Never` on the verb path)
+  the Never outcome of RetryClass on the verb path)
 - **INV-BOT-162** A retrying proxy delivers each keyed effect once. Every
   `idempotent::IdempotentPost` attempt of one operation reuses its
   caller-generated key and its payload byte for byte over the single

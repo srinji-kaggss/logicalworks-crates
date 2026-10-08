@@ -164,14 +164,14 @@ impl ConflictEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Record {
-    /// The current version, counting applied writes from [`NO_VERSION`](crate::cas::NO_VERSION).
+    /// The current version, counting applied writes from [`NO_VERSION`].
     version: u64,
     /// The value the winning write left.
     value: String,
 }
 
 impl Record {
-    /// The installed version, counting applied writes upward from [`NO_VERSION`](crate::cas::NO_VERSION).
+    /// The installed version, counting applied writes upward from [`NO_VERSION`].
     ///
     /// Every successful write installs exactly one more than the version it named, so this
     /// number also orders the writes that touched the record.
@@ -194,7 +194,7 @@ impl Record {
 pub struct StoreState {
     /// The records by name.
     records: HashMap<String, Record>,
-    /// The most recent conflicts, oldest first, capped at [`MAX_CONFLICTS`](crate::cas::MAX_CONFLICTS).
+    /// The most recent conflicts, oldest first, capped at [`MAX_CONFLICTS`].
     conflicts: VecDeque<ConflictEntry>,
     /// How many conflicts the cap evicted.
     evicted: u64,
