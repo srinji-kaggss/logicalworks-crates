@@ -10,3 +10,14 @@
 # `$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`.
 [build]
 rustc-workspace-wrapper = "clippy-driver"
+
+# Every registry package `Cargo.lock` resolves is checked into `vendor/`
+# (`cargo vendor --locked --versioned-dirs vendor/`), and every build resolves
+# through it. A tree nobody builds from is unaudited bytes that look like an
+# assurance (#266). `lgwks-deps vendor check .` reads this same section, so the
+# check can never drift to a tree cargo is not resolving.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

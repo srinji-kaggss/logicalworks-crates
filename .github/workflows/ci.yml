@@ -209,6 +209,42 @@ jobs:
       - name: Root README quickstart matches its compiled example
         run: python3 scripts/ci_local.py --lane readme-quickstart
 
+  # Option A of issue #266: the vendor tree is only an assurance if a build
+  # reads from it. This job proves it with nothing to fall back on: a scratch
+  # CARGO_HOME (no registry cache) and CARGO_NET_OFFLINE, so any package the
+  # tree does not cover fails the build instead of fetching. It rides lwc-4
+  # with the gate checks, which are seconds and share this instance's target.
+  offline:
+    name: Offline vendored build
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-4]
+    timeout-minutes: 20
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+      - name: Verify vendored sources cover the lockfile
+        run: >
+          cargo run --locked -p lgwks_deps --bin lgwks-deps -- vendor check .
+          || (echo 'stale vendor tree: run cargo vendor --locked --versioned-dirs vendor/ and commit the result' >&2; exit 2)
+      - name: Build workspace offline from vendored sources
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$(mktemp -d)"
+          entries="$(ls -A "${CARGO_HOME}" | wc -l | tr -d ' ')"
+          test "${entries}" = 0
+          echo "scratch CARGO_HOME ${CARGO_HOME} holds ${entries} entries: no registry cache"
+          cargo build --workspace --locked --offline
+      - name: Test vendor coverage offline
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="$(mktemp -d)"
+          cargo test --locked --offline -p lgwks_deps --lib vendor::
+
   # The two results the checks list names on every pull request. Each reads the
   # report its lane wrote in the job above and passes only on that lane's own
   # pass line, so the row is exactly the lane's verdict on this commit.

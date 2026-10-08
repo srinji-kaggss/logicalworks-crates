@@ -80,6 +80,39 @@ fast = true
 command = "cargo run --locked -p lgwks_deps --bin lgwks-deps -- check ."
 ci_step = "Enforce dependency edge ownership"
 
+# INV-VENDOR-SINGLE-TREE (#266, option A): every registry package the lock
+# resolves is checked into vendor/, and the build resolves through it. A lock
+# change without a vendor refresh fails vendor-check; the CI step names the
+# refresh command, and docs/releasing.md records the flow.
+[[lane]]
+id = "vendor-check"
+group = "workspace"
+surfaces = "local ci"
+required = true
+command = "cargo run --locked -p lgwks_deps --bin lgwks-deps -- vendor check ."
+ci_step = "Verify vendored sources cover the lockfile"
+
+# The offline proof: the same workspace built with no registry cache and no
+# network. CI runs it with a scratch CARGO_HOME, so a fetch the tree does not
+# cover fails here rather than silently succeeding from a warm cache.
+[[lane]]
+id = "offline-build"
+group = "workspace"
+surfaces = "local ci"
+required = true
+command = "cargo build --workspace --locked --offline"
+ci_step = "Build workspace offline from vendored sources"
+
+# The vendor module's own tests, executed offline: the gate that enforces the
+# tree is itself proven while the network is off.
+[[lane]]
+id = "offline-test"
+group = "workspace"
+surfaces = "local ci"
+required = true
+command = "cargo test --locked --offline -p lgwks_deps --lib vendor::"
+ci_step = "Test vendor coverage offline"
+
 [[lane]]
 id = "std-first"
 surfaces = "local ci"

@@ -108,6 +108,21 @@ on the 2.2.0 train). Move each one in the same commit, and prove it with
 refuses a stale lock without compiling. The `CHANGELOG.md` entry follows, per crate, and records the
 behavioural changes a consumer will encounter, not only the signatures.
 
+Any commit that changes `Cargo.lock` also refreshes `vendor/` in the same
+commit (#266, option A): every registry package the lock resolves is checked
+in under `vendor/`, and `.cargo/config.toml` resolves every build through it,
+so a lock the tree does not cover breaks the offline build it feeds:
+
+```sh
+cargo vendor --locked --versioned-dirs vendor/
+```
+
+A lock change without the refresh fails the `vendor-check` lane
+(`lgwks-deps vendor check .`), whose refusal names the refresh command, and
+the offline CI job proves the tree is sufficient with an empty registry. The
+refresh itself needs the network once (about 15 s against a warm registry
+cache on 2026-10-07 for 924 packages); everything after it is `--offline`.
+
 Version position: every crate is at `1.x` since 2026-10-04, so semantic
 versioning applies as written. A removed or renamed public item, or a new
 variant on an enum that is not `#[non_exhaustive]`, takes a **major** bump. New
