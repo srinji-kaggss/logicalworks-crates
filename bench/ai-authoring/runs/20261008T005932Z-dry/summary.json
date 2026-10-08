@@ -1,0 +1,882 @@
+{
+  "generated_by": "bench/ai-authoring/run.py",
+  "lgwks_bot_sha": "7eecd5e11bf451b92424c9c650a983d586510401",
+  "protocol": {
+    "same_prompt_skeleton": true,
+    "same_sheet_budget": "each API sheet <= 250 lines",
+    "same_oracle": true,
+    "hidden_oracle": true,
+    "repair_budget": 4,
+    "cargo_serialized": "one cargo process at a time under an fcntl lock",
+    "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills",
+    "profiles": [
+      "first-time",
+      "expert-hurry",
+      "anxious",
+      "misuser",
+      "agent"
+    ],
+    "profile_text_is_fixed": "each profile is one fixed persona preamble prepended to the same prompt skeleton; the framing, the API sheet, the oracle, the repair budget and the sandbox are identical across profiles",
+    "oracle_measured_under_time_l": "oracle_wall_ms is the wall time of the cargo test invocation that runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is that process's maximum resident set size in bytes, or null on a host with no /usr/bin/time",
+    "cleanup_ok_is_the_drop_clause": "cleanup_ok is true only when the task's 'dropping the future leaves nothing live' oracle test passed; a crate that never compiled reports false rather than a cleanup result",
+    "skipped_cells": [
+      {
+        "task": "capture",
+        "api": "old",
+        "why": "the old rt sheet offers no supervised process spawn, so the task that needs owned processes, bounded capture and group cleanup cannot be written from it"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "model": "__dry-run__",
+      "api": "fan",
+      "task": "capture",
+      "profile": "first-time",
+      "n": 10,
+      "compiled": 10,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0.0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 2,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 3,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 4,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 5,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 6,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 7,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 8,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        },
+        {
+          "trial": 9,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "a_small_output_returns_exact_head_and_total": "pass",
+            "a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling": "pass",
+            "an_unstartable_program_is_a_typed_spawn_refusal": "pass",
+            "a_deadline_stops_the_whole_group": "pass",
+            "a_completed_run_leaves_no_orphan_behind": "pass",
+            "cancelling_leaves_no_descendant": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0.0,
+      "tokens_out_median": 0.0,
+      "consumer_lines_median": 53.0,
+      "orchestration_sites_median": 0.0,
+      "oracle_wall_ms_median": 1685.5810000000001,
+      "oracle_peak_rss_bytes_median": 182304768.0
+    },
+    {
+      "model": "__dry-run__",
+      "api": "fan",
+      "task": "durable-retry",
+      "profile": "first-time",
+      "n": 10,
+      "compiled": 10,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0.0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 2,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 3,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 4,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 5,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 6,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 7,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 8,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 9,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0.0,
+      "tokens_out_median": 0.0,
+      "consumer_lines_median": 47.0,
+      "orchestration_sites_median": 0.0,
+      "oracle_wall_ms_median": 1382.3845000000001,
+      "oracle_peak_rss_bytes_median": 172007424.0
+    },
+    {
+      "model": "__dry-run__",
+      "api": "fan",
+      "task": "tenant-cache",
+      "profile": "first-time",
+      "n": 10,
+      "compiled": 10,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0.0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 2,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 3,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 4,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 5,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 6,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 7,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 8,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 9,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0.0,
+      "tokens_out_median": 0.0,
+      "consumer_lines_median": 17.0,
+      "orchestration_sites_median": 0.0,
+      "oracle_wall_ms_median": 907.367,
+      "oracle_peak_rss_bytes_median": 174129152.0
+    },
+    {
+      "model": "__dry-run__",
+      "api": "old",
+      "task": "durable-retry",
+      "profile": "first-time",
+      "n": 10,
+      "compiled": 10,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0.0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 2,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 3,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 4,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 5,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 6,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 7,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 8,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        },
+        {
+          "trial": 9,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "phase1_blocks_until_released": "pass",
+            "a_fresh_call_applies_once_and_returns_applied": "pass",
+            "status_is_never_unknown": "pass",
+            "waiting_past_the_deadline_is_typed": "pass",
+            "dropping_mid_wait_applies_nothing_twice": "pass",
+            "kill_mid_effect_recovers_exactly_once": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0.0,
+      "tokens_out_median": 0.0,
+      "consumer_lines_median": 30.0,
+      "orchestration_sites_median": 1.0,
+      "oracle_wall_ms_median": 1217.92,
+      "oracle_peak_rss_bytes_median": 171630592.0
+    },
+    {
+      "model": "__dry-run__",
+      "api": "old",
+      "task": "tenant-cache",
+      "profile": "first-time",
+      "n": 10,
+      "compiled": 10,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0.0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 1,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 2,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 3,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 4,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 5,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 6,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 7,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 8,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        },
+        {
+          "trial": 9,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 6,
+          "oracle_total": 6,
+          "oracle": {
+            "same_request_resolves_the_same_bytes_twice": "pass",
+            "two_tenants_on_one_resource_stay_isolated": "pass",
+            "a_wrong_token_is_refused_and_caches_nothing": "pass",
+            "another_tenants_token_is_refused": "pass",
+            "a_thousand_mixed_calls_all_resolve_their_own_value": "pass",
+            "dropping_mid_flight_leaves_the_cache_usable": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0.0,
+      "tokens_out_median": 0.0,
+      "consumer_lines_median": 26.0,
+      "orchestration_sites_median": 4.0,
+      "oracle_wall_ms_median": 917.375,
+      "oracle_peak_rss_bytes_median": 174161920.0
+    }
+  ]
+}

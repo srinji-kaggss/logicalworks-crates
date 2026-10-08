@@ -236,6 +236,31 @@ has not been measured on tasks that ask for it
 ([#270](https://github.com/srinji-kaggss/logicalworks-crates/issues/270)). Until
 it is, the frontier claim rests on the authority axis above and not on authoring.
 
+That measurement now exists for reference solutions, and it falls the honest
+way in both directions (`bench/ai-authoring/README.md`, runs
+`20261008T003455Z-dry` and `20261008T005932Z-dry`, 140 dry trials, ten per
+cell, zero variance everywhere). On three held-out tasks whose oracles fail any
+solution lacking the guarantee — bounded capture of a forking child past 64
+MiB, tenant isolation at a thousand in flight with typed refusals, and
+exactly-once effect application across `SIGKILL` — the `script!` arm, the
+facade, the facade plus `FanOut` and the hand-rolled old surface pass every
+clause on every trial, and the `futures` comparator fails exactly the
+guarantee clauses on every trial (the flood, the orphan and the promptness of
+the cancel; the isolation, both refusals and the mixed thousand; the
+drop-duplicate and the kill-duplicate). Each oracle's negative control is a
+committed reference `futures` solution failing it with a committed `lgwks_bot`
+solution passing it, quoted in the README.
+
+What this does and does not move. The `script!` arm is measured for the first
+time and holds: 60 of 60 full passes across the three tasks. The `futures`
+lead on the old tasks stands unchallenged — nothing here re-runs models, and
+no interval is claimed over deterministic references. The frontier closed
+model and the human authors have not run (READY-NOT-RUN with the exact
+commands in the README). So the frontier claim now rests on two legs — the
+authority axis above, and a measured authoring comparison on guarantee tasks
+where every `lgwks_bot` arm beats the ecosystem standard — with the model
+half still open.
+
 *Not covered:* the survey sample is eight systems and one patent reading, not
 the whole market. A rival that occupies the same axis would falsify the
 position, and no one has looked for one since the survey ran.

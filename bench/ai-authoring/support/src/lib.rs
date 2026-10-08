@@ -14,6 +14,14 @@
 //!   effect ledger, in a module of its own so a reader of the two above is not
 //!   reading a third instrument they never call.
 //!
+//! The newer tasks' fixed vocabularies live here too, one module per task, so
+//! every arm's reference solution re-exports one definition rather than
+//! copying the prompt's items per file:
+//!
+//! - [`capture`]: the `capture` task's error and bounded result.
+//! - [`tenant_cache`]: the `tenant-cache` task's refusal.
+//! - [`durable`]: the `durable-retry` task's recovery error.
+//!
 //! The world is owned by the harness, never by the solution: a solution calls
 //! these methods and returns the numbers; the oracle reads the counters. Nothing
 //! here sleeps on a wall clock except through [`lgwks_bot::rt::time::sleep`].
@@ -51,6 +59,22 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// more items at the root because it is a third instrument the other two tasks
 /// never call: a reader of [`Fetcher`] and [`Stage`] should not have to read it.
 pub mod recovery;
+
+/// The `capture` task's fixed error and bounded result.
+pub mod capture;
+
+/// The `tenant-cache` task's fixed refusal.
+pub mod tenant_cache;
+
+/// The `durable-retry` task's fixed recovery error.
+pub mod durable;
+
+/// The `aggregate` task's fixed sum error, for references that re-export one
+/// definition rather than copying the prompt's items per file.
+pub mod aggregate;
+
+/// The `pipeline` task's fixed stage error, for the same reason.
+pub mod pipeline;
 
 // ── The deterministic delay plan ─────────────────────────────────────────────
 

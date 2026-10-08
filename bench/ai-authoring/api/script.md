@@ -1,10 +1,12 @@
-# API sheet — the new surface plus the one-call fan-out: `lgwks_bot::task`, `lgwks_bot::script`
+# API sheet — the `script!` language: `lgwks_bot::script!` over `task`/`script`
 
 You may use only the items on this sheet plus `std` and `ai_task_support`.
 
-This is the higher-level task and orchestration surface. Every item below is a
-real public item of the crate. Signatures are given exactly as they are
-declared.
+This is the indented orchestration language. A `script!` block declares flows;
+each flow expands to an `async fn` taking the tenant `Scope` first and
+returning `Result<Output, FlowError>`, with every block expanding to one call
+into `lgwks_bot::script`. Every item below is a real public item of the crate.
+Signatures are given exactly as they are declared.
 
 ## Declaring and running a task
 
@@ -51,47 +53,42 @@ declared.
   path; a later attempt at the same path returns the recorded value. Integers
   and `String` are recordable.
 
-## One-call fan-out with your own errors (`lgwks_bot::script::FanOut`)
+## The language (`lgwks_bot::script!`)
 
-No scope, tenant or `Arc` is needed.
+Write `lgwks_bot::script! { ... }` at module level. Inside every flow `scope`
+is the current `Scope`. Any other line is Rust, passed through as written.
 
-- `FanOut::new<I: IntoIterator>(items: I) -> FanOut<I>`
-  - `fn at_most(self, limit: usize) -> Self` — at most `limit` bodies at once
-    (1..=65536; anything else comes back as `FanOutError::Flow`).
-  - `fn within(self, deadline: Duration) -> Self` — one deadline for the whole
-    fan-out.
-  - `async fn run<T, E, F, Fut>(self, body: F) -> Result<Vec<T>, FanOutError<E>>`
-    where `F: Fn(I::Item) -> Fut, Fut: Future<Output = Result<T, E>>`.
-- `FanOutError<E>` — `Item { index: usize, error: E }` (the first failing item's
-  position and your own error, unchanged), `TimedOut { after: Duration }`,
-  `Flow(FlowError)`.
-- Bounded, ordered (values in input order), fail-fast (the first error stops it,
-  starts no further item and drops every running body), owning (dropping the
-  future drops every body).
-- `lgwks_bot::rt::time::timeout<F: Future>(duration: Duration, future: F) -> Result<F::Output, Elapsed>`
-  races any future against a deadline and drops it when the deadline passes.
+- `[pub] flow name(inputs) [-> Output]:` — an `async fn` taking the tenant
+  `Scope` first and returning `Result<Output, FlowError>`.
+- `each x in xs:` — every item, as many at once as the machine sustains,
+  results in input order, first failure stops the rest.
+- `each x in xs, at most (limit) at once:` — the same, under a named limit.
+- `within 2s:` — the block, or `TimedOut` when the deadline passes. Durations
+  read like `20ms`, `200ms`, `5s`.
+- `retry up to 3 times[, waiting 100ms]:` — the block again while it fails
+  transiently, same key each attempt, within the run's retry budget
+  (attempts in `1..=1000`).
+- `together:` — each line underneath concurrently; `let x = ..` lines bind
+  their result.
+- `step name:` — a named scope: its own key and error location.
+- `for x in xs:` — every item in turn, each in its own scope.
+- `if cond:` / `else if cond:` / `else:` — as written.
+- `let x = <block>:` — the block's last line becomes `x`.
+- `run other(args)` — call another flow in this scope, await it, propagate
+  its failure.
+- `give back value` — return from the flow.
+- `fail with reason` / `fail transiently with reason` — stop with a permanent
+  / retryable failure.
+- `.or_fail()` / `.or_retry()` (`lgwks_bot::script::ResultExt`) — turn a
+  foreign error into a flow failure.
+- Every script emits `ARCHITECTURE`: the flows it declares and the tree of
+  blocks inside each, compiled from the same tokens.
 
-```rust
-use std::time::Duration;
-
-use lgwks_bot::script::{FanOut, FanOutError};
-
-#[derive(Debug)]
-struct Refused(u32);
-
-fn main() {
-    let outcome = lgwks_bot::rt::runtime::block_on(
-        FanOut::new(1_u32..=8)
-            .at_most(4)
-            .within(Duration::from_secs(5))
-            .run(|id| async move { if id == 6 { Err(Refused(id)) } else { Ok(id * 2) } }),
-    );
-    match outcome {
-        Err(FanOutError::Item { index, error }) => assert_eq!((index, error.0), (5, 6)),
-        other => panic!("expected the sixth item to fail, got {other:?}"),
-    }
-}
-```
+The language refuses, at compile time: numeric concurrency bounds, attempts
+outside `1..=1000`, zero durations, `unwrap` / `expect` / `panic!` /
+`assert*!`, indexing and slicing, `loop` / `while` / `spawn`,
+`block_on`, `thread::sleep`, `process::exit`, `unsafe`, and the rest of the
+panicking and blocking vocabulary. Write the bounded block instead.
 
 ## Scoped orchestration (`lgwks_bot::script`)
 
@@ -149,19 +146,21 @@ fn main() {
 ## A bounded fan-out in this API
 
 ```rust
-use std::num::NonZeroUsize;
+use lgwks_bot::script::{FlowError, Scope};
 
-use lgwks_bot::script::{FlowError, Scope, Tenant, each};
+lgwks_bot::script! {
+    /// Double every value and sum the results.
+    flow double_sum(values: Vec<u64>) -> u64:
+        let doubled = each value in values:
+            value.saturating_mul(2)
+        give back doubled.into_iter().sum()
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use lgwks_bot::script::Tenant;
     let scope = Scope::root(Tenant::new("demo")?);
-    let pool = Some(NonZeroUsize::new(8).ok_or("a non-zero bound")?);
     let total: u64 = lgwks_bot::rt::runtime::block_on(async move {
-        let values = each(&scope, "double", pool, 0u64..100, |_step, value| async move {
-            Ok::<u64, FlowError>(value * 2)
-        })
-        .await?;
-        Ok::<u64, FlowError>(values.into_iter().sum())
+        double_sum(&scope, (0u64..100).collect()).await
     })?;
     assert_eq!(total, 9900, "0..100 doubled");
     Ok(())
@@ -195,13 +194,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Notes
 
+- There is no `join!` / `try_join!` on this surface, and none is needed: `each`
+  bounds a fan-out, `together` joins a fixed set of branches, and a flow that
+  must stop at the first failure uses either. See the sheet's refusals: a macro
+  form that re-spelled those blocks would be a second name for the same bounds.
 - `each` drives its bodies on the task that awaits it and owns them; dropping the
   future drops every body, so nothing outlives the call.
 - `Host::run` applies the host's default deadline with `within`, under the scope
   `tenant/<task name>`, and reports the disposition, output and located error.
-- There is no `join!` / `try_join!` on this surface, and that is deliberate
-  rather than an omission: `FanOut` is the one-call fan-out with the caller's
-  own error type, `each` is the scoped one, and a two-future macro would be a
-  third spelling of the same bounds. A fixed pair is joined by awaiting both in
-  one async block; a pair that must stop at the first failure is a `FanOut`
-  over two items.
