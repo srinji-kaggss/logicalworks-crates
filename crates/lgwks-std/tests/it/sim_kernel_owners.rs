@@ -205,6 +205,12 @@ fn names_trace() -> Result<u64, Box<dyn Error>> {
                     fold(&mut trace, 3);
                 }
                 Err(error) => {
+                    lgwks_std::trace::warn!(
+                        seed = seed,
+                        scope_name = name,
+                        kind = ?error.kind(),
+                        "sim_kernel_owners: a scope name was refused with an unmodelled kind: {error}"
+                    );
                     return Err(format!(
                         "seed {seed:#x}: {name:?} refused with an unmodelled kind: {error}"
                     )

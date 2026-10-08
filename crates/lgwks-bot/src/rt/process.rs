@@ -170,6 +170,11 @@ impl SandboxProfile {
     /// ASCII (profiles are ASCII text; anything else is damage or an attack).
     pub fn validate(&self) -> io::Result<()> {
         if self.source.is_empty() || self.source.len() > Self::MAX_SOURCE_BYTES {
+            lgwks_std::trace::warn!(
+                len = self.source.len(),
+                max = Self::MAX_SOURCE_BYTES,
+                "SandboxProfile::validate refused an empty or oversized profile source"
+            );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -184,6 +189,10 @@ impl SandboxProfile {
             .bytes()
             .position(|byte| !byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
         {
+            lgwks_std::trace::warn!(
+                offset = at,
+                "SandboxProfile::validate refused a profile source holding a non-text byte"
+            );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("a sandbox profile holds a non-text byte at offset {at}"),

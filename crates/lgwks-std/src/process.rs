@@ -1720,7 +1720,12 @@ fn validate_scope_name(name: &str) -> io::Result<()> {
 /// who this process parents.
 #[cfg(all(target_os = "linux", feature = "process"))]
 pub fn own_children() -> io::Result<Vec<i32>> {
-    let own = i32::try_from(std::process::id()).map_err(|_| invalid_pid())?;
+    let own = i32::try_from(std::process::id()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("own_children: the supervisor's own pid does not fit i32: {error}"),
+        )
+    })?;
     match read_proc_children(own) {
         Ok(mut children) => {
             children.sort_unstable();
@@ -1757,7 +1762,12 @@ pub fn enable_child_subreaper() -> io::Result<()> {
     // `PR_SET_CHILD_SUBREAPER` takes a flag, and rustix spells the flag as the
     // adopter's pid: `None` is zero, which *clears* the setting. Passing this
     // process's own pid sets it with the only adopter this supervisor can name.
-    let own_pid = i32::try_from(std::process::id()).map_err(|_| invalid_pid())?;
+    let own_pid = i32::try_from(std::process::id()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("enable_child_subreaper: the supervisor's own pid does not fit i32: {error}"),
+        )
+    })?;
     let own = rustix::process::Pid::from_raw(own_pid).ok_or_else(invalid_pid)?;
     match rustix::process::set_child_subreaper(Some(own)) {
         Ok(()) => Ok(()),
@@ -1792,7 +1802,14 @@ pub fn enable_child_subreaper() -> io::Result<()> {
 #[cfg(all(target_os = "linux", feature = "process"))]
 pub fn adopted_descendants(candidates: &[i32]) -> io::Result<BTreeSet<i32>> {
     let self_pid = std::process::id();
-    let own = match read_proc_children(i32::try_from(self_pid).map_err(|_| invalid_pid())?) {
+    let own = match read_proc_children(i32::try_from(self_pid).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "adopted_descendants: the supervisor's own pid {self_pid} does not fit i32: {error}"
+            ),
+        )
+    })?) {
         Ok(children) => children,
         Err(error) => {
             let refusal = Err(error);

@@ -64,8 +64,10 @@ fn model_valid(source: &str) -> bool {
 
 /// One drawn index below `len`.
 fn draw_index(sim: &mut sim::Sim, len: usize) -> Result<usize, Box<dyn Error>> {
-    let bound = u32::try_from(len).map_err(|_| "a draw alphabet fits u32")?;
-    usize::try_from(sim.rng().below(bound)).map_err(|_| "a u32 draw fits usize".into())
+    let bound = u32::try_from(len)
+        .map_err(|error| format!("a draw alphabet of {len} entries fits u32: {error}"))?;
+    usize::try_from(sim.rng().below(bound))
+        .map_err(|error| -> Box<dyn Error> { format!("a u32 draw fits usize: {error}").into() })
 }
 
 /// One drawn profile source.
@@ -73,7 +75,10 @@ fn draw_source(sim: &mut sim::Sim) -> Result<String, Box<dyn Error>> {
     let length = if sim.rng().below(16) == 0 {
         // Rarely overlong: the bound is the property under test.
         SandboxProfile::MAX_SOURCE_BYTES
-            .checked_add(usize::try_from(sim.rng().below(16)).map_err(|_| "a u32 draw fits usize")?)
+            .checked_add(
+                usize::try_from(sim.rng().below(16))
+                    .map_err(|error| format!("a u32 draw fits usize: {error}"))?,
+            )
             .ok_or("the overlong draw fits usize")?
     } else {
         draw_index(sim, 96)?
