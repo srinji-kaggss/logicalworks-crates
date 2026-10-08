@@ -168,9 +168,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Authority (per-call capabilities)
+
+- `lgwks_bot::cap::Cap` — `fn new(name: &str) -> Cap`. Shipped names:
+  `Cap::NET`, `Cap::FS`, `Cap::SYS`, `Cap::NOTIFY`; any other string is a
+  custom capability.
+- `lgwks_bot::gate::GrantSet` — `fn empty() -> GrantSet`,
+  `fn grant(mut self, cap: Cap) -> Self`.
+- `HostBuilder::grants(self, grants: GrantSet) -> Self` — the authority runs
+  are admitted against.
+- `lgwks_bot::script::Scope::require(&self, caps: &[Cap]) -> Result<(), FlowError>`
+  — checked at the step that reaches; the refusal carries the whole shortfall.
+
+## Supervised processes (`process` feature)
+
+- `lgwks_bot::rt::process::ProcessSpec`
+  - `fn new(program: impl AsRef<OsStr>) -> ProcessSpec`
+  - `fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self`
+  - `fn capture_stdout(&mut self, limit: NonZeroUsize) -> &mut Self` — retain at most `limit` head bytes of standard output
+  - `fn capture_stderr(&mut self, limit: NonZeroUsize) -> &mut Self`
+  - `fn deadline(&mut self, deadline: Duration) -> &mut Self` — stop the whole group past the deadline
+- `lgwks_bot::rt::supervise::Supervisor::run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError>` — run to completion under the supervisor's ceiling, deadline and process-group ownership; dropping the returned future stops the whole group.
+- `ProcessRun` — `fn exit_code(&self) -> Option<i32>`, `fn deadline_fired(&self) -> bool`, `fn stdout(&self) -> &CapturedStream`, `fn stderr(&self) -> &CapturedStream`.
+- `CapturedStream` — `fn bytes(&self) -> &[u8]` (the retained head), `fn total_bytes(&self) -> u64` (the exact total), `fn truncated(&self) -> bool`.
+- `ProcessRunError` — `Refused` (cancelled before the fork: nothing ran), `NotStarted { source }` (nothing ran), `AfterStart { source }` (ran; indeterminate).
+
 ## Notes
 
 - `each` drives its bodies on the task that awaits it and owns them; dropping the
   future drops every body, so nothing outlives the call.
 - `Host::run` applies the host's default deadline with `within`, under the scope
   `tenant/<task name>`, and reports the disposition, output and located error.
+- There is no `join!` / `try_join!` on this surface, and that is deliberate
+  rather than an omission: `FanOut` is the one-call fan-out with the caller's
+  own error type, `each` is the scoped one, and a two-future macro would be a
+  third spelling of the same bounds. A fixed pair is joined by awaiting both in
+  one async block; a pair that must stop at the first failure is a `FanOut`
+  over two items.

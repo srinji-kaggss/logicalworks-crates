@@ -28,6 +28,12 @@ keywords = ["stdlib", "zero-dependencies", "json", "tracing", "debug"]
 #   ron           — 1 crate beyond serde (bitflags — zero-dep leaf)
 #                   Rust-native config/data notation; serde-based
 #   getrandom     — 0-dep leaves in std-only mode for supported OSes
+#   ed25519-dalek — detached signatures: curve25519-dalek (fiat backend) plus
+#                   the RustCrypto signature/sha2/subtle/zeroize leaves; no
+#                   rand_core, because keygen reads lgwks_std::random instead.
+#                   default-features off with `alloc` only, so no std-gated
+#                   error impls enter: the module's typed errors carry no
+#                   upstream source.
 #   ureq          — blocking HTTP client, rustls-only (no gzip/cookies/json
 #                   extras); closure is the rustls TLS stack plus small leaves
 #   iri-string    — zero-dep URI validation leaf at default features
@@ -53,6 +59,7 @@ core = []
 trace = ["dep:tracing", "dep:tracing-subscriber"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
+sign = ["random", "hash", "dep:ed25519-dalek"]
 pattern = ["dep:regex"]
 json = ["dep:serde", "dep:serde_json"]
 ron = ["dep:serde", "dep:ron"]
@@ -61,7 +68,7 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-full = ["trace", "random", "hash", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
+full = ["trace", "random", "hash", "sign", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
 
 [dependencies]
 # `attributes` is deliberately NOT enabled. It is the half of `tracing` that
@@ -80,6 +87,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["float_roundtrip"], optional = true }
 ron = { version = "0.12", optional = true }
 getrandom = { version = "0.4", optional = true }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 iri-string = { version = "0.7", optional = true }
 rustix = { version = "1", default-features = false, features = ["std", "fs"], optional = true }

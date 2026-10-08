@@ -25,6 +25,7 @@ use std::time::Duration;
 use super::clock::Clock;
 use super::error::BotError;
 use super::gate::GrantSet;
+use super::skew::{MonoDeadline, SkewBound, lease_holds};
 
 /// A capability permission required by a bot domain.
 ///
@@ -370,12 +371,26 @@ pub struct Auth {
 /// value INV-BOT-30 forbids persisting as though it were a time. Two proofs
 /// minted on two hosts therefore both read "how long since I was issued", which
 /// is the only comparison two hosts can make soundly.
+///
+/// The expiry is a [`MonoDeadline`] on the granting clock, judged on a foreign
+/// clock only through [`crate::skew::lease_holds`] with the lease's
+/// [`SkewBound`]. A direct comparison of the deadline against a foreign reading
+/// assumes the clocks agree, which is the defect [`crate::skew`] exists to
+/// prevent.
 #[derive(Debug, Clone)]
 struct Lease {
     /// The clock the expiry is measured on, shared with whoever issued it.
     clock: Clock,
     /// The reading on that clock at which the proof stops being usable.
     expires_at: Duration,
+    /// How far a judging host's clock may disagree with the granting clock
+    /// before a cross-host check refuses (issue #278, row 2).
+    ///
+    /// Judged only by [`Auth::check_remote`](Auth::check_remote): the
+    /// same-clock [`Auth::check`](Auth::check) reads the granting clock
+    /// itself, where any disagreement is a defect rather than drift and the
+    /// bound would hide it.
+    max_skew: Duration,
 }
 
 impl Auth {
@@ -397,15 +412,37 @@ impl Auth {
         }
     }
 
-    /// Attach a credential expiry measured on `clock`.
+    /// Attach a credential expiry measured on `clock`, with no skew allowance.
     ///
     /// Crate-private because the seal is the point: a caller that could name its
     /// own expiry could mint a proof that outlives the authority behind it, and
-    /// [`GrantSet::issue`] is the only path that decides one.
+    /// [`GrantSet::issue`] is the only path that decides one. No allowance
+    /// because this is the same-clock form: [`Auth::check`] reads the granting
+    /// clock itself, where disagreement is a defect rather than drift.
     pub(crate) fn with_lease(mut self, clock: Clock, ttl: Duration) -> Self {
         self.lease = Some(Lease {
             expires_at: clock.now().saturating_add(ttl),
             clock,
+            max_skew: Duration::ZERO,
+        });
+        self
+    }
+
+    /// Attach a credential expiry measured on `clock`, judged on a foreign
+    /// clock with up to `max_skew` of disagreement allowed (issue #278, row 2).
+    ///
+    /// Crate-private for the same seal reason as [`Auth::with_lease`], and
+    /// [`GrantSet::issue_skewed`] is the only path that decides one.
+    pub(crate) fn with_skewed_lease(
+        mut self,
+        clock: Clock,
+        ttl: Duration,
+        max_skew: SkewBound,
+    ) -> Self {
+        self.lease = Some(Lease {
+            expires_at: clock.now().saturating_add(ttl),
+            clock,
+            max_skew: max_skew.get(),
         });
         self
     }
@@ -494,6 +531,59 @@ impl Auth {
         }
     }
 
+    /// The skew allowance this proof's lease carries, when its grant named an
+    /// expiry.
+    ///
+    /// `None` is two facts, and the caller can tell them apart only by asking
+    /// further: either the grant named no expiry at all (see
+    /// [`Auth::expires_at`]), or it named one with no allowance. Both judge
+    /// exactly on the granting clock.
+    #[must_use]
+    pub fn max_skew(&self) -> Option<Duration> {
+        self.lease.as_ref().map(|lease| lease.max_skew)
+    }
+
+    /// Check coverage and expiry against a **foreign** clock: the proof was
+    /// minted on its granting clock and is judged on `observer`, allowing the
+    /// two to disagree by up to the lease's [`SkewBound`] (issue #278, row 2).
+    ///
+    /// This is the cross-host form of [`Auth::check`]. Same-host callers use
+    /// that: it reads the granting clock itself, where any disagreement is a
+    /// defect rather than drift and an allowance would hide it. A caller that
+    /// judged a foreign proof with `check` assumes the clocks agree, which is
+    /// the defect [`crate::skew`] exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::CapabilityDenied`] when any required capability is not
+    /// covered, checked first so a proof that never covered the call is not
+    /// reported as merely lapsed; [`BotError::CredentialExpired`] when the
+    /// observer's reading is past the deadline plus the bound, carrying the
+    /// observer's reading as `now` so the refusal says which clock judged it.
+    pub fn check_remote(&self, required: &[Cap], observer: &Clock) -> Result<(), BotError> {
+        match Deficit::from_shortages(self.uncovered(required)) {
+            Some(deficit) => Err(BotError::CapabilityDenied { deficit }),
+            None => Ok(()),
+        }?;
+        let Some(lease) = self.lease.as_ref() else {
+            return Ok(());
+        };
+        let observer_now = observer.now();
+        if lease_holds(lease.expires_at, observer_now, lease.max_skew) {
+            return Ok(());
+        }
+        let refusal = Err(BotError::CredentialExpired {
+            capabilities: self.covers.clone(),
+            expired_at: lease.expires_at,
+            now: observer_now,
+        });
+        lgwks_std::trace::debug!(
+            error = ?refusal.as_ref().err(),
+            "check_remote: returning an error to the caller"
+        );
+        refusal
+    }
+
     /// Refuse a proof whose credential has expired, naming every capability the
     /// proof covered.
     ///
@@ -507,7 +597,10 @@ impl Auth {
             return Ok(());
         };
         let now = lease.clock.now();
-        if now < lease.expires_at {
+        // Read through the deadline type rather than comparing durations by
+        // hand: the expiry is a monotonic deadline on the granting clock, and
+        // the type is what says so.
+        if !MonoDeadline::at(lease.expires_at).is_due_on(now) {
             return Ok(());
         }
         let refusal = Err(BotError::CredentialExpired {

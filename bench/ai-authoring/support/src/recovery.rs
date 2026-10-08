@@ -42,8 +42,7 @@ fn planned_delay(seed: u64, index: u32) -> Duration {
 
 /// Why a durable unit did not produce its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnitError {
-    /// The unit at this index was configured to fail.
+pub enum UnitError {    /// The unit at this index was configured to fail.
     Unit {
         /// The unit's index, which is its identity.
         index: u32,
@@ -59,6 +58,24 @@ impl fmt::Display for UnitError {
 }
 
 impl std::error::Error for UnitError {}
+
+/// Why a `recovery` run did not return its total.
+///
+/// The task's fixed vocabulary, kept beside the world it is measured against:
+/// one definition for every arm, so a copy per reference file is how the
+/// copies drift. New references re-export this; model authors write their own
+/// from the prompt.
+#[derive(Debug)]
+pub enum RecoveryError {
+    /// The overall deadline passed before the total resolved.
+    Deadline,
+    /// The run has no durable store to replay from.
+    NoStore,
+    /// The run has no repair ledger to resume against.
+    NoLedger,
+    /// A unit failed, naming the unit's index.
+    Unit { index: u32 },
+}
 
 /// A point-in-time reading of the unit instrumentation.
 ///

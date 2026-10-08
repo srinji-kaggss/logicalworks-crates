@@ -88,6 +88,8 @@ tests = [
   "it::sys_process_binding::a_framed_record_cut_off_mid_frame_is_a_typed_refusal",
   "it::sys_process_binding::a_capture_ceiling_ends_the_framed_read_rather_than_the_child",
   "it::sys_process_binding::execute_reports_the_exit_code_and_the_captured_streams",
+  "it::t_rows_default::a_full_journal_refuses_one_more_event_and_keeps_its_history_t05",
+  "it::sim_t_rows_default::journal_counts_are_exact_for_every_seed_t05",
 ]
 
 [[row]]
@@ -218,6 +220,8 @@ tests = [
   "it::repair::the_root_budget_stays_charged_across_repair_and_resume_t13",
   "it::repair::a_denied_repair_costs_nothing",
   "it::sim_repair::a_spent_budget_refuses_every_later_attempt",
+  "it::t_rows_default::a_repair_charges_the_root_budget_and_never_resets_it_t13",
+  "it::sim_t_rows_default::repairs_charge_exactly_their_spend_for_every_seed_t13",
 ]
 
 [[row]]
@@ -234,6 +238,9 @@ tests = [
   "it::durable_crash_observation::a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt",
   "it::durable_crash_observation::a_settlement_recorded_before_a_real_kill_is_the_recovered_answer",
   "it::effect_journal::e11_a_blind_resend_is_not_representable",
+  "it::t_rows_default::a_recorded_answer_replays_without_a_new_request_t15",
+  "it::t_rows_default::a_compatible_resume_replays_while_a_revised_definition_is_a_typed_drift_t15",
+  "it::sim_t_rows_default::resumes_replay_or_refuse_drift_for_every_seed_t15",
 ]
 
 [[row]]
@@ -279,6 +286,8 @@ tests = [
   "it::durable_dispatch::a_restart_holds_an_uncertain_attempt_rather_than_resending_it",
   "it::sim_journal::recover_uncertain_r00",
   "it::sim_journal::recover_uncertain_r01",
+  "it::t_rows_default::a_dropped_waiter_leaves_uncertainty_and_a_later_client_settles_it_t17",
+  "it::sim_t_rows_default::dropped_waiters_settle_under_the_same_run_for_every_seed_t17",
 ]
 
 [[row]]
@@ -351,6 +360,8 @@ tests = [
   "it::t22_process_surface::the_readable_description_surface_compiles_for_an_external_consumer",
   "it::t22_process_surface::the_sanctioned_runner_accepts_the_same_description",
   "it::t22_process_surface::supervisor_is_the_sanctioned_process_runner",
+  "it::t_rows_default::without_the_process_feature_a_process_description_is_unnameable_t22",
+  "it::sim_t_rows_default::subject_names_validate_identically_for_every_seed_t22",
 ]
 
 [[row]]
@@ -367,6 +378,8 @@ tests = [
   "it::repair::a_blocked_run_leaves_its_finished_analysis_recorded",
   "it::sim_repair::a_wide_need_set_costs_one_analysis",
   "it::sim_spec_materialize::generated_specs_admit_exactly_their_injected_needs",
+  "it::t_rows_default::a_first_step_reach_is_blocked_at_admission_costing_nothing_t23",
+  "it::sim_t_rows_default::shortfalls_name_exactly_the_seeded_subset_for_every_seed_t23",
 ]
 
 [[row]]
@@ -381,6 +394,8 @@ tests = [
   "it::repair::an_over_wide_grant_is_refused_rather_than_narrowed",
   "it::sim_repair::a_bounded_sweep_repairs_every_ticket_once",
   "it::sim_repair::every_repair_charges_the_root_budget_once",
+  "it::t_rows_default::a_ticket_applies_once_and_a_denied_or_wide_grant_changes_nothing_t24",
+  "it::sim_t_rows_default::tickets_apply_once_for_every_seed_t24",
 ]
 
 [[row]]
@@ -425,6 +440,9 @@ gap = ""
 tests = [
   "it::proposal::a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27",
   "it::proposal::a_truncated_payload_never_becomes_a_full_coverage_claim",
+  "it::t_rows_default::a_checkpoint_round_trip_preserves_work_corrections_unknowns_and_evidence_t27",
+  "it::sim_t_rows_default::checkpoints_round_trip_for_every_seed_t27",
+  "it::sim_t_rows_default::torn_records_are_refused_at_every_cut_for_every_seed_t27",
 ]
 
 [[row]]
@@ -473,6 +491,8 @@ tests = [
   "it::request_key::a_reattach_survives_a_reopened_store",
   "it::sim_request_key::drop_and_reattach_band_08",
   "it::sim_request_key::collisions_across_two_tenants_band_00",
+  "it::t_rows_default::one_key_one_payload_conflict_reattach_and_distinct_keys_t30",
+  "it::sim_t_rows_default::keys_reattach_conflict_and_isolate_for_every_seed_t30",
 ]
 
 [[row]]
@@ -493,6 +513,8 @@ tests = [
   "it::gh_binding::an_unavailable_diff_is_a_typed_coverage_refusal",
   "it::gh_binding::a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal",
   "it::gh_binding::a_review_list_past_the_ceiling_is_refused_not_truncated",
+  "it::t_rows_default::without_a_runner_nothing_executes_and_subjects_stay_typed_t31",
+  "it::sim_t_rows_default::runnerless_calls_refuse_norunner_for_every_seed_t31",
 ]
 
 [[row]]
@@ -505,6 +527,8 @@ tests = [
   "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing_t32",
   "sim_review_path::head_moved_between_snapshot_and_publish_r32",
   "sim_review_path::a_publication_is_pinned_to_the_read_commit",
+  "it::t_rows_default::a_moved_head_is_detectable_as_reviewed_a_current_b_t32",
+  "it::sim_t_rows_default::moves_detect_exactly_when_shas_differ_for_every_seed_t32",
 ]
 
 [[row]]
@@ -521,6 +545,8 @@ tests = [
   "it::pr_review_journey::a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled",
   "sim_review_path::duplicate_submission_r16",
   "sim_review_path::verified_and_not_observed_r32",
+  "it::t_rows_default::reconciliation_verifies_the_exact_review_or_stays_unknown_t33",
+  "it::sim_t_rows_default::bodies_verify_exactly_when_they_match_for_every_seed_t33",
 ]
 
 [[row]]
@@ -534,6 +560,8 @@ tests = [
   "sim_review_path::an_unverified_effect_retains_its_review_id",
   "sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
   "it::gh_binding::a_record_still_being_appended_is_not_read_back",
+  "it::t_rows_default::a_read_back_review_proves_its_exact_identity_t34",
+  "it::sim_t_rows_default::records_prove_their_exact_identities_for_every_seed_t34",
 ]
 
 [[row]]

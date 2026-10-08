@@ -58,6 +58,23 @@ approved_on = "2026-09-17"
 review = "docs/appcui-admission.md"
 
 [[approved]]
+crate = "ed25519-dalek"
+tier = "boundary"
+version = "^2.2"
+license = "BSD-3-Clause"
+owner = "lgwks_std"
+capability = "sign.ed25519"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "normal"
+uses_default_features = "false"
+features = "alloc"
+reason = "Detached ed25519 seals that verify offline from the public key alone (#316): BLAKE3 gives MACs only under a shared secret, while a sealed run record must verify from the public key with no secret on the verifier; the standard library has no asymmetric primitive. Same crate and version the consumer seals with, so its direct edge deletes on migration. Lean stack: default-features off with alloc only, so no rand_core enters — key generation reads lgwks_std::random — and the compiled closure is curve25519-dalek plus the RustCrypto signature/sha2/subtle/zeroize leaves."
+approved_by = "maintainer"
+approved_on = "2026-10-07"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/316"
+
+[[approved]]
 crate = "serde"
 tier = "boundary"
 version = "^1"

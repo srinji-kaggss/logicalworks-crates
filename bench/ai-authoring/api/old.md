@@ -113,9 +113,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Authority (per-call capabilities)
+
+- `lgwks_bot::cap::Cap` — `fn new(name: &str) -> Cap`. Shipped names:
+  `Cap::NET`, `Cap::FS`, `Cap::SYS`, `Cap::NOTIFY`; any other string is a
+  custom capability.
+- `lgwks_bot::gate::GrantSet` — `fn empty() -> GrantSet`,
+  `fn grant(mut self, cap: Cap) -> Self`.
+- `lgwks_bot::rt::cancel::CancellationToken` is above; authority is separate
+  from cancellation: a cancelled run stops, a refused run never starts.
+
+## Supervised processes (`process` feature)
+
+- `lgwks_bot::rt::process::ProcessSpec`
+  - `fn new(program: impl AsRef<OsStr>) -> ProcessSpec`
+  - `fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self`
+  - `fn capture_stdout(&mut self, limit: NonZeroUsize) -> &mut Self` — retain at most `limit` head bytes of standard output
+  - `fn capture_stderr(&mut self, limit: NonZeroUsize) -> &mut Self`
+  - `fn deadline(&mut self, deadline: Duration) -> &mut Self` — stop the whole group past the deadline
+- `lgwks_bot::rt::supervise::Supervisor::run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError>` — run to completion under the supervisor's ceiling, deadline and process-group ownership; dropping the returned future stops the whole group.
+- `ProcessRun` — `fn exit_code(&self) -> Option<i32>`, `fn deadline_fired(&self) -> bool`, `fn stdout(&self) -> &CapturedStream`, `fn stderr(&self) -> &CapturedStream`.
+- `CapturedStream` — `fn bytes(&self) -> &[u8]` (the retained head), `fn total_bytes(&self) -> u64` (the exact total), `fn truncated(&self) -> bool`.
+- `ProcessRunError` — `Refused` (cancelled before the fork: nothing ran), `NotStarted { source }` (nothing ran), `AfterStart { source }` (ran; indeterminate).
+
 ## Notes
 
 - There is no `spawn` that returns a droppable handle to a running task.
   `JoinSet` owns what it starts, and dropping the set aborts.
 - `join_all_bounded` bounds concurrency but does not fail fast: to stop on the
   first failure you must start work in bounded waves and check each wave.
+- There is no `join!` / `try_join!` on this surface, and that is deliberate
+  rather than an omission: the surface joins a *bounded set* of tasks
+  (`join_all_bounded`, `JoinSet`) or races against a deadline (`timeout`,
+  `run_until_cancelled`), and a two-future macro would be a third spelling of
+  the same bounds. A pair of futures is joined by awaiting both in one async
+  block, or by putting both in a `JoinSet` and reading the two reports.
