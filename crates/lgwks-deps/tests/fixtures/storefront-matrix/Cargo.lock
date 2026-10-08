@@ -3963,7 +3963,6 @@ name = "lgwks_std"
 version = "2.2.0"
 dependencies = [
  "getrandom 0.4.3",
- "rustix 1.1.5",
  "serde",
  "serde_json",
  "tracing",

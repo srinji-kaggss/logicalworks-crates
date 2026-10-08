@@ -45,6 +45,7 @@ mod sim_hash;
 mod sim_hex;
 mod sim_http;
 mod sim_id;
+mod sim_kernel_owners;
 mod sim_leb128;
 mod sim_locale;
 mod sim_measured_paths;
