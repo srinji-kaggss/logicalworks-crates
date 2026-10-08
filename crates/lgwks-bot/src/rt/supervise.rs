@@ -3960,6 +3960,11 @@ fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     // The group kill reaches what the child spawned; `OwnedChild`'s drop-time
     // kill reaches the direct child on the paths where no group kill ran.
     command.process_group(0);
+    // Under the start-sweep lock from the spawn until the track below: a new
+    // leader is sweepable before it is tracked, so the lock keeps every
+    // adoption pass from collecting a leader that exits fast.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    let _start_sweep = crate::journal::owner::lock(&START_SWEEP);
     let child = OwnedChild::own(command.into_std().spawn()?)?;
     // Read before the child is awaited: an unreaped child still has its id,
     // and a group leader's group id is its own pid, which `process_group(0)`
@@ -3969,6 +3974,11 @@ fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     // the leader, its pid is somebody's answer rather than an adoptee.
     #[cfg(all(target_os = "linux", feature = "process"))]
     track_leader(group);
+    // Released before the collection below: the pass takes the same lock, and
+    // a mutex is not reentrant, so holding it across the call would deadlock
+    // the start on its own sweep.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    drop(_start_sweep);
     // A start is the second moment adopted zombies are collected, beside the
     // confirmation pass: a supervisor that only ever starts children still
     // releases the adoptees its earlier trees stranded.
@@ -3976,6 +3986,20 @@ fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     let _collected = sweep_adopted();
     Ok((child, group))
 }
+
+/// Serialises a start's spawn-to-track against every adoption sweep.
+///
+/// [`track_leader`] runs after [`OwnedChild::own`], and owning takes locks and
+/// builds pipe readers: under concurrency the new leader is visible in the
+/// process table — and therefore sweepable — before it is tracked. A sweep
+/// pass landing in that window collects a leader that exits fast, and its
+/// driver's exit observation fails with `ECHILD`, which surfaces as an
+/// unobservable run with no exit code. Both sides hold this lock — the start
+/// from the spawn until the track, the sweep for the whole scan-and-reap pass —
+/// so a pass never interleaves a start. Short holds only, never across an
+/// await: the spawn and the nonblocking reaps are both synchronous.
+#[cfg(all(target_os = "linux", feature = "process"))]
+static START_SWEEP: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// How many tree scopes this process has named, disambiguating reused pids.
 ///
@@ -4073,8 +4097,12 @@ fn unclaimed_children() -> Vec<i32> {
 /// not parked orphans — returning how many it collected. A refusal or an
 /// unreadable child list waits for the next sweep rather than failing the
 /// caller; the confirming sweep below is the one that waits out the deaths.
+/// The whole pass holds the start-sweep lock, so it never interleaves a
+/// start's spawn-to-track: without that a pass could collect a leader that
+/// exits before its driver tracks it, stealing its driver's exit.
 #[cfg(all(target_os = "linux", feature = "process"))]
 fn sweep_adopted() -> usize {
+    let _start_sweep = crate::journal::owner::lock(&START_SWEEP);
     let zombies = unclaimed_children();
     if zombies.is_empty() {
         return 0;
