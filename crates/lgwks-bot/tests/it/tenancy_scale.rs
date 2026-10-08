@@ -373,12 +373,19 @@ fn submitter_share(
 ) -> Result<u128, String> {
     let submits = u128::from(
         u64::try_from(tasks.saturating_mul(rounds))
-            .map_err(|_| String::from("the round count does not fit in u64"))?,
+            .map_err(|error| format!("the round count does not fit in u64: {error}"))?,
     );
     let mean_arrival = mean_nanos(arrival_nanos, arrivals)?;
     let wall_per_submit = match wall.as_nanos().checked_div(submits.max(1)) {
         Some(nanos) => nanos,
-        None => return Err(String::from("one submission has no wall")),
+        None => {
+            lgwks_std::trace::warn!(
+                tasks,
+                rounds,
+                "tenancy_scale it: one submission has no wall to divide"
+            );
+            return Err(String::from("one submission has no wall"));
+        }
     };
     per_mille(mean_arrival, wall_per_submit)
 }
@@ -394,7 +401,14 @@ fn per_mille(part: u64, whole: u128) -> Result<u128, String> {
         .checked_div(whole.max(1))
     {
         Some(share) => Ok(share),
-        None => Err(String::from("a per-mille share has no ratio")),
+        None => {
+            lgwks_std::trace::warn!(
+                part,
+                whole = %whole,
+                "tenancy_scale it: a per-mille share has no ratio"
+            );
+            Err(String::from("a per-mille share has no ratio"))
+        }
     }
 }
 
@@ -403,6 +417,7 @@ fn per_mille(part: u64, whole: u128) -> Result<u128, String> {
 /// than dividing by zero.
 fn mean_nanos(nanos: u64, decisions: u64) -> Result<u64, String> {
     if decisions == 0 {
+        lgwks_std::trace::warn!("tenancy_scale it: the arm took no arrival decisions to average");
         return Err(String::from("the arm took no arrival decisions to average"));
     }
     match u128::from(nanos).checked_div(u128::from(decisions)) {
@@ -460,6 +475,9 @@ async fn neighbour_arm(
     while supervisor.tenant_capacity(neighbour).0 > 0 || supervisor.tenant_capacity(attacker).0 > 0
     {
         if quiet_since.elapsed() > Duration::from_secs(10) {
+            lgwks_std::trace::warn!(
+                "tenancy_scale it: the arm's admitted tasks never finished within 10 s"
+            );
             return Err(String::from(
                 "the arm's admitted tasks never finished within 10 s",
             ));
@@ -470,12 +488,22 @@ async fn neighbour_arm(
     let report = supervisor.shutdown().await;
     let submitted = tasks.saturating_mul(flood.saturating_add(1));
     if report.stats().spawned != wide(submitted)? {
+        lgwks_std::trace::warn!(
+            spawned = report.stats().spawned,
+            submitted,
+            "tenancy_scale it: the arm admitted a different task count than submitted"
+        );
         return Err(format!(
             "the arm admitted {} tasks, not the {submitted} both tenants submitted",
             report.stats().spawned
         ));
     }
     if report.stats().completed != report.stats().spawned {
+        lgwks_std::trace::warn!(
+            completed = report.stats().completed,
+            spawned = report.stats().spawned,
+            "tenancy_scale it: the arm completed fewer than the admitted tasks"
+        );
         return Err(format!(
             "the arm completed {} of {} admitted tasks",
             report.stats().completed,

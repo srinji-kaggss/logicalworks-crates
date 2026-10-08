@@ -118,7 +118,9 @@ impl HostId {
         }
     }
 
-    /// The coordinator's name.
+    /// The identity this coordinator presents when it acquires a lease: the
+    /// holder the authority records on the grant, so refusals and recovery
+    /// can name who held what.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -420,6 +422,11 @@ impl GrantChannel for LoopbackChannel {
     /// [`ChannelError`] while the partition flag is set.
     fn validate(&self, lease: &Lease) -> Result<bool, ChannelError> {
         if self.partitioned() {
+            lgwks_std::trace::warn!(
+                holder = %lease.holder().name(),
+                epoch = lease.epoch(),
+                "dist_lease: validation refused while the channel is partitioned"
+            );
             return Err(ChannelError::partitioned());
         }
         Ok(self.handle.check(lease).is_ok())
@@ -522,6 +529,10 @@ impl<T> WorkQueue<T> {
     /// [`QueueError::ZeroCapacity`] when `capacity` is zero.
     pub fn new(capacity: usize) -> Result<Self, QueueError> {
         if capacity == 0 {
+            lgwks_std::trace::warn!(
+                capacity,
+                "dist_lease: work queue refused: zero capacity holds nothing"
+            );
             return Err(QueueError::ZeroCapacity);
         }
         Ok(Self {
@@ -537,6 +548,11 @@ impl<T> WorkQueue<T> {
     /// still in hand.
     pub fn try_push(&mut self, item: T) -> Result<(), Overfull<T>> {
         if self.queue.len() >= self.capacity {
+            lgwks_std::trace::warn!(
+                len = self.queue.len(),
+                capacity = self.capacity,
+                "dist_lease: work queue full; refusing push with the item returned to the caller"
+            );
             return Err(Overfull::refused(item, self.capacity));
         }
         self.queue.push_back(item);
