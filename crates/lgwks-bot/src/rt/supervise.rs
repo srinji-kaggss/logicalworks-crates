@@ -3923,12 +3923,15 @@ impl Drop for Supervisor {
     /// reparents orphaned descendants to this process, and without a reap
     /// they stay `kill(pid, 0)`-present past the death they report. The sweep
     /// reaps only this process's own children outside the live and parked
-    /// sets, so it cannot take a pid another owner still tracks.
+    /// sets, so it cannot take a pid another owner still tracks. Best effort
+    /// and single-pass — `Drop` cannot await the deaths, so a zombie still
+    /// dying here is collected by the next cleanup's confirming sweep rather
+    /// than waited on.
     fn drop(&mut self) {
         self.token.cancel();
         self.set.abort_all();
         #[cfg(all(target_os = "linux", feature = "process"))]
-        let _collected = sweep_adopted_confirmed();
+        let _collected = sweep_adopted();
     }
 }
 
@@ -4064,6 +4067,12 @@ fn unclaimed_children() -> Vec<i32> {
         .collect()
 }
 
+/// Reap the unclaimed children of this process once, best effort.
+///
+/// One nonblocking pass over the children no driver owns — not live leaders,
+/// not parked orphans — returning how many it collected. A refusal or an
+/// unreadable child list waits for the next sweep rather than failing the
+/// caller; the confirming sweep below is the one that waits out the deaths.
 #[cfg(all(target_os = "linux", feature = "process"))]
 fn sweep_adopted() -> usize {
     let zombies = unclaimed_children();
@@ -4081,23 +4090,23 @@ fn sweep_adopted() -> usize {
 
 /// Reap unclaimed children until none remain or the bound is spent.
 ///
-/// The confirming half of [`sweep_adopted`] for paths that cannot await: a
-/// signalled process dies on the kernel's schedule, and a single nonblocking
-/// reap attempted before the death lands leaves a zombie no later pass
-/// collects. This waits for the deaths, bounded (400 × 5 ms like the async
-/// adoption reap), so a supervisor that goes out of scope takes its adopted
-/// zombies with it rather than leaving them `kill -0`-present behind it.
-/// Synchronous like the rest of the drop path; only ever waits on processes
-/// that are already children of this process.
+/// The confirming half of [`sweep_adopted`]: a signalled process dies on the
+/// kernel's schedule, and a single nonblocking reap attempted before the death
+/// lands leaves a zombie no later pass collects. This waits for the deaths,
+/// bounded (400 × 5 ms like the async adoption reap), so the cleanup that
+/// observes a tree takes its stranded adoptees with it rather than leaving
+/// them `kill -0`-present behind it. Async like the rest of the cleanup path,
+/// so the wait parks on the runtime clock instead of blocking its thread;
+/// only ever waits on processes that are already children of this process.
 #[cfg(all(target_os = "linux", feature = "process"))]
-fn sweep_adopted_confirmed() -> usize {
+async fn sweep_adopted_confirmed() -> usize {
     let mut collected = 0usize;
     for _ in 0..400 {
         if unclaimed_children().is_empty() {
             break;
         }
-        collected += sweep_adopted();
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        collected = collected.saturating_add(sweep_adopted());
+        crate::rt::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     collected
 }
@@ -5370,9 +5379,13 @@ impl<'ops> ProcessGroup<'ops> {
         self.adopt_orphans().await;
         // Stranded adoptees of earlier trees — orphans adopted after their own
         // guard's pass — are collected here rather than left as rows `kill -0`
-        // still reports present.
+        // still reports present. Confirming, not single-pass: a stranded
+        // adoptee still dying on the kernel's schedule when the sweep first
+        // looks would otherwise survive into the observation below as a false
+        // survivor, so the sweep waits out the deaths within the same bound
+        // the adoption reap uses.
         #[cfg(all(target_os = "linux", feature = "process"))]
-        let _collected = sweep_adopted();
+        let _collected = sweep_adopted_confirmed().await;
         // The scope's own confirmation before the rounds: an empty member
         // list is the kernel's evidence that nothing of the tree is left, and
         // a non-empty one joins the survivors the rounds observe, so an early
