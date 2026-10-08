@@ -228,6 +228,9 @@ DROP_CLAUSE_BY_TASK = {
     "aggregate": "dropping_the_future_leaves_no_fetch_live",
     "pipeline": "dropping_the_future_leaves_no_stage_live",
     "recovery": "dropping_the_future_leaves_no_unit_live",
+    "capture": "cancelling_leaves_no_descendant",
+    "tenant-cache": "dropping_mid_flight_leaves_the_cache_usable",
+    "durable-retry": "dropping_mid_wait_applies_nothing_twice",
 }
 
 
@@ -532,7 +535,14 @@ def oracle_test_names(oracle_source: str) -> list:
 #: mutant is the new one plus a mutation. Naming it here rather than guessing
 #: `old-` from the task name is what keeps "the mutant is one mutation away
 #: from a reference that passes" true for a task with only one reference.
-MUTANT_BASE = {"aggregate": "old", "pipeline": "old", "recovery": "new"}
+MUTANT_BASE = {
+    "aggregate": "old",
+    "pipeline": "old",
+    "recovery": "new",
+    "capture": "new",
+    "tenant-cache": "new",
+    "durable-retry": "new",
+}
 
 #: Tasks the old `lgwks_bot::rt` surface cannot express at all, with the reason.
 #:
@@ -548,6 +558,40 @@ NEW_ONLY_TASK_WHY = (
     "the old rt surface has no durable run store, no remember, no run identity "
     "and no resume, so it keeps no record of a completed unit to consult and "
     "cannot express 'finish the work without redoing a completed unit'"
+)
+
+#: Tasks the old `lgwks_bot::rt` surface cannot express at all, for the same
+#: reason `recovery` is new-only: a cell asking for one would measure a model
+#: guessing at a capability the sheet does not offer.
+#:
+#: `capture` has no old-API arm because the old sheet offers no supervised
+#: process spawn: `Supervisor::run_process` is outside the sheet, so the task
+#: that needs owned processes, bounded capture and group cleanup cannot be
+#: written from it. The omission is recorded in the run's protocol block like
+#: `recovery`'s, rather than left for a reader to notice.
+NO_OLD_TASKS = {"capture"}
+
+#: Why `capture` has no old-API arm.
+NO_OLD_TASK_WHY = (
+    "the old rt sheet offers no supervised process spawn, so the task that "
+    "needs owned processes, bounded capture and group cleanup cannot be "
+    "written from it"
+)
+
+#: Tasks the `futures` sheet cannot express at all.
+#:
+#: `recovery` has no futures arm for the same reason it has no old arm: the
+#: futures sheet offers no durable run store, no `remember`, no run identity
+#: and no resume, so a cell asking for one would measure a model guessing at
+#: a capability the sheet does not offer.
+NO_FUTURES_TASKS = {"recovery"}
+
+#: Why `recovery` has no futures arm.
+NO_FUTURES_TASK_WHY = (
+    "the futures sheet offers no durable run store, no remember, no run "
+    "identity and no resume, so it keeps no record of a completed unit to "
+    "consult and cannot express 'finish the work without redoing a completed "
+    "unit'"
 )
 
 
@@ -819,8 +863,11 @@ def main() -> int:
         default="stealth/space-bunny-alpha,deepseek/deepseek-v4.1-flash",
         help="comma-separated fixed model ids",
     )
-    parser.add_argument("--apis", default="old,new")
-    parser.add_argument("--tasks", default="aggregate,pipeline,recovery")
+    parser.add_argument("--apis", default="old,new,script")
+    parser.add_argument(
+        "--tasks",
+        default="aggregate,pipeline,recovery,capture,tenant-cache,durable-retry",
+    )
     parser.add_argument(
         "--profiles",
         default=",".join(DEFAULT_PROFILES),
@@ -948,20 +995,45 @@ def main() -> int:
     # `recovery` has no old-API arm, because the old `rt` surface has no durable
     # run store, no `remember`, no run identity and no resume — so it cannot
     # express the task at all, and a cell asking for one would measure a model
-    # guessing at a capability the API does not have. The omission is recorded in
-    # the run's protocol block rather than left for a reader to notice.
-    skipped = [
-        {"task": task, "api": "old", "why": NEW_ONLY_TASK_WHY}
-        for task in tasks
-        if task in NEW_ONLY_TASKS
+    # guessing at a capability the API does not have. `capture` has no old-API
+    # arm either, because the old sheet offers no supervised process spawn, and
+    # `recovery` has no futures arm either, because that sheet offers no
+    # durable store. All three omissions are recorded in the run's protocol
+    # block rather than left for a reader to notice.
+    skipped = (
+        [
+            {"task": task, "api": "old", "why": NEW_ONLY_TASK_WHY}
+            for task in tasks
+            if task in NEW_ONLY_TASKS
+        ]
+        + [
+            {"task": task, "api": "old", "why": NO_OLD_TASK_WHY}
+            for task in tasks
+            if task in NO_OLD_TASKS
+        ]
+        + [
+            {"task": task, "api": "futures", "why": NO_FUTURES_TASK_WHY}
+            for task in tasks
+            if task in NO_FUTURES_TASKS
+        ]
+    )
+    jobs = [
+        job
+        for job in jobs
+        if not (
+            (
+                (job["task"] in NEW_ONLY_TASKS or job["task"] in NO_OLD_TASKS)
+                and job["api"] == "old"
+            )
+            or (job["task"] in NO_FUTURES_TASKS and job["api"] == "futures")
+        )
     ]
-    jobs = [job for job in jobs if not (job["task"] in NEW_ONLY_TASKS and job["api"] == "old")]
     if skipped:
-        print(f"skipped {len(skipped)} old-API cell(s): " + ", ".join(
-            f"{item['task']}/old" for item in skipped
+        print(f"skipped {len(skipped)} cell(s): " + ", ".join(
+            f"{item['task']}/{item['api']}" for item in skipped
         ))
         for item in skipped:
-            print(f"  {item['task']}/old: {item['why']}")
+            print(f"  {item['task']}/{item['api']}: {item['why']}")
 
     records = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:

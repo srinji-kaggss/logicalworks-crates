@@ -114,6 +114,32 @@ as `tests/oracle.rs`; it asserts on the harness instrumentation, one
   recorded in every run's `summary.json` under `protocol.skipped_cells` rather
   than left as a missing row.
 
+- **`capture`** — `solve(argv, head_limit, deadline)`. Clauses: a small output
+  returns its exact head and total (1); a 70 MB flood stays within the
+  four-kibibyte ceiling with the exact total and the truncated flag (2); an
+  unstartable program is a typed `Spawn` refusal (3); a 300 ms deadline stops
+  the whole group (4); a completed run leaves no orphaned grandchild (5);
+  dropping the future leaves no descendant and no new zombie, promptly (6).
+  Unix-only: every clause forks `sh` grandchildren and reads the process
+  table, under per-process markers so sibling trials never match each other.
+
+  **`capture` has no old-API arm, for the same architectural reason in the
+  other direction.** The old sheet offers no supervised process spawn, so the
+  task cannot be written from it. The omission is recorded under
+  `protocol.skipped_cells` like `recovery`'s.
+- **`tenant-cache`** — `solve(tenant, resource, token)`. Clauses: the same
+  request resolves the same bytes twice (1); two tenants on one resource stay
+  isolated (2); a wrong token is refused and caches nothing (3); another
+  tenant's token is refused (4); a thousand mixed calls across ten resources
+  and both tenants all resolve their own value (5); dropping mid-flight leaves
+  the cache usable (6).
+- **`durable-retry`** — `solve(effect_dir, key, deadline)`. Clauses: a fresh
+  call applies once and returns `applied:{key}` (1); the status is never
+  `Unknown` (2); waiting past the deadline is typed (3); dropping mid-wait
+  applies nothing twice (4); `SIGKILL` mid-effect (Unix-only, in a child
+  running the phase-1 test) followed by an in-process recovery applies exactly
+  once in total and returns `recovered:{key}` (5).
+
 The oracles are deterministic: no counter is asserted on a wall-clock sleep. The
 only waits are short ones that let a future begin, plus the 200 ms the drop
 clause allows a cancelled body to be counted out. The `recovery` oracle's
@@ -340,12 +366,109 @@ count did not stop the clause catching a solution that re-runs.
 temp root, so it reproduces only on the host that ran the trials; the verdicts
 it wrote are committed beside the run.
 
+## Results: the `script!` arm and the guarantee tasks v2 (`runs/20261008T003455Z-dry/`, `runs/20261008T005932Z-dry/`)
+
+The frontier follow-up to the table above (#270): a fifth arm for the
+`script!` language (`api/script.md`, added with `try_join!`/`join!` notes on
+the old, new and fan sheets documenting why those macros do not exist there),
+and three held-out tasks whose oracles fail any solution lacking the
+guarantee. The `futures` arm is the same ecosystem comparator, scored as the
+negative control it is: a plain `Command::output`, a resource-keyed map with
+no token check, and an append-without-readback.
+
+140 dry trials (reference solutions, ten per cell, first profile only — a canned
+solution never reads the persona, so five copies would be one trial wearing
+five labels). Every trial compiled; every `lgwks_bot` cell passed every clause
+of its task on all ten trials; every `futures` cell failed exactly the
+guarantee clauses on all ten trials, with zero variance anywhere:
+
+| arm | capture (6 clauses) | tenant-cache (6) | durable-retry (6) | consumer lines (c/t/d) |
+|---|---|---|---|---|
+| `script` | 10/10 | 10/10 | 10/10 | 62 / 31 / 43 |
+| `new` | 10/10 | 10/10 | 10/10 | 40 / 37 / 45 |
+| `fan` | 10/10 | 10/10 | 10/10 | 53 / 17 / 47 |
+| `old` | — (no process spawn on the sheet) | 10/10 | 10/10 | — / 26 / 30 |
+| `futures` | 0/10 (3/6 each) | 0/10 (2/6 each) | 0/10 (4/6 each) | 28 / 19 / 22 |
+
+The `futures` failures, identical on all ten trials per cell, are the negative
+control for every new oracle:
+
+- `capture`: fails the 70 MB flood (retains everything), the orphaned
+  grandchild (outlives the call) and the promptness of the cancel (blocks
+  through the sleep); passes the small output, the spawn refusal and the slow
+  deadline verdict.
+- `tenant-cache`: fails the two-tenant isolation, both token refusals and the
+  thousand-call mix; passes consistency and post-drop usability.
+- `durable-retry`: fails the drop-then-recover duplicate and the kill-then-
+  recover duplicate; passes the fresh call, the known status and the deadline.
+
+What this supports, stated per task including where `lgwks_bot` does not win:
+
+- **`capture`: every `lgwks_bot` arm passes everything; `futures` keeps 3 of
+  6.** The guarantee holds on all four surfaces that expose it. On lines the
+  order inverts: `futures` 28, `new` 40, `fan` 53, `script` 62. The DSL costs
+  the most lines here and buys nothing over the facade on this task — the
+  supervisor does the owning in all four.
+- **`tenant-cache`: every `lgwks_bot` arm passes everything; `futures` keeps 2
+  of 6.** `fan` wins lines outright at 17 (one `FanOut` over one read), ahead
+  of `futures` at 19 — the one task where a facade arm is also the shortest.
+- **`durable-retry`: every `lgwks_bot` arm passes everything; `futures` keeps 4
+  of 6.** The two failures are the two that matter: exactly-once across a
+  drop and across a `SIGKILL`.
+- **No variance, no intervals.** Ten identical verdicts per cell is a
+  deterministic reference replayed, not ten model samples: confidence
+  intervals over model behaviour need the model matrix below, which has not
+  run. Nothing here claims one.
+- **The harness leaves no orphan process.** `ps` after each run shows no
+  oracle, solution or sleep process; the capture oracle asserts it per trial
+  under per-process markers.
+
+## Model and human cells: READY-NOT-RUN
+
+The cells above prove the harness, the tasks and the oracles — including both
+halves of every negative control — but they are references, not measurements
+of authors. The frontier matrix the issue requires (at least three models with
+at least one frontier closed model, at least two human authors on a subset,
+ten trials per cell, 95% intervals with no claim over overlaps) has not run:
+this host holds no frontier-model credential and no human authors. The exact
+commands, ready to launch where those exist:
+
+```sh
+AI_AUTHORING_CMD=<cli> python3 bench/ai-authoring/run.py \
+    --models <frontier-closed-id>,stealth/space-bunny-alpha,deepseek/deepseek-v4.1-flash \
+    --apis old,new,fan,futures,script \
+    --tasks aggregate,pipeline,recovery,capture,tenant-cache,durable-retry \
+    --profiles first-time,expert-hurry,anxious,misuser,agent \
+    --trials 10 --parallel 6
+python3 bench/ai-authoring/run.py --dry-run --trials 10 \
+    --apis fan,old --tasks capture,tenant-cache,durable-retry
+python3 bench/ai-authoring/run.py --mutants \
+    --tasks aggregate,pipeline,recovery,capture,tenant-cache,durable-retry
+```
+
+`--tasks`/`--apis` default to the full v2 set (`old,new,script` arms — `fan`
+and `futures` select explicitly — and all six tasks); `capture/old`,
+`recovery/old` and `recovery/futures` are recorded under
+`protocol.skipped_cells` with the architectural reason, never silently
+dropped.
+
 ## Proof the plumbing works: references and mutants
 
 `reference/<api>-<task>.rs` are hand-written correct solutions, one per API and
-task. They are the dry-run's canned solutions and the proof that each task is
-solvable in each API. `recovery` has only `new-recovery.rs`, for the reason given
-above. Every reference compiles and passes every oracle clause of its task.
+task the sheet can express. They are the dry-run's canned solutions and the
+proof that each task is solvable in each API. `recovery` has only
+`new-recovery.rs` (and now `script-recovery.rs`), for the reason given above;
+`capture` has no `old-capture.rs`, because the old sheet offers no supervised
+process spawn; `recovery` has no `futures-recovery.rs`, because the combinators
+have no durable surface. Every reference compiles and passes every oracle
+clause of its task — 140 dry trials across the two v2 runs, every one green.
+
+The tasks' fixed vocabularies (`CaptureError`/`CaptureResult`, `CacheError`,
+`RecoverError`, and now `aggregate::SolveError`, `pipeline::PipelineError`
+and `recovery::RecoveryError`) live in `support/` with one definition per
+task, which the references re-export: the prompt fixes these items, so a copy
+per reference file is how the copies drift. Model authors still write their
+own from the prompt.
 
 `reference/mutant-<task>.rs` are deliberately wrong inputs, one per task. Each is
 its reference — placed beside the mutant as `mod reference`, never forked — plus
@@ -357,6 +480,9 @@ intended clause:
 | `mutant-aggregate` (unbounded fan-out) | `join_all_bounded(usize::MAX, …)` | `at_most_four_fetches_are_in_flight` | `the_overall_deadline_is_honoured` |
 | `mutant-pipeline` (detached spawn, leaked task set) | work handed to a process-lifetime `JoinSet` | `dropping_the_future_leaves_no_stage_live` | — |
 | `mutant-recovery` (a private store per attempt) | each attempt books a fresh store directory, so the resume finds nothing | `a_resume_does_not_rerun_a_completed_unit` | — |
+| `mutant-capture` (unbounded retain) | the whole output is the head and `truncated` is always false | `a_flood_past_sixty_four_mebibytes_stays_within_its_ceiling` | `a_completed_run_leaves_no_orphan_behind`, `cancelling_leaves_no_descendant` |
+| `mutant-tenant-cache` (resource-keyed map) | the token is checked but the key carries no tenant | `two_tenants_on_one_resource_stay_isolated` | `a_thousand_mixed_calls_all_resolve_their_own_value`, and `a_wrong_token_is_refused_and_caches_nothing` (beta's authorised read finds alpha's earlier entry under the same key — the same leak through shared test state) |
+| `mutant-durable-retry` (checked yet duplicated) | the record is read and its answer discarded; every call appends | `dropping_mid_wait_applies_nothing_twice` | `kill_mid_effect_recovers_exactly_once` |
 
 The mutant sources are not estate code and are never built by the estate
 workspace; the pipeline mutant deliberately leaks a `JoinSet` with `Box::leak`
@@ -370,13 +496,15 @@ python3 bench/ai-authoring/run.py --dry-run --trials 1      # every reference ce
 python3 bench/ai-authoring/run.py --mutants                 # one negative control per task
 AI_AUTHORING_CMD=<cli> python3 bench/ai-authoring/run.py \
     --models stealth/space-bunny-alpha,deepseek/deepseek-v4.1-flash \
-    --apis old,new --tasks aggregate,pipeline,recovery \
+    --apis old,new,script --tasks aggregate,pipeline,recovery,capture,tenant-cache,durable-retry \
     --profiles first-time,expert-hurry,anxious,misuser,agent \
     --trials 2 --parallel 6
 ```
 
-`--profiles` defaults to all five and `--tasks` to all three. The default model
+`--profiles` defaults to all five and `--tasks` to all six. The default model
 ids are `stealth/space-bunny-alpha` and `deepseek/deepseek-v4.1-flash`. A model
 call must be closed-book and this runner enforces that with macOS
 `sandbox-exec`, so a host without it refuses rather than running the model
-open-book against the hidden oracle.
+open-book against the hidden oracle. The trial template builds
+`lgwks_bot` with `script` and `process`, alike for every arm, so the arms
+differ only in the API sheet the author is given.

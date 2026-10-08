@@ -13,8 +13,10 @@ publish = false
 
 [dependencies]
 # `script` implies `rt`, `time`, `sync` and `macros`, so a solution may use
-# either the new task/Host facade or the old rt surface.
-lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["script"] }
+# either the new task/Host facade or the old rt surface. `process` binds the
+# supervised child the `capture` task needs; it is on for every arm alike, so
+# the arms still differ only in the API sheet the author is given.
+lgwks_bot = { path = "../../../crates/lgwks-bot", default-features = false, features = ["script", "process"] }
 ai_task_support = { path = "../support" }
 # The ecosystem-standard comparator arm (`api/futures.md`). Present in every trial
 # crate so the arms differ only in the API sheet the author is given.
