@@ -93,6 +93,106 @@ pub enum EnvDelta {
     Clear,
 }
 
+/// How a supervised child is confined past its process group, declared as data.
+///
+/// A `ProcessSpec` is data, so this is data too: a profile, not a callback.
+/// The supervisor applies it between the fork and the exec, so every
+/// descendant inherits it — a confinement that only wrapped the leader's exit
+/// code would be a report, not a boundary.
+///
+/// The Linux half — Landlock subtree-deny rules — is not here: it needs
+/// syscall bindings the estate has not admitted, and no new edge is added
+/// without the Director, so a subtree-deny variant would be a promise with no
+/// enforcement behind it. What ships is the macOS half, enforced through the
+/// platform's own `sandbox-exec`; the in-process `sandbox_init` that would
+/// avoid its per-spawn cost needs an FFI leaf the workspace gate refuses, and
+/// is recorded as pending where the cost is measured.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Confinement {
+    /// No confinement beyond the supervisor's group and cleanup.
+    #[default]
+    None,
+    /// A macOS sandbox profile confining the child and its descendants.
+    SandboxProfile(SandboxProfile),
+}
+
+/// A macOS sandbox profile, applied to a supervised child before it execs.
+///
+/// The source is one `sandbox-exec -p` profile — `(version 1)(allow default)
+/// (deny file-read* (subpath "/coord"))` — so the child and everything it
+/// forks are confined by the kernel, while the supervisor itself is not. The
+/// profile travels as a string because the supervisor applies it, never
+/// compiles it: an invalid profile refuses the spawn rather than running the
+/// child unconfined.
+///
+/// A denied subpath must name the kernel's resolved path: the sandbox matches
+/// what the filesystem resolves, so a subpath spelled through a symlink
+/// (macOS's symlinked `$TMPDIR` included) names a directory nothing writes
+/// through. Canonicalize denied directories before building the source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SandboxProfile {
+    /// The profile source handed to `sandbox-exec -p`.
+    source: String,
+}
+
+impl SandboxProfile {
+    /// The longest profile source [`Self::validate`] accepts, in bytes.
+    ///
+    /// A profile is data the supervisor passes to one spawn, so it is bounded
+    /// like every other spawn input rather than read without limit.
+    pub const MAX_SOURCE_BYTES: usize = 65_536;
+
+    /// Carry `source` as the child's sandbox profile.
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
+
+    /// The profile source handed to `sandbox-exec -p`.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Refuse a profile that could not confine anything.
+    ///
+    /// Empty, oversized, or non-printable sources are refused as
+    /// [`std::io::ErrorKind::InvalidInput`]: the supervisor applies profiles,
+    /// never repairs them, and a spawn refused here starts nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] for an empty source, one past
+    /// [`Self::MAX_SOURCE_BYTES`], or one carrying a byte outside printable
+    /// ASCII (profiles are ASCII text; anything else is damage or an attack).
+    pub fn validate(&self) -> io::Result<()> {
+        if self.source.is_empty() || self.source.len() > Self::MAX_SOURCE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "a sandbox profile is 1..={} printable bytes, got {}",
+                    Self::MAX_SOURCE_BYTES,
+                    self.source.len()
+                ),
+            ));
+        }
+        if let Some(at) = self
+            .source
+            .bytes()
+            .position(|byte| !byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a sandbox profile holds a non-text byte at offset {at}"),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Pure, inspectable data describing one supervised process.
 ///
 /// A `ProcessSpec` cannot spawn, wait, inspect status, kill, or dereference an
@@ -120,6 +220,8 @@ pub struct ProcessSpec {
     stderr_file: Option<PathBuf>,
     /// Optional maximum runtime.
     deadline: Option<Duration>,
+    /// How the child is confined past its process group.
+    confinement: Confinement,
 }
 
 impl ProcessSpec {
@@ -136,6 +238,7 @@ impl ProcessSpec {
             stdout_file: None,
             stderr_file: None,
             deadline: None,
+            confinement: Confinement::None,
         }
     }
 
@@ -251,6 +354,18 @@ impl ProcessSpec {
         self
     }
 
+    /// Confine the child past its process group.
+    ///
+    /// A [`Confinement::SandboxProfile`] wraps the spawn in the platform's
+    /// sandbox on macOS and refuses it anywhere else, so a profile set by
+    /// mistake on Linux or Windows starts nothing rather than running the
+    /// child unconfined. Confinement applies between the fork and the exec,
+    /// so every descendant inherits it.
+    pub fn confinement(&mut self, confinement: Confinement) -> &mut Self {
+        self.confinement = confinement;
+        self
+    }
+
     /// The program to execute, for inspection only.
     #[must_use]
     pub fn program(&self) -> &OsStr {
@@ -312,6 +427,15 @@ impl ProcessSpec {
         self.deadline
     }
 
+    /// How the child is confined past its process group, for inspection only.
+    ///
+    /// [`Confinement::None`] unless [`Self::confinement`] named a profile: a
+    /// spec that never asked for confinement must not read as one that did.
+    #[must_use]
+    pub const fn confinement_policy(&self) -> &Confinement {
+        &self.confinement
+    }
+
     /// The retained-byte ceiling for stdout, or `None` when it is not captured.
     #[must_use]
     pub(crate) const fn stdout_capture(&self) -> Option<NonZeroUsize> {
@@ -330,6 +454,39 @@ impl ProcessSpec {
         }
     }
 
+    /// Build the engine command's program: the spec's own, or the sandbox wrapper.
+    ///
+    /// A confined spawn replaces the program with the platform's sandbox and
+    /// carries the target as its operand (see [`Self::configure`]), so the
+    /// wrapper confines itself before it execs the target and the profile
+    /// holds the child and every descendant.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] for a profile that could not
+    /// confine anything, [`std::io::ErrorKind::Unsupported`] for a profile on
+    /// a target without the platform's sandbox. Both refuse before the fork,
+    /// so neither can run a child unconfined.
+    pub(crate) fn command(&self) -> io::Result<Command> {
+        match self.confinement {
+            Confinement::None => Ok(Command::new(&self.program)),
+            Confinement::SandboxProfile(ref profile) => {
+                profile.validate()?;
+                #[cfg(target_os = "macos")]
+                {
+                    Ok(sandbox_command(profile))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "lgwks_bot: a sandbox profile confines a child on macOS only",
+                    ))
+                }
+            }
+        }
+    }
+
     /// Configure the private engine command owned by the supervisor.
     ///
     /// # Errors
@@ -338,7 +495,19 @@ impl ProcessSpec {
     /// [`stdout_to_file`](Self::stdout_to_file) or
     /// [`stderr_to_file`](Self::stderr_to_file).
     pub(crate) fn configure(&self, command: &mut Command) -> io::Result<()> {
-        command.args(&self.args);
+        match self.confinement {
+            Confinement::None => {
+                command.args(&self.args);
+            }
+            Confinement::SandboxProfile(_) => {
+                // The wrapper's first operand is the target: `sandbox-exec -p
+                // <profile> <program> <args...>`. The program travels as an
+                // argument here because [`Self::command`] already replaced it
+                // with the wrapper.
+                command.arg(&self.program);
+                command.args(&self.args);
+            }
+        }
         for delta in &self.env {
             match *delta {
                 EnvDelta::Set { ref key, ref value } => {
@@ -366,6 +535,22 @@ impl ProcessSpec {
         });
         Ok(())
     }
+}
+
+/// The `sandbox-exec` wrapper for a confined spawn (macOS).
+///
+/// `sandbox-exec -p <profile>`: the wrapper confines itself before it execs
+/// the target, so the profile holds the child and everything it forks. The
+/// profile was validated by the caller; this names the wrapper. The per-spawn
+/// cost of the extra fork and exec is measured, not assumed — see the
+/// confinement evidence in `docs/production-readiness.md` §4.7 — and the
+/// in-process `sandbox_init` that would avoid it is pending on an FFI leaf the
+/// workspace gate refuses.
+#[cfg(target_os = "macos")]
+fn sandbox_command(profile: &SandboxProfile) -> Command {
+    let mut command = Command::new("/usr/bin/sandbox-exec");
+    command.arg("-p").arg(profile.source());
+    command
 }
 
 /// Open `path` for a child's output: created if absent, truncated if present.

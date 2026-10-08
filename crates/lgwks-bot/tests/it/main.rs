@@ -171,6 +171,7 @@ mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;
 mod sim_clock_wiring;
+mod sim_confinement;
 mod sim_continuation;
 mod sim_continuation_seal;
 mod sim_credential;
