@@ -285,6 +285,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **getrandom** — zero deps in std-only mode
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
+- **ed25519-dalek** — detached seals for the `sign` feature (alloc-only, no rand_core; key generation reads `lgwks_std::random`)
 - **rustix** — safe POSIX syscall surface for the `fs-raw` and `process` primitives; Unix-only, optional
 - **tracing** — default-on structured event facade for library diagnostics.
 - **tracing-subscriber** — default debugger bootstrap. `install_default("service")`

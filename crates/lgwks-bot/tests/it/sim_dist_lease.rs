@@ -384,12 +384,22 @@ fn run_seed(seed: u64) -> TestResult<String> {
                         match set.coordinators[hid].begin_run(&lease, &start, &["fmt", "clippy"]) {
                             Err(DispatchError::Lease(_)) => Ok::<(), Box<dyn Error>>(()),
                             Err(other) => {
+                                lgwks_std::trace::warn!(
+                                    seed,
+                                    %other,
+                                    "sim_dist_lease: a stale begin fenced with an unexpected refusal"
+                                );
                                 return Err(format!(
                                     "seed {seed}: a stale begin must fence, got {other}"
                                 )
                                 .into());
                             }
                             Ok(()) => {
+                                lgwks_std::trace::warn!(
+                                    seed,
+                                    run = %run,
+                                    "sim_dist_lease: a stale begin committed"
+                                );
                                 return Err(
                                     format!("seed {seed}: a stale begin must not commit").into()
                                 );
@@ -487,6 +497,11 @@ fn grant_step(
         match set.channels[hid].validate(&lease) {
             Err(_) => Ok::<(), Box<dyn Error>>(()),
             Ok(_) => {
+                lgwks_std::trace::warn!(
+                    seed,
+                    hid,
+                    "sim_dist_lease: a partitioned channel answered validation"
+                );
                 return Err(format!("seed {seed}: a partitioned channel must not answer").into());
             }
         }?;
@@ -521,9 +536,22 @@ fn grant_step(
         match refused {
             Err(DispatchError::Lease(_)) => Ok::<(), Box<dyn Error>>(()),
             Err(other) => {
+                lgwks_std::trace::warn!(
+                    seed,
+                    %other,
+                    "sim_dist_lease: a stale grant fenced with an unexpected refusal"
+                );
                 return Err(format!("seed {seed}: a stale grant must fence, got {other}").into());
             }
-            Ok(()) => return Err(format!("seed {seed}: a stale grant must not commit").into()),
+            Ok(()) => {
+                lgwks_std::trace::warn!(
+                    seed,
+                    run = %run,
+                    lane,
+                    "sim_dist_lease: a stale grant committed"
+                );
+                return Err(format!("seed {seed}: a stale grant must not commit").into());
+            }
         }?;
         return Ok(());
     }
@@ -614,29 +642,39 @@ fn lane_must_end(model: &Model, run: &str, lane: usize) -> TestResult<bool> {
     })
 }
 
-/// Record the modeled dispatch of one lane.
-fn dispatch_model_lane(model: &mut Model, run: &str, lane: usize) -> TestResult<()> {
+/// The modeled lane a step targets: the run and the lane row it names.
+///
+/// One lookup for the dispatch and end recorders, so a lane the model lost is
+/// refused once, in one place, rather than once per recorder.
+fn model_lane_slot<'a>(
+    model: &'a mut Model,
+    run: &str,
+    lane: usize,
+) -> TestResult<&'a mut ModelLane> {
     let held = model
         .runs
         .get_mut(run)
         .ok_or_else(|| format!("the model lost {run}"))?;
     let Some(slot) = held.lanes.get_mut(lane) else {
+        lgwks_std::trace::warn!(
+            run = %run,
+            lane,
+            "sim_dist_lease: the model lost the lane a step targets"
+        );
         return Err(format!("the model lost lane {lane} of {run}").into());
     };
-    *slot = ModelLane::Dispatched;
+    Ok(slot)
+}
+
+/// Record the modeled dispatch of one lane.
+fn dispatch_model_lane(model: &mut Model, run: &str, lane: usize) -> TestResult<()> {
+    *model_lane_slot(model, run, lane)? = ModelLane::Dispatched;
     Ok(())
 }
 
 /// Record the modeled end of one lane.
 fn end_model_lane(model: &mut Model, run: &str, lane: usize) -> TestResult<()> {
-    let held = model
-        .runs
-        .get_mut(run)
-        .ok_or_else(|| format!("the model lost {run}"))?;
-    let Some(slot) = held.lanes.get_mut(lane) else {
-        return Err(format!("the model lost lane {lane} of {run}").into());
-    };
-    *slot = ModelLane::Ended;
+    *model_lane_slot(model, run, lane)? = ModelLane::Ended;
     Ok(())
 }
 
