@@ -44,10 +44,15 @@ struct Operation {
 /// Cut one operation from the seed.
 fn operation(rng: &mut Rng, index: usize) -> Result<Operation, Box<dyn Error>> {
     let key = format!("op-{index}-{}", rng.next_u64());
-    let length = usize::try_from(rng.between(1, 256)).map_err(|_| "a draw fits")?;
+    let length = usize::try_from(rng.between(1, 256)).map_err(|error| {
+        format!("the payload-length draw for operation {index} fits in a usize: {error}")
+    })?;
     let mut payload = Vec::with_capacity(length);
     for _ in 0..length {
-        payload.push(u8::try_from(rng.below(256)).map_err(|_| "a byte draw fits")?);
+        payload.push(
+            u8::try_from(rng.below(256))
+                .map_err(|error| format!("a sub-256 payload byte draw fits in a u8: {error}"))?,
+        );
     }
     Ok(Operation {
         key,
@@ -93,7 +98,8 @@ impl Upstream {
 /// Returns the trace hash: the replay receipt.
 fn run(seed: u64, trace: &mut Trace) -> TestResult {
     let mut rng = Rng::new(seed);
-    let operations = usize::try_from(rng.between(1, 6)).map_err(|_| "a draw fits")?;
+    let operations = usize::try_from(rng.between(1, 6))
+        .map_err(|error| format!("the operations draw for seed {seed} fits in a usize: {error}"))?;
     trace.record_number("operations", operations);
     let mut upstream = Upstream::default();
     for index in 0..operations {

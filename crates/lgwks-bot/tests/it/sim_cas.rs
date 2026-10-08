@@ -45,8 +45,10 @@ struct Attempt {
 /// Returns the trace hash: the replay receipt.
 fn run(seed: u64, trace: &mut Trace) -> TestResult {
     let mut rng = Rng::new(seed);
-    let writers = usize::try_from(rng.between(2, 8)).map_err(|_| "a draw fits")?;
-    let records = usize::try_from(rng.between(1, 4)).map_err(|_| "a draw fits")?;
+    let writers = usize::try_from(rng.between(2, 8))
+        .map_err(|error| format!("the writers draw fits in a usize: {error}"))?;
+    let records = usize::try_from(rng.between(1, 4))
+        .map_err(|error| format!("the records draw fits in a usize: {error}"))?;
     trace.record_number("writers", writers);
     trace.record_number("records", records);
     // The directory dies with the run: a refused scenario leaves no file
@@ -72,8 +74,11 @@ fn run(seed: u64, trace: &mut Trace) -> TestResult {
     // A seeded permutation of the attempts: the only nondeterminism a real
     // race has, drawn from the seed rather than the scheduler.
     for index in (1..attempts.len()).rev() {
-        let bound = u32::try_from(index.saturating_add(1)).map_err(|_| "too many attempts")?;
-        let drawn = usize::try_from(rng.below(bound)).map_err(|_| "a draw is a valid index")?;
+        let bound = u32::try_from(index.saturating_add(1)).map_err(|error| {
+            format!("the shuffle bound for attempt {index} fits in a u32: {error}")
+        })?;
+        let drawn = usize::try_from(rng.below(bound))
+            .map_err(|error| format!("a below-{bound} draw is a valid swap index: {error}"))?;
         attempts.swap(index, drawn);
     }
     let mut applied: HashMap<usize, u64> = HashMap::new();
@@ -133,8 +138,11 @@ fn run(seed: u64, trace: &mut Trace) -> TestResult {
         }
     }
     let expected_conflicts = u64::try_from(attempts.len())
-        .map_err(|_| "too many attempts")?
-        .saturating_sub(u64::try_from(records).map_err(|_| "too many records")?);
+        .map_err(|error| format!("the {} attempts fit in a u64: {error}", attempts.len()))?
+        .saturating_sub(
+            u64::try_from(records)
+                .map_err(|error| format!("the {records} records fit in a u64: {error}"))?,
+        );
     if conflicts != expected_conflicts {
         return refuse(format!(
             "{conflicts} conflicts were recorded, {expected_conflicts} were inevitable"

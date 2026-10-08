@@ -94,6 +94,9 @@ impl PostInput {
     ) -> Result<Self, BotError> {
         let key = key.into();
         if key.is_empty() {
+            lgwks_std::trace::warn!(
+                "idempotent post: refusing a POST with an empty idempotency key, nothing is sent"
+            );
             return Err(BotError::DomainError {
                 domain: "idempotent::post".to_owned(),
                 certainty: DispatchCertainty::Refused,
@@ -101,6 +104,10 @@ impl PostInput {
             });
         }
         if body.len() > MAX_POST_BYTES {
+            lgwks_std::trace::warn!(
+                "idempotent post: refusing a {}-byte body over the {MAX_POST_BYTES}-byte cap, nothing is sent",
+                body.len()
+            );
             return Err(BotError::DomainError {
                 domain: "idempotent::post".to_owned(),
                 certainty: DispatchCertainty::Refused,
@@ -130,7 +137,7 @@ impl PostInput {
         &self.key
     }
 
-    /// The body's content type.
+    /// The media type the payload is sent as; the upstream answers in kind, and a mismatch is the receiver's refusal to interpret the bytes.
     #[must_use]
     pub fn content_type(&self) -> &str {
         &self.content_type
@@ -245,6 +252,10 @@ impl verb::Execute for IdempotentPost {
                 // carried as a `NeedSet` repair — never a generic failure and
                 // never a silent retry.
                 if crate::cap::is_credential_status(response.status) {
+                    lgwks_std::trace::warn!(
+                        "idempotent post: the upstream answered {} to a keyed effect, carrying the credential repair",
+                        response.status
+                    );
                     return Err(upstream_credential_rejection(
                         &domain,
                         response.status,

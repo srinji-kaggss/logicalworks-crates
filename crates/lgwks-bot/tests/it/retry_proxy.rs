@@ -62,14 +62,23 @@ fn read_request(stream: &mut TcpStream) -> Result<RawRequest, String> {
             .read(&mut byte)
             .map_err(|error| format!("reading the request head: {error}"))?;
         if read == 0 {
+            lgwks_std::trace::warn!(
+                "retry proxy fixture: the peer closed the connection after {} head bytes, mid-request",
+                head.len()
+            );
             return Err("the peer closed the connection mid-request".to_owned());
         }
         head.extend_from_slice(&byte);
         if head.len() > 64 * 1024 {
+            lgwks_std::trace::warn!(
+                "retry proxy fixture: the request head reached {} bytes, over the 64 KiB ceiling",
+                head.len()
+            );
             return Err("the request head exceeds 64 KiB".to_owned());
         }
     }
-    let text = String::from_utf8(head).map_err(|_| "the request head is not UTF-8")?;
+    let text = String::from_utf8(head)
+        .map_err(|error| format!("the request head is not UTF-8: {error}"))?;
     let mut lines = text.lines();
     let request_line = lines.next().ok_or("an empty request")?.to_owned();
     // A 100-continue is answered before the body is read: the client waits
@@ -85,7 +94,7 @@ fn read_request(stream: &mut TcpStream) -> Result<RawRequest, String> {
             length = value
                 .trim()
                 .parse()
-                .map_err(|_| "a non-numeric content length")?;
+                .map_err(|error| format!("a non-numeric content length {value:?}: {error}"))?;
         }
         if name.trim().eq_ignore_ascii_case("expect")
             && value.trim().eq_ignore_ascii_case("100-continue")
@@ -118,7 +127,7 @@ fn read_response(stream: &mut TcpStream) -> Result<(u16, Vec<u8>), String> {
         .nth(1)
         .ok_or("a status line without a status")?
         .parse()
-        .map_err(|_| "a non-numeric status")?;
+        .map_err(|error| format!("a non-numeric status in {text:?}: {error}"))?;
     Ok((status, bytes))
 }
 
@@ -214,7 +223,12 @@ fn serve_proxy(
                     Some(answer) => client
                         .write_all(&answer)
                         .map_err(|error| format!("proxy answer: {error}"))?,
-                    None => return Err("the proxy forwarded nothing".to_owned()),
+                    None => {
+                        lgwks_std::trace::warn!(
+                            "retry proxy fixture: {DUPLICATES} forwards per reception across {connections} receptions produced no answer to return"
+                        );
+                        return Err("the proxy forwarded nothing".to_owned());
+                    }
                 }
             }
             Ok(())
