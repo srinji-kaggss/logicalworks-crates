@@ -52,6 +52,20 @@ fn note_failure(failed: &Mutex<u32>, index: u32) {
     }
 }
 
+/// Refuse with `NoStore` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_no_store<T>(cause: impl std::fmt::Debug) -> Result<T, RecoveryError> {
+    ai_task_support::diagnostic(format_args!("recovery script arm: no store: {cause:?}"));
+    Err(RecoveryError::NoStore)
+}
+
+/// Refuse with `Deadline` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_deadline<T>(cause: impl std::fmt::Debug) -> Result<T, RecoveryError> {
+    ai_task_support::diagnostic(format_args!("recovery script arm deadline: {cause:?}"));
+    Err(RecoveryError::Deadline)
+}
+
 lgwks_bot::script! {
     /// Run every unit in turn, stopping at the first failure.
     flow work_units(world: ai_task_support::recovery::World, failed: std::sync::Arc<std::sync::Mutex<u32>>) -> u64:
@@ -74,14 +88,14 @@ fn settled(report: &lgwks_bot::task::Report<u64>, failed: &FailedUnit) -> Result
         return report.output().copied().ok_or(RecoveryError::NoLedger);
     }
     if report.disposition() == Disposition::DeadlineExceeded {
-        return Err(RecoveryError::Deadline);
+        return err_deadline("deadline exceeded");
     }
     let recorded = match failed.lock() {
         Ok(guard) => *guard,
         Err(poisoned) => *poisoned.into_inner(),
     };
     if recorded == u32::MAX {
-        return Err(RecoveryError::NoStore);
+        return err_no_store("no failure recorded");
     }
     Err(RecoveryError::Unit { index: recorded })
 }
@@ -91,14 +105,26 @@ pub async fn recover(
     store_dir: PathBuf,
     deadline: Duration,
 ) -> Result<u64, RecoveryError> {
-    let run = RunId::from_hex(RUN).map_err(|_| RecoveryError::NoStore)?;
+    let run = RunId::from_hex(RUN).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("recovery script arm: run identity refused: {error:?}"));
+        RecoveryError::NoStore
+    })?;
     let host = Host::builder(TENANT)
-        .map_err(|_| RecoveryError::NoStore)?
+        .map_err(|error| {
+            ai_task_support::diagnostic(format_args!("recovery script arm: tenant refused: {error:?}"));
+            RecoveryError::NoStore
+        })?
         .default_deadline(deadline)
         .run_store(&store_dir)
-        .map_err(|_| RecoveryError::NoStore)?
+        .map_err(|error| {
+            ai_task_support::diagnostic(format_args!("recovery script arm: run store refused: {error:?}"));
+            RecoveryError::NoStore
+        })?
         .build()
-        .map_err(|_| RecoveryError::NoStore)?;
+        .map_err(|error| {
+            ai_task_support::diagnostic(format_args!("recovery script arm: host build refused: {error:?}"));
+            RecoveryError::NoStore
+        })?;
     let failed: FailedUnit = Arc::new(Mutex::new(u32::MAX));
     let failed_for_settled = Arc::clone(&failed);
     let work = task("flow-units", move |scope: Scope, _attempt: u32| {
@@ -106,7 +132,10 @@ pub async fn recover(
         let failed = Arc::clone(&failed);
         async move { work_units(&scope, world, failed).await }
     })
-    .map_err(|_| RecoveryError::NoStore)?;
+    .map_err(|error| {
+        ai_task_support::diagnostic(format_args!("recovery script arm: task refused: {error:?}"));
+        RecoveryError::NoStore
+    })?;
 
     // The first attempt. Whatever it reaches, its records are already on the
     // disk, so the resume below can find them.

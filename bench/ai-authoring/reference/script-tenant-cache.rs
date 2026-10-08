@@ -19,6 +19,12 @@ lgwks_bot::script! {
             format!("value-of-{tenant}-{resource}").into_bytes()
 }
 
+/// Refuse the read, naming the failed step on the trace stream.
+fn refused(cause: impl std::fmt::Debug) -> CacheError {
+    ai_task_support::diagnostic(format_args!("tenant-cache script arm refused: {cause:?}"));
+    CacheError::Refused
+}
+
 pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>, CacheError> {
     // The token buys the cache capability for the tenant's own token and
     // nothing otherwise; the decision is inline because this arm keeps the
@@ -29,10 +35,10 @@ pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>,
         GrantSet::empty()
     };
     let host = Host::builder(tenant)
-        .map_err(|_| CacheError::Refused)?
+        .map_err(refused)?
         .grants(admitted)
         .build()
-        .map_err(|_| CacheError::Refused)?;
+        .map_err(refused)?;
     let owned_tenant = tenant.to_owned();
     let owned_resource = resource.to_owned();
     let work = task("serve", move |scope: Scope, _: ()| {
@@ -40,8 +46,8 @@ pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>,
         let owned_resource = owned_resource.clone();
         async move { serve_value(&scope, owned_tenant, owned_resource).await }
     })
-    .map_err(|_| CacheError::Refused)?;
+    .map_err(refused)?;
     // Any non-success — Blocked, Failed, Cancelled — is a refusal: the value
     // is only readable under the run's authority.
-    host.run(&work, ()).await.into_result().map_err(|_| CacheError::Refused)
+    host.run(&work, ()).await.into_result().map_err(refused)
 }

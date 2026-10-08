@@ -19,9 +19,16 @@ fn leaked() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     CACHED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Refuse the read as the whole answer, naming why on the trace stream.
+/// A `return Err(..)` names no cause; returning this names it.
+fn err_refused<T>(cause: impl std::fmt::Debug) -> Result<T, CacheError> {
+    ai_task_support::diagnostic(format_args!("tenant-cache mutant refused: {cause:?}"));
+    Err(CacheError::Refused)
+}
+
 pub async fn solve(who: &str, what: &str, proof: &str) -> Result<Vec<u8>, CacheError> {
     if proof != format!("token-for-{who}") {
-        return Err(CacheError::Refused);
+        return err_refused("the proof does not open this tenant");
     }
     let mut held = match leaked().lock() {
         Ok(guard) => guard,

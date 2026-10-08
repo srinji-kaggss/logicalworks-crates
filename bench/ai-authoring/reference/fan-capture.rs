@@ -55,12 +55,14 @@ pub async fn solve(
         })?;
     let run = runs.into_iter().next().ok_or(CaptureError::Cancelled)?;
     if run.deadline_fired() {
-        return Err(CaptureError::Deadline);
+        ai_task_support::diagnostic(format_args!("capture fan arm: the run outlived its deadline"));
+        Err(CaptureError::Deadline)
+    } else {
+        let kept = run.stdout();
+        Ok(CaptureResult::new(
+            kept.bytes().to_vec(),
+            kept.total_bytes(),
+            kept.truncated(),
+        ))
     }
-    let kept = run.stdout();
-    Ok(CaptureResult::new(
-        kept.bytes().to_vec(),
-        kept.total_bytes(),
-        kept.truncated(),
-    ))
 }

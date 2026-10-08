@@ -47,8 +47,28 @@ lgwks_bot::script! {
         give back partials.into_iter().sum()
 }
 
+/// The caller's cancellation, naming the cause on the trace stream.
+fn cancelled(cause: impl std::fmt::Debug) -> SolveError {
+    ai_task_support::diagnostic(format_args!("aggregate script arm cancelled: {cause:?}"));
+    SolveError::Cancelled
+}
+
+/// Refuse with `Deadline` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_deadline<T>(cause: impl std::fmt::Debug) -> Result<T, SolveError> {
+    ai_task_support::diagnostic(format_args!("aggregate script arm deadline: {cause:?}"));
+    Err(SolveError::Deadline)
+}
+
+/// Refuse with `Cancelled` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_cancelled<T>(cause: impl std::fmt::Debug) -> Result<T, SolveError> {
+    ai_task_support::diagnostic(format_args!("aggregate script arm: already cancelled: {cause:?}"));
+    Err(SolveError::Cancelled)
+}
+
 pub async fn solve(ids: Vec<u32>, fetch: Fetcher, deadline: Duration) -> Result<u64, SolveError> {
-    let tenant = Tenant::new("aggregate").map_err(|_| SolveError::Cancelled)?;
+    let tenant = Tenant::new("aggregate").map_err(cancelled)?;
     let outer = Scope::root(tenant);
     let inner = outer.clone();
     let failed: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
@@ -58,13 +78,13 @@ pub async fn solve(ids: Vec<u32>, fetch: Fetcher, deadline: Duration) -> Result<
     })
     .await;
     if let Err(FlowError::TimedOut { .. }) = outcome {
-        return Err(SolveError::Deadline);
+        return err_deadline("the deadline scope timed out");
     }
     if let Err(FlowError::Cancelled { .. }) = outcome {
-        return Err(SolveError::Cancelled);
+        return err_cancelled("the deadline scope was cancelled");
     }
     if outcome.is_ok() {
-        return outcome.map_err(|_| SolveError::Cancelled);
+        return outcome.map_err(cancelled);
     }
     match failed_for_outcome.lock() {
         Ok(guard) => match *guard {

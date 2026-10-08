@@ -27,17 +27,18 @@ pub async fn solve(
         .map_err(|source| CaptureError::Spawn(source.to_string()))?;
     let started = std::time::Instant::now();
     let mut kept = Vec::new();
-    match child.stdout.take() {
-        Some(mut pipe) => {
-            pipe.read_to_end(&mut kept)
-                .map_err(|source| CaptureError::Spawn(source.to_string()))?;
-        }
-        None => return Err(CaptureError::Spawn("no stdout pipe".to_owned())),
-    }
+    let mut pipe = child.stdout.take().ok_or_else(|| {
+        ai_task_support::diagnostic(format_args!("capture mutant: no stdout pipe"));
+        CaptureError::Spawn("no stdout pipe".to_owned())
+    })?;
+    pipe.read_to_end(&mut kept)
+        .map_err(|source| CaptureError::Spawn(source.to_string()))?;
     let _ = child.wait();
-    if started.elapsed() > deadline {
-        return Err(CaptureError::Deadline);
+    if started.elapsed() <= deadline {
+        let total = kept.len();
+        Ok(CaptureResult::new(kept, total as u64, false))
+    } else {
+        ai_task_support::diagnostic(format_args!("capture mutant: the run outlived its deadline"));
+        Err(CaptureError::Deadline)
     }
-    let total = kept.len();
-    Ok(CaptureResult::new(kept, total as u64, false))
 }

@@ -24,9 +24,16 @@ fn allowed(tenant: &str, token: &str) -> bool {
     token == format!("token-for-{tenant}")
 }
 
+/// Refuse the read as the whole answer, naming why on the trace stream.
+/// A `return Err(..)` names no cause; returning this names it.
+fn err_refused<T>(cause: impl std::fmt::Debug) -> Result<T, CacheError> {
+    ai_task_support::diagnostic(format_args!("tenant-cache old arm refused: {cause:?}"));
+    Err(CacheError::Refused)
+}
+
 pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>, CacheError> {
     if !allowed(tenant, token) {
-        return Err(CacheError::Refused);
+        return err_refused("the token does not open this tenant");
     }
     let mut held = match entries().lock() {
         Ok(guard) => guard,

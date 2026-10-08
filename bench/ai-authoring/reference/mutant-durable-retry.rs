@@ -19,11 +19,23 @@ pub async fn solve(
     tag: String,
     bound: Duration,
 ) -> Result<String, RecoverError> {
-    std::fs::create_dir_all(&location).map_err(|_| RecoverError::Deadline)?;
-    // The record is read and its answer discarded: the append below runs
-    // whether or not the line is already there.
-    let _ = has_application(&location, &tag).map_err(|_| RecoverError::Deadline)?;
-    append_application(&location, &tag).map_err(|_| RecoverError::Deadline)?;
+    std::fs::create_dir_all(&location).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry mutant: create_dir_all failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
+    // The record is read and noted, but the append below runs whether or
+    // not the line is already there.
+    let already_applied = has_application(&location, &tag).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry mutant: record read failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
+    ai_task_support::diagnostic(format_args!(
+        "durable-retry mutant: record already present: {already_applied}"
+    ));
+    append_application(&location, &tag).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry mutant: append failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
     let opened = std::time::Instant::now();
     loop {
         if is_released(&location) {
@@ -32,8 +44,10 @@ pub async fn solve(
             return Ok(format!("applied:{tag}"));
         }
         if opened.elapsed() > bound {
-            return Err(RecoverError::Deadline);
+            break;
         }
         lgwks_bot::rt::time::sleep(Duration::from_millis(10)).await;
     }
+    ai_task_support::diagnostic(format_args!("durable-retry mutant: the release never appeared"));
+    Err(RecoverError::Deadline)
 }

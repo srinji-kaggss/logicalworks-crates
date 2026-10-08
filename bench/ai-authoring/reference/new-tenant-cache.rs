@@ -26,12 +26,18 @@ fn grants_for(tenant: &str, token: &str) -> GrantSet {
     }
 }
 
+/// Refuse the read, naming the failed step on the trace stream.
+fn refused(cause: impl std::fmt::Debug) -> CacheError {
+    ai_task_support::diagnostic(format_args!("tenant-cache new arm refused: {cause:?}"));
+    CacheError::Refused
+}
+
 pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>, CacheError> {
     let host = Host::builder(tenant)
-        .map_err(|_| CacheError::Refused)?
+        .map_err(refused)?
         .grants(grants_for(tenant, token))
         .build()
-        .map_err(|_| CacheError::Refused)?;
+        .map_err(refused)?;
     let owned_tenant = tenant.to_owned();
     let owned_resource = resource.to_owned();
     let work = task("serve", move |scope: Scope, _: ()| {
@@ -42,10 +48,10 @@ pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>,
             Ok::<_, FlowError>(format!("value-of-{tenant}-{resource}").into_bytes())
         }
     })
-    .map_err(|_| CacheError::Refused)?;
+    .map_err(refused)?;
     let report = host.run(&work, ()).await;
     if report.disposition().is_success() {
-        report.into_result().map_err(|_| CacheError::Refused)
+        report.into_result().map_err(refused)
     } else {
         Err(CacheError::Refused)
     }

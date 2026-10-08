@@ -14,22 +14,28 @@ use lgwks_bot::script::{FlowError, Scope, Tenant, attempts, retry};
 
 pub use ai_task_support::durable::RecoverError; // new arm
 
+/// Refuse with `Deadline`, naming the cause on the trace stream.
+fn deadline(cause: impl std::fmt::Debug) -> RecoverError {
+    ai_task_support::diagnostic(format_args!("durable-retry new arm refused: {cause:?}"));
+    RecoverError::Deadline
+}
+
 pub async fn solve(
     root: PathBuf,
     tag: String,
     wait: Duration,
 ) -> Result<String, RecoverError> {
-    std::fs::create_dir_all(&root).map_err(|_| RecoverError::Deadline)?;
-    let fresh = !has_application(&root, &tag).map_err(|_| RecoverError::Deadline)?;
+    std::fs::create_dir_all(&root).map_err(deadline)?;
+    let fresh = !has_application(&root, &tag).map_err(deadline)?;
     if fresh {
-        append_application(&root, &tag).map_err(|_| RecoverError::Deadline)?;
+        append_application(&root, &tag).map_err(deadline)?;
     }
     let status = if fresh {
         format!("applied:{tag}")
     } else {
         format!("recovered:{tag}")
     };
-    let scope = Scope::root(Tenant::new("durable").map_err(|_| RecoverError::Deadline)?);
+    let scope = Scope::root(Tenant::new("durable").map_err(deadline)?);
     let started = std::time::Instant::now();
     let release = root.join("release");
     // A thousand polls a hundred milliseconds apart: a hundred seconds of
@@ -38,7 +44,7 @@ pub async fn solve(
     retry(
         &scope,
         "wait-release",
-        attempts(1000).map_err(|_| RecoverError::Deadline)?,
+        attempts(1000).map_err(deadline)?,
         Duration::from_millis(100),
         |_, _| {
             let release = release.clone();
@@ -54,6 +60,6 @@ pub async fn solve(
         },
     )
     .await
-    .map_err(|_| RecoverError::Deadline)?;
+    .map_err(deadline)?;
     Ok(status)
 }

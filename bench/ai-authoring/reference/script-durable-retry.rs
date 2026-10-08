@@ -13,6 +13,12 @@ use lgwks_bot::script::{FlowError, Scope, Tenant};
 
 pub use ai_task_support::durable::RecoverError; // script arm
 
+/// Refuse with `Deadline`, naming the cause on the trace stream.
+fn deadline(cause: impl std::fmt::Debug) -> RecoverError {
+    ai_task_support::diagnostic(format_args!("durable-retry script arm refused: {cause:?}"));
+    RecoverError::Deadline
+}
+
 lgwks_bot::script! {
     /// Wait for the release file, then hand back the settled status.
     flow await_release(dir: PathBuf, status: String, deadline: Duration) -> String:
@@ -32,17 +38,17 @@ pub async fn solve(
     span: Duration,
 ) -> Result<String, RecoverError> {
     use ai_task_support::durable::{append_application, has_application};
-    std::fs::create_dir_all(&home).map_err(|_| RecoverError::Deadline)?;
-    let settled_before = has_application(&home, &job).map_err(|_| RecoverError::Deadline)?;
+    std::fs::create_dir_all(&home).map_err(deadline)?;
+    let settled_before = has_application(&home, &job).map_err(deadline)?;
     if !settled_before {
-        append_application(&home, &job).map_err(|_| RecoverError::Deadline)?;
+        append_application(&home, &job).map_err(deadline)?;
     }
     let status = if settled_before {
         format!("recovered:{job}")
     } else {
         format!("applied:{job}")
     };
-    let scope = Scope::root(Tenant::new("durable").map_err(|_| RecoverError::Deadline)?);
+    let scope = Scope::root(Tenant::new("durable").map_err(deadline)?);
     match await_release(&scope, home, status, span).await {
         Ok(done) => Ok(done),
         Err(FlowError::Failed { reason, .. }) if reason == "deadline" => {

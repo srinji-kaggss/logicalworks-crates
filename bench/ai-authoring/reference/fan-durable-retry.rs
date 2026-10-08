@@ -19,19 +19,31 @@ pub async fn solve(
     ticket: String,
     cap: Duration,
 ) -> Result<String, RecoverError> {
-    std::fs::create_dir_all(&base).map_err(|_| RecoverError::Deadline)?;
+    std::fs::create_dir_all(&base).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry fan arm: create_dir_all failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
     // A line already there means an earlier attempt applied and died before
     // answering: reconcile instead of duplicating.
-    let applied_before = has_application(&base, &ticket).map_err(|_| RecoverError::Deadline)?;
+    let applied_before = has_application(&base, &ticket).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry fan arm: record read failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
     if !applied_before {
-        append_application(&base, &ticket).map_err(|_| RecoverError::Deadline)?;
+        append_application(&base, &ticket).map_err(|error| {
+            ai_task_support::diagnostic(format_args!("durable-retry fan arm: append failed: {error:?}"));
+            RecoverError::Deadline
+        })?;
     }
     let outcome = if applied_before {
         format!("recovered:{ticket}")
     } else {
         format!("applied:{ticket}")
     };
-    let scope = Scope::root(Tenant::new("durable").map_err(|_| RecoverError::Deadline)?);
+    let scope = Scope::root(Tenant::new("durable").map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry fan arm: tenant refused: {error:?}"));
+        RecoverError::Deadline
+    })?);
     let opened = std::time::Instant::now();
     // Attempts cover the deadline at a hundred milliseconds apart, capped at
     // the thousand the bound allows: the elapsed check below enforces the
@@ -39,11 +51,17 @@ pub async fn solve(
     // deadline it was derived from.
     let polls = u32::try_from(cap.as_millis() / 100 + 100)
         .map(|over| over.min(1000))
-        .map_err(|_| RecoverError::Deadline)?;
+        .map_err(|error| {
+            ai_task_support::diagnostic(format_args!("durable-retry fan arm: poll count overflowed: {error:?}"));
+            RecoverError::Deadline
+        })?;
     retry(
         &scope,
         "await-release",
-        attempts(polls).map_err(|_| RecoverError::Deadline)?,
+        attempts(polls).map_err(|error| {
+            ai_task_support::diagnostic(format_args!("durable-retry fan arm: poll bound refused: {error:?}"));
+            RecoverError::Deadline
+        })?,
         Duration::from_millis(100),
         |_, _| {
             let base = base.clone();
@@ -59,6 +77,9 @@ pub async fn solve(
         },
     )
     .await
-    .map_err(|_| RecoverError::Deadline)?;
+    .map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry fan arm: the wait was refused: {error:?}"));
+        RecoverError::Deadline
+    })?;
     Ok(outcome)
 }

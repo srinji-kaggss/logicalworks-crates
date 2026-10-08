@@ -11,9 +11,13 @@ pub use ai_task_support::tenant_cache::*;
 use lgwks_bot::script::FanOut;
 
 pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>, CacheError> {
-    if token != format!("token-for-{tenant}") {
-        return Err(CacheError::Refused);
-    }
+    let admitted: Result<(), CacheError> = if token == format!("token-for-{tenant}") {
+        Ok(())
+    } else {
+        ai_task_support::diagnostic(format_args!("tenant-cache fan arm refused: bad token"));
+        Err(CacheError::Refused)
+    };
+    admitted?;
     let who = tenant.to_owned();
     let what = resource.to_owned();
     let mut values = FanOut::new([(who, what)])
@@ -22,6 +26,9 @@ pub async fn solve(tenant: &str, resource: &str, token: &str) -> Result<Vec<u8>,
             Ok::<_, CacheError>(format!("value-of-{tenant}-{resource}").into_bytes())
         })
         .await
-        .map_err(|_| CacheError::Refused)?;
+        .map_err(|error| {
+            ai_task_support::diagnostic(format_args!("tenant-cache fan arm: fan-out refused: {error:?}"));
+            CacheError::Refused
+        })?;
     values.pop().ok_or(CacheError::Refused)
 }

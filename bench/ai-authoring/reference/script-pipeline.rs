@@ -93,7 +93,10 @@ lgwks_bot::script! {
 }
 
 pub async fn solve(stage: Stage, deadline: Duration) -> Result<Published, PipelineError> {
-    let tenant = Tenant::new("pipeline").map_err(|_| PipelineError::Cancelled)?;
+    let tenant = Tenant::new("pipeline").map_err(|error| {
+        ai_task_support::diagnostic(format_args!("pipeline script arm: tenant refused: {error:?}"));
+        PipelineError::Cancelled
+    })?;
     let outer = Scope::root(tenant);
     let failed: Arc<Mutex<Option<StageName>>> = Arc::new(Mutex::new(None));
     let failed_for_outcome = Arc::clone(&failed);

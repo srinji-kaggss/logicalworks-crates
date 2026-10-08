@@ -151,17 +151,15 @@ pub(crate) fn effect_key(attempt: &str, epoch: &str) -> Result<EffectKey, Box<dy
     const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
     const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
-    Ok(EffectIdentity::new(
-        RunId::from_hex(RUN)?,
-        EnvironmentId::from_hex(ENV)?,
-        FlowRevision::from_tagged("blake3_256", FLOW_HEX)?,
-    )
-    .key(
-        ActionId::from_hex(ACTION)?,
-        AttemptId::from_decimal(attempt)?,
-        ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?,
-        EnvironmentEpoch::from_decimal(epoch)?,
-    ))
+    let run = RunId::from_hex(RUN)?;
+    let environment = EnvironmentId::from_hex(ENV)?;
+    let revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
+    let identity = EffectIdentity::new(run, environment, revision);
+    let action = ActionId::from_hex(ACTION)?;
+    let attempt_id = AttemptId::from_decimal(attempt)?;
+    let digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
+    let epoch_id = EnvironmentEpoch::from_decimal(epoch)?;
+    Ok(identity.key(action, attempt_id, digest, epoch_id))
 }
 
 /// The run and ticket a blocked `Report<u32>` names, read off together because

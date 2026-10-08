@@ -18,10 +18,12 @@ pub async fn solve(
     deadline: Duration,
 ) -> Result<CaptureResult, CaptureError> {
     let mut words = argv;
-    if words.is_empty() {
-        return Err(CaptureError::Spawn("empty argv".to_owned()));
-    }
-    let program = words.remove(0);
+    let program = if words.is_empty() {
+        ai_task_support::diagnostic(format_args!("capture futures arm: empty argv"));
+        Err(CaptureError::Spawn("empty argv".to_owned()))
+    } else {
+        Ok(words.remove(0))
+    }?;
     let mut command = std::process::Command::new(program);
     for arg in words {
         command.arg(arg);
@@ -32,11 +34,17 @@ pub async fn solve(
     let output = command
         .output()
         .map_err(|source| CaptureError::Spawn(source.to_string()))?;
-    if started.elapsed() > deadline {
-        return Err(CaptureError::Deadline);
+    if started.elapsed() <= deadline {
+        let total = u64::try_from(output.stdout.len()).map_err(|error| {
+            ai_task_support::diagnostic(format_args!(
+                "capture futures arm: output too large to count: {error:?}"
+            ));
+            CaptureError::Spawn("output too large to count".to_owned())
+        })?;
+        let kept: Vec<u8> = output.stdout.iter().copied().take(head_limit).collect();
+        Ok(CaptureResult::new(kept, total, false))
+    } else {
+        ai_task_support::diagnostic(format_args!("capture futures arm: the run outlived its deadline"));
+        Err(CaptureError::Deadline)
     }
-    let total = u64::try_from(output.stdout.len())
-        .map_err(|_| CaptureError::Spawn("output too large to count".to_owned()))?;
-    let kept: Vec<u8> = output.stdout.iter().copied().take(head_limit).collect();
-    Ok(CaptureResult::new(kept, total, false))
 }

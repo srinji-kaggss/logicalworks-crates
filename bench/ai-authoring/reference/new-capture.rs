@@ -15,6 +15,13 @@ pub use ai_task_support::capture::{CaptureError, CaptureResult};
 use lgwks_bot::rt::process::{ProcessRunError, ProcessSpec};
 use lgwks_bot::rt::supervise::Supervisor;
 
+/// Refuse with `Deadline` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_deadline<T>(cause: impl std::fmt::Debug) -> Result<T, CaptureError> {
+    ai_task_support::diagnostic(format_args!("capture new arm deadline: {cause:?}"));
+    Err(CaptureError::Deadline)
+}
+
 pub async fn solve(
     argv: Vec<String>,
     head_limit: usize,
@@ -37,7 +44,7 @@ pub async fn solve(
     match supervisor.run_process(&spec).await {
         Ok(run) => {
             if run.deadline_fired() {
-                return Err(CaptureError::Deadline);
+                return err_deadline("the run outlived its deadline");
             }
             let captured = run.stdout();
             Ok(CaptureResult::new(

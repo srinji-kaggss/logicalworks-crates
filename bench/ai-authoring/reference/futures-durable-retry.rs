@@ -18,17 +18,25 @@ pub async fn solve(
     key: String,
     deadline: Duration,
 ) -> Result<String, RecoverError> {
-    std::fs::create_dir_all(&effect_dir).map_err(|_| RecoverError::Deadline)?;
+    std::fs::create_dir_all(&effect_dir).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry futures arm: create_dir_all failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
     // No read-before-apply: every call appends, so a recovery duplicates.
-    append_application(&effect_dir, &key).map_err(|_| RecoverError::Deadline)?;
+    append_application(&effect_dir, &key).map_err(|error| {
+        ai_task_support::diagnostic(format_args!("durable-retry futures arm: append failed: {error:?}"));
+        RecoverError::Deadline
+    })?;
     let started = std::time::Instant::now();
     loop {
         if is_released(&effect_dir) {
             return Ok(format!("applied:{key}"));
         }
         if started.elapsed() > deadline {
-            return Err(RecoverError::Deadline);
+            break;
         }
         lgwks_bot::rt::time::sleep(Duration::from_millis(10)).await;
     }
+    ai_task_support::diagnostic(format_args!("durable-retry futures arm: no release arrived before the deadline"));
+    Err(RecoverError::Deadline)
 }

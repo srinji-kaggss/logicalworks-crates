@@ -18,6 +18,19 @@ use lgwks_bot::rt::process::{ProcessRunError, ProcessSpec};
 use lgwks_bot::rt::supervise::Supervisor;
 use lgwks_bot::script::{FlowError, Scope, Tenant};
 
+/// Refuse a spawn, naming why on the trace stream.
+fn spawn(note: &str) -> CaptureError {
+    ai_task_support::diagnostic(format_args!("capture script arm: spawn refused: {note}"));
+    CaptureError::Spawn(note.to_owned())
+}
+
+/// Refuse with `Deadline` as the whole answer, naming the cause on the trace
+/// stream. A `return Err(..)` names no cause; returning this names it.
+fn err_deadline<T>(cause: impl std::fmt::Debug) -> Result<T, CaptureError> {
+    ai_task_support::diagnostic(format_args!("capture script arm deadline: {cause:?}"));
+    Err(CaptureError::Deadline)
+}
+
 lgwks_bot::script! {
     /// Run one command under supervision and hand back its outcome.
     flow supervised(
@@ -54,16 +67,16 @@ pub async fn solve(
     head_limit: usize,
     deadline: Duration,
 ) -> Result<CaptureResult, CaptureError> {
-    let (program, args) = match argv.split_first() {
-        Some((first, rest)) => (first.clone(), rest.to_vec()),
-        None => return Err(CaptureError::Spawn("empty argv".to_owned())),
-    };
+    let (program, args) = argv
+        .split_first()
+        .map(|(first, rest)| (first.clone(), rest.to_vec()))
+        .ok_or_else(|| spawn("empty argv"))?;
     let tenant = Tenant::new("capture").map_err(|error| CaptureError::Spawn(error.to_string()))?;
     let scope = Scope::root(tenant);
     match supervised(&scope, program, args, head_limit, deadline).await {
         Ok((head, total, truncated, fired)) => {
             if fired {
-                return Err(CaptureError::Deadline);
+                return err_deadline("the run outlived its deadline");
             }
             Ok(CaptureResult::new(head, total, truncated))
         }
