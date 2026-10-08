@@ -246,7 +246,7 @@ pub enum ContainmentMechanism {
     /// No process table was read for the members this stopped: the kernel owns
     /// the membership, so a `setsid` escapee attached to the scope dies with it
     /// and no fork race applies to the members it holds. The completeness claim
-    /// rests on the scope reading empty afterwards ([`CgroupScope::members`]),
+    /// rests on the scope reading empty afterwards (`CgroupScope::members`),
     /// not on a table snapshot.
     CgroupKill,
     /// Linux: descendants the subreaper flag re-parented to the supervisor.
@@ -255,7 +255,7 @@ pub enum ContainmentMechanism {
     /// through a walk from a leader that may already have exited, and a pid
     /// that is both captured and adopted is provably still the same process.
     /// The completeness claim rests on that intersection
-    /// ([`adopted_descendants`]), not on the group alone.
+    /// (`adopted_descendants`), not on the group alone.
     SubreaperAdoption,
 }
 
