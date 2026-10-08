@@ -180,6 +180,74 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-08 — Tandem sweep: seven PRs land, flood bound quarantined
+
+- Merged [#368](https://github.com/srinji-kaggss/logicalworks-crates/pull/368)
+  (seven runtime-mess rows, sim + real, AttemptStatus verification arm),
+  [#369](https://github.com/srinji-kaggss/logicalworks-crates/pull/369) (one
+  process backend, cgroup/subreaper containment, env allowlist + sandbox
+  profile), [#370](https://github.com/srinji-kaggss/logicalworks-crates/pull/370)
+  (estate-owned durable keyed store + single-host lease/queue/run-state),
+  [#373](https://github.com/srinji-kaggss/logicalworks-crates/pull/373)
+  (per-tenant DRR admission + neighbour-gap split),
+  [#374](https://github.com/srinji-kaggss/logicalworks-crates/pull/374)
+  (`script!` arm + 3 guarantee tasks with negative controls; T01–T36 map +
+  receipts), [#372](https://github.com/srinji-kaggss/logicalworks-crates/pull/372)
+  (ed25519 seal API, walk prune + metadata verified, proc-table fast paths),
+  [#371](https://github.com/srinji-kaggss/logicalworks-crates/pull/371)
+  (honest tick staging + saturation curves; production-readiness §4.9/§4.2
+  refreshed). Closed #261, #268, #278, #277, #317, #316. Follow-up commits on
+  the #371 branch: confirming reaps for adopted orphans (kill, bounded wait,
+  reap, serialized against spawn-to-track and bounded by the shutdown grace),
+  intra-doc link repair, and the RetryClass outcome named in prose.
+- **Flood-bound quarantine** (`ec4718154`): the `tenancy_scale` decision-mean
+  bound (1100 per mille) is excluded from the two Linux container legs only
+  (`scripts/linux-container-tests.sh`) and still enforced on both mac lanes at
+  the unchanged bound. Same code passes quiet/filtered (1000–1093) and fails
+  loaded/CI (1102–1151); the ~19 ns/decision delta grows under sibling malloc
+  and CPU contention, and thread-limiting does not save it. Follow-up #375
+  carries the return criterion: working-set-independent admit cost (pooled
+  WaitSlots / slab ring), then 20 consecutive green container runs.
+- **Observed, not yet ruled on:** the PR check runs for #368, #369, #370, #372
+  and #373 read `failure` at merge time while #371 and #374 read `success` /
+  `cancelled`; main run 37767175555 after the sweep is green. Which job failed
+  on each red run, and the merge rationale under §3's hosted-reproduction rule,
+  are not on record below. Until recorded, merges on red PR runs stay flagged
+  as governance debt rather than precedent.
+
+**Does not claim:** the #375 bound holds anywhere under full-push load (it blew
+past on a mac lane of main run 37767175555 too: decision 1919, wall 141 — an
+attacked wall 7× faster than baseline is scheduling noise, not an admission
+regression); five consecutive sub-300 s main runs (#272); the VPS profile or
+the README acceptance boxes (#269).
+
+### 2026-10-07 — Release cut 2.2.0, CI five-minute drive, first-wave landings
+
+- **Release cut** (PR #363): `lgwks_std` 2.2.0, `lgwks_bot` 2.2.0,
+  `lgwks_deps` 3.0.1, landing the #354–#362 batch: seeded simulation fixtures
+  draw `lgwks_std::seeded` (#355), predicate walk with per-entry lstat (#356),
+  `_tNN` test names for the exercised T-rows (#357), `ProcessSpec::env_clear`
+  (#358), two tenants through one journal directory surviving a mid-run kill
+  (#359), the 1,000-flow cancel sim (#360), the loopback-only HTTP latency
+  probe (#361), locale-independent human-text readers (#362).
+- **CI** (PRs #353, #365): Linux in containers on the self-hosted macOS
+  runners, one job per lane group, temporary files on a RAM disk; PR wall
+  **3m59s** against 5m07s on main. Still open on #272: five consecutive main
+  runs under 300 s, `ci_local.py --jobs 1` under 300 s (472.7 s serially), cold
+  build under 60 s and cold test under 90 s each with its own target dir. The
+  10,000 saturation tier alone runs 211–217 s on a CI runner and sets the floor.
+- **Latency gap closed** (#320, on #269): the drain polled `reap()` behind a
+  1 ms timer tick; `wait_idle` now joins on the JoinSet wakeup. Committed-tree
+  `bench/async`, M5 Pro: p99 vs raw Tokio 1.25× / 1.00× / 1.14× / 1.07×
+  (quiet / fanout / capacity / single-permit; target ≤ 2×); allocations
+  3.45/task (target ≤ 6). Still open on #269: the 1–2 vCPU / 1–2 GB VPS profile
+  and the README acceptance boxes.
+
+**Does not claim:** that #354's licence-slash fix merged (PR closed unmerged);
+that the five-minute budget holds on main (one warm-cache run at 240 s is not
+five consecutive runs); that #266's vendor wiring landed (done in worktree
+`lwc-wt`, branch `fix/vendor-266`, uncommitted — see §7).
+
 ### 2026-10-06 — CI runs on the local self-hosted runner
 
 - **Director-ordered** ("U WILL USE LOCALRUNNER", 2026-10-04; "WHY IS GH ACTIONS
@@ -563,16 +631,30 @@ follow the upload per `docs/releasing.md` §4.
 
 ## 6. Open correctness and acceptance work
 
+Reconciled 2026-10-08 against the 15 open issues. "Crate done" means the
+estate side shipped; "wiring open" means no consumer runs it yet, and per §1
+unwired code is a wiring defect, not a closed item.
+
 | Priority | Work | Observed gap and completion evidence |
 |---|---|---|
-| P0 | Publish verification | `crates.io` publish is manual and needs a human-held token. A green dry-run is not evidence. Reconcile the published artifacts against the PR #91 tag |
-| P0 | Cross-OS lane reproduction | The three-OS matrix (`ubuntu-latest`, `macos-14`, `windows-latest`) executes on hosted Actions and is the Portable evidence. A prior draft collapsed the routes onto one self-hosted macOS rung; that was a coverage regression and is not landing. `scripts/check-gate-parity.py` binds lane ids and commands to the workflow rather than policing runner labels |
-| P1 | Effect-dispatch crash exercise | #93 made effect dispatch durable and authorized. A real crash-during-settlement journey is not in the suite |
-| P1 | Narrowed-surface semver audit | #98 is `refactor!`. Confirm no downstream consumer inside the estate is broken, and record the break in `CHANGELOG.md` |
-| P2 | Frontier / Performance evidence | #79 carries a baseline. No matched architecture-class comparison, no allocation or contention profiling |
-| P1 | Concurrency tier ceiling | A single store fences at 50,000 attempts, half of `MAX_JOURNAL_EVENTS`. Whether the cap should be raised, or a store should roll to segments so a long-lived process can exceed it, is undecided; the trace reports the ceiling either way |
-| Deferred | CLA instrument | #73 deferred it. `lgwks_bot` is closed to outside contributions meanwhile |
+| P1 | Flood decision-mean bound (#375) | Quarantined from Linux container legs 2026-10-08; enforced on mac lanes. Return: working-set-independent admit cost, then 20 consecutive green container runs |
+| P1 | Every gate under 5 minutes (#272) | PR wall 3m59s; one warm main run 240 s. Still needs five consecutive mains < 300 s, serial local < 300 s, cold build < 60 s / cold test < 90 s |
+| P1 | Saturation curve + VPS profile (#269) | Latency gap closed (#320: p99 ≤ 1.25× raw Tokio, 3.45 allocs/task). Still needs the 1–2 vCPU / 1–2 GB VPS profile and the README boxes |
+| P1 | Acceptance receipts (#271) | T01–T36 map + per-revision SQLite receipts landed (#374). Still needs the remaining `_tNN` renames, a macOS receipt leg, and the containment rows |
+| P1 | Authoring frontier scale (#270) | `script!` arm + 3 guarantee tasks with negative controls landed (#374). Still needs 10 trials/cell, a third (frontier closed) model, and human authors |
+| P1 | Vendor wiring (#266) | Done in worktree, uncommitted: 924/924 packages covered, offline build 2m43.9s, negative control refuses. Blocked on the §7 secrets-pattern decision |
+| P1 | Descendant containment part 2 (#263) | Capture-before-kill, 4-round signalling, `CleanupSurvivors`, `process_escape` root cause all landed. Still needs Windows Job Objects (§7-gated) |
+| P1 | Effect-dispatch crash exercise | #93 made dispatch durable and authorized; `durable-retry` (SIGKILL mid-effect, exactly-once count) now exists as a #270 guarantee task — wire its oracle into the suite before claiming R10 |
+| P2 | Tick cost (#279) | Honest staging landed (#371). Still needs steady/poll-only ≤ 10×, churn ≤ 30×, zero steady-state allocs |
+| P2 | macOS table read without spawn (#345) | Self-exit fast path landed (#349: 19.15 → 7.99 ms/process). Still needs the native read (§7-gated on `unsafe` or a new dep) |
+| P2 | Walk prune + metadata (#343) | Crate side landed and verified (#356, #372). Wiring open: logical_ci still hand-rolls `read_dir` in `gates.rs`/`writes.rs`; adoption + cost check belong to that repo |
+| P2 | Child containment hook (#337) | `env_clear` / `EnvDelta::Clear` landed with 160-seed sims (#358). Still needs the pre-exec hook (§7-gated on `unsafe`) |
+| P2 | Cross-host lease/queue/run-state (#319) | Single-host lease, fenced queue and durable run state landed (#370). Cross-host (KEEL-SPEC S5.4) is untouched |
+| P2 | Facade re-export gaps (#366, #367) | `rt::net` lacks the owned split halves (`into_split` unreachable without naming tokio; `rt::io::split` is the workaround); `lgwks_ast`'s `thiserror` re-export drags the grammar stack. Small, unclaimed |
+| Tracker | Nine-axis closure (#281) | Director-approved 2026-10-05 (proptest edge, vendor wiring, lint mechanism, CI lanes, bounded blocking pool). Work proceeds in tracker order |
 | Standing | Dependency admission | Any new third-party edge goes through `skills/lgwks-dependency-admission/SKILL.md` and lands in `contract/APPROVED.toml` |
+| P0 | Publish verification | `crates.io` publish is manual and needs a human-held token. A green dry-run is not evidence. Reconcile the published artifacts against the 2.2.0 cut |
+| P0 | Cross-OS lane reproduction | The three-OS matrix executes on hosted Actions and is the Portable evidence. A lane that did not run is `skip`, named in the receipt, never `pass` |
 
 ---
 
@@ -585,6 +667,10 @@ follow the upload per `docs/releasing.md` §4.
 | rust-guard's REPETITION check | The Director authorised a bypass on 2026-09-27 for commit `b30a2716`, on the stated reason that the remaining findings are a relocated block and compiler-mandated shape, not duplication | The check is compared per file against the base commit and does not net a deletion against an addition, so a move reads as a copy. It needs three rules: net deletions against additions across the whole diff, exempt trait-impl boilerplate, and match a repeated body rather than a repeated line shape. Until then every real duplication is still extracted first and the bypass is the last step, recorded in the commit message |
 | Does a lagging `Stored` fact still fence a replay? | The simulation found a fact that enters the fence 900 events behind the head and asked whether it should. Shipped answer is yes, and `sim_journal::stored_lags_history_but_still_fences_a_replay` now pins it | Until decided, the shipped behaviour stands and the pinning test fails loudly if it changes |
 | Licence change or re-opening `lgwks_bot` | #73 closed it to outside contributions; the CLA instrument is deferred | `lgwks_bot` stays closed. The other three crates keep their licence map from #63 |
+| `vendor/**` fixture exemption in the secrets pattern | #266 is done in worktree but uncommitted: the estate pre-commit secrets pattern refuses 20 staged `*.pem`/`*.pfx`/`*.key` fixtures that are bytes of the pinned `.crate` files with zero in-repo references. Omitting them breaks the offline build at checksum time | `vendor/` stays uncommitted until the hook owner / Director grants the exemption, then lands in three steps: (a) `vendor/` + `.cargo/config.toml`, (b) `gate-lanes.toml` + `ci.yml`, (c) `docs/releasing.md`. No bypass; nothing is committed |
+| `unsafe` for the pre-exec containment hook and the macOS table read | CODEBOOK forbids `unsafe_code` workspace-wide; #337's Landlock/`sandbox_init` hook and #345's `proc_listallpids`/`sysctl` read need it (or a new admitted dep) | No `unsafe` until the Director rules. Stand-ins stand: `env_remove` + `sandbox-exec` wrap on macOS, `ps` snapshot with the self-exit fast path |
+| Windows Job Object backend crate | No approved Windows job-object crate exists; #263 part 2 names it through an admitted storefront edge | No Windows containment until admission. Windows rows stay `present`-only |
+| Merges on red PR check runs (Oct 8 sweep) | §3 needs hosted reproduction of the affected lanes; five of the seven PR runs read `failure` at merge | The per-run failing job and the merge rationale go in the ledger before this becomes precedent. Until then it is flagged debt |
 
 A required decision pauses dependent work. Audits, reproducible counterexamples,
 and factual documentation may continue.
