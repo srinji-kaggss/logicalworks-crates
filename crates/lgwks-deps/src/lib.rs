@@ -2421,6 +2421,7 @@ mod tests {
         {
             const APPROVED: &[&str] = &[
                 "blake3",
+                "ed25519-dalek",
                 "getrandom",
                 "iri-string",
                 "regex",

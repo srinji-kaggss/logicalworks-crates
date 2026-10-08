@@ -510,6 +510,15 @@ pub fn process_exists(pid: i32) -> io::Result<bool> {
 /// receipt that claims less than it established is the honest one and a receipt
 /// that claims more is the dangerous one.
 ///
+/// Off Linux the states come from one whole-table `ps` snapshot — a process
+/// spawn per call — so a signal-zero probe runs first and a set whose every pid
+/// is already absent returns empty without spawning anything. A probe is not a
+/// state: a pid the probe finds present is still decided by the table, and a
+/// pid that exits between the probe and the snapshot is decided the way the
+/// table reads it. Absence needs no table: no live process can name a pid
+/// nobody holds as its parent, and a zombie holds its id, so an absent pid is
+/// not running however the table would have spelled it.
+///
 /// `pids` may be empty, in which case no table is read and the answer is empty:
 /// asking about nothing must not cost a process spawn.
 #[cfg(all(unix, feature = "process"))]
@@ -537,17 +546,32 @@ pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let snapshot = read_table_states()?;
+        // The probe before the spawn (#345): signal zero costs a syscall and
+        // answers absence exactly, while the snapshot below costs a `ps`
+        // invocation. A pid nobody holds is not running — a zombie would hold
+        // its id — so a set the probe proves wholly absent needs no table.
+        // A pid the probe finds present is still decided by the table, which
+        // is what tells a zombie from a process that runs.
+        let mut present = Vec::with_capacity(pids.len());
         for pid in pids {
-            match snapshot.get(pid) {
+            if process_exists(*pid)? {
+                present.push(*pid);
+            }
+        }
+        if present.is_empty() {
+            return Ok(running);
+        }
+        let snapshot = read_table_states()?;
+        for pid in present {
+            match snapshot.get(&pid) {
                 Some(state) => {
                     if !state.starts_with('Z') {
-                        running.insert(*pid);
+                        running.insert(pid);
                     }
                 }
                 None => {
-                    if process_exists(*pid)? {
-                        running.insert(*pid);
+                    if process_exists(pid)? {
+                        running.insert(pid);
                     }
                 }
             }
@@ -1240,7 +1264,16 @@ pub enum OrphanReap {
 #[cfg(all(unix, feature = "process"))]
 pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
     let holder = match leader.scheme() {
-        StartScheme::Ps => ps_start(leader.pid)?,
+        StartScheme::Ps => {
+            // The probe before the spawn (#345): `ps_start` answers `None`
+            // exactly when no process holds the pid — it disambiguates an
+            // empty `ps` listing with this same probe — so an absent pid is
+            // `LeaderGone` without spawning `ps` to learn nothing.
+            if !process_exists(leader.pid)? {
+                return Ok(OrphanReap::LeaderGone);
+            }
+            ps_start(leader.pid)?
+        }
         #[cfg(target_os = "linux")]
         StartScheme::Proc => proc_start(leader.pid)?,
         #[cfg(not(target_os = "linux"))]

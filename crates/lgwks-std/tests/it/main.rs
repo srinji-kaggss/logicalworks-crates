@@ -55,6 +55,7 @@ mod sim_random_error;
 mod sim_retry_arithmetic;
 mod sim_seeded;
 mod sim_shared_policy_tiers;
+mod sim_sign;
 mod sim_similarity_sweep;
 mod sim_task_public;
 mod sim_tenant_isolation;
