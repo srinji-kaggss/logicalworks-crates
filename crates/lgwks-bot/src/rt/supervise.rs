@@ -3918,9 +3918,17 @@ impl Drop for Supervisor {
     /// its tasks with it. It is deliberately synchronous: `Drop` cannot await,
     /// so tasks are aborted rather than joined. Use [`Supervisor::shutdown`]
     /// when the caller needs to know they have finished before continuing.
+    ///
+    /// The drop also sweeps adopted zombies: on Linux the subreaper flag
+    /// reparents orphaned descendants to this process, and without a reap
+    /// they stay `kill(pid, 0)`-present past the death they report. The sweep
+    /// reaps only this process's own children outside the live and parked
+    /// sets, so it cannot take a pid another owner still tracks.
     fn drop(&mut self) {
         self.token.cancel();
         self.set.abort_all();
+        #[cfg(all(target_os = "linux", feature = "process"))]
+        let _collected = sweep_adopted_confirmed();
     }
 }
 
@@ -4032,27 +4040,33 @@ fn untrack_leader(pid: i32) {
 /// wait promptly never notice; the edge is inherent to the process-wide
 /// subreaper flag, whose adoptees would otherwise strand every tree's zombies
 /// here.
+/// Children of this process no driver owns: not live leaders, not parked orphans.
 #[cfg(all(target_os = "linux", feature = "process"))]
-fn sweep_adopted() -> usize {
+fn unclaimed_children() -> Vec<i32> {
     let children = match lgwks_std::process::own_children() {
         Ok(children) => children,
         Err(error) => {
             lgwks_std::trace::debug!(%error, "sweep: the child list was unreadable; adopted zombies wait for the next sweep");
-            return 0;
+            return Vec::new();
         }
     };
     if children.is_empty() {
-        return 0;
+        return Vec::new();
     }
     let live = crate::journal::owner::lock(&LIVE_LEADERS).clone();
     let parked: std::collections::BTreeSet<i32> = crate::journal::owner::lock(&ORPHANS)
         .iter()
         .filter_map(|orphan| i32::try_from(orphan.id()).ok())
         .collect();
-    let zombies: Vec<i32> = children
+    children
         .into_iter()
         .filter(|pid| !live.contains(pid) && !parked.contains(pid))
-        .collect();
+        .collect()
+}
+
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn sweep_adopted() -> usize {
+    let zombies = unclaimed_children();
     if zombies.is_empty() {
         return 0;
     }
@@ -4063,6 +4077,29 @@ fn sweep_adopted() -> usize {
             0
         }
     }
+}
+
+/// Reap unclaimed children until none remain or the bound is spent.
+///
+/// The confirming half of [`sweep_adopted`] for paths that cannot await: a
+/// signalled process dies on the kernel's schedule, and a single nonblocking
+/// reap attempted before the death lands leaves a zombie no later pass
+/// collects. This waits for the deaths, bounded (400 × 5 ms like the async
+/// adoption reap), so a supervisor that goes out of scope takes its adopted
+/// zombies with it rather than leaving them `kill -0`-present behind it.
+/// Synchronous like the rest of the drop path; only ever waits on processes
+/// that are already children of this process.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn sweep_adopted_confirmed() -> usize {
+    let mut collected = 0usize;
+    for _ in 0..400 {
+        if unclaimed_children().is_empty() {
+            break;
+        }
+        collected += sweep_adopted();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    collected
 }
 
 /// Scope the just-spawned leader `pid` to its own cgroup, best effort.
@@ -5330,7 +5367,7 @@ impl<'ops> ProcessGroup<'ops> {
         // keeps its pid unreissued, so each one is provably still the process
         // this tree started.
         #[cfg(all(target_os = "linux", feature = "process"))]
-        self.adopt_orphans();
+        self.adopt_orphans().await;
         // Stranded adoptees of earlier trees — orphans adopted after their own
         // guard's pass — are collected here rather than left as rows `kill -0`
         // still reports present.
@@ -5362,31 +5399,42 @@ impl<'ops> ProcessGroup<'ops> {
 
     /// Kill and reap the captured descendants this process adopted.
     ///
-    /// One pass, bounded by the signalled set: orphans adopted after this
+    /// One signal pass, bounded by the signalled set: orphans adopted after this
     /// call are not in it, and the receipt's rounds — not another pass — are
     /// what bound the work. A pid adopted here was captured while the leader
     /// lived and is an unreaped child now, so the signal cannot reach a
     /// stranger and the reap cannot steal a live leader's exit.
+    ///
+    /// The reap confirms rather than fires once: a signalled process dies on
+    /// the kernel's schedule, not this task's, and under load the death lands
+    /// after a single nonblocking reap attempted it — leaving a zombie no
+    /// later pass collects while the receipt already claims the tree. The loop
+    /// below waits for the deaths it caused, bounded (400 × 5 ms), then
+    /// observes only what is still genuinely alive; a pid that never dies is
+    /// a survivor, not a missed reap.
     #[cfg(all(target_os = "linux", feature = "process"))]
-    fn adopt_orphans(&mut self) {
+    async fn adopt_orphans(&mut self) {
         let adopted = self.signal_adopted();
         if adopted.is_empty() {
             return;
         }
-        match lgwks_std::process::reap_descendants(&adopted) {
-            Ok(reaped) => {
-                let reaped: std::collections::BTreeSet<i32> = reaped.into_iter().collect();
-                let still: Vec<i32> = adopted
-                    .into_iter()
-                    .filter(|pid| !reaped.contains(pid))
-                    .collect();
-                self.observe_running(&still);
+        let mut unreaped = adopted;
+        for _ in 0..400 {
+            match lgwks_std::process::reap_descendants(&unreaped) {
+                Ok(reaped) => {
+                    let reaped: std::collections::BTreeSet<i32> = reaped.into_iter().collect();
+                    unreaped.retain(|pid| !reaped.contains(pid));
+                    if unreaped.is_empty() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    lgwks_std::trace::debug!(%error, task = ?self.task, "confirm: the adoption reap was refused; retrying within the death bound");
+                }
             }
-            Err(error) => {
-                lgwks_std::trace::debug!(%error, task = ?self.task, "confirm: the adoption reap was refused; the observation below owns these pids");
-                self.observe_running(&adopted);
-            }
+            crate::rt::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+        self.observe_running(&unreaped);
     }
 
     /// Signal the adopted orphans without observing them.
