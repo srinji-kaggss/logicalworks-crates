@@ -105,6 +105,6 @@ crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:797	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-deps/src/lib.rs:85	pub mod scan;
-crates/lgwks-std/src/process.rs:1263	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
+crates/lgwks-std/src/process.rs:1287	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task.rs:419	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 docs/guidance-runner-spec.md:193	`review`.

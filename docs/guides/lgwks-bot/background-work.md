@@ -143,7 +143,7 @@ to them is a record written before the kill.
 (`crates/lgwks-bot/src/rt/supervise.rs:2632`): the pid **and** the instant the OS
 records that pid's process started. Store `leader().to_string()` durably — a
 database row, written before the lane does work — and a successor parses it back
-and calls `reap_orphaned_group` (`crates/lgwks-std/src/process.rs:1263`):
+and calls `reap_orphaned_group` (`crates/lgwks-std/src/process.rs:1287`):
 
 ```rust
 use lgwks_bot::rt::process::{OrphanReap, ProcessIdentity, reap_orphaned_group};
