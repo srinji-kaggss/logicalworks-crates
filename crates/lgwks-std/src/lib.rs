@@ -21,6 +21,9 @@
 //!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
+//! - `sign` — sign. Adds `ed25519-dalek` (default-features off, `alloc` only).
+//!   Implies `random` (key generation reads the one entropy source) and `hash`
+//!   (the sealed message carries the BLAKE3 of the record).
 //! - `pattern` — pattern. Adds `regex`.
 //! - `json` — json. Adds `serde`, `serde_json`.
 //! - `ron` — ron. Adds `serde`, `ron`.
@@ -92,6 +95,9 @@ pub mod seeded;
 /// for `json` and `ron` (test builds only).
 #[cfg(all(test, any(feature = "json", feature = "ron")))]
 mod serde_facade;
+/// Detached ed25519 seals over domain-separated records (feature `sign`).
+#[cfg(feature = "sign")]
+pub mod sign;
 /// Pure, replaceable similarity metrics and weighted composition.
 pub mod similarity;
 /// Single-threaded executor: `block_on`, `join_all`, `spawn_blocking`.

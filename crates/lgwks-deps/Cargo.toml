@@ -81,9 +81,6 @@ bevy-ecs = ["dep:bevy_ecs"]
 bevy-app = ["bevy-ecs", "dep:bevy_app"]
 bevy-time = ["bevy-ecs", "dep:bevy_time"]
 bevy-state = ["bevy-ecs", "dep:bevy_state"]
-# Signal-zero process-group observation, forwarded to `lgwks_std::process`
-# (the one process-group backend, on rustix; #263).
-process-group-probe = ["lgwks_std/process"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
@@ -155,7 +152,6 @@ workspace = true
 features = [
     "tokio-full",
     "appcui",
-    "process-group-probe",
     "bevy-app",
     "bevy-time",
     "bevy-state",

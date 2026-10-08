@@ -153,6 +153,34 @@ impl GrantSet {
         Ok(proof.with_lease(clock.clone(), ttl))
     }
 
+    /// Mint a proof whose credential lifetime is measured on `clock` and
+    /// judged on a foreign clock with up to `max_skew` of disagreement allowed.
+    ///
+    /// The cross-host form of [`Self::issue_at`]: the shortest lifetime still
+    /// decides, and the allowance rides on the lease so the judging host reads
+    /// it from the proof rather than configuring it beside the check (issue
+    /// #278, row 2). Judged through
+    /// [`Auth::check_remote`](Auth::check_remote); a same-host caller uses
+    /// `issue_at` and [`Auth::check`](Auth::check), where an allowance would
+    /// hide a defect as drift.
+    ///
+    /// # Errors
+    ///
+    /// [`BotError::CapabilityDenied`] naming every ungranted requirement.
+    pub fn issue_skewed(
+        &self,
+        required: &[Cap],
+        clock: &Clock,
+        max_skew: super::skew::SkewBound,
+    ) -> Result<Auth, BotError> {
+        self.admit(required)?;
+        let proof = Auth::new(required.to_vec());
+        let Some(ttl) = self.shortest_lifetime(required) else {
+            return Ok(proof);
+        };
+        Ok(proof.with_skewed_lease(clock.clone(), ttl, max_skew))
+    }
+
     /// The shortest lifetime among `required`, or `None` when none of them
     /// named one.
     fn shortest_lifetime(&self, required: &[Cap]) -> Option<Duration> {

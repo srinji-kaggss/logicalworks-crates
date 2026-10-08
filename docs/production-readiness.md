@@ -424,13 +424,13 @@ The state of that, honestly:
 | **The element is gone, not moved** | ⚠️ studied, not coded | [`frontier.md`](frontier.md): false-heal 40.5–57.1% on removed elements; decoy and drift score ranges **overlap**, so no threshold separates them |
 | An OS dialog stole focus mid-flow | ❌ | no coverage |
 | A file was half-written when read | ✅ tested | `stability::read_stable_file`: two reads must agree on length, mtime and digest, an unsettled subject is `BotError::UnstableObservation` (pending, `NotDelivered`, never a change); `tests/it/stability.rs` drives a real file under a real child-process writer, `tests/it/sim_stability.rs` sweeps 1,024 seeds |
-| Clock skew between two hosts | ❌ | no coverage |
+| Clock skew between two hosts | ✅ tested | `skew::SkewBound` declares how far two honest clocks may disagree; a lease expiry is a `MonoDeadline` on the granting clock judged on a foreign reading only through `lease_holds`, and `Auth::check_remote` is the cross-host form of `check` (INV-BOT-160). Generations take no bound (`epoch_holds` is exact). `tests/it/skew.rs` judges live leases from clocks at ±skew and past the bound over a real `Broker`; `tests/it/sim_skew.rs` sweeps 1,024 seeds |
 | A credential expired mid-run | ✅ tested | `GrantSet::grant_expiring` + `Auth::check`: a lapsed proof is `BotError::CredentialExpired` (`Refused`, `RetryClass::Never`), an upstream 401/403/404 is `BotError::CredentialRejected` carrying a `NeedSet` repair (`cap::is_credential_status`, `GhError::repair`), wired through `PrSnapshotSource::poll` and every `gh` flow; `tests/it/credential.rs` spends a real credential's life on a real wall clock over a real file, `gh_binding.rs` and `sim_review_path.rs` drive a real `gh` child refusing the token, `tests/it/sim_credential.rs` sweeps 1,024 seeds |
 | The locale changed a date or number format | ✅ tested (macOS) | every `lgwks_std` reader of human text (RFC 3339, hex, percent, JSON/RON numbers) answers the same under `C`, `de_DE`, `ar_SA`, `fa_IR` and `ja_JP` in their own time zones and refuses Arabic-Indic and Persian digits, a decimal comma and a grouping space; the one reader that leaves the process, `ps -o lstart`, is pinned to `TZ=UTC0 LC_ALL=C`. `tests/it/sim_locale.rs` sweeps 1,000 seeds in-process and re-runs the sweep and a process-start read in a child under each locale (INV-STD-LOCALE-1); removing the `ps` pin fails it. The in-process readers consult no locale, so for them the child re-run guards against a future libc call rather than discriminating one; a host without these locales (the Linux container) falls back to `C` and passes without exercising them |
-| Two operators edited one record | ❌ | no coverage |
+| Two operators edited one record | ✅ tested | `cas::RecordStore` applies a write only when the record still holds the expected version; a late write is typed `BotError::Conflict { expected, found }` (`RetryClass::Never`), recorded in the store's bounded conflict log and read back on reopen (INV-BOT-161). `tests/it/cas.rs` races sixteen real threads on a real file and drives the `Execute` path; `tests/it/sim_cas.rs` sweeps 1,024 seeded schedules |
 | The app updated and the selector no longer resolves | ❌ | no coverage in the wild |
 | Accessibility tree mutated during a read | ❌ | no coverage |
-| A non-idempotent effect was sent twice by a retrying proxy | ⚠️ designed | the journal ladder refuses a second `OutcomeObserved` with different evidence; untested against a real retrying proxy |
+| A non-idempotent effect was sent twice by a retrying proxy | ✅ tested | `idempotent::IdempotentPost` reuses one caller-generated key and payload on every attempt; the upstream deduplicates on the key and counts exactly one effect, and an upstream credential refusal on the path is the typed `NeedSet` repair (INV-BOT-162). `tests/it/retry_proxy.rs` stands a real loopback proxy forwarding every request three times in front of the adapter; `tests/it/sim_retry_proxy.rs` sweeps 1,024 seeded delivery schedules |
 | The user cancelled halfway through | ⚠️ partly | `tests/it/sim_cancel_under_load.rs` stops a real `Host` with 1,000 flows in flight at a seeded point, over 1,000 seeds. Every flow reports `Succeeded`, `Cancelled` or `Refused`; the host's admitted and refused counts agree with the reports; no body outlives the call or starts after the stop; every permit returns. A run still queued at the stop is `Refused` whatever order the stop's wakes arrive in (INV-BOT-20). Before that rule the same seed did not replay. Supervised processes under a stop are `process_escape` (INV-BOT-156), at tens of processes rather than 1,000 |
 
 The rows marked ❌ are not oversights to be fixed in an afternoon each. They are
@@ -686,17 +686,45 @@ BSD or WASI at all. It now holds no target list of its own, and its typed
 `EntropyError` is what a caller on any of these targets gets when the source
 fails.
 
-**Containment per OS, as executed evidence (#263).** On Unix the supervisor
+**Containment per OS, as executed evidence (#263, #337).** On Unix the supervisor
 captures the leader's descendants and stops each by pid as well as signalling
 the group, so a `setsid` escapee is stopped: `tests/it/process_escape.rs`
-observes it gone with `kill -0` (1,000 of 1,000 iterations on
-`aarch64-apple-darwin` through the `ps` snapshot; the `/proc` child-list reader is
-compiled for `x86_64-unknown-linux-gnu` and executed by the `ubuntu-latest` test
-lanes). A descendant orphaned to init before the cleanup ran is not reachable
-from the leader on either: a cleanup that begins after the leader exited on its
-own reads no table and reports `ResidualRisk::LeaderExited`, so its containment
-is never `is_complete()` (INV-BOT-158, #347). Windows has no containment at
-all.
+observes it gone with `kill -0`, 4 tests × 1,000 iterations with zero failures
+on `aarch64-apple-darwin` (4,000 executions, `--retries 0`, `leaky` only where
+the test intends it). On Linux the tree additionally runs in its own cgroup v2
+scope, killed first with `cgroup.kill`, and the supervisor adopts orphans
+through the child-subreaper flag: `sim_confinement ::
+a_cgroup_scope_kills_a_setsid_escapee_where_the_mount_allows` passes with the
+receipt naming `CgroupKill` where the mount admits a scope (privileged
+`rust:1.99.0-bookworm` container, `aarch64`), and falls back to the capture
+rounds where it does not; `sim_kernel_owners ::
+an_adopted_orphan_is_named_by_its_adoption` proves the attribution (a pid that
+is both captured and adopted is signalled, then reaped), and the sweep in
+`start` / `confirm_absence` collects the adoptees no guard captured, so a
+killed descendant is never left as a `kill -0`-present zombie. The fire test
+drives 1,000 supervised depth-3 trees under cancellation at in-flight 100 (ten
+rounds of one hundred 7-process trees, 7,000 processes) and at in-flight 1,000
+(one round of one thousand 3-process chains, 3,000 processes — the host's
+`maxprocperuid` of 4,000 forbids ten thousand processes at once, so the second
+level uses chains rather than fan-out): zero surviving descendants in every
+round, verified from the OS process table. Cleanup latency p50/p99 559/574 ms
+at in-flight 100 and 6,582 ms at in-flight 1,000 (one thousand macOS `ps`
+snapshots dominate the second number), peak RSS 13.8 MB and 58.8 MB
+respectively. A descendant orphaned to init before the cleanup ran, where no
+subreaper adopted it, is still not reachable from the leader: a cleanup that
+begins after the leader exited on its own reads no table and reports
+`ResidualRisk::LeaderExited`, so its containment is never `is_complete()`
+(INV-BOT-158, #347). macOS lanes additionally confine through
+`ProcessSpec::confinement` (`sim_confinement ::
+a_sandboxed_child_is_denied_its_denied_subtree`): a denied write fails with the
+kernel's refusal and leaves no file, while a confined `true` still exits zero.
+The sandbox costs one extra fork and exec per spawn, measured on this host at
+p50 10.80 ms against 3.17 ms for a bare `true` (n=200 each); the in-process
+`sandbox_init` that would avoid it needs an FFI leaf the workspace gate
+refuses, and Linux subtree-deny needs Landlock syscall bindings the estate has
+not admitted — both recorded, neither shipped. Windows has no containment at
+all: a job-object backend needs either an admitted Windows API crate or the
+same refused FFI leaf, so the `windows-latest` job stays a build receipt.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` on non-Unix, so a
@@ -736,15 +764,56 @@ present exactly once. Capacity is admitted per tenant by
 `Supervisor::with_tenancy` (INV-BOT-151; `tenancy::a_noisy_tenant_cannot_starve_a_quiet_one`,
 `a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
 `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
+A `Scope`'s tenant reaches every body under `each`, `retry` and
+`FanOut::run_in` (`sim_tenancy_scope`: two tenants key the same path
+differently, every retry attempt shares one tenant and key, `run_in` enters
+the caller's step, clock and stop; the standalone `FanOut::run` keeps its
+reserved tenant). `each` and `FanOut` still take no permit — tenant admission
+bounds who is admitted, not the CPU an admitted body burns — so a scope's
+tenant reaches item scopes, not admission.
+
+Measured on one macOS arm64 host (15 cores, shared with other work) and one
+Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
+
+- **Noisy neighbour** (A 10,000 slow tasks, B 100 × ~2 ms, limit 64):
+  quiet p99 under the flood is 11.375 µs (macOS) / 5.5 µs (Linux) against
+  3.828 ms / 3.084 ms alone — ratios 2‰ / 1‰ against the 2000‰ bound. The
+  alone-side p99 in both runs is one slow baseline admission (host noise on a
+  shared machine), not the flood: the medians are 583 ns alone vs 1.5 µs under
+  the flood (macOS), sub-microsecond apart in absolute terms.
+- **5,000 tenants provisioned** (`tenancy_scale`, every admission inside a 5 s
+  progress bound, 0 refusals, every task terminal):
+
+  | tier | macOS p50 / p99 / max | macOS peak RSS | Linux p50 / p99 / max | Linux peak RSS |
+  |---|---:|---:|---:|---:|
+  | 100 | 9.9 µs / 37.4 µs / 339 µs | 6,592 KiB | 7.0 µs / 120.2 µs / 1.91 ms | 9,536 KiB |
+  | 1,000 | 7.9 µs / 34.1 µs / 83 µs | 8,128 KiB | 6.9 µs / 80.5 µs / 785 µs | 11,792 KiB |
+  | 10,000 | 0.54 µs / 16.0 µs / 34 µs | 16,544 KiB | 0.63 µs / 10.1 µs / 707 µs | 19,060 KiB |
+  | 100,000 | 0.46 µs / 14.6 µs / 148 µs | 97,744 KiB | 0.71 µs / 12.2 µs / 693 µs | 100,368 KiB |
+
+  The 100,000 tier holds 100,000 parked tasks (5,000 tenants × 20): ~1 KiB of
+  peak RSS per in-flight task on both hosts.
+- **Adversarial split** (#351, `tenancy_scale::the_floods_cost_is_scheduling_not_admission`,
+  41 interleaved rounds × 2,000 neighbour tasks, bound unchanged at 10%): the
+  mean arrival-decision cost (lock + round, `Supervisor::admission_cost`) is
+  569 ns alone vs 583 ns attacked (macOS) and 189 ns vs 195 ns (Linux) —
+  decision-mean ratios 1024‰ / 1031‰, inside the envelope on both hosts, so
+  there is no admission-side cost to fix. The remainder is stated separately:
+  arrival decisions are ~29% of a neighbour submission on macOS (8–12% on
+  Linux, where the clock read is cheaper); the rest is the task spawn, the
+  bounded reap and the executor's polls beside the flood's completions. Wall
+  ratios 989‰ / 692‰ — the attacked arm measured faster on both hosts, which
+  is scheduling noise, not isolation.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
 own file, so the run proves the kill and the restart keep each file's prefix,
 not that a shared file separates tenants. The kill is a cut of the file a real writer produced, not a
 `SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
-journal for real). A `script::Scope`'s tenant does not reach any admission,
-because `each` and `FanOut` drive their bodies on the awaiting task and take no
-permit. Tenant admission bounds who is admitted, not the CPU an admitted body
-burns.
+journal for real). The 11.2% neighbour gap was seen only on GitHub's x86_64
+runners and is still unreproduced anywhere else: arm64 Linux (container and
+dedicated cores) and arm64 macOS show no gap, and the split above attributes
+the measured difference to scheduling. An x86_64 4-vCPU host with the split
+instrumentation is the run that would confirm or refute the SMT hypothesis.
 
 ### 4.9 Performance — fastest correct implementation
 

@@ -13,7 +13,6 @@ gpui = ["lgwks_deps/gpui"]
 ml-candle = ["lgwks_deps/ml-candle"]
 ml-candle-metal = ["lgwks_deps/ml-candle-metal"]
 ml-tokenizers = ["lgwks_deps/ml-tokenizers"]
-process-group-probe = ["lgwks_deps/process-group-probe"]
 all-storefront = [
     "appcui",
     "bevy-ecs",
@@ -21,7 +20,6 @@ all-storefront = [
     "ml-candle",
     "ml-candle-metal",
     "ml-tokenizers",
-    "process-group-probe",
     "tokio-base",
     "tokio-time",
     "tokio-sync",
@@ -65,9 +63,6 @@ required-features = ["ml-candle-metal"]
 [[example]]
 name = "ml_tokenizers"
 required-features = ["ml-tokenizers"]
-[[example]]
-name = "process_group_probe"
-required-features = ["process-group-probe"]
 [[example]]
 name = "tokio_base"
 required-features = ["tokio-base"]

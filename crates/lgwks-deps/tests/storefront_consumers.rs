@@ -171,7 +171,6 @@ storefront_families! {
     storefront_gpui_compiles_alone => ("gpui", "gpui"),
     #[cfg(target_os = "macos")]
     storefront_ml_candle_metal_compiles_alone => ("ml-candle-metal", "ml_candle_metal"),
-    storefront_process_group_probe_compiles_alone => ("process-group-probe", "process_group_probe"),
 }
 
 #[test]

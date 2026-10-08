@@ -97,8 +97,15 @@ mod liveness_fixtures;
 #[path = "../support/scratch.rs"]
 mod scratch;
 
+#[cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "script"))]
+#[path = "../support/tenancy_harness.rs"]
+mod tenancy_harness;
+
 #[path = "../sim/mod.rs"]
 mod sim;
+
+#[path = "../support/sweep.rs"]
+mod sweep_fixtures;
 
 /// This test binary re-invoked to run the one test named `test` as a probe child.
 ///
@@ -125,7 +132,9 @@ fn probe_test(module: &str, test: &str) -> String {
 
 mod ambiguous_commit;
 mod authority;
+mod cas;
 mod credential;
+mod dist_lease;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -159,6 +168,7 @@ mod registry;
 mod repair;
 mod request_key;
 mod resume_liveness;
+mod retry_proxy;
 mod rt_async_tier;
 mod rt_process;
 mod rt_process_files;
@@ -167,14 +177,17 @@ mod script_flow;
 mod script_refusals;
 mod session;
 mod sim_cancel_under_load;
+mod sim_cas;
 mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;
 mod sim_clock_wiring;
+mod sim_confinement;
 mod sim_continuation;
 mod sim_continuation_seal;
 mod sim_credential;
 mod sim_dispatch;
+mod sim_dist_lease;
 mod sim_epoch_identity;
 mod sim_group_commit;
 mod sim_inspect;
@@ -193,10 +206,12 @@ mod sim_ready;
 mod sim_repair;
 mod sim_replay_drift;
 mod sim_request_key;
+mod sim_retry_proxy;
 mod sim_review_pr;
 mod sim_run_boundaries;
 mod sim_scale;
 mod sim_script;
+mod sim_skew;
 mod sim_source_matrix;
 mod sim_spec_materialize;
 mod sim_stability;
@@ -211,7 +226,10 @@ mod sim_task_axes;
 mod sim_task_resume;
 mod sim_tenancy;
 mod sim_tenancy_model;
+mod sim_tenancy_scope;
 mod sim_tenant_journal_kill;
+mod sim_tenant_store;
+mod skew;
 mod spec_materialize;
 mod stability;
 mod store_read_failure;
@@ -225,4 +243,6 @@ mod task_front_door;
 mod task_million;
 mod task_resume;
 mod tenancy;
+mod tenancy_scale;
+mod tenant_store;
 mod wrong_identity_evidence;

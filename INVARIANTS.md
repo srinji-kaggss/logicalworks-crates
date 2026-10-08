@@ -588,9 +588,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `LeaderExited` — INV-BOT-158), so
   "nothing survived" and "nothing was looked at" never read alike. **Not
   claimed:** a descendant forked after the last capture that left the group in
-  the same window, or one orphaned to init before the cleanup ran; closing those
-  needs a kernel-level owner (a cgroup v2 `cgroup.kill`, a Windows job object),
-  which this crate does not have. · why: #87 acceptance row T21 (LC-10), #263 ·
+  the same window. On Linux the tree's cgroup v2 scope is killed first
+  (`CgroupKill`) and captured descendants re-parented to the supervisor are
+  killed and reaped by pid (`SubreaperAdoption`); the receipt names which
+  owner ran. A Windows job object is still pending (#263). · why: #87 acceptance row T21 (LC-10), #263 ·
   enforced by: `tests/it/process_escape.rs`
   (`a_session_escape_is_captured_and_stopped_by_pid`,
   `cleanup_never_signals_a_process_outside_the_supervisors_group_t21`),
@@ -601,8 +602,12 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_truncated_capture_is_reported_as_a_prefix_and_not_as_the_tree`,
   `sim_a_seeded_drain_reaches_the_models_receipt`,
   `sim_every_receipt_arm_is_reachable_in_the_family`,
-  `sim_distinct_seeds_drive_distinct_drains`), and lgwks_std's
-  `tests/it/sim_descendants.rs`
+  `sim_distinct_seeds_drive_distinct_drains`), lgwks_std's
+  `tests/it/sim_descendants.rs`, `tests/it/sim_kernel_owners.rs`
+  (`strongest_ranks_kernel_owners_above_table_readings`,
+  `an_adopted_orphan_is_named_by_its_adoption`), and
+  `tests/it/sim_confinement.rs`
+  (`a_cgroup_scope_kills_a_setsid_escapee_where_the_mount_allows`)
 - **INV-BOT-157** A supervisor killed outright leaves a record its successor can
   reap by, and the reap signals only the process the record names.
   `Supervisor::spawn_process_identified` returns, beside the task id, the
@@ -1778,6 +1783,67 @@ Each of these was a shipped defect. Treat the list as the spec.
   `a_thousand_cleared_tenants_never_cross`,
   `ten_thousand_cleared_tenants_never_cross`), all seven of which fail with the
   `Clear` arm removed from `configure`
+- **INV-BOT-160** A lease minted on one clock is judged on another only within
+  a declared skew bound, and a generation fence takes no bound at all. The
+  expiry is a `skew::MonoDeadline` on the granting clock; `Auth::check_remote`
+  judges it on the observer's reading through `skew::lease_holds` (accept
+  while the observer reads before expiry plus bound, refuse past it), and the
+  refusal is the existing typed `BotError::CredentialExpired` naming the
+  judging clock's reading — never a generic failure. The same-clock
+  `Auth::check` assumes agreement and allows nothing, because one host's
+  disagreement is a defect rather than drift. A lagging observer accepts a
+  lease its issuer already considers lapsed: the judge reads the observer's
+  clock, and that liveness bias is stated in the contract rather than hidden.
+  Operator-facing stamps are `skew::WallStamp`, never deadlines, so a history
+  cannot be mistaken for authority. · why: #278 row 2 · enforced by:
+  `tests/it/sim_skew.rs`
+  (`skewed_observers_agree_with_the_predicate_on_every_seed`, 1,024 seeds,
+  same seed replays the same trace hash) and `tests/it/skew.rs`
+  (`observers_within_skew_hold_a_live_lease`,
+  `an_observer_past_the_bound_is_refused_and_a_lagging_one_accepts`,
+  `two_wall_clocks_judge_a_live_lease_as_live`,
+  `a_replaced_environment_fences_exactly_at_any_skew` over a real `Broker`,
+  `the_same_clock_check_refuses_without_an_allowance`)
+- **INV-BOT-161** Two editors of one record produce one winner and one typed
+  conflict, never a lost update. Every `cas::RecordStore` write names the
+  version it saw; a write that arrives late is refused as `BotError::Conflict`
+  carrying `expected` and `found`, recorded in the store's ring-bounded
+  conflict log (`MAX_CONFLICTS`, evictions counted) before the refusal is
+  reported, and reopening the store reads the records and the conflicts back.
+  The outcome is `RetryClass::Never`: the same expectation refused again is
+  the same refusal, so a retry without a re-read is never a blind one — a
+  retry that re-reads and names the version found is a new write. The store
+  persists by atomic rename (the protocol `stability` recognises) under the
+  crate's one lock site, and cross-process writers are outside its fence by
+  construction: two processes sharing one path need the journal's
+  compare-and-append. · why: #278 row 5 · enforced by:
+  `tests/it/sim_cas.rs`
+  (`seeded_editors_produce_one_winner_and_typed_conflicts`, 1,024 seeds,
+  same seed replays the same trace hash, reopened state identical) and
+  `tests/it/cas.rs`
+  (`racing_writers_produce_one_winner_and_typed_conflicts`, sixteen real
+  threads on a real file;
+  `the_execute_path_reports_a_typed_conflict_that_survives_reopen`, asserting
+  `RetryClass::Never` on the verb path)
+- **INV-BOT-162** A retrying proxy delivers each keyed effect once. Every
+  `idempotent::IdempotentPost` attempt of one operation reuses its
+  caller-generated key and its payload byte for byte over the single
+  `Idempotency-Key` header; the upstream deduplicates on the key and counts
+  exactly one effect however often the proxy delivered it. An empty key and an
+  oversize body are refused at construction, before anything is sent. An
+  upstream credential status on this path is the credential row's typed
+  `BotError::CredentialRejected` carrying its `NeedSet` repair — never a
+  generic failure and never a silent retry — and any other exchange failure
+  says what it established (`NotDelivered` on a transport fault, because the
+  key is what makes a retry a retry). · why: #278 row 6 · enforced by:
+  `tests/it/sim_retry_proxy.rs`
+  (`a_duplicating_proxy_delivers_each_key_exactly_once`, 1,024 seeds, same
+  seed replays the same trace hash;
+  `unkeyed_and_oversize_operations_are_refused_at_construction`) and
+  `tests/it/retry_proxy.rs`
+  (`a_proxy_that_duplicates_everything_applies_each_key_once`, a real
+  loopback proxy forwarding every request three times against a real keyed
+  upstream; `an_upstream_401_on_the_proxy_path_is_a_typed_repair`)
 - **INV-BOT-19** After a delivered group signal, an `EPERM` from a further
   `killpg` against the still-present, unreaped group is an observation that the
   group is present, not a refused termination: cleanup stays pending and is
