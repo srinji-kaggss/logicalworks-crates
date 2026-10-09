@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_work_is_bounded_independently_of_the_attempt_value() {
+    fn delay_work_is_bounded_independently_of_the_attempt_value() -> Result<(), String> {
         let policy = RetryPolicy::new(u32::MAX, Duration::from_nanos(1), Duration::MAX);
         // The shift-and-compare form performs a fixed number of machine
         // operations whatever `attempt` is. An implementation that looped
@@ -380,12 +380,15 @@ mod tests {
         //
         // The oracle is a ratio, not an absolute: it holds on a loaded host as
         // long as the constant factor is nowhere near `2^25`. Each attempt is
-        // timed in `ROUNDS` interleaved windows and compared at its median, so
-        // one window the scheduler descheduled — a CI run at load 116 timed
-        // 261 ms against 1.1 ms for the same arithmetic — moves no verdict
-        // unless it lands in most rounds of one attempt; a walk over `attempt`
+        // timed in `ROUNDS` interleaved windows and judged at its *fastest*
+        // window. A host can only add time to a window — a CI run at load 116
+        // timed 261 ms against 1.1 ms for the same arithmetic, and on main run
+        // 37933518033 five of nine ~1 ms windows of one attempt were stalled,
+        // which moved a median — while work that grows with `attempt` is in
+        // every window, the fastest included, so the minimum keeps the whole
+        // discrimination and drops only the stalls. A walk over `attempt`
         // misses the bound in every round.
-        const ROUNDS: usize = 9;
+        const ROUNDS: usize = 15;
         const ATTEMPTS: [u32; 4] = [70, 128, 1_000, u32::MAX];
         let repeats = 11_112_u64;
         let mut windows = [[std::time::Duration::ZERO; ATTEMPTS.len()]; ROUNDS];
@@ -408,21 +411,26 @@ mod tests {
         }
         let per_attempt: [[std::time::Duration; ROUNDS]; ATTEMPTS.len()] =
             std::array::from_fn(|index| windows.map(|round| round[index]));
-        let medians = per_attempt.map(|mut rounds| {
-            rounds.sort_unstable();
-            rounds[ROUNDS >> 1]
-        });
-        let baseline = medians[0].as_nanos();
-        for (attempt, (elapsed, rounds)) in
-            ATTEMPTS.into_iter().zip(medians.into_iter().zip(windows))
-        {
-            assert!(
-                elapsed.as_nanos() <= baseline.saturating_mul(4).saturating_add(1_000_000),
-                "attempt {attempt} took {elapsed:?} at its median against {baseline}ns at \
-                 attempt 70; the work must not scale with the numeric attempt value \
-                 (rounds {rounds:?})"
+        let mut fastest = Vec::with_capacity(ATTEMPTS.len());
+        for rounds in &per_attempt {
+            fastest.push(
+                rounds
+                    .iter()
+                    .min()
+                    .copied()
+                    .ok_or("an attempt timed no window")?,
             );
         }
+        let baseline = fastest.first().ok_or("no attempt was timed")?.as_nanos();
+        for ((attempt, elapsed), rounds) in ATTEMPTS.into_iter().zip(&fastest).zip(&per_attempt) {
+            assert!(
+                elapsed.as_nanos() <= baseline.saturating_mul(4).saturating_add(1_000_000),
+                "attempt {attempt} took {elapsed:?} at its fastest window against {baseline}ns \
+                 at attempt 70; the work must not scale with the numeric attempt value \
+                 (its windows {rounds:?})"
+            );
+        }
+        Ok(())
     }
 
     #[test]

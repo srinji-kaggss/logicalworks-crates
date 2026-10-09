@@ -1201,6 +1201,9 @@ mod tenancy_support {
     use crate::rt::tenancy::{Arrival, DeficitRoundRobin, Grant, GrantOutcome, TryArrival};
     use crate::script::Tenant;
 
+    /// The round scheduler's lock, held for one decision.
+    type RoundGuard<'shell> = std::sync::MutexGuard<'shell, DeficitRoundRobin<Arc<WaitSlot>>>;
+
     /// The permit pool and the round scheduler, with the two directions a
     /// permit travels: out of a completed task into the next eligible tenant's
     /// waiter.
@@ -1463,20 +1466,42 @@ mod tenancy_support {
             }
         }
 
-        /// Run one lock-hold decision, charging its wall time to `ops` and
-        /// `nanos`.
+        /// Run one decision under the round lock, charging its own work to
+        /// `ops` and `nanos` and not the wait to take the lock.
         ///
-        /// The two reads of the clock cost tens of nanoseconds and are symmetric
-        /// across tenants, so a comparison of two arms' counters measures the
-        /// decisions rather than the clock.
-        fn timed<T>(&self, ops: &AtomicU64, nanos: &AtomicU64, decision: impl FnOnce() -> T) -> T {
+        /// `prepare` runs before the lock and is charged: an arrival's own work,
+        /// such as allocating its wait slot, is part of its decision whatever
+        /// the round holds. `decide` runs with the lock held and is charged,
+        /// through the unlock. The wait between the two is not: it is another
+        /// decision holding the round — a completing task's release, charged to
+        /// that release's own counter — and on an oversubscribed host it is
+        /// mostly the time that holder spent descheduled. Charging it here made
+        /// one host stall read as a 114x arrival cost (main run 37933518033),
+        /// which is the scheduling share INV-BOT-151 does not claim to isolate.
+        ///
+        /// The three reads of the clock cost tens of nanoseconds and are
+        /// symmetric across tenants, so a comparison of two arms' counters
+        /// measures the decisions rather than the clock.
+        fn timed<P, T>(
+            &self,
+            ops: &AtomicU64,
+            nanos: &AtomicU64,
+            prepare: impl FnOnce() -> P,
+            decide: impl FnOnce(&mut RoundGuard<'_>, P) -> T,
+        ) -> T {
             let started = Instant::now();
-            let outcome = decision();
+            let prepared = prepare();
+            let before_lock = started.elapsed();
+            let mut round = self.lock();
+            let held = Instant::now();
+            let outcome = decide(&mut round, prepared);
+            drop(round);
+            let charged = before_lock.saturating_add(held.elapsed());
             // A saturating read: the only input that does not fit is a decision
             // longer than 584 years, which pins the counter rather than wrapping
             // it, the same way the crate's counters saturate rather than wrap.
             let mut elapsed = u64::MAX;
-            if let Ok(fits) = u64::try_from(started.elapsed().as_nanos()) {
+            if let Ok(fits) = u64::try_from(charged.as_nanos()) {
                 elapsed = fits;
             }
             ops.fetch_add(1, Ordering::Relaxed);
@@ -1487,7 +1512,7 @@ mod tenancy_support {
         /// Take the lock. A poisoned lock still guards a consistent value: every
         /// critical section is a handful of plain writes over queues and
         /// counters, so a panic elsewhere is not a reason to strand permits.
-        fn lock(&self) -> std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>> {
+        fn lock(&self) -> RoundGuard<'_> {
             crate::journal::owner::lock(&self.round)
         }
 
@@ -1509,29 +1534,36 @@ mod tenancy_support {
         /// receiver is `self: &Arc<Self>` because an admitted lease has to keep
         /// the shell alive for as long as it holds the permit.
         pub(super) fn admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(&self.admit_ops, &self.admit_nanos, || {
-                let slot = WaitSlot::fresh();
-                let mut round = self.lock();
-                let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
-                match outcome {
-                    Arrival::Immediate(permit) => Admission::Admitted(self.lease(permit, tenant)),
-                    Arrival::Queued => {
-                        // An arrival that could not take a permit may still be
-                        // servable right now — the ring may have drained between its
-                        // check and this one — so the round is pumped before the
-                        // caller parks. A pump that grants to this very waiter wakes
-                        // it, and the caller's poll collects the permit.
-                        self.pump(&mut round, None);
-                        Admission::Queued(WaitPermit::new(
-                            Arc::clone(&slot),
-                            Arc::clone(self),
-                            tenant.clone(),
-                        ))
+            self.timed(
+                &self.admit_ops,
+                &self.admit_nanos,
+                WaitSlot::fresh,
+                |round, slot| {
+                    let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
+                    match outcome {
+                        Arrival::Immediate(permit) => {
+                            Admission::Admitted(self.lease(permit, tenant))
+                        }
+                        Arrival::Queued => {
+                            // An arrival that could not take a permit may still be
+                            // servable right now — the ring may have drained between its
+                            // check and this one — so the round is pumped before the
+                            // caller parks. A pump that grants to this very waiter wakes
+                            // it, and the caller's poll collects the permit.
+                            self.pump(round, None);
+                            Admission::Queued(WaitPermit::new(
+                                Arc::clone(&slot),
+                                Arc::clone(self),
+                                tenant.clone(),
+                            ))
+                        }
+                        Arrival::Refused { limit } => Admission::Refused { limit },
+                        Arrival::SupervisorFull { limit } => {
+                            Admission::SupervisorQueueFull { limit }
+                        }
                     }
-                    Arrival::Refused { limit } => Admission::Refused { limit },
-                    Arrival::SupervisorFull { limit } => Admission::SupervisorQueueFull { limit },
-                }
-            })
+                },
+            )
         }
 
         /// Admit one arrival for `tenant` that refuses rather than waits.
@@ -1540,18 +1572,22 @@ mod tenancy_support {
         /// that keeps hammering a full supervisor accumulates no waiters. The
         /// refusal path has to cost nothing as well as say so.
         pub(super) fn try_admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(&self.admit_ops, &self.admit_nanos, || {
-                let mut round = self.lock();
-                let outcome = round.try_arrive(tenant, || self.take_from_pool());
-                match outcome {
-                    TryArrival::Immediate(permit) => {
-                        Admission::Admitted(self.lease(permit, tenant))
+            self.timed(
+                &self.admit_ops,
+                &self.admit_nanos,
+                || (),
+                |round, ()| {
+                    let outcome = round.try_arrive(tenant, || self.take_from_pool());
+                    match outcome {
+                        TryArrival::Immediate(permit) => {
+                            Admission::Admitted(self.lease(permit, tenant))
+                        }
+                        TryArrival::Contended => Admission::Refused {
+                            limit: round.policy().queue_per_tenant(),
+                        },
                     }
-                    TryArrival::Contended => Admission::Refused {
-                        limit: round.policy().queue_per_tenant(),
-                    },
-                }
-            })
+                },
+            )
         }
 
         /// One of this supervisor's in-flight admissions ended, carrying its
@@ -1562,11 +1598,15 @@ mod tenancy_support {
         /// straight to the next eligible waiter rather than returning it to a
         /// pool for the next arrival to win.
         pub(super) fn release(&self, tenant: &Tenant, permit: OwnedSemaphorePermit) {
-            self.timed(&self.release_ops, &self.release_nanos, || {
-                let mut round = self.lock();
-                round.note_release(tenant);
-                self.pump(&mut round, Some(permit));
-            });
+            self.timed(
+                &self.release_ops,
+                &self.release_nanos,
+                || (),
+                |round, ()| {
+                    round.note_release(tenant);
+                    self.pump(round, Some(permit));
+                },
+            );
         }
 
         /// Hand permits to eligible tenants until none can take one.
@@ -1575,11 +1615,7 @@ mod tenancy_support {
         /// the loop reaches for another only when the round says a queued tenant
         /// could take it. A contended pool is therefore drained exactly as far
         /// as the queued work justifies and no further.
-        fn pump(
-            &self,
-            round: &mut std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>>,
-            spare: Option<OwnedSemaphorePermit>,
-        ) {
+        fn pump(&self, round: &mut RoundGuard<'_>, spare: Option<OwnedSemaphorePermit>) {
             let mut spare = spare;
             loop {
                 let permit = match spare.take() {
@@ -1619,7 +1655,7 @@ mod tenancy_support {
         /// Correcting the count here instead would subtract before the owner
         /// added, and a count that saturates at zero loses the subtraction.
         fn settle(
-            round: &mut std::sync::MutexGuard<'_, DeficitRoundRobin<Arc<WaitSlot>>>,
+            round: &mut RoundGuard<'_>,
             grant: Grant<Arc<WaitSlot>, OwnedSemaphorePermit>,
         ) -> Option<OwnedSemaphorePermit> {
             let returned = grant.waiter.deliver(grant.permit)?;
@@ -2027,8 +2063,8 @@ const COOPERATIVE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 #[cfg(feature = "script")]
 const REAP_PER_ADMISSION: usize = 2;
 
-/// How much longer [`Supervisor::shutdown`] waits, past
-/// [`COOPERATIVE_DRAIN_GRACE`], while a supervised process task is still live.
+/// How long [`Supervisor::shutdown`] waits, past [`COOPERATIVE_DRAIN_GRACE`],
+/// for the next supervised process task to finish its cleanup.
 ///
 /// A process task is cooperative by construction — its wait races the token —
 /// but answering the token *is* its cleanup: up to [`CONTAINMENT_ROUNDS`]
@@ -2042,6 +2078,18 @@ const REAP_PER_ADMISSION: usize = 2;
 /// the wait rather than charging it: a drain that finishes is absorbed at once,
 /// and only a process task still live when this runs out is aborted, its
 /// drop-time fallback still signalling the group.
+///
+/// The grace runs from the last drain that finished, not from a fixed point.
+/// Drains contend for one host, so thirty-two of them on a host also carrying
+/// thirteen CI lanes and two builds outlasted a fixed two seconds while every
+/// one was still finishing in turn, and shutdown aborted fifteen cooperating
+/// drains part-way (main run 37933518033). Waiting while drains keep finishing,
+/// and giving up only after two seconds in which none did, aborts a stalled
+/// drain exactly as before and never a progressing one. The wait stays
+/// bounded: shutdown owns the supervisor, so no task is spawned while it waits
+/// and the live count only reaches a new low at most once per process task,
+/// which caps the whole wait at the cooperative grace plus this grace once per
+/// live process task.
 #[cfg(all(unix, feature = "process"))]
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
@@ -2603,11 +2651,14 @@ impl Supervisor {
     /// lock-hold arrival decisions the round has taken and their cumulative
     /// wall time in nanoseconds, beside how many releases completing tasks
     /// took through the same lock and theirs. The arrival half is the
-    /// scheduler lock plus the round and the pump (#351's admission side); a
-    /// tenanted admission's reap, its task spawn, and the executor's own polls
-    /// are outside the counters, so the remainder of a measured admission wait
-    /// is the scheduling share. `(0, 0, 0, 0)` for a supervisor built without
-    /// a [`TenancyPolicy`], which takes no round decisions at all.
+    /// arrival's wait slot plus the round and the pump under the scheduler
+    /// lock (#351's admission side). The wait to *take* that lock is not
+    /// charged: it is another decision holding the round, counted by that
+    /// decision. A tenanted admission's reap, its task spawn, and the
+    /// executor's own polls are outside the counters too, so the remainder of
+    /// a measured admission wait is the scheduling share. `(0, 0, 0, 0)` for a
+    /// supervisor built without a [`TenancyPolicy`], which takes no round
+    /// decisions at all.
     ///
     /// ```
     /// use lgwks_bot::rt::supervise::Supervisor;
@@ -3171,17 +3222,27 @@ impl Supervisor {
         // that cannot be moved by whoever is driving time.
         let watchdog = self.clock.wall_watchdog();
         let deadline = watchdog.elapsed().saturating_add(COOPERATIVE_DRAIN_GRACE);
+        // The fewest live process tasks seen so far, and when that count last
+        // fell: a drain finishing is the progress the process grace runs from.
+        let mut fewest_live = self.live_cleanups();
+        let mut progressed_at = deadline;
         loop {
             while let Some(joined) = self.set.try_join_next_with_id() {
                 self.absorb(joined, Retention::Draining);
             }
             // The set emptying is the real exit condition; the grace is the
             // ceiling on how long the loop may keep trying, extended only while a
-            // process task is still draining its bounded cleanup.
+            // process task is still draining its bounded cleanup and drains are
+            // still finishing.
             let elapsed = watchdog.elapsed();
+            let live = self.live_cleanups();
+            if live < fewest_live {
+                fewest_live = live;
+                progressed_at = progressed_at.max(elapsed);
+            }
             if self.set.is_empty()
                 || (elapsed >= deadline
-                    && !self.cleanup_holds_grace(elapsed.saturating_sub(deadline)))
+                    && !self.cleanup_holds_grace(elapsed.saturating_sub(progressed_at)))
             {
                 break;
             }
@@ -3205,22 +3266,32 @@ impl Supervisor {
         }
     }
 
-    /// Whether shutdown keeps waiting `overrun` past its cooperative grace: only
-    /// while a process task is live and [`PROCESS_CLEANUP_GRACE`] has not run out.
+    /// Whether shutdown keeps waiting, `quiet` after the later of its
+    /// cooperative grace and the last drain that finished: only while a process
+    /// task is live and [`PROCESS_CLEANUP_GRACE`] has not passed without one.
     #[cfg(all(unix, feature = "process"))]
-    fn cleanup_holds_grace(&self, overrun: Duration) -> bool {
-        overrun < PROCESS_CLEANUP_GRACE
-            && self
-                .cleanup_owners
-                .live
-                .load(std::sync::atomic::Ordering::Acquire)
-                > 0
+    fn cleanup_holds_grace(&self, quiet: Duration) -> bool {
+        quiet < PROCESS_CLEANUP_GRACE && self.live_cleanups() > 0
+    }
+
+    /// Supervised process tasks that have not yet finished their cleanup.
+    #[cfg(all(unix, feature = "process"))]
+    fn live_cleanups(&self) -> usize {
+        self.cleanup_owners
+            .live
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Without supervised processes no task drains a cleanup.
+    #[cfg(not(all(unix, feature = "process")))]
+    const fn live_cleanups(&self) -> usize {
+        0
     }
 
     /// Without supervised processes nothing drains a cleanup, so the cooperative
     /// grace is the whole wait.
     #[cfg(not(all(unix, feature = "process")))]
-    const fn cleanup_holds_grace(&self, _overrun: Duration) -> bool {
+    const fn cleanup_holds_grace(&self, _quiet: Duration) -> bool {
         false
     }
 
