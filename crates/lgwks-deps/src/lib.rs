@@ -86,7 +86,7 @@ pub mod scan;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 pub mod vendor;
 
-#[cfg(feature = "macro")]
+#[cfg(any(feature = "macro", feature = "script"))]
 pub use proc_macro2;
 #[cfg(feature = "macro")]
 pub use quote;

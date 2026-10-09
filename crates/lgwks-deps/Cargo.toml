@@ -33,6 +33,11 @@ scan = ["dep:syn", "dep:proc-macro2"]
 # off: selecting `scan` does not pull `quote`, and a runtime consumer pulls
 # none of the three.
 macro = ["dep:syn", "dep:proc-macro2", "dep:quote"]
+# The token stream the `script!` language is read from (`lgwks_ast`'s `script`
+# feature, #383): `proc-macro2` with span locations and nothing else, so a tool
+# that reads scripts, and the macro that compiles them, share one parser
+# without either pulling `syn` or `quote` for it. Default off.
+script = ["dep:proc-macro2"]
 # Storefront features. `lgwks_deps` is the install-and-select surface:
 # the end user enables exactly the third-party capability they want, and the
 # default build pulls none of them. gpui is Zed's GPU desktop UI framework;

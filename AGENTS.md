@@ -37,9 +37,12 @@ There are three dependency surfaces and one standalone parser:
 - `lgwks_bot`: async, runners, and the actor roles.
 - `lgwks_deps`: everything else, the **storefront**. The end user installs
   `lgwks_deps` and selects which dependency features to turn on.
-- `lgwks_ast`: standalone, and finished. It is complete rather than parked, so
-  it needs no further work and is not a candidate for new capability; do not
-  grow it into a fourth surface.
+- `lgwks_ast`: standalone, and the one parser. It reads source in many
+  languages through tree-sitter and, behind its default-off `script` feature,
+  reads the `script!` language (`lgwks_ast::script::parse`), which
+  `lgwks_macros` compiles and every tool reads through (SL-2, the Director's
+  direction of 2026-10-08, #383). It is not a candidate for other capability;
+  do not grow it into a fourth surface.
 
 If a capability exists in `std`, `lgwks_std`, `lgwks_bot`, or `lgwks_ast`, use
 it. A **new** third-party dependency is an optional, feature-gated edge of

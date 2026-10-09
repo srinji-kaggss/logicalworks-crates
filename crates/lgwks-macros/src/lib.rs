@@ -1,8 +1,9 @@
 //! `script!`: orchestration written the way it is said.
 //!
-//! Re-exported as `lgwks_bot::script!`; use it from there. This crate is the
-//! syntax. The semantics live in `lgwks_bot::script`, and every block below
-//! expands to one call into it.
+//! Re-exported as `lgwks_bot::script!`; use it from there. This crate writes
+//! the Rust. The language is read by `lgwks_ast::script::parse`, the one
+//! parser every tool that reads a script also calls, and the semantics live in
+//! `lgwks_bot::script`, where every block below expands to one call.
 //!
 //! ```text
 //! lgwks_bot::script! {
@@ -67,18 +68,18 @@
 //! [`Scope`]: https://docs.rs/lgwks_bot/latest/lgwks_bot/script/struct.Scope.html
 
 mod emit;
-mod lines;
-mod refuse;
 
 use lgwks_deps::proc_macro2::TokenStream;
+use lgwks_deps::syn::Error;
 
 /// Expand an indented orchestration script into `async fn`s over
 /// `lgwks_bot::script` and an `ARCHITECTURE` map. See the crate
 /// documentation for the language.
 #[proc_macro]
 pub fn script(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let lines = lines::split(TokenStream::from(input));
-    let expanded = lines::tree(lines).and_then(emit::script);
+    let expanded = lgwks_ast::script::parse(TokenStream::from(input))
+        .map_err(|refusal| Error::new(refusal.span(), refusal.message()))
+        .and_then(|script| emit::script(&script));
     match expanded {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
@@ -89,4 +90,4 @@ pub fn script(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 mod tests;
 
 #[cfg(test)]
-mod lines_props;
+mod lexicon_docs;

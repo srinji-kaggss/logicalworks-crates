@@ -149,6 +149,17 @@ through `Language::of_shebang`, which `detect` does not consult.
 `Ambiguous`; non-syntax parser failures return `Err` because they leave a
 required candidate uninspected.
 
+## The `script!` language
+
+`features = ["script"]` adds `lgwks_ast::script::parse`, the one reader of the
+`script!` orchestration language: tokens (a macro's input, or
+`TokenStream::from_str` over a file) in, a typed `Script` out, or a `Refusal`
+located at its token that names what to write instead. `lgwks_macros` compiles
+scripts through it, so a tool that maps, checks or dry-compiles a script gets
+exactly the tree and the refusals `cargo build` does. The feature selects no
+grammar; it builds `proc-macro2` through the `lgwks_deps` storefront and
+nothing else.
+
 ## Custom languages
 
 ast-grep ships a fixed built-in set; its documented extension point for

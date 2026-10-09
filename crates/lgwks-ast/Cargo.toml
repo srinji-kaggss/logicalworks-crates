@@ -83,6 +83,13 @@ lang-php = ["parser", "ast-grep-language/tree-sitter-php"]
 lang-ruby = ["parser", "ast-grep-language/tree-sitter-ruby"]
 lang-solidity = ["parser", "ast-grep-language/tree-sitter-solidity"]
 lang-yaml = ["parser", "ast-grep-language/tree-sitter-yaml"]
+# The `script!` language's parser (SL-2, #383): `lgwks_ast::script::parse`,
+# the typed script tree and the lexicon. `lgwks_macros` compiles scripts through
+# it and a tool reads them through it, so the language has one reader. It needs
+# token streams only, reached through the `lgwks_deps` storefront that owns the
+# `proc-macro2` edge (INV-DEP-3), and logs each refusal through `tracing`; no
+# grammar is selected by it, so the macro's build compiles no tree-sitter.
+script = ["dep:lgwks_deps", "dep:tracing"]
 full = [
     "lang-rust",
     "lang-python",
@@ -131,6 +138,18 @@ tracing = { version = "0.1", default-features = false, features = ["std"], optio
 # features), so this names an edge that was already compiled rather than adding
 # a crate: the `Tree` built here is the type `StrDoc` holds.
 tree-sitter = { version = "0.27", optional = true }
+# The token streams `script` reads (feature `script`, #383), through the
+# storefront that owns the edge; `default-features = false` keeps the `scan`
+# detectors out, so the macro's build pulls `proc-macro2` and nothing else here.
+lgwks_deps = { workspace = true, features = ["script"], optional = true }
+
+[dev-dependencies]
+# The script parser's line-tree properties (#273) moved here with the parser
+# (#383): shrinking to the minimal misaligned tree, with persisted seeds.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+# `lgwks_std::seeded`, the one seeded stream the script simulations draw from
+# (INV-STD-SEEDED-1), so a seed names the same scripts on every target.
+lgwks_std = { workspace = true }
 
 [[example]]
 name = "parse"

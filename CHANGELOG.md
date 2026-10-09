@@ -22,6 +22,21 @@ the parser with no grammar compiled; it is now `default-features = false,
 features = ["parser"]`. `diagnostic::diagnostics` and
 `diagnostic::recovery_count` walk a parsed tree and need `parser`.
 
+### lgwks_ast — the `script!` parser (#383)
+
+- **Added** the `script` feature (default off): `lgwks_ast::script::parse`
+  reads the `script!` language into a typed tree (flows, steps, labels and the
+  `ARCHITECTURE` map) with every refusal decided there, and exports the lexicon
+  (`LEXICON`, `Kind`, `Word`). A tool now reads a script through the same
+  function the macro compiles it with, from plain source text, refusals
+  included (SL-2, #383). The feature reaches `proc-macro2` through the
+  `lgwks_deps` storefront and selects no grammar.
+
+### lgwks_macros
+
+- **Changed** `script!` is a shim over `lgwks_ast::script::parse`: the macro
+  only writes Rust for the parsed tree. Expansions and refusals are unchanged.
+
 ## [lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1] - 2026-10-07
 
 ### Upgrading

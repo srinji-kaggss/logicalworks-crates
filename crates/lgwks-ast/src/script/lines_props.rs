@@ -6,7 +6,7 @@
 //! with one line moved to a column no block owns must be refused, and the
 //! refusal must name that line. A failing tree shrinks to the smallest one.
 
-#[path = "../../lgwks-std/tests/support/prop.rs"]
+#[path = "../../../lgwks-std/tests/support/prop.rs"]
 mod prop;
 
 use std::str::FromStr;
@@ -16,7 +16,8 @@ use proptest::collection::vec;
 use proptest::prelude::{Strategy, any};
 use proptest::test_runner::TestCaseError;
 
-use crate::lines::{self, Line, Node};
+use super::lines::{self, Line, Node};
+use super::{Refusal, Result as Parsed};
 use prop::{Outcome, check, setup};
 
 /// The seed every run starts from. Changing it is a new corpus, not a retry.
@@ -167,7 +168,7 @@ fn a_rendered_tree_reads_back_as_the_same_tree() -> Outcome {
 }
 
 /// A tree builder under test, over already-split lines.
-type Build = fn(Vec<Line>) -> lgwks_deps::syn::Result<Vec<Node>>;
+type Build = fn(Vec<Line>) -> Parsed<Vec<Node>>;
 
 /// One line moved two columns off its block's column must be refused, and
 /// the refusal must name that line.
@@ -208,7 +209,7 @@ fn misalignment_property(
                         moved.saturating_add(1),
                         line.text
                     )));
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "moving a line: returning an error to the caller");
+                    tracing::debug!(error = ?refusal.as_ref().err(), "moving a line: returning an error to the caller");
                     return refusal;
                 }
             },
@@ -252,7 +253,7 @@ fn a_line_off_every_block_column_is_refused_at_that_line() -> Outcome {
 fn the_property_catches_a_builder_that_snaps_lines_to_the_grid() -> Outcome {
     /// Rounds every column down to a multiple of the indent before building:
     /// a misaligned line is silently re-homed instead of refused.
-    fn snapping(mut split: Vec<Line>) -> lgwks_deps::syn::Result<Vec<Node>> {
+    fn snapping(mut split: Vec<Line>) -> Parsed<Vec<Node>> {
         for line in &mut split {
             // Rounding a column down to a multiple of the indent is arithmetic
             // on the column, and a divisor of zero is not a rounding at all, so
@@ -261,11 +262,11 @@ fn the_property_catches_a_builder_that_snaps_lines_to_the_grid() -> Outcome {
             let over = match line.column.checked_rem(INDENT) {
                 Some(over) => over,
                 None => {
-                    let refusal = Err(lgwks_deps::syn::Error::new(
+                    let refusal = Err(Refusal::new(
                         line.span,
                         format!("the indentation unit is {INDENT}, and zero is not an indent"),
                     ));
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "snapping: returning an error to the caller");
+                    tracing::debug!(error = ?refusal.as_ref().err(), "snapping: returning an error to the caller");
                     return refusal;
                 }
             };

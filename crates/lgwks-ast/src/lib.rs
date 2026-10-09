@@ -41,3 +41,9 @@ mod parser;
 
 #[cfg(feature = "parser")]
 pub use parser::*;
+
+/// The `script!` language's one reader (SL-2, #383): `script::parse` turns a
+/// token stream into the typed script tree with every refusal decided, the
+/// tree `lgwks_macros::script!` compiles and any tool reads.
+#[cfg(feature = "script")]
+pub mod script;
