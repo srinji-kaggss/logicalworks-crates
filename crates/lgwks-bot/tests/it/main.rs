@@ -153,6 +153,7 @@ mod journal_liveness;
 mod journal_scale;
 mod journal_writer_fence;
 mod locator_eligibility;
+mod net_split;
 mod no_default;
 mod observe_refresh;
 mod orphan_reap;
