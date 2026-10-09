@@ -1,15 +1,19 @@
-//! p50/p95/p99 of the two per-run overheads the front door adds.
+//! p50/p95/p99 of the per-run overheads the front door adds.
 //!
 //! ```text
 //! cargo run --release -p lgwks_bot --example measure_overhead -- [runs]
 //! ```
 //!
-//! Two lines are printed through the shared instrument every other measurement
+//! Three lines are printed through the shared instrument every other measurement
 //! harness in this crate uses (`support/measure.rs`), so the numbers here and
 //! the numbers `resume_cost`, `tail_cost` and `poll_deadline_cost` print mean
 //! the same thing: `host_run` is one `Host::run` of an immediately-ready body
-//! and `process_run` is one `sys::Process` execute of `true`. Latency is in
-//! microseconds per call, measured around the public entry point. Peak RSS is read externally (`/usr/bin/time -l`), not from
+//! and `process_run` is one `sys::Process` execute of `true`;
+//! `process_run_pinned_path` is that execute with the child's `PATH` pinned to
+//! the inherited one, the spawn whose bare program `std` forks for and the
+//! supervisor resolves to take `posix_spawn` instead. Latency is in
+//! microseconds per call, measured around the public entry point.
+//! Peak RSS is read externally (`/usr/bin/time -l`), not from
 //! inside: a process id is an identity the OS reuses, which the estate's
 //! std-first gate refuses.
 //!
@@ -22,6 +26,7 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use lgwks_bot::domain::sys::Process;
+use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{Auth, Cap, Execute, GrantSet};
@@ -97,5 +102,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<(), lgwks_bot::BotError>(())
     })?;
     report("process_run", process_samples)?;
+
+    // The same execute with `PATH` pinned: the bare name std forks for.
+    let inherited = std::env::var_os("PATH").ok_or("an inherited PATH to pin")?;
+    let mut spec = ProcessSpec::new("true");
+    spec.env("PATH", inherited);
+    let pinned = Process::from_spec(spec);
+    let mut pinned_samples = Vec::with_capacity(runs);
+    runtime.block_on(async {
+        for _ in 0..run_count {
+            let started = Instant::now();
+            let state = pinned.execute_action((auth.clone(), &())).await?;
+            pinned_samples.push(started.elapsed().as_micros());
+            assert_eq!(state.exit_code, Some(0), "the measured child exited zero");
+        }
+        Ok::<(), lgwks_bot::BotError>(())
+    })?;
+    report("process_run_pinned_path", pinned_samples)?;
     Ok(())
 }
