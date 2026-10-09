@@ -177,7 +177,7 @@ STD_FIRST = (
 # the next genuine occurrence added to the same file, and this list exists to be
 # the audit's record of what a reader looked at and decided — not a mute button.
 EXEMPT: dict[str, tuple[str, str]] = {
-    "crates/lgwks-ast/src/script/sim_script.rs:691": (
+    "crates/lgwks-ast/src/script/sim_script.rs:694": (
         'line: "let planted = std::thread::spawn(work)",',
         "a script line planted to prove the `script!` parser refuses an unowned "
         "spawn (\"a spawned task has no owner\"); it is parsed as data and never "

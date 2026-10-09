@@ -647,10 +647,13 @@ const LET: &str = "let planted = ";
 
 /// Every defect class `refuse.rs` names, one line each.
 static PLANTS: [Plant; 16] = [
+    // Spaced as `unwrap ()` on purpose: the parser reads tokens, so the space
+    // is invisible to it, and the plant proves whitespace cannot step around
+    // the refusal the way it steps around a text search.
     Plant {
-        line: "let planted = items.first().unwrap()",
+        line: "let planted = items.first().unwrap ()",
         at: "unwrap",
-        says: "`.unwrap()` ends the program",
+        says: "unwrap()` ends the program",
     },
     Plant {
         line: "let planted = Option::expect(items.first(), \"x\")",
