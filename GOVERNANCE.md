@@ -180,6 +180,39 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-09 — Paired timing lands, main red on load, open PRs hardened
+
+- Merged [#392](https://github.com/srinji-kaggss/logicalworks-crates/pull/392)
+  (main `de5772b6a`): timing comparisons judge the median of per-round ratios
+  over alternating paired rounds instead of sequential means.
+- **Main went red** on run 37933518033: `tenancy_scale` flood read a 1770‰
+  median (rounds 12–114565‰), `process_escape` aborted 15 of 32 drains, and
+  the `retry` work bound read 12 ms. Part of that load was an agent running
+  local cargo on the CI host while main's run executed — a process defect,
+  now a standing rule: no local cargo while CI runs on the same machine. The
+  instruments were the defects, not the bounds:
+  [#393](https://github.com/srinji-kaggss/logicalworks-crates/pull/393)
+  stops charging the round-lock wait to the arrival, runs the process cleanup
+  grace from the last drain that finished, and judges the retry bound at each
+  attempt's fastest window. Under 2× ncpu spinners, ten alternating rounds:
+  the old flood instrument failed 4/10 (medians 995–1127‰), the new one
+  passed 10/10 (989–1071‰). No bound was relaxed.
+- Hardened, waiting on #393 then CI:
+  [#376](https://github.com/srinji-kaggss/logicalworks-crates/pull/376)
+  (posix_spawn resolves only what `execvp` would run; `process_run_pinned_path`
+  p99 10.5–25.4 ms → 8.6–9.5 ms over six paired rounds, RSS unchanged) and
+  [#377](https://github.com/srinji-kaggss/logicalworks-crates/pull/377)
+  (`rt::net::tcp` / `rt::net::unix` owned and borrowed split halves at
+  tokio's paths, real loopback tests).
+- Script language: [#379](https://github.com/srinji-kaggss/logicalworks-crates/pull/379)
+  (one-parser spec) names tracker #390; the parser's home crate is an open
+  decision in the spec. #380 (one-page lexicon) is in progress.
+
+**Does not claim:** that #393 is merged or main green; the Linux container leg
+re-measured with the new flood instrument (the #375 quarantine stays); a
+reproduction of the `process_escape` or `retry` CI failures, which passed in
+both arms locally — their fixes rest on the mechanism.
+
 ### 2026-10-08 — Tandem sweep: seven PRs land, flood bound quarantined
 
 - Merged [#368](https://github.com/srinji-kaggss/logicalworks-crates/pull/368)
@@ -208,12 +241,26 @@ Newest first. Each entry names what changed, the receipts, and what it does
   and CPU contention, and thread-limiting does not save it. Follow-up #375
   carries the return criterion: working-set-independent admit cost (pooled
   WaitSlots / slab ring), then 20 consecutive green container runs.
-- **Observed, not yet ruled on:** the PR check runs for #368, #369, #370, #372
-  and #373 read `failure` at merge time while #371 and #374 read `success` /
-  `cancelled`; main run 37767175555 after the sweep is green. Which job failed
-  on each red run, and the merge rationale under §3's hosted-reproduction rule,
-  are not on record below. Until recorded, merges on red PR runs stay flagged
-  as governance debt rather than precedent.
+- **Observed, not yet ruled on:** the head-commit check runs for #368, #369,
+  #370, #372 and #374 read `failure` at merge time; #371 (37764364375) and #373
+  (37720790448) read `success`. (An earlier revision of this entry listed #373
+  as red and #374 as green; that was wrong.) Main run 37767175555 after the
+  sweep is green. The failing jobs, read from each run on 2026-10-09:
+  - #368 (37725966621): Gate checks (invariant enforcement refs), Saturation
+    shard c (exit 100), Linux bot-full (100), Docs (doc build broken-link, 101);
+    three more jobs lost their runner.
+  - #369 (37725542591): Linux bot-full (100), Docs (101); four jobs lost their
+    runner.
+  - #370 (37712797216): workspace tests, bot full, bot no-default, both Linux
+    legs and std shard b (all exit 100), and scan (exit 2).
+  - #372 (37712798373): Gate checks (dependency contract alignment) and bot
+    async runner tests (101).
+  - #374 (37726141252): Gate checks (invariant refs), Docs (101), Linux
+    bot-full (100); four jobs lost their runner.
+
+  The merge rationale under §3's hosted-reproduction rule is still not on
+  record. These are recorded facts, not a ruling: merges on red PR runs stay
+  flagged as governance debt rather than precedent until the Director rules.
 
 **Does not claim:** the #375 bound holds anywhere under full-push load (it blew
 past on a mac lane of main run 37767175555 too: decision 1919, wall 141 — an
@@ -631,13 +678,17 @@ follow the upload per `docs/releasing.md` §4.
 
 ## 6. Open correctness and acceptance work
 
-Reconciled 2026-10-08 against the 15 open issues. "Crate done" means the
+Reconciled 2026-10-08 against the 15 open issues; P0 rows and the flood and
+facade rows updated 2026-10-09. "Crate done" means the
 estate side shipped; "wiring open" means no consumer runs it yet, and per §1
 unwired code is a wiring defect, not a closed item.
 
 | Priority | Work | Observed gap and completion evidence |
 |---|---|---|
-| P1 | Flood decision-mean bound (#375) | Quarantined from Linux container legs 2026-10-08; enforced on mac lanes. Return: working-set-independent admit cost, then 20 consecutive green container runs |
+| P0 | Main red on run 37933518033 | Three load-sensitive instruments (flood lock wait, fixed cleanup grace, median retry window). Fix in #393; done when #393 merges and main's next run is green |
+| P0 | Publish verification | `crates.io` publish is manual and needs a human-held token. A green dry-run is not evidence. Reconcile the published artifacts against the 2.2.0 cut |
+| P0 | Cross-OS lane reproduction | The three-OS matrix executes on hosted Actions and is the Portable evidence. A lane that did not run is `skip`, named in the receipt, never `pass` |
+| P1 | Flood decision-mean bound (#375) | Quarantined from Linux container legs 2026-10-08; enforced on mac lanes. #392 judges paired medians; #393 stops charging the lock wait (mac: 10/10 inside the bound at 2× ncpu load). Return: the container leg re-measured with the new instrument, then 20 consecutive green container runs |
 | P1 | Every gate under 5 minutes (#272) | PR wall 3m59s; one warm main run 240 s. Still needs five consecutive mains < 300 s, serial local < 300 s, cold build < 60 s / cold test < 90 s |
 | P1 | Saturation curve + VPS profile (#269) | Latency gap closed (#320: p99 ≤ 1.25× raw Tokio, 3.45 allocs/task). Still needs the 1–2 vCPU / 1–2 GB VPS profile and the README boxes |
 | P1 | Acceptance receipts (#271) | T01–T36 map + per-revision SQLite receipts landed (#374). Still needs the remaining `_tNN` renames, a macOS receipt leg, and the containment rows |
@@ -650,11 +701,9 @@ unwired code is a wiring defect, not a closed item.
 | P2 | Walk prune + metadata (#343) | Crate side landed and verified (#356, #372). Wiring open: logical_ci still hand-rolls `read_dir` in `gates.rs`/`writes.rs`; adoption + cost check belong to that repo |
 | P2 | Child containment hook (#337) | `env_clear` / `EnvDelta::Clear` landed with 160-seed sims (#358). Still needs the pre-exec hook (§7-gated on `unsafe`) |
 | P2 | Cross-host lease/queue/run-state (#319) | Single-host lease, fenced queue and durable run state landed (#370). Cross-host (KEEL-SPEC S5.4) is untouched |
-| P2 | Facade re-export gaps (#366, #367) | `rt::net` lacks the owned split halves (`into_split` unreachable without naming tokio; `rt::io::split` is the workaround); `lgwks_ast`'s `thiserror` re-export drags the grammar stack. Small, unclaimed |
+| P2 | Facade re-export gaps (#366, #367) | #366: `rt::net::tcp` / `rt::net::unix` split halves in #377, waiting on CI. #367: `lgwks_ast`'s `thiserror` re-export drags the grammar stack; unclaimed |
 | Tracker | Nine-axis closure (#281) | Director-approved 2026-10-05 (proptest edge, vendor wiring, lint mechanism, CI lanes, bounded blocking pool). Work proceeds in tracker order |
 | Standing | Dependency admission | Any new third-party edge goes through `skills/lgwks-dependency-admission/SKILL.md` and lands in `contract/APPROVED.toml` |
-| P0 | Publish verification | `crates.io` publish is manual and needs a human-held token. A green dry-run is not evidence. Reconcile the published artifacts against the 2.2.0 cut |
-| P0 | Cross-OS lane reproduction | The three-OS matrix executes on hosted Actions and is the Portable evidence. A lane that did not run is `skip`, named in the receipt, never `pass` |
 
 ---
 
@@ -670,7 +719,7 @@ unwired code is a wiring defect, not a closed item.
 | `vendor/**` fixture exemption in the secrets pattern | #266 is done in worktree but uncommitted: the estate pre-commit secrets pattern refuses 20 staged `*.pem`/`*.pfx`/`*.key` fixtures that are bytes of the pinned `.crate` files with zero in-repo references. Omitting them breaks the offline build at checksum time | `vendor/` stays uncommitted until the hook owner / Director grants the exemption, then lands in three steps: (a) `vendor/` + `.cargo/config.toml`, (b) `gate-lanes.toml` + `ci.yml`, (c) `docs/releasing.md`. No bypass; nothing is committed |
 | `unsafe` for the pre-exec containment hook and the macOS table read | CODEBOOK forbids `unsafe_code` workspace-wide; #337's Landlock/`sandbox_init` hook and #345's `proc_listallpids`/`sysctl` read need it (or a new admitted dep) | No `unsafe` until the Director rules. Stand-ins stand: `env_remove` + `sandbox-exec` wrap on macOS, `ps` snapshot with the self-exit fast path |
 | Windows Job Object backend crate | No approved Windows job-object crate exists; #263 part 2 names it through an admitted storefront edge | No Windows containment until admission. Windows rows stay `present`-only |
-| Merges on red PR check runs (Oct 8 sweep) | §3 needs hosted reproduction of the affected lanes; five of the seven PR runs read `failure` at merge | The per-run failing job and the merge rationale go in the ledger before this becomes precedent. Until then it is flagged debt |
+| Merges on red PR check runs (Oct 8 sweep) | §3 needs hosted reproduction of the affected lanes; five of the seven PR runs (#368, #369, #370, #372, #374) read `failure` at merge | The failing jobs per run are recorded in the 2026-10-08 entry (2026-10-09). The merge rationale is not on record, and whether those merges stand as precedent is the Director's ruling. Until then it is flagged debt |
 
 A required decision pauses dependent work. Audits, reproducible counterexamples,
 and factual documentation may continue.
