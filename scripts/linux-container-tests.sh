@@ -74,13 +74,14 @@ if [ "${#suites[@]}" -eq 0 ]; then
     suites=(workspace bot-full appcui)
 fi
 commands=()
-# The flood decision-mean bound is host-geometry sensitive: its ~19ns/decision
-# delta is cache/allocator working-set behaviour, and on the shared 4-vCPU
-# container host with parallel siblings it lands at 1102-1151 against the 1100
-# envelope while the user-visible wall ratio passes with margin (issue #375).
-# The test keeps running at the unchanged bound on both mac lanes, where the
-# host holds it; it is excluded here, beside the r32 tier exclusion, until the
-# admit path is working-set independent.
+# The flood decision bound does not hold here with margin. Judged on the median
+# of 101 paired rounds (the estimator that removes host bursts), the 4-vCPU
+# OrbStack container reads 1062-1089 per mille on a quiet host and 1039-1267
+# (16 of 20 past the 1100 envelope) with its siblings loading the machine,
+# where both mac lanes read 957-1084 saturated. That is a systematic Linux
+# admission-side cost (issue #375), not noise, so the test is excluded here,
+# beside the r32 tier exclusion, at the unchanged bound, until the arrival
+# decision is working-set independent.
 flood_quarantine="not test(the_floods_cost_is_scheduling_not_admission)"
 for suite in "${suites[@]}"; do
     case "${suite}" in
