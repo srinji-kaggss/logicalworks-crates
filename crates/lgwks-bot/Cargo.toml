@@ -36,7 +36,10 @@ macros = ["rt", "lgwks_deps/tokio-macros"]
 # tenant and step, and recorded in the `ARCHITECTURE` map. The proc macro is
 # first-party (`lgwks_macros`); its `syn`/`quote` edge is owned by the
 # `lgwks_deps` storefront and compiles for the host only.
-script = ["rt", "time", "sync", "macros", "dep:lgwks_macros"]
+# `lgwks_ast/script` (no grammar; the parser `lgwks_macros` already builds) is
+# where the map's one rendering lives, `lgwks_ast::script::write_map`, which the
+# script tool prints a parsed script through too (#384).
+script = ["rt", "time", "sync", "macros", "dep:lgwks_macros", "dep:lgwks_ast", "lgwks_ast/script"]
 # Reader/writer traits. Not implied by `rt`: a consumer reading from a pipe or a
 # file needs `AsyncRead` without any of the drivers, and it is the module that
 # makes `net`, `process`, and `fs` composable with each other.
@@ -58,7 +61,7 @@ signal = ["rt", "lgwks_deps/tokio-signal"]
 # `lgwks_ast`, which cannot build for the WASI boundary target. Not on by
 # default for that reason; `full` turns it on so the gate exercises it rather
 # than letting it rot as an unbuilt candidate.
-inspect = ["dep:lgwks_ast"]
+inspect = ["dep:lgwks_ast", "lgwks_ast/default"]
 # Minting a run identity needs an entropy source, and the estate has exactly
 # one: `lgwks_std::random`, whose `random` feature is `getrandom` under
 # `lgwks_std`'s ownership. This crate authors no edge of its own — it turns on a
@@ -141,10 +144,17 @@ lgwks_macros = { workspace = true, optional = true }
 # INV-DEP-1 names for it; the finished parser itself is not grown. Its default
 # grammar set includes the two the shipped structural rule set speaks (Rust and
 # Python), so the edge needs no feature override.
-lgwks_ast = { workspace = true, optional = true }
+# Default features off: `inspect` turns on the grammars (`lgwks_ast/default`),
+# `script` only the grammar-free `script` reader, so a `script` build compiles
+# no tree-sitter and still builds for the WASI boundary target.
+lgwks_ast = { workspace = true, optional = true, default-features = false }
 
 [dev-dependencies]
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+# The script tool's reading (`lgwks_ast::script::read_source`, `Script::to_json`),
+# held to the `ARCHITECTURE` this crate's tests compile (#384). No grammar: the
+# tool reads tokens, not tree-sitter trees.
+lgwks_ast = { workspace = true, default-features = false, features = ["tool"] }
 
 [lints]
 workspace = true

@@ -9,6 +9,64 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_ast — the script tool, a second caller of the one parser (#384)
+
+- **Added** `script::read_source` and `script::Invocation`: every `script!` in
+  a Rust file, found by token and read through `script::parse`, each with its
+  line and column. `Script` implements `Display` as the runtime's
+  `Architecture` renders the `ARCHITECTURE` the macro emits for it.
+- **Added** the `tool` feature (default off): `Script::to_json`, and the
+  `lgwks-ast` binary, `lgwks-ast script map|check [--json] [PATH...]`. The
+  tool's map equals the compiled `ARCHITECTURE` on every `script!` in the
+  repository: the bot's tests, compared in process, and its two examples and
+  the AI-authoring bench's reference solutions, held by `const` assertions a
+  `cargo check` probe evaluates (`script_map_parity`). Its refusal is the
+  compiler's, at
+  the same line and column (`the_tool_reports_the_refusal_the_compiler_reports`).
+- **Added** `script::write_map` and `script::MapStep`, the one rendering of an
+  architecture map: `lgwks_bot::script::Architecture`'s `Display` now prints
+  through it, so the tool and the runtime cannot render a map differently.
+
+### lgwks_bot — the map renders through `lgwks_ast` (#384)
+
+- The `script` feature now also enables the grammar-free `lgwks_ast/script`
+  (already built by `lgwks_macros`) for `Architecture`'s rendering. The
+  `lgwks_ast` edge is `default-features = false`; `inspect` turns the grammars
+  on as before, so a `script` build still compiles no tree-sitter and still
+  checks for `wasm32-wasip1`.
+- **Added** `script::FlowShape::line`, the `flow` header's source line, as a
+  `const fn` beside `name`, `signature` and `steps`.
+- The `script-check` gate lane runs `lgwks-ast script check` over the
+  repository.
+
+### lgwks_ast — the typed-error derive without a parser (#367)
+
+The grammar stack (`ast-grep-core`, `ast-grep-language`, `tree-sitter`,
+`tracing`) is now the optional `parser` feature, which every `lang-*` feature
+enables. The default set is unchanged and so is every path a consumer names.
+`default-features = false` now yields only the typed-error derive and the
+`diagnostic` types, with no tree-sitter compiled.
+
+**Breaking, `default-features = false` only:** that configuration used to be
+the parser with no grammar compiled; it is now `default-features = false,
+features = ["parser"]`. `diagnostic::diagnostics` and
+`diagnostic::recovery_count` walk a parsed tree and need `parser`.
+
+### lgwks_ast — the `script!` parser (#383)
+
+- **Added** the `script` feature (default off): `lgwks_ast::script::parse`
+  reads the `script!` language into a typed tree (flows, steps, labels and the
+  `ARCHITECTURE` map) with every refusal decided there, and exports the lexicon
+  (`LEXICON`, `Kind`, `Word`). A tool now reads a script through the same
+  function the macro compiles it with, from plain source text, refusals
+  included (SL-2, #383). The feature reaches `proc-macro2` through the
+  `lgwks_deps` storefront and selects no grammar.
+
+### lgwks_macros
+
+- **Changed** `script!` is a shim over `lgwks_ast::script::parse`: the macro
+  only writes Rust for the parsed tree. Expansions and refusals are unchanged.
+
 ## [lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1] - 2026-10-07
 
 ### Upgrading

@@ -301,6 +301,15 @@ command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
 ci_step = "Scan reports zero findings"
 
 [[lane]]
+id = "script-check"
+group = "quality"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check"
+ci_step = "Every script! in the repository reads"
+
+[[lane]]
 id = "docs-all-features"
 group = "docs"
 surfaces = "local ci"
@@ -373,7 +382,8 @@ required = true
 command = """\
 cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features -- -D warnings && \
-cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features -- -D warnings\
+cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser -- -D warnings\
 """
 ci_step = "Clippy no default features"
 
@@ -533,6 +543,7 @@ surfaces = "local ci"
 required = true
 command = """\
 cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features && \
+cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser && \
 cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets && \
 cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features\
 """
@@ -563,6 +574,7 @@ surfaces = "ci"
 required = true
 command = """\
 cargo test --locked -p lgwks_ast --lib --no-default-features && \
+cargo test --locked -p lgwks_ast --lib --no-default-features --features parser && \
 cargo test --locked -p lgwks_ast --lib && \
 for grammar in bash c cpp csharp css dart elixir go haskell hcl html java javascript json kotlin lua md nix php python ruby rust scala solidity swift tsx typescript yaml; do \
   cargo test --locked -p lgwks_ast --lib --no-default-features --features lang-$grammar || exit 1; \

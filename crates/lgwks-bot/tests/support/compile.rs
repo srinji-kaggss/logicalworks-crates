@@ -2,8 +2,8 @@
 //! against the real workspace lockfile.
 //!
 //! One definition, shared by every target that type-checks a downstream
-//! consumer (`t22_process_surface`, `t02_compile_surface` and
-//! `script_refusals`). The probe copies the workspace `Cargo.lock` and shares
+//! consumer (`t22_process_surface`, `t02_compile_surface`, `script_refusals`
+//! and `script_map_parity`). The probe copies the workspace `Cargo.lock` and shares
 //! the workspace target directory, so it resolves the versions the workspace
 //! compiled rather than whatever the local registry cache holds newest, and it
 //! does not compile every dependency cold. The positive control and the lint
@@ -12,7 +12,6 @@
 //! This module is included with `#[path = "support/compile.rs"] mod compile;`.
 
 use std::fs;
-use std::path::Path;
 use std::process::{Command, Output};
 
 #[path = "../../../lgwks-deps/tests/support/target_dir.rs"]
@@ -35,7 +34,7 @@ pub fn compile_probe(
     dependency: &str,
     main: &str,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    probe("check", name, dependency, main)
+    probe("check", name, &this_crate(dependency), main)
 }
 
 /// [`compile_probe`] under `cargo clippy` with every warning denied: the
@@ -51,20 +50,48 @@ pub fn clippy_probe(
     dependency: &str,
     main: &str,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    probe("clippy", name, dependency, main)
+    probe("clippy", name, &this_crate(dependency), main)
 }
 
-/// Write the one-file consumer and run `cargo <subcommand>` over it.
+/// [`compile_probe`] for a consumer whose `[dependencies]` table is
+/// `dependencies`, written out whole: a consumer that needs a crate beside
+/// `lgwks_bot`, such as the AI-authoring bench's `ai_task_support`. It
+/// resolves against the workspace lockfile like every other probe, so it
+/// reuses what the workspace and its neighbouring probes already built and
+/// downloads nothing.
+///
+/// # Errors
+///
+/// As [`compile_probe`].
+#[cfg(feature = "script")]
+pub fn check_consumer(
+    name: &str,
+    dependencies: &str,
+    main: &str,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    probe("check", name, dependencies, main)
+}
+
+/// The `[dependencies]` line naming this crate, with `dependency` appended
+/// inside its table (`, features = [..]`).
+fn this_crate(dependency: &str) -> String {
+    format!(
+        "lgwks_bot = {{ path = {:?}{dependency} }}\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// Write the one-file consumer, whose `[dependencies]` table is
+/// `dependencies`, and run `cargo <subcommand>` over it.
 fn probe(
     subcommand: &str,
     name: &str,
-    dependency: &str,
+    dependencies: &str,
     main: &str,
 ) -> Result<Output, Box<dyn std::error::Error>> {
     let scratch = crate::scratch::Scratch::new(name)?;
     let root = scratch.path();
     fs::create_dir_all(root.join("src"))?;
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::copy(
         workspace_root()?.join("Cargo.lock"),
         root.join("Cargo.lock"),
@@ -72,8 +99,7 @@ fn probe(
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nlgwks_bot = {{ path = \"{}\"{dependency} }}\n",
-            manifest_dir.display()
+            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependencies}"
         ),
     )?;
     fs::write(root.join("src/main.rs"), main)?;

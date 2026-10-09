@@ -4261,6 +4261,9 @@ version = "1.1.0"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
+ "lgwks_deps",
+ "lgwks_std",
+ "proptest",
  "thiserror 2.0.20",
  "tracing",
  "tree-sitter",
@@ -4303,9 +4306,9 @@ dependencies = [
 name = "lgwks_macros"
 version = "1.1.1"
 dependencies = [
+ "lgwks_ast",
  "lgwks_deps",
  "lgwks_std",
- "proptest",
 ]
 
 [[package]]

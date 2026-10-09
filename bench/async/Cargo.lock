@@ -616,9 +616,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lgwks_ast"
+version = "1.1.0"
+dependencies = [
+ "lgwks_deps",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "lgwks_bot"
 version = "2.2.0"
 dependencies = [
+ "lgwks_ast",
  "lgwks_deps",
  "lgwks_macros",
  "lgwks_std",
@@ -640,6 +650,7 @@ dependencies = [
 name = "lgwks_macros"
 version = "1.1.1"
 dependencies = [
+ "lgwks_ast",
  "lgwks_deps",
  "lgwks_std",
 ]

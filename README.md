@@ -285,6 +285,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/ai-orchestration.spec.md`](docs/ai-orchestration.spec.md) | AI-authored scripts and AI workloads: constrained proposals, bounded artifact context, subject pinning, no-progress intervention and same-model evaluation. |
 | [`docs/pr-review-orchestration.spec.md`](docs/pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
 | [`docs/orchestration-acceptance.spec.md`](docs/orchestration-acceptance.spec.md) | The 36 proposed public-interface falsifiers, and the developer-experience and quality evaluation that would accept the facade. Every case unrun. |
+| [`docs/script-lexicon.md`](docs/script-lexicon.md) | Every `script!` word on one page, generated from the lexicon the parser dispatches on: its forms, refusals, guarantees and an example. Enough context to write a script from alone. |
 | [`docs/orchestration-evidence.md`](docs/orchestration-evidence.md) | The pinned source findings, the foundational Rust assessment, and the reference entries the orchestration specs are built on. |
 | [`docs/bot-on-ecs.md`](docs/bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
 | [`docs/effect-kernel.md`](docs/effect-kernel.md) | The durable effect dispatch and recovery kernel: the journal ladder, the recovery fold, settlement unification, durability admission, and what one authority means. |

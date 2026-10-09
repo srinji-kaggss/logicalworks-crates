@@ -71,6 +71,19 @@ resolved in the consuming crate, so the `extern crate … as thiserror;` line is
 what makes the expansion resolve; the crate root re-exports the module it
 needs.
 
+A crate that wants only the derive turns the parser off, and compiles no
+grammar and no tree-sitter at all:
+
+```toml
+lgwks_ast = { version = "1", default-features = false }
+```
+
+Without default features the crate is the derive and the `diagnostic` types
+(`Diagnostic`, `Span`, `Pos`, `Severity`). The parser is the `parser` feature,
+which every `lang-*` feature enables; `default-features = false, features =
+["parser"]` is the parser with no grammar compiled, for a caller that
+registers its own through `CustomLang`.
+
 ## Grammar selection
 
 One cargo feature per grammar forwards to `ast-grep-language`. The default
@@ -135,6 +148,36 @@ through `Language::of_shebang`, which `detect` does not consult.
 `try_detect_content` returns `ContentDetection::NoMatch`, `Unique(language)`, or
 `Ambiguous`; non-syntax parser failures return `Err` because they leave a
 required candidate uninspected.
+
+## The `script!` language
+
+`features = ["script"]` adds `lgwks_ast::script::parse`, the one reader of the
+`script!` orchestration language: tokens (a macro's input, or
+`TokenStream::from_str` over a file) in, a typed `Script` out, or a `Refusal`
+located at its token that names what to write instead. `lgwks_macros` compiles
+scripts through it, so a tool that maps, checks or dry-compiles a script gets
+exactly the tree and the refusals `cargo build` does. The feature selects no
+grammar; it builds `proc-macro2` through the `lgwks_deps` storefront and
+nothing else.
+
+`script::read_source` finds every `script!` in one Rust file the way the
+compiler hands them to the macro (by token, at any nesting, under any path
+prefix; never inside a string or comment) and reads each through `parse`.
+`features = ["tool"]` adds `Script::to_json`, in the shape the runtime's
+`Architecture::to_json` writes, and the `lgwks-ast` binary:
+
+```text
+lgwks-ast script map   [--json] [PATH...]   # every script's map, as its ARCHITECTURE renders
+lgwks-ast script check [--json] [PATH...]   # only refusals, at cargo build's line:column
+```
+
+A directory is walked for `.rs` files (skipping `target`, `vendor`,
+`node_modules`, `third_party`, `.venv`, `.git`, `.jj`); no `PATH` means `.`.
+Exit 0 when nothing is refused, 2 when a script is refused, a file is not Rust
+tokens or a path cannot be read. The repository's `script-check` gate lane runs
+`check` over the whole tree. The tool lives here rather than in `lgwks-deps`
+because `script` reaches `proc-macro2` through `lgwks_deps`, and `lgwks_deps`
+depending back on this crate is a cycle Cargo refuses.
 
 ## Custom languages
 

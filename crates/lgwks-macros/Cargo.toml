@@ -20,11 +20,12 @@ proc-macro = true
 # owns those edges (`contract/APPROVED.toml`: syn, proc-macro2, quote). No other
 # feature of `lgwks_deps` is selected, so this pulls no runtime.
 lgwks_deps = { workspace = true, default-features = false, features = ["macro"] }
+# The language itself: `lgwks_ast::script::parse` reads every script and makes
+# every refusal (#383), so this crate only writes Rust for the tree it returns.
+# No grammar feature is selected, so no tree-sitter grammar is built for it.
+lgwks_ast = { workspace = true, default-features = false, features = ["script"] }
 # The diagnostics `unlogged-err-return` requires come from the estate facade.
 lgwks_std = { workspace = true }
-
-[dev-dependencies]
-proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

@@ -2438,72 +2438,88 @@ impl WavePoll<'_> {
         armed: &AtomicBool,
         deadline: Duration,
     ) -> Poll<Result<Option<Erased>, BotError>> {
-        {
-            let mut state = lock(&self.watchdog.state);
-            // Only a poll that has already been turned can be cut off here. The
-            // reaper is another thread, so a wave whose first wedged poll armed
-            // it can expire before the executor reaches a sibling's first turn;
-            // refusing that sibling unpolled would report a source that answers
-            // at once as stalled, on nothing but how the host scheduled two
-            // threads. Its first turn polls it, and a poll still pending after
-            // that turn is cut off below.
+        // Copied out of `self` so the guard borrows the wave, not this poll,
+        // and the poll can still install its own waker under it.
+        let watchdog = self.watchdog;
+        let cut_off = {
+            let mut state = lock(&watchdog.state);
+            // An expired wave still turns every poll once more, and only a poll
+            // still pending after that turn is cut off. The reaper is another
+            // thread, so the deadline can pass between any two turns of a poll —
+            // before a sibling's first turn, or between a yielding source's
+            // `Pending` and the turn it woke itself for. Refusing that turn
+            // unpolled would report a source that was ready to answer as stalled
+            // on nothing but how the host scheduled two threads, so the same seed
+            // would decide a different stall set on a loaded host than an idle
+            // one. One more turn is bounded: a wedged poll answers `Pending` and
+            // is cut off on it, so an expired wave ends on its next pass.
             if state.expired && self.installed {
-                return Poll::Ready(self.stalled(deadline));
-            }
-            // Whether the installed waker is one the executor will recognise. A
-            // poll that has not installed one yet, or whose installed waker
-            // belongs to a different task, has to write again — and writing the
-            // *same* waker on every turn would be a clone per turn for nothing.
-            let stale = if self.installed {
-                state
-                    .wakers
-                    .get(self.slot)
-                    .and_then(|slot| slot.as_ref())
-                    .is_none_or(|installed| !installed.will_wake(cx.waker()))
-            } else {
                 true
-            };
-            if let (true, Some(slot)) = (stale, state.wakers.get_mut(self.slot)) {
-                *slot = Some(cx.waker().clone());
-                self.installed = true;
+            } else {
+                self.install(&mut state, cx);
+                false
             }
-        }
+        };
         match self.poll.as_mut().poll(cx) {
-            // Polled before a late expiry is consulted, so a poll that resolved
-            // in the same turn the deadline passed still answers with what it
-            // read. A cancellation landing on a poll that was about to finish is
-            // indistinguishable from one that never was going to, and only the
-            // value is a fact. A poll that answers on its first turn — the
-            // ordinary one — returns here without ever having started a thread,
-            // which is the whole of the lazy half.
             Poll::Ready(outcome) => Poll::Ready(outcome),
-            Poll::Pending => {
-                // Registered before the wave is armed, so the reaper's first
-                // look at the wave already sees this poll as outstanding. The
-                // registration and the `expired` read below are two critical
-                // sections rather than one, and that is safe here in a way it is
-                // not above: `start` takes the same lock, so a reaper cannot be
-                // running to fire between them until this poll has registered.
-                self.watchdog.poll_pending(self.slot);
-                // Started only now, because a wave with nothing pending has
-                // nothing to watch. The first poll in the wave to go Pending is
-                // the one that spends the thread, and a wave whose every source
-                // answered spends none — the ordinary tick. Registering first and
-                // arming second is what makes a wave that will never be woken
-                // again, a wedged source, still bounded: the reaper exists before
-                // this turn returns `Pending`, so the deadline can still fire and
-                // wake it. A spawn the host refuses reports this poll stalled and
-                // leaves every already-resolved poll in the wave with its answer,
-                // because a poll that answered never reaches this arm.
-                if !self.watchdog.start(clock, armed) {
-                    return Poll::Ready(self.stalled(deadline));
-                }
-                if self.watchdog.expired() {
-                    Poll::Ready(self.stalled(deadline))
-                } else {
-                    Poll::Pending
-                }
-            }
+            Poll::Pending if cut_off => Poll::Ready(self.stalled(deadline)),
+            Poll::Pending => self.park(clock, armed, deadline),
+        }
+    }
+
+    /// Install this turn's waker in the poll's slot, unless the one already
+    /// there will wake the same task.
+    ///
+    /// Whether the installed waker is one the executor will recognise: a poll
+    /// that has not installed one yet, or whose installed waker belongs to a
+    /// different task, has to write again — and writing the *same* waker on
+    /// every turn would be a clone per turn for nothing.
+    fn install(&mut self, state: &mut WatchdogState, cx: &Context<'_>) {
+        let stale = if self.installed {
+            state
+                .wakers
+                .get(self.slot)
+                .and_then(|slot| slot.as_ref())
+                .is_none_or(|installed| !installed.will_wake(cx.waker()))
+        } else {
+            true
+        };
+        if let (true, Some(slot)) = (stale, state.wakers.get_mut(self.slot)) {
+            *slot = Some(cx.waker().clone());
+            self.installed = true;
+        }
+    }
+
+    /// Register a poll that answered `Pending` on a live wave, arm the wave's
+    /// reaper, and report whether it may still wait.
+    fn park(
+        &self,
+        clock: &Clock,
+        armed: &AtomicBool,
+        deadline: Duration,
+    ) -> Poll<Result<Option<Erased>, BotError>> {
+        // Registered before the wave is armed, so the reaper's first look at the
+        // wave already sees this poll as outstanding. The registration and the
+        // `expired` read below are two critical sections rather than one, and
+        // that is safe here in a way it is not in `turn`: `start` takes the same
+        // lock, so a reaper cannot be running to fire between them until this
+        // poll has registered.
+        self.watchdog.poll_pending(self.slot);
+        // Started only now, because a wave with nothing pending has nothing to
+        // watch. The first poll in the wave to go Pending is the one that spends
+        // the thread, and a wave whose every source answered spends none — the
+        // ordinary tick. Registering first and arming second is what makes a
+        // wave that will never be woken again, a wedged source, still bounded:
+        // the reaper exists before this turn returns `Pending`, so the deadline
+        // can still fire and wake it. A spawn the host refuses reports this poll
+        // stalled and leaves every already-resolved poll in the wave with its
+        // answer, because a poll that answered never reaches this arm. An expiry
+        // read here costs the poll nothing it was about to read: it was polled
+        // this turn and answered `Pending`.
+        if !self.watchdog.start(clock, armed) || self.watchdog.expired() {
+            Poll::Ready(self.stalled(deadline))
+        } else {
+            Poll::Pending
         }
     }
 }
@@ -7414,6 +7430,90 @@ pub(super) mod tests {
     use std::io;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A yielding source turned once on a live wave, then again after the wave
+    /// expired, answers with its value; a source still pending on that turn is
+    /// the one reported stalled.
+    ///
+    /// This is the interleaving a loaded host produces and an idle one does
+    /// not: the reaper fires between a source's `Pending` and the turn it woke
+    /// itself for. `join` waits on the real reaper, which only returns once the
+    /// wave has expired because both polls are still alive, so the interleaving
+    /// is forced rather than raced, and a wave that cut off the yielding source
+    /// unpolled fails here on every run.
+    #[test]
+    fn an_expired_wave_still_reads_a_source_ready_on_its_next_turn() -> TestResult {
+        let deadline = Duration::from_millis(1);
+        let watchdog = PollWatchdog::new(deadline, 2);
+        let clock = Clock::wall();
+        let armed = AtomicBool::new(false);
+        let mut cx = Context::from_waker(Waker::noop());
+        let yields = Rc::new(Cell::new(1_u32));
+        let mut yielding = WavePoll {
+            chain: 0,
+            watchdog: &watchdog,
+            slot: 0,
+            installed: false,
+            poll: Box::pin(std::future::poll_fn({
+                let yields = Rc::clone(&yields);
+                move |turn: &mut Context<'_>| {
+                    if yields.get() > 0 {
+                        yields.set(yields.get().saturating_sub(1));
+                        turn.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Ok(None))
+                    }
+                }
+            })),
+        };
+        let mut wedged = WavePoll {
+            chain: 1,
+            watchdog: &watchdog,
+            slot: 1,
+            installed: false,
+            poll: Box::pin(std::future::pending()),
+        };
+        assert!(
+            yielding
+                .turn(&mut cx, &clock, &armed, deadline)
+                .is_pending(),
+            "a source that yields is pending on its first turn"
+        );
+        assert!(
+            wedged.turn(&mut cx, &clock, &armed, deadline).is_pending(),
+            "a wedged source is pending on its first turn"
+        );
+        assert!(
+            armed.load(Ordering::Relaxed),
+            "a wave with a pending poll starts its reaper"
+        );
+        watchdog.join();
+        assert!(
+            watchdog.expired(),
+            "the reaper returned on the wave's expiry"
+        );
+        assert!(
+            matches!(
+                yielding.turn(&mut cx, &clock, &armed, deadline),
+                Poll::Ready(Ok(None))
+            ),
+            "a source ready on the turn after expiry answers rather than stalls"
+        );
+        assert!(
+            matches!(
+                wedged.turn(&mut cx, &clock, &armed, deadline),
+                Poll::Ready(Err(BotError::PollStalled { chain: 1, .. }))
+            ),
+            "a source still pending after its last turn is the one cut off"
+        );
+        assert_eq!(
+            yields.get(),
+            0,
+            "the yielding source was turned exactly twice"
+        );
+        Ok(())
+    }
 
     /// A domain refusal from a test source, recorded before it is returned.
     ///

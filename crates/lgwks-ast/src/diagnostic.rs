@@ -1,6 +1,6 @@
 //! Spans, severities, and the diagnostics a tool reports on code.
 //!
-//! The refusal type is [`ParseError`]; this module is what a
+//! The parser's refusal type is `ParseError`; this module is what a
 //! tool actually renders. A [`Diagnostic`] carries the four things a report line
 //! needs and the refusal type does not: which file, where in it, how bad, and
 //! what to say.
@@ -18,14 +18,18 @@
 //! given number is in. `byte` is always the raw zero-based offset, because that
 //! is what [`str::get`] and slicing take.
 //!
-//! The walk is the same cursor walk [`inspect_ast`] uses, so collecting
+//! The walk is the same cursor walk `inspect_ast` uses, so collecting
 //! diagnostics over a wide tree retains memory proportional to depth rather
 //! than to fan-out.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::{AstNode, LanguageExt};
+#[cfg(feature = "parser")]
+use ast_grep_core::tree_sitter::LanguageExt;
+
+#[cfg(feature = "parser")]
+use crate::AstNode;
 
 /// One position in a source file.
 ///
@@ -335,6 +339,7 @@ impl<'src> LineIndex<'src> {
 /// entry point is [`tree_diagnostics`](crate::tree_diagnostics), which takes
 /// the source from the tree and cannot be handed the wrong one.
 #[must_use]
+#[cfg(feature = "parser")]
 pub fn diagnostics<L: LanguageExt>(
     path: impl Into<PathBuf>,
     root: &AstNode<'_, L>,
@@ -370,6 +375,7 @@ pub fn diagnostics<L: LanguageExt>(
 /// parser gave up on or *where*. Use it to decide whether to keep going; use
 /// this to tell a reader where the damage is.
 #[must_use]
+#[cfg(feature = "parser")]
 pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
     let mut count = 0_usize;
     visit_each_node(root, &mut |node| {
@@ -387,6 +393,7 @@ pub fn recovery_count<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// frontier this traversal exists not to build. Every field is read off the
 /// node before the cursor moves on; `kind` borrows the tree rather than the
 /// node, so it outlives the handle it came from.
+#[cfg(feature = "parser")]
 struct Found<'tree> {
     /// Whether the node is an `ERROR` recovery node.
     is_error: bool,
@@ -417,6 +424,7 @@ struct Found<'tree> {
 /// inspects the root too, so the two walks agree on which nodes exist: a tree
 /// whose root is itself a recovery node is counted here exactly as it is
 /// refused by [`try_parse`].
+#[cfg(feature = "parser")]
 fn visit_each_node<L: LanguageExt>(root: &AstNode<'_, L>, visit: &mut dyn FnMut(&Found<'_>)) {
     visit_each_node_measuring(root, visit, None);
 }
@@ -427,6 +435,7 @@ fn visit_each_node<L: LanguageExt>(root: &AstNode<'_, L>, visit: &mut dyn FnMut(
 /// against this walk rather than against a second copy of it. A test that
 /// reimplemented the traversal would keep passing if this one regressed, which
 /// is the failure mode a copied walk always has.
+#[cfg(feature = "parser")]
 fn visit_each_node_measuring<L: LanguageExt>(
     root: &AstNode<'_, L>,
     visit: &mut dyn FnMut(&Found<'_>),
@@ -487,6 +496,7 @@ fn peak_retained_frames<L: LanguageExt>(root: &AstNode<'_, L>) -> usize {
 /// generic grammar — so a message built from the node alone could not say which
 /// grammar it meant. Taking it as a parameter keeps the two facts in one place:
 /// the caller named the grammar it parsed with, and the message names that.
+#[cfg(feature = "parser")]
 fn recovery_message(node_kind_missing: bool, node_kind: &str, language: &str) -> String {
     if node_kind_missing {
         format!("{language} is missing {node_kind}")
@@ -500,6 +510,7 @@ fn recovery_message(node_kind_missing: bool, node_kind: &str, language: &str) ->
 /// An empty path renders as `:1:1: E: …`, which reads as a truncated filename
 /// instead of as "no file was given". The placeholder keeps the shape of the
 /// line and says plainly that the file is unknown.
+#[cfg(feature = "parser")]
 fn labeled(path: PathBuf) -> PathBuf {
     if path.as_os_str().is_empty() {
         PathBuf::from("<source>")
@@ -511,7 +522,7 @@ fn labeled(path: PathBuf) -> PathBuf {
 /// The offset just past the last byte of `source`, as a zero-width span.
 ///
 /// The end of a file is where a whole-file refusal is reported, so this is what
-/// [`ParseError::to_diagnostic`](crate::ParseError::to_diagnostic) anchors its
+/// the parser's `ParseError::to_diagnostic` anchors its
 /// size refusals to.
 #[must_use]
 pub fn end_of(source: &str) -> Span {
@@ -522,6 +533,7 @@ pub fn end_of(source: &str) -> Span {
 ///
 /// How a checked parse's [`SyntaxDiagnostic`] byte
 /// offsets become the line and column a renderer points at.
+#[cfg(feature = "parser")]
 pub(crate) fn span_of(source: &str, range: Range<usize>) -> Span {
     LineIndex::new(source).span(range)
 }

@@ -1386,7 +1386,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `sim_a_seed_replays_its_trace_and_distinct_seeds_diverge`), and
   `sim_pool_lifetime.rs` (`sim_every_scenario_drains_joins_and_never_loses_a_job`,
   `sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_takes_one`,
-  `sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles`,
+  `sim_many_burst_and_idle_cycles_never_accumulate_join_handles`,
   `sim_a_seed_replays_its_pool_lifetime_trace`,
   `sim_distinct_seeds_diverge_in_their_pool_lifetime_trace`).
 
@@ -1399,10 +1399,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `(((…` is a few bytes per level and produces one node per level, which the
   byte and node ceilings admit in the hundreds of thousands of levels.
   · why: #143 R17, #277 · enforced by:
-  `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
-  `lgwks_ast::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
-  `lgwks_ast::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
-  `lgwks_ast::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
+  `lgwks_ast::parser::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
+  `lgwks_ast::parser::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
+  `lgwks_ast::parser::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
+  `lgwks_ast::parser::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
 - **INV-AST-2** Content detection parses each distinct compiled candidate once;
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
@@ -1412,13 +1412,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   rendered `InvalidSyntax` refusal points at the earliest retained recovery
   node; `AstMetrics` has no `Default`, so every value came from a walk.
   · why: #165 A1–A4, #194 · enforced by:
-  `lgwks_ast::tests::an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node`,
-  `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
-  `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
-  `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
-  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
-  `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
-  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
+  `lgwks_ast::parser::tests::an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node`,
+  `lgwks_ast::parser::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
+  `lgwks_ast::parser::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
+  `lgwks_ast::parser::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
+  `lgwks_ast::parser::tests::syntax_diagnostics_stop_at_the_declared_bound`,
+  `lgwks_ast::parser::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
+  `lgwks_ast::parser::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
   `tests/it/content_detection.rs`, and `tests/it/sim_diagnostics.rs`, which checks 64
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
@@ -1443,11 +1443,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `AstMetrics` folds order-independently, the retained diagnostics are the
   earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before they are
   returned, and `diagnostics` sorts its own output. · why: #277 · enforced by:
-  `lgwks_ast::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
+  `lgwks_ast::parser::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
   (the replaced walk is kept as a test-only model and the replacement must visit
   the same nodes at the same depths with the same recovery state on five tree
-  shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
-  `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
+  shapes), `lgwks_ast::parser::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
+  `lgwks_ast::parser::tests::a_node_budget_charges_children_in_source_order`, and
   `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
 - **INV-AST-4** Hostile input earns a typed refusal, and the input that could
   not is refused *before* the grammar sees it. Four generators per compiled
@@ -1489,7 +1489,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `every_refusal_renders_as_a_located_diagnostic`,
   `the_unchecked_parse_of_the_same_shapes_still_answers`,
   `multibyte_and_truncated_sources_are_answered`) and
-  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `lgwks_ast::parser::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
   `the_container_count_does_not_charge_prose_or_a_thematic_break`,
   `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
   `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a
@@ -2409,7 +2409,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   caller-advanceable counter, because a source that stopped answering is not
   waiting for time to pass — and `MAX_IN_FLIGHT_POLLS` bounds the fan-out while
   this bounds the wait, which is the half it never did. A poll that
-  misses it is **dropped mid-flight**: it commits nothing, keeps its chain's
+  misses it is **dropped mid-flight**, decided on the poll and not on the
+  scheduler: an expired wave turns each poll once more and cuts off only one still
+  pending on that turn, so a source that yielded and was ready to answer is read,
+  however late the host gave it its turn. A dropped poll commits nothing, keeps its chain's
   baseline and its forced-refresh mark standing (the same rule a failed poll
   already follows, since the value it was to replace is still there), and is
   reported in `TickReport::stalled` naming the chain, the source's own
@@ -2427,7 +2430,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `spawn_blocking` has its handle released and its thread runs to completion — the
   stall is about this bot's observation, not about the source's work. · why:
   #87 step 3 (T06, LC-03), slow-source half, closing the gap INV-BOT-122 named ·
-  enforced by: `tests/it/observe_refresh.rs`
+  enforced by: `ecs::tests::an_expired_wave_still_reads_a_source_ready_on_its_next_turn`,
+  `tests/it/observe_refresh.rs`
   (`a_slow_source_does_not_block_an_independent_chain`,
   `a_stalled_chain_is_re_polled_and_commits_when_it_answers`,
   `a_poll_deadline_that_bounds_nothing_is_refused_at_build`) and
