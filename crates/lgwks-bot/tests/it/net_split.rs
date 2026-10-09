@@ -144,8 +144,7 @@ mod unix_socket {
             let (reply, client_read) = timeout(STEP, receive_line(client_read)).await??;
             assert_eq!(reply, "reply\n");
 
-            let refused: Result<UnixStream, unix::ReuniteError> =
-                client_read.reunite(server_write);
+            let refused: Result<UnixStream, unix::ReuniteError> = client_read.reunite(server_write);
             let Err(unix::ReuniteError(client_read, server_write)) = refused else {
                 return Err("halves of two streams reunited".into());
             };
