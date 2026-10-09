@@ -1934,13 +1934,16 @@ mod resolution_tests {
         let scratch = Scratch::new()?;
         scratch.file("witness", SCRIPT, 0o755)?;
         let absent = scratch.dir.join("absent");
-        let mut entries: Vec<&OsStr> = vec![absent.as_os_str(); MAX_PATH_ENTRIES];
-        entries.push(scratch.entry());
-        let spec = spec_with_path("witness", &joined(&entries));
+        // `misses` absent entries, then the one that holds the witness.
+        let path_after = |misses: usize| {
+            let mut entries: Vec<&OsStr> = vec![absent.as_os_str(); misses];
+            entries.push(scratch.entry());
+            joined(&entries)
+        };
+        let spec = spec_with_path("witness", &path_after(MAX_PATH_ENTRIES));
         assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
-        // One entry inside the bound is still walked.
-        entries.remove(0);
-        let spec = spec_with_path("witness", &joined(&entries));
+        // One miss fewer puts the witness on the last entry the walk reads.
+        let spec = spec_with_path("witness", &path_after(MAX_PATH_ENTRIES.saturating_sub(1)));
         assert_eq!(spec.resolved_program(), scratch.dir.join("witness"));
         Ok(())
     }
