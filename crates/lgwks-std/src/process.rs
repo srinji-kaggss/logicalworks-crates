@@ -1831,15 +1831,17 @@ pub fn adopted_descendants(candidates: &[i32]) -> io::Result<BTreeSet<i32>> {
 /// The targeted counterpart of the orphan queue: `waitpid` on the exact pid,
 /// so a live supervised leader is never stolen by a reap meant for an adopted
 /// orphan. A pid that already exited is collected; one still running is left
-/// alone; one that is not a child of this process is an error the caller reads
-/// as "not mine to reap".
+/// alone; and one that is not, or is no longer, a child of this process —
+/// reaped by another waiter first — is passed over without being named, so it
+/// is absent from the answer exactly as a running one is. A caller that must
+/// tell those two apart asks [`adopted_descendants`] which pids it still holds.
 ///
 /// Returns the pids this call reaped, sorted.
 ///
 /// # Errors
 ///
-/// The wait's own error other than "no such process" for a pid that left while
-/// it was named — that pid is gone, which is what the reap was for.
+/// The wait's own error other than `ECHILD` and `ESRCH`, the two answers for a
+/// pid that is not this process's to wait for.
 #[cfg(all(target_os = "linux", feature = "process"))]
 pub fn reap_descendants(pids: &[i32]) -> io::Result<Vec<i32>> {
     let mut reaped = Vec::new();
