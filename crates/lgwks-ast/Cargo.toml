@@ -40,39 +40,49 @@ default = [
     "lang-java",
     "lang-swift",
 ]
-lang-rust = ["ast-grep-language/tree-sitter-rust"]
-lang-python = ["ast-grep-language/tree-sitter-python"]
-lang-typescript = ["ast-grep-language/tree-sitter-typescript"]
+# The multi-language parser and its grammar stack (#367). Every `lang-*`
+# feature enables it, so the default set has it; without it this crate is the
+# typed-error derive and the diagnostic types alone, with no tree-sitter, so a
+# consumer that wants only the derive does not compile a parser.
+parser = [
+    "dep:ast-grep-core",
+    "dep:ast-grep-language",
+    "dep:tracing",
+    "dep:tree-sitter",
+]
+lang-rust = ["parser", "ast-grep-language/tree-sitter-rust"]
+lang-python = ["parser", "ast-grep-language/tree-sitter-python"]
+lang-typescript = ["parser", "ast-grep-language/tree-sitter-typescript"]
 # TSX is not a separate upstream grammar: ast-grep parses `.tsx` with the
 # TypeScript parser, so this feature forwards to the same crate as
 # `lang-typescript` and pulls nothing further. It exists as its own feature
 # because a `.tsx` file is a distinct thing to *select*, and a caller building
 # a React tool should not have to know that upstream reuses one parser.
-lang-tsx = ["ast-grep-language/tree-sitter-typescript"]
-lang-javascript = ["ast-grep-language/tree-sitter-javascript"]
-lang-go = ["ast-grep-language/tree-sitter-go"]
-lang-java = ["ast-grep-language/tree-sitter-java"]
-lang-swift = ["ast-grep-language/tree-sitter-swift"]
-lang-c = ["ast-grep-language/tree-sitter-c"]
-lang-cpp = ["ast-grep-language/tree-sitter-cpp"]
-lang-csharp = ["ast-grep-language/tree-sitter-c-sharp"]
-lang-scala = ["ast-grep-language/tree-sitter-scala"]
-lang-kotlin = ["ast-grep-language/tree-sitter-kotlin"]
-lang-bash = ["ast-grep-language/tree-sitter-bash"]
-lang-css = ["ast-grep-language/tree-sitter-css"]
-lang-dart = ["ast-grep-language/tree-sitter-dart"]
-lang-elixir = ["ast-grep-language/tree-sitter-elixir"]
-lang-haskell = ["ast-grep-language/tree-sitter-haskell"]
-lang-hcl = ["ast-grep-language/tree-sitter-hcl"]
-lang-html = ["ast-grep-language/tree-sitter-html"]
-lang-json = ["ast-grep-language/tree-sitter-json"]
-lang-lua = ["ast-grep-language/tree-sitter-lua"]
-lang-md = ["ast-grep-language/tree-sitter-md"]
-lang-nix = ["ast-grep-language/tree-sitter-nix"]
-lang-php = ["ast-grep-language/tree-sitter-php"]
-lang-ruby = ["ast-grep-language/tree-sitter-ruby"]
-lang-solidity = ["ast-grep-language/tree-sitter-solidity"]
-lang-yaml = ["ast-grep-language/tree-sitter-yaml"]
+lang-tsx = ["parser", "ast-grep-language/tree-sitter-typescript"]
+lang-javascript = ["parser", "ast-grep-language/tree-sitter-javascript"]
+lang-go = ["parser", "ast-grep-language/tree-sitter-go"]
+lang-java = ["parser", "ast-grep-language/tree-sitter-java"]
+lang-swift = ["parser", "ast-grep-language/tree-sitter-swift"]
+lang-c = ["parser", "ast-grep-language/tree-sitter-c"]
+lang-cpp = ["parser", "ast-grep-language/tree-sitter-cpp"]
+lang-csharp = ["parser", "ast-grep-language/tree-sitter-c-sharp"]
+lang-scala = ["parser", "ast-grep-language/tree-sitter-scala"]
+lang-kotlin = ["parser", "ast-grep-language/tree-sitter-kotlin"]
+lang-bash = ["parser", "ast-grep-language/tree-sitter-bash"]
+lang-css = ["parser", "ast-grep-language/tree-sitter-css"]
+lang-dart = ["parser", "ast-grep-language/tree-sitter-dart"]
+lang-elixir = ["parser", "ast-grep-language/tree-sitter-elixir"]
+lang-haskell = ["parser", "ast-grep-language/tree-sitter-haskell"]
+lang-hcl = ["parser", "ast-grep-language/tree-sitter-hcl"]
+lang-html = ["parser", "ast-grep-language/tree-sitter-html"]
+lang-json = ["parser", "ast-grep-language/tree-sitter-json"]
+lang-lua = ["parser", "ast-grep-language/tree-sitter-lua"]
+lang-md = ["parser", "ast-grep-language/tree-sitter-md"]
+lang-nix = ["parser", "ast-grep-language/tree-sitter-nix"]
+lang-php = ["parser", "ast-grep-language/tree-sitter-php"]
+lang-ruby = ["parser", "ast-grep-language/tree-sitter-ruby"]
+lang-solidity = ["parser", "ast-grep-language/tree-sitter-solidity"]
+lang-yaml = ["parser", "ast-grep-language/tree-sitter-yaml"]
 full = [
     "lang-rust",
     "lang-python",
@@ -105,14 +115,14 @@ full = [
 ]
 
 [dependencies]
-ast-grep-core = "0.45"
-ast-grep-language = { version = "0.45", default-features = false }
+ast-grep-core = { version = "0.45", optional = true }
+ast-grep-language = { version = "0.45", default-features = false, optional = true }
 thiserror = { version = "2", default-features = false }
 # The `unlogged-err-return` rule requires a recorded signal on every refusal,
 # and `print_stderr` is `forbid` in library code. `lgwks_ast` stands outside the
 # `lgwks_std` facade (INV-DEP-1), so it reaches `tracing` directly. Registered in
 # `contract/APPROVED.toml`; `attributes` stays off so no proc-macro stack enters.
-tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 # #277: the parse deadline. `ast-grep-core` builds its `Parser` privately and
 # calls `parse` with no progress callback, so a parse through it cannot be
 # stopped; `Parser::parse_with_options` and `ParseOptions::progress_callback` can.
@@ -120,11 +130,18 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # requirement is the one `ast-grep-core` 0.45 already resolves (0.27.0, default
 # features), so this names an edge that was already compiled rather than adding
 # a crate: the `Tree` built here is the type `StrDoc` holds.
-tree-sitter = "0.27"
+tree-sitter = { version = "0.27", optional = true }
 
 [[example]]
 name = "parse"
 required-features = ["lang-rust"]
+
+# The parse-budget measurement (`scripts/measure-ast-budget.sh`, built with
+# `full`) walks `Language::ALL`, so it needs the parser and nothing more: with no
+# grammar compiled it measures nothing, rather than failing to build.
+[[example]]
+name = "parse_budget"
+required-features = ["parser"]
 
 [lints]
 workspace = true

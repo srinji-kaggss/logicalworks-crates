@@ -126,7 +126,7 @@ Three constants, in different units, bounding different work.
 | `MAX_DETECT_BYTES` | 64 KiB | one content-detection probe |
 
 The two parse bounds are not interchangeable, and the crate says so plainly
-(`crates/lgwks-ast/src/lib.rs:54`):
+(`crates/lgwks-ast/src/parser.md:77`):
 
 > [`MAX_SOURCE_BYTES`] bounds the bytes handed to the parser and is what keeps
 > parse work linear in input; [`MAX_AST_NODES`] is measured on the tree *after*

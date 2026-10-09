@@ -1,7 +1,7 @@
 //! `error` owns this crate's typed-diagnostic derive.
 //!
 //! `std::error::Error` is a trait, and stable `std` has no derive that
-//! generates `Display` or `source`. [`ParseError`] is built
+//! generates `Display` or `source`. `ParseError` is built
 //! with this derive, and code-observability consumers derive their diagnostics
 //! from the same stack instead of each declaring `thiserror`.
 //!

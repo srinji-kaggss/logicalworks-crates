@@ -440,7 +440,9 @@ jobs:
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
-          --all-targets --no-default-features -- -D warnings
+          --all-targets --no-default-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
+          --all-targets --no-default-features --features parser -- -D warnings
       - name: Clippy process-only
         # `process` alone is a supported consumer shape: a bot that starts
         # children and nothing else. It was missing from the matrix, so a
@@ -662,6 +664,7 @@ jobs:
         run: |
           set -eu
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
+           cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
       - name: Execute the lgwks-ast grammar matrix
@@ -690,6 +693,9 @@ jobs:
             echo "::endgroup::"
           }
           execute cargo test --locked -p lgwks_ast --lib --no-default-features
+          # The parser with no grammar compiled: what `--no-default-features`
+          # meant before the grammar stack became optional (#367).
+          execute cargo test --locked -p lgwks_ast --lib --no-default-features --features parser
           execute cargo test --locked -p lgwks_ast --lib
           # Every standalone grammar, one build. A grammar that fails to parse
           # its own language still fails here: the per-grammar test reads that
