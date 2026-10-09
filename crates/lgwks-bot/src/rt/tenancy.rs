@@ -649,6 +649,27 @@ impl<W> DeficitRoundRobin<W> {
     where
         F: FnOnce() -> Option<P>,
     {
+        self.arrive_with(tenant, || waiter, acquire)
+    }
+
+    /// [`arrive`](Self::arrive), building the waiter only when the arrival
+    /// actually parks.
+    ///
+    /// An arrival admitted at once or refused never needs a waiter, and under a
+    /// flood those are most arrivals. Building the waiter up front made every
+    /// decision pay an allocation and a free, so its cost rode on the
+    /// allocator's contention rather than on the round (#375). `make_waiter`
+    /// runs at most once, and only on the [`Arrival::Queued`] path.
+    pub(crate) fn arrive_with<P, F, M>(
+        &mut self,
+        tenant: &Tenant,
+        make_waiter: M,
+        acquire: F,
+    ) -> Arrival<P>
+    where
+        F: FnOnce() -> Option<P>,
+        M: FnOnce() -> W,
+    {
         let ceiling = self.policy.per_tenant_limit;
         let queue_limit = self.policy.queue_per_tenant;
         // The entry exists from the first arrival and is removed once idle, so
@@ -683,7 +704,7 @@ impl<W> DeficitRoundRobin<W> {
                 limit: self.policy.queue_total,
             };
         }
-        entry.queue.push_back(waiter);
+        entry.queue.push_back(make_waiter());
         self.retained = self.retained.saturating_add(1);
         // A tenant at its ceiling parks off the ring; `note_release` re-arms it
         // the moment one of its admissions completes. The waiter is still
@@ -936,6 +957,48 @@ mod tests {
             queued,
             "with a ring member present, the next arrival queues rather than jumping it"
         );
+        Ok(())
+    }
+
+    /// The waiter is built only when an arrival parks (#375): an immediate
+    /// admission and both refusals never call `make_waiter`, and a queued
+    /// arrival calls it exactly once.
+    #[test]
+    fn a_waiter_is_built_only_for_an_arrival_that_parks() -> Result<(), Box<dyn Error>> {
+        let mut core: Core = DeficitRoundRobin::new(TenancyPolicy::new(1, 1).with_queue_total(1));
+        let t0 = tenant("t-0")?;
+        let t1 = tenant("t-1")?;
+        let built = std::cell::Cell::new(0_u32);
+        let make = || {
+            built.set(built.get().saturating_add(1));
+            built.get()
+        };
+        assert_eq!(
+            core.arrive_with(&t0, make, || Some(7_u32)),
+            Arrival::Immediate(7),
+            "a free pool admits at once"
+        );
+        assert_eq!(built.get(), 0, "an immediate admission built no waiter");
+        assert!(
+            parked(core.arrive_with(&t0, make, || None::<u32>)),
+            "a spent pool parks the arrival"
+        );
+        assert_eq!(
+            built.get(),
+            1,
+            "the parked arrival built exactly one waiter"
+        );
+        assert_eq!(
+            core.arrive_with(&t0, make, || None::<u32>),
+            Arrival::Refused { limit: 1 },
+            "a full tenant queue refuses"
+        );
+        assert_eq!(
+            core.arrive_with(&t1, make, || None::<u32>),
+            Arrival::SupervisorFull { limit: 1 },
+            "a full supervisor refuses"
+        );
+        assert_eq!(built.get(), 1, "neither refusal built a waiter");
         Ok(())
     }
 

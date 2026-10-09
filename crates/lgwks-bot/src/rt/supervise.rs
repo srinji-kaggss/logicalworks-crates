@@ -1469,34 +1469,28 @@ mod tenancy_support {
         /// Run one decision under the round lock, charging its own work to
         /// `ops` and `nanos` and not the wait to take the lock.
         ///
-        /// `prepare` runs before the lock and is charged: an arrival's own work,
-        /// such as allocating its wait slot, is part of its decision whatever
-        /// the round holds. `decide` runs with the lock held and is charged,
-        /// through the unlock. The wait between the two is not: it is another
-        /// decision holding the round — a completing task's release, charged to
-        /// that release's own counter — and on an oversubscribed host it is
-        /// mostly the time that holder spent descheduled. Charging it here made
-        /// one host stall read as a 114x arrival cost (main run 37933518033),
-        /// which is the scheduling share INV-BOT-151 does not claim to isolate.
+        /// `decide` runs with the lock held and is charged, through the unlock.
+        /// The wait to take the lock is not: it is another decision holding the
+        /// round — a completing task's release, charged to that release's own
+        /// counter — and on an oversubscribed host it is mostly the time that
+        /// holder spent descheduled. Charging it here made one host stall read
+        /// as a 114x arrival cost (main run 37933518033), which is the
+        /// scheduling share INV-BOT-151 does not claim to isolate.
         ///
-        /// The three reads of the clock cost tens of nanoseconds and are
+        /// The two reads of the clock cost tens of nanoseconds and are
         /// symmetric across tenants, so a comparison of two arms' counters
         /// measures the decisions rather than the clock.
-        fn timed<P, T>(
+        fn timed<T>(
             &self,
             ops: &AtomicU64,
             nanos: &AtomicU64,
-            prepare: impl FnOnce() -> P,
-            decide: impl FnOnce(&mut RoundGuard<'_>, P) -> T,
+            decide: impl FnOnce(&mut RoundGuard<'_>) -> T,
         ) -> T {
-            let started = Instant::now();
-            let prepared = prepare();
-            let before_lock = started.elapsed();
             let mut round = self.lock();
             let held = Instant::now();
-            let outcome = decide(&mut round, prepared);
+            let outcome = decide(&mut round);
             drop(round);
-            let charged = before_lock.saturating_add(held.elapsed());
+            let charged = held.elapsed();
             // A saturating read: the only input that does not fit is a decision
             // longer than 584 years, which pins the counter rather than wrapping
             // it, the same way the crate's counters saturate rather than wrap.
@@ -1534,36 +1528,43 @@ mod tenancy_support {
         /// receiver is `self: &Arc<Self>` because an admitted lease has to keep
         /// the shell alive for as long as it holds the permit.
         pub(super) fn admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(
-                &self.admit_ops,
-                &self.admit_nanos,
-                WaitSlot::fresh,
-                |round, slot| {
-                    let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
-                    match outcome {
-                        Arrival::Immediate(permit) => {
-                            Admission::Admitted(self.lease(permit, tenant))
-                        }
-                        Arrival::Queued => {
-                            // An arrival that could not take a permit may still be
-                            // servable right now — the ring may have drained between its
-                            // check and this one — so the round is pumped before the
-                            // caller parks. A pump that grants to this very waiter wakes
-                            // it, and the caller's poll collects the permit.
-                            self.pump(round, None);
-                            Admission::Queued(WaitPermit::new(
-                                Arc::clone(&slot),
-                                Arc::clone(self),
-                                tenant.clone(),
-                            ))
-                        }
-                        Arrival::Refused { limit } => Admission::Refused { limit },
-                        Arrival::SupervisorFull { limit } => {
-                            Admission::SupervisorQueueFull { limit }
-                        }
+            self.timed(&self.admit_ops, &self.admit_nanos, |round| {
+                // The slot is built only if the arrival parks: an arrival
+                // admitted at once or refused allocates nothing (#375).
+                let mut parked = None;
+                let park = || {
+                    let slot = WaitSlot::fresh();
+                    parked = Some(Arc::clone(&slot));
+                    slot
+                };
+                let outcome = round.arrive_with(tenant, park, || self.take_from_pool());
+                match (outcome, parked) {
+                    (Arrival::Immediate(permit), _) => {
+                        Admission::Admitted(self.lease(permit, tenant))
                     }
-                },
-            )
+                    (Arrival::Queued, Some(slot)) => {
+                        // An arrival that could not take a permit may still be
+                        // servable right now — the ring may have drained between its
+                        // check and this one — so the round is pumped before the
+                        // caller parks. A pump that grants to this very waiter wakes
+                        // it, and the caller's poll collects the permit.
+                        self.pump(round, None);
+                        Admission::Queued(WaitPermit::new(slot, Arc::clone(self), tenant.clone()))
+                    }
+                    // `arrive_with` queues only by calling `park`, so a queued
+                    // arrival always has its slot. Answered rather than
+                    // asserted: with no slot nothing was queued either, and the
+                    // caller is told the queue is full instead of parking on a
+                    // waiter no grant can reach.
+                    (Arrival::Queued, None) => Admission::Refused {
+                        limit: round.policy().queue_per_tenant(),
+                    },
+                    (Arrival::Refused { limit }, _) => Admission::Refused { limit },
+                    (Arrival::SupervisorFull { limit }, _) => {
+                        Admission::SupervisorQueueFull { limit }
+                    }
+                }
+            })
         }
 
         /// Admit one arrival for `tenant` that refuses rather than waits.
@@ -1572,22 +1573,17 @@ mod tenancy_support {
         /// that keeps hammering a full supervisor accumulates no waiters. The
         /// refusal path has to cost nothing as well as say so.
         pub(super) fn try_admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(
-                &self.admit_ops,
-                &self.admit_nanos,
-                || (),
-                |round, ()| {
-                    let outcome = round.try_arrive(tenant, || self.take_from_pool());
-                    match outcome {
-                        TryArrival::Immediate(permit) => {
-                            Admission::Admitted(self.lease(permit, tenant))
-                        }
-                        TryArrival::Contended => Admission::Refused {
-                            limit: round.policy().queue_per_tenant(),
-                        },
+            self.timed(&self.admit_ops, &self.admit_nanos, |round| {
+                let outcome = round.try_arrive(tenant, || self.take_from_pool());
+                match outcome {
+                    TryArrival::Immediate(permit) => {
+                        Admission::Admitted(self.lease(permit, tenant))
                     }
-                },
-            )
+                    TryArrival::Contended => Admission::Refused {
+                        limit: round.policy().queue_per_tenant(),
+                    },
+                }
+            })
         }
 
         /// One of this supervisor's in-flight admissions ended, carrying its
@@ -1598,15 +1594,10 @@ mod tenancy_support {
         /// straight to the next eligible waiter rather than returning it to a
         /// pool for the next arrival to win.
         pub(super) fn release(&self, tenant: &Tenant, permit: OwnedSemaphorePermit) {
-            self.timed(
-                &self.release_ops,
-                &self.release_nanos,
-                || (),
-                |round, ()| {
-                    round.note_release(tenant);
-                    self.pump(round, Some(permit));
-                },
-            );
+            self.timed(&self.release_ops, &self.release_nanos, |round| {
+                round.note_release(tenant);
+                self.pump(round, Some(permit));
+            });
         }
 
         /// Hand permits to eligible tenants until none can take one.
