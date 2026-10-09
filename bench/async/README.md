@@ -140,6 +140,23 @@ CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
   cargo run --release --manifest-path bench/async/Cargo.toml -- --sim-open-loop
 ```
 
+## The flood split — a neighbour's cost under a fail-at-once flood
+
+```sh
+CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
+  cargo run --release --manifest-path bench/async/Cargo.toml -- --flood-split --rounds=41
+```
+
+The wall-clock half of INV-BOT-151 (`flood.rs`). Each paired round runs the
+neighbour alone and under four attacker submissions per neighbour task, back
+to back in alternating order, on a 64-permit pool with a 32-permit ceiling,
+and prints the neighbour's own throughput and its own arrival-decision time as
+per-mille of the arm alone (p50/p95/p99/min/max). It asserts nothing: the gate
+is `sim_tenancy_flood`, which checks the claim exactly in virtual time, and a
+ratio of two arms on a shared host reads the host (#375). Two runs on a quiet
+macOS arm64 host read throughput p50 1018‰ / 986‰ and decision p50
+1053‰ / 1010‰, 0.70 s wall, 4.2 MB peak RSS.
+
 ## The saturation curve — the knee, at six in-flight bounds
 
 ```sh

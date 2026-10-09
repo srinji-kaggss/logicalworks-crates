@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use lgwks_bot::rt::supervise::{SpawnRefused, Supervisor};
-use lgwks_bot::rt::sync::{CancellationToken, Notify};
+use lgwks_bot::rt::sync::Notify;
 use lgwks_bot::script::Tenant;
 
 /// A count wide enough to compare against a `Stats` counter.
@@ -150,43 +150,3 @@ pub async fn submit_parked(
     )
     .await
 }
-
-/// Submit one body for `tenant` inside [`SUBMISSION_BOUND`], naming the tenant
-/// when the submission is refused.
-pub async fn admit<F, Fut>(
-    supervisor: &mut Supervisor,
-    tenant: &Tenant,
-    body: F,
-) -> Result<(), String>
-where
-    F: FnOnce(CancellationToken) -> Fut,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    let admitted = bounded(
-        SUBMISSION_BOUND,
-        "one tenant's submission",
-        supervisor.spawn_for(tenant, body),
-    )
-    .await?;
-    admitted.map_err(|refusal| format!("{tenant} was refused: {refusal}"))
-}
-
-/// The neighbour's measured body: a fixed amount of arithmetic, identical in
-/// both arms of a throughput comparison, sunk into [`CONSUMED`] so the
-/// optimiser cannot remove it.
-pub async fn neighbour_work() {
-    let mut accumulator: u64 = 0;
-    for step in 0..2_000_u64 {
-        accumulator = accumulator.wrapping_add(step.wrapping_mul(2_654_435_761));
-    }
-    let sunk = match usize::try_from(std::hint::black_box(accumulator)) {
-        Ok(as_index) => as_index,
-        Err(_) => usize::MAX,
-    };
-    CONSUMED.fetch_add(sunk, Ordering::Relaxed);
-}
-
-/// Where the neighbour's arithmetic is sunk, so the optimiser cannot remove the
-/// work two runs are compared on. Wrapping add is used throughout so no run
-/// panics on overflow.
-static CONSUMED: AtomicUsize = AtomicUsize::new(0);
