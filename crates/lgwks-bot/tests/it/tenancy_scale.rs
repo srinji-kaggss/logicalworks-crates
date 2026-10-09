@@ -265,10 +265,17 @@ fn every_tenant_is_provisioned_at_each_in_flight_tier() -> TestResult {
 /// on the runtime beside the neighbour's submissions — which INV-BOT-151 does
 /// not claim to isolate.
 ///
-/// The bound is unchanged: the flood must not inflate the mean arrival
-/// decision past the same 10% envelope the neighbour's throughput is judged
-/// against. A mean taken over hundreds of thousands of decisions is stable to
-/// far better than that on any host this runs on.
+/// The bound is unchanged: the flood must not inflate the arrival decision
+/// past the same 10% envelope the neighbour's throughput is judged against.
+/// It is judged on the **median of the per-round ratios**, not on one ratio of
+/// pooled means. Each round runs both arms back to back, alternating which goes
+/// first, so a round's ratio compares two arms that ran under the same host
+/// load; a pooled mean lets one arm absorb a burst the other never saw. On a
+/// host shared with twelve other CI lanes the pooled ratio read 1103–1304‰
+/// while the attacked arm's wall was 321–865‰ of the baseline's — the attacked
+/// arm finishing faster is a host burst landing on the baseline, not an
+/// admission cost. A flood that does inflate the round's decision inflates it
+/// in every round, and the median of every round reads it.
 #[test]
 fn the_floods_cost_is_scheduling_not_admission() -> TestResult {
     /// The pool both arms run under: the neighbour's share is unreachable by
@@ -279,82 +286,116 @@ fn the_floods_cost_is_scheduling_not_admission() -> TestResult {
     /// How many fail-at-once attacker submissions land before each neighbour
     /// submission in the attacked arm.
     const FLOOD: usize = 4;
-    /// How many interleaved rounds each arm runs. Odd, so the median is a
-    /// round that ran.
-    const ROUNDS: usize = 41;
+    /// How many paired rounds run. Odd, so the median is a round that ran.
+    const ROUNDS: usize = 101;
 
     let attacker = Tenant::new("attacker")?;
     let neighbour = Tenant::new("neighbour")?;
     let runtime = Runtime::new()?;
 
-    let mut baseline_wall = Duration::ZERO;
-    let mut attacked_wall = Duration::ZERO;
-    let mut baseline_arrivals = 0_u64;
-    let mut baseline_arrival_nanos = 0_u64;
-    let mut attacked_arrivals = 0_u64;
-    let mut attacked_arrival_nanos = 0_u64;
-    for _ in 0..ROUNDS {
-        let measured = runtime.block_on(neighbour_arm(&neighbour, &attacker, POOL, TASKS, 0))?;
-        baseline_wall = baseline_wall.saturating_add(measured.wall);
-        baseline_arrivals = baseline_arrivals.saturating_add(measured.arrivals);
-        baseline_arrival_nanos = baseline_arrival_nanos.saturating_add(measured.arrival_nanos);
-        let measured =
-            runtime.block_on(neighbour_arm(&neighbour, &attacker, POOL, TASKS, FLOOD))?;
-        attacked_wall = attacked_wall.saturating_add(measured.wall);
-        attacked_arrivals = attacked_arrivals.saturating_add(measured.arrivals);
-        attacked_arrival_nanos = attacked_arrival_nanos.saturating_add(measured.arrival_nanos);
+    let mut baseline = ArmTotals::default();
+    let mut attacked = ArmTotals::default();
+    let mut round_ratios = Vec::with_capacity(ROUNDS);
+    for round in 0..ROUNDS {
+        let arm =
+            |flood| runtime.block_on(neighbour_arm(&neighbour, &attacker, POOL, TASKS, flood));
+        // Alternate the order, so whichever position a warm cache or a host
+        // burst favours lands on both arms equally often.
+        let (quiet, flooded) = if round % 2 == 0 {
+            let quiet = arm(0)?;
+            (quiet, arm(FLOOD)?)
+        } else {
+            let flooded = arm(FLOOD)?;
+            (arm(0)?, flooded)
+        };
+        round_ratios.push(per_mille(
+            mean_nanos(flooded.arrival_nanos, flooded.arrivals)?,
+            u128::from(mean_nanos(quiet.arrival_nanos, quiet.arrivals)?),
+        )?);
+        baseline.add(&quiet);
+        attacked.add(&flooded);
     }
+    round_ratios.sort_unstable();
+    let Some(decision_per_mille) = round_ratios.get(ROUNDS.div_euclid(2)).copied() else {
+        return Err("the paired rounds produced no median ratio".into());
+    };
     // Per mille, in integers: this workspace forbids the float casts a ratio
     // of durations would take. Means, not totals: the attacked arm takes five
     // times the decisions, on five times the threads, so only the per-decision
-    // cost compares.
-    let baseline_mean = mean_nanos(baseline_arrival_nanos, baseline_arrivals)?;
-    let attacked_mean = mean_nanos(attacked_arrival_nanos, attacked_arrivals)?;
-    let decision_per_mille = match u128::from(attacked_mean)
-        .saturating_mul(1_000)
-        .checked_div(u128::from(baseline_mean.max(1)))
-    {
-        Some(ratio) => ratio,
-        None => return Err("the attacked decision mean has no ratio against the baseline".into()),
-    };
-    let wall_per_mille = match attacked_wall
+    // cost compares. The pooled ratio is reported beside the median so a run
+    // shows how far host noise moved it.
+    let baseline_mean = mean_nanos(baseline.arrival_nanos, baseline.arrivals)?;
+    let attacked_mean = mean_nanos(attacked.arrival_nanos, attacked.arrivals)?;
+    let pooled_per_mille = per_mille(attacked_mean, u128::from(baseline_mean))?;
+    let wall_per_mille = match attacked
+        .wall
         .as_nanos()
         .saturating_mul(1_000)
-        .checked_div(baseline_wall.as_nanos().max(1))
+        .checked_div(baseline.wall.as_nanos().max(1))
     {
         Some(ratio) => ratio,
         None => return Err("the attacked wall has no ratio against the baseline".into()),
     };
+    let (lowest, highest) = match (round_ratios.first(), round_ratios.last()) {
+        (Some(lowest), Some(highest)) => (*lowest, *highest),
+        _ => return Err("the paired rounds produced no ratio range".into()),
+    };
     let mut line = std::io::stdout().lock();
     let _written = writeln!(
         line,
-        "split over {ROUNDS} rounds x {TASKS} neighbour tasks: baseline wall {baseline_wall:?} \
-         arrival mean {baseline_mean} ns over {baseline_arrivals} decisions (submitter share \
-         {}\u{2030}); attacked wall {attacked_wall:?} arrival mean {attacked_mean} ns over \
-         {attacked_arrivals} decisions (submitter share {}\u{2030}); wall ratio \
-         {wall_per_mille}\u{2030}, decision-mean ratio {decision_per_mille}\u{2030}",
+        "split over {ROUNDS} paired rounds x {TASKS} neighbour tasks: baseline wall {:?} \
+         arrival mean {baseline_mean} ns over {} decisions (submitter share \
+         {}\u{2030}); attacked wall {:?} arrival mean {attacked_mean} ns over \
+         {} decisions (submitter share {}\u{2030}); wall ratio \
+         {wall_per_mille}\u{2030}, decision-mean ratio median {decision_per_mille}\u{2030} \
+         (rounds {lowest}..{highest}\u{2030}, pooled {pooled_per_mille}\u{2030})",
+        baseline.wall,
+        baseline.arrivals,
         submitter_share(
-            baseline_arrival_nanos,
-            baseline_arrivals,
-            baseline_wall,
+            baseline.arrival_nanos,
+            baseline.arrivals,
+            baseline.wall,
             TASKS,
             ROUNDS
         )?,
+        attacked.wall,
+        attacked.arrivals,
         submitter_share(
-            attacked_arrival_nanos,
-            attacked_arrivals,
-            attacked_wall,
+            attacked.arrival_nanos,
+            attacked.arrivals,
+            attacked.wall,
             TASKS,
             ROUNDS
         )?,
     );
     assert!(
         decision_per_mille <= 1_100,
-        "the flood inflated the mean arrival decision to {decision_per_mille}\u{2030} of its \
-         cost alone, past the 10% envelope: the cost is admission-side and must be fixed in \
-         the round, not stated away (wall ratio {wall_per_mille}\u{2030})"
+        "the flood inflated the median round's arrival decision to {decision_per_mille}\u{2030} \
+         of its cost alone, past the 10% envelope: the cost is admission-side and must be fixed \
+         in the round, not stated away (rounds {lowest}..{highest}\u{2030}, pooled \
+         {pooled_per_mille}\u{2030}, wall ratio {wall_per_mille}\u{2030})"
     );
     Ok(())
+}
+
+/// One arm's measurements summed over every round it ran.
+#[derive(Default)]
+struct ArmTotals {
+    /// Time the neighbour spent inside its own `spawn_for` calls.
+    wall: Duration,
+    /// Arrival decisions taken.
+    arrivals: u64,
+    /// Their cumulative lock-hold time, in nanoseconds.
+    arrival_nanos: u64,
+}
+
+impl ArmTotals {
+    /// Fold one round's arm into the totals.
+    fn add(&mut self, arm: &ArmMeasurement) {
+        self.wall = self.wall.saturating_add(arm.wall);
+        self.arrivals = self.arrivals.saturating_add(arm.arrivals);
+        self.arrival_nanos = self.arrival_nanos.saturating_add(arm.arrival_nanos);
+    }
 }
 
 /// The submitter's arrival-decision share of one neighbour submission, per
