@@ -401,29 +401,81 @@ fn bounded_jaccard_refuses_before_the_quadratic_scan() -> Result<(), EvidenceErr
     Ok(())
 }
 
+std::thread_local! {
+    /// How many member comparisons [`Counted`] has made on this thread.
+    static COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A set member that counts every comparison made of it.
+///
+/// The scorer's only access to a member is `PartialEq`, so the count is the
+/// exact amount of member work a score did: a refusal by length must do none,
+/// whatever the length. Counted per thread, so a test running beside this one
+/// cannot move the figure.
+struct Counted(u32);
+
+impl PartialEq for Counted {
+    fn eq(&self, other: &Self) -> bool {
+        COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
+        self.0 == other.0
+    }
+}
+
 #[test]
 fn budget_refusal_precedes_amplification_and_is_measurable() {
     // A large set is refused by length alone; the quadratic scan is never
-    // entered. The assertion is on the growth ratio of a whole timed loop, not
-    // of a per-call figure: a refusal costs about a nanosecond, so a per-call
-    // reading floored to integer nanoseconds is 1 or 3 by timer noise alone
-    // (CI saw "1ns -> 3ns" on an unchanged path). Each size takes the fastest of
-    // `TRIALS` loops of `REPEATS` calls, so one preemption cannot be read as
-    // growth, and every loop runs long enough for the timer to resolve it.
-    // Nine short trials beat five long ones: at opt-level 0 a 200k-call trial
-    // spans ~14 ms, and under a loaded host every one of five such windows
-    // catches a deschedule (run 37669895633 read 6.5x growth on an unchanged
-    // path), while a 50k-call trial spans ~3.5 ms and the fastest of nine
-    // still finds the path's own cost. 50k calls at ~70 ns is 3.5 ms, 87,500
-    // timer ticks, so the loop stays resolved; the sizes, the bound and the
+    // entered. Two falsifiers, and the first is exact: a member that counts its
+    // comparisons shows a refusal at every size compares nothing, and an
+    // in-budget set shows the counter does see the scan when one runs.
+    //
+    // The second is the timed growth ratio of a whole loop, not of a per-call
+    // figure: a refusal costs about a nanosecond, so a per-call reading floored
+    // to integer nanoseconds is 1 or 3 by timer noise alone (CI saw "1ns ->
+    // 3ns" on an unchanged path). Each size takes the fastest of `TRIALS` loops
+    // of `REPEATS` calls, and the trials are interleaved across the sizes. Run
+    // back to back, one size's nine 0.5 ms loops span under 5 ms, so one
+    // deschedule of that length covers every trial of that size and reads as
+    // growth (run 37952159765 read 497625ns -> 1589416ns on an unchanged
+    // path). Interleaved, each size's trials are spread over the whole test,
+    // and a burst lands on every size alike. The sizes, the bound and the
     // verdict logic are unchanged.
     const REPEATS: u64 = 50_000;
     const TRIALS: usize = 9;
+    const SIZES: [usize; 3] = [2_000, 4_000, 8_000];
     /// The member every position of the over-budget set carries.
     const FILLER_MEMBER: u32 = 0x5EED;
+    let counted_scorer = BoundedJaccard::<Counted>::new(16);
+    for size in SIZES {
+        let big: Vec<Counted> = (0..size).map(|_| Counted(FILLER_MEMBER)).collect();
+        COMPARISONS.with(|count| count.set(0));
+        let refused = CheckedSimilarity::try_score(&counted_scorer, &big, &big);
+        assert!(
+            matches!(
+                refused,
+                Err(EvidenceError::CollectionTooLong { maximum: 16, observed }) if observed == size
+            ),
+            "an over-budget set of {size} is refused with its limit"
+        );
+        assert_eq!(
+            COMPARISONS.with(std::cell::Cell::get),
+            0,
+            "the refusal of a {size}-member set compared no member"
+        );
+    }
+    let small: Vec<Counted> = (0..16).map(Counted).collect();
+    COMPARISONS.with(|count| count.set(0));
+    assert!(
+        CheckedSimilarity::try_score(&counted_scorer, &small, &small).is_ok(),
+        "an in-budget set is scored"
+    );
+    assert!(
+        COMPARISONS.with(std::cell::Cell::get) > 0,
+        "the counter sees the scan when one runs, so its zero above is a measurement"
+    );
+
     let scorer = BoundedJaccard::<u32>::new(16);
-    let mut previous = 0_u128;
-    for size in [2_000_usize, 4_000, 8_000] {
+    let mut inputs: Vec<Vec<u32>> = Vec::with_capacity(SIZES.len());
+    for size in SIZES {
         // The members are filler in the width the element type is: this family
         // measures a refusal by length and what that refusal costs, so the count
         // is the fact under test and the members are what fills it.
@@ -436,8 +488,11 @@ fn budget_refusal_precedes_amplification_and_is_measurable() {
             }),
             "an over-budget set of {size} is refused with its limit"
         );
-        let mut fastest = u128::MAX;
-        for _ in 0..TRIALS {
+        inputs.push(big);
+    }
+    let mut fastest = [u128::MAX; SIZES.len()];
+    for _ in 0..TRIALS {
+        for (big, best) in inputs.iter().zip(fastest.iter_mut()) {
             let start = std::time::Instant::now();
             let mut refusals_seen = 0_u64;
             for _ in 0..REPEATS {
@@ -458,16 +513,17 @@ fn budget_refusal_precedes_amplification_and_is_measurable() {
                 refusals_seen, REPEATS,
                 "every timed call refused with the budget error"
             );
-            fastest = fastest.min(start.elapsed().as_nanos());
+            *best = (*best).min(start.elapsed().as_nanos());
         }
-        if previous > 0 {
+    }
+    for pair in fastest.windows(2) {
+        if let [previous, next] = pair {
             assert!(
-                fastest < previous.saturating_mul(3),
+                *next < previous.saturating_mul(3),
                 "S4: doubling the input must not quadruple the refusal work: \
-                 {previous}ns -> {fastest}ns for {REPEATS} refusals"
+                 {previous}ns -> {next}ns for {REPEATS} refusals"
             );
         }
-        previous = fastest;
     }
 }
 

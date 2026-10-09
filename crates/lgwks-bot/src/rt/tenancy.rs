@@ -649,11 +649,43 @@ impl<W> DeficitRoundRobin<W> {
     where
         F: FnOnce() -> Option<P>,
     {
+        self.arrive_with(tenant, || waiter, acquire)
+    }
+
+    /// [`arrive`](Self::arrive), building the waiter only when the arrival
+    /// actually parks.
+    ///
+    /// An arrival admitted at once or refused never needs a waiter, and under a
+    /// flood those are most arrivals. Building the waiter up front made every
+    /// decision pay an allocation and a free, so its cost rode on the
+    /// allocator's contention rather than on the round (#375). `make_waiter`
+    /// runs at most once, and only on the [`Arrival::Queued`] path.
+    pub(crate) fn arrive_with<P, F, M>(
+        &mut self,
+        tenant: &Tenant,
+        make_waiter: M,
+        acquire: F,
+    ) -> Arrival<P>
+    where
+        F: FnOnce() -> Option<P>,
+        M: FnOnce() -> W,
+    {
         let ceiling = self.policy.per_tenant_limit;
         let queue_limit = self.policy.queue_per_tenant;
         // The entry exists from the first arrival and is removed once idle, so
         // a tenant that arrives, drains and leaves costs nothing afterwards.
-        let entry = self.entries.entry(tenant.clone()).or_default();
+        // The name is cloned only to create the entry: a clone is a reference
+        // count update, and the tenant's count is the one every lease it holds
+        // updates from the cores its tasks complete on (#375).
+        if !self.entries.contains_key(tenant) {
+            self.entries.insert(tenant.clone(), Entry::default());
+        }
+        let Some(entry) = self.entries.get_mut(tenant) else {
+            // Unreachable: the entry was inserted above under the same `&mut`.
+            // Answered as the tenant's own bound rather than asserted, so a
+            // broken map refuses the arrival instead of admitting it uncounted.
+            return Arrival::Refused { limit: queue_limit };
+        };
         if self.ring.is_empty()
             && entry.in_flight < ceiling
             && let Some(permit) = acquire()
@@ -683,7 +715,7 @@ impl<W> DeficitRoundRobin<W> {
                 limit: self.policy.queue_total,
             };
         }
-        entry.queue.push_back(waiter);
+        entry.queue.push_back(make_waiter());
         self.retained = self.retained.saturating_add(1);
         // A tenant at its ceiling parks off the ring; `note_release` re-arms it
         // the moment one of its admissions completes. The waiter is still
