@@ -2409,7 +2409,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   caller-advanceable counter, because a source that stopped answering is not
   waiting for time to pass — and `MAX_IN_FLIGHT_POLLS` bounds the fan-out while
   this bounds the wait, which is the half it never did. A poll that
-  misses it is **dropped mid-flight**: it commits nothing, keeps its chain's
+  misses it is **dropped mid-flight**, decided on the poll and not on the
+  scheduler: an expired wave turns each poll once more and cuts off only one still
+  pending on that turn, so a source that yielded and was ready to answer is read,
+  however late the host gave it its turn. A dropped poll commits nothing, keeps its chain's
   baseline and its forced-refresh mark standing (the same rule a failed poll
   already follows, since the value it was to replace is still there), and is
   reported in `TickReport::stalled` naming the chain, the source's own
@@ -2427,7 +2430,8 @@ Each of these was a shipped defect. Treat the list as the spec.
   `spawn_blocking` has its handle released and its thread runs to completion — the
   stall is about this bot's observation, not about the source's work. · why:
   #87 step 3 (T06, LC-03), slow-source half, closing the gap INV-BOT-122 named ·
-  enforced by: `tests/it/observe_refresh.rs`
+  enforced by: `ecs::tests::an_expired_wave_still_reads_a_source_ready_on_its_next_turn`,
+  `tests/it/observe_refresh.rs`
   (`a_slow_source_does_not_block_an_independent_chain`,
   `a_stalled_chain_is_re_polled_and_commits_when_it_answers`,
   `a_poll_deadline_that_bounds_nothing_is_refused_at_build`) and
