@@ -25,7 +25,10 @@ pub(crate) fn expand(source: &str) -> Result<String, String> {
 
 /// Every refusal the language makes, each with the fragment of its message
 /// that names the replacement.
-const REFUSALS: [(&str, &str, &str); 33] = [
+///
+/// A word's guarantee may cite a case here by its name (`lexicon::Evidence`),
+/// which is why the table is visible to the crate.
+pub(crate) const REFUSALS: [(&str, &str, &str); 34] = [
     (
         "unwrap by path",
         "flow f(x: Option<u8>):\n    let n = Option::unwrap(x)\n",
@@ -166,6 +169,11 @@ const REFUSALS: [(&str, &str, &str); 33] = [
         "give back from a nested block",
         "flow f() -> u8:\n    within 1s:\n        give back 1\n",
         "`give back` returns from the flow",
+    ),
+    (
+        "if with no else as the value",
+        "flow f(ready: bool) -> u8:\n    if ready:\n        1\n",
+        "promises an output",
     ),
     (
         "promised output never produced",
