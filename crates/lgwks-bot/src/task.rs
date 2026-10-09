@@ -2537,7 +2537,7 @@ impl Host {
     {
         // Checked before the reactor is taken, so the refusal cannot leave a
         // freshly built runtime behind for a caller that never used it.
-        if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
+        if crate::rt::runtime::inside_runtime() {
             let refusal = Err(HostError::InsideRuntime);
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block_on: returning an error to the caller");
             return refusal;

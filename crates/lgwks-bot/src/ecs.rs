@@ -5635,7 +5635,7 @@ impl EcsBot {
     /// the tick.
     pub fn tick(&mut self) -> Result<usize, BotError> {
         #[cfg(feature = "rt")]
-        if lgwks_deps::tokio::runtime::Handle::try_current().is_ok() {
+        if crate::rt::runtime::inside_runtime() {
             let refusal = Err(BotError::TickInsideRuntime);
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tick: returning an error to the caller");
             return refusal;

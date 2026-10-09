@@ -303,6 +303,17 @@ impl Handle {
     }
 }
 
+/// Whether a runtime is already driving the calling thread.
+///
+/// The one place this crate asks the engine that question. The synchronous
+/// entry points — `EcsBot::tick` and `Host::block_on` — refuse to start a
+/// second driver on a thread a runtime already drives, because blocking that
+/// thread would stall every task the outer runtime has parked on it. Both read
+/// the answer here, so the engine is named once rather than at every refusal.
+pub(crate) fn inside_runtime() -> bool {
+    lgwks_deps::tokio::runtime::Handle::try_current().is_ok()
+}
+
 /// Run one future to completion on a private current-thread runtime.
 ///
 /// This is the convenience entry for a one-off async call from synchronous
