@@ -661,14 +661,19 @@ Each of these was a shipped defect. Treat the list as the spec.
   races the token — and answering the token *is* its cleanup, which spends
   capture rounds against the process table, so `Supervisor::shutdown` keeps
   absorbing past `COOPERATIVE_DRAIN_GRACE` while a spawned process task is still
-  live (`LiveProcess`, counted on the supervisor's cleanup owners), bounded by
-  `PROCESS_CLEANUP_GRACE`. One `ps` snapshot measured p50 16 ms, p99 45 ms and
+  live (`LiveProcess`, counted on the supervisor's cleanup owners), until
+  `PROCESS_CLEANUP_GRACE` passes with no drain finishing: the grace runs from
+  the last drain that finished, so drains contending for a saturated host are
+  waited out while they progress (a fixed 2 s aborted 15 of 32 on main run
+  37933518033), and the wait stays bounded by one grace per live process task.
+  One `ps` snapshot measured p50 16 ms, p99 45 ms and
   max 68 ms at load 9.6, so a whole drain is a few hundred milliseconds under
   load, and the 50 ms grace aborted it part-way: the outcome was `Aborted` with
   no receipt for a task that had already stopped its tree. That was
   `process_escape`'s unexplained intermittent failure (10 of 1,000 iterations
   at load 15); with the bound it passed 1,000 of 1,000 at load up to 16.6.
-  **Not claimed:** a drain longer than the bound is still aborted, and its
+  **Not claimed:** a drain still live after a whole grace in which no drain
+  finished is aborted, and its
   drop-time fallback signals the group but not the captured pids. · why: #263
   item 5 · enforced by: `tests/it/process_escape.rs`
   (`shutdown_reports_every_draining_cleanup_rather_than_aborting_it`, which
