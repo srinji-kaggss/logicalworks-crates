@@ -553,6 +553,12 @@ pub struct DeficitRoundRobin<W> {
     /// checked against. A count rather than a sum over the entries because a sum
     /// is O(tenants) on every decision and this is read on every arrival.
     retained: usize,
+    /// Steps the round has taken: one per decision entered, one per pass of
+    /// the grant loop, and one per waiter a skip or a compaction looked at.
+    /// The module's cost claim — amortized O(1) round work per event, whatever
+    /// the queues hold — is read from this count rather than from a clock, so
+    /// it holds or fails the same way on a quiet host and a saturated one.
+    work: u64,
 }
 
 impl<W> DeficitRoundRobin<W> {
@@ -564,7 +570,31 @@ impl<W> DeficitRoundRobin<W> {
             entries: BTreeMap::new(),
             ring: VecDeque::new(),
             retained: 0,
+            work: 0,
         }
+    }
+
+    /// Steps this round has taken since it was built.
+    ///
+    /// One step for every decision entered ([`arrive`](Self::arrive),
+    /// [`try_arrive`](Self::try_arrive), [`note_release`](Self::note_release),
+    /// [`note_abandoned`](Self::note_abandoned)), one for every pass of the
+    /// [`grant`](Self::grant) loop, and one for every waiter a skip or a
+    /// compaction inspected. Each of those is paid for by an event — a pass
+    /// that retires a ring member by the arrival or release that armed it, a
+    /// skip or a compaction by the abandonment that left the waiter behind —
+    /// so the count stays within a constant multiple of the events, however
+    /// many tenants or waiters the round holds. That is the cost claim a flood
+    /// is checked against (#375), and a count is checked the same way on every
+    /// host.
+    #[must_use]
+    pub fn work(&self) -> u64 {
+        self.work
+    }
+
+    /// Charge `steps` to the work count.
+    fn step(&mut self, steps: u64) {
+        self.work = self.work.saturating_add(steps);
     }
 
     /// The ceilings, queue bounds and weights this round admits under, fixed
@@ -670,6 +700,7 @@ impl<W> DeficitRoundRobin<W> {
         F: FnOnce() -> Option<P>,
         M: FnOnce() -> W,
     {
+        self.step(1);
         let ceiling = self.policy.per_tenant_limit;
         let queue_limit = self.policy.queue_per_tenant;
         // The entry exists from the first arrival and is removed once idle, so
@@ -732,6 +763,7 @@ impl<W> DeficitRoundRobin<W> {
     where
         F: FnOnce() -> Option<P>,
     {
+        self.step(1);
         let ceiling = self.policy.per_tenant_limit;
         if !self.ring.is_empty() || self.entries.contains_key(tenant) {
             // A ring member or an existing entry means work is already waiting —
@@ -763,6 +795,7 @@ impl<W> DeficitRoundRobin<W> {
     /// tenant parked at its ceiling with waiters goes back on the ring, and a
     /// fully idle entry is removed so the map stays bounded by live tenants.
     pub fn note_release(&mut self, tenant: &Tenant) {
+        self.step(1);
         let Some(entry) = self.entries.get_mut(tenant) else {
             return;
         };
@@ -800,6 +833,7 @@ impl<W> DeficitRoundRobin<W> {
     where
         F: FnMut(&W) -> bool,
     {
+        self.step(1);
         let Some(entry) = self.entries.get_mut(tenant) else {
             return;
         };
@@ -809,7 +843,11 @@ impl<W> DeficitRoundRobin<W> {
         // leave nothing for the skip in `grant` to do.
         if entry.abandoned > entry.live() {
             let before = entry.queue.len();
-            entry.queue.retain(|waiter| is_live(waiter));
+            let mut inspected = 0_u64;
+            entry.queue.retain(|waiter| {
+                inspected = inspected.saturating_add(1);
+                is_live(waiter)
+            });
             self.retained = self
                 .retained
                 .saturating_sub(before.saturating_sub(entry.queue.len()));
@@ -817,6 +855,7 @@ impl<W> DeficitRoundRobin<W> {
             // is zero. Setting it rather than recomputing keeps the two from
             // disagreeing if a liveness predicate is stricter than the count.
             entry.abandoned = 0;
+            self.step(inspected);
         }
     }
 
@@ -833,6 +872,7 @@ impl<W> DeficitRoundRobin<W> {
         F: FnMut(&W) -> bool,
     {
         loop {
+            self.step(1);
             let Some(front) = self.ring.front().cloned() else {
                 return GrantOutcome::Idle(permit);
             };
@@ -845,11 +885,14 @@ impl<W> DeficitRoundRobin<W> {
             };
             // Skip the abandoned heads this tenant accumulated. Each skip spends
             // one unit of `abandoned`, so the count cannot drift.
+            let mut skipped = 0_u64;
             while entry.queue.front().is_some_and(|waiter| !is_live(waiter)) {
                 entry.queue.pop_front();
                 entry.abandoned = entry.abandoned.saturating_sub(1);
                 self.retained = self.retained.saturating_sub(1);
+                skipped = skipped.saturating_add(1);
             }
+            self.work = self.work.saturating_add(skipped);
             if entry.queue.is_empty() {
                 // Nothing left to serve: retire the member and try the next.
                 self.ring.pop_front();

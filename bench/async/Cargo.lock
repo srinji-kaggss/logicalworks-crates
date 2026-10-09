@@ -620,6 +620,7 @@ name = "lgwks_bot"
 version = "2.2.0"
 dependencies = [
  "lgwks_deps",
+ "lgwks_macros",
  "lgwks_std",
 ]
 
@@ -629,7 +630,18 @@ version = "3.0.1"
 dependencies = [
  "bevy_ecs",
  "lgwks_std",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
  "tokio",
+]
+
+[[package]]
+name = "lgwks_macros"
+version = "1.1.1"
+dependencies = [
+ "lgwks_deps",
+ "lgwks_std",
 ]
 
 [[package]]

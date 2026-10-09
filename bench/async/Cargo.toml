@@ -27,7 +27,7 @@ publish = false
 
 [dependencies]
 # The facade under test, with the async surface this comparison measures.
-lgwks_bot = { path = "../../crates/lgwks-bot", default-features = false, features = ["rt", "time", "sync"] }
+lgwks_bot = { path = "../../crates/lgwks-bot", default-features = false, features = ["rt", "time", "sync", "script"] }
 
 # The baseline side reaches the engine directly rather than through the facade.
 # That is the whole point of the comparison: a baseline that went through

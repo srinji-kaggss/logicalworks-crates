@@ -1603,9 +1603,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `rt::supervise::tenancy_support::tests::a_late_abandonment_leaves_the_live_count_exact`,
   `rt::supervise::tests::a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling`,
   `tests/it/tenancy.rs` (`a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
-  `an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`,
-  `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`, and
-  `tests/it/sim_tenancy_model.rs` (seventeen properties over the whole seed space)
+  `a_noisy_tenant_cannot_starve_a_quiet_one`), `tests/it/sim_tenancy.rs`,
+  `tests/it/sim_tenancy_model.rs` (seventeen properties over the whole seed
+  space), and `tests/it/sim_tenancy_flood.rs` (a flood leaves the neighbour's
+  virtual finish time exact and the round's work within four steps per event;
+  the wall-clock split is reported by `bench/async -- --flood-split`, #375)
 - **INV-BOT-152** A continued journal loses nothing, duplicates nothing and has
   one authority. A continuation is one sealed checkpoint frame written byte for
   byte into the predecessor and its successor; the checkpoint carries one folded

@@ -74,19 +74,10 @@ if [ "${#suites[@]}" -eq 0 ]; then
     suites=(workspace bot-full appcui)
 fi
 commands=()
-# The flood decision bound does not hold here with margin. Judged on the median
-# of 101 paired rounds (the estimator that removes host bursts), the 4-vCPU
-# OrbStack container reads 1062-1089 per mille on a quiet host and 1039-1267
-# (16 of 20 past the 1100 envelope) with its siblings loading the machine,
-# where both mac lanes read 957-1084 saturated. That is a systematic Linux
-# admission-side cost (issue #375), not noise, so the test is excluded here,
-# beside the r32 tier exclusion, at the unchanged bound, until the arrival
-# decision is working-set independent.
-flood_quarantine="not test(the_floods_cost_is_scheduling_not_admission)"
 for suite in "${suites[@]}"; do
     case "${suite}" in
-        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers) and ${flood_quarantine}'") ;;
-        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier) and ${flood_quarantine}'") ;;
+        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
+        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc"
