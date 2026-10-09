@@ -596,7 +596,7 @@ On `wasm32-wasip1`, the `rt` feature uses a current-thread runtime;
 | `rt::time` | `time` | `sleep`, `sleep_until`, `timeout`, `timeout_at`, `interval`, `Instant`, `Elapsed` |
 | `rt::sync` | `sync` | `CancellationToken`, `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `OnceCell` |
 | `rt::io` | `io` | `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their extensions, `BufReader`, `BufWriter`, `duplex`, `copy` |
-| `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
+| `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host`; Unix `UnixListener`, `UnixStream`, `UnixDatagram`; the split halves at tokio's own paths, `rt::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf, ReuniteError}` and the same five under `rt::net::unix` |
 | `rt::process` | `process` | `Command` — describing what to run, with `StdioPolicy::Capture` for a bounded stream. Running it is `Supervisor::spawn_process` (reported later) or `Supervisor::run_process` (returns its output); `Child` and its pipes are not exported |
 | `rt::fs` | `fs` | async filesystem (blocking-threadpool wrapper) |
 | `rt::signal` | `signal` | OS signal streams (Unix/Windows) |

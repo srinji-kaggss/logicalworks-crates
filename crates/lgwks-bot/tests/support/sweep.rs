@@ -14,8 +14,8 @@
 //! seeds-per-minute beside the test's name from a timed run.
 //!
 //! Peak RSS is the high-water mark where the platform reports one (Linux
-//! `VmHWM`) and a point sample where it does not (macOS `ps`), said plainly
-//! in [`peak_rss_bytes`]'s contract rather than hidden behind one name.
+//! `VmHWM`) and `None` where it does not, said plainly in
+//! [`peak_rss_bytes`]'s contract rather than hidden behind one name.
 
 /// The seed space a row's sweep covers: the row asks for at least a thousand.
 pub const SWEEP_SEEDS: u64 = 1024;
@@ -53,19 +53,17 @@ pub fn refuse<Outcome>(cause: impl Into<String>) -> Result<Outcome, Box<dyn std:
 /// instead.
 #[must_use]
 pub fn peak_rss_bytes() -> Option<u64> {
+    // The `VmHWM:` line is found, not assumed first: `/proc/self/status` opens
+    // with `Name:`, and reading only the first line answered `None` on every
+    // Linux host, so no sweep's memory bound was ever checked there.
     #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            let digits = line.strip_prefix("VmHWM:")?;
-            let numeric = match digits.trim().strip_suffix("kB") {
-                Some(kb) => kb.trim(),
-                None => return None,
-            };
-            let kb: u64 = numeric.parse().ok()?;
-            return Some(kb.saturating_mul(1024));
-        }
-        None
+        let digits = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))?;
+        let kb: u64 = digits.trim().strip_suffix("kB")?.trim().parse().ok()?;
+        Some(kb.saturating_mul(1024))
     }
     #[cfg(not(target_os = "linux"))]
     {

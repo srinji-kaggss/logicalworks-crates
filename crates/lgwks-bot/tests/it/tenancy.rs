@@ -22,14 +22,12 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::Runtime;
-use lgwks_bot::rt::supervise::{ShutdownReport, SpawnRefused, Supervisor};
+use lgwks_bot::rt::supervise::{SpawnRefused, Supervisor};
 use lgwks_bot::rt::tenancy::TenancyPolicy;
 use lgwks_bot::rt::time::sleep;
 use lgwks_bot::script::Tenant;
 
-use crate::tenancy_harness::{
-    Gate, admit, bounded, neighbour_work, percentile, submit_parked, wide,
-};
+use crate::tenancy_harness::{Gate, bounded, percentile, submit_parked, wide};
 
 /// What a test reports when its precondition did not hold.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -280,166 +278,6 @@ fn a_tenant_past_its_queue_bound_is_refused_by_name() -> TestResult {
     );
     Ok(())
 }
-/// The adversarial arm of the noisy-neighbour sweep (#268): a tenant that floods
-/// with spawns that fail at once does not cost its neighbour throughput.
-///
-/// The attacker's bodies end the instant they are polled, so every one of its
-/// admissions is a full churn through the round: an arrival, a grant, a release
-/// handed back through the round, and an entry that drains and is removed. A
-/// supervised body returns `()`, so for the scheduler a body that fails at once
-/// and one that returns at once are the same event: the permit comes back in the
-/// tick it was taken. [`FLOOD_PER_NEIGHBOUR`] of those land before every one of
-/// the neighbour's submissions.
-///
-/// The neighbour's throughput is the time it spends inside its own `spawn_for`
-/// calls: with its ceiling reached, each call returns only when one of its own
-/// bodies completes, so that sum is the rate the scheduler serves it at.
-/// Admission takes `&mut Supervisor`, so one caller submits for both tenants;
-/// the caller's time spent submitting the attacker's work is the harness's, not
-/// the neighbour's, and is not counted. In production the two tenants are two
-/// callers.
-///
-/// Both arms run [`ROUNDS`] times, interleaved, on identically shaped
-/// supervisors, so the load the rest of a shared host adds falls on both arms
-/// alike, and each arm's cost is its median round. The fastest round was used
-/// before and it measured the host: on a GitHub runner the baseline's own nine
-/// rounds spread from 3.2 ms to 6.4 ms, its best was 16% under its second best,
-/// and the comparison failed on that one lucky window while the attacked arm's
-/// median sat 8% *under* the baseline's. A minimum is an extreme value, and its
-/// spread over a few-millisecond window is wider than the 10% being tested; the
-/// median of interleaved rounds is the estimate whose spread is not. Neither arm
-/// sleeps or waits before its timed window, so neither starts with parked
-/// workers the other did not have.
-#[test]
-fn an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput() -> TestResult {
-    let attacker = Tenant::new("attacker")?;
-    let neighbour = Tenant::new("neighbour")?;
-    let runtime = Runtime::new()?;
-
-    let mut baseline_walls = Vec::with_capacity(ROUNDS);
-    let mut attacked_walls = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
-        let (baseline_wall, baseline_report) =
-            runtime.block_on(neighbour_arm(&neighbour, &attacker, 0))?;
-        let (attacked_wall, attacked_report) =
-            runtime.block_on(neighbour_arm(&neighbour, &attacker, FLOOD_PER_NEIGHBOUR))?;
-
-        // Nothing either tenant submitted was lost, in any round. A task still
-        // queued when `shutdown` lands is reported cancelled after completing,
-        // so the accounting is `completed == spawned`.
-        let flood = wide(NEIGHBOUR_TASKS.saturating_mul(FLOOD_PER_NEIGHBOUR))?;
-        for (report, expected, arm) in [
-            (&baseline_report, wide(NEIGHBOUR_TASKS)?, "baseline"),
-            (
-                &attacked_report,
-                wide(NEIGHBOUR_TASKS)?.saturating_add(flood),
-                "attacked",
-            ),
-        ] {
-            let stats = report.stats();
-            assert_eq!(
-                stats.spawned, expected,
-                "the {arm} arm admitted every task both tenants submitted"
-            );
-            assert_eq!(
-                stats.completed, stats.spawned,
-                "every task the {arm} arm admitted reached a terminal outcome"
-            );
-        }
-        baseline_walls.push(baseline_wall);
-        attacked_walls.push(attacked_wall);
-    }
-    // Each attacked round is judged against the baseline round run beside it,
-    // and the verdict is the median of those paired ratios. Two arms' medians
-    // taken separately measure the host as much as the arms: on a runner whose
-    // load moves within seconds, the baseline's own rounds spread from 2.0 ms to
-    // 6.5 ms (run 37530668988), three times the 10% under test. A pair shares
-    // its moment of the host, so the ratio cancels what the moment adds, and the
-    // median of 41 ratios is decided by the rounds where the host held still.
-    // Per mille, in integers: this workspace forbids the float casts a ratio of
-    // durations would take.
-    let mut ratios: Vec<u128> = baseline_walls
-        .iter()
-        .zip(&attacked_walls)
-        .map(|(baseline, attacked)| {
-            attacked
-                .as_nanos()
-                .saturating_mul(1_000)
-                .checked_div(baseline.as_nanos())
-        })
-        .collect::<Option<_>>()
-        .ok_or("a baseline round that took no time has no ratio")?;
-    ratios.sort_unstable();
-    let ratio = ratios
-        .get(ratios.len() >> 1)
-        .copied()
-        .ok_or("a paired round ran")?;
-    let baseline_median = median(&mut baseline_walls).ok_or("a baseline round ran")?;
-    let attacked_median = median(&mut attacked_walls).ok_or("an attacked round ran")?;
-
-    // The spec's bound: the neighbour's throughput under the flood is within 10%
-    // of its throughput alone.
-    assert!(
-        ratio <= 1_100,
-        "the neighbour's admission time under a fail-at-once flood was {ratio}\u{2030} of \
-         its time alone at the median of {ROUNDS} paired rounds, more than 10% over \
-         (arm medians {attacked_median:?} attacked, {baseline_median:?} alone; paired \
-         ratios {ratios:?})"
-    );
-    Ok(())
-}
-
-/// The middle of `walls` once sorted, or `None` for no rounds. [`ROUNDS`] is odd,
-/// so the middle is one measured round rather than an average of two.
-fn median(walls: &mut [Duration]) -> Option<Duration> {
-    walls.sort_unstable();
-    walls.get(walls.len() >> 1).copied()
-}
-
-/// One arm of [`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`]:
-/// the neighbour's fixed workload, with `flood` fail-at-once attacker
-/// submissions before each of its own.
-///
-/// Returns the time the neighbour spent inside its own `spawn_for` calls, and
-/// the supervisor's report once every task has ended.
-async fn neighbour_arm(
-    neighbour: &Tenant,
-    attacker: &Tenant,
-    flood: usize,
-) -> Result<(Duration, ShutdownReport), String> {
-    let mut supervisor = Supervisor::with_tenancy(POOL, TenancyPolicy::new(half(), POOL));
-    let mut neighbour_time = Duration::ZERO;
-    for _ in 0..NEIGHBOUR_TASKS {
-        for _ in 0..flood {
-            admit(&mut supervisor, attacker, |_token| async {}).await?;
-        }
-        let submitted = Instant::now();
-        admit(&mut supervisor, neighbour, |_token| neighbour_work()).await?;
-        neighbour_time = neighbour_time.saturating_add(submitted.elapsed());
-    }
-    Ok((neighbour_time, supervisor.shutdown().await))
-}
-
-/// Half the pool: the per-tenant ceiling both tests hand out, and the share one
-/// noisy tenant may hold.
-fn half() -> usize {
-    POOL.div_ceil(2)
-}
-
-/// How many tasks the neighbour runs in the adversarial arm.
-const NEIGHBOUR_TASKS: usize = 2_000;
-
-/// How many interleaved rounds each arm of the throughput comparison runs.
-///
-/// One round per arm is a single few-millisecond sample, and a sample that size
-/// on a host running the rest of the suite measures the host. Odd, so the median
-/// is a round that ran; forty-one per arm cost under a second together.
-const ROUNDS: usize = 41;
-
-/// How many fail-at-once attacker submissions land before each neighbour
-/// submission in the adversarial arm: a flood four times the neighbour's own
-/// volume, eight thousand spawns per round.
-const FLOOD_PER_NEIGHBOUR: usize = 4;
 
 /// How many tasks the loud tenant submits in the flood.
 ///

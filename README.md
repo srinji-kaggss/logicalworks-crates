@@ -281,6 +281,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/async-sdk-shape.md`](docs/async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
 | [`docs/declarative-orchestration.spec.md`](docs/declarative-orchestration.spec.md) | The task-first front door: typed task, host and report, one registry and execution path, the responsibility split, and the full known-deficit repair. Proposed, not shipped. |
 | [`docs/orchestration-lifecycle.spec.md`](docs/orchestration-lifecycle.spec.md) | Single-owner state, atomic fingerprint and value commits, attempt-bound evidence, readiness and process-tree ownership, and the honest durability boundary. |
+| [`docs/script-language.spec.md`](docs/script-language.spec.md) | The `script!` language: one lexicon, one parser, one call per line, guarantees carried by words, and where the parser lives. Proposed, not shipped. |
 | [`docs/ai-orchestration.spec.md`](docs/ai-orchestration.spec.md) | AI-authored scripts and AI workloads: constrained proposals, bounded artifact context, subject pinning, no-progress intervention and same-model evaluation. |
 | [`docs/pr-review-orchestration.spec.md`](docs/pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
 | [`docs/orchestration-acceptance.spec.md`](docs/orchestration-acceptance.spec.md) | The 36 proposed public-interface falsifiers, and the developer-experience and quality evaluation that would accept the facade. Every case unrun. |
@@ -299,6 +300,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
 | [`docs/production-readiness.md`](docs/production-readiness.md) | Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate. |
 | [`docs/std-ast-deps-closure-matrix.md`](docs/std-ast-deps-closure-matrix.md) | All twenty-one `lgwks_std` modules, `lgwks_ast` and `lgwks_deps`: each with its feature, its evidence state, the test that exists on the named revision, and its owning issue. |
+| [`docs/invariants-long-form.md`](docs/invariants-long-form.md) | The reasoning, measurements and stated limits behind each one-line rule in `INVARIANTS.md`. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all five crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |

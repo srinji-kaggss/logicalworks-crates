@@ -1469,34 +1469,28 @@ mod tenancy_support {
         /// Run one decision under the round lock, charging its own work to
         /// `ops` and `nanos` and not the wait to take the lock.
         ///
-        /// `prepare` runs before the lock and is charged: an arrival's own work,
-        /// such as allocating its wait slot, is part of its decision whatever
-        /// the round holds. `decide` runs with the lock held and is charged,
-        /// through the unlock. The wait between the two is not: it is another
-        /// decision holding the round — a completing task's release, charged to
-        /// that release's own counter — and on an oversubscribed host it is
-        /// mostly the time that holder spent descheduled. Charging it here made
-        /// one host stall read as a 114x arrival cost (main run 37933518033),
-        /// which is the scheduling share INV-BOT-151 does not claim to isolate.
+        /// `decide` runs with the lock held and is charged, through the unlock.
+        /// The wait to take the lock is not: it is another decision holding the
+        /// round — a completing task's release, charged to that release's own
+        /// counter — and on an oversubscribed host it is mostly the time that
+        /// holder spent descheduled. Charging it here made one host stall read
+        /// as a 114x arrival cost (main run 37933518033), which is the
+        /// scheduling share INV-BOT-151 does not claim to isolate.
         ///
-        /// The three reads of the clock cost tens of nanoseconds and are
+        /// The two reads of the clock cost tens of nanoseconds and are
         /// symmetric across tenants, so a comparison of two arms' counters
         /// measures the decisions rather than the clock.
-        fn timed<P, T>(
+        fn timed<T>(
             &self,
             ops: &AtomicU64,
             nanos: &AtomicU64,
-            prepare: impl FnOnce() -> P,
-            decide: impl FnOnce(&mut RoundGuard<'_>, P) -> T,
+            decide: impl FnOnce(&mut RoundGuard<'_>) -> T,
         ) -> T {
-            let started = Instant::now();
-            let prepared = prepare();
-            let before_lock = started.elapsed();
             let mut round = self.lock();
             let held = Instant::now();
-            let outcome = decide(&mut round, prepared);
+            let outcome = decide(&mut round);
             drop(round);
-            let charged = before_lock.saturating_add(held.elapsed());
+            let charged = held.elapsed();
             // A saturating read: the only input that does not fit is a decision
             // longer than 584 years, which pins the counter rather than wrapping
             // it, the same way the crate's counters saturate rather than wrap.
@@ -1534,36 +1528,43 @@ mod tenancy_support {
         /// receiver is `self: &Arc<Self>` because an admitted lease has to keep
         /// the shell alive for as long as it holds the permit.
         pub(super) fn admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(
-                &self.admit_ops,
-                &self.admit_nanos,
-                WaitSlot::fresh,
-                |round, slot| {
-                    let outcome = round.arrive(tenant, Arc::clone(&slot), || self.take_from_pool());
-                    match outcome {
-                        Arrival::Immediate(permit) => {
-                            Admission::Admitted(self.lease(permit, tenant))
-                        }
-                        Arrival::Queued => {
-                            // An arrival that could not take a permit may still be
-                            // servable right now — the ring may have drained between its
-                            // check and this one — so the round is pumped before the
-                            // caller parks. A pump that grants to this very waiter wakes
-                            // it, and the caller's poll collects the permit.
-                            self.pump(round, None);
-                            Admission::Queued(WaitPermit::new(
-                                Arc::clone(&slot),
-                                Arc::clone(self),
-                                tenant.clone(),
-                            ))
-                        }
-                        Arrival::Refused { limit } => Admission::Refused { limit },
-                        Arrival::SupervisorFull { limit } => {
-                            Admission::SupervisorQueueFull { limit }
-                        }
+            self.timed(&self.admit_ops, &self.admit_nanos, |round| {
+                // The slot is built only if the arrival parks: an arrival
+                // admitted at once or refused allocates nothing (#375).
+                let mut parked = None;
+                let park = || {
+                    let slot = WaitSlot::fresh();
+                    parked = Some(Arc::clone(&slot));
+                    slot
+                };
+                let outcome = round.arrive_with(tenant, park, || self.take_from_pool());
+                match (outcome, parked) {
+                    (Arrival::Immediate(permit), _) => {
+                        Admission::Admitted(self.lease(permit, tenant))
                     }
-                },
-            )
+                    (Arrival::Queued, Some(slot)) => {
+                        // An arrival that could not take a permit may still be
+                        // servable right now — the ring may have drained between its
+                        // check and this one — so the round is pumped before the
+                        // caller parks. A pump that grants to this very waiter wakes
+                        // it, and the caller's poll collects the permit.
+                        self.pump(round, None);
+                        Admission::Queued(WaitPermit::new(slot, Arc::clone(self), tenant.clone()))
+                    }
+                    // `arrive_with` queues only by calling `park`, so a queued
+                    // arrival always has its slot. Answered rather than
+                    // asserted: with no slot nothing was queued either, and the
+                    // caller is told the queue is full instead of parking on a
+                    // waiter no grant can reach.
+                    (Arrival::Queued, None) => Admission::Refused {
+                        limit: round.policy().queue_per_tenant(),
+                    },
+                    (Arrival::Refused { limit }, _) => Admission::Refused { limit },
+                    (Arrival::SupervisorFull { limit }, _) => {
+                        Admission::SupervisorQueueFull { limit }
+                    }
+                }
+            })
         }
 
         /// Admit one arrival for `tenant` that refuses rather than waits.
@@ -1572,22 +1573,17 @@ mod tenancy_support {
         /// that keeps hammering a full supervisor accumulates no waiters. The
         /// refusal path has to cost nothing as well as say so.
         pub(super) fn try_admit(self: &Arc<Self>, tenant: &Tenant) -> Admission {
-            self.timed(
-                &self.admit_ops,
-                &self.admit_nanos,
-                || (),
-                |round, ()| {
-                    let outcome = round.try_arrive(tenant, || self.take_from_pool());
-                    match outcome {
-                        TryArrival::Immediate(permit) => {
-                            Admission::Admitted(self.lease(permit, tenant))
-                        }
-                        TryArrival::Contended => Admission::Refused {
-                            limit: round.policy().queue_per_tenant(),
-                        },
+            self.timed(&self.admit_ops, &self.admit_nanos, |round| {
+                let outcome = round.try_arrive(tenant, || self.take_from_pool());
+                match outcome {
+                    TryArrival::Immediate(permit) => {
+                        Admission::Admitted(self.lease(permit, tenant))
                     }
-                },
-            )
+                    TryArrival::Contended => Admission::Refused {
+                        limit: round.policy().queue_per_tenant(),
+                    },
+                }
+            })
         }
 
         /// One of this supervisor's in-flight admissions ended, carrying its
@@ -1598,15 +1594,10 @@ mod tenancy_support {
         /// straight to the next eligible waiter rather than returning it to a
         /// pool for the next arrival to win.
         pub(super) fn release(&self, tenant: &Tenant, permit: OwnedSemaphorePermit) {
-            self.timed(
-                &self.release_ops,
-                &self.release_nanos,
-                || (),
-                |round, ()| {
-                    round.note_release(tenant);
-                    self.pump(round, Some(permit));
-                },
-            );
+            self.timed(&self.release_ops, &self.release_nanos, |round| {
+                round.note_release(tenant);
+                self.pump(round, Some(permit));
+            });
         }
 
         /// Hand permits to eligible tenants until none can take one.
@@ -2090,8 +2081,15 @@ const REAP_PER_ADMISSION: usize = 2;
 /// and the live count only reaches a new low at most once per process task,
 /// which caps the whole wait at the cooperative grace plus this grace once per
 /// live process task.
+///
+/// Four seconds, because a quiet window has to outlast the longest wait one
+/// drain makes on its own bounds, or a drain that is still inside a bound it
+/// was given is aborted as stalled. On Linux that wait is the adoption reap,
+/// [`ADOPTION_REAP_PASSES`] × [`ADOPTION_REAP_INTERVAL`] (two seconds), then
+/// the confirming sweep: with the grace equal to the reap's bound alone, an
+/// adoptee that died on the bound's last pass lost its drain to the abort.
 #[cfg(all(unix, feature = "process"))]
-const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(4);
 
 /// Bounded capture-and-signal rounds one cleanup performs.
 ///
@@ -4192,7 +4190,8 @@ fn sweep_adopted() -> usize {
 /// The confirming half of [`sweep_adopted`]: a signalled process dies on the
 /// kernel's schedule, and a single nonblocking reap attempted before the death
 /// lands leaves a zombie no later pass collects. This waits for the deaths,
-/// bounded to 10 × 5 ms: a death lands in milliseconds, while a live adoptee
+/// bounded to [`SWEEP_CONFIRM_PASSES`] × [`ADOPTION_REAP_INTERVAL`]: a death
+/// lands in milliseconds, while a live adoptee
 /// — a long-sleeping escapee the cleanup's own kill is still delivering —
 /// never vanishes on its own, and waiting out the adoption bound here would
 /// blow the shutdown grace a draining cleanup is owed (the drain test shuts
@@ -4204,14 +4203,81 @@ fn sweep_adopted() -> usize {
 #[cfg(all(target_os = "linux", feature = "process"))]
 async fn sweep_adopted_confirmed() -> usize {
     let mut collected = 0usize;
-    for _ in 0..10 {
+    for _ in 0..SWEEP_CONFIRM_PASSES {
         if unclaimed_children().is_empty() {
             break;
         }
         collected = collected.saturating_add(sweep_adopted());
-        crate::rt::time::sleep(std::time::Duration::from_millis(5)).await;
+        crate::rt::time::sleep(ADOPTION_REAP_INTERVAL).await;
     }
     collected
+}
+
+/// The wait between two reap passes over signalled adoptees.
+#[cfg(all(target_os = "linux", feature = "process"))]
+const ADOPTION_REAP_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Reap passes one drain's [`reap_adopted`] makes before it observes instead.
+///
+/// With [`ADOPTION_REAP_INTERVAL`] this is two seconds, the longest wait a
+/// drain makes on its own bounds, so [`PROCESS_CLEANUP_GRACE`] is set past it.
+#[cfg(all(target_os = "linux", feature = "process"))]
+const ADOPTION_REAP_PASSES: u32 = 400;
+
+/// Passes [`sweep_adopted_confirmed`] makes over the unclaimed children.
+#[cfg(all(target_os = "linux", feature = "process"))]
+const SWEEP_CONFIRM_PASSES: u32 = 10;
+
+/// What [`reap_adopted`] left behind.
+#[cfg(all(target_os = "linux", feature = "process"))]
+struct AdoptionReap {
+    /// Adopted pids still children of this process when the bound ran out.
+    unreaped: Vec<i32>,
+    /// Reap passes made, at most [`ADOPTION_REAP_PASSES`].
+    passes: u32,
+}
+
+/// Reap signalled adoptees until none is still owed, or the bound is spent.
+///
+/// A pid is settled two ways: a pass here reaps it, or it is no longer a child
+/// of this process at all. The second is the common case under shutdown, not
+/// an edge: [`sweep_adopted`] collects every unclaimed child, and each draining
+/// cleanup runs one sweep, so with thirty-two drains at once one drain's sweep
+/// reaps another drain's adoptee. `waitpid` then answers `ECHILD`, which
+/// `reap_descendants` passes over without naming, so the pid looks exactly like
+/// one still dying. Read that way it held its drain for the whole bound, 400 ×
+/// 5 ms, with no drain finishing meanwhile, and shutdown aborted a drain whose
+/// tree was already gone (main run 37945731952, Linux container). So a pass
+/// that leaves anything asks which of those pids are still this process's
+/// children — a zombie still is until it is reaped — and keeps only those. An
+/// unreadable child list keeps every pid owed, which costs the bound and never
+/// claims a reap that did not happen.
+#[cfg(all(target_os = "linux", feature = "process"))]
+async fn reap_adopted(adopted: Vec<i32>) -> AdoptionReap {
+    let mut unreaped = adopted;
+    let mut passes = 0_u32;
+    while passes < ADOPTION_REAP_PASSES {
+        passes = passes.saturating_add(1);
+        match lgwks_std::process::reap_descendants(&unreaped) {
+            Ok(reaped) => unreaped.retain(|pid| reaped.binary_search(pid).is_err()),
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, "confirm: the adoption reap was refused; retrying within the death bound");
+            }
+        }
+        if !unreaped.is_empty() {
+            match lgwks_std::process::adopted_descendants(&unreaped) {
+                Ok(children) => unreaped.retain(|pid| children.contains(pid)),
+                Err(error) => {
+                    lgwks_std::trace::debug!(%error, "confirm: the child list was unreadable; every adoptee stays owed");
+                }
+            }
+        }
+        if unreaped.is_empty() {
+            break;
+        }
+        crate::rt::time::sleep(ADOPTION_REAP_INTERVAL).await;
+    }
+    AdoptionReap { unreaped, passes }
 }
 
 /// Scope the just-spawned leader `pid` to its own cgroup, best effort.
@@ -5524,33 +5590,21 @@ impl<'ops> ProcessGroup<'ops> {
     /// The reap confirms rather than fires once: a signalled process dies on
     /// the kernel's schedule, not this task's, and under load the death lands
     /// after a single nonblocking reap attempted it — leaving a zombie no
-    /// later pass collects while the receipt already claims the tree. The loop
-    /// below waits for the deaths it caused, bounded (400 × 5 ms), then
-    /// observes only what is still genuinely alive; a pid that never dies is
-    /// a survivor, not a missed reap.
+    /// later pass collects while the receipt already claims the tree.
+    /// [`reap_adopted`] waits for the deaths it caused, within
+    /// [`ADOPTION_REAP_PASSES`], and this then observes only what is still
+    /// genuinely alive; a pid that never dies is a survivor, not a missed reap.
     #[cfg(all(target_os = "linux", feature = "process"))]
     async fn adopt_orphans(&mut self) {
         let adopted = self.signal_adopted();
         if adopted.is_empty() {
             return;
         }
-        let mut unreaped = adopted;
-        for _ in 0..400 {
-            match lgwks_std::process::reap_descendants(&unreaped) {
-                Ok(reaped) => {
-                    let reaped: std::collections::BTreeSet<i32> = reaped.into_iter().collect();
-                    unreaped.retain(|pid| !reaped.contains(pid));
-                    if unreaped.is_empty() {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    lgwks_std::trace::debug!(%error, task = ?self.task, "confirm: the adoption reap was refused; retrying within the death bound");
-                }
-            }
-            crate::rt::time::sleep(std::time::Duration::from_millis(5)).await;
+        let settled = reap_adopted(adopted).await;
+        if !settled.unreaped.is_empty() {
+            lgwks_std::trace::debug!(task = ?self.task, passes = settled.passes, unreaped = settled.unreaped.len(), "confirm: adoptees outlived the death bound; observing them");
+            self.observe_running(&settled.unreaped);
         }
-        self.observe_running(&unreaped);
     }
 
     /// Signal the adopted orphans without observing them.
@@ -6934,6 +6988,74 @@ mod tests {
         assert_eq!(semaphore.available_permits(), 1);
         assert_eq!(signaller.calls.load(Ordering::Relaxed), 0);
         Ok(())
+    }
+
+    /// An adoptee another waiter reaped first is settled on the first pass,
+    /// not waited on for the whole death bound.
+    ///
+    /// The other waiter is the test's own `wait`, standing in for a second
+    /// drain's sweep: after it, `waitpid` on the pid answers `ECHILD`, which is
+    /// what held a drain for 400 passes and had shutdown abort it.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    #[test]
+    fn an_adoptee_another_waiter_reaped_is_settled_on_the_first_pass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let pid = i32::try_from(child.id())?;
+        child.kill()?;
+        let _status = child.wait()?;
+
+        let settled = block_on(super::reap_adopted(vec![pid]));
+
+        assert!(
+            settled.unreaped.is_empty(),
+            "a pid this process no longer holds is not owed a reap: {:?}",
+            settled.unreaped
+        );
+        assert_eq!(
+            settled.passes, 1,
+            "it is settled by the pass that finds it gone, not by the bound"
+        );
+        Ok(())
+    }
+
+    /// The control: an adoptee still this process's child is reaped here, so
+    /// settling a pid nobody holds did not stop the reap of one somebody does.
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    #[test]
+    fn a_killed_adoptee_still_held_is_reaped_by_the_drain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn()?;
+        let pid = i32::try_from(child.id())?;
+        child.kill()?;
+
+        let settled = block_on(super::reap_adopted(vec![pid]));
+
+        assert!(
+            settled.unreaped.is_empty(),
+            "a killed child dies inside the bound and is reaped: {:?}",
+            settled.unreaped
+        );
+        assert!(
+            lgwks_std::process::adopted_descendants(&[pid])?.is_empty(),
+            "the reap collected the zombie, so the pid is no longer this process's child"
+        );
+        Ok(())
+    }
+
+    /// A quiet window outlasts the longest wait one drain makes on its own
+    /// bounds, so a drain still inside a bound it was given is never aborted as
+    /// stalled (INV-BOT-156).
+    #[cfg(all(target_os = "linux", feature = "process"))]
+    #[test]
+    fn the_cleanup_grace_outlasts_a_drains_own_longest_wait() {
+        let reap = super::ADOPTION_REAP_INTERVAL.saturating_mul(super::ADOPTION_REAP_PASSES);
+        let sweep = super::ADOPTION_REAP_INTERVAL.saturating_mul(super::SWEEP_CONFIRM_PASSES);
+        assert!(
+            super::PROCESS_CLEANUP_GRACE > reap.saturating_add(sweep),
+            "grace {:?} must outlast the adoption reap {reap:?} plus the sweep {sweep:?}",
+            super::PROCESS_CLEANUP_GRACE
+        );
     }
 
     #[cfg(all(unix, feature = "process"))]

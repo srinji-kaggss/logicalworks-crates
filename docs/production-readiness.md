@@ -763,7 +763,7 @@ torn append and is refused for a landed one, so every interrupted effect is
 present exactly once. Capacity is admitted per tenant by
 `Supervisor::with_tenancy` (INV-BOT-151; `tenancy::a_noisy_tenant_cannot_starve_a_quiet_one`,
 `a_tenant_that_submits_ten_thousand_tasks_cannot_starve_another`,
-`an_adversarial_tenants_spawns_do_not_cost_its_neighbour_throughput`).
+`sim_tenancy_flood`).
 A `Scope`'s tenant reaches every body under `each`, `retry` and
 `FanOut::run_in` (`sim_tenancy_scope`: two tenants key the same path
 differently, every retry attempt shares one tenant and key, `run_in` enters
@@ -793,28 +793,30 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
 
   The 100,000 tier holds 100,000 parked tasks (5,000 tenants × 20): ~1 KiB of
   peak RSS per in-flight task on both hosts.
-- **Adversarial split** (#351, `tenancy_scale::the_floods_cost_is_scheduling_not_admission`,
-  101 paired rounds × 2,000 neighbour tasks, each round running both arms back
-  to back in alternating order, bound unchanged at 10% on the **median round's**
-  ratio): the arrival-decision cost (`Supervisor::admission_cost`: the
-  arrival's wait slot plus the round and the pump under the scheduler lock,
-  **not** the wait to take that lock, which is another decision holding it) is
-  261 ns alone vs 259 ns attacked on a quiet macOS run, median ratio 1000‰,
-  rounds 804–1178‰. With every core oversubscribed twice by spinners, ten runs
-  read medians 989–1071‰ with rounds 351–4288‰, all inside the bound; the
-  previous instrument, which also charged the wait for the lock, read
-  995–1127‰ (4 of 10 past) with rounds 4–10625‰ under the same load, run
-  alternately with the new one. That wait is a completing task's release
-  holding the round, mostly while descheduled on an oversubscribed host: it
-  turned one CI stall into a 1770‰ median on main run 37933518033 and is the
-  scheduling share INV-BOT-151 does not claim. Wall ratios 991–1013‰ quiet.
-  A pooled ratio of means — what this test asserted before #392 — read
-  1103–1304‰ on a CI host shared by thirteen lanes while the attacked arm's
-  wall was 321–865‰ of the baseline's: a burst landing on one sequential arm,
-  not a cost. **Linux is not yet re-measured:** the 4-vCPU OrbStack container
-  read a 1062–1089‰ median on a quiet host and 1039–1267‰ saturated with the
-  lock wait still charged, so the container leg keeps the #375
-  quarantine until the arrival decision is working-set independent.
+- **Adversarial split** (#351, #375). The gate is deterministic:
+  `sim_tenancy_flood` drives the shipped round in virtual time, one neighbour
+  caller against one to 256 attacker callers flooding 1, 4, 32 or 256
+  fail-at-once submissions per neighbour task, with seeded abandonment, over
+  256 seeds. With both ceilings inside half the pool the neighbour's last task
+  ends at the **same virtual instant** with and without the flood — exact, not
+  within 10% — and with overlapping ceilings some seed's flood does delay it
+  (the negative control). The round's own step count (`DeficitRoundRobin::work`:
+  one per decision, per grant pass, and per waiter a skip or compaction looks
+  at) stays within four steps per event at every flood size; compacting on every
+  abandonment instead of when abandoned waiters outnumber the live ones reads
+  11,317 steps for 1,604 events and fails it. The wall-clock half is a report,
+  not a gate: `bench/async -- --flood-split --rounds=41` (paired arms, POOL 64,
+  ceiling 32, 2,000 neighbour tasks, flood 4, alternating order) read the
+  neighbour's flooded throughput at p50 1018‰ / 986‰ (p99 1167‰ / 1237‰) of
+  its arm alone and its own decision time at p50 1053‰ / 1010‰ (p99 1407‰ /
+  1244‰), two runs on a quiet macOS host, 0.70 s wall and 4.2 MB peak RSS. The
+  wall-clock tests it replaces read the host: on CI shared by thirteen lanes
+  their paired ratios spread from 170‰ to 34,985‰ in one run, and the residual
+  on a quiet host is a fixed 3–8 ns cache-coherence delta per decision (the
+  flood's completions write the round and the pool counter from other cores), so
+  a cheaper decision raised the ratio rather than lowering it (branch
+  `perf/admit-outside-lock-375`, 50 → 40 ns, not landed). The Linux container
+  leg runs the deterministic family like every other test.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
 own file, so the run proves the kill and the restart keep each file's prefix,
