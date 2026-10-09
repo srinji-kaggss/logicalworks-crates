@@ -794,16 +794,22 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
   The 100,000 tier holds 100,000 parked tasks (5,000 tenants × 20): ~1 KiB of
   peak RSS per in-flight task on both hosts.
 - **Adversarial split** (#351, `tenancy_scale::the_floods_cost_is_scheduling_not_admission`,
-  41 interleaved rounds × 2,000 neighbour tasks, bound unchanged at 10%): the
-  mean arrival-decision cost (lock + round, `Supervisor::admission_cost`) is
-  569 ns alone vs 583 ns attacked (macOS) and 189 ns vs 195 ns (Linux) —
-  decision-mean ratios 1024‰ / 1031‰, inside the envelope on both hosts, so
-  there is no admission-side cost to fix. The remainder is stated separately:
-  arrival decisions are ~29% of a neighbour submission on macOS (8–12% on
-  Linux, where the clock read is cheaper); the rest is the task spawn, the
-  bounded reap and the executor's polls beside the flood's completions. Wall
-  ratios 989‰ / 692‰ — the attacked arm measured faster on both hosts, which
-  is scheduling noise, not isolation.
+  101 paired rounds × 2,000 neighbour tasks, each round running both arms back
+  to back in alternating order, bound unchanged at 10% on the **median round's**
+  ratio): the mean arrival-decision cost (lock + round,
+  `Supervisor::admission_cost`) is 506–512 ns alone vs 514–524 ns attacked on
+  macOS, median ratios 1021–1028‰ over five quiet runs and 957–1084‰ over
+  twenty runs with every core held by a spinner. The arrival decisions are
+  ~31% of a neighbour submission there; the rest is the task spawn, the bounded
+  reap and the executor's polls beside the flood's completions. Wall ratios
+  991–1013‰. A pooled ratio of means — what this test asserted before — read
+  1103–1304‰ on a CI host shared by thirteen lanes while the attacked arm's wall
+  was 321–865‰ of the baseline's: a burst landing on one sequential arm, not a
+  cost. **Linux is not inside the envelope with margin:** in the 4-vCPU OrbStack
+  container the median is 1062–1089‰ on a quiet host (twenty runs) — a
+  systematic 6–9% admission-side cost, not noise — and 1039–1267‰ (16 of 20
+  past 1,100‰) with the host saturated, so the container leg keeps the #375
+  quarantine until the arrival decision is working-set independent.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
 own file, so the run proves the kill and the restart keep each file's prefix,
