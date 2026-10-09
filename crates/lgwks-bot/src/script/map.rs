@@ -53,30 +53,30 @@ impl Architecture {
 
 impl fmt::Display for Architecture {
     /// One line per flow and per block, indented by nesting, each ending with
-    /// the source line it was declared on.
+    /// the source line it was declared on: `lgwks_ast::script::write_map`, the
+    /// one rendering the script tool also prints a parsed script through.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for flow in self.flows {
-            writeln!(formatter, "flow {}  @{}", flow.signature, flow.line)?;
-            render_steps(formatter, flow.steps, 1)?;
-        }
-        Ok(())
+        lgwks_ast::script::write_map(
+            formatter,
+            self.flows
+                .iter()
+                .map(|flow| (flow.signature, flow.line, flow.steps)),
+        )
     }
 }
 
-/// Write `steps` and their children at `depth`.
-fn render_steps(
-    formatter: &mut fmt::Formatter<'_>,
-    steps: &[StepShape],
-    depth: usize,
-) -> fmt::Result {
-    for step in steps {
-        for _ in 0..depth {
-            formatter.write_str("  ")?;
-        }
-        writeln!(formatter, "{}  @{}", step.detail, step.line)?;
-        render_steps(formatter, step.steps, depth.saturating_add(1))?;
+impl lgwks_ast::script::MapStep for StepShape {
+    fn detail(&self) -> &str {
+        self.detail
     }
-    Ok(())
+
+    fn line(&self) -> impl fmt::Display {
+        self.line
+    }
+
+    fn children(&self) -> &[Self] {
+        self.steps
+    }
 }
 
 /// One flow in an [`Architecture`].
@@ -124,6 +124,12 @@ impl FlowShape {
     #[must_use]
     pub const fn signature(&self) -> &'static str {
         self.signature
+    }
+
+    /// The source line of the `flow` header.
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
     }
 
     /// The blocks directly inside the flow.

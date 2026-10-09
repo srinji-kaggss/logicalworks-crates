@@ -10,10 +10,17 @@
 mod content_detection;
 mod hostile;
 mod parse_deadline;
+mod script_tool;
 mod sim_diagnostics;
 mod sim_parse_bounds;
 mod sim_parse_deadline;
+mod sim_script_find;
 
+/// A scratch directory that dies with the test that made it, the one every
+/// suite in the estate names and removes the same way (INV-BOT-116).
+#[cfg(feature = "tool")]
+#[path = "../../../lgwks-bot/tests/support/scratch.rs"]
+mod scratch;
 /// The seed substrate every `sim_*` module in this binary drives.
 ///
 /// One copy per binary rather than one per module: `#[path]` includes resolve to

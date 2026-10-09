@@ -39,11 +39,21 @@
 //! `lgwks_deps` storefront and builds no tree-sitter, so the macro's build does
 //! not grow by a grammar.
 //!
+//! [`read_source`] finds every `script!` in a Rust file and reads each through
+//! [`parse`], which is how a tool maps or checks a whole repository without
+//! compiling it. With the `tool` feature, `Script::to_json` writes the map as
+//! the runtime's `Architecture::to_json` does, and the `lgwks-ast` binary runs
+//! `lgwks-ast script map|check [--json] [PATH...]` over a tree (#384).
+//!
 //! [`parse`]: crate::script::parse
 //! [`Script`]: crate::script::Script
+//! [`read_source`]: crate::script::read_source
 
 use lgwks_deps::proc_macro2::{Span, TokenStream};
 
+mod find;
+#[cfg(feature = "tool")]
+mod json;
 mod lexicon;
 mod lines;
 mod parse;
@@ -55,10 +65,12 @@ mod lines_props;
 #[cfg(test)]
 mod sim_script;
 
+pub use find::{Invocation, read_source};
 pub use lexicon::{Axis, Evidence, Form, Guarantee, Kind, LEXICON, Position, Word};
 pub use tree::{
     Block, Bound, Branch, BranchValue, Call, Code, Construct, Duration, Each, Flow, FlowShape, For,
-    Fragment, IfBranch, IfChain, Retry, Script, Statement, Step, StepShape, Together, Within,
+    Fragment, IfBranch, IfChain, MapStep, Retry, Script, Statement, Step, StepShape, Together,
+    Within, write_map,
 };
 
 /// A script the language refuses, located at the token it is about.

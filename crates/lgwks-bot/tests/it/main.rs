@@ -175,6 +175,7 @@ mod rt_process;
 mod rt_process_files;
 mod rt_runtime_stack;
 mod script_flow;
+mod script_map_parity;
 mod script_refusals;
 mod session;
 mod sim_cancel_under_load;

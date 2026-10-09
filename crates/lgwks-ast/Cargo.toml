@@ -90,6 +90,14 @@ lang-yaml = ["parser", "ast-grep-language/tree-sitter-yaml"]
 # `proc-macro2` edge (INV-DEP-3), and logs each refusal through `tracing`; no
 # grammar is selected by it, so the macro's build compiles no tree-sitter.
 script = ["dep:lgwks_deps", "dep:tracing"]
+# The script tool (#384): `script::Script::to_json` and the `lgwks-ast` binary,
+# `lgwks-ast script map|check [--json] [PATH...]`, the second caller of the one
+# parser (SL-2). It walks a tree and writes JSON through `lgwks_std`, a
+# workspace member, so it adds no third-party edge. It lives here rather than
+# in `lgwks-deps` because `script` already depends on `lgwks_deps` for
+# `proc_macro2`, and `lgwks_deps` depending back on this crate is a cycle Cargo
+# refuses.
+tool = ["script", "dep:lgwks_std"]
 full = [
     "lang-rust",
     "lang-python",
@@ -142,14 +150,25 @@ tree-sitter = { version = "0.27", optional = true }
 # storefront that owns the edge; `default-features = false` keeps the `scan`
 # detectors out, so the macro's build pulls `proc-macro2` and nothing else here.
 lgwks_deps = { workspace = true, features = ["script"], optional = true }
+# The script tool's tree walk and JSON (feature `tool`, #384).
+lgwks_std = { workspace = true, features = ["json"], optional = true }
 
 [dev-dependencies]
 # The script parser's line-tree properties (#273) moved here with the parser
 # (#383): shrinking to the minimal misaligned tree, with persisted seeds.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 # `lgwks_std::seeded`, the one seeded stream the script simulations draw from
-# (INV-STD-SEEDED-1), so a seed names the same scripts on every target.
-lgwks_std = { workspace = true }
+# (INV-STD-SEEDED-1), so a seed names the same scripts on every target; and
+# `random`, which names the script tool's scratch trees (#384) so two runs on
+# one machine never share one.
+lgwks_std = { workspace = true, features = ["random"] }
+
+# `lgwks-ast script map|check`: every `script!` in a tree, read by the one
+# parser (#384). Built only with the tool selected.
+[[bin]]
+name = "lgwks-ast"
+path = "src/bin/lgwks-ast.rs"
+required-features = ["tool"]
 
 [[example]]
 name = "parse"

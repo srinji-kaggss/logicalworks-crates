@@ -12,6 +12,8 @@
 //! language can grow a word without a caller's exhaustive match compiling into
 //! a silent misreading.
 
+use std::fmt;
+
 use lgwks_deps::proc_macro2::{Delimiter, Ident, Span, TokenStream, TokenTree};
 
 use super::lexicon::Kind;
@@ -29,6 +31,92 @@ impl Script {
     pub const fn flows(&self) -> &[Flow] {
         self.flows.as_slice()
     }
+}
+
+impl fmt::Display for Script {
+    /// The architecture map, through [`write_map`]: the one rendering the
+    /// runtime's `Architecture` uses for the `ARCHITECTURE` the macro emits.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_map(
+            formatter,
+            self.flows.iter().map(|flow| {
+                (
+                    flow.shape.signature.as_str(),
+                    flow.shape.line,
+                    flow.shape.steps.as_slice(),
+                )
+            }),
+        )
+    }
+}
+
+/// A step as an architecture map shows it, whoever holds it: the tree
+/// [`parse`](super::parse) answers with, or the map `lgwks_bot::script`
+/// compiles from that tree into a program.
+pub trait MapStep: Sized {
+    /// The step's one-line description, as the map prints it.
+    fn detail(&self) -> &str;
+    /// The source line the step was declared on.
+    fn line(&self) -> impl fmt::Display;
+    /// The steps nested directly inside this one.
+    fn children(&self) -> &[Self];
+}
+
+impl MapStep for StepShape {
+    fn detail(&self) -> &str {
+        self.detail.as_str()
+    }
+
+    fn line(&self) -> impl fmt::Display {
+        self.line
+    }
+
+    fn children(&self) -> &[Self] {
+        self.children.as_slice()
+    }
+}
+
+/// Write an architecture map: per flow, `flow <signature>  @<line>`, then each
+/// step on its own line, indented two spaces per level of nesting, ending with
+/// `  @<line>`.
+///
+/// The one rendering of a map (#384): the script tool prints a parsed
+/// [`Script`] through it and `lgwks_bot::script::Architecture` prints the
+/// compiled `ARCHITECTURE` through it, so the two cannot drift apart.
+///
+/// # Errors
+///
+/// The writer's own error.
+pub fn write_map<'map, Out, Step, Line>(
+    out: &mut Out,
+    flows: impl IntoIterator<Item = (&'map str, Line, &'map [Step])>,
+) -> fmt::Result
+where
+    Out: fmt::Write + ?Sized,
+    Step: MapStep + 'map,
+    Line: fmt::Display,
+{
+    for (signature, line, steps) in flows {
+        writeln!(out, "flow {signature}  @{line}")?;
+        write_steps(out, steps, 1)?;
+    }
+    Ok(())
+}
+
+/// Write `steps` and the steps nested in them, starting at `depth`.
+fn write_steps<Out, Step>(out: &mut Out, steps: &[Step], depth: usize) -> fmt::Result
+where
+    Out: fmt::Write + ?Sized,
+    Step: MapStep,
+{
+    for step in steps {
+        for _ in 0..depth {
+            out.write_str("  ")?;
+        }
+        writeln!(out, "{}  @{}", step.detail(), step.line())?;
+        write_steps(out, step.children(), depth.saturating_add(1))?;
+    }
+    Ok(())
 }
 
 /// `[pub] flow name(inputs) [-> Output]:` and its body.

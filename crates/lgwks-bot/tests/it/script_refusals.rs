@@ -81,3 +81,56 @@ fn a_forget_renamed_outside_the_script_is_refused_inside_it() -> TestResult {
     assert_refused_by_lint(&output, "mem::forget");
     Ok(())
 }
+
+/// The script tool and the compiler refuse one construct with one message at
+/// one place (#384): `lgwks-ast script check` reads the consumer's source
+/// through the function the macro calls, so its refusal's line, column and
+/// message are the ones the compiler prints for the same file. The probe runs
+/// under the same clippy pass as this file's other consumers, so it reuses
+/// their build instead of paying for a second one.
+#[test]
+fn the_tool_reports_the_refusal_the_compiler_reports() -> TestResult {
+    let source = consumer("", "", "std::process::exit(code)");
+    let invocations = lgwks_ast::script::read_source(&source)?;
+    assert!(
+        invocations.len() == 1
+            && invocations
+                .iter()
+                .all(|invocation| invocation.read().is_err()),
+        "the tool finds the consumer's one script! and refuses it: {invocations:?}"
+    );
+    let output = clippy_probe("script-refusal-located", "", &source)?;
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the compiler refused the flow too:\n{printed}"
+    );
+    for refusal in invocations
+        .iter()
+        .filter_map(|invocation| invocation.read().err())
+    {
+        let location = format!(
+            "src/main.rs:{}:{}",
+            refusal.line(),
+            refusal.column().saturating_add(1)
+        );
+        assert!(
+            printed.contains(&location),
+            "the compiler reports the refusal at the tool's {location}:\n{printed}"
+        );
+        assert!(
+            refusal
+                .message()
+                .lines()
+                .next()
+                .is_some_and(|first| printed.contains(&format!("error: {first}"))),
+            "the compiler reports the tool's message `{}`:\n{printed}",
+            refusal.message()
+        );
+    }
+    Ok(())
+}
