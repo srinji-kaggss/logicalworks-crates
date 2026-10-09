@@ -796,19 +796,24 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
 - **Adversarial split** (#351, `tenancy_scale::the_floods_cost_is_scheduling_not_admission`,
   101 paired rounds × 2,000 neighbour tasks, each round running both arms back
   to back in alternating order, bound unchanged at 10% on the **median round's**
-  ratio): the mean arrival-decision cost (lock + round,
-  `Supervisor::admission_cost`) is 506–512 ns alone vs 514–524 ns attacked on
-  macOS, median ratios 1021–1028‰ over five quiet runs and 957–1084‰ over
-  twenty runs with every core held by a spinner. The arrival decisions are
-  ~31% of a neighbour submission there; the rest is the task spawn, the bounded
-  reap and the executor's polls beside the flood's completions. Wall ratios
-  991–1013‰. A pooled ratio of means — what this test asserted before — read
-  1103–1304‰ on a CI host shared by thirteen lanes while the attacked arm's wall
-  was 321–865‰ of the baseline's: a burst landing on one sequential arm, not a
-  cost. **Linux is not inside the envelope with margin:** in the 4-vCPU OrbStack
-  container the median is 1062–1089‰ on a quiet host (twenty runs) — a
-  systematic 6–9% admission-side cost, not noise — and 1039–1267‰ (16 of 20
-  past 1,100‰) with the host saturated, so the container leg keeps the #375
+  ratio): the arrival-decision cost (`Supervisor::admission_cost`: the
+  arrival's wait slot plus the round and the pump under the scheduler lock,
+  **not** the wait to take that lock, which is another decision holding it) is
+  261 ns alone vs 259 ns attacked on a quiet macOS run, median ratio 1000‰,
+  rounds 804–1178‰. With every core oversubscribed twice by spinners, ten runs
+  read medians 989–1071‰ with rounds 351–4288‰, all inside the bound; the
+  previous instrument, which also charged the wait for the lock, read
+  995–1127‰ (4 of 10 past) with rounds 4–10625‰ under the same load, run
+  alternately with the new one. That wait is a completing task's release
+  holding the round, mostly while descheduled on an oversubscribed host: it
+  turned one CI stall into a 1770‰ median on main run 37933518033 and is the
+  scheduling share INV-BOT-151 does not claim. Wall ratios 991–1013‰ quiet.
+  A pooled ratio of means — what this test asserted before #392 — read
+  1103–1304‰ on a CI host shared by thirteen lanes while the attacked arm's
+  wall was 321–865‰ of the baseline's: a burst landing on one sequential arm,
+  not a cost. **Linux is not yet re-measured:** the 4-vCPU OrbStack container
+  read a 1062–1089‰ median on a quiet host and 1039–1267‰ saturated with the
+  lock wait still charged, so the container leg keeps the #375
   quarantine until the arrival decision is working-set independent.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
