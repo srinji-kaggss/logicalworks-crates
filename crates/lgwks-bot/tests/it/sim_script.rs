@@ -235,10 +235,10 @@ lgwks_bot::script! {
     /// Three branches at once, each result bound to its name.
     flow trio(probe: &Probe, first: Item, second: Item, third: Item) -> u64:
         together:
-            let a = run part(probe, first)
-            let b = run part(probe, second)
-            let c = run part(probe, third)
-        give back a.wrapping_add(b).wrapping_add(c)
+            let left = run part(probe, first)
+            let middle = run part(probe, second)
+            let right = run part(probe, third)
+        give back left.wrapping_add(middle).wrapping_add(right)
 
     /// Two named steps, recording the key the flow and each step sees;
     /// `failing` names the step that refuses (0: neither, 1: `fetch`, 2:
@@ -999,8 +999,8 @@ fn step_failure_located(band: Band) -> TestResult {
         let scope = tenant_scope("acme", CancellationToken::new())?;
         let outcome = drive(stepped(&scope, &probe, turns, failing));
         let entered = probe.keys.borrow().len();
-        match (failing, &outcome) {
-            (0, &Ok(value)) => {
+        match (failing, outcome) {
+            (0, Ok(value)) => {
                 assert_eq!(
                     value, turns,
                     "with no refusal the flow gives back its value"
@@ -1015,7 +1015,7 @@ fn step_failure_located(band: Band) -> TestResult {
                 assert_eq!(error.at(), "stepped/store", "located at `store`: {error}");
                 assert_eq!(entered, 3, "`fetch` ran before `store` failed");
             }
-            _ => unexpected(&format!("failing={failing} outcome={outcome:?}"))?,
+            (_, other) => unexpected(&format!("failing={failing} outcome={other:?}"))?,
         }
         sim.record(&format!(
             "failing={failing} turns={turns} entered={entered}"

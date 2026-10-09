@@ -10,14 +10,13 @@
 //! method by path (`Option::unwrap(x)`) or renaming it with a `use` inside a
 //! flow is therefore refused by spelling, and a name imported *outside* the
 //! script under another spelling is out of reach here. That half is closed by
-//! the lint attributes [`lint_forbids`] puts on every generated flow, which the
-//! consumer's own compiler and clippy enforce by resolved path.
+//! the `forbid` lint attributes `lgwks_macros` puts on every generated flow,
+//! which the consumer's own compiler and clippy enforce by resolved path.
 
 use lgwks_deps::proc_macro2::{Delimiter, TokenStream, TokenTree};
-use lgwks_deps::quote::quote;
-use lgwks_deps::syn::{Error, Result};
 
-use crate::lines::{is_ident, is_punct};
+use super::lines::{is_ident, is_punct};
+use super::{Refusal, Result};
 
 /// Macro names that end a program instead of returning an error.
 const PANICKING_MACROS: [&str; 10] = [
@@ -59,28 +58,6 @@ const KEYWORDS_BEFORE_BRACKET: [&str; 12] = [
     "let", "for", "in", "return", "break", "else", "match", "if", "as", "move", "mut", "ref",
 ];
 
-/// The lints every generated flow carries at `forbid`, so the consumer's
-/// compiler (`unsafe_code`) and clippy (the rest) refuse by resolved path what
-/// the token check can only refuse by spelling. `forbid` rather than `deny`
-/// because an `#[allow]` inside the flow cannot lower it.
-pub(crate) fn lint_forbids() -> TokenStream {
-    quote! {
-        #[forbid(
-            unsafe_code,
-            clippy::unwrap_used,
-            clippy::expect_used,
-            clippy::panic,
-            clippy::todo,
-            clippy::unimplemented,
-            clippy::unreachable,
-            clippy::indexing_slicing,
-            clippy::exit,
-            clippy::mem_forget,
-            clippy::panic_in_result_fn
-        )]
-    }
-}
-
 /// Absolute path prefixes that only exist on the machine that wrote them.
 const MACHINE_PATHS: [&str; 9] = [
     "/Users/",
@@ -102,22 +79,22 @@ const MACHINE_PATHS: [&str; 9] = [
 /// replacement in the message.
 pub(crate) fn check(tokens: &[TokenTree]) -> Result<()> {
     if let Some(import) = refused_import(tokens) {
-        let refusal = Err(Error::new(
+        let refusal = Err(Refusal::new(
             import.span(),
             format!(
                 "`use` of `{import}` inside a flow renames a call the script refuses; call what the \
              flow needs by its full path, or put it behind a function outside the script"
             ),
         ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
+        tracing::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
         return refusal;
     }
     for (index, token) in tokens.iter().enumerate() {
         let back = |distance: usize| index.checked_sub(distance).and_then(|at| tokens.get(at));
         let next = index.checked_add(1).and_then(|at| tokens.get(at));
         if let Some(message) = refusal(token, back(1), back(3), next) {
-            let refusal = Err(Error::new(token.span(), message));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
+            let refusal = Err(Refusal::new(token.span(), message));
+            tracing::debug!(error = ?refusal.as_ref().err(), "check: returning an error to the caller");
             return refusal;
         }
         if let TokenTree::Group(ref group) = *token {

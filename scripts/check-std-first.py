@@ -176,7 +176,14 @@ STD_FIRST = (
 # The list is deliberately exact-line rather than per-file. A glob would cover
 # the next genuine occurrence added to the same file, and this list exists to be
 # the audit's record of what a reader looked at and decided — not a mute button.
-EXEMPT: dict[str, tuple[str, str]] = {}
+EXEMPT: dict[str, tuple[str, str]] = {
+    "crates/lgwks-ast/src/script/sim_script.rs:691": (
+        'line: "let planted = std::thread::spawn(work)",',
+        "a script line planted to prove the `script!` parser refuses an unowned "
+        "spawn (\"a spawned task has no owner\"); it is parsed as data and never "
+        "compiled, so it spawns nothing",
+    ),
+}
 
 
 def code_only(text: str) -> str:
@@ -187,7 +194,7 @@ def code_only(text: str) -> str:
     cases forced this. `crates/lgwks-deps/src/scan.rs` *is* a source scanner,
     and its pattern table holds `"tracing::"`; reporting that as a reach into
     `tracing` is the checker reporting a detector as the thing it detects. And
-    `crates/lgwks-macros/src/refuse.rs` writes a diagnostic whose continuation
+    `crates/lgwks-ast/src/script/refuse.rs` (then in `lgwks-macros`) writes a diagnostic whose continuation
     line starts with `use `…`;`, which the `use` pattern read as a statement:
     the prose became a "crate", bound itself as a name, resolved through that
     binding, and was printed among the crates the estate reaches (#195).

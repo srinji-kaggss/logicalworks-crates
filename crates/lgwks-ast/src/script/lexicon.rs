@@ -1,28 +1,29 @@
 //! The lexicon: every word of `script!`, one row each (SL-1, #380).
 //!
-//! The parser dispatches on this table, and the documentation is rendered from
-//! it: the block table in the crate documentation and the word table in the
-//! README are both checked against [`doc_table`] and [`readme_table`] by the
-//! tests below, so a word cannot be added, renamed or re-described in one
-//! place and not the other.
+//! The parser dispatches on this table, and `lgwks_macros` renders its
+//! documentation from it: the block table in that crate's documentation, the
+//! word table in its README and the one-page lexicon are each checked against
+//! the table by that crate's tests, so a word cannot be added, renamed or
+//! re-described in one place and not the other.
 //!
 //! A word is reachable only through its row. [`Kind`] is constructed nowhere
 //! but in [`LEXICON`], so a kind with no row is a variant the compiler reports
-//! as never constructed, which the workspace's `-D warnings` refuses; and
-//! `emit` dispatches on the kind of the row a line's first token names, so a
-//! line whose word has no row is plain Rust and never reaches an emitter.
+//! as never constructed, which the workspace's `-D warnings` refuses; and the
+//! parser dispatches on the kind of the row a line's first token names, so a
+//! line whose word has no row is plain Rust and never reaches a word's reader.
 //!
 //! The particles inside a form (`in`, `up to`, `times`, `waiting`, `at most`,
-//! `with`) are part of that word's grammar, read by its emitter; they are not
+//! `with`) are part of that word's grammar, read by its reader; they are not
 //! words, and a line cannot start with one.
 
 use lgwks_deps::proc_macro2::TokenTree;
 
-use crate::lines::{Line, ident};
+use super::lines::{Line, ident};
 
-/// What a word does, which is what `emit` dispatches on.
+/// What a word does, which is what the parser dispatches on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Kind {
+#[non_exhaustive]
+pub enum Kind {
     /// `flow name(inputs) -> Output:`
     Flow,
     /// `each x in xs:`
@@ -53,7 +54,8 @@ pub(crate) enum Kind {
 
 impl Kind {
     /// The token a line starts with to say this word.
-    pub(crate) const fn spelling(self) -> &'static str {
+    #[must_use]
+    pub const fn spelling(self) -> &'static str {
         match self {
             Self::Flow => "flow",
             Self::Each => "each",
@@ -74,7 +76,8 @@ impl Kind {
 
 /// Where a word may stand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Position {
+#[non_exhaustive]
+pub enum Position {
     /// Opens a flow at the top level of a script.
     Flow,
     /// Opens an indented block: its line ends in `:`.
@@ -87,7 +90,8 @@ pub(crate) enum Position {
 
 impl Position {
     /// The name the README table gives this position.
-    const fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Flow => "flow",
             Self::Block => "block",
@@ -105,7 +109,8 @@ impl Position {
 /// the workspace's `-D warnings` refuses, and adding it is part of admitting
 /// the word that first serves it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Axis {
+#[non_exhaustive]
+pub enum Axis {
     /// Holds for any input and any schedule, not only the common one.
     Generalized,
     /// The caller depends on a typed answer, never on the callee's internals.
@@ -122,7 +127,8 @@ pub(crate) enum Axis {
 
 impl Axis {
     /// The axis as the README names it.
-    const fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Generalized => "generalized",
             Self::Decoupled => "decoupled",
@@ -136,9 +142,11 @@ impl Axis {
 
 /// The test that proves a guarantee: a compile-fail case or a deterministic
 /// simulation, the two kinds of evidence SL-4 accepts.
-pub(crate) enum Evidence {
-    /// A case of the compile-fail table (`REFUSALS` in `src/tests.rs`), named
-    /// by its case.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Evidence {
+    /// A case of `lgwks_macros`' compile-fail table (`REFUSALS` in its
+    /// `src/tests.rs`), named by its case.
     Refusal(&'static str),
     /// A seeded simulation: a `#[test]`, or a family a `band_family!` sweeps,
     /// in a `sim_` file named from the workspace root.
@@ -150,28 +158,35 @@ pub(crate) enum Evidence {
     },
 }
 
-impl Evidence {
-    /// The evidence as the README cites it.
-    fn cite(&self) -> String {
-        match *self {
-            Self::Refusal(case) => format!("refusal *{case}*"),
-            // A path with no directory is already the file's own name.
-            Self::Sim { file, test } => match file.rsplit_once('/') {
-                Some((_, name)) => format!("`{test}` in `{name}`"),
-                None => format!("`{test}` in `{file}`"),
-            },
-        }
-    }
+/// One thing that holds wherever a word is used, and the test that proves it.
+#[derive(Debug)]
+pub struct Guarantee {
+    /// The axis it serves.
+    axis: Axis,
+    /// What holds, in one clause.
+    claim: &'static str,
+    /// The test that fails if it stops holding.
+    evidence: Evidence,
 }
 
-/// One thing that holds wherever a word is used, and the test that proves it.
-pub(crate) struct Guarantee {
-    /// The axis it serves.
-    pub(crate) axis: Axis,
+impl Guarantee {
+    /// Which of the nine axes this guarantee is evidence for.
+    #[must_use]
+    pub const fn axis(&self) -> Axis {
+        self.axis
+    }
+
     /// What holds, in one clause.
-    pub(crate) claim: &'static str,
+    #[must_use]
+    pub const fn claim(&self) -> &'static str {
+        self.claim
+    }
+
     /// The test that fails if it stops holding.
-    pub(crate) evidence: Evidence,
+    #[must_use]
+    pub const fn evidence(&self) -> &Evidence {
+        &self.evidence
+    }
 }
 
 /// A guarantee proved by a simulation in `lgwks_bot`'s `sim_script.rs`, the
@@ -200,33 +215,93 @@ const fn refused(axis: Axis, claim: &'static str, case: &'static str) -> Guarant
 const SCRIPT_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script.rs";
 
 /// One written form of a word and what it means.
-pub(crate) struct Form {
+#[derive(Debug)]
+pub struct Form {
     /// The form as an author writes it.
-    pub(crate) written: &'static str,
+    written: &'static str,
     /// What it does, in one clause.
-    pub(crate) means: &'static str,
+    means: &'static str,
+}
+
+impl Form {
+    /// The form as an author writes it, as Markdown.
+    #[must_use]
+    pub const fn written(&self) -> &'static str {
+        self.written
+    }
+
+    /// What it does, in one clause, as Markdown.
+    #[must_use]
+    pub const fn means(&self) -> &'static str {
+        self.means
+    }
 }
 
 /// One word of the language: the six things SL-1 names, plus where it stands.
-pub(crate) struct Word {
+#[derive(Debug)]
+pub struct Word {
     /// What the word does; its spelling is [`Kind::spelling`].
-    pub(crate) kind: Kind,
+    kind: Kind,
     /// Where it may stand.
-    pub(crate) position: Position,
-    /// The `lgwks_bot::script` primitive the word expands to a call of, as
-    /// Markdown the README renders as written: code in backticks, and prose,
-    /// such as a word that expands to plain Rust, as prose.
-    pub(crate) primitive: &'static str,
-    /// Its written forms. A word documented inside another word's form (`else`
-    /// in `if`'s) has none of its own.
-    pub(crate) forms: &'static [Form],
-    /// What the word itself refuses, beyond the refusals every passthrough
-    /// line carries (`refuse.rs`).
-    pub(crate) refuses: &'static [&'static str],
+    position: Position,
+    /// The `lgwks_bot::script` primitive the word expands to a call of.
+    primitive: &'static str,
+    /// Its written forms.
+    forms: &'static [Form],
+    /// What the word itself refuses.
+    refuses: &'static [&'static str],
     /// What holds wherever the word is used, each with its proof (SL-4).
-    pub(crate) guarantees: &'static [Guarantee],
-    /// A whole script using the word, which the tests expand.
-    pub(crate) example: &'static str,
+    guarantees: &'static [Guarantee],
+    /// A whole script using the word.
+    example: &'static str,
+}
+
+impl Word {
+    /// What the word does; its spelling is [`Kind::spelling`].
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Where it may stand.
+    #[must_use]
+    pub const fn position(&self) -> Position {
+        self.position
+    }
+
+    /// The `lgwks_bot::script` primitive the word expands to a call of, as
+    /// Markdown: code in backticks, and prose, such as a word that expands to
+    /// plain Rust, as prose.
+    #[must_use]
+    pub const fn primitive(&self) -> &'static str {
+        self.primitive
+    }
+
+    /// Its written forms. A word documented inside another word's form
+    /// (`else` in `if`'s) has none of its own.
+    #[must_use]
+    pub const fn forms(&self) -> &'static [Form] {
+        self.forms
+    }
+
+    /// What the word itself refuses, beyond the refusals every passthrough
+    /// line carries.
+    #[must_use]
+    pub const fn refuses(&self) -> &'static [&'static str] {
+        self.refuses
+    }
+
+    /// What holds wherever the word is used, each with its proof (SL-4).
+    #[must_use]
+    pub const fn guarantees(&self) -> &'static [Guarantee] {
+        self.guarantees
+    }
+
+    /// A whole script using the word, which `lgwks_macros`' tests expand.
+    #[must_use]
+    pub const fn example(&self) -> &'static str {
+        self.example
+    }
 }
 
 /// A written form and what it means.
@@ -238,7 +313,7 @@ const fn form(written: &'static str, means: &'static str) -> Form {
 const IF_ELSE_EXAMPLE: &str = "flow route(code: u16) -> u8:\n    if code < 400:\n        give back 0\n    else if code < 500:\n        give back 1\n    else:\n        give back 2\n";
 
 /// Every word, in the order the documentation lists them.
-pub(crate) const LEXICON: [Word; 13] = [
+pub const LEXICON: [Word; 13] = [
     Word {
         kind: Kind::Flow,
         position: Position::Flow,
@@ -513,242 +588,27 @@ pub(crate) fn kind_of(line: &Line) -> Option<Kind> {
     line.tokens.first().and_then(word).map(|row| row.kind)
 }
 
-/// The block words, as the refusal for an unknown block lists them.
+/// The block words, as the refusal for an unknown block lists them: in lexicon
+/// order, `else` written with the `if` it belongs to, `let` in the form that
+/// opens a block, and the last one after an "or".
 pub(crate) fn block_words() -> String {
-    let words: Vec<String> = LEXICON
+    let mut words: Vec<String> = LEXICON
         .iter()
         .filter(|row| row.position == Position::Block)
-        .map(|row| format!("`{}`", row.kind.spelling()))
-        .collect();
-    words.join(", ")
-}
-
-/// The crate documentation's block table, as `//!` lines.
-pub(crate) fn doc_table() -> String {
-    let rows = LEXICON
-        .iter()
-        .flat_map(|row| row.forms)
-        .map(|form| format!("//! | {} | {} |\n", form.written, form.means));
-    [
-        "//! | Written | Means |\n".to_owned(),
-        "//! |---|---|\n".to_owned(),
-    ]
-    .into_iter()
-    .chain(rows)
-    .collect()
-}
-
-/// The README's word table: every row, with the columns the crate
-/// documentation leaves to the README.
-pub(crate) fn readme_table() -> String {
-    let rows = LEXICON.iter().map(|row| {
-        let written: Vec<&str> = row.forms.iter().map(|form| form.written).collect();
-        let means: Vec<String> = row.forms.iter().map(|form| plain(form.means)).collect();
-        let written = if written.is_empty() {
-            format!("`{}` (see `if`)", row.kind.spelling())
-        } else {
-            written.join("<br>")
-        };
-        format!(
-            "| {written} | {} | {} | {} | {} | {} |\n",
-            row.position.name(),
-            row.primitive,
-            cell(&means.join("<br>")),
-            cell(&row.refuses.join("; ")),
-            cell(&guarantees(row)),
-        )
-    });
-    [
-        "| Written | Where | Calls | Means | Refuses | Guarantees |\n".to_owned(),
-        "|---|---|---|---|---|---|\n".to_owned(),
-    ]
-    .into_iter()
-    .chain(rows)
-    .collect()
-}
-
-/// A row's guarantees as one README cell: each claim with its axis and proof.
-fn guarantees(row: &Word) -> String {
-    let cited: Vec<String> = row
-        .guarantees
-        .iter()
-        .map(|guarantee| {
-            format!(
-                "{} ({}; {})",
-                guarantee.claim,
-                guarantee.axis.name(),
-                guarantee.evidence.cite()
-            )
+        .filter_map(|row| match row.kind {
+            Kind::Else => None,
+            Kind::If => Some(format!(
+                "`{}`/`{}`",
+                Kind::If.spelling(),
+                Kind::Else.spelling()
+            )),
+            Kind::Let => Some(format!("`{} x = <block>:`", Kind::Let.spelling())),
+            kind => Some(format!("`{}`", kind.spelling())),
         })
         .collect();
-    cited.join("; ")
-}
-
-/// An intra-doc link rendered as the code it names, for a page rustdoc does
-/// not resolve.
-fn plain(text: &str) -> String {
-    text.replace("[`", "`").replace("`]", "`")
-}
-
-/// An empty cell written as a dash, so a reader sees "nothing" rather than a
-/// gap.
-fn cell(text: &str) -> &str {
-    if text.is_empty() { "—" } else { text }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::{Evidence, LEXICON, doc_table, readme_table};
-    use crate::tests::{REFUSALS, expand};
-
-    /// The crate documentation's block table is the one the lexicon renders.
-    #[test]
-    fn the_crate_doc_table_is_rendered_from_the_lexicon() {
-        let table = doc_table();
-        assert!(
-            include_str!("lib.rs").contains(&table),
-            "src/lib.rs must carry the lexicon's block table verbatim:\n{table}"
-        );
-    }
-
-    /// The README's word table is the one the lexicon renders.
-    #[test]
-    fn the_readme_table_is_rendered_from_the_lexicon() {
-        let table = readme_table();
-        assert!(
-            include_str!("../README.md").contains(&table),
-            "README.md must carry the lexicon's word table verbatim:\n{table}"
-        );
-    }
-
-    /// One row per spelling: two rows for one token would make dispatch
-    /// depend on table order.
-    #[test]
-    fn every_spelling_has_exactly_one_row() {
-        let mut seen = HashSet::new();
-        for row in &LEXICON {
-            assert!(
-                seen.insert(row.kind.spelling()),
-                "`{}` has two rows",
-                row.kind.spelling()
-            );
-        }
-    }
-
-    /// Every row's example is a script the macro expands, and it uses the
-    /// word it illustrates.
-    #[test]
-    fn every_example_expands_and_uses_its_word() -> Result<(), String> {
-        for row in &LEXICON {
-            let spelling = row.kind.spelling();
-            let uses_word = row
-                .example
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .any(|token| token == spelling);
-            assert!(uses_word, "the example for `{spelling}` never says it");
-            expand(row.example)
-                .map_err(|refusal| format!("the example for `{spelling}` is refused: {refusal}"))?;
-        }
-        Ok(())
-    }
-
-    /// Every word guarantees something, and every guarantee names a test that
-    /// exists: a compile-fail case in `REFUSALS`, or a `#[test]` or swept
-    /// family in a `sim_` file. Renaming or deleting the test fails this, so a
-    /// guarantee cannot outlive its proof. The tests themselves run in the same
-    /// gate, so existing is what is left to check here.
-    #[test]
-    fn every_guarantee_names_a_test_that_exists() -> Result<(), String> {
-        for row in &LEXICON {
-            let spelling = row.kind.spelling();
-            if row.guarantees.is_empty() {
-                return Err(format!("`{spelling}` guarantees nothing"));
-            }
-            for guarantee in row.guarantees {
-                resolve(&guarantee.evidence)
-                    .map_err(|why| format!("`{spelling}` ({}): {why}", guarantee.claim))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Find the test `evidence` names.
-    fn resolve(evidence: &Evidence) -> Result<(), String> {
-        match *evidence {
-            Evidence::Refusal(case) => {
-                if REFUSALS.iter().any(|&(name, _, _)| name == case) {
-                    Ok(())
-                } else {
-                    Err(format!("no compile-fail case named {case:?}"))
-                }
-            }
-            Evidence::Sim { file, test } => {
-                let is_sim = file
-                    .rsplit_once('/')
-                    .is_some_and(|(_, name)| name.starts_with("sim_"));
-                if !is_sim {
-                    return Err(format!("{file} is not a simulation file"));
-                }
-                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-                let source = std::fs::read_to_string(root.join(file))
-                    .map_err(|error| format!("{file}: {error}"))?;
-                if defines_test(&source, test) {
-                    Ok(())
-                } else {
-                    Err(format!("{file} has no test or swept family `{test}`"))
-                }
-            }
-        }
-    }
-
-    /// Whether `source` declares `test` as a `#[test]` function, or defines it
-    /// as a family a `band_family!` sweeps.
-    fn defines_test(source: &str, test: &str) -> bool {
-        let header = format!("fn {test}(");
-        let lines: Vec<&str> = source.lines().map(str::trim_start).collect();
-        let Some(at) = lines.iter().position(|line| line.starts_with(&header)) else {
-            return false;
-        };
-        let attributed = lines
-            .iter()
-            .take(at)
-            .rev()
-            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
-            .any(|line| line.starts_with("#[test]"));
-        attributed || source.contains(&format!("=> {test}, "))
-    }
-
-    /// The resolver is not vacuous: a name with no test behind it, a swept
-    /// family that is not swept, and a case not in the table are all refused.
-    #[test]
-    fn a_guarantee_whose_test_is_gone_is_refused() {
-        let sweeps =
-            "fn fan(band: Band) -> TestResult {}\nband_family! { fan_band_00 => fan, 0; }\n";
-        assert!(defines_test(sweeps, "fan"), "a swept family resolves");
-        assert!(
-            !defines_test(sweeps, "fan_gone"),
-            "a missing family does not"
-        );
-        let unswept = "fn helper(band: Band) -> TestResult {}\n";
-        assert!(
-            !defines_test(unswept, "helper"),
-            "an unswept helper does not"
-        );
-        let attributed = "/// Doc.\n#[test]\nfn proves() {}\n";
-        assert!(defines_test(attributed, "proves"), "a `#[test]` resolves");
-        assert!(
-            resolve(&Evidence::Refusal("no such case")).is_err(),
-            "an unknown compile-fail case does not"
-        );
-        assert!(
-            resolve(&Evidence::Sim {
-                file: "crates/lgwks-bot/tests/it/script_flow.rs",
-                test: "a_deadline_that_passes_fails_the_step_as_timed_out",
-            })
-            .is_err(),
-            "a test outside a simulation file is not evidence"
-        );
+    match words.pop() {
+        Some(last) if !words.is_empty() => format!("{}, or {last}", words.join(", ")),
+        Some(last) => last,
+        None => String::new(),
     }
 }

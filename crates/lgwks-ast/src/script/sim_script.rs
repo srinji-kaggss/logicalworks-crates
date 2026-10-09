@@ -1,15 +1,16 @@
 //! Seeded simulations of the `script!` parser (#391).
 //!
 //! One seed draws whole scripts and every family asserts a property of the
-//! real `lines::split`, `lines::tree`, `refuse::check` and `emit::script`
-//! against a model the family keeps itself:
+//! real `lines::split`, `lines::tree`, `refuse::check` and [`parse`] against a
+//! model the family keeps itself:
 //!
 //! - the line tree is the one an independent indentation model predicts — line
 //!   number, column, token count, block and children — with calls split across
 //!   lines inside their brackets;
 //! - a line moved off every block column is refused at that line;
 //! - every script the grammar generator draws, which between them say every
-//!   word of the lexicon, expands;
+//!   word of the lexicon, parses (the macro writes Rust for any tree, so this
+//!   is the language accepting it);
 //! - a refused construct planted at any depth is refused at its own token with
 //!   the replacement in the message, and still refused nested inside brackets;
 //! - a step's label does not move when an unrelated line is inserted above it;
@@ -24,12 +25,12 @@
 use std::str::FromStr;
 
 use lgwks_deps::proc_macro2::{TokenStream, TokenTree};
-use lgwks_deps::syn;
 use lgwks_std::seeded::Seeded;
 
-use crate::lexicon::{Kind, LEXICON};
-use crate::lines::{self, Node};
-use crate::{emit, refuse};
+use super::lexicon::{Kind, LEXICON};
+use super::lines::{self, Node};
+use super::tree::{self, Block, BranchValue, Call, Code, Construct, Fragment, Statement};
+use super::{Refusal, parse, refuse};
 
 /// Columns per indentation level.
 const INDENT: usize = 4;
@@ -267,9 +268,11 @@ fn tree_family(first: u64, count: u64) -> Result<u64, String> {
         rows(&nodes, &mut read);
         if !read.iter().eq(laid.placed.iter().map(|placed| &placed.row)) {
             let model: Vec<&Row> = laid.placed.iter().map(|placed| &placed.row).collect();
-            return Err(format!(
+            let refusal = format!(
                 "seed {seed:#x}: the model laid out {model:?} and the tree read {read:?}:\n{source}"
-            ));
+            );
+            tracing::debug!(error = %refusal, "tree_family: returning an error to the caller");
+            return Err(refusal);
         }
         for row in &read {
             trace.count(row.line);
@@ -311,19 +314,23 @@ fn misalignment_family(first: u64, count: u64) -> Result<u64, String> {
         let source = physical.join("\n");
         match lines::tree(lines::split(stream(&source)?)) {
             Ok(_) => {
-                return Err(format!(
+                let refusal = format!(
                     "seed {seed:#x}: line {} moved off its column and was accepted:\n{source}",
                     moved.row.line
-                ));
+                );
+                tracing::debug!(error = %refusal, "misalignment_family: returning an error to the caller");
+                return Err(refusal);
             }
             Err(error) => {
                 let named = error.span().start().line;
                 if named != moved.row.line {
-                    return Err(format!(
+                    let refusal = format!(
                         "seed {seed:#x}: line {} moved, the refusal names line {named} \
                          ({error}):\n{source}",
                         moved.row.line
-                    ));
+                    );
+                    tracing::debug!(error = %refusal, "misalignment_family: returning an error to the caller");
+                    return Err(refusal);
                 }
                 trace.count(named);
                 trace.word(u64::from(deeper));
@@ -417,15 +424,16 @@ impl Script {
             } else {
                 self.draw.index(8)?
             };
-            match choice {
-                0 => self.plain(depth)?,
-                1 => self.run(depth)?,
-                2 | 3 => self.value(depth)?,
-                4 => self.nested(depth, "step part", Kind::Step)?,
-                5 => self.nested(depth, "for item in items", Kind::For)?,
-                6 => self.choice(depth)?,
-                _ => self.together(depth)?,
-            }
+            let written = match choice {
+                0 => self.plain(depth),
+                1 => self.run(depth),
+                2 | 3 => self.value(depth),
+                4 => self.nested(depth, "step part", Kind::Step),
+                5 => self.nested(depth, "for item in items", Kind::For),
+                6 => self.choice(depth),
+                _ => self.together(depth),
+            };
+            written?;
         }
         Ok(())
     }
@@ -461,7 +469,10 @@ impl Script {
         let name = self.name();
         let (header, kind) = *self.draw.pick(&[
             ("each item in items", Kind::Each),
-            ("each item in items, at most (site.quota()) at once", Kind::Each),
+            (
+                "each item in items, at most (site.quota()) at once",
+                Kind::Each,
+            ),
             ("within 2s", Kind::Within),
             ("retry up to 3 times", Kind::Retry),
             ("retry up to 3 times, waiting 100ms", Kind::Retry),
@@ -494,7 +505,11 @@ impl Script {
         self.line(depth, format!("if items.len() > {name}:"), Some(Kind::If));
         self.branch(inner)?;
         if self.draw.one_in(2)? {
-            self.line(depth, format!("else if items.len() == {name}:"), Some(Kind::Else));
+            self.line(
+                depth,
+                format!("else if items.len() == {name}:"),
+                Some(Kind::Else),
+            );
             self.branch(inner)?;
         }
         if self.draw.one_in(2)? {
@@ -585,28 +600,31 @@ impl Script {
     }
 }
 
-/// Expand `source` as the macro does: the expansion, or the refusal with its
-/// span.
-fn expand(source: &str) -> Result<Result<String, syn::Error>, String> {
-    let tokens = stream(source)?;
-    Ok(lines::tree(lines::split(tokens))
-        .and_then(emit::script)
-        .map(|expanded| expanded.to_string()))
+/// Read `source` as the macro does: the tree, or the refusal with its span.
+fn read(source: &str) -> Result<Result<tree::Script, Refusal>, String> {
+    Ok(parse(stream(source)?))
 }
 
-/// The expansion of a script the family expects to be accepted.
-fn accepted(seed: u64, source: &str) -> Result<String, String> {
-    expand(source)?.map_err(|error| format!("seed {seed:#x}: refused ({error}):\n{source}"))
+/// The tree of a script the family expects to be accepted.
+fn accepted(seed: u64, source: &str) -> Result<tree::Script, String> {
+    read(source)?.map_err(|refusal| format!("seed {seed:#x}: refused ({refusal}):\n{source}"))
 }
 
-/// Every generated script expands.
+/// Every generated script parses, and its map names every step it wrote.
 fn expansion_family(first: u64, count: u64) -> Result<u64, String> {
     let mut trace = Trace::default();
     for offset in 0..count {
         let seed = SCRIPT_BASE.wrapping_add(first).wrapping_add(offset);
         let script = Script::drawn(seed)?;
         let (source, _) = script.render();
-        trace.count(accepted(seed, &source)?.len());
+        let read = accepted(seed, &source)?;
+        for flow in read.flows() {
+            trace.text(flow.shape().signature());
+            trace.count(flow.shape().steps().len());
+        }
+        for label in labels(&read) {
+            trace.text(&label);
+        }
         trace.count(script.lines.len());
     }
     Ok(trace.0)
@@ -720,7 +738,10 @@ const WRAPPERS: [(&str, &str); 4] = [("outer(", ")"), ("{ ", " }"), ("vec![", "]
 fn planted_line(draw: &mut Draw, plant: &Plant, nest: bool) -> Result<(String, usize), String> {
     let missing = || format!("`{}` does not contain `{}`", plant.line, plant.at);
     let Some(rest) = plant.line.strip_prefix(LET).filter(|_| nest) else {
-        return Ok((plant.line.to_owned(), plant.line.find(plant.at).ok_or_else(missing)?));
+        return Ok((
+            plant.line.to_owned(),
+            plant.line.find(plant.at).ok_or_else(missing)?,
+        ));
     };
     let depth = draw.between(1, 3)?;
     let mut opening = String::new();
@@ -764,13 +785,17 @@ fn planting(first: u64, count: u64, nest: bool) -> Result<(u64, Vec<usize>), Str
             .get(under.saturating_add(1))
             .ok_or_else(|| format!("seed {seed:#x}: the planted line has no start"))?;
         let column = depth.saturating_mul(INDENT).saturating_add(offset_in_line);
-        let Err(error) = expand(&source)? else {
-            return Err(format!("seed {seed:#x}: `{line}` was accepted:\n{source}"));
+        let Err(error) = read(&source)? else {
+            let refusal = format!("seed {seed:#x}: `{line}` was accepted:\n{source}");
+            tracing::debug!(error = %refusal, "planting: returning an error to the caller");
+            return Err(refusal);
         };
         spanned_at(seed, &error, (line_number, column), plant.says, &source)?;
         let alone: Vec<TokenTree> = stream(&line)?.into_iter().collect();
         let Err(direct) = refuse::check(&alone) else {
-            return Err(format!("seed {seed:#x}: refuse::check accepted `{line}` alone"));
+            let refusal = format!("seed {seed:#x}: refuse::check accepted `{line}` alone");
+            tracing::debug!(error = %refusal, "planting: returning an error to the caller");
+            return Err(refusal);
         };
         spanned_at(seed, &direct, (1, offset_in_line), plant.says, &line)?;
         trace.count(line_number);
@@ -783,7 +808,7 @@ fn planting(first: u64, count: u64, nest: bool) -> Result<(u64, Vec<usize>), Str
 /// The refusal is spanned at `(line, column)` and names the replacement.
 fn spanned_at(
     seed: u64,
-    error: &syn::Error,
+    error: &Refusal,
     (line, column): (usize, usize),
     says: &str,
     source: &str,
@@ -791,11 +816,13 @@ fn spanned_at(
     let start = error.span().start();
     let message = error.to_string();
     if (start.line, start.column) != (line, column) || !message.contains(says) {
-        return Err(format!(
+        let refusal = format!(
             "seed {seed:#x}: expected `{says}` at {line}:{column}, the refusal was `{message}` \
              at {}:{}:\n{source}",
             start.line, start.column
-        ));
+        );
+        tracing::debug!(error = %refusal, "spanned_at: returning an error to the caller");
+        return Err(refusal);
     }
     Ok(())
 }
@@ -812,13 +839,94 @@ fn nested_plant_family(first: u64, count: u64) -> Result<u64, String> {
 
 // ── Step labels ───────────────────────────────────────────────────────────
 
-/// Every label an expansion enters a scope under, in order.
-fn labels(expansion: &str) -> Vec<String> {
-    expansion
-        .split("enter (\"")
-        .skip(1)
-        .filter_map(|after| after.split_once('"').map(|(label, _)| label.to_owned()))
-        .collect()
+/// Every label the tree gives a scope, depth first in source order: each
+/// block's, and each `run` call's.
+fn labels(script: &tree::Script) -> Vec<String> {
+    let mut out = Vec::new();
+    for flow in script.flows() {
+        block_labels(flow.body(), &mut out);
+    }
+    out
+}
+
+/// The labels under `block`.
+fn block_labels(block: &Block, out: &mut Vec<String>) {
+    for statement in block.statements() {
+        match *statement {
+            Statement::Rust(ref code)
+            | Statement::Let(ref code)
+            | Statement::GiveBack(ref code) => {
+                code_labels(code, out);
+            }
+            Statement::Fail { ref reason, .. } => code_labels(reason, out),
+            Statement::Run(ref call) => call_labels(call, out),
+            Statement::Bind { ref block, .. } | Statement::Construct(ref block) => {
+                construct_labels(block, out);
+            }
+            Statement::Together(ref together) => {
+                for branch in together.branches() {
+                    match *branch.value() {
+                        BranchValue::Construct(ref construct) => construct_labels(construct, out),
+                        BranchValue::Run(ref call) => call_labels(call, out),
+                        BranchValue::Rust(ref code) => code_labels(code, out),
+                    }
+                }
+            }
+            Statement::For(ref each) => {
+                out.push(each.label().to_owned());
+                code_labels(each.items(), out);
+                block_labels(each.body(), out);
+            }
+            Statement::If(ref chain) => {
+                for branch in chain.branches() {
+                    if let Some(condition) = branch.condition() {
+                        code_labels(condition, out);
+                    }
+                    block_labels(branch.body(), out);
+                }
+            }
+        }
+    }
+}
+
+/// The labels of one block construct and everything under it.
+fn construct_labels(construct: &Construct, out: &mut Vec<String>) {
+    match *construct {
+        Construct::Each(ref each) => {
+            out.push(each.label().to_owned());
+            code_labels(each.items(), out);
+            block_labels(each.body(), out);
+        }
+        Construct::Within(ref within) => {
+            out.push(within.label().to_owned());
+            block_labels(within.body(), out);
+        }
+        Construct::Retry(ref again) => {
+            out.push(again.label().to_owned());
+            block_labels(again.body(), out);
+        }
+        Construct::Step(ref step) => {
+            out.push(step.label().to_owned());
+            block_labels(step.body(), out);
+        }
+    }
+}
+
+/// The labels of the `run` calls in a line of Rust.
+fn code_labels(code: &Code, out: &mut Vec<String>) {
+    for fragment in code.fragments() {
+        match *fragment {
+            Fragment::Token(_) => {}
+            Fragment::Group { ref inner, .. } => code_labels(inner, out),
+            Fragment::Run(ref call) => call_labels(call, out),
+        }
+    }
+}
+
+/// A call's label, then the labels of the calls in its arguments.
+fn call_labels(call: &Call, out: &mut Vec<String>) {
+    out.push(call.label().to_owned());
+    code_labels(call.arguments(), out);
 }
 
 /// A line inserted above a step changes none of the script's step labels.
@@ -837,10 +945,12 @@ fn label_family(first: u64, count: u64) -> Result<u64, String> {
         let (edited, _) = script.render();
         let after = labels(&accepted(seed, &edited)?);
         if before != after {
-            return Err(format!(
+            let refusal = format!(
                 "seed {seed:#x}: an unrelated line moved the labels {before:?} to \
                  {after:?}:\n{edited}"
-            ));
+            );
+            tracing::debug!(error = %refusal, "label_family: returning an error to the caller");
+            return Err(refusal);
         }
         seen = seen.saturating_add(before.len());
         for label in &before {
@@ -848,7 +958,10 @@ fn label_family(first: u64, count: u64) -> Result<u64, String> {
         }
     }
     if seen == 0 {
-        return Err("no script in the band entered a labelled scope, so nothing was tested".to_owned());
+        let refusal =
+            "no script in the band entered a labelled scope, so nothing was tested".to_owned();
+        tracing::debug!(error = %refusal, "label_family: returning an error to the caller");
+        return Err(refusal);
     }
     Ok(trace.0)
 }
@@ -914,8 +1027,8 @@ fn sim_one_band_of_scripts_says_every_word() -> Result<(), String> {
     }
     let unsaid: Vec<&str> = LEXICON
         .iter()
-        .filter(|row| !said.contains(&row.kind))
-        .map(|row| row.kind.spelling())
+        .filter(|row| !said.contains(&row.kind()))
+        .map(|row| row.kind().spelling())
         .collect();
     if unsaid.is_empty() {
         Ok(())
@@ -959,7 +1072,9 @@ fn sim_the_same_seed_replays_to_the_same_trace() -> Result<(), String> {
     if once == again {
         Ok(())
     } else {
-        Err(format!("one seed range traced {once:x?} and then {again:x?}"))
+        Err(format!(
+            "one seed range traced {once:x?} and then {again:x?}"
+        ))
     }
 }
 
@@ -977,7 +1092,9 @@ fn sim_distinct_seeds_diverge_in_every_family() -> Result<(), String> {
     if same.is_empty() {
         Ok(())
     } else {
-        Err(format!("families {same:?} traced two seed ranges identically"))
+        Err(format!(
+            "families {same:?} traced two seed ranges identically"
+        ))
     }
 }
 

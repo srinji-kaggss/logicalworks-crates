@@ -1,7 +1,7 @@
 //! `script!`'s refusals, held by a real downstream consumer's compiler.
 //!
-//! The macro refuses banned calls by spelling (`lgwks_macros::refuse`), and
-//! those refusals are asserted by message in that crate's own tests. What a
+//! The macro refuses banned calls by spelling (`lgwks_ast::script` reads them), and
+//! those refusals are asserted by message in `lgwks_macros`' own tests. What a
 //! token check cannot see is a name imported outside the script under another
 //! spelling: `use std::process::exit;` above the macro, `exit(1)` inside it.
 //! For that half every generated flow carries `#[forbid(..)]` lint attributes,

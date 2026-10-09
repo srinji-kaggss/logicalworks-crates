@@ -11,7 +11,8 @@
 use lgwks_deps::proc_macro2::{
     Delimiter, Group, Ident, LineColumn, Punct, Spacing, Span, TokenStream, TokenTree,
 };
-use lgwks_deps::syn::{Error, Result};
+
+use super::{Refusal, Result};
 
 /// One logical line of a script.
 pub(crate) struct Line {
@@ -128,12 +129,12 @@ pub(crate) fn tree(lines: Vec<Line>) -> Result<Vec<Node>> {
     };
     let nodes = block(&mut queue, first_column)?;
     if let Some(stray) = queue.next() {
-        let refusal = Err(Error::new(
+        let refusal = Err(Refusal::new(
             stray.span,
             "this line is indented less than the first line of the script; \
          every flow starts at the same column",
         ));
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tree: returning an error to the caller");
+        tracing::debug!(error = ?refusal.as_ref().err(), "tree: returning an error to the caller");
         return refusal;
     }
     Ok(nodes)
@@ -150,11 +151,11 @@ fn block(
             break;
         }
         if next.column > column {
-            let refusal = Err(Error::new(
+            let refusal = Err(Refusal::new(
                 next.span,
                 "unexpected indent: only a line ending in `:` opens an indented block",
             ));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+            tracing::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
             return refusal;
         }
         let Some(line) = queue.next() else {
@@ -164,23 +165,23 @@ fn block(
         if line.opens_block {
             let Some(child_column) = queue.peek().map(|child| child.column) else {
                 let refusal = Err(expected_block(&line));
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                tracing::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
                 return refusal;
             };
             if child_column <= column {
                 let refusal = Err(expected_block(&line));
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                tracing::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
                 return refusal;
             }
             children = block(queue, child_column)?;
             if let Some(after) = queue.peek()
                 && after.column > column
             {
-                let refusal = Err(Error::new(
+                let refusal = Err(Refusal::new(
                     after.span,
                     "this dedent does not line up with any enclosing block",
                 ));
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
+                tracing::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
                 return refusal;
             }
         }
@@ -190,8 +191,8 @@ fn block(
 }
 
 /// The error for a header with no block beneath it.
-fn expected_block(line: &Line) -> Error {
-    Error::new(
+fn expected_block(line: &Line) -> Refusal {
+    Refusal::new(
         line.span,
         "this line ends in `:` and so opens a block, but nothing is indented beneath it",
     )
