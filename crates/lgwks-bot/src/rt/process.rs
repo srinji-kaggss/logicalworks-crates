@@ -503,24 +503,31 @@ impl ProcessSpec {
     /// a `/`; a bare name with a pinned `PATH` (see [`Self::env`]) falls back
     /// to `fork` + `execvp`, which copies the supervisor's page tables and
     /// runs every allocator's at-fork handlers on each spawn. Resolving here
-    /// keeps the fast path for the exact case production callers hit, while
-    /// every ambiguous case stays bare and takes the old path unchanged.
+    /// takes the fast path for the case production callers hit.
     ///
-    /// The lookup folds the spec's own deltas over the inherited `PATH`, in
-    /// order, so the search sees what the child will see (INV-BOT-159): after
-    /// a `Clear` that sets no `PATH`, or a `Remove`, the path is unknown and
-    /// the program stays bare for the platform's default search. Entries keep
-    /// `execvp` semantics: absent entries, directories, and files without any
-    /// execute bit are skipped; an empty entry means the child's working
-    /// directory. A candidate that is executable but carries no `#!` line and
-    /// no ELF magic is left bare, because `execvp` would run it through the
-    /// shell (`ENOEXEC` fallback) and a resolved path would fail instead.
+    /// The rule is that resolution may only ever name **the file `execvp`
+    /// would have run**; anything it cannot decide stays bare and takes the
+    /// fork path unchanged. The lookup folds the spec's own deltas over the
+    /// inherited `PATH`, in order, so the search sees what the child will see
+    /// (INV-BOT-159): after a `Clear` that sets no `PATH`, or a `Remove`, the
+    /// path is unknown and the program stays bare. Each entry is judged the
+    /// way `execve` judges it — symlinks followed — and an entry `execvp`
+    /// would pass over (absent, a directory, no execute bit at all, a search
+    /// it may not make) is passed over here. An entry it would *try* ends the
+    /// walk: a regular file with every execute bit and a directly executable
+    /// head (a `#!` line naming an existing executable interpreter, or this
+    /// platform's native binary magic) resolves; anything else — partial
+    /// execute bits, a head that could not be read, a shell-fallback script —
+    /// stays bare, because whether `execvp` runs it or moves on is the
+    /// kernel's call for this caller, not a guess this walk may make. A
+    /// working directory that is not absolute stays bare too: `Command` would
+    /// read a relative program path against the child's directory a second
+    /// time.
     ///
-    /// Stated differences from the fork path: the `+x`-bit check is the
-    /// caller's readability rule, so a superuser whose kernel would execute a
-    /// bit-less file still takes the fork path for it; and the directory walk
-    /// happens before the fork rather than after, so a `PATH` entry replaced
-    /// in between resolves to the earlier file.
+    /// **Not claimed:** the walk happens before the fork rather than after, so
+    /// a `PATH` entry replaced in between resolves to the earlier file; and a
+    /// native binary whose loader is missing fails with `ENOENT` where
+    /// `execvp` would have tried a later entry of the same name.
     pub(crate) fn resolved_program(&self) -> PathBuf {
         #[cfg(unix)]
         if let Some(resolved) = resolve_on_path(&self.program, &self.env, self.cwd.as_deref()) {
@@ -587,17 +594,29 @@ impl ProcessSpec {
 #[cfg(unix)]
 const MAX_PATH_ENTRIES: usize = 128;
 
-/// Resolve `program` against `path` the way `execvp` would, or `None`.
+/// How many bytes of a candidate's head [`probe_entry`] reads: enough for a
+/// `#!` line naming an interpreter by an ordinary absolute path.
+#[cfg(unix)]
+const MAX_HEAD_BYTES: usize = 256;
+
+/// Resolve `program` against the child's `PATH` the way `execvp` would, or
+/// `None` to spawn it bare.
 ///
-/// `None` means "spawn it bare": the name holds a `/`, the path is unknown,
-/// nothing executable was found, or the only executable needs the shell
-/// fallback. Every `None` takes the pre-existing fork path, so resolution can
-/// only add the fast path, never change what runs.
+/// `None` means the name holds a `/`, the path is unknown, the base directory
+/// is not absolute, nothing executable was found, or an entry was found whose
+/// fate only the kernel can decide. Every `None` takes the pre-existing fork
+/// path, so resolution can only add the fast path, never change what runs.
 #[cfg(unix)]
 fn resolve_on_path(program: &OsStr, deltas: &[EnvDelta], cwd: Option<&Path>) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::PermissionsExt as _;
-    if program.as_bytes().contains(&b'/') {
+    if program.is_empty() || program.as_bytes().contains(&b'/') {
+        return None;
+    }
+    // A spec that leaves `PATH` alone already spawns through `posix_spawnp`,
+    // which searches the inherited path itself: walking it here would only add
+    // a stat, an open and a read to every ordinary spawn. `std` falls back to
+    // the fork exactly when the path was changed, so that is when this walks.
+    if !deltas.iter().any(EnvDelta::changes_path) {
         return None;
     }
     let path = effective_path(deltas)?;
@@ -605,34 +624,35 @@ fn resolve_on_path(program: &OsStr, deltas: &[EnvDelta], cwd: Option<&Path>) -> 
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir().ok()?,
     };
-    let mut entries = 0usize;
-    for entry in path.as_bytes().split(|byte| *byte == b':') {
-        entries = entries.saturating_add(1);
-        if entries > MAX_PATH_ENTRIES {
+    if !base.is_absolute() {
+        return None;
+    }
+    for (index, entry) in path.as_bytes().split(|byte| *byte == b':').enumerate() {
+        if index >= MAX_PATH_ENTRIES {
             return None;
         }
-        let dir = if entry.is_empty() {
-            base.clone()
-        } else {
-            base.join(OsStr::from_bytes(entry))
-        };
-        let candidate = dir.join(program);
-        let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
-            continue;
-        };
-        if metadata.file_type().is_dir() || metadata.permissions().mode() & 0o111 == 0 {
-            continue;
-        }
-        match probe_executable(&candidate) {
-            Executable::Direct => return Some(candidate),
-            // An entry that fails is skipped: the search moves on.
-            Executable::Unreadable => continue,
-            // Executable but not directly so: `execvp` would run it through
-            // the shell. Leaving the program bare preserves that fallback.
-            Executable::NeedsShell => return None,
+        // An empty entry is the child's working directory; a relative one is
+        // read against it; an absolute one replaces it.
+        let candidate = base.join(OsStr::from_bytes(entry)).join(program);
+        match probe_entry(&candidate) {
+            Entry::PassedOver => {}
+            Entry::Spawnable => return Some(candidate),
+            Entry::Undecided => return None,
         }
     }
     None
+}
+
+#[cfg(unix)]
+impl EnvDelta {
+    /// Whether this delta changes the child's `PATH`, the condition under which
+    /// `std` gives up `posix_spawnp` for a bare program.
+    fn changes_path(&self) -> bool {
+        match *self {
+            Self::Set { ref key, .. } | Self::Remove { ref key } => key.as_os_str() == "PATH",
+            Self::Clear => true,
+        }
+    }
 }
 
 /// The `PATH` the child will see: the inherited one folded through `deltas`.
@@ -660,44 +680,139 @@ fn effective_path(deltas: &[EnvDelta]) -> Option<OsString> {
     path
 }
 
-/// What probing one `PATH` candidate found.
+/// What `execvp` would do with one `PATH` candidate.
 #[cfg(unix)]
-enum Executable {
-    /// A `#!` script or ELF binary: the kernel runs it directly.
-    Direct,
-    /// Could not be opened or read: an entry that fails, skipped like one.
-    Unreadable,
-    /// Executable but leaning on `execvp`'s shell fallback: resolve to bare.
-    NeedsShell,
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    /// `execvp` moves on to the next entry: absent, a directory, no execute
+    /// bit, or a search it may not make.
+    PassedOver,
+    /// The kernel runs it directly, for any caller: the walk resolves here.
+    Spawnable,
+    /// `execvp` would try it, and only the kernel knows what happens: the
+    /// walk stops and the program stays bare.
+    Undecided,
 }
 
-/// Whether the kernel can execute `candidate` without a shell: a `#!` script
-/// or an ELF binary. Anything else leans on `execvp`'s `ENOEXEC` fallback, so
-/// it resolves to "leave it bare". An unreadable file is skipped the same
-/// way an entry that fails is skipped.
+/// Judge one candidate the way `execve` would, symlinks followed.
 #[cfg(unix)]
-fn probe_executable(candidate: &Path) -> Executable {
-    use std::io::Read as _;
-    let mut head = [0u8; 4];
-    let mut file = match std::fs::File::open(candidate) {
-        Ok(file) => file,
+fn probe_entry(candidate: &Path) -> Entry {
+    use std::os::unix::fs::PermissionsExt as _;
+    let metadata = match std::fs::metadata(candidate) {
+        Ok(metadata) => metadata,
+        // The three errors `execvp` searches past; any other is the kernel's.
         Err(error) => {
-            lgwks_std::trace::debug!(
-                path = ?candidate,
-                error = %error,
-                "resolve_on_path skipped a candidate it could not open"
-            );
-            return Executable::Unreadable;
+            return match error.kind() {
+                io::ErrorKind::NotFound
+                | io::ErrorKind::NotADirectory
+                | io::ErrorKind::PermissionDenied => Entry::PassedOver,
+                _ => {
+                    lgwks_std::trace::debug!(
+                        path = ?candidate,
+                        error = %error,
+                        "resolve_on_path left the program bare at a candidate it could not stat"
+                    );
+                    Entry::Undecided
+                }
+            };
         }
     };
-    // A short or failed read is damage, not an executable: skip the entry.
-    if file.read_exact(&mut head).is_err() {
-        return Executable::Unreadable;
+    if metadata.is_dir() {
+        return Entry::PassedOver;
     }
-    if head.starts_with(b"#!") || head.starts_with(b"\x7fELF") {
-        Executable::Direct
+    match metadata.permissions().mode() & 0o111 {
+        0 => return Entry::PassedOver,
+        0o111 => {}
+        // Executable by someone: whether by this caller is the kernel's call.
+        _ => return Entry::Undecided,
+    }
+    if !metadata.is_file() {
+        return Entry::Undecided;
+    }
+    let mut head = Vec::with_capacity(MAX_HEAD_BYTES);
+    if let Err(error) = read_head(candidate, &mut head) {
+        // An execute-only file is still executable: an unreadable head is the
+        // kernel's to judge, never a reason to try the next entry.
+        lgwks_std::trace::debug!(
+            path = ?candidate,
+            error = %error,
+            "resolve_on_path left the program bare at a head it could not read"
+        );
+        return Entry::Undecided;
+    }
+    if is_direct_head(&head) {
+        Entry::Spawnable
     } else {
-        Executable::NeedsShell
+        Entry::Undecided
+    }
+}
+
+/// Read up to [`MAX_HEAD_BYTES`] of `candidate` into `head`.
+#[cfg(unix)]
+fn read_head(candidate: &Path, head: &mut Vec<u8>) -> io::Result<()> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(candidate)?;
+    let limit = u64::try_from(MAX_HEAD_BYTES).map_err(io::Error::other)?;
+    file.take(limit).read_to_end(head)?;
+    Ok(())
+}
+
+/// Whether the kernel executes a file with this head without a shell: a
+/// `#!` line whose interpreter is an existing regular file with every execute
+/// bit, or this platform's native binary magic.
+#[cfg(unix)]
+fn is_direct_head(head: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Some(line) = head.strip_prefix(b"#!") {
+        // A `#!` line longer than the head names no ordinary interpreter.
+        let Some(end) = line.iter().position(|byte| *byte == b'\n') else {
+            return false;
+        };
+        let Some((line, _)) = line.split_at_checked(end) else {
+            return false;
+        };
+        let Some(interpreter) = line
+            .split(|byte| *byte == b' ' || *byte == b'\t')
+            .find(|word| !word.is_empty())
+        else {
+            return false;
+        };
+        let interpreter = Path::new(OsStr::from_bytes(interpreter));
+        return interpreter.is_absolute()
+            && std::fs::metadata(interpreter).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 == 0o111
+            });
+    }
+    is_native_binary(head)
+}
+
+/// An ELF image: the native format of every non-Apple Unix this crate builds
+/// for. A Mach-O there is `ENOEXEC`, which `execvp` hands to the shell.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn is_native_binary(head: &[u8]) -> bool {
+    head.starts_with(b"\x7fELF")
+}
+
+/// A Mach-O image, thin or universal. A universal header shares its magic with
+/// a Java class file, whose next word is a version (45 or more) where a
+/// universal binary's is its architecture count, so only a small count is a
+/// binary. An ELF image here is `ENOEXEC`, which `execvp` hands to the shell.
+#[cfg(target_vendor = "apple")]
+fn is_native_binary(head: &[u8]) -> bool {
+    /// More architectures than any universal binary carries, and fewer than
+    /// the first Java class-file version.
+    const MAX_FAT_ARCHS: u32 = 20;
+    let Some((magic, rest)) = head.split_first_chunk::<4>() else {
+        return false;
+    };
+    match *magic {
+        [0xcf | 0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce | 0xcf] => true,
+        [0xca, 0xfe, 0xba, 0xbe | 0xbf] => rest
+            .first_chunk::<4>()
+            .map(|count| u32::from_be_bytes(*count))
+            .is_some_and(|count| count > 0 && count < MAX_FAT_ARCHS),
+        _ => false,
     }
 }
 
@@ -1555,48 +1670,63 @@ impl std::error::Error for ProcessRunError {
 #[cfg(all(test, unix))]
 mod resolution_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
-    static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+    /// Distinguishes scratch directories made in the same nanosecond.
+    static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    /// A scratch `PATH` entry owned by one test: a directory of fixture
-    /// programs under the system temp dir, removed afterwards.
-    struct Fixture {
+    /// A shell script whose interpreter exists on every Unix this runs on.
+    const SCRIPT: &[u8] = b"#!/bin/sh\nexit 0\n";
+
+    /// One test's scratch `PATH` entry, removed on drop however the test ends.
+    struct Scratch {
         dir: PathBuf,
     }
 
-    impl Fixture {
-        fn named(body: &str, executable: bool) -> io::Result<Self> {
-            use std::os::unix::fs::PermissionsExt as _;
-            let dir = std::env::temp_dir().join(format!(
-                "lgwks-resolve-{}-{}",
-                std::process::id(),
-                FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
+    impl Scratch {
+        /// A fresh directory named by the clock and a counter (INV-DEP-6): a
+        /// process id is reused by the OS and is not an identity.
+        fn new() -> io::Result<Self> {
+            let nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(since) => since.as_nanos(),
+                Err(before) => before.duration().as_nanos(),
+            };
+            let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("lgwks-resolve-{nanos}-{seq}"));
             std::fs::create_dir_all(&dir)?;
-            for (name, mode) in [("witness", 0o755), ("plain", 0o644)] {
-                let at = dir.join(name);
-                std::fs::write(&at, body)?;
-                if executable || name == "witness" {
-                    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode))?;
-                }
-            }
             Ok(Self { dir })
         }
 
-        fn path_value(&self) -> OsString {
-            self.dir.as_os_str().to_os_string()
+        /// Write `name` with `body` and exactly `mode`.
+        fn file(&self, name: &str, body: &[u8], mode: u32) -> io::Result<PathBuf> {
+            use std::os::unix::fs::PermissionsExt as _;
+            let at = self.dir.join(name);
+            std::fs::write(&at, body)?;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode))?;
+            Ok(at)
+        }
+
+        /// Make `name` a symlink to `target`.
+        fn link(&self, name: &str, target: &Path) -> io::Result<PathBuf> {
+            let at = self.dir.join(name);
+            std::os::unix::fs::symlink(target, &at)?;
+            Ok(at)
+        }
+
+        fn entry(&self) -> &OsStr {
+            self.dir.as_os_str()
         }
     }
 
-    impl Drop for Fixture {
+    impl Drop for Scratch {
         fn drop(&mut self) {
             if let Err(error) = std::fs::remove_dir_all(&self.dir) {
                 lgwks_std::trace::debug!(
                     path = ?self.dir,
                     error = %error,
-                    "resolution_tests fixture left its scratch dir behind"
+                    "resolution_tests left its scratch dir behind"
                 );
             }
         }
@@ -1608,33 +1738,145 @@ mod resolution_tests {
         spec
     }
 
+    fn joined(entries: &[&OsStr]) -> OsString {
+        let mut path = OsString::new();
+        for (index, entry) in entries.iter().enumerate() {
+            if index > 0 {
+                path.push(":");
+            }
+            path.push(entry);
+        }
+        path
+    }
+
     #[test]
-    fn a_bare_name_resolves_to_the_entry_holding_a_shebang_script() -> io::Result<()> {
-        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
-        let spec = spec_with_path("witness", &fixture.path_value());
-        assert_eq!(spec.resolved_program(), fixture.dir.join("witness"));
+    fn a_bare_name_resolves_to_a_script_whose_interpreter_exists() -> io::Result<()> {
+        let scratch = Scratch::new()?;
+        let witness = scratch.file("witness", SCRIPT, 0o755)?;
+        let spec = spec_with_path("witness", scratch.entry());
+        assert_eq!(spec.resolved_program(), witness);
+        Ok(())
+    }
+
+    #[test]
+    fn a_script_naming_a_missing_interpreter_stays_bare() -> io::Result<()> {
+        // `execve` fails it with ENOENT and `execvp` would try a later entry,
+        // so resolving it would change what runs.
+        let scratch = Scratch::new()?;
+        scratch.file("witness", b"#!/nonexistent/lgwks-interpreter\n", 0o755)?;
+        let spec = spec_with_path("witness", scratch.entry());
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlink_to_a_native_binary_resolves_to_the_link() -> io::Result<()> {
+        // `/bin/sh` is ELF on Linux and a universal Mach-O on macOS, so this
+        // also drives each platform's native-magic arm.
+        let scratch = Scratch::new()?;
+        let witness = scratch.link("witness", Path::new("/bin/sh"))?;
+        let spec = spec_with_path("witness", scratch.entry());
+        assert_eq!(spec.resolved_program(), witness);
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlink_is_judged_by_its_target_and_passed_over_like_it() -> io::Result<()> {
+        // The link's own mode is 0o777 (0o755 on macOS); the target has no
+        // execute bit, so `execve` refuses it and `execvp` moves on.
+        let first = Scratch::new()?;
+        let target = first.file("real", SCRIPT, 0o644)?;
+        first.link("witness", &target)?;
+        let second = Scratch::new()?;
+        let later = second.file("witness", SCRIPT, 0o755)?;
+        let spec = spec_with_path("witness", &joined(&[first.entry(), second.entry()]));
+        assert_eq!(spec.resolved_program(), later);
+        Ok(())
+    }
+
+    #[test]
+    fn an_execute_only_entry_is_never_skipped_for_a_later_one() -> io::Result<()> {
+        // `execvp` runs the first executable entry whether or not its head is
+        // readable. As a user the head is unreadable and the name stays bare;
+        // as root it is read and resolves to the first entry. Never the second.
+        let first = Scratch::new()?;
+        let earlier = first.file("witness", SCRIPT, 0o711)?;
+        let second = Scratch::new()?;
+        let later = second.file("witness", SCRIPT, 0o755)?;
+        let spec = spec_with_path("witness", &joined(&[first.entry(), second.entry()]));
+        let resolved = spec.resolved_program();
+        assert_ne!(resolved, later, "a later entry shadowed an executable one");
+        assert!(
+            resolved == earlier || resolved == Path::new("witness"),
+            "resolved to {resolved:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_execute_bits_stay_bare_for_the_kernel_to_judge() -> io::Result<()> {
+        let first = Scratch::new()?;
+        first.file("witness", SCRIPT, 0o710)?;
+        let second = Scratch::new()?;
+        second.file("witness", SCRIPT, 0o755)?;
+        let spec = spec_with_path("witness", &joined(&[first.entry(), second.entry()]));
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_relative_working_directory_stays_bare() -> io::Result<()> {
+        // `Command` would read a relative program against the child's working
+        // directory again, doubling it.
+        let mut spec = ProcessSpec::new("witness");
+        spec.current_dir("relative-lgwks-dir");
+        spec.env("PATH", "");
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_shell_fallback_script_stays_bare() -> io::Result<()> {
+        let scratch = Scratch::new()?;
+        scratch.file("witness", b"exit 0\n", 0o755)?;
+        let spec = spec_with_path("witness", scratch.entry());
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_foreign_binary_and_a_class_file_stay_bare() -> io::Result<()> {
+        // The other platform's magic is ENOEXEC here, and a Java class file
+        // shares the universal Mach-O magic with a version where the count is.
+        #[cfg(target_vendor = "apple")]
+        let foreign: &[u8] = b"\x7fELF\x02\x01\x01\x00";
+        #[cfg(not(target_vendor = "apple"))]
+        let foreign: &[u8] = &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
+        let class: &[u8] = &[0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x41];
+        for head in [foreign, class] {
+            let scratch = Scratch::new()?;
+            scratch.file("witness", head, 0o755)?;
+            let spec = spec_with_path("witness", scratch.entry());
+            assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        }
         Ok(())
     }
 
     #[test]
     fn a_name_holding_a_slash_is_never_rewritten() -> io::Result<()> {
-        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
-        let spelled = fixture.dir.join("witness");
-        let Some(spelled_str) = spelled.to_str() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "temp dir is not UTF-8",
-            ));
-        };
-        let spec = spec_with_path(spelled_str, &fixture.path_value());
+        let scratch = Scratch::new()?;
+        let spelled = scratch.file("witness", SCRIPT, 0o755)?;
+        let mut spec = ProcessSpec::new(spelled.as_os_str());
+        spec.env("PATH", scratch.entry());
         assert_eq!(spec.resolved_program(), spelled);
         Ok(())
     }
 
     #[test]
     fn a_name_found_nowhere_stays_bare_for_the_platform_default() -> io::Result<()> {
-        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
-        let spec = spec_with_path("no-such-program-lgwks", &fixture.path_value());
+        let scratch = Scratch::new()?;
+        scratch.file("witness", SCRIPT, 0o755)?;
+        let spec = spec_with_path("no-such-program-lgwks", scratch.entry());
         assert_eq!(
             spec.resolved_program(),
             PathBuf::from("no-such-program-lgwks")
@@ -1651,68 +1893,67 @@ mod resolution_tests {
 
     #[test]
     fn a_removed_path_stays_bare() -> io::Result<()> {
-        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
-        let mut spec = spec_with_path("witness", &fixture.path_value());
+        let scratch = Scratch::new()?;
+        scratch.file("witness", SCRIPT, 0o755)?;
+        let mut spec = spec_with_path("witness", scratch.entry());
         spec.env_remove("PATH");
         assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
         Ok(())
     }
 
     #[test]
-    fn a_shebang_less_script_stays_bare_to_keep_the_shell_fallback() -> io::Result<()> {
-        let dir = std::env::temp_dir().join(format!(
-            "lgwks-resolve-noshebang-{}-{}",
-            std::process::id(),
-            FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir)?;
-        let at = dir.join("witness");
-        std::fs::write(&at, "exit 0\n")?;
+    fn directories_and_bit_less_files_are_passed_over_for_a_later_entry() -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755))?;
-        let spec = spec_with_path("witness", dir.as_os_str());
-        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
-        if let Err(error) = std::fs::remove_dir_all(&dir) {
-            lgwks_std::trace::debug!(
-                path = ?dir,
-                error = %error,
-                "resolution_tests fixture left its scratch dir behind"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn directories_and_bit_less_files_are_skipped_for_a_later_entry() -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt as _;
-        let first = Fixture::named("#!/bin/sh\nexit 0\n", false)?;
-        // A directory named `witness` with the execute bit: skipped, not run.
-        let decoy = first.dir.join("witness");
-        if std::fs::remove_file(&decoy).is_err() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "fixture witness file missing before the decoy replaces it",
-            ));
-        }
+        let directory = Scratch::new()?;
+        let decoy = directory.dir.join("witness");
         std::fs::create_dir_all(&decoy)?;
         std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755))?;
-        let second = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
-        let mut combined = first.path_value();
-        combined.push(":");
-        combined.push(second.path_value());
-        let spec = spec_with_path("witness", &combined);
-        assert_eq!(spec.resolved_program(), second.dir.join("witness"));
+        let bitless = Scratch::new()?;
+        bitless.file("witness", SCRIPT, 0o644)?;
+        let found = Scratch::new()?;
+        let witness = found.file("witness", SCRIPT, 0o755)?;
+        let path = joined(&[directory.entry(), bitless.entry(), found.entry()]);
+        let spec = spec_with_path("witness", &path);
+        assert_eq!(spec.resolved_program(), witness);
         Ok(())
     }
 
     #[test]
     fn an_empty_entry_searches_the_spec_working_directory() -> io::Result<()> {
-        let fixture = Fixture::named("#!/bin/sh\nexit 0\n", true)?;
+        let scratch = Scratch::new()?;
+        let witness = scratch.file("witness", SCRIPT, 0o755)?;
         let mut spec = ProcessSpec::new("witness");
-        spec.current_dir(&fixture.dir);
+        spec.current_dir(&scratch.dir);
         spec.env("PATH", "");
-        assert_eq!(spec.resolved_program(), fixture.dir.join("witness"));
+        assert_eq!(spec.resolved_program(), witness);
         Ok(())
+    }
+
+    #[test]
+    fn a_path_longer_than_the_walk_bound_stays_bare() -> io::Result<()> {
+        let scratch = Scratch::new()?;
+        scratch.file("witness", SCRIPT, 0o755)?;
+        let absent = scratch.dir.join("absent");
+        let mut entries: Vec<&OsStr> = vec![absent.as_os_str(); MAX_PATH_ENTRIES];
+        entries.push(scratch.entry());
+        let spec = spec_with_path("witness", &joined(&entries));
+        assert_eq!(spec.resolved_program(), PathBuf::from("witness"));
+        // One entry inside the bound is still walked.
+        entries.remove(0);
+        let spec = spec_with_path("witness", &joined(&entries));
+        assert_eq!(spec.resolved_program(), scratch.dir.join("witness"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_inherited_path_is_left_to_posix_spawnp() {
+        // `sh` is on every inherited `PATH`: a walk here would resolve it and
+        // pay for the search `posix_spawnp` already makes.
+        let spec = ProcessSpec::new("sh");
+        assert_eq!(spec.resolved_program(), PathBuf::from("sh"));
+        let mut other = ProcessSpec::new("sh");
+        other.env("LGWKS_UNRELATED", "1");
+        assert_eq!(other.resolved_program(), PathBuf::from("sh"));
     }
 
     #[test]
