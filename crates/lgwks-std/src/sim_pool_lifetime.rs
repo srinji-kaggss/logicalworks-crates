@@ -393,10 +393,12 @@ fn assert_handles_accounted(pool: &Arc<Pool>, where_: &str, seed: u64) {
 /// One seed's burst/idle cycles, as its trace hash.
 ///
 /// Every cycle submits a burst, lets the threads finish, waits out the
-/// keep-alive, and checks the handle bound after *every* step — after each
-/// submit, not only once the pool has gone quiet. The next cycle's first submit
-/// then has to find exactly its own handle: the exited threads were joined on
-/// the way, so a handle per cycle cannot accumulate.
+/// keep-alive, and checks the handle identity after *every* step — after each
+/// submit, not only once the pool has gone quiet. The next cycle's first submit,
+/// made once every older thread has returned, then has to find exactly its own
+/// handle: the exited threads were joined on the way, so a handle per cycle
+/// cannot accumulate. That is the bound the pool keeps, and it is checked
+/// exactly; a count against the ceiling is not one (#397).
 fn cycles(seed: u64) -> u64 {
     let mut rng = Rng::new(seed);
     let ceiling = rng.below(4).saturating_add(1);
@@ -426,16 +428,13 @@ fn cycles(seed: u64) -> u64 {
         }
         assert_handles_accounted(&pool, &format!("cycle {cycle} drained"), seed);
         wait_until_empty(&pool, seed);
-        // With every thread gone and no start to reap them, what the list holds
-        // is exactly the threads this cycle started — never more, however many
-        // cycles came before.
-        let held = lock(&pool.state).handles.len();
-        assert!(
-            held <= ceiling,
-            "seed {seed:#x}: cycle {cycle} left {held} join handles for a ceiling of {ceiling}; \
-             a thread that exits on its keep-alive must be reaped, not held"
-        );
-        fold(&mut trace, u64::from(held <= ceiling));
+        // No count against the ceiling here. A start reaps only threads that
+        // have returned, so a thread from an earlier cycle that left the
+        // accounting but was still in its last instructions when this cycle
+        // started keeps its handle beside the ones this cycle added: CI read 3
+        // handles at a ceiling of 2 (#397). The identity below holds at every
+        // instant, and the reap after `wait_until_all_returned` checks exactly
+        // that nothing is held past the next start.
         assert_handles_accounted(&pool, &format!("cycle {cycle} idle"), seed);
 
         // The next cycle's first submit reaps what has returned. `live == 0`
@@ -678,7 +677,7 @@ fn sim_every_scenario_drains_joins_and_never_loses_a_job() {
 }
 
 #[test]
-fn sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles() {
+fn sim_many_burst_and_idle_cycles_never_accumulate_join_handles() {
     let [first_seed, ..] = SWEEP_SEEDS;
     let mut state = seeded_stream(first_seed);
     for _ in 0..SEEDS {

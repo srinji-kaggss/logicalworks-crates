@@ -1386,7 +1386,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `sim_a_seed_replays_its_trace_and_distinct_seeds_diverge`), and
   `sim_pool_lifetime.rs` (`sim_every_scenario_drains_joins_and_never_loses_a_job`,
   `sim_a_start_inside_the_mid_exit_window_keeps_both_handles_and_the_next_reap_takes_one`,
-  `sim_many_burst_and_idle_cycles_never_outgrow_the_ceiling_in_join_handles`,
+  `sim_many_burst_and_idle_cycles_never_accumulate_join_handles`,
   `sim_a_seed_replays_its_pool_lifetime_trace`,
   `sim_distinct_seeds_diverge_in_their_pool_lifetime_trace`).
 
