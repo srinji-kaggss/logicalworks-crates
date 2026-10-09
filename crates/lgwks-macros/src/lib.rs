@@ -91,3 +91,6 @@ mod tests;
 
 #[cfg(test)]
 mod lines_props;
+
+#[cfg(test)]
+mod sim_script;
