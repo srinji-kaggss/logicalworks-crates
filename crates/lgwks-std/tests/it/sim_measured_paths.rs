@@ -56,6 +56,42 @@ impl Percentiles {
         Self { samples }
     }
 
+    /// Times `iterations` calls of each of `first` and `second`, alternating
+    /// them call by call, and collects each one's samples.
+    ///
+    /// Two paths measured one after the other are measured under two
+    /// different host loads, and a comparison between them reads the load as
+    /// cost: a lane sharing its machine saw the second of two sequential arms
+    /// run slower than the first by more than the property under test.
+    /// Alternating puts every burst on both arms, so their ratio is the paths'
+    /// own.
+    fn measure_paired(
+        iterations: u32,
+        mut first: impl FnMut(u32),
+        mut second: impl FnMut(u32),
+    ) -> (Self, Self) {
+        // The range's exact size hint sizes both collections in one allocation
+        // each, as `measure` does for one.
+        let (first_samples, second_samples) = (0..iterations)
+            .map(|index| {
+                let start = Instant::now();
+                first(index);
+                let first_elapsed = nanos(start.elapsed());
+                let start = Instant::now();
+                second(index);
+                (first_elapsed, nanos(start.elapsed()))
+            })
+            .unzip();
+        (
+            Self {
+                samples: first_samples,
+            },
+            Self {
+                samples: second_samples,
+            },
+        )
+    }
+
     /// Returns the sample at `percentile`, counting from the smallest.
     ///
     /// The index is the nearest-rank percentile: with `n` samples the `p`
@@ -175,12 +211,13 @@ fn retry_delay_latency_is_flat_across_the_attempt_range() {
 #[test]
 fn glob_match_latency_is_linear_after_the_repair() {
     // #154 G1: the repaired matcher is one pass per token, so doubling the
-    // path must roughly double the time and must not change the allocation
-    // count.
+    // path must roughly double the time: a quadratic matcher quadruples it.
     let Ok(pattern) = GlobPattern::compile_with_dialect("*a**/b[0-9]?", GlobDialect::Legacy) else {
         return;
     };
-    let mut scratch = GlobScratch::new();
+    // Each arm owns its scratch, as each caller does (INV-GLOB-1).
+    let mut short_scratch = GlobScratch::new();
+    let mut long_scratch = GlobScratch::new();
     // `a/**/b<digit><scalar>` matches, and the doubled form adds one more
     // directory level, so both paths are real matches and the only difference
     // is length.
@@ -191,13 +228,12 @@ fn glob_match_latency_is_linear_after_the_repair() {
     // The hit counts are `u32`s for the same reason the iteration count is: the
     // counter and the count it is compared against are then the same width.
     let mut small_hits = 0_u32;
-    let small = Percentiles::measure(iterations, |_| {
-        small_hits += u32::from(pattern.is_match_with(&short, &mut scratch));
-    });
     let mut large_hits = 0_u32;
-    let large = Percentiles::measure(iterations, |_| {
-        large_hits += u32::from(pattern.is_match_with(&long, &mut scratch));
-    });
+    let (small, large) = Percentiles::measure_paired(
+        iterations,
+        |_| small_hits += u32::from(pattern.is_match_with(&short, &mut short_scratch)),
+        |_| large_hits += u32::from(pattern.is_match_with(&long, &mut long_scratch)),
+    );
     assert_eq!(
         small_hits, iterations,
         "every timed short match must be observed"
@@ -208,11 +244,18 @@ fn glob_match_latency_is_linear_after_the_repair() {
     );
     let (small_p50, small_p95, small_p99) = small.summary();
     let (large_p50, large_p95, large_p99) = large.summary();
+    // The median, not the mean: one call the scheduler parked for a
+    // millisecond moves a mean of microsecond calls by more than the whole
+    // property, and it did — a lane sharing its host failed this on the mean
+    // with medians 2.0x apart. The bound is 3x, between the 2x a linear pass
+    // costs and the 4x a quadratic one does, plus timer granularity.
     assert!(
-        large.mean() <= small.mean().saturating_mul(6).saturating_add(200),
+        large_p50 <= small_p50.saturating_mul(3).saturating_add(200),
         "doubling the path must not quadruple the match cost: \
          p50/p95/p99 {small_p50}/{small_p95}/{small_p99}ns vs \
-         {large_p50}/{large_p95}/{large_p99}ns"
+         {large_p50}/{large_p95}/{large_p99}ns (means {}ns vs {}ns)",
+        small.mean(),
+        large.mean()
     );
     if let Some(rss) = peak_rss_bytes() {
         assert!(
