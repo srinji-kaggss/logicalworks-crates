@@ -300,6 +300,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/framework-comparison.md`](docs/framework-comparison.md) | Why the field looks the same, the four axes it actually differs on, and the axis nobody occupies. |
 | [`docs/production-readiness.md`](docs/production-readiness.md) | Nine-axis production readiness of `lgwks_bot`, the case that it replaces non-AI automation and RPA, and the rows that currently fail their own gate. |
 | [`docs/std-ast-deps-closure-matrix.md`](docs/std-ast-deps-closure-matrix.md) | All twenty-one `lgwks_std` modules, `lgwks_ast` and `lgwks_deps`: each with its feature, its evidence state, the test that exists on the named revision, and its owning issue. |
+| [`docs/invariants-long-form.md`](docs/invariants-long-form.md) | The reasoning, measurements and stated limits behind each one-line rule in `INVARIANTS.md`. |
 | [`docs/releasing.md`](docs/releasing.md) | The release process. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Per-release changes across all five crates. |
 | [`SECURITY.md`](SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
