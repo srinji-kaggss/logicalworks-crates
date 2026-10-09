@@ -176,8 +176,15 @@ fn rate_field(elapsed: Duration) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = lgwks_bot::Runtime::new()?;
     let mut out = std::io::stdout().lock();
+    // `script_tenants map` prints the flow's map and runs nothing: what the
+    // script does, read without running it, and what `lgwks-ast script map`
+    // must print for this file (#384).
+    if std::env::args().nth(1).as_deref() == Some("map") {
+        write!(out, "{ARCHITECTURE}")?;
+        return Ok(());
+    }
+    let runtime = lgwks_bot::Runtime::new()?;
     let pages: Vec<u32> = (0..PAGES).collect();
     let expected: u64 = pages.iter().map(|&page| u64::from(page)).sum();
 

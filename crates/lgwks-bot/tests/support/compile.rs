@@ -54,6 +54,63 @@ pub fn clippy_probe(
     probe("clippy", name, dependency, main)
 }
 
+/// Run one of this crate's examples with `features` and `args`, built against
+/// the workspace lockfile into the workspace target directory, and return what
+/// it printed.
+///
+/// # Errors
+///
+/// Whatever the workspace lookup or the child process reports.
+#[cfg(feature = "script")]
+pub fn run_example(
+    example: &str,
+    features: &str,
+    args: &[&str],
+) -> Result<Output, Box<dyn std::error::Error>> {
+    Ok(Command::new(env!("CARGO"))
+        .args(["run", "--offline", "--locked", "--quiet", "--manifest-path"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .args(["--example", example, "--features", features, "--"])
+        .args(args)
+        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .output()?)
+}
+
+/// Build and run a one-file binary whose `[dependencies]` table is
+/// `dependencies`, resolved against a copy of `lockfile`, offline, into the
+/// workspace target directory, and return what it printed.
+///
+/// For a consumer of another Cargo root than the workspace (the AI-authoring
+/// bench's trial graph), whose lockfile is the one its own builds use.
+///
+/// # Errors
+///
+/// Whatever the filesystem, the workspace lookup or the child process reports.
+#[cfg(feature = "script")]
+pub fn run_probe(
+    name: &str,
+    dependencies: &str,
+    lockfile: &Path,
+    main: &str,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    let scratch = crate::scratch::Scratch::new(name)?;
+    let root = scratch.path();
+    fs::create_dir_all(root.join("src"))?;
+    fs::copy(lockfile, root.join("Cargo.lock"))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependencies}"
+        ),
+    )?;
+    fs::write(root.join("src/main.rs"), main)?;
+    Ok(Command::new(env!("CARGO"))
+        .args(["run", "--offline", "--quiet", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .output()?)
+}
+
 /// Write the one-file consumer and run `cargo <subcommand>` over it.
 fn probe(
     subcommand: &str,

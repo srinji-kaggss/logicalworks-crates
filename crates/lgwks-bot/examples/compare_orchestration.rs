@@ -485,6 +485,12 @@ fn count_field(value: Option<u128>) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    // `compare_orchestration map` prints the script's map and runs nothing:
+    // what `lgwks-ast script map` must print for this file (#384).
+    if args.get(1).map(String::as_str) == Some("map") {
+        write!(std::io::stdout().lock(), "{ARCHITECTURE}")?;
+        return Ok(());
+    }
     let way = args.get(1).map_or("script", String::as_str).to_owned();
     let scenario = match args.get(2).map_or("throughput", String::as_str) {
         "throughput" => Scenario::Throughput,

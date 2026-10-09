@@ -421,6 +421,12 @@ jobs:
       # finding rather than reporting a count.
       - name: Scan reports zero findings
         run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
+      # #384: every `script!` in the tree, read by the one parser the macro
+      # calls (SL-2), without compiling it. Refuses on any construct the
+      # language refuses and on any file that is not Rust tokens, at the
+      # line and column `cargo build` would report.
+      - name: Every script! in the repository reads
+        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).

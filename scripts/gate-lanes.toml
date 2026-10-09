@@ -301,6 +301,15 @@ command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
 ci_step = "Scan reports zero findings"
 
 [[lane]]
+id = "script-check"
+group = "quality"
+surfaces = "local ci"
+required = true
+fast = true
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check"
+ci_step = "Every script! in the repository reads"
+
+[[lane]]
 id = "docs-all-features"
 group = "docs"
 surfaces = "local ci"

@@ -9,6 +9,33 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_ast — the script tool, a second caller of the one parser (#384)
+
+- **Added** `script::read_source` and `script::Invocation`: every `script!` in
+  a Rust file, found by token and read through `script::parse`, each with its
+  line and column. `Script` implements `Display` as the runtime's
+  `Architecture` renders the `ARCHITECTURE` the macro emits for it.
+- **Added** the `tool` feature (default off): `Script::to_json`, and the
+  `lgwks-ast` binary, `lgwks-ast script map|check [--json] [PATH...]`. The
+  tool's map equals the compiled `ARCHITECTURE` on every `script!` in the
+  repository: the bot's tests, its two examples (each now takes `map`, which
+  prints its `ARCHITECTURE` and runs nothing) and the AI-authoring bench's
+  reference solutions (`script_map_parity`). Its refusal is the compiler's, at
+  the same line and column (`the_tool_reports_the_refusal_the_compiler_reports`).
+- **Added** `script::write_map` and `script::MapStep`, the one rendering of an
+  architecture map: `lgwks_bot::script::Architecture`'s `Display` now prints
+  through it, so the tool and the runtime cannot render a map differently.
+
+### lgwks_bot — the map renders through `lgwks_ast` (#384)
+
+- The `script` feature now also enables the grammar-free `lgwks_ast/script`
+  (already built by `lgwks_macros`) for `Architecture`'s rendering. The
+  `lgwks_ast` edge is `default-features = false`; `inspect` turns the grammars
+  on as before, so a `script` build still compiles no tree-sitter and still
+  checks for `wasm32-wasip1`.
+- The `script-check` gate lane runs `lgwks-ast script check` over the
+  repository.
+
 ### lgwks_ast — the typed-error derive without a parser (#367)
 
 The grammar stack (`ast-grep-core`, `ast-grep-language`, `tree-sitter`,
