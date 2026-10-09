@@ -67,6 +67,7 @@
 //! [`Scope`]: https://docs.rs/lgwks_bot/latest/lgwks_bot/script/struct.Scope.html
 
 mod emit;
+mod lexicon;
 mod lines;
 mod refuse;
 

@@ -4,6 +4,7 @@ use lgwks_deps::proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTre
 use lgwks_deps::quote::{ToTokens, quote};
 use lgwks_deps::syn::{Error, Result};
 
+use crate::lexicon::{self, Kind};
 use crate::lines::{Line, after, group, ident, is_ident, is_parens, is_punct, text};
 
 use super::{Labels, Shapes, runtime};
@@ -21,7 +22,7 @@ pub(super) fn rewrite(
     // hands back where it stopped, instead of the caller re-deriving both.
     let mut rest = tokens;
     while let Some((token, tail)) = rest.split_first() {
-        if is_ident(token, "run")
+        if lexicon::is(token, Kind::Run)
             && let Some((remaining, call)) = run_call(tail, labels, shapes, line)?
         {
             output.extend(quote!((#call?)));
@@ -400,7 +401,7 @@ pub(super) fn run_only(
     let Some((first, rest)) = tokens.split_first() else {
         return Ok(None);
     };
-    if !is_ident(first, "run") {
+    if !lexicon::is(first, Kind::Run) {
         return Ok(None);
     }
     let lookahead_labels = labels.seen.clone();

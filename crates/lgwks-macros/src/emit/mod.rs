@@ -23,6 +23,7 @@ use lgwks_deps::proc_macro2::{Delimiter, TokenStream, TokenTree};
 use lgwks_deps::quote::quote;
 use lgwks_deps::syn::{Error, Result};
 
+use crate::lexicon::{self, Kind};
 use crate::lines::{Line, Node, group, ident, is_ident, is_punct, text};
 use crate::refuse;
 
@@ -284,7 +285,7 @@ pub(crate) fn script(nodes: Vec<Node>) -> Result<TokenStream> {
 fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<(TokenStream, TokenStream)> {
     let Node { line, children } = node;
     let tokens = &line.tokens;
-    let at_flow = tokens.iter().position(|token| is_ident(token, "flow"));
+    let at_flow = tokens.iter().position(|token| lexicon::is(token, Kind::Flow));
     let (Some(at_flow), true) = (at_flow, line.opens_block) else {
         let refusal = Err(Error::new(
             line.span,
@@ -420,7 +421,8 @@ fn block(nodes: &[Node], labels: &mut Labels, place: Place) -> Result<Body> {
     let mut shapes = Shapes::default();
     let mut index: usize = 0;
     while let Some(node) = nodes.get(index) {
-        if node.line.starts_with("else") {
+        let kind = lexicon::kind_of(&node.line);
+        if kind == Some(Kind::Else) {
             let refusal = Err(Error::new(
                 node.line.span,
                 "`else:` must follow an `if ..:` block at the same indentation",
@@ -428,11 +430,11 @@ fn block(nodes: &[Node], labels: &mut Labels, place: Place) -> Result<Body> {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "block: returning an error to the caller");
             return refusal;
         }
-        let consumed = if node.line.starts_with("if") && node.line.opens_block {
+        let consumed = if kind == Some(Kind::If) && node.line.opens_block {
             let chain: Vec<&Node> = nodes
                 .iter()
                 .skip(index.saturating_add(1))
-                .take_while(|sibling| sibling.line.starts_with("else"))
+                .take_while(|sibling| lexicon::kind_of(&sibling.line) == Some(Kind::Else))
                 .collect();
             let last_in_block = index.saturating_add(chain.len()).saturating_add(1) == nodes.len();
             let wants_value = place.wants_value && last_in_block;
@@ -486,34 +488,47 @@ fn statement(
     if !line.opens_block {
         return simple(line, labels, place, run_shapes).map(|piece| (piece, None));
     }
-    // Each form is asked of the line itself rather than of a keyword string the
-    // caller had to invent for a line that starts with no identifier: a line
-    // that starts with punctuation is plain Rust, and `simple` and
-    // `construct_expr` are the two places that decide what to do with it.
-    if line.starts_with("let") {
-        let (pattern, construct) = split_let(line)?;
-        let inner = Line {
-            tokens: construct,
-            column: line.column,
-            number: line.number,
-            opens_block: true,
-            span: line.span,
-        };
-        let (expr, shape) = construct_expr(&inner, &node.children, labels)?;
-        return Ok((
-            Piece::new(quote!(let #pattern = #expr?;), false),
-            Some(shape),
-        ));
+    // The word is looked up in the lexicon rather than spelled here: a line
+    // whose first token is no word (punctuation, a name) is plain Rust, and
+    // `construct_expr` is the one place that refuses it as a block.
+    match lexicon::kind_of(line) {
+        Some(Kind::Let) => {
+            let (pattern, construct) = split_let(line)?;
+            let inner = Line {
+                tokens: construct,
+                column: line.column,
+                number: line.number,
+                opens_block: true,
+                span: line.span,
+            };
+            let (expr, shape) = construct_expr(&inner, &node.children, labels)?;
+            Ok((
+                Piece::new(quote!(let #pattern = #expr?;), false),
+                Some(shape),
+            ))
+        }
+        Some(Kind::Together) => {
+            together(line, &node.children, labels).map(|(piece, shape)| (piece, Some(shape)))
+        }
+        Some(Kind::For) => for_loop(line, &node.children, labels, place)
+            .map(|(piece, shape)| (piece, Some(shape))),
+        Some(
+            Kind::Flow
+            | Kind::Each
+            | Kind::Within
+            | Kind::Retry
+            | Kind::Step
+            | Kind::If
+            | Kind::Else
+            | Kind::Run
+            | Kind::GiveBack
+            | Kind::Fail,
+        )
+        | None => {
+            let (tokens, shape) = construct_expr(line, &node.children, labels)?;
+            Ok((Piece::fallible(tokens), Some(shape)))
+        }
     }
-    if line.starts_with("together") {
-        return together(line, &node.children, labels).map(|(piece, shape)| (piece, Some(shape)));
-    }
-    if line.starts_with("for") {
-        return for_loop(line, &node.children, labels, place)
-            .map(|(piece, shape)| (piece, Some(shape)));
-    }
-    let (tokens, shape) = construct_expr(line, &node.children, labels)?;
-    Ok((Piece::fallible(tokens), Some(shape)))
 }
 
 /// Expand a block that yields a value: `each`, `within`, `retry`, `step`.
@@ -522,15 +537,28 @@ fn construct_expr(
     children: &[Node],
     labels: &mut Labels,
 ) -> Result<(TokenStream, TokenStream)> {
-    match line.keyword() {
-        Some(word) if word == "each" => each(line, children, labels),
-        Some(word) if word == "within" => within(line, children, labels),
-        Some(word) if word == "retry" => retry(line, children, labels),
-        Some(word) if word == "step" => step(line, children, labels),
-        _ => Err(Error::new(
+    match lexicon::kind_of(line) {
+        Some(Kind::Each) => each(line, children, labels),
+        Some(Kind::Within) => within(line, children, labels),
+        Some(Kind::Retry) => retry(line, children, labels),
+        Some(Kind::Step) => step(line, children, labels),
+        Some(
+            Kind::Flow
+            | Kind::Together
+            | Kind::For
+            | Kind::If
+            | Kind::Else
+            | Kind::Let
+            | Kind::Run
+            | Kind::GiveBack
+            | Kind::Fail,
+        )
+        | None => Err(Error::new(
             line.span,
-            "unknown block; a line ending in `:` is one of `each`, `within`, `retry`, \
-             `together`, `step`, `for`, `if`/`else`, or `let x = <block>:`",
+            format!(
+                "unknown block; a line ending in `:` is one of {}",
+                lexicon::block_words()
+            ),
         )),
     }
 }
@@ -543,19 +571,29 @@ fn simple(
     run_shapes: &mut Shapes,
 ) -> Result<Piece> {
     let tokens = &line.tokens;
-    if line.starts_with("give") {
-        return give_back(line, place, labels, run_shapes);
-    }
-    if line.starts_with("fail") {
-        return fail_line(line, &runtime(), labels, run_shapes);
-    }
-    if line.starts_with("let") {
-        let rewritten = rewrite(tokens, labels, run_shapes, line)?;
-        return Ok(Piece::new(quote!(#rewritten;), false));
-    }
-    match run_only(tokens, labels, run_shapes, line)? {
-        Some(call) => Ok(Piece::fallible(call)),
-        None => Ok(Piece::new(rewrite(tokens, labels, run_shapes, line)?, true)),
+    match lexicon::kind_of(line) {
+        Some(Kind::GiveBack) => give_back(line, place, labels, run_shapes),
+        Some(Kind::Fail) => fail_line(line, &runtime(), labels, run_shapes),
+        Some(Kind::Let) => {
+            let rewritten = rewrite(tokens, labels, run_shapes, line)?;
+            Ok(Piece::new(quote!(#rewritten;), false))
+        }
+        Some(
+            Kind::Flow
+            | Kind::Each
+            | Kind::Within
+            | Kind::Retry
+            | Kind::Together
+            | Kind::Step
+            | Kind::For
+            | Kind::If
+            | Kind::Else
+            | Kind::Run,
+        )
+        | None => match run_only(tokens, labels, run_shapes, line)? {
+            Some(call) => Ok(Piece::fallible(call)),
+            None => Ok(Piece::new(rewrite(tokens, labels, run_shapes, line)?, true)),
+        },
     }
 }
 
@@ -566,7 +604,11 @@ fn give_back(
     labels: &mut Labels,
     run_shapes: &mut Shapes,
 ) -> Result<Piece> {
-    let rest = expect_words(line, &["give", "back"], "`give back <value>`")?;
+    let rest = expect_words(
+        line,
+        &[Kind::GiveBack.spelling(), "back"],
+        "`give back <value>`",
+    )?;
     if place.nested {
         let refusal = Err(Error::new(
             line.span,
@@ -599,14 +641,18 @@ fn fail_line(
             quote!(transient),
             expect_words(
                 line,
-                &["fail", "transiently", "with"],
+                &[Kind::Fail.spelling(), "transiently", "with"],
                 "`fail transiently with <reason>`",
             )?,
         )
     } else {
         (
             quote!(failed),
-            expect_words(line, &["fail", "with"], "`fail with <reason>`")?,
+            expect_words(
+                line,
+                &[Kind::Fail.spelling(), "with"],
+                "`fail with <reason>`",
+            )?,
         )
     };
     let reason = rewrite(rest, labels, run_shapes, line)?;

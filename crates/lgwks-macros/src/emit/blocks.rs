@@ -4,6 +4,7 @@ use lgwks_deps::proc_macro2::{TokenStream, TokenTree};
 use lgwks_deps::quote::quote;
 use lgwks_deps::syn::{Error, Result};
 
+use crate::lexicon::{self, Kind};
 use crate::lines::{Line, Node, after, ident, is_ident, is_punct, text};
 use crate::refuse;
 
@@ -85,7 +86,7 @@ pub(super) fn if_chain(
             after(&line.tokens, 1)
         } else {
             match *after(&line.tokens, 1) {
-                [ref word, ref rest @ ..] if is_ident(word, "if") && !rest.is_empty() => rest,
+                [ref word, ref rest @ ..] if lexicon::is(word, Kind::If) && !rest.is_empty() => rest,
                 _ => {
                     let refusal = Err(Error::new(
                         line.span,
@@ -396,7 +397,7 @@ fn together_child(
 ) -> Result<(TokenStream, TokenStream)> {
     let child_line = &child.line;
     refuse::check(&child_line.tokens)?;
-    let (pattern, value) = if child_line.starts_with("let") {
+    let (pattern, value) = if lexicon::kind_of(child_line) == Some(Kind::Let) {
         let (pattern, rest) = split_let(child_line)?;
         (pattern, rest)
     } else {

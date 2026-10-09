@@ -27,20 +27,6 @@ pub(crate) struct Line {
     pub(crate) span: Span,
 }
 
-impl Line {
-    /// The identifier the line starts with, if it starts with one.
-    pub(crate) fn keyword(&self) -> Option<&Ident> {
-        self.tokens.first().and_then(ident)
-    }
-
-    /// Whether the line starts with the identifier `word`.
-    pub(crate) fn starts_with(&self, word: &str) -> bool {
-        self.tokens
-            .first()
-            .is_some_and(|token| is_ident(token, word))
-    }
-}
-
 /// A line and the block it opens, if any.
 pub(crate) struct Node {
     /// The header, or the whole statement.
