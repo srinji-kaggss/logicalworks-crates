@@ -9,6 +9,19 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_ast — the typed-error derive without a parser (#367)
+
+The grammar stack (`ast-grep-core`, `ast-grep-language`, `tree-sitter`,
+`tracing`) is now the optional `parser` feature, which every `lang-*` feature
+enables. The default set is unchanged and so is every path a consumer names.
+`default-features = false` now yields only the typed-error derive and the
+`diagnostic` types, with no tree-sitter compiled.
+
+**Breaking, `default-features = false` only:** that configuration used to be
+the parser with no grammar compiled; it is now `default-features = false,
+features = ["parser"]`. `diagnostic::diagnostics` and
+`diagnostic::recovery_count` walk a parsed tree and need `parser`.
+
 ## [lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1] - 2026-10-07
 
 ### Upgrading
