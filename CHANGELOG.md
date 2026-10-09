@@ -18,9 +18,10 @@ breaks are listed explicitly under the crate.
 - **Added** the `tool` feature (default off): `Script::to_json`, and the
   `lgwks-ast` binary, `lgwks-ast script map|check [--json] [PATH...]`. The
   tool's map equals the compiled `ARCHITECTURE` on every `script!` in the
-  repository: the bot's tests, its two examples (each now takes `map`, which
-  prints its `ARCHITECTURE` and runs nothing) and the AI-authoring bench's
-  reference solutions (`script_map_parity`). Its refusal is the compiler's, at
+  repository: the bot's tests, compared in process, and its two examples and
+  the AI-authoring bench's reference solutions, held by `const` assertions a
+  `cargo check` probe evaluates (`script_map_parity`). Its refusal is the
+  compiler's, at
   the same line and column (`the_tool_reports_the_refusal_the_compiler_reports`).
 - **Added** `script::write_map` and `script::MapStep`, the one rendering of an
   architecture map: `lgwks_bot::script::Architecture`'s `Display` now prints
@@ -33,6 +34,8 @@ breaks are listed explicitly under the crate.
   `lgwks_ast` edge is `default-features = false`; `inspect` turns the grammars
   on as before, so a `script` build still compiles no tree-sitter and still
   checks for `wasm32-wasip1`.
+- **Added** `script::FlowShape::line`, the `flow` header's source line, as a
+  `const fn` beside `name`, `signature` and `steps`.
 - The `script-check` gate lane runs `lgwks-ast script check` over the
   repository.
 

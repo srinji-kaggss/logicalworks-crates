@@ -126,6 +126,12 @@ impl FlowShape {
         self.signature
     }
 
+    /// The source line of the `flow` header.
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
     /// The blocks directly inside the flow.
     #[must_use]
     pub const fn steps(&self) -> &'static [StepShape] {

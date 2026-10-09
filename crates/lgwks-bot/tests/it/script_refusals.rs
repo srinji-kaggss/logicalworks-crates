@@ -17,7 +17,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 use crate::compile;
 
-use compile::{assert_compiles, assert_refused_by_lint, clippy_probe, compile_probe};
+use compile::{assert_compiles, assert_refused_by_lint, clippy_probe};
 
 /// A consumer with `imports` above one script whose single flow runs `body`.
 fn consumer(imports: &str, attribute: &str, body: &str) -> String {
@@ -85,7 +85,9 @@ fn a_forget_renamed_outside_the_script_is_refused_inside_it() -> TestResult {
 /// The script tool and the compiler refuse one construct with one message at
 /// one place (#384): `lgwks-ast script check` reads the consumer's source
 /// through the function the macro calls, so its refusal's line, column and
-/// message are the ones `cargo check` prints for the same file.
+/// message are the ones the compiler prints for the same file. The probe runs
+/// under the same clippy pass as this file's other consumers, so it reuses
+/// their build instead of paying for a second one.
 #[test]
 fn the_tool_reports_the_refusal_the_compiler_reports() -> TestResult {
     let source = consumer("", "", "std::process::exit(code)");
@@ -97,7 +99,7 @@ fn the_tool_reports_the_refusal_the_compiler_reports() -> TestResult {
                 .all(|invocation| invocation.read().is_err()),
         "the tool finds the consumer's one script! and refuses it: {invocations:?}"
     );
-    let output = compile_probe("script-refusal-located", "", &source)?;
+    let output = clippy_probe("script-refusal-located", "", &source)?;
     let printed = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

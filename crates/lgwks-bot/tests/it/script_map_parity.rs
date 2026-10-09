@@ -3,34 +3,33 @@
 //! `lgwks-ast script map` finds every `script!` in a file by lexing the file
 //! and reads each through `lgwks_ast::script::parse`, the function the macro
 //! itself calls. This file holds that reading to the `ARCHITECTURE` the macro
-//! compiled for the same invocation in this binary: the rendered map and the
-//! JSON document must be equal, line numbers included, for every `script!`
-//! compiled here. A tool that read a script differently from the compiler, or
-//! numbered its lines differently, fails here and not in a reader's head.
+//! compiled for the same invocation: the rendered map and the JSON document
+//! must be equal, line numbers included. A tool that read a script differently
+//! from the compiler, or numbered its lines differently, fails here and not in
+//! a reader's head.
 //!
-//! The examples' scripts compile into their own binaries, which this binary
-//! cannot link, so each example is run with `map`, which prints its
-//! `ARCHITECTURE` and runs nothing, and the tool's map is held to that text.
-//!
-//! The AI-authoring bench's reference solutions hold the rest. They build in
-//! the bench's own Cargo root, so every reference that holds a `script!` is
-//! compiled as a module of one probe binary against the bench's lockfile, and
-//! each `ARCHITECTURE` it prints is held to the tool's reading of that file.
-//! The references are found by reading the directory, not listed, so a new one
-//! is covered the day it is added.
+//! This binary's own scripts are compared in process. The rest are files this
+//! binary cannot hold: the examples (each loads `tests/support/lock.rs`, which
+//! this binary already loads, and a file loaded twice is refused) and the
+//! AI-authoring bench's reference solutions (built against the bench's support
+//! crate). Each becomes a module of one probe that `cargo check` type-checks,
+//! with the tool's reading of it written in as `const` assertions on that
+//! module's `ARCHITECTURE`. The compiler evaluates them, so a divergence is a
+//! compile error naming the file, the flow and the step. The references are
+//! found by reading the directory, not listed, so a new one is covered the day
+//! it is added.
 
 #![cfg(feature = "script")]
 
 use std::error::Error;
-
-use lgwks_ast::script::{Script, read_source};
-use lgwks_bot::script::Architecture;
-use lgwks_std::json::Value;
-
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::compile::{run_example, run_probe};
+use lgwks_ast::script::{Script, StepShape, read_source};
+use lgwks_bot::script::Architecture;
+use lgwks_std::json::Value;
+
+use crate::compile::check_consumer;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -51,31 +50,16 @@ fn the_one_script(file: &str, source: &str) -> Result<Script, Box<dyn Error>> {
     Ok(script.clone())
 }
 
-/// Every example that holds a `script!`: its name, its source, and the
-/// features it requires (its `[[example]]` entry's `required-features`).
-const EXAMPLES: [(&str, &str, &str); 2] = [
-    (
-        "compare_orchestration",
-        include_str!("../../examples/compare_orchestration.rs"),
-        "script rt time sync macros",
-    ),
-    (
-        "script_tenants",
-        include_str!("../../examples/script_tenants.rs"),
-        "script",
-    ),
-];
-
 /// Every `script!` this binary compiles: the source file it is written in,
 /// read as text, and the map the macro compiled from it.
 const COMPILED: [(&str, &str, Architecture); 2] = [
     (
-        "script_flow.rs",
+        "tests/it/script_flow.rs",
         include_str!("script_flow.rs"),
         crate::script_flow::ARCHITECTURE,
     ),
     (
-        "sim_script.rs",
+        "tests/it/sim_script.rs",
         include_str!("sim_script.rs"),
         crate::sim_script::ARCHITECTURE,
     ),
@@ -104,95 +88,149 @@ fn the_tool_reads_every_compiled_script_as_its_architecture() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn the_tool_reads_each_example_as_the_map_it_prints() -> TestResult {
-    for (example, source, features) in EXAMPLES {
-        let script = the_one_script(example, source)?;
-        let output = run_example(example, features, &["map"])?;
-        let printed = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success(),
-            "{example} map ran:\n{printed}\n{}",
-            String::from_utf8_lossy(&output.stderr)
+/// The message of the one assertion the probe makes that must fail.
+const CONTROL: &str = "parity control: the probe's assertions were evaluated";
+
+/// Byte equality of two strings, usable in a `const` (the probe's own copy).
+const SAME: &str = "const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+";
+
+/// Write one `const` assertion: `condition` must hold, or the compile fails
+/// with `label`.
+fn fact(out: &mut String, condition: &str, label: &str) -> std::fmt::Result {
+    writeln!(out, "    assert!({condition}, {label:?});")
+}
+
+/// Write the assertions for `steps` at `path` (an expression naming the
+/// compiled slice), labelled `at`, recursing into each step.
+fn assert_steps(out: &mut String, path: &str, at: &str, steps: &[StepShape]) -> std::fmt::Result {
+    let count = format!("{path}.len() == {}", steps.len());
+    fact(out, &count, &format!("{at}: the number of steps"))?;
+    for (index, step) in steps.iter().enumerate() {
+        let here = format!("{path}[{index}]");
+        let label = format!("{at}.{index}");
+        let kind = format!(
+            "matches!({here}.kind(), lgwks_bot::script::StepKind::{:?})",
+            step.kind()
         );
-        assert!(!printed.is_empty(), "{example} printed a map");
-        assert_eq!(
-            script.to_string(),
-            printed,
-            "{example}: the tool's map is the ARCHITECTURE the example compiled"
-        );
+        fact(out, &kind, &format!("{label}: kind"))?;
+        let subject = format!("same({here}.subject(), {:?})", step.subject());
+        fact(out, &subject, &format!("{label}: subject"))?;
+        let detail = format!("same({here}.detail(), {:?})", step.detail());
+        fact(out, &detail, &format!("{label}: detail"))?;
+        let line = format!("{here}.line() == {}", step.line());
+        fact(out, &line, &format!("{label}: line"))?;
+        assert_steps(out, &format!("{here}.steps()"), &label, step.children())?;
     }
     Ok(())
 }
 
-/// The separator the probe prints before each reference's map.
-const MARK: &str = "=== reference ";
+/// The probe's source: each file as a module, the tool's reading of it as
+/// `const` assertions on its `ARCHITECTURE`, and one assertion that fails.
+fn probe_source(files: &[(PathBuf, Script)]) -> Result<String, std::fmt::Error> {
+    let mut main = String::new();
+    for (index, reference) in files.iter().enumerate() {
+        let shown = reference.0.display().to_string();
+        writeln!(main, "#[path = {shown:?}]\nmod reference_{index};")?;
+        writeln!(
+            main,
+            "const _: () = {{\n    let map = reference_{index}::ARCHITECTURE;"
+        )?;
+        let flows = reference.1.flows();
+        let count = format!("map.flows().len() == {}", flows.len());
+        fact(&mut main, &count, &format!("{shown}: the number of flows"))?;
+        for (number, flow) in flows.iter().enumerate() {
+            let shape = flow.shape();
+            let path = format!("map.flows()[{number}]");
+            let at = format!("{shown} flow {}", shape.name());
+            let name = format!("same({path}.name(), {:?})", shape.name());
+            fact(&mut main, &name, &format!("{at}: name"))?;
+            let signature = format!("same({path}.signature(), {:?})", shape.signature());
+            fact(&mut main, &signature, &format!("{at}: signature"))?;
+            let line = format!("{path}.line() == {}", shape.line());
+            fact(&mut main, &line, &format!("{at}: line"))?;
+            assert_steps(&mut main, &format!("{path}.steps()"), &at, shape.steps())?;
+        }
+        main.push_str("};\n");
+    }
+    writeln!(main, "const _: () = assert!(false, {CONTROL:?});")?;
+    main.push_str(SAME);
+    main.push_str("fn main() {}\n");
+    Ok(main)
+}
+
+/// The examples that hold a `script!`, by file name under `examples/`.
+const EXAMPLES: [&str; 2] = ["compare_orchestration.rs", "script_tenants.rs"];
 
 #[test]
-fn the_tool_reads_each_bench_reference_as_the_map_it_compiles_to() -> TestResult {
+fn the_tool_reads_each_example_and_bench_reference_as_the_map_it_compiles_to() -> TestResult {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize()?;
     let bench = manifest.join("../../bench/ai-authoring").canonicalize()?;
-    let mut references: Vec<(PathBuf, Script)> = Vec::new();
     let mut listing: Vec<PathBuf> = std::fs::read_dir(bench.join("reference"))?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<_, _>>()?;
     listing.sort();
+    let mut files: Vec<(PathBuf, Script)> = Vec::new();
+    for example in EXAMPLES {
+        let path = manifest.join("examples").join(example);
+        let script = the_one_script(example, &std::fs::read_to_string(&path)?)?;
+        files.push((path, script));
+    }
     for path in listing {
         let source = std::fs::read_to_string(&path)?;
         if !read_source(&source)?.is_empty() {
             let script = the_one_script(&path.display().to_string(), &source)?;
-            references.push((path, script));
+            files.push((path, script));
         }
     }
     assert!(
-        references.len() >= 6,
-        "the bench's script references were found: {}",
-        references.len()
+        files.len() >= EXAMPLES.len() + 6,
+        "the examples and the bench's script references were found: {}",
+        files.len()
     );
-    let mut main = String::new();
-    for (index, reference) in references.iter().enumerate() {
-        let shown = reference.0.display().to_string();
-        writeln!(main, "#[path = {shown:?}]\nmod reference_{index};")?;
-    }
-    main.push_str("fn main() {\n");
-    for index in 0..references.len() {
-        writeln!(
-            main,
-            "    print!(\"{MARK}{index}\\n{{}}\", reference_{index}::ARCHITECTURE);"
-        )?;
-    }
-    main.push_str("}\n");
+    // `process` beside the default features is the set `t22_process_surface`
+    // already type-checks, so this probe reuses that build of `lgwks_bot`;
+    // `ai_task_support`'s narrower request unifies into it.
     let dependencies = format!(
-        "lgwks_bot = {{ path = {:?}, default-features = false, features = [\"script\", \"process\"] }}\n\
+        "lgwks_bot = {{ path = {:?}, features = [\"process\"] }}\n\
+         lgwks_std = {{ path = {:?} }}\n\
          ai_task_support = {{ path = {:?} }}\n",
         manifest.display().to_string(),
+        manifest
+            .join("../lgwks-std")
+            .canonicalize()?
+            .display()
+            .to_string(),
         bench.join("support").display().to_string()
     );
-    let output = run_probe(
-        "bench-reference-maps",
-        &dependencies,
-        &bench.join("Cargo.lock"),
-        &main,
-    )?;
-    let printed = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "the references compiled and printed their maps:\n{printed}\n{}",
+    let output = check_consumer("script-map-parity", &dependencies, &probe_source(&files)?)?;
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let maps: Vec<&str> = printed.split(MARK).skip(1).collect();
-    assert_eq!(
-        maps.len(),
-        references.len(),
-        "one map per reference:\n{printed}"
+    // Exactly one error, and it is the control: the compiler evaluated the
+    // assertions (the control fired) and every one of the tool's held.
+    assert!(
+        !output.status.success() && printed.contains(CONTROL),
+        "the probe's assertions were evaluated:\n{printed}"
     );
-    for (index, (map, reference)) in maps.iter().zip(&references).enumerate() {
-        assert_eq!(
-            format!("{index}\n{}", reference.1),
-            *map,
-            "{}: the tool's map is the ARCHITECTURE the reference compiled",
-            reference.0.display()
-        );
-    }
+    assert!(
+        printed.contains("due to 1 previous error"),
+        "the tool's reading of every file is the ARCHITECTURE it compiles to:\n{printed}"
+    );
     Ok(())
 }
