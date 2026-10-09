@@ -1303,8 +1303,12 @@ fn pace_plan(rng: &mut Rng, ticks: u32) -> Result<PacePlan, Box<dyn std::error::
 ///
 /// One millisecond rather than more because nothing here races it: a source
 /// that is not wedged answers on its first turn, and a first turn is always
-/// polled however early the wave's reaper fires. At 40 ms the stall families
-/// spent ~12 s a band waiting.
+/// polled however early the wave's reaper fires. A source that yields once is
+/// read on the turn after its `Pending` whenever that turn lands, because an
+/// expired wave turns every poll once more before cutting it off; only its
+/// *first* turn can fall behind a deadline a wedged sibling armed, which is why
+/// the replay family arms yields ahead of wedges only. At 40 ms the stall
+/// families spent ~12 s a band waiting.
 const SIM_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Build one tenant's bot over [`MAX_CHAINS`] paced sources.
@@ -2872,6 +2876,14 @@ fn two_tenants_interleaved_ticks_never_cross_attribution() -> TestResult {
 /// the *set* of stalled chains and the watchdog count rather than any timing, so
 /// the receipt is a statement about what the run decided and not about how fast
 /// it decided it.
+///
+/// A source yields only when no wedged source precedes it in the wave. The wave
+/// takes first turns in chain order, so a yielding source ahead of every wedged
+/// one takes its first turn before any reaper exists, and its second turn is
+/// read however late the host schedules it. Behind a wedged source its first
+/// turn lands on whichever side of the deadline the host put it — the wall
+/// deadline is real time by design (INV-BOT-123) — so a yield there would make
+/// the trace record the scheduler rather than the run.
 #[test]
 fn the_same_seed_replays_a_deadline_wave() -> TestResult {
     sim::assert_replays(sim::band_of(40), |sim| {
@@ -2879,9 +2891,12 @@ fn the_same_seed_replays_a_deadline_wave() -> TestResult {
         let mut subject = scripted_bot("sim-observe-deadline-replay", 0, 3, SIM_DEADLINE, holds)?;
         let ticks = sim.rng().between(2, 3);
         for tick in 1..=ticks {
+            let mut behind_a_wedge = false;
             for (index, held) in subject.handles.iter().enumerate() {
                 let wedged = sim.rng().chance(250);
-                let yields = sim.rng().between(0, 1);
+                let drawn = sim.rng().between(0, 1);
+                let yields = if behind_a_wedge { 0 } else { drawn };
+                behind_a_wedge = behind_a_wedge || wedged;
                 let pace = if wedged { WEDGED_PACE } else { 0 };
                 let value = tick
                     .saturating_mul(10)
