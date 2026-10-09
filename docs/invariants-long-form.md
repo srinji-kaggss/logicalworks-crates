@@ -1399,10 +1399,10 @@ Each of these was a shipped defect. Treat the list as the spec.
   `(((…` is a few bytes per level and produces one node per level, which the
   byte and node ceilings admit in the hundreds of thousands of levels.
   · why: #143 R17, #277 · enforced by:
-  `lgwks_ast::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
-  `lgwks_ast::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
-  `lgwks_ast::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
-  `lgwks_ast::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
+  `lgwks_ast::parser::tests::a_small_node_budget_does_not_retain_a_wide_sibling_frontier`,
+  `lgwks_ast::parser::tests::a_completed_walk_retains_one_frame_per_active_ancestor`,
+  `lgwks_ast::parser::tests::a_tree_past_the_depth_bound_refuses_as_ast_too_deep`,
+  `lgwks_ast::parser::tests::the_depth_witness_costs_one_level_more_than_the_ceiling_and_no_more`
 - **INV-AST-2** Content detection parses each distinct compiled candidate once;
   only invalid syntax is negative evidence, while parser or budget refusal
   leaves detection incomplete. Bounded AST metrics identify partial walks, and
@@ -1412,13 +1412,13 @@ Each of these was a shipped defect. Treat the list as the spec.
   rendered `InvalidSyntax` refusal points at the earliest retained recovery
   node; `AstMetrics` has no `Default`, so every value came from a walk.
   · why: #165 A1–A4, #194 · enforced by:
-  `lgwks_ast::tests::an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node`,
-  `lgwks_ast::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
-  `lgwks_ast::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
-  `lgwks_ast::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
-  `lgwks_ast::tests::syntax_diagnostics_stop_at_the_declared_bound`,
-  `lgwks_ast::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
-  `lgwks_ast::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
+  `lgwks_ast::parser::tests::an_invalid_syntax_diagnostic_points_at_the_earliest_recovery_node`,
+  `lgwks_ast::parser::tests::duplicate_and_permuted_candidates_parse_once_and_preserve_ambiguity`,
+  `lgwks_ast::parser::tests::incomplete_candidate_inspection_is_not_reported_as_unique`,
+  `lgwks_ast::parser::tests::inspection_metrics_name_complete_exact_and_over_limit_walks`,
+  `lgwks_ast::parser::tests::syntax_diagnostics_stop_at_the_declared_bound`,
+  `lgwks_ast::parser::tests::a_truncated_syntax_report_keeps_the_earliest_errors_in_source_order`,
+  `lgwks_ast::parser::tests::the_refusal_and_the_report_count_the_same_recovery_nodes`,
   `tests/it/content_detection.rs`, and `tests/it/sim_diagnostics.rs`, which checks 64
   seeded malformed sources per family against a line/column model
   (`the_refusal_keeps_the_earliest_recovery_nodes_in_source_order`,
@@ -1443,11 +1443,11 @@ Each of these was a shipped defect. Treat the list as the spec.
   `AstMetrics` folds order-independently, the retained diagnostics are the
   earliest under `MAX_SYNTAX_DIAGNOSTICS` and are sorted before they are
   returned, and `diagnostics` sorts its own output. · why: #277 · enforced by:
-  `lgwks_ast::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
+  `lgwks_ast::parser::tests::the_cursor_walk_visits_exactly_the_nodes_the_positional_walk_did`
   (the replaced walk is kept as a test-only model and the replacement must visit
   the same nodes at the same depths with the same recovery state on five tree
-  shapes), `lgwks_ast::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
-  `lgwks_ast::tests::a_node_budget_charges_children_in_source_order`, and
+  shapes), `lgwks_ast::parser::tests::the_walk_costs_the_same_per_node_however_wide_the_tree_is`,
+  `lgwks_ast::parser::tests::a_node_budget_charges_children_in_source_order`, and
   `lgwks_ast::diagnostic::tests::a_deep_narrow_tree_still_descends_one_level_per_ancestor`
 - **INV-AST-4** Hostile input earns a typed refusal, and the input that could
   not is refused *before* the grammar sees it. Four generators per compiled
@@ -1489,7 +1489,7 @@ Each of these was a shipped defect. Treat the list as the spec.
   `every_refusal_renders_as_a_located_diagnostic`,
   `the_unchecked_parse_of_the_same_shapes_still_answers`,
   `multibyte_and_truncated_sources_are_answered`) and
-  `lgwks_ast::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
+  `lgwks_ast::parser::tests` (`the_container_count_names_the_shapes_the_scanner_overflows_on`,
   `the_container_count_does_not_charge_prose_or_a_thematic_break`,
   `the_container_count_is_linear_in_the_bytes_and_holds_no_line`,
   `a_refusal_names_the_container_bound_and_where_it_was_applied`), all under a

@@ -71,6 +71,19 @@ resolved in the consuming crate, so the `extern crate … as thiserror;` line is
 what makes the expansion resolve; the crate root re-exports the module it
 needs.
 
+A crate that wants only the derive turns the parser off, and compiles no
+grammar and no tree-sitter at all:
+
+```toml
+lgwks_ast = { version = "1", default-features = false }
+```
+
+Without default features the crate is the derive and the `diagnostic` types
+(`Diagnostic`, `Span`, `Pos`, `Severity`). The parser is the `parser` feature,
+which every `lang-*` feature enables; `default-features = false, features =
+["parser"]` is the parser with no grammar compiled, for a caller that
+registers its own through `CustomLang`.
+
 ## Grammar selection
 
 One cargo feature per grammar forwards to `ast-grep-language`. The default
