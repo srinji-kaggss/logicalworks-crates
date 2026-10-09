@@ -797,10 +797,13 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
   101 paired rounds × 2,000 neighbour tasks, each round running both arms back
   to back in alternating order, bound unchanged at 10% on the **median round's**
   ratio): the arrival-decision cost (`Supervisor::admission_cost`: the
-  arrival's wait slot plus the round and the pump under the scheduler lock,
-  **not** the wait to take that lock, which is another decision holding it) is
-  261 ns alone vs 259 ns attacked on a quiet macOS run, median ratio 1000‰,
-  rounds 804–1178‰. With every core oversubscribed twice by spinners, ten runs
+  round and the pump under the scheduler lock, a parked arrival's wait slot
+  included, **not** the wait to take that lock, which is another decision
+  holding it) is 179 ns alone vs 184 ns attacked on a quiet macOS run since
+  the slot is built only for an arrival that parks (#375; 261 vs 259 ns
+  before, when every arrival allocated one), median ratio 1027‰; with the
+  cores oversubscribed twice, ten runs read 969–1058‰. Before #375's change
+  the quiet median was 1000‰, rounds 804–1178‰, and with every core oversubscribed twice by spinners, ten runs
   read medians 989–1071‰ with rounds 351–4288‰, all inside the bound; the
   previous instrument, which also charged the wait for the lock, read
   995–1127‰ (4 of 10 past) with rounds 4–10625‰ under the same load, run
@@ -811,10 +814,17 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
   A pooled ratio of means — what this test asserted before #392 — read
   1103–1304‰ on a CI host shared by thirteen lanes while the attacked arm's
   wall was 321–865‰ of the baseline's: a burst landing on one sequential arm,
-  not a cost. **Linux is not yet re-measured:** the 4-vCPU OrbStack container
-  read a 1062–1089‰ median on a quiet host and 1039–1267‰ saturated with the
-  lock wait still charged, so the container leg keeps the #375
-  quarantine until the arrival decision is working-set independent.
+  not a cost. **Linux:** the 4-vCPU OrbStack container read a 1062–1089‰
+  median on a quiet host and 1039–1267‰ saturated with the lock wait still
+  charged; with the slot built only on parking it reads 1024–1068‰ quiet
+  (20 of 20 inside) and 1020–1134‰ with the host's cores each loaded once
+  (2 of 20 past). The residual is a fixed 3–8 ns per decision, not a share:
+  the flood's completions write the round and the pool's counter from other
+  cores, and the next arrival reads those lines back. A cheaper decision
+  raises the ratio against that fixed delta — building leases outside the
+  lock cut the mean from 50 to 40 ns on loaded macOS and moved its median
+  to 1030–1119‰ (branch `perf/admit-outside-lock-375`, not landed) — so the
+  container leg keeps the #375 quarantine.
 
 *Not covered:* two tenants appending to one journal *file*; each tenant owns its
 own file, so the run proves the kill and the restart keep each file's prefix,
