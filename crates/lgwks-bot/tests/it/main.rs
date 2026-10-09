@@ -226,6 +226,7 @@ mod sim_task;
 mod sim_task_axes;
 mod sim_task_resume;
 mod sim_tenancy;
+mod sim_tenancy_flood;
 mod sim_tenancy_model;
 mod sim_tenancy_scope;
 mod sim_tenant_journal_kill;

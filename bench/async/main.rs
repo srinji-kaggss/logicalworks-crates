@@ -88,6 +88,10 @@ mod alloc_count;
 // copy of that function is a second definition of what "the intended start" is.
 mod openloop;
 
+// `--flood-split`: INV-BOT-151's wall-clock half, a report beside the
+// deterministic `sim_tenancy_flood` gate (#375).
+mod flood;
+
 // Every count this rig converts between `usize` and `u64` is lossless on the 64-bit
 // hosts it is built for, and this assertion makes any other width a compile error
 // rather than a silent clamp hidden at a conversion site.
@@ -4442,6 +4446,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut overload = false;
     let mut attribution = false;
     let mut simulation = false;
+    let mut flood_split = false;
     let mut window_seconds: u64 = 2;
     let mut tier: Option<usize> = None;
     let mut knee: u64 = 32_768;
@@ -4500,6 +4505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "overload" => overload = true,
                 "alloc-attribution" => attribution = true,
                 "sim-open-loop" => simulation = true,
+                "flood-split" => flood_split = true,
                 // An unknown flag is refused rather than ignored: a mistyped
                 // `--saturaton` that silently ran the default suite would report a
                 // number for a run nobody asked for.
@@ -4538,6 +4544,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         load_source,
         "host"
     );
+
+    if flood_split {
+        // A report, never a gate: the claim's gate is `sim_tenancy_flood`, and a
+        // wall-clock ratio on a shared host reads the host (#375).
+        return block_on_mode(workers, || flood::flood_split(rounds));
+    }
 
     if simulation {
         // The seeded model runs alone and exits non-zero when a replay diverges: a
