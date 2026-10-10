@@ -174,6 +174,7 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<Flow> {
         signature,
         line: line.number,
         steps,
+        passthrough: super::passthrough::of(&body),
     };
     Ok(Flow {
         attributes: attributes.into_iter().collect(),

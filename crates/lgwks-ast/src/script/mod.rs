@@ -57,6 +57,7 @@ mod json;
 mod lexicon;
 mod lines;
 mod parse;
+mod passthrough;
 mod refuse;
 mod tree;
 
@@ -69,8 +70,8 @@ pub use find::{Invocation, read_source};
 pub use lexicon::{Axis, Evidence, Form, Guarantee, Kind, LEXICON, Position, Word};
 pub use tree::{
     Block, Bound, Branch, BranchValue, Call, Code, Construct, Domain, Duration, Each, Flow,
-    FlowShape, For, Fragment, IfBranch, IfChain, MapStep, Retry, Script, Site, Statement, Step,
-    StepShape, Together, Within, write_map,
+    FlowShape, For, Fragment, IfBranch, IfChain, MapStep, Passthrough, Retry, Script, Site,
+    Statement, Step, StepShape, Together, Within, write_map,
 };
 
 /// A script the language refuses, located at the token it is about.

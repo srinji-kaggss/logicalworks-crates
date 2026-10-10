@@ -128,6 +128,8 @@ Outcomes, not axis rows:
 - **Size.** Lines per flow against the equivalent hand-written Rust.
 - **Passthrough share.** The share of passthrough lines across estate scripts.
   It is a signal for SL-7 and never a gate, because a gated share would be
-  gamed.
+  gamed. Each flow's map lists its passthrough lines, and
+  `scripts/passthrough-census.py` ranks their shapes; the procedure that
+  reads the census is `docs/script-word-admission.md` (#389).
 
 None of these has been measured for the lexicon-only cell yet.

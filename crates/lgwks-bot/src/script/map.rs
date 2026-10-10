@@ -91,6 +91,8 @@ pub struct FlowShape {
     line: u32,
     /// The blocks directly inside the flow.
     steps: &'static [StepShape],
+    /// The lines the flow passes through as plain Rust, in source order.
+    passthrough: &'static [Passthrough],
 }
 
 impl FlowShape {
@@ -102,12 +104,14 @@ impl FlowShape {
         signature: &'static str,
         line: u32,
         steps: &'static [StepShape],
+        passthrough: &'static [Passthrough],
     ) -> Self {
         Self {
             name,
             signature,
             line,
             steps,
+            passthrough,
         }
     }
 
@@ -138,6 +142,13 @@ impl FlowShape {
         self.steps
     }
 
+    /// The lines this flow passes through as plain Rust, in source order: the
+    /// lines no word reads, which the word-admission census counts.
+    #[must_use]
+    pub const fn passthrough(&self) -> &'static [Passthrough] {
+        self.passthrough
+    }
+
     /// Every flow this one runs, anywhere inside it, in source order.
     #[must_use]
     pub fn runs(&self) -> Vec<&'static str> {
@@ -154,6 +165,38 @@ fn runs_in(steps: &'static [StepShape]) -> Vec<&'static str> {
             own.into_iter().chain(runs_in(step.steps))
         })
         .collect()
+}
+
+/// A line a flow passes through as written: no word, and no `run`, `observe`
+/// or `act` inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+pub struct Passthrough {
+    /// The source line.
+    line: u32,
+    /// The line as written.
+    text: &'static str,
+}
+
+impl Passthrough {
+    #[doc(hidden)]
+    /// Describe a passthrough line. Called by `script!`.
+    #[must_use]
+    pub const fn new(line: u32, text: &'static str) -> Self {
+        Self { line, text }
+    }
+
+    /// The source line.
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The line as written.
+    #[must_use]
+    pub const fn text(&self) -> &'static str {
+        self.text
+    }
 }
 
 /// One block inside a flow.

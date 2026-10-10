@@ -619,8 +619,13 @@ fn flow_shape(shape: &FlowShape) -> TokenStream {
     let signature = shape.signature();
     let line = line_literal(shape.line());
     let steps = shape.steps().iter().map(step_shape);
+    let passthrough = shape.passthrough().iter().map(|passed| {
+        let line = line_literal(passed.line());
+        let text = passed.text();
+        quote!(#script::Passthrough::new(#line, #text))
+    });
     quote! {
-        #script::FlowShape::new(#name, #signature, #line, &[#(#steps),*])
+        #script::FlowShape::new(#name, #signature, #line, &[#(#steps),*], &[#(#passthrough),*])
     }
 }
 

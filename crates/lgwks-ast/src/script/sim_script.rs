@@ -984,6 +984,64 @@ fn label_family(first: u64, count: u64) -> Result<u64, String> {
     Ok(trace.0)
 }
 
+/// Whether a generated line says a word anywhere: `run`, `observe`, `act`,
+/// `give back` or `fail`. The block words are headers, which `opens` marks.
+fn says_a_word(text: &str) -> bool {
+    text.split_whitespace()
+        .any(|token| matches!(token, "run" | "observe" | "act" | "give" | "fail"))
+}
+
+/// A line with all whitespace removed: a group that runs onto the next lines
+/// is written back with its line breaks, and the model wrote it with `\n`.
+fn squeezed(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// The map lists as passthrough exactly the lines the generator wrote as
+/// plain Rust, each at its source line and as written, and no line that says
+/// a word, at any depth (#389).
+fn passthrough_family(first: u64, count: u64) -> Result<u64, String> {
+    let mut trace = Trace::default();
+    let mut seen = 0_usize;
+    for offset in 0..count {
+        let seed = SCRIPT_BASE.wrapping_add(first).wrapping_add(offset);
+        let script = Script::drawn(seed)?;
+        let (source, starts) = script.render();
+        let expected: Vec<(usize, String)> = script
+            .lines
+            .iter()
+            .zip(&starts)
+            .filter(|&(src, _)| src.opens.is_none() && !says_a_word(&src.text))
+            .map(|(src, &line)| (line, squeezed(&src.text)))
+            .collect();
+        let read: Vec<(usize, String)> = accepted(seed, &source)?
+            .flows()
+            .iter()
+            .flat_map(|flow| flow.shape().passthrough())
+            .map(|passed| (passed.line(), squeezed(passed.text())))
+            .collect();
+        if read != expected {
+            let refusal = format!(
+                "seed {seed:#x}: the generator wrote {expected:?} as plain Rust and the \
+                 map lists {read:?}:\n{source}"
+            );
+            tracing::debug!(error = %refusal, "passthrough_family: returning an error to the caller");
+            return Err(refusal);
+        }
+        seen = seen.saturating_add(read.len());
+        for &(line, ref text) in &read {
+            trace.count(line);
+            trace.text(text);
+        }
+    }
+    if seen == 0 {
+        let refusal = "no script in the band wrote a plain Rust line".to_owned();
+        tracing::debug!(error = %refusal, "passthrough_family: returning an error to the caller");
+        return Err(refusal);
+    }
+    Ok(trace.0)
+}
+
 // ── The families as tests ─────────────────────────────────────────────────
 
 /// One `#[test]` per band of a family, so a failing band names itself.
@@ -1030,6 +1088,11 @@ bands!(nested_plant_family:
 bands!(label_family:
     sim_step_labels_survive_a_line_inserted_above_band_00 = 0,
     sim_step_labels_survive_a_line_inserted_above_band_01 = 1,
+);
+
+bands!(passthrough_family:
+    sim_the_map_lists_exactly_the_plain_rust_lines_band_00 = 0,
+    sim_the_map_lists_exactly_the_plain_rust_lines_band_01 = 1,
 );
 
 #[test]
@@ -1080,6 +1143,7 @@ fn every_family(first: u64, count: u64) -> Result<Vec<u64>, String> {
         plant_family(first, count)?,
         nested_plant_family(first, count)?,
         label_family(first, count)?,
+        passthrough_family(first, count)?,
     ])
 }
 

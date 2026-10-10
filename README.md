@@ -287,6 +287,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/pr-review-orchestration.spec.md`](docs/pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
 | [`docs/orchestration-acceptance.spec.md`](docs/orchestration-acceptance.spec.md) | The 36 proposed public-interface falsifiers, and the developer-experience and quality evaluation that would accept the facade. Every case unrun. |
 | [`docs/script-lexicon.md`](docs/script-lexicon.md) | Every `script!` word on one page, generated from the lexicon the parser dispatches on: its forms, refusals, guarantees and an example. Enough context to write a script from alone. |
+| [`docs/script-word-admission.md`](docs/script-word-admission.md) | How a word joins the `script!` language: three cited estate sites, its row, a refusal case per refusal, a test per guarantee, a seeded simulation, and the passthrough census that finds candidates. |
 | [`docs/orchestration-evidence.md`](docs/orchestration-evidence.md) | The pinned source findings, the foundational Rust assessment, and the reference entries the orchestration specs are built on. |
 | [`docs/bot-on-ecs.md`](docs/bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
 | [`docs/effect-kernel.md`](docs/effect-kernel.md) | The durable effect dispatch and recovery kernel: the journal ladder, the recovery fold, settlement unification, durability admission, and what one authority means. |

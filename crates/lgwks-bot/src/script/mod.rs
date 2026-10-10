@@ -109,7 +109,7 @@ pub use domain::{Acted, DomainUse, act, admit_domains, observe};
 pub use each::{each, each_at};
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use fan_out::{FanOut, FanOutError};
-pub use map::{Architecture, FlowShape, StepKind, StepShape};
+pub use map::{Architecture, FlowShape, Passthrough, StepKind, StepShape};
 pub use ready::{
     FailAfterReady, Generation, MAX_DEPENDANTS, MAX_NAME_BYTES, Readiness, ReadinessError, Ready,
     ReadyOutcome,
