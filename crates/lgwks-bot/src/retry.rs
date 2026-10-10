@@ -618,15 +618,11 @@ mod tests {
 
     /// Facts that permit a retry, so each test changes exactly one thing.
     fn permissive(class: RetryClass) -> Result<RetryFacts, Box<dyn std::error::Error>> {
-        Ok(RetryFacts::new(
-            declared(),
-            0,
-            class,
-            dispatched(DIGEST_HEX)?,
-            payload()?,
+        Ok(
+            RetryFacts::new(declared(), 0, class, dispatched(DIGEST_HEX)?, payload()?)
+                .with_live_authority()
+                .with_evidence(EffectEvidence::NotApplied),
         )
-        .with_live_authority()
-        .with_evidence(EffectEvidence::NotApplied))
     }
 
     /// A contract over the shared action and payload, with the given window and

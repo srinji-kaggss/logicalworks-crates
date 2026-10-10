@@ -650,7 +650,9 @@ fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
             Predecessor::Failed | Predecessor::Abandoned | Predecessor::Unknown => is_value,
         };
         let policy = match state {
-            Predecessor::Abandoned => RetryPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::MAX),
+            Predecessor::Abandoned => {
+                RetryPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::MAX)
+            }
             Predecessor::Failed | Predecessor::Unknown | Predecessor::Skipped => {
                 RetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::MAX)
             }
@@ -697,7 +699,7 @@ fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
             }
         }
 
-        let attempts_left = policy.max_attempts();
+        let attempts_left = policy.max_attempts.max(1);
         match state {
             Predecessor::Skipped => {
                 assert_eq!(

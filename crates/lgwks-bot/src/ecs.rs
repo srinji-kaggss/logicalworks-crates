@@ -3119,11 +3119,7 @@ impl Retrying {
             total = total.saturating_add(self.policy.delay(retry, 0));
         }
         let rest = attempts.saturating_sub(walked);
-        total.saturating_add(
-            self.policy
-                .delay(SATURATED_RETRY, 0)
-                .saturating_mul(rest),
-        )
+        total.saturating_add(self.policy.delay(SATURATED_RETRY, 0).saturating_mul(rest))
     }
 }
 
@@ -3854,7 +3850,7 @@ impl Ledger {
                     reason: AbandonReason::AttemptsExhausted { attempts },
                     cause: "effect not applied; its record landed on retry".into(),
                 },
-            }
+            },
         };
         true
     }
@@ -10108,11 +10104,15 @@ pub(super) mod tests {
             &log,
         )
         .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        .build(&net_grants())?;
 
-        refused(bot.tick(), |fired| format!("a refusal was reported as {fired} fired"))?;
+        refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
         clock.advance(std::time::Duration::from_secs(10))?;
-        refused(bot.tick(), |fired| format!("a refusal was reported as {fired} fired"))?;
+        refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
         assert_eq!(attempts.get(), 2, "the first retry fit inside the deadline");
 
         clock.advance(std::time::Duration::from_secs(3_600))?;
@@ -10123,7 +10123,11 @@ pub(super) mod tests {
             matches!(error, BotError::PendingTransition { .. }),
             "expected the abandoned chain to be reported, got {error:?}"
         );
-        assert_eq!(attempts.get(), 2, "the deadline abandoned it with an attempt left");
+        assert_eq!(
+            attempts.get(),
+            2,
+            "the deadline abandoned it with an attempt left"
+        );
         assert!(log.borrow().is_empty(), "nor was its successor run");
         Ok(())
     }
