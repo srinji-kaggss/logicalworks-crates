@@ -74,8 +74,8 @@
 //!
 //! This module does not log. It reports. The cause travels to the caller in the
 //! verdict, and the verdict reaches the run's declared record — the
-//! [`DecisionReceipt`] written to the
-//! [`Journal`] — rather than a session transcript,
+//! [`DecisionReceipt`](crate::session::DecisionReceipt) written to the
+//! [`Journal`](crate::session::Journal) — rather than a session transcript,
 //! which is a rendering of what was said and not of what was decided. A log line
 //! would be a second, unmanaged copy of the same fact, and this crate has no
 //! logging edge to write one through. An [`Embedder`] that fails is expected to

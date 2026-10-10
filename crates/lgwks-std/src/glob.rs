@@ -13,7 +13,7 @@
 //! path component are errors.
 //! [GlobDialect::Legacy](crate::glob::GlobDialect::Legacy) preserves the
 //! earlier boolean matcher's literal unclosed brackets, descending-range no-match, and
-//! `**` anywhere behavior. The one-call [`matches`] function continues to use
+//! `**` anywhere behavior. The one-call [`matches`](fn@crate::glob::matches) function continues to use
 //! that named legacy dialect for source compatibility.
 //!
 //! This module replaces only the matching portion of the upstream `glob`

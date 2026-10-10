@@ -46,6 +46,21 @@ doc() {
 lane_all_features() {
   doc -p lgwks_std -p lgwks_bot -p lgwks_ast --all-features
   doc -p lgwks_deps --features tokio-full
+  lane_docsrs
+}
+
+# The build docs.rs itself runs: nightly rustdoc, `--cfg docsrs`, each crate's
+# `[package.metadata.docs.rs]` features. Nightly resolves a module's `//!` links
+# in the module's own scope where the pinned toolchain resolved them in the
+# parent's, so lgwks_std 2.2.0, lgwks_bot 2.2.0 and lgwks_ast 1.1.0 passed every
+# lane above and still failed on docs.rs, which then served 1.0. A link that
+# only one toolchain can resolve fails here, before it is published.
+lane_docsrs() {
+  printf '\n--- docs.rs build (nightly, --cfg docsrs)\n'
+  RUSTDOCFLAGS='--cfg docsrs -D warnings' rustup run nightly \
+    cargo doc --no-deps --locked -p lgwks_std -p lgwks_bot -p lgwks_ast -p lgwks_macros --all-features
+  RUSTDOCFLAGS='--cfg docsrs -D warnings' rustup run nightly \
+    cargo doc --no-deps --locked -p lgwks_deps --features tokio-full,appcui,bevy-app,bevy-time,bevy-state
 }
 
 # No features on, per crate. The other boundary: this lane does not compile the
