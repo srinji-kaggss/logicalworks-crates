@@ -1181,10 +1181,26 @@ fn a_real_kill_mid_append_leaves_no_duplicate_and_no_lost_receipt() -> TestResul
         0,
         "an in-flight append killed before its device answered must not commit"
     );
+    // T14 row 0: an attempt nobody acknowledged was never promised to anyone,
+    // so it recovers as no attempt at all. Not `Prepared`, which would claim
+    // the intent was durable, and not an unknown barrier, which would demand a
+    // reconciliation for an effect that cannot have left the process. Row 1,
+    // killed one acknowledgment later, recovers `Prepared` for the same key.
+    let this_key = key("1", DIGEST_A)?;
+    let recovered = journal.recover();
+    assert_eq!(
+        recovered.status(this_key),
+        None,
+        "an unacknowledged admission recovers as no attempt, never as Prepared"
+    );
+    assert!(
+        recovered.uncertain().is_empty(),
+        "nothing was dispatched, so nothing is unknown and nothing is resent: {:?}",
+        recovered.uncertain()
+    );
 
     // The retry lands exactly once: there was no acknowledgment to lose, and
     // the fact on the disk is the first and only one for the attempt.
-    let this_key = key("1", DIGEST_A)?;
     let ack = journal.compare_and_append(
         journal.tail(),
         &EffectEvent::IntentAdmitted { key: this_key },

@@ -40,8 +40,10 @@ use std::error::Error;
 use std::rc::Rc;
 
 use lgwks_bot::journal::{EffectEvent, EffectJournal, MemoryJournal};
-use lgwks_bot::spec::{Bot, EffectScope};
-use lgwks_bot::{Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, RefreshReason};
+use lgwks_bot::spec::{Bot, EffectScope, RetryPolicy};
+use lgwks_bot::{
+    Auth, BotError, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet, RefreshReason,
+};
 
 use sim::Band;
 
@@ -77,6 +79,9 @@ enum Outcome {
     Lands,
     /// The acknowledgement never arrived, so the entry is held rather than done.
     Held,
+    /// The effect provably did not land, so the entry may be retried while its
+    /// attempt budget lasts and is abandoned when it runs out.
+    Refuses,
 }
 
 /// An action that records its inputs and then lands or holds, per [`Outcome`].
@@ -103,6 +108,11 @@ impl Acting {
     /// An action that holds, counting its entries.
     fn holds() -> Self {
         Self::with(Outcome::Held)
+    }
+
+    /// An action that definitely fails, counting its entries.
+    fn refuses() -> Self {
+        Self::with(Outcome::Refuses)
     }
 
     /// An action with a fresh record and a zeroed counter.
@@ -147,6 +157,14 @@ impl Execute for Acting {
             Outcome::Held => Err(BotError::EffectIndeterminate {
                 domain: "test::acting".to_owned(),
                 cause: "the acknowledgement never arrived".to_owned(),
+            }),
+            // `NotDelivered`, not `Refused`: a transient refusal the chain
+            // retries while it has budget, so the Failed and Abandoned arms of
+            // T10 are two budgets over one action rather than two actions.
+            Outcome::Refuses => Err(BotError::DomainError {
+                domain: "test::acting".to_owned(),
+                certainty: DispatchCertainty::NotDelivered,
+                cause: "the upstream refused before anything was delivered".to_owned(),
             }),
         }
     }
@@ -569,6 +587,162 @@ fn a_required_predecessor_holds_its_dependent(band: Band) -> TestResult {
     })
 }
 
+/// The states T10 names for a required predecessor, beside the one decided
+/// state that does not hold its dependent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Predecessor {
+    /// It definitely failed and still has attempts left.
+    Failed,
+    /// It definitely failed with no attempt left, so it was given up on.
+    Abandoned,
+    /// Its outcome never arrived.
+    Unknown,
+    /// Its condition did not hold, so it ran nothing and left nothing in doubt.
+    Skipped,
+}
+
+impl Predecessor {
+    /// Every state, in a fixed order, so the seed's draw names the same state on
+    /// every run.
+    const ALL: [Self; 4] = [Self::Failed, Self::Abandoned, Self::Unknown, Self::Skipped];
+
+    /// The spelling the trace records.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Abandoned => "abandoned",
+            Self::Unknown => "unknown",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// T10, swept over every predecessor state: a dependent behind a predecessor
+/// that failed, was abandoned or became Unknown never runs, over a drawn number
+/// of ticks; a dependent behind a skipped predecessor runs once.
+///
+/// One dependent and one predecessor per scenario, so the only thing the seed
+/// varies is the state the predecessor is left in and how long the bot keeps
+/// ticking afterwards. The row's subject is "merely because it is no longer
+/// active": a failed entry stops being attempted once its budget is spent, an
+/// unknown one is held rather than re-entered, and neither is a reason for the
+/// dependent to proceed. The skipped arm is the control that keeps the sweep
+/// honest: a predecessor whose guard did not hold decided that nothing should
+/// happen, so the entry behind it is not held hostage by an effect that never
+/// started, and a sweep that blocked everything would fail there.
+fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
+    sim::assert_replays(band, |sim| {
+        let drawn = usize::try_from(sim.rng().below(4))?;
+        let state = *Predecessor::ALL
+            .get(drawn)
+            .ok_or("the draw names a predecessor state")?;
+        let ticks = sim.rng().between(1, 8);
+        let store = Rc::new(RefCell::new(MemoryJournal::new()));
+        let predecessor = match state {
+            Predecessor::Failed | Predecessor::Abandoned => Acting::refuses(),
+            Predecessor::Unknown => Acting::holds(),
+            Predecessor::Skipped => Acting::lands(),
+        };
+        let dependent = Acting::lands();
+        let dependent_ran = dependent.record();
+        let guard = match state {
+            Predecessor::Skipped => |_: &u32| false,
+            Predecessor::Failed | Predecessor::Abandoned | Predecessor::Unknown => is_value,
+        };
+        let policy = match state {
+            Predecessor::Abandoned => RetryPolicy::ONE_ATTEMPT,
+            Predecessor::Failed | Predecessor::Unknown | Predecessor::Skipped => {
+                RetryPolicy::DEFAULT
+            }
+        };
+        let mut bot = Bot::builder("sim-t10-states")
+            .with_retry_policy(policy)
+            .observe(FixedSource)
+            .on(guard, predecessor.clone())
+            .on(|_: &u32| true, dependent)
+            .with_effects(scope_of(&store)?)
+            .build(&GrantSet::empty())?;
+
+        for tick in 0..ticks {
+            let outcome = bot.tick();
+            match (state, outcome) {
+                (Predecessor::Skipped, Ok(_)) => {}
+                (Predecessor::Skipped, Err(error)) => {
+                    let refusal = Err(format!(
+                        "tick {tick}: a skipped predecessor holds nothing, got {error:?}"
+                    )
+                    .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "every_predecessor_state_decides_its_dependent: returning an error to the caller");
+                    return refusal;
+                }
+                (_, Ok(fired)) => {
+                    let refusal = Err(format!(
+                        "tick {tick}: a {} predecessor read as a clean {fired}-effect tick",
+                        state.tag()
+                    )
+                    .into());
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "every_predecessor_state_decides_its_dependent: returning an error to the caller");
+                    return refusal;
+                }
+                (_, Err(error)) => assert!(
+                    matches!(
+                        error,
+                        BotError::DomainError { .. }
+                            | BotError::EffectIndeterminate { .. }
+                            | BotError::PendingTransition { .. }
+                    ),
+                    "tick {tick}: a {} predecessor is reported by a typed variant: {error:?}",
+                    state.tag()
+                ),
+            }
+        }
+
+        let attempts_left = policy.max_attempts();
+        match state {
+            Predecessor::Skipped => {
+                assert_eq!(
+                    predecessor.entries(),
+                    0,
+                    "a skipped predecessor ran nothing"
+                );
+                assert_eq!(
+                    dependent_ran.borrow().as_slice(),
+                    [sim::rig::VALUE],
+                    "the dependent of a skipped predecessor ran once, with the observed value"
+                );
+            }
+            Predecessor::Failed | Predecessor::Abandoned | Predecessor::Unknown => {
+                assert!(
+                    dependent_ran.borrow().is_empty(),
+                    "after {ticks} ticks the dependent of a {} predecessor ran: {:?}",
+                    state.tag(),
+                    dependent_ran.borrow()
+                );
+                assert!(
+                    !bot.pending().is_empty(),
+                    "the {} predecessor stays reported rather than dropped",
+                    state.tag()
+                );
+                let entered = predecessor.entries();
+                assert!(
+                    (1..=attempts_left).contains(&entered),
+                    "the {} predecessor ran at least once and never past its budget of \
+                     {attempts_left}: {entered}",
+                    state.tag()
+                );
+                if state == Predecessor::Unknown {
+                    assert_eq!(entered, 1, "a held predecessor is never re-entered");
+                }
+            }
+        }
+        sim.trace.record(state.tag());
+        sim.trace.record_number("ticks", u64::from(ticks));
+        sim.trace
+            .record_number("predecessor_entries", u64::from(predecessor.entries()));
+        Ok(())
+    })
+}
+
 // ── T11: a late settlement stays attributable to its own attempt ────────────
 
 /// T11: a predecessor that reported itself indeterminate is never re-entered
@@ -686,6 +860,7 @@ band_family! {
     a_held_mass_never_starves_an_independent_chain_t06 => a_held_mass_never_starves_an_independent_chain, 38;
     a_required_predecessor_holds_its_dependent_t10 => a_required_predecessor_holds_its_dependent, 39;
     an_indeterminate_predecessor_is_never_resent_t11 => an_indeterminate_predecessor_is_never_resent, 40;
+    every_predecessor_state_decides_its_dependent_t10 => every_predecessor_state_decides_its_dependent, 42;
 }
 
 // `ArtifactStore` lives in `proposal`, which is gated on `script`.

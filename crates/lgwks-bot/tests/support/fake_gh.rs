@@ -448,11 +448,58 @@ if [ "$is_reviews" -eq 1 ]; then
         exit 0
         ;;
     esac
-    # The list is the receiver's own store, read back as a document. `sh` is not
-    # asked to parse JSON on the way out: each accepted create appended its
-    # rendered record to `reviews.jsonl`, so a scenario that posted one review
-    # reads back exactly that review and a receiver with many reviews does not
-    # pay a `sed` per stored review on every read.
+    # Records in the order the endpoint lists them, oldest first: the history
+    # filler, then each review the receiver accepted. Each record is preceded
+    # by what stands before it on the wire, decided by `separate`: nothing
+    # before the first, a comma between two on one page, and at a page
+    # boundary either the end of the answer (a read that did not ask for
+    # `--paginate` gets the first page and no more, as the REST endpoint
+    # answers a client that ignores the `Link` header), a comma (`gh api
+    # --paginate` merging array pages into one array), or `][` for the
+    # `concatenated` shape, the older client's one array per page.
+    field review_page; page=$val
+    paginate=0
+    for arg in "$@"; do
+      if [ "$arg" = "--paginate" ]; then paginate=1; fi
+    done
+    at=0
+    ended=0
+    separate() {
+      if [ "$at" -eq 0 ]; then
+        return 0
+      fi
+      if [ -n "${page:-}" ] && [ "$page" -gt 0 ] 2>/dev/null && [ $((at % page)) -eq 0 ]; then
+        if [ "$paginate" -eq 0 ]; then
+          ended=1
+          return 1
+        fi
+        if [ "$shape" = "concatenated" ]; then
+          printf ']['
+        else
+          printf ','
+        fi
+        return 0
+      fi
+      printf ','
+    }
+    printf '['
+    # Filler reviews, for the review-ceiling and pagination probes. They are
+    # real records on another commit: what matters is that the adapter would
+    # have had to read them to call the list complete, so returning only the
+    # prefix would be a lie about the pull request's review history.
+    field filler_reviews; filler=$val
+    i=0
+    while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
+      separate || break
+      printf '{"id":%s,"commit_id":"%s","state":"COMMENTED","body":"history"}' \
+        "$((7000 + i))" "ccccccccccccccccccccccccccccccccccccccc"
+      i=$((i + 1))
+      at=$((at + 1))
+    done
+    # The receiver's own store, read back as records. `sh` is not asked to
+    # parse JSON on the way out: each accepted create appended its rendered
+    # record to `reviews.jsonl`, so a scenario that posted one review reads back
+    # exactly that review.
     #
     # The store is `{...},{...}` — a record per create with a *leading*
     # separator, which is what one atomic append can carry. Two earlier
@@ -461,39 +508,20 @@ if [ "$is_reviews" -eq 1 ]; then
     # the kernel interleaved into `[,,{...}]`, and a separator decided by an
     # existence probe, which two creates could both read as absent.
     #
-    # So the store's leading separator is dropped on the way out. Each record is
-    # one newline-terminated line, and the builtin `read` loop keeps only the
-    # lines it saw end: `read` reports a final line with no newline as a
-    # failure, so a record another run is still appending — visible half-copied
-    # on tmpfs — ends the loop instead of reaching the answer. `${store#?}`
-    # then drops the first separator, one byte, without forking a reader on
-    # every read-back. An absent or empty store yields an empty string, so `[`
-    # is still followed by `]` and a pull request with no reviews reads back as
-    # `[]`.
-    printf '['
-    if [ -s "$dir/reviews.jsonl" ]; then
-      store=""
+    # So each record's leading separator is dropped on the way out and
+    # `separate` writes the one the wire needs. Each record is one
+    # newline-terminated line, and the builtin `read` loop keeps only the lines
+    # it saw end: `read` reports a final line with no newline as a failure, so a
+    # record another run is still appending — visible half-copied on tmpfs —
+    # ends the loop instead of reaching the answer. An absent or empty store
+    # adds nothing, so a pull request with no reviews reads back as `[]`.
+    if [ "$ended" -eq 0 ] && [ -s "$dir/reviews.jsonl" ]; then
       while IFS= read -r record; do
-        store="$store$record"
+        separate || break
+        printf '%s' "${record#?}"
+        at=$((at + 1))
       done < "$dir/reviews.jsonl"
-      printf '%s' "${store#?}"
     fi
-    # Filler reviews, for the review-ceiling probe. They are real records on
-    # another commit: what matters is that the adapter would have had to read
-    # them to call the list complete, so returning only the prefix would be a
-    # lie about the pull request's review history.
-    field filler_reviews; filler=$val
-    i=0
-    while [ -n "${filler:-}" ] && [ "$i" -lt "$filler" ] 2>/dev/null; do
-      if [ "$i" -eq 0 ] && [ ! -s "$dir/reviews.jsonl" ]; then
-        :
-      else
-        printf ','
-      fi
-      printf '{"id":%s,"commit_id":"%s","state":"COMMENTED","body":"history"}' \
-        "$((7000 + i))" "ccccccccccccccccccccccccccccccccccccccc"
-      i=$((i + 1))
-    done
   if [ "$shape" = "truncated" ]; then
     # The document opened and the records are valid; what is missing is the
     # close. A decoder that fills that in would invent the end of the list.
@@ -619,6 +647,13 @@ pub struct Scenario {
     /// in one document, because what is under test is the adapter's refusal to
     /// treat a clean decode as proof of completeness.
     pub filler_reviews: u32,
+    /// The page size the review endpoint serves, `0` for one page however long.
+    ///
+    /// With a size set, a read without `--paginate` sees only the first page,
+    /// so a review on a later page is visible only to a client that follows
+    /// every page. That is the falsifier for pagination: an adapter that read
+    /// one page would decode a clean, short, wrong list.
+    pub review_page: u32,
     /// What the review read emits instead of a JSON list: `""` for a real list,
     /// `garbage` for something that is not JSON, or `truncated` for a JSON
     /// document whose closing bracket was lost.
@@ -660,6 +695,7 @@ impl Scenario {
             hang_seconds: 0,
             flood_bytes: 0,
             filler_reviews: 0,
+            review_page: 0,
             reviews_shape: "",
             snapshot_shape: "",
             files_shape: "",
@@ -729,6 +765,13 @@ impl Scenario {
     #[must_use]
     pub fn with_filler_reviews(mut self, count: u32) -> Self {
         self.filler_reviews = count;
+        self
+    }
+
+    /// The review endpoint serves its list in pages of `size` records.
+    #[must_use]
+    pub fn with_review_pages(mut self, size: u32) -> Self {
+        self.review_page = size;
         self
     }
 
@@ -854,7 +897,7 @@ impl Scenario {
              \"create\":\"{create}\",\"next_review_id\":9001,\
              \"created_body\":\"{body}\",\"created_state\":\"{state}\",\
              \"fail_reads\":{fail_reads},\"hang_seconds\":{hang},\"flood_bytes\":{flood},\
-             \"filler_reviews\":{filler},\"reviews_shape\":\"{shape}\",\
+             \"filler_reviews\":{filler},\"review_page\":{page},\"reviews_shape\":\"{shape}\",\
              \"snapshot_shape\":\"{snapshot}\",\"files_shape\":\"{files}\",\
              \"filler_files\":{filler_files},\"diff_bytes\":{diff_bytes},\
              \"applied_comments\":{applied},\"deny_reads\":{deny},\
@@ -867,6 +910,7 @@ impl Scenario {
             hang = self.hang_seconds,
             flood = self.flood_bytes,
             filler = self.filler_reviews,
+            page = self.review_page,
             shape = self.reviews_shape,
             snapshot = self.snapshot_shape,
             files = self.files_shape,

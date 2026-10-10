@@ -534,6 +534,104 @@ fn a_dropped_waiter_leaves_uncertainty_and_a_later_client_settles_it_t17() -> Te
     Ok(())
 }
 
+/// T17, drain half: after a waiter is dropped mid-effect, the still-owning
+/// host reports cleanup and uncertainty as two independent facts, and draining
+/// it moves neither.
+///
+/// Cleanup is the admission counters: the dropped waiter's permit came back,
+/// so nothing is in flight and every permit is free. Uncertainty is the
+/// request: no terminal was recorded, so a later submission is told
+/// `InFlight` with no report. A host that conflated the two would either keep
+/// the permit to stand for the uncertain request (a leak a drain can never
+/// clear) or drop the request with its permit (a lost effect reported as
+/// cleaned up). After `cancel` drains the host, the counters are unchanged and
+/// a second host over the same store still reads the request as in flight,
+/// then settles it to a terminal under the same run.
+#[test]
+fn a_drained_host_reports_cleanup_and_uncertainty_as_two_facts_t17() -> TestResult {
+    let scratch = Scratch::new("t17-drain")?;
+    let owner = Host::builder("acme")?.run_store(scratch.path())?.build()?;
+    let ceiling = owner.limits().max_concurrent_tasks();
+    let key = RequestKey::new("order-17-drain")?;
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let parking = parking_task!("parking", &entered)?;
+    drive_until_entered(Box::pin(owner.submit(&key, &parking, 4u32)), &entered);
+    assert!(
+        entered.load(Ordering::SeqCst),
+        "the waiter entered its body before being dropped"
+    );
+
+    // Cleanup, read from the admission counters alone.
+    let admission = owner.admission();
+    assert_eq!(
+        admission.in_flight(),
+        0,
+        "the dropped waiter holds no permit"
+    );
+    assert_eq!(
+        admission.available_permits(),
+        ceiling,
+        "every permit is free again: {admission:?}"
+    );
+
+    // Uncertainty, read from the request alone.
+    let run = match lgwks_bot::block_on(owner.submit(&key, &parking, 4u32))? {
+        Submission::InFlight(in_flight) => in_flight.run(),
+        other => {
+            let refusal =
+                Err(format!("cleanup must not erase the uncertain request: got {other:?}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_drained_host_reports_cleanup_and_uncertainty_as_two_facts_t17: returning an error to the caller");
+            return refusal;
+        }
+    };
+
+    // Drain the owner. Its counters do not move, and the uncertainty outlives it.
+    owner.cancel();
+    assert!(owner.is_cancelled(), "the drain took effect");
+    assert_eq!(
+        owner.admission().in_flight(),
+        0,
+        "the drain freed nothing it had not freed"
+    );
+    assert_eq!(owner.admission().available_permits(), ceiling);
+    drop(owner);
+
+    let successor = Host::builder("acme")?.run_store(scratch.path())?.build()?;
+    match lgwks_bot::block_on(successor.submit(&key, &parking, 4u32))? {
+        Submission::InFlight(in_flight) => assert_eq!(
+            in_flight.run(),
+            run,
+            "the successor reads the same uncertain run the owner left"
+        ),
+        other => {
+            let refusal = Err(format!(
+                "a drain must not settle the request by omission: got {other:?}"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_drained_host_reports_cleanup_and_uncertainty_as_two_facts_t17: returning an error to the caller");
+            return refusal;
+        }
+    }
+    let settled = Rc::new(Cell::new(0_u32));
+    let settler = counted_u32_task!("settler", &settled)?;
+    let report: Report<u32> = lgwks_bot::block_on(successor.resume(run, &settler, 4u32));
+    assert_eq!(
+        report.disposition(),
+        Disposition::Succeeded,
+        "the successor settles the uncertain run: {:?}",
+        report.error()
+    );
+    assert_eq!(report.run_id(), Some(run), "under the run the key derives");
+    assert_eq!(settled.get(), 1, "the settling body ran once");
+    assert_eq!(
+        successor.admission().in_flight(),
+        0,
+        "and returned its permit"
+    );
+    Ok(())
+}
+
 // ── T22 ─────────────────────────────────────────────────────────────────────
 
 /// T22, feature-boundary half: without the `process` feature the `rt::process`

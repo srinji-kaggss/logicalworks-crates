@@ -327,6 +327,73 @@ fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
     Ok(())
 }
 
+/// T31, pagination: a review list served in pages is read across every page,
+/// and an answer whose pages arrive as separate documents is refused rather
+/// than decoded as its first page.
+///
+/// The fake serves 100 records a page and answers a read that does not ask
+/// for `--paginate` with the first page only, exactly as the REST endpoint
+/// does for a client that ignores the `Link` header. So the record that sits
+/// past the second page boundary is visible only to an adapter that follows
+/// every page: one that read a single page would decode a clean list of 100
+/// and call it complete. The second half is the older client's spelling, one
+/// array per page back to back: a decoder that stopped at the first closing
+/// bracket would return page one as the whole history, so the answer must be
+/// a typed refusal.
+#[test]
+fn a_paginated_review_list_is_read_across_every_page_t31() -> TestResult {
+    const PAGE: u32 = 100;
+    const RECORDS: u32 = 250;
+    let fake = FakeGh::install("paginated", HEAD)?;
+    fake.configure(
+        Scenario::new(HEAD)
+            .with_filler_reviews(RECORDS)
+            .with_review_pages(PAGE),
+    )?;
+    let gh = Gh::new(Repository::new("acme/widgets")?)
+        .program(fake.program())
+        .capture_limit(limit(4 * 1024 * 1024)?)
+        .deadline(Some(Duration::from_secs(20)))
+        .env("PATH", fake.search_path()?);
+    let pull = lgwks_bot::domain::gh::PullRequest::new(Repository::new("acme/widgets")?, 7);
+    let runtime = lgwks_bot::Runtime::new()?;
+
+    let reviews = runtime.block_on(gh.read_reviews(&pull))?;
+    assert_eq!(
+        reviews.len(),
+        usize::try_from(RECORDS)?,
+        "every page was read: three pages of {PAGE}, the last one short"
+    );
+    let last = reviews
+        .last()
+        .ok_or("a read of 250 records returned none")?;
+    assert_eq!(
+        last.id(),
+        7_000_u64.saturating_add(u64::from(RECORDS).saturating_sub(1)),
+        "the last record is the one on the third page, which a one-page read never sees"
+    );
+
+    fake.configure(
+        Scenario::new(HEAD)
+            .with_filler_reviews(RECORDS)
+            .with_review_pages(PAGE)
+            .answers_reviews_with("concatenated"),
+    )?;
+    match runtime.block_on(gh.read_reviews(&pull)) {
+        Err(GhError::Response { .. } | GhError::MalformedResponse { .. }) => {}
+        other => {
+            let refusal = Err(format!(
+                "pages arriving as separate documents must be refused, never decoded as page \
+                 one: got {other:?}"
+            )
+            .into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_paginated_review_list_is_read_across_every_page_t31: returning an error to the caller");
+            return refusal;
+        }
+    }
+    Ok(())
+}
+
 /// The fake receiver's read-back never hands out a record another run is still
 /// appending. On tmpfs a concurrent reader can see the front half of an append
 /// (CI read a store cut mid-string at byte 8,193), so the fixture commits each

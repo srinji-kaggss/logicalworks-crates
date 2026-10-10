@@ -159,8 +159,8 @@ tests = [
 id = "T10"
 requires = "DX-06/LC-01"
 row = "A required predecessor fails, is abandoned, is skipped or becomes Unknown; dependent writes never run merely because it is no longer active."
-state = "present"
-gap = "The Unknown half is now swept over a seeded number of recovery cycles, with the dependent proved not to run and the predecessor's body proved to be entered exactly once; the other three predecessor states (Failed, Abandoned, Skipped) are named only through the ecs_tick and durable_dispatch journeys, not swept for one dependent."
+state = "exercised"
+gap = ""
 tests = [
   "it::sim_t_rows::a_required_predecessor_holds_its_dependent_t10",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
@@ -168,14 +168,15 @@ tests = [
   "ecs_tick::an_abandoned_entry_blocks_its_successors",
   "ecs_tick::a_skipped_entry_does_not_block_its_successor",
   "ecs_tick::an_abandoned_entry_is_never_a_quiet_tick",
+  "it::sim_t_rows::every_predecessor_state_decides_its_dependent_t10",
 ]
 
 [[row]]
 id = "T11"
 requires = "LC-05/06"
 row = "A Unknown -> NotApplied -> B Unknown; delayed A NotApplied and A Applied cannot alter B. Duplicate A evidence stays attributable to A."
-state = "present"
-gap = "Holding an indeterminate predecessor across a seeded number of restarts, under one attributable key, with the body never re-entered, is now swept; no named test still delivers A's evidence late, after A has already moved Unknown -> NotApplied, and asserts that B stays Unknown."
+state = "exercised"
+gap = ""
 tests = [
   "it::sim_t_rows::an_indeterminate_predecessor_is_never_resent_t11",
   "it::durable_dispatch::a_recovered_unknown_blocks_a_true_condition_and_its_successor",
@@ -188,6 +189,7 @@ tests = [
   "it::sim_dispatch::not_applied_r00",
   "it::sim_dispatch::applied_never_r00",
   "it::sim_dispatch::store_isolation_r00",
+  "it::wrong_identity_evidence::late_evidence_for_a_settled_attempt_cannot_alter_its_retry_t11",
 ]
 
 [[row]]
@@ -228,8 +230,8 @@ tests = [
 id = "T14"
 requires = "LC-05/12/13"
 row = "Crash before intent ack, after ack before dispatch, after dispatch before response, after response before receipt and during recovery. No unknown effect is blindly replayed."
-state = "present"
-gap = "Four of the five named boundaries are covered; the crash before intent ack (nothing committed) has no named test of its own."
+state = "exercised"
+gap = ""
 tests = [
   "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14",
   "it::durable_crash_observation::a_kill_between_prepare_and_outcome_recovers_a_barrier_not_an_answer",
@@ -278,8 +280,8 @@ tests = [
 id = "T17"
 requires = "LC-08"
 row = "Drop a scoped waiter during an effect, then drain the still-owning host; report uncertainty and cleanup separately. Explicit durable submission outlives its client by contract."
-state = "present"
-gap = "Dropping the client and holding the uncertain attempt are named; no named test asserts that uncertainty and cleanup are reported as two independent facts from the same drained host."
+state = "exercised"
+gap = ""
 tests = [
   "it::request_key::a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17",
   "it::request_key::a_host_stop_mid_run_leaves_the_request_resumable",
@@ -288,6 +290,7 @@ tests = [
   "it::sim_journal::recover_uncertain_r01",
   "it::t_rows_default::a_dropped_waiter_leaves_uncertainty_and_a_later_client_settles_it_t17",
   "it::sim_t_rows_default::dropped_waiters_settle_under_the_same_run_for_every_seed_t17",
+  "it::t_rows_default::a_drained_host_reports_cleanup_and_uncertainty_as_two_facts_t17",
 ]
 
 [[row]]
@@ -337,12 +340,14 @@ id = "T21"
 requires = "LC-10"
 row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
 state = "present"
-gap = "Signalling only into the supervised group and a session escape captured and stopped by pid are named; no named test exercises PID or process-group reuse, and the row is not executed per backend (containment is Unix-only)."
+gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal; the row is not yet receipted per backend: the Linux container leg runs these tests in CI but records no receipt, and containment is Unix-only."
 tests = [
   "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group_t21",
   "it::process_escape::a_session_escape_is_captured_and_stopped_by_pid",
   "it::process_escape::shutdown_reports_every_draining_cleanup_rather_than_aborting_it",
   "it::gh_binding::a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code",
+  "it::orphan_reap::a_record_naming_a_recycled_pid_signals_nothing_t21",
+  "lgwks_bot::rt::supervise::tests::a_reaped_or_recycled_group_id_is_never_signalled",
 ]
 
 [[row]]
@@ -499,8 +504,8 @@ tests = [
 id = "T31"
 requires = "PR-02/03/04"
 row = "Untrusted PR, pagination, rename, unavailable diff and build-script execution produce correct subject/coverage and sandbox decisions."
-state = "present"
-gap = "Untrusted PR, rename, unavailable diff, both diff ceilings and build-script execution are named; pagination of a list endpoint has no named test."
+state = "exercised"
+gap = ""
 tests = [
   "sim_review_path::an_untrusted_build_script_is_never_executed",
   "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed_t31",
@@ -515,6 +520,7 @@ tests = [
   "it::gh_binding::a_review_list_past_the_ceiling_is_refused_not_truncated",
   "it::t_rows_default::without_a_runner_nothing_executes_and_subjects_stay_typed_t31",
   "it::sim_t_rows_default::runnerless_calls_refuse_norunner_for_every_seed_t31",
+  "it::gh_binding::a_paginated_review_list_is_read_across_every_page_t31",
 ]
 
 [[row]]
