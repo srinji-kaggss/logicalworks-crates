@@ -169,7 +169,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::num::{NonZeroU32, NonZeroU128};
+use std::num::NonZeroU128;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -4956,8 +4956,7 @@ fn fire_plan(world: &mut World) {
                     &transition,
                     value,
                     index,
-                    ledger,
-                    now,
+                    Planned { ledger, now },
                     &mut steps,
                     failure,
                 );
@@ -5039,6 +5038,16 @@ fn put_plan_buffers(world: &mut World, steps: Vec<Step>, failures: Vec<Option<Bo
     plan.failures = failures;
 }
 
+/// What one chain's planning walk reads besides the chain: the ledger of
+/// entry states, and the moment a backoff is judged against.
+#[derive(Clone, Copy)]
+struct Planned<'a> {
+    /// Every entry's state.
+    ledger: &'a Ledger,
+    /// The bot clock's reading for this tick.
+    now: Duration,
+}
+
 /// Record the decisions one chain's walk reaches, in entry order.
 ///
 /// Only the decisions a walk can make without attempting anything are taken
@@ -5058,11 +5067,11 @@ fn plan_chain(
     transition: &Transition,
     value: &Erased,
     index: usize,
-    ledger: &Ledger,
-    now: Duration,
+    planned: Planned<'_>,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
+    let Planned { ledger, now } = planned;
     for (entry_index, entry) in chain.entries.iter().enumerate() {
         let Some(state) = transition.entries.get(entry_index) else {
             continue;

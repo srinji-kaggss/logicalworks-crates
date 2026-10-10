@@ -650,9 +650,9 @@ fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
             Predecessor::Failed | Predecessor::Abandoned | Predecessor::Unknown => is_value,
         };
         let policy = match state {
-            Predecessor::Abandoned => RetryPolicy::ONE_ATTEMPT,
+            Predecessor::Abandoned => RetryPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::MAX),
             Predecessor::Failed | Predecessor::Unknown | Predecessor::Skipped => {
-                RetryPolicy::DEFAULT
+                RetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::MAX)
             }
         };
         let mut bot = Bot::builder("sim-t10-states")
