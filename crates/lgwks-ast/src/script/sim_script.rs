@@ -442,9 +442,17 @@ impl Script {
     /// next lines.
     fn plain(&mut self, depth: usize) -> Result<(), String> {
         let name = self.name();
-        let text = match self.draw.index(3)? {
+        let text = match self.draw.index(5)? {
             0 => format!("let a{name} = site.get({name})"),
             1 => format!("let a{name} = site.pair(\n{name},\nitems.len())"),
+            2 => {
+                self.say(Kind::Observe);
+                format!("let o{name}: u16 = observe probe::status of site.key({name})")
+            }
+            3 => {
+                self.say(Kind::Act);
+                format!("act notify::page on site.key({name}) with items.len()")
+            }
             _ => format!("site.note({name}).await.or_retry()?"),
         };
         self.line(depth, text, None);
@@ -922,6 +930,13 @@ fn code_labels(code: &Code, out: &mut Vec<String>) {
             Fragment::Token(_) => {}
             Fragment::Group { ref inner, .. } => code_labels(inner, out),
             Fragment::Run(ref call) => call_labels(call, out),
+            Fragment::Domain(ref used) => {
+                out.push(used.label().to_owned());
+                code_labels(used.target(), out);
+                if let Some(value) = used.value() {
+                    code_labels(value, out);
+                }
+            }
         }
     }
 }

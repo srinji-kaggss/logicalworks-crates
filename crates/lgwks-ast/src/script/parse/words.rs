@@ -1,21 +1,29 @@
-//! Inline words: `run`, bounds, durations, and the map entries they leave.
+//! Inline words: `run`, `observe`, `act`, bounds, durations, and the map
+//! entries they leave.
 
 use lgwks_deps::proc_macro2::{Delimiter, Group, Ident, TokenStream, TokenTree};
 
 use super::super::lexicon::{self, Kind};
 use super::super::lines::{Line, after, group, ident, is_ident, is_parens, is_punct, text};
-use super::super::tree::{Bound, Call, Code, Duration, Fragment, Site, StepShape};
+use super::super::tree::{Bound, Call, Code, Domain, Duration, Fragment, Site, StepShape};
 use super::super::{Refusal, Result};
 use super::Labels;
 
-/// Read a line of Rust, turning each `run name(args)` into a [`Call`] in this
+/// Read a line of Rust, turning each `run name(args)` into a [`Call`] and each
+/// `observe` or `act` of a registry identifier into a [`Domain`], in this
 /// scope.
+///
+/// # Errors
+///
+/// An `observe` or `act` followed by an identifier but not by the rest of its
+/// form: that is never Rust (two names cannot stand side by side), so it is
+/// the word written wrong, and the refusal names the form.
 pub(super) fn rewrite(
     tokens: &[TokenTree],
     labels: &mut Labels,
     shapes: &mut Vec<StepShape>,
     line: &Line,
-) -> Code {
+) -> Result<Code> {
     let mut fragments = Vec::new();
     // The walk carries the tail rather than an index into it, so "the tokens
     // after `run`" is the slice itself and a call that consumed several tokens
@@ -23,36 +31,167 @@ pub(super) fn rewrite(
     let mut rest = tokens;
     while let Some((token, tail)) = rest.split_first() {
         if lexicon::is(token, Kind::Run)
-            && let Some((remaining, call)) = run_call(tail, labels, shapes, line)
+            && let Some((remaining, call)) = run_call(tail, labels, shapes, line)?
         {
             fragments.push(Fragment::Run(call));
             rest = remaining;
             continue;
+        }
+        // A domain word takes the rest of the line, or of the bracket it stands
+        // in, as its target and value, so nothing is left after it to walk.
+        if let Some(kind) = domain_word(token)
+            && let Some(domain) = domain_call(kind, rest, labels, shapes, line)?
+        {
+            fragments.push(Fragment::Domain(domain));
+            break;
         }
         if let TokenTree::Group(ref group) = *token {
             let inner: Vec<TokenTree> = group.stream().into_iter().collect();
             fragments.push(Fragment::Group {
                 delimiter: group.delimiter(),
                 span: group.span(),
-                inner: rewrite(&inner, labels, shapes, line),
+                inner: rewrite(&inner, labels, shapes, line)?,
             });
         } else {
             fragments.push(Fragment::Token(token.clone()));
         }
         rest = tail;
     }
-    Code { fragments }
+    Ok(Code { fragments })
+}
+
+/// The domain word `token` is, when it is `observe` or `act`.
+fn domain_word(token: &TokenTree) -> Option<Kind> {
+    [Kind::Observe, Kind::Act]
+        .into_iter()
+        .find(|&kind| lexicon::is(token, kind))
+}
+
+/// `observe id of target` or `act id on target with value`, starting at the
+/// word: the domain step, or `None` when what follows the word is not an
+/// identifier, in which case the word is a name of plain Rust (`observe(x)`,
+/// `let act = ..`) and nothing was consumed.
+///
+/// # Errors
+///
+/// An identifier with no particle after it, a particle with nothing after it,
+/// or an `act` with no `with`.
+fn domain_call(
+    kind: Kind,
+    tokens: &[TokenTree],
+    labels: &mut Labels,
+    shapes: &mut Vec<StepShape>,
+    line: &Line,
+) -> Result<Option<Domain>> {
+    let Some((word, after_word)) = tokens.split_first() else {
+        return Ok(None);
+    };
+    let Some((id, base, after_id)) = identifier(after_word) else {
+        return Ok(None);
+    };
+    let (particle, form) = if kind == Kind::Observe {
+        ("of", "`observe <domain::id> of <target>`")
+    } else {
+        ("on", "`act <domain::id> on <target> with <value>`")
+    };
+    let after_particle = match after_id.split_first() {
+        Some((next, rest)) if is_ident(next, particle) && !rest.is_empty() => rest,
+        _ => {
+            let refusal = Err(Refusal::new(
+                word.span(),
+                format!(
+                    "this line reads {form}: the identifier is a key of the host's `DomainRegistry`"
+                ),
+            ));
+            tracing::debug!(error = ?refusal.as_ref().err(), "domain_call: returning an error to the caller");
+            return refusal;
+        }
+    };
+    let (target, value) = if kind == Kind::Observe {
+        (after_particle, None)
+    } else {
+        let split = after_particle
+            .iter()
+            .position(|token| is_ident(token, "with"))
+            .and_then(|at| after_particle.split_at_checked(at));
+        match split {
+            Some((target, &[_, ref value @ ..])) if !target.is_empty() && !value.is_empty() => {
+                (target, Some(value))
+            }
+            _ => {
+                let refusal = Err(Refusal::new(
+                    word.span(),
+                    format!(
+                        "this line reads {form}: an action is built from its target and handed its value"
+                    ),
+                ));
+                tracing::debug!(error = ?refusal.as_ref().err(), "domain_call: returning an error to the caller");
+                return refusal;
+            }
+        }
+    };
+    let target = rewrite(target, labels, shapes, line)?;
+    let value = match value {
+        Some(tokens) => Some(rewrite(tokens, labels, shapes, line)?),
+        None => None,
+    };
+    let label = labels.next(&base);
+    let map = shape(kind, id.clone(), text(tokens), line, Vec::new());
+    let site = Site::of(&map);
+    shapes.push(map);
+    Ok(Some(Domain {
+        site,
+        kind,
+        id,
+        label,
+        target,
+        value,
+    }))
+}
+
+/// A path of names joined by `::` at the front of `tokens`: the path as one
+/// string, its last name, and the tokens after it; `None` when `tokens` does
+/// not start with a name.
+fn identifier(tokens: &[TokenTree]) -> Option<(String, String, &[TokenTree])> {
+    let mut id = String::new();
+    let mut last: Option<String> = None;
+    let mut rest = tokens;
+    while let Some((segment, tail)) = rest.split_first() {
+        let Some(name) = ident(segment) else {
+            break;
+        };
+        let name = name.to_string();
+        if last.is_some() {
+            id.push_str("::");
+        }
+        id.push_str(&name);
+        last = Some(name);
+        rest = tail;
+        match *rest {
+            [ref first, ref second, ref after @ ..]
+                if is_punct(first, ':') && is_punct(second, ':') =>
+            {
+                rest = after;
+            }
+            _ => break,
+        }
+    }
+    last.map(|last| (id, last, rest))
 }
 
 /// `path(args)` after a `run`: the call and the tokens left after it. `None`
 /// when what follows `run` is not a call, in which case nothing was consumed
 /// and the caller continues from the first token.
+///
+/// # Errors
+///
+/// A domain word in the arguments written wrong (see [`rewrite`]).
 fn run_call<'line>(
     tokens: &'line [TokenTree],
     labels: &mut Labels,
     shapes: &mut Vec<StepShape>,
     line: &Line,
-) -> Option<(&'line [TokenTree], Call)> {
+) -> Result<Option<(&'line [TokenTree], Call)>> {
     let mut path: Vec<TokenTree> = Vec::new();
     let mut rest = tokens;
     let mut callee: Option<&Ident> = None;
@@ -78,15 +217,17 @@ fn run_call<'line>(
         }
     }
     let (Some(callee), Some(arguments)) = (callee, rest.first()) else {
-        return None;
+        return Ok(None);
     };
-    let arguments = group(arguments).filter(|_| is_parens(arguments))?;
+    let Some(arguments) = group(arguments).filter(|_| is_parens(arguments)) else {
+        return Ok(None);
+    };
     let callee = callee.to_string();
     // The walk above left `rest` on the argument group, so the call consumed that
     // group too and what follows the call is what is past it.
     let after_arguments = after(rest, 1);
     let inner: Vec<TokenTree> = arguments.stream().into_iter().collect();
-    let arguments = rewrite(&inner, labels, shapes, line);
+    let arguments = rewrite(&inner, labels, shapes, line)?;
     let label = labels.next(&callee);
     let map = shape(
         Kind::Run,
@@ -97,7 +238,7 @@ fn run_call<'line>(
     );
     let site = Site::of(&map);
     shapes.push(map);
-    Some((
+    Ok(Some((
         after_arguments,
         Call {
             site,
@@ -106,7 +247,7 @@ fn run_call<'line>(
             label,
             arguments,
         },
-    ))
+    )))
 }
 
 /// Words a line must start with, and the tokens after them.
@@ -378,26 +519,32 @@ pub(super) fn text_of(stream: &TokenStream) -> String {
 
 /// A line that is exactly `run name(args)`: the call, whose result is the
 /// line's.
+///
+/// # Errors
+///
+/// A domain word in the arguments written wrong (see [`rewrite`]).
 pub(super) fn run_only(
     tokens: &[TokenTree],
     labels: &mut Labels,
     shapes: &mut Vec<StepShape>,
     line: &Line,
-) -> Option<Call> {
-    let (first, rest) = tokens.split_first()?;
+) -> Result<Option<Call>> {
+    let Some((first, rest)) = tokens.split_first() else {
+        return Ok(None);
+    };
     if !lexicon::is(first, Kind::Run) {
-        return None;
+        return Ok(None);
     }
     let lookahead_labels = labels.clone();
     let lookahead_shapes = shapes.len();
     // The call must consume the whole line to be the line's value; anything left
     // after it is another statement, so the lookahead is rolled back.
-    match run_call(rest, labels, shapes, line) {
-        Some((&[], call)) => Some(call),
+    match run_call(rest, labels, shapes, line)? {
+        Some((&[], call)) => Ok(Some(call)),
         _ => {
             *labels = lookahead_labels;
             shapes.truncate(lookahead_shapes);
-            None
+            Ok(None)
         }
     }
 }

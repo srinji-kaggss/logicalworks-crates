@@ -98,6 +98,7 @@ use crate::effect::{InputIdentity, RunId};
 use crate::gate::GrantSet;
 use crate::journal::frame::SaturatingFrom;
 use crate::journal::owner::lock;
+use crate::registry::DomainRegistry;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::{Handle, Runtime};
 use crate::rt::sync::{CancellationToken, OwnedSemaphorePermit, Semaphore};
@@ -964,6 +965,9 @@ struct Installation {
     /// ticket named, and the next run on this host is admitted against the same
     /// grant.
     grants: GrantSet,
+    /// The registry a flow's `observe` and `act` resolve against, when the
+    /// caller installed one (#388).
+    domains: Option<&'static DomainRegistry>,
     /// The most root attempts one run may be charged before it is refused.
     repair_attempts: u64,
     /// The most root spend one run may be charged before it is refused.
@@ -1151,6 +1155,7 @@ impl Host {
             codec: UNVERSIONED_CODEC.to_owned(),
             ledger: None,
             grants: GrantSet::empty(),
+            domains: None,
             repair_attempts: default_repair_attempts(),
             repair_spend: default_repair_spend(),
         })
@@ -2542,6 +2547,7 @@ impl Host {
         RecordsAuthority(Arc::new(RunAuthority {
             base: self.inner.grants.clone(),
             delta: grant_delta.clone(),
+            domains: self.inner.domains,
         }))
     }
 
@@ -3039,6 +3045,9 @@ struct RunAuthority {
     base: GrantSet,
     /// What this run's repair authorized, limited to its ticket's needs.
     delta: GrantSet,
+    /// The registry the host was given, which a repair never changes: a repair
+    /// widens what a run may reach, never which domains it can name.
+    domains: Option<&'static DomainRegistry>,
 }
 
 impl AuthorityCheck for RunAuthority {
@@ -3054,6 +3063,10 @@ impl AuthorityCheck for RunAuthority {
             |cap| self.base.grants(cap) || self.delta.grants(cap),
             None,
         )
+    }
+
+    fn domains(&self) -> Option<&'static DomainRegistry> {
+        self.domains
     }
 }
 
@@ -3096,6 +3109,8 @@ pub struct HostBuilder {
     /// blocked run names the whole shortfall and its repair ticket is written once
     /// rather than one refusal at a time.
     grants: GrantSet,
+    /// The registry a flow's domain words resolve against, when installed.
+    domains: Option<&'static DomainRegistry>,
     /// The durable step-record store, when the caller installed one.
     store: Option<store::RunStore>,
     /// The declared schema id of this host's durable step values.
@@ -3223,6 +3238,20 @@ impl HostBuilder {
         self
     }
 
+    /// Resolve every run's `observe` and `act` against `registry` (#388).
+    ///
+    /// The same `static` a [`BotSpec`](crate::spec::BotSpec) materializes
+    /// against, so a flow and a spec that name one identifier reach one
+    /// constructor. The default is none: a flow that names a domain on a host
+    /// with no registry is refused at its entry, naming the absence, rather
+    /// than reaching some registry the caller did not choose. A registry
+    /// decides only which constructor an identifier builds; what the built
+    /// domain may reach is still [`HostBuilder::grants`].
+    pub fn domains(mut self, registry: &'static DomainRegistry) -> Self {
+        self.domains = Some(registry);
+        self
+    }
+
     /// Install a durable repair ledger under `dir`.
     ///
     /// One file per tenant, named after it, so two tenants pointed at the same
@@ -3336,6 +3365,7 @@ impl HostBuilder {
                 codec: self.codec,
                 ledger: self.ledger,
                 grants: self.grants,
+                domains: self.domains,
                 repair_attempts: self.repair_attempts,
                 repair_spend: self.repair_spend,
                 reactor: Mutex::new(None),

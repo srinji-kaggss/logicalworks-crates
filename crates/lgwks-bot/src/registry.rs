@@ -63,6 +63,36 @@ use crate::error::BotError;
 use crate::spec::{EvaluateAny, ExecuteAny, ObserveAny, TypedEval, TypedExec, Witness};
 use crate::verb::{Evaluate, Execute, Observe};
 
+#[cfg(feature = "script")]
+/// The longest identifier [`DomainRegistry::nearest`] compares.
+const NEAREST_MAX_CHARS: usize = 256;
+
+#[cfg(feature = "script")]
+/// The least edit-distance score an identifier must reach to be suggested:
+/// half its characters in place, below which a suggestion is noise.
+const NEAREST_MIN_SCORE: f64 = 0.5;
+
+#[cfg(feature = "script")]
+/// Which half of a registry an identifier is looked up in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// The `observe` list: a source.
+    Source,
+    /// The `execute` list: an action.
+    Action,
+}
+
+#[cfg(feature = "script")]
+impl Role {
+    /// The role as a refusal spells it, matching [`BotError::DuplicateDomain`].
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Action => "action",
+        }
+    }
+}
+
 /// Builds one source from the `target` its spec names.
 ///
 /// A function pointer rather than a closure: the registry is a `static`, and a
@@ -455,6 +485,9 @@ impl std::fmt::Debug for Condition {
 /// may legitimately name both — a domain that observes a repository and also
 /// acts on one is one domain with two roles, not a name collision.
 pub struct DomainRegistry {
+    /// The name the registry was declared under, when `domains!` declared it:
+    /// what a refusal names so a reader knows which list to edit.
+    name: Option<&'static str>,
     /// Registered sources, in declaration order.
     sources: &'static [(&'static str, SourceCtor)],
     /// Registered actions, in declaration order.
@@ -468,7 +501,57 @@ impl DomainRegistry {
         sources: &'static [(&'static str, SourceCtor)],
         actions: &'static [(&'static str, ActionCtor)],
     ) -> Self {
-        Self { sources, actions }
+        Self {
+            name: None,
+            sources,
+            actions,
+        }
+    }
+
+    /// Assemble a registry declared under `name`, which every refusal that
+    /// names this registry quotes. What [`domains!`](crate::domains) expands
+    /// to.
+    #[must_use]
+    pub const fn named(
+        name: &'static str,
+        sources: &'static [(&'static str, SourceCtor)],
+        actions: &'static [(&'static str, ActionCtor)],
+    ) -> Self {
+        Self {
+            name: Some(name),
+            sources,
+            actions,
+        }
+    }
+
+    /// The name the registry was declared under, or `None` for one assembled
+    /// with [`DomainRegistry::new`].
+    #[must_use]
+    pub const fn name(&self) -> Option<&'static str> {
+        self.name
+    }
+
+    #[cfg(feature = "script")]
+    /// The declared identifier in `role` closest to `domain_id` by edit
+    /// distance, for a refusal to suggest; `None` when the role declares
+    /// nothing or no identifier shares enough with it to be a plausible typo.
+    ///
+    /// Bounded: identifiers longer than [`NEAREST_MAX_CHARS`] are not compared,
+    /// so a hostile identifier cannot make a refusal quadratic in its length.
+    pub(crate) fn nearest(&self, role: Role, domain_id: &str) -> Option<&'static str> {
+        match role {
+            Role::Source => closest(self.sources, domain_id),
+            Role::Action => closest(self.actions, domain_id),
+        }
+    }
+
+    #[cfg(feature = "script")]
+    /// Whether `role` declares `domain_id` exactly once.
+    pub(crate) fn declares(&self, role: Role, domain_id: &str) -> bool {
+        match role {
+            Role::Source => self.source(domain_id).is_some(),
+            Role::Action => self.action(domain_id).is_some(),
+        }
     }
 
     /// A registry with nothing registered.
@@ -478,6 +561,7 @@ impl DomainRegistry {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
+            name: None,
             sources: &[],
             actions: &[],
         }
@@ -579,6 +663,26 @@ impl DomainRegistry {
     }
 }
 
+#[cfg(feature = "script")]
+/// The identifier in `ids` closest to `domain_id` by edit distance, when one
+/// scores at least [`NEAREST_MIN_SCORE`]; see [`DomainRegistry::nearest`].
+fn closest<C>(ids: &[(&'static str, C)], domain_id: &str) -> Option<&'static str> {
+    let metric = lgwks_std::similarity::EditDistance::new(NEAREST_MAX_CHARS);
+    ids.iter()
+        .filter_map(|&(declared, _)| {
+            let scored = metric.try_score(domain_id, declared);
+            if let Err(ref refused) = scored {
+                lgwks_std::trace::debug!(error = ?refused, "nearest: an identifier too long to compare is not suggested");
+            }
+            scored
+                .ok()
+                .filter(|&score| score >= NEAREST_MIN_SCORE)
+                .map(|score| (score, declared))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, declared)| declared)
+}
+
 impl std::fmt::Debug for DomainRegistry {
     /// Lists the identifiers rather than the function pointers, which have no
     /// useful rendering and would make two registries with the same domains
@@ -586,6 +690,7 @@ impl std::fmt::Debug for DomainRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DomainRegistry")
+            .field("name", &self.name)
             .field("sources", &self.source_ids().collect::<Vec<&str>>())
             .field("actions", &self.action_ids().collect::<Vec<&str>>())
             .finish()
@@ -655,7 +760,8 @@ macro_rules! domains {
         }
     ) => {
         $(#[$meta])*
-        $vis static $name: $crate::DomainRegistry = $crate::DomainRegistry::new(
+        $vis static $name: $crate::DomainRegistry = $crate::DomainRegistry::named(
+            ::core::stringify!($name),
             &[ $( ($source_id, $source_ctor as $crate::SourceCtor) ),* ],
             &[ $( ($action_id, $action_ctor as $crate::ActionCtor) ),* ],
         );

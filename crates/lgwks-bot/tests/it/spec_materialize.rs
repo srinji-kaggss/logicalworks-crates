@@ -46,12 +46,12 @@ thread_local! {
 }
 
 /// Append one operation to the current thread's trace.
-fn record(operation: impl Into<String>) {
+pub(crate) fn record(operation: impl Into<String>) {
     OPERATIONS.with(|trace| trace.borrow_mut().push(operation.into()));
 }
 
 /// Take the trace, leaving it empty.
-fn take_trace() -> Vec<String> {
+pub(crate) fn take_trace() -> Vec<String> {
     OPERATIONS.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
 }
 
@@ -132,7 +132,10 @@ impl Observe for Counter {
 }
 
 /// An action that records the value it was handed, tagged by its target.
-struct Page {
+///
+/// Shared with `script_domains`, whose flows act through the same action a
+/// spec's chain does.
+pub(crate) struct Page {
     /// A label the target carried, so two pages in a chain are distinguishable.
     label: String,
     /// The capabilities this instance requires.
@@ -154,7 +157,7 @@ impl Page {
     }
 
     /// Build a cap-free one from the `target` its spec names.
-    fn from_target(target: &str) -> Result<Action, BotError> {
+    pub(crate) fn from_target(target: &str) -> Result<Action, BotError> {
         Ok(Action::new(Self::with_caps(target, Vec::new())))
     }
 

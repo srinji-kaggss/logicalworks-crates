@@ -246,6 +246,10 @@ pub enum StepKind {
     For,
     /// `run flow(..)`; the subject is the flow.
     Run,
+    /// `observe domain::id of target`; the subject is the identifier.
+    Observe,
+    /// `act domain::id on target with value`; the subject is the identifier.
+    Act,
     /// `if cond:`.
     If,
     /// `else:` or `else if cond:`.

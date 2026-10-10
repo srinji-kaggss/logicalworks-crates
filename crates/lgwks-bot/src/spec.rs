@@ -1120,6 +1120,25 @@ pub enum Need {
         /// The capability it requires and was not granted.
         capability: Cap,
     },
+    /// A flow's `observe` or `act` names an identifier the run's registry
+    /// does not declare in that role (#388).
+    ///
+    /// Carries what a reader repairs from: the registry it was looked up in
+    /// (`None` when the host was given none) and the closest identifier that
+    /// registry does declare, so a typo reads as one.
+    UnknownDomain {
+        /// `"source"` for `observe`, `"action"` for `act`.
+        role: &'static str,
+        /// The identifier the flow wrote.
+        domain: String,
+        /// The registry's declared name, or `None` when no registry was
+        /// installed or it was assembled without one.
+        registry: Option<String>,
+        /// Whether a registry was installed for the run at all.
+        installed: bool,
+        /// The closest identifier the registry declares in the same role.
+        nearest: Option<String>,
+    },
 }
 
 impl Need {
@@ -1138,7 +1157,7 @@ impl Need {
             | Self::ActionTargetRejected { chain, .. }
             | Self::UnknownCondition { chain, .. }
             | Self::MissingCapability { chain, .. } => Some(chain),
-            Self::CredentialExpired { .. } => None,
+            Self::CredentialExpired { .. } | Self::UnknownDomain { .. } => None,
         }
     }
 
@@ -1153,7 +1172,8 @@ impl Need {
             Self::MissingCapability { action, .. } => action,
             Self::UnknownSource { .. }
             | Self::SourceTargetRejected { .. }
-            | Self::CredentialExpired { .. } => None,
+            | Self::CredentialExpired { .. }
+            | Self::UnknownDomain { .. } => None,
         }
     }
 }
@@ -1236,6 +1256,41 @@ impl std::fmt::Display for Need {
                     capability
                 ),
             },
+            Self::UnknownDomain {
+                role,
+                ref domain,
+                ref registry,
+                installed,
+                ref nearest,
+            } => {
+                if !installed {
+                    return write!(
+                        formatter,
+                        "{role} `{}` is named, and this host was given no domain registry; \
+                         install one with `HostBuilder::domains`",
+                        Escaped(domain)
+                    );
+                }
+                match *registry {
+                    Some(ref name) => write!(
+                        formatter,
+                        "{role} `{}` is not declared in registry `{}`",
+                        Escaped(domain),
+                        Escaped(name)
+                    )?,
+                    None => write!(
+                        formatter,
+                        "{role} `{}` is not declared in the host's registry",
+                        Escaped(domain)
+                    )?,
+                }
+                match *nearest {
+                    Some(ref close) => {
+                        write!(formatter, "; the nearest declared is `{}`", Escaped(close))
+                    }
+                    None => formatter.write_str("; it declares nothing close"),
+                }
+            }
         }
     }
 }

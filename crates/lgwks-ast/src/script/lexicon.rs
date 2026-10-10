@@ -13,8 +13,8 @@
 //! line whose word has no row is plain Rust and never reaches a word's reader.
 //!
 //! The particles inside a form (`in`, `up to`, `times`, `waiting`, `at most`,
-//! `with`) are part of that word's grammar, read by its reader; they are not
-//! words, and a line cannot start with one.
+//! `with`, `of`, `on`) are part of that word's grammar, read by its reader;
+//! they are not words, and a line cannot start with one.
 
 use lgwks_deps::proc_macro2::TokenTree;
 
@@ -46,6 +46,10 @@ pub enum Kind {
     Let,
     /// `run other(args)`
     Run,
+    /// `observe domain::id of target`
+    Observe,
+    /// `act domain::id on target with value`
+    Act,
     /// `give back value`
     GiveBack,
     /// `fail with reason`
@@ -68,6 +72,8 @@ impl Kind {
             Self::Else => "else",
             Self::Let => "let",
             Self::Run => "run",
+            Self::Observe => "observe",
+            Self::Act => "act",
             Self::GiveBack => "give",
             Self::Fail => "fail",
         }
@@ -214,6 +220,60 @@ const fn refused(axis: Axis, claim: &'static str, case: &'static str) -> Guarant
 /// The simulation file whose flows the real macro expanded.
 const SCRIPT_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script.rs";
 
+/// The simulation file whose flows call registry domains (#388).
+const DOMAIN_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script_domains.rs";
+
+/// A domain word's row: inline, and calling the runtime function it is
+/// spelled as.
+///
+/// `observe` and `act` differ only in what they read and promise, so the
+/// row's fixed part is written once here.
+const fn domain_word(
+    kind: Kind,
+    primitive: &'static str,
+    forms: &'static [Form],
+    refuses: &'static [&'static str],
+    guarantees: &'static [Guarantee],
+    example: &'static str,
+) -> Word {
+    Word {
+        kind,
+        position: Position::Inline,
+        primitive,
+        forms,
+        refuses,
+        guarantees,
+        example,
+    }
+}
+
+/// What `observe` and `act` share: their trace is the `BotSpec` chain's.
+const SAME_AS_SPEC: Guarantee = domain_sim(
+    Axis::Generalized,
+    "the same polls and actions, in the same order, as the `BotSpec` chain over the same registry",
+    "the_script_trace_is_the_spec_trace",
+);
+
+/// What `observe` and `act` share: an undeclared identifier refuses the flow
+/// at its entry.
+const UNKNOWN_DOMAIN_REFUSED: Guarantee = domain_sim(
+    Axis::Decoupled,
+    "an identifier the registry lacks refuses the flow before its first step, naming the registry and the nearest identifier",
+    "an_unknown_domain_refuses_the_flow_before_any_step",
+);
+
+/// A guarantee proved by a simulation in `lgwks_bot`'s `sim_script_domains.rs`.
+const fn domain_sim(axis: Axis, claim: &'static str, test: &'static str) -> Guarantee {
+    Guarantee {
+        axis,
+        claim,
+        evidence: Evidence::Sim {
+            file: DOMAIN_SIMS,
+            test,
+        },
+    }
+}
+
 /// One written form of a word and what it means.
 #[derive(Debug)]
 pub struct Form {
@@ -313,7 +373,7 @@ const fn form(written: &'static str, means: &'static str) -> Form {
 const IF_ELSE_EXAMPLE: &str = "flow route(code: u16) -> u8:\n    if code < 400:\n        give back 0\n    else if code < 500:\n        give back 1\n    else:\n        give back 2\n";
 
 /// Every word, in the order the documentation lists them.
-pub const LEXICON: [Word; 13] = [
+pub const LEXICON: [Word; 15] = [
     Word {
         kind: Kind::Flow,
         position: Position::Flow,
@@ -537,6 +597,54 @@ pub const LEXICON: [Word; 13] = [
         )],
         example: "flow outer(site: &Site) -> usize:\n    let pages = run crawl(site)\n    give back pages\n",
     },
+    domain_word(
+        Kind::Observe,
+        "`observe`",
+        &[form(
+            "`observe domain::id of target`",
+            "poll the source the host's registry declares under `domain::id`, built from `target`, as a step of its own; bind it with a type, `let n: u16 = ..`",
+        )],
+        &["an identifier with no `of <target>`"],
+        &[
+            refused(
+                Axis::Idiomatic,
+                "an identifier with no `of <target>` is refused at the word, naming the form",
+                "observe with no target",
+            ),
+            UNKNOWN_DOMAIN_REFUSED,
+            SAME_AS_SPEC,
+            domain_sim(
+                Axis::MultiTenant,
+                "the source's capabilities are checked against this run's grant at the step",
+                "a_domain_short_of_authority_blocks_its_step",
+            ),
+        ],
+        "flow open(repo: &str) -> u16:\n    let open: u16 = observe github::pr_status of repo\n    give back open\n",
+    ),
+    domain_word(
+        Kind::Act,
+        "`act`",
+        &[form(
+            "`act domain::id on target with value`",
+            "run the action the host's registry declares under `domain::id`, built from `target`, on `value`, as a step of its own",
+        )],
+        &["an identifier with no `on <target> with <value>`"],
+        &[
+            refused(
+                Axis::Idiomatic,
+                "an identifier with no `on <target> with <value>` is refused at the word, naming the form",
+                "act with no value",
+            ),
+            domain_sim(
+                Axis::Ephemeral,
+                "only an effect that stays in the process runs; an external one is refused before it runs, naming the effect ledger",
+                "an_external_action_is_refused_before_it_runs",
+            ),
+            SAME_AS_SPEC,
+            UNKNOWN_DOMAIN_REFUSED,
+        ],
+        "flow page(count: u16):\n    if count > 2:\n        act notify::page on \"oncall\" with count\n",
+    ),
     Word {
         kind: Kind::GiveBack,
         position: Position::Line,
