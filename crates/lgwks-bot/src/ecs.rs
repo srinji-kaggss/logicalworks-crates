@@ -6917,7 +6917,7 @@ impl<S: Observe> EcsObserveBuilder<S> {
     /// # The rule this relies on
     ///
     /// Equal types across the chain is sound only because every verb so far
-    /// consumes its input and produces a caller-visible one: [`Evaluate::check`](crate::Evaluate::check)
+    /// consumes its input and produces a caller-visible one: `Evaluate`'s [`check`](crate::Evaluate::check)
     /// returns a `bool`, a pure predicate with no derived output, so
     /// `Source::Output == Condition::Input == Action::Input` is already the real
     /// semantics rather than a simplification of it.
