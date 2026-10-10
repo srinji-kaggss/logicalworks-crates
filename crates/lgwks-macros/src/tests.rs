@@ -29,7 +29,7 @@ pub(crate) fn expand(source: &str) -> Result<String, String> {
 ///
 /// A word's guarantee may cite a case here by its name (`lexicon::Evidence`),
 /// which is why the table is visible to the crate.
-pub(crate) const REFUSALS: [(&str, &str, &str); 34] = [
+pub(crate) const REFUSALS: [(&str, &str, &str); 37] = [
     (
         "unwrap by path",
         "flow f(x: Option<u8>):\n    let n = Option::unwrap(x)\n",
@@ -200,6 +200,21 @@ pub(crate) const REFUSALS: [(&str, &str, &str); 34] = [
         "else without if",
         "flow f():\n    else:\n        1\n",
         "`else:` must follow",
+    ),
+    (
+        "observe with no target",
+        "flow f() -> u16:\n    let n: u16 = observe github::pr_status\n    give back n\n",
+        "`observe <domain::id> of <target>`",
+    ),
+    (
+        "act with no target",
+        "flow f(n: u16):\n    act notify::page with n\n",
+        "`act <domain::id> on <target> with <value>`",
+    ),
+    (
+        "act with no value",
+        "flow f(n: u16):\n    act notify::page on \"oncall\"\n",
+        "`act <domain::id> on <target> with <value>`",
     ),
 ];
 

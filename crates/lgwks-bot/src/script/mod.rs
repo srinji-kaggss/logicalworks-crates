@@ -81,6 +81,7 @@
 
 mod admit;
 mod control;
+mod domain;
 mod each;
 mod error;
 mod fan_out;
@@ -104,6 +105,7 @@ pub use admit::{
     refusal_record,
 };
 pub use control::{at_most, attempts, retry, retry_at, within, within_at, within_on};
+pub use domain::{Acted, DomainUse, act, admit_domains, observe};
 pub use each::{each, each_at};
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use fan_out::{FanOut, FanOutError};

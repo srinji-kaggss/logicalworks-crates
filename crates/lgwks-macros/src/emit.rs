@@ -14,7 +14,7 @@
 //! `lgwks_ast` than this crate was built against.
 
 use lgwks_ast::script::{
-    Block, Bound, BranchValue, Call, Code, Construct, Duration, Each, Flow, FlowShape, For,
+    Block, Bound, BranchValue, Call, Code, Construct, Domain, Duration, Each, Flow, FlowShape, For,
     Fragment, IfChain, Kind, Retry, Script, Site, Statement, Step, StepShape, Together, Within,
 };
 use lgwks_deps::proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
@@ -182,6 +182,7 @@ fn flow_code(flow: &Flow) -> Result<TokenStream> {
     let forbids = lint_forbids();
     let visibility = flow.visibility();
     let header = flow.shape();
+    let admission = domain_admission(header.steps())?;
     let site = site_static(
         Kind::Flow,
         header.line(),
@@ -194,7 +195,10 @@ fn flow_code(flow: &Flow) -> Result<TokenStream> {
         #visibility async fn #name(#inputs) -> ::core::result::Result<#output, #script::FlowError> {
             #helpers
             let scope = &scope.enter_at(#name_text, #site)?;
-            let outcome: ::core::result::Result<#output, #script::FlowError> = async #body_block.await;
+            let outcome: ::core::result::Result<#output, #script::FlowError> = async {
+                #admission
+                #body_block
+            }.await;
             scope.settle(&outcome);
             outcome.map_err(|error| error.located(scope))
         }
@@ -444,6 +448,10 @@ fn code(rust: &Code) -> Result<TokenStream> {
                 let run = call(run)?;
                 tokens.extend(quote!((#run?)));
             }
+            Fragment::Domain(ref used) => {
+                let used = domain(used)?;
+                tokens.extend(quote!((#used?)));
+            }
             _ => {
                 let refusal = newer_word("fragment of Rust");
                 lgwks_std::trace::debug!(error = %refusal, "code: returning an error to the caller");
@@ -477,6 +485,75 @@ fn call(run: &Call) -> Result<TokenStream> {
         called.settle(&outcome);
         outcome
     }))
+}
+
+/// `observe` or `act`, awaited, as a flow `Result`, in a scope of its own
+/// label so the domain's step is keyed and trailed like any other.
+fn domain(used: &Domain) -> Result<TokenStream> {
+    let script = runtime();
+    let id = used.id();
+    let target = code(used.target())?;
+    let target = quote!(::core::convert::AsRef::<str>::as_ref(&(#target)));
+    let invoked = match (used.kind(), used.value()) {
+        (Kind::Observe, None) => quote!(#script::observe(called, #id, #target)),
+        (Kind::Act, Some(value)) => {
+            let value = code(value)?;
+            quote!(#script::act(called, #id, #target, #value))
+        }
+        _ => {
+            let refusal = newer_word("domain call");
+            lgwks_std::trace::debug!(error = %refusal, "domain: returning an error to the caller");
+            return Err(refusal);
+        }
+    };
+    let label = used.label();
+    let site = site_of(used.site());
+    Ok(quote!({
+        let called = &scope.enter_at(#label, #site)?;
+        let outcome = #invoked.await;
+        called.settle(&outcome);
+        outcome
+    }))
+}
+
+/// The admission a flow runs before its first step when it names any domain:
+/// every identifier it writes, in source order, each once, checked against the
+/// host's registry in one pass. Nothing when it names none.
+fn domain_admission(steps: &[StepShape]) -> Result<TokenStream> {
+    let mut uses: Vec<(Kind, &str)> = Vec::new();
+    collect_domains(steps, &mut uses);
+    if uses.is_empty() {
+        return Ok(TokenStream::new());
+    }
+    let script = runtime();
+    let mut entries = Vec::new();
+    for (kind, id) in uses {
+        entries.push(match kind {
+            Kind::Observe => quote!(#script::DomainUse::observe(#id)),
+            Kind::Act => quote!(#script::DomainUse::act(#id)),
+            _ => {
+                let refusal = newer_word("domain call");
+                lgwks_std::trace::debug!(error = %refusal, "domain_admission: returning an error to the caller");
+                return Err(refusal);
+            }
+        });
+    }
+    Ok(quote!(#script::admit_domains(scope, &[#(#entries),*])?;))
+}
+
+/// Every domain step in `steps` and their children, in source order, each
+/// identifier once per role.
+fn collect_domains<'shape>(steps: &'shape [StepShape], uses: &mut Vec<(Kind, &'shape str)>) {
+    for step in steps {
+        let kind = step.kind();
+        if matches!(kind, Kind::Observe | Kind::Act) {
+            let used = (kind, step.subject());
+            if !uses.contains(&used) {
+                uses.push(used);
+            }
+        }
+        collect_domains(step.children(), uses);
+    }
 }
 
 /// A `&'static Site` for `site`, as a block holding the one `static` it names.

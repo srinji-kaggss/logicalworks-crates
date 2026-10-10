@@ -124,6 +124,15 @@ pub(crate) trait AuthorityCheck: Send + Sync {
     /// Every capability in `required` this run's authority does not cover, in
     /// declaration order, each named once.
     fn uncovered(&self, required: &[crate::cap::Cap]) -> Vec<crate::cap::Shortage>;
+
+    /// The registry the run's `observe` and `act` resolve against, when the
+    /// host was given one.
+    ///
+    /// Asked of the authority rather than installed beside it because it is
+    /// the same kind of fact — what the host lets this run name — and a fourth
+    /// task-local would widen the frame every nested run carries (see the
+    /// composition note on the host's run path).
+    fn domains(&self) -> Option<&'static crate::registry::DomainRegistry>;
 }
 
 impl Authority {
@@ -136,6 +145,11 @@ impl Authority {
     ) -> Option<Vec<crate::cap::Shortage>> {
         let short = self.0.uncovered(required);
         (!short.is_empty()).then_some(short)
+    }
+
+    /// The registry the host installed for this run, if any.
+    pub(crate) fn domains(&self) -> Option<&'static crate::registry::DomainRegistry> {
+        self.0.domains()
     }
 }
 

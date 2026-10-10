@@ -115,8 +115,11 @@ pub(super) fn if_chain(
             return refusal;
         }
         let mut run_shapes = Vec::new();
-        let condition =
-            (!is_final_else).then(|| rewrite(condition_tokens, labels, &mut run_shapes, line));
+        let condition = if is_final_else {
+            None
+        } else {
+            Some(rewrite(condition_tokens, labels, &mut run_shapes, line)?)
+        };
         let (body, inner) = block(&node.children, labels, branch_place)?;
         every_branch_leaves = every_branch_leaves && body.diverges();
         run_shapes.extend(inner);
@@ -194,7 +197,7 @@ pub(super) fn each(
     };
     let label = labels.next(&format!("each:{}", text(pattern)));
     let mut run_shapes = Vec::new();
-    let items = rewrite(items, labels, &mut run_shapes, line);
+    let items = rewrite(items, labels, &mut run_shapes, line)?;
     let pattern: TokenStream = pattern.iter().cloned().collect();
     let (body, inner) = nested_body(children)?;
     run_shapes.extend(inner);
@@ -382,9 +385,9 @@ fn together_child(
             tracing::debug!(error = ?refusal.as_ref().err(), "together_child: returning an error to the caller");
             return refusal;
         }
-        match run_only(&value_line.tokens, labels, shapes, &value_line) {
+        match run_only(&value_line.tokens, labels, shapes, &value_line)? {
             Some(call) => BranchValue::Run(call),
-            None => BranchValue::Rust(rewrite(&value_line.tokens, labels, shapes, &value_line)),
+            None => BranchValue::Rust(rewrite(&value_line.tokens, labels, shapes, &value_line)?),
         }
     };
     Ok(Branch { pattern, value })
@@ -401,7 +404,7 @@ pub(super) fn for_loop(
     let (pattern, items) = pattern_and_items(line, tokens, "for")?;
     let label = labels.next(&format!("for:{}", text(pattern)));
     let mut run_shapes = Vec::new();
-    let items = rewrite(items, labels, &mut run_shapes, line);
+    let items = rewrite(items, labels, &mut run_shapes, line)?;
     let pattern: TokenStream = pattern.iter().cloned().collect();
     let mut inner_labels = Labels::default();
     let (body, inner) = block(

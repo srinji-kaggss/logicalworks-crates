@@ -192,6 +192,38 @@ flow outer(site: &Site) -> usize:
     give back pages
 ```
 
+## `observe`
+
+Stands inside a line of Rust. Calls `observe`.
+
+- `observe domain::id of target` — poll the source the host's registry declares under `domain::id`, built from `target`, as a step of its own; bind it with a type, `let n: u16 = ..`
+
+Refuses: an identifier with no `of <target>`.
+
+Guarantees: an identifier with no `of <target>` is refused at the word, naming the form (idiomatic); an identifier the registry lacks refuses the flow before its first step, naming the registry and the nearest identifier (decoupled); the same polls and actions, in the same order, as the `BotSpec` chain over the same registry (generalized); the source's capabilities are checked against this run's grant at the step (multi-tenant).
+
+```text
+flow open(repo: &str) -> u16:
+    let open: u16 = observe github::pr_status of repo
+    give back open
+```
+
+## `act`
+
+Stands inside a line of Rust. Calls `act`.
+
+- `act domain::id on target with value` — run the action the host's registry declares under `domain::id`, built from `target`, on `value`, as a step of its own
+
+Refuses: an identifier with no `on <target> with <value>`.
+
+Guarantees: an identifier with no `on <target> with <value>` is refused at the word, naming the form (idiomatic); only an effect that stays in the process runs; an external one is refused before it runs, naming the effect ledger (ephemeral); the same polls and actions, in the same order, as the `BotSpec` chain over the same registry (generalized); an identifier the registry lacks refuses the flow before its first step, naming the registry and the nearest identifier (decoupled).
+
+```text
+flow page(count: u16):
+    if count > 2:
+        act notify::page on "oncall" with count
+```
+
 ## `give back`
 
 Starts a line of its own. Calls none: `return Ok`.

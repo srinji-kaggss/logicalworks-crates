@@ -62,7 +62,9 @@ Other vocabularies that SL-1 must absorb or link to:
 
 - Domain identifiers such as `"github::pr_status"`. They are declared with
   `domains!` (`crates/lgwks-bot/src/registry.rs`) and named by strings in
-  `BotSpec` (`src/spec.rs`).
+  `BotSpec` (`src/spec.rs`). Absorbed by #388: `observe <domain::id> of
+  <target>` and `act <domain::id> on <target> with <value>` resolve the same
+  strings through the host's registry, admitted at the flow's entry.
 - Natural-language resolution of an utterance to a verdict (`src/language.rs`,
   `src/semantic.rs`, `src/session.rs`).
 - The proposed task vocabulary of `task`, `all`, `map` and `watch` (DX-02 in

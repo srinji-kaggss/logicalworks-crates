@@ -486,15 +486,17 @@ impl IfBranch {
     }
 }
 
-/// A line of Rust with its `run` calls read out of it.
+/// A line of Rust with its `run`, `observe` and `act` calls read out of it.
 #[derive(Debug, Clone, Default)]
 pub struct Code {
-    /// The line's tokens, in order, with every `run` call one fragment.
+    /// The line's tokens, in order, with every `run`, `observe` and `act` call
+    /// one fragment.
     pub(crate) fragments: Vec<Fragment>,
 }
 
 impl Code {
-    /// The line's tokens, in order, with every `run` call one fragment.
+    /// The line's tokens, in order, with every `run`, `observe` and `act` call
+    /// one fragment.
     #[must_use]
     pub const fn fragments(&self) -> &[Fragment] {
         self.fragments.as_slice()
@@ -539,6 +541,65 @@ impl Call {
     #[must_use]
     pub const fn arguments(&self) -> &Code {
         &self.arguments
+    }
+}
+
+/// `observe domain::id of target` or `act domain::id on target with value`: a
+/// registry identifier called in this scope, as a step of its own (#388).
+///
+/// The identifier is kept as written, `::` and all, because it is the key the
+/// host's `DomainRegistry` declares and the text a refusal names; it is never
+/// resolved here. Resolution is the runtime's, at the flow's entry, against
+/// the registry the run was given, so a flow refers to a domain by the same
+/// string a `BotSpec` does and the two cannot drift.
+#[derive(Debug, Clone)]
+pub struct Domain {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
+    /// Whether it observes (`observe`) or acts (`act`).
+    pub(crate) kind: Kind,
+    /// The registry identifier, as written without spaces: `github::pr_status`.
+    pub(crate) id: String,
+    /// The structural label: the identifier's last segment, numbered among
+    /// same-named steps in one scope.
+    pub(crate) label: String,
+    /// What the domain is built from: after `of` for `observe`, between `on`
+    /// and `with` for `act`.
+    pub(crate) target: Code,
+    /// What an action is handed, after `with`; `None` for `observe`.
+    pub(crate) value: Option<Code>,
+}
+
+impl Domain {
+    /// Whether it observes ([`Kind::Observe`]) or acts ([`Kind::Act`]).
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The registry identifier, as written without spaces.
+    #[must_use]
+    pub const fn id(&self) -> &str {
+        self.id.as_str()
+    }
+
+    /// The structural label: the identifier's last segment, numbered among
+    /// same-named steps in one scope.
+    #[must_use]
+    pub const fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// What the domain is built from.
+    #[must_use]
+    pub const fn target(&self) -> &Code {
+        &self.target
+    }
+
+    /// What an action is handed; `None` for an observation.
+    #[must_use]
+    pub const fn value(&self) -> Option<&Code> {
+        self.value.as_ref()
     }
 }
 
@@ -604,7 +665,7 @@ macro_rules! site_of {
     )*};
 }
 
-site_of!(Each, Within, Retry, Step, For, Call);
+site_of!(Each, Within, Retry, Step, For, Call, Domain);
 
 /// A flow's entry in the architecture map.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -859,4 +920,6 @@ pub enum Fragment {
     },
     /// A `run` call.
     Run(Call),
+    /// An `observe` or `act` of a registry domain.
+    Domain(Domain),
 }
