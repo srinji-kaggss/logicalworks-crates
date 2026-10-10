@@ -63,13 +63,16 @@ use crate::error::BotError;
 use crate::spec::{EvaluateAny, ExecuteAny, ObserveAny, TypedEval, TypedExec, Witness};
 use crate::verb::{Evaluate, Execute, Observe};
 
+#[cfg(feature = "script")]
 /// The longest identifier [`DomainRegistry::nearest`] compares.
 const NEAREST_MAX_CHARS: usize = 256;
 
+#[cfg(feature = "script")]
 /// The least edit-distance score an identifier must reach to be suggested:
 /// half its characters in place, below which a suggestion is noise.
 const NEAREST_MIN_SCORE: f64 = 0.5;
 
+#[cfg(feature = "script")]
 /// Which half of a registry an identifier is looked up in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -79,6 +82,7 @@ pub(crate) enum Role {
     Action,
 }
 
+#[cfg(feature = "script")]
 impl Role {
     /// The role as a refusal spells it, matching [`BotError::DuplicateDomain`].
     pub(crate) const fn as_str(self) -> &'static str {
@@ -527,6 +531,7 @@ impl DomainRegistry {
         self.name
     }
 
+    #[cfg(feature = "script")]
     /// The declared identifier in `role` closest to `domain_id` by edit
     /// distance, for a refusal to suggest; `None` when the role declares
     /// nothing or no identifier shares enough with it to be a plausible typo.
@@ -540,6 +545,7 @@ impl DomainRegistry {
         }
     }
 
+    #[cfg(feature = "script")]
     /// Whether `role` declares `domain_id` exactly once.
     pub(crate) fn declares(&self, role: Role, domain_id: &str) -> bool {
         match role {
@@ -657,6 +663,7 @@ impl DomainRegistry {
     }
 }
 
+#[cfg(feature = "script")]
 /// The identifier in `ids` closest to `domain_id` by edit distance, when one
 /// scores at least [`NEAREST_MIN_SCORE`]; see [`DomainRegistry::nearest`].
 fn closest<C>(ids: &[(&'static str, C)], domain_id: &str) -> Option<&'static str> {
