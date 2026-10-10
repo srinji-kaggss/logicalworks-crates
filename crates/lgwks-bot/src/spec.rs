@@ -1246,8 +1246,8 @@ impl std::fmt::Display for Need {
 mod tests {
     use super::*;
     use crate::error::DispatchCertainty;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
     /// What a test returns when it can fail in more than one error domain.
     ///
@@ -1282,31 +1282,72 @@ mod tests {
         }
     }
 
-    /// Block the calling blocking-pool thread for `duration`.
+    /// How long a poll waits for its sibling at the [`Rendezvous`]: far past
+    /// any scheduling delay a loaded runner adds, far inside
+    /// [`crate::ecs::DEFAULT_POLL_DEADLINE`], so a tick that polled one source
+    /// at a time would still answer, with a peak of one.
+    const SIBLING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The polls in flight now, and the most that have been at once.
+    #[derive(Default)]
+    struct Overlap {
+        in_flight: usize,
+        peak: usize,
+    }
+
+    /// A meeting point for the polls of one tick.
     ///
-    /// `rt::time::sleep` cannot be used here: `Bot::tick` drives
-    /// `lgwks_std::task::block_on`, whose executor has no timer driver, and the
-    /// caller is a `spawn_blocking` closure that has nothing to await on. The
-    /// property under test is wall-clock overlap between two polls, and holding
-    /// a real thread is the only way to express it on this executor.
-    ///
-    /// `park_timeout` and not `rt::time::sleep`: the async form has no timer
-    /// driver on `lgwks_std::task::block_on`, and that absence is the thing under
-    /// test. It is also the substitution the codebook names for a banned
-    /// `std::thread::sleep`, so nothing here needs a suppression.
-    ///
-    /// What `sleep` promised and `park_timeout` does not is that it does not
-    /// return early: the API allows a spurious wake-up, and a pool thread can
-    /// carry an unpark token its executor left behind, which ends the next park
-    /// at once. So the park repeats until the deadline has actually passed, and
-    /// the thread is held for the whole of `duration` either way.
-    fn hold_pool_thread_for(duration: std::time::Duration) {
-        let started = std::time::Instant::now();
-        while let Some(left) = duration.checked_sub(started.elapsed()) {
-            if left.is_zero() {
-                break;
+    /// The property under test is that `Bot::tick` has two polls in flight at
+    /// once. A fixed hold (it was 40 ms) only shows that when the second poll
+    /// starts before the first one's hold ends, and a loaded CI runner broke that
+    /// race: the hold expired first and the peak read 1. Here each poll waits
+    /// for the other instead of for a clock. When both are in flight together,
+    /// the peak is 2 on every schedule. When tick polls them one after the
+    /// other, the first waits out its patience alone and the peak is 1. Neither
+    /// answer depends on how fast the host is.
+    #[derive(Default)]
+    struct Rendezvous {
+        overlap: Mutex<Overlap>,
+        arrived: Condvar,
+    }
+
+    impl Rendezvous {
+        /// The counts. A poisoned lock still holds them, because nothing a
+        /// panicking holder could have done leaves the two numbers torn.
+        fn overlap(&self) -> MutexGuard<'_, Overlap> {
+            match self.overlap.lock() {
+                Ok(overlap) => overlap,
+                Err(poisoned) => poisoned.into_inner(),
             }
-            std::thread::park_timeout(left);
+        }
+
+        /// Arrive, wait until `quorum` polls have been in flight together or
+        /// the patience runs out, then leave.
+        ///
+        /// The wait is on the peak, not the live count: a peak never falls, so
+        /// the first poll to leave cannot strand its sibling waiting for a count
+        /// that has already dropped back.
+        fn meet(&self, quorum: usize) {
+            let mut overlap = self.overlap();
+            // Bound: the test drives two chains against one rendezvous, so the
+            // count stays at most 2.
+            overlap.in_flight = overlap.in_flight.saturating_add(1);
+            overlap.peak = overlap.peak.max(overlap.in_flight);
+            self.arrived.notify_all();
+            let mut overlap =
+                match self
+                    .arrived
+                    .wait_timeout_while(overlap, SIBLING_PATIENCE, |overlap| overlap.peak < quorum)
+                {
+                    Ok((overlap, _waited)) => overlap,
+                    Err(poisoned) => poisoned.into_inner().0,
+                };
+            overlap.in_flight = overlap.in_flight.saturating_sub(1);
+        }
+
+        /// The most polls that have been in flight at once.
+        fn peak(&self) -> usize {
+            self.overlap().peak
         }
     }
 
@@ -1406,12 +1447,11 @@ mod tests {
         }
     }
 
-    /// An observer that records how many polls overlap. Its body crosses a
-    /// `spawn_blocking` thread, which is the only way two polls can run at the
-    /// same wall-clock time on a one-thread executor.
+    /// An observer that meets its siblings at a [`Rendezvous`]. Its body crosses
+    /// a `spawn_blocking` thread, which is the only way two polls can be in
+    /// flight at once on a one-thread executor whose `block_on` has no timer.
     struct PeakSource {
-        in_flight: Arc<AtomicUsize>,
-        peak: Arc<AtomicUsize>,
+        rendezvous: Arc<Rendezvous>,
     }
     impl crate::verb::Observe for PeakSource {
         type Output = u32;
@@ -1420,18 +1460,8 @@ mod tests {
         }
         async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
             call.0.check(crate::verb::Observe::required_caps(self))?;
-            let in_flight = Arc::clone(&self.in_flight);
-            let peak = Arc::clone(&self.peak);
-            lgwks_std::task::spawn_blocking(move || {
-                // Bound: the test drives at most two chains against this source,
-                // so the previous count is 0 or 1 and the increment cannot reach
-                // `usize::MAX`.
-                let now = in_flight.fetch_add(1, Ordering::SeqCst).saturating_add(1);
-                peak.fetch_max(now, Ordering::SeqCst);
-                hold_pool_thread_for(std::time::Duration::from_millis(40));
-                in_flight.fetch_sub(1, Ordering::SeqCst);
-            })
-            .await;
+            let rendezvous = Arc::clone(&self.rendezvous);
+            lgwks_std::task::spawn_blocking(move || rendezvous.meet(2)).await;
             Ok(1)
         }
         fn domain_id(&self) -> &str {
@@ -1793,13 +1823,11 @@ mod tests {
 
     #[test]
     fn tick_polls_sources_concurrently() -> TestResult<()> {
-        // Both polls block on a dedicated thread, so the peak in-flight count
-        // can only reach 2 if tick drives the two sources at the same time.
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
+        // Each poll waits on a pool thread for its sibling, so the peak reaches
+        // 2 only if tick has both sources in flight at the same time.
+        let rendezvous = Arc::new(Rendezvous::default());
         let source = || PeakSource {
-            in_flight: Arc::clone(&in_flight),
-            peak: Arc::clone(&peak),
+            rendezvous: Arc::clone(&rendezvous),
         };
         let mut bot = Bot::builder("concurrent")
             .observe(source())
@@ -1815,11 +1843,8 @@ mod tests {
             .with_effects(test_effects()?)
             .build(&GrantSet::empty())?;
         assert_eq!(bot.tick()?, 2);
-        let observed = peak.load(Ordering::SeqCst);
-        assert!(
-            observed >= 2,
-            "sources overlapped only {observed} at a time"
-        );
+        let observed = rendezvous.peak();
+        assert_eq!(observed, 2, "sources overlapped only {observed} at a time");
         Ok(())
     }
 
