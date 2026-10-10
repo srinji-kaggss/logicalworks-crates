@@ -10,6 +10,7 @@ use crate::rt::clock::{Clock, TimeSource};
 use crate::rt::time;
 use crate::rt::time::Deadline;
 
+use super::trail::{Outcome, Site};
 use super::{FlowError, MAX_ATTEMPTS, MAX_BACKOFF, MAX_IN_FLIGHT, Scope, StepKey};
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
@@ -99,16 +100,40 @@ fn refuse_step<T>(site: &str, error: FlowError) -> Result<T, FlowError> {
 /// # Errors
 ///
 /// The body's own error, `TimedOut`, or `Cancelled`.
-pub async fn within<T, Fut>(
+pub fn within<'s, T, Fut>(
+    scope: &'s Scope,
+    step: &str,
+    limit: Duration,
+    body: Fut,
+) -> impl Future<Output = Result<T, FlowError>> + use<'s, T, Fut>
+where
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    within_on(scope.clock(), scope, step, limit, body)
+}
+
+#[doc(hidden)]
+/// [`within`] for a deadline `script!` wrote at `site`: the step is entered in
+/// the run's trail with its line and settled with its outcome. Called by
+/// `script!`.
+///
+/// # Errors
+///
+/// As [`within`].
+pub async fn within_at<T, Fut>(
     scope: &Scope,
     step: &str,
+    site: &'static Site,
     limit: Duration,
     body: Fut,
 ) -> Result<T, FlowError>
 where
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    within_on(scope.clock(), scope, step, limit, body).await
+    let mark = scope.mark(&scope.join(step), site);
+    let finished = bounded(scope.clock(), scope, Arc::clone(mark.path()), limit, body).await;
+    mark.settle(|| Outcome::of(&finished));
+    finished
 }
 
 /// [`within`] with the logical bound measured on an explicitly named `clock`.
@@ -118,10 +143,34 @@ where
 /// caller whose step is bounded by a *shorter* clock than the flow's — an
 /// admission budget that is tighter than the run's, say — and for tests that
 /// want to say which clock governs rather than imply it.
-pub async fn within_on<T, Fut>(
+pub fn within_on<'s, T, Fut>(
+    clock: &'s Clock,
+    scope: &'s Scope,
+    step: &str,
+    limit: Duration,
+    body: Fut,
+) -> impl Future<Output = Result<T, FlowError>> + use<'s, T, Fut>
+where
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    // The location every refusal from this step carries, computed once: both
+    // arms of the race refuse here, and joining it per refusal would allocate
+    // the same string twice on the path that fails.
+    bounded(clock, scope, scope.join(step), limit, body)
+}
+
+/// The race behind [`within`], [`within_on`] and [`within_at`], located at
+/// `at`.
+///
+/// [`within`] and [`within_on`] return this future rather than awaiting it, so
+/// a hand-written nest of deadlines pays one poll frame per level, not one per
+/// wrapper, and the trail entry `script!` keeps is settled by [`within_at`]
+/// outside it, so this frame is no larger for carrying one
+/// (`sim_clock_wiring::a_deep_nest_of_clock_governed_steps_is_stack_bounded`).
+async fn bounded<T, Fut>(
     clock: &Clock,
     scope: &Scope,
-    step: &str,
+    at: Arc<str>,
     limit: Duration,
     body: Fut,
 ) -> Result<T, FlowError>
@@ -129,10 +178,6 @@ where
     Fut: Future<Output = Result<T, FlowError>>,
 {
     let deadline = Deadline::after(clock, limit);
-    // The location every refusal from this step carries, computed once: both
-    // arms below refuse here, and joining it per refusal would allocate the same
-    // string twice on the path that fails.
-    let at = scope.join(step);
     let timed_out = || FlowError::TimedOut {
         at: Arc::clone(&at),
         after: limit,
@@ -281,43 +326,78 @@ pub async fn retry<T, F, Fut>(
     step: &str,
     attempts: NonZeroU32,
     backoff: Duration,
+    body: F,
+) -> Result<T, FlowError>
+where
+    F: FnMut(Scope, u32) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let here = scope.enter_sharing(step, None)?;
+    attempt_until_settled(&here, attempts, backoff, body).await
+}
+
+#[doc(hidden)]
+/// [`retry`] for a block `script!` wrote at `site`: the step's trail entry
+/// carries its line and settles with how many attempts it took. Called by
+/// `script!`.
+///
+/// # Errors
+///
+/// As [`retry`].
+pub async fn retry_at<T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    attempts: NonZeroU32,
+    backoff: Duration,
+    body: F,
+) -> Result<T, FlowError>
+where
+    F: FnMut(Scope, u32) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let here = scope.enter_sharing(step, Some(site))?;
+    attempt_until_settled(&here, attempts, backoff, body).await
+}
+
+/// The attempts of one [`retry`] in its step scope `here`, which is settled
+/// with the result and the number of attempts that produced it.
+async fn attempt_until_settled<T, F, Fut>(
+    here: &Scope,
+    attempts: NonZeroU32,
+    backoff: Duration,
     mut body: F,
 ) -> Result<T, FlowError>
 where
     F: FnMut(Scope, u32) -> Fut,
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    let here = scope.enter_sharing(step)?;
     here.policy().first_attempt();
     let mut attempt: u32 = 1;
-    loop {
-        here.checkpoint()?;
+    let finished = loop {
+        if let Err(stopped) = here.checkpoint() {
+            break Err(stopped);
+        }
         let error = match body(here.clone(), attempt).await {
-            Ok(value) => return Ok(value),
-            Err(error) => error.located(&here),
+            Ok(value) => break Ok(value),
+            Err(error) => error.located(here),
         };
         if !error.is_retryable() {
-            let refusal = Err(error);
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
-            return refusal;
+            break Err(error);
         }
         if attempt >= attempts.get() {
-            let refusal = Err(FlowError::Exhausted {
+            break Err(FlowError::Exhausted {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
-            return refusal;
         }
         if !here.policy().take_retry() {
-            let refusal = Err(FlowError::Throttled {
+            break Err(FlowError::Throttled {
                 at: Arc::clone(here.shared_path()),
                 attempts: attempt,
                 last: Box::new(error),
             });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
-            return refusal;
         }
         // The key is hashed here, only once a retry is due: most steps never
         // retry, and those should not pay for a digest they do not use.
@@ -329,14 +409,17 @@ where
                 .await
                 .is_none()
         {
-            let refusal = Err(FlowError::Cancelled {
+            break Err(FlowError::Cancelled {
                 at: Arc::clone(here.shared_path()),
             });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "retry: returning an error to the caller");
-            return refusal;
         }
         attempt = attempt.saturating_add(1);
+    };
+    if let Err(ref error) = finished {
+        lgwks_std::trace::debug!(?error, "retry: returning an error to the caller");
     }
+    here.settle_with(|| Outcome::of_attempts(&finished, attempt));
+    finished
 }
 
 /// The wait after failed attempt `attempt`: `base · 2^(attempt-1)`, capped at

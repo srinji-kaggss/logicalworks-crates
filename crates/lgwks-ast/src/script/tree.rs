@@ -208,6 +208,8 @@ impl Block {
 /// `each <pattern> in <items>:`, every item concurrently under a bound.
 #[derive(Debug, Clone)]
 pub struct Each {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The structural label of the fan-out's scope.
     pub(crate) label: String,
     /// The written bound; `None` when the runtime sizes the fan-out.
@@ -255,6 +257,8 @@ impl Each {
 /// `within <duration>:`, the body under a deadline.
 #[derive(Debug, Clone)]
 pub struct Within {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The structural label of the deadline's scope.
     pub(crate) label: String,
     /// The deadline.
@@ -286,6 +290,8 @@ impl Within {
 /// `retry up to <N> times[, waiting <duration>]:`.
 #[derive(Debug, Clone)]
 pub struct Retry {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The structural label of the retry's scope.
     pub(crate) label: String,
     /// The attempt budget.
@@ -325,6 +331,8 @@ impl Retry {
 /// `step <name>:`, a named scope.
 #[derive(Debug, Clone)]
 pub struct Step {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The structural label: the name, numbered among same-named siblings.
     pub(crate) label: String,
     /// The body.
@@ -386,6 +394,8 @@ impl Branch {
 /// `for <pattern> in <items>:`, sequentially, one scope per item.
 #[derive(Debug, Clone)]
 pub struct For {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The structural label every item's scope is numbered under.
     pub(crate) label: String,
     /// The pattern each item binds.
@@ -494,6 +504,8 @@ impl Code {
 /// `run path(args)`: another flow called in this scope.
 #[derive(Debug, Clone)]
 pub struct Call {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
     /// The callee's path as written, `::` and all.
     pub(crate) path: TokenStream,
     /// The callee's last segment, which names its scope.
@@ -529,6 +541,70 @@ impl Call {
         &self.arguments
     }
 }
+
+/// Where a step stands in the script: its word, its source line and the line
+/// as written.
+///
+/// Every construct that enters a scope at run time carries one, so the trail a
+/// run leaves points each entry back at the line that produced it (SL-6, #386).
+/// It is never part of a step label. Labels are structural: a line number in
+/// one would change every key below a line inserted above it, and a run resumed
+/// across that deploy would replay nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// The word the line starts with.
+    pub(crate) kind: Kind,
+    /// The 1-based source line, as the compiler reports it.
+    pub(crate) line: usize,
+    /// The line as written, without its `:`.
+    pub(crate) text: String,
+}
+
+impl Site {
+    /// The site of the step `shape` maps: the same word, line and text, so the
+    /// map and the trail cannot describe one line two ways.
+    pub(crate) fn of(shape: &StepShape) -> Self {
+        Self {
+            kind: shape.kind,
+            line: shape.line,
+            text: shape.detail.clone(),
+        }
+    }
+
+    /// The word the line starts with.
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The 1-based source line, as the compiler reports it.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// The line as written, without its `:`.
+    #[must_use]
+    pub const fn text(&self) -> &str {
+        self.text.as_str()
+    }
+}
+
+/// `site()` for every construct that enters a scope at run time, declared once:
+/// the field is the same on each, and so is what reading it means.
+macro_rules! site_of {
+    ($($construct:ident),* $(,)?) => {$(
+        impl $construct {
+            /// Where this construct's line stands in the script.
+            #[must_use]
+            pub const fn site(&self) -> &Site {
+                &self.site
+            }
+        }
+    )*};
+}
+
+site_of!(Each, Within, Retry, Step, For, Call);
 
 /// A flow's entry in the architecture map.
 #[derive(Debug, Clone, PartialEq, Eq)]

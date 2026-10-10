@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 
+use super::trail::Site;
 use super::{FlowError, MAX_IN_FLIGHT, POLL_BUDGET, Scope};
 
 // ── each ────────────────────────────────────────────────────────────────────
@@ -47,7 +48,48 @@ where
     F: Fn(Scope, I::Item) -> Fut,
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    let here = scope.enter(step)?;
+    fan_out_from(scope, step, None, limit, items, body).await
+}
+
+#[doc(hidden)]
+/// [`each`] for a fan-out `script!` wrote at `site`: the step and every body's
+/// scope carry the line in the run's trail, and the step settles with the
+/// fan-out's result. Called by `script!`, whose bodies settle themselves.
+///
+/// # Errors
+///
+/// As [`each`].
+pub async fn each_at<I, T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    limit: Option<NonZeroUsize>,
+    items: I,
+    body: F,
+) -> Result<Vec<T>, FlowError>
+where
+    I: IntoIterator,
+    F: Fn(Scope, I::Item) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    fan_out_from(scope, step, Some(site), limit, items, body).await
+}
+
+/// The body of [`each`] and [`each_at`].
+async fn fan_out_from<I, T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: Option<&'static Site>,
+    limit: Option<NonZeroUsize>,
+    items: I,
+    body: F,
+) -> Result<Vec<T>, FlowError>
+where
+    I: IntoIterator,
+    F: Fn(Scope, I::Item) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let here = scope.enter_from(step, site)?;
     // An absent limit is the scope's own policy — the machine's core count under
     // the declared ceiling — which is a decision about capacity rather than a
     // value this call failed to produce. A caller's own limit is bounded by the
@@ -77,7 +119,7 @@ where
     let body = &body;
     let here = &here;
 
-    std::future::poll_fn(move |context: &mut Context<'_>| {
+    let finished = std::future::poll_fn(move |context: &mut Context<'_>| {
         wakes.set_parent(context.waker());
         let mut polled: usize = 0;
         loop {
@@ -117,7 +159,9 @@ where
             Poll::Pending
         }
     })
-    .await
+    .await;
+    here.settle(&finished);
+    finished
 }
 
 /// One occupied slot of a fan-out.
