@@ -103,8 +103,8 @@ pub use admit::{
     Gate, RefusalRecord, admit, intervention_of, provenance_of, read_refusal, refusal_of,
     refusal_record,
 };
-pub use control::{at_most, attempts, retry, within, within_on};
-pub use each::each;
+pub use control::{at_most, attempts, retry, retry_at, within, within_at, within_on};
+pub use each::{each, each_at};
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use fan_out::{FanOut, FanOutError};
 pub use map::{Architecture, FlowShape, StepKind, StepShape};
@@ -115,6 +115,7 @@ pub use ready::{
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
+pub use trail::{Outcome, ScriptTrail, Site, TrailEntry};
 
 /// How many step paths a scope's trail retains unless a host says otherwise.
 ///

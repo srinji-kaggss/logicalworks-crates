@@ -6,8 +6,8 @@ use super::super::lexicon::{self, Kind};
 use super::super::lines::{Line, Node, after, ident, is_ident, is_punct, text};
 use super::super::refuse;
 use super::super::tree::{
-    Block, Branch, BranchValue, Construct, Each, For, IfBranch, IfChain, Retry, Statement, Step,
-    StepShape, Together, Within,
+    Block, Branch, BranchValue, Construct, Each, For, IfBranch, IfChain, Retry, Site, Statement,
+    Step, StepShape, Together, Within,
 };
 use super::super::{Refusal, Result};
 use super::words::{bound, duration, refuse_typed_concurrency, rewrite, run_only, shape};
@@ -198,14 +198,15 @@ pub(super) fn each(
     let pattern: TokenStream = pattern.iter().cloned().collect();
     let (body, inner) = nested_body(children)?;
     run_shapes.extend(inner);
+    let map = shape(Kind::Each, subject, text(&line.tokens), line, run_shapes);
     let fan = Each {
+        site: Site::of(&map),
         label,
         bound: written_bound,
         pattern,
         items,
         body,
     };
-    let map = shape(Kind::Each, subject, text(&line.tokens), line, run_shapes);
     Ok((Construct::Each(fan), map))
 }
 
@@ -220,7 +221,13 @@ pub(super) fn within(
     let label = labels.next("within");
     let (body, inner) = nested_body(children)?;
     let map = shape(Kind::Within, text(spec), text(&line.tokens), line, inner);
-    Ok((Construct::Within(Within { label, limit, body }), map))
+    let deadline = Within {
+        site: Site::of(&map),
+        label,
+        limit,
+        body,
+    };
+    Ok((Construct::Within(deadline), map))
 }
 
 /// `retry up to <N> times[, waiting <duration>]:`
@@ -266,6 +273,7 @@ pub(super) fn retry(
     let (body, inner) = nested_body(children)?;
     let map = shape(Kind::Retry, subject, text(&line.tokens), line, inner);
     let again = Retry {
+        site: Site::of(&map),
         label,
         attempts,
         waiting,
@@ -296,7 +304,12 @@ pub(super) fn step(
     let label = labels.next(&name);
     let (body, inner) = nested_body(children)?;
     let map = shape(Kind::Step, name, text(&line.tokens), line, inner);
-    Ok((Construct::Step(Step { label, body }), map))
+    let named = Step {
+        site: Site::of(&map),
+        label,
+        body,
+    };
+    Ok((Construct::Step(named), map))
 }
 
 /// `together:` and its branches, run concurrently on this task.
@@ -408,6 +421,7 @@ pub(super) fn for_loop(
         run_shapes,
     );
     let each = For {
+        site: Site::of(&map),
         label,
         pattern,
         items,

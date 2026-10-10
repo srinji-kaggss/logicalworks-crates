@@ -4,7 +4,7 @@ use lgwks_deps::proc_macro2::{Delimiter, Group, Ident, TokenStream, TokenTree};
 
 use super::super::lexicon::{self, Kind};
 use super::super::lines::{Line, after, group, ident, is_ident, is_parens, is_punct, text};
-use super::super::tree::{Bound, Call, Code, Duration, Fragment, StepShape};
+use super::super::tree::{Bound, Call, Code, Duration, Fragment, Site, StepShape};
 use super::super::{Refusal, Result};
 use super::Labels;
 
@@ -88,16 +88,19 @@ fn run_call<'line>(
     let inner: Vec<TokenTree> = arguments.stream().into_iter().collect();
     let arguments = rewrite(&inner, labels, shapes, line);
     let label = labels.next(&callee);
-    shapes.push(shape(
+    let map = shape(
         Kind::Run,
         callee.clone(),
         format!("run {}", text(&path)),
         line,
         Vec::new(),
-    ));
+    );
+    let site = Site::of(&map);
+    shapes.push(map);
     Some((
         after_arguments,
         Call {
+            site,
             path: path.into_iter().collect(),
             callee,
             label,

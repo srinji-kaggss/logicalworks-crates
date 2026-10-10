@@ -228,6 +228,10 @@ impl StepShape {
 #[serde(crate = "lgwks_std::json::serde")]
 #[non_exhaustive]
 pub enum StepKind {
+    /// `flow name(inputs) -> Output:`, a flow's own header. It names a
+    /// [`Site`](crate::script::Site) in a run's trail, never a [`StepShape`]:
+    /// a flow's map entry is its [`FlowShape`].
+    Flow,
     /// `each x in xs, at most N at once:`; the subject is `N`.
     Each,
     /// `within D:`; the subject is `D`.

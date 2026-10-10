@@ -9,6 +9,47 @@ breaks are listed explicitly under the crate.
 
 ## [Unreleased]
 
+### lgwks_bot — a run reads back as its script (#386, SL-6)
+
+- **Added** `script::Site` (word, source line, line as written), `Outcome`
+  (`Succeeded`, `Retried`, `TimedOut`, `Cancelled`, `Failed`), `TrailEntry`
+  and `ScriptTrail`. Every step a `script!` line enters (a flow, `step`,
+  `each` and each of its bodies, `within`, `retry`, each `for` iteration, a
+  numbered `run`) records its `Site` in the run's trail and settles there with
+  its outcome; `retry` settles with the attempt that succeeded.
+- **Added** `task::Report::trail` and `Report::script_trail`, which renders a
+  finished run as the script's lines in the order they ran, each with its
+  source line, nesting, item number and outcome (`tests/it/script_trail.rs`).
+- **Added** `script::StepKind::Flow`, the word a flow header's `Site` names; a
+  `StepShape` never carries it. `StepKind` is `#[non_exhaustive]`, so this is
+  additive.
+- A `within` written in `script!` is now an entry of the trail, so
+  `Report::steps` lists it; a `within` called by hand records nothing, as
+  before. The host settles its task step, so the trail's first entry carries
+  the run's outcome.
+- Step keys and paths are unchanged: the site rides beside the key, never in
+  it (`a_script_step_keys_as_its_path_entered_by_hand`). The trail is the same
+  bounded ring (INV-BOT-20).
+- `script!` calls the doc-hidden `Scope::enter_at`, `Scope::item_at`,
+  `Scope::settle`, `each_at`, `within_at` and `retry_at`; `enter`, `item`,
+  `each` and `retry` keep their signatures.
+- **Changed** `within` and `within_on` from `async fn` to `fn` returning
+  `impl Future` (`+ use<'s, T, Fut>`), the same output: they hand back the
+  race's own future, so a nest of deadlines pays one poll frame per level
+  rather than one per wrapper, and the borrow of `step` ends at the call. A
+  caller that awaits them is unchanged
+  (`sim_clock_wiring::a_deep_nest_of_clock_governed_steps_is_stack_bounded`).
+- Cost, measured with `examples/measure_overhead.rs` (2,000 runs of 1,024
+  script lines, release, the same machine): one script line costs the runtime
+  p50 134 ns / p99 153 ns on main 86163649 and p50 143 ns / p99 170 ns with
+  the trail, which also records each `within` line main did not record.
+
+### lgwks_ast — every construct knows its line (#386)
+
+- **Added** `script::Site` and a `site()` on `Each`, `Within`, `Retry`, `Step`,
+  `For` and `Call`: the word, line and text the construct's map entry already
+  carried, so the macro can emit them beside the structural label.
+
 ### lgwks_ast — the script tool, a second caller of the one parser (#384)
 
 - **Added** `script::read_source` and `script::Invocation`: every `script!` in

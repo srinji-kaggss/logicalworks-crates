@@ -69,8 +69,8 @@ pub use find::{Invocation, read_source};
 pub use lexicon::{Axis, Evidence, Form, Guarantee, Kind, LEXICON, Position, Word};
 pub use tree::{
     Block, Bound, Branch, BranchValue, Call, Code, Construct, Duration, Each, Flow, FlowShape, For,
-    Fragment, IfBranch, IfChain, MapStep, Retry, Script, Statement, Step, StepShape, Together,
-    Within, write_map,
+    Fragment, IfBranch, IfChain, MapStep, Retry, Script, Site, Statement, Step, StepShape,
+    Together, Within, write_map,
 };
 
 /// A script the language refuses, located at the token it is about.

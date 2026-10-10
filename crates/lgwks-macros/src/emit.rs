@@ -15,7 +15,7 @@
 
 use lgwks_ast::script::{
     Block, Bound, BranchValue, Call, Code, Construct, Duration, Each, Flow, FlowShape, For,
-    Fragment, IfChain, Retry, Script, Statement, Step, StepShape, Together, Within,
+    Fragment, IfChain, Kind, Retry, Script, Site, Statement, Step, StepShape, Together, Within,
 };
 use lgwks_deps::proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
 use lgwks_deps::quote::{ToTokens, quote};
@@ -181,14 +181,21 @@ fn flow_code(flow: &Flow) -> Result<TokenStream> {
     // flow cannot lower what the flow forbids.
     let forbids = lint_forbids();
     let visibility = flow.visibility();
+    let header = flow.shape();
+    let site = site_static(
+        Kind::Flow,
+        header.line(),
+        &format!("flow {}", header.signature()),
+    );
     Ok(quote! {
         #attributes
         #forbids
         #doc
         #visibility async fn #name(#inputs) -> ::core::result::Result<#output, #script::FlowError> {
             #helpers
-            let scope = &scope.enter(#name_text)?;
+            let scope = &scope.enter_at(#name_text, #site)?;
             let outcome: ::core::result::Result<#output, #script::FlowError> = async #body_block.await;
+            scope.settle(&outcome);
             outcome.map_err(|error| error.located(scope))
         }
     })
@@ -289,10 +296,13 @@ fn each(fan: &Each) -> Result<TokenStream> {
     let items = code(fan.items())?;
     let pattern = fan.pattern();
     let inner = body(fan.body())?.into_ok_block();
+    let site = site_of(fan.site());
     Ok(quote! {
-        #script::each(scope, #label, #limit, #items, async |scope: #script::Scope, #pattern| {
+        #script::each_at(scope, #label, #site, #limit, #items, async |scope: #script::Scope, #pattern| {
             let scope = &scope;
-            #inner
+            let outcome: ::core::result::Result<_, #script::FlowError> = async #inner.await;
+            scope.settle(&outcome);
+            outcome
         }).await
     })
 }
@@ -303,8 +313,9 @@ fn within(deadline: &Within) -> Result<TokenStream> {
     let label = deadline.label();
     let limit = duration(deadline.limit())?;
     let inner = body(deadline.body())?.into_ok_block();
+    let site = site_of(deadline.site());
     Ok(quote! {
-        #script::within(scope, #label, #limit, async #inner).await
+        #script::within_at(scope, #label, #site, #limit, async #inner).await
     })
 }
 
@@ -318,8 +329,9 @@ fn retry(attempts: &Retry) -> Result<TokenStream> {
         Some(pause) => duration(pause)?,
     };
     let inner = body(attempts.body())?.into_ok_block();
+    let site = site_of(attempts.site());
     Ok(quote! {
-        #script::retry(scope, #label, #script::attempts(#count)?, #waiting, async |scope: #script::Scope, attempt: u32| {
+        #script::retry_at(scope, #label, #site, #script::attempts(#count)?, #waiting, async |scope: #script::Scope, attempt: u32| {
             let scope = &scope;
             let _ = attempt;
             #inner
@@ -332,10 +344,12 @@ fn step(named: &Step) -> Result<TokenStream> {
     let script = runtime();
     let label = named.label();
     let inner = body(named.body())?.into_ok_block();
+    let site = site_of(named.site());
     Ok(quote! {
         {
-            let scope = &scope.enter(#label)?;
+            let scope = &scope.enter_at(#label, #site)?;
             let outcome: ::core::result::Result<_, #script::FlowError> = async #inner.await;
+            scope.settle(&outcome);
             outcome.map_err(|error| error.located(scope))
         }
     })
@@ -367,11 +381,24 @@ fn for_loop(each: &For) -> Result<TokenStream> {
     let label = each.label();
     let items = code(each.items())?;
     let pattern = each.pattern();
-    let inner = body(each.body())?.into_block();
+    let script = runtime();
+    let site = site_of(each.site());
+    let iteration = body(each.body())?;
+    // An iteration that reaches its end settles as done. One whose last line
+    // leaves the flow has no end to reach, and a settle after it would be code
+    // the compiler reports as unreachable; it stays unsettled, and the step
+    // that the exit settles says why.
+    let settled = if iteration.diverges {
+        TokenStream::new()
+    } else {
+        quote!(scope.settle::<()>(&::core::result::Result::<(), #script::FlowError>::Ok(()));)
+    };
+    let inner = iteration.into_block();
     Ok(quote! {
         for (lgwks_script_index, #pattern) in ::core::iter::IntoIterator::into_iter(#items).enumerate() {
-            let scope = &scope.item(#label, lgwks_script_index)?;
+            let scope = &scope.item_at(#label, lgwks_script_index, #site)?;
             #inner
+            #settled
         }
     })
 }
@@ -432,17 +459,46 @@ fn code(rust: &Code) -> Result<TokenStream> {
 /// numbered label otherwise, so two calls in one scope never share a key.
 fn call(run: &Call) -> Result<TokenStream> {
     let path = run.path();
-    let scope_argument = if run.label() == run.callee() {
-        quote!(scope)
+    let arguments = if run.arguments().is_empty() {
+        TokenStream::new()
     } else {
-        let label = run.label();
-        quote!(&scope.enter(#label)?)
+        let arguments = code(run.arguments())?;
+        quote!(, #arguments)
     };
-    if run.arguments().is_empty() {
-        return Ok(quote!(#path(#scope_argument).await));
+    if run.label() == run.callee() {
+        // The callee enters its own name, from its own header line.
+        return Ok(quote!(#path(scope #arguments).await));
     }
-    let arguments = code(run.arguments())?;
-    Ok(quote!(#path(#scope_argument, #arguments).await))
+    let label = run.label();
+    let site = site_of(run.site());
+    Ok(quote!({
+        let called = &scope.enter_at(#label, #site)?;
+        let outcome = #path(called #arguments).await;
+        called.settle(&outcome);
+        outcome
+    }))
+}
+
+/// A `&'static Site` for `site`, as a block holding the one `static` it names.
+fn site_of(site: &Site) -> TokenStream {
+    site_static(site.kind(), site.line(), site.text())
+}
+
+/// A `&'static Site` for the line `text`, the word `kind`, on source line
+/// `line`.
+///
+/// A `static` rather than a value: the trail keeps a pointer per step, so the
+/// line's text is written into the binary once and never copied at run time.
+/// The variant is named by the word's `Debug` rendering, as [`step_shape`]
+/// names it.
+fn site_static(kind: Kind, line: usize, text: &str) -> TokenStream {
+    let script = runtime();
+    let kind = Ident::new(&format!("{kind:?}"), Span::call_site());
+    let line = line_literal(line);
+    quote!({
+        static SITE: #script::Site = #script::Site::new(#script::StepKind::#kind, #line, #text);
+        &SITE
+    })
 }
 
 /// A bound as the runtime's argument.

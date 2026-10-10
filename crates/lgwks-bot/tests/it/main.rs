@@ -177,6 +177,7 @@ mod rt_runtime_stack;
 mod script_flow;
 mod script_map_parity;
 mod script_refusals;
+mod script_trail;
 mod session;
 mod sim_cancel_under_load;
 mod sim_cas;

@@ -108,7 +108,8 @@ use crate::script::run_store::{
 use crate::script::scope::step_key as reserved_step_key;
 use crate::script::trail::Trail;
 use crate::script::{
-    Appended, DEFAULT_TRAIL_STEPS, Durable, FlowError, MAX_IN_FLIGHT, Scope, Tenant, within,
+    Appended, DEFAULT_TRAIL_STEPS, Durable, FlowError, MAX_IN_FLIGHT, Scope, ScriptTrail, Tenant,
+    TrailEntry, within,
 };
 
 use self::name::TaskName;
@@ -485,6 +486,9 @@ pub struct Report<O> {
     elapsed: Duration,
     /// The retained step paths, oldest first.
     steps: Vec<Arc<str>>,
+    /// The retained steps with their script lines and outcomes, oldest first:
+    /// the same entries as `steps`, one for one.
+    trail: Vec<TrailEntry>,
     /// How many paths the ring dropped to stay bounded.
     dropped_steps: usize,
     /// How many paths this report could retain.
@@ -592,6 +596,40 @@ impl<O> Report<O> {
     #[must_use]
     pub fn steps(&self) -> &[Arc<str>] {
         &self.steps
+    }
+
+    /// The retained steps, oldest first, each with the script line that
+    /// produced it and how it ended: the entries behind [`Report::steps`].
+    #[must_use]
+    pub fn trail(&self) -> &[TrailEntry] {
+        &self.trail
+    }
+
+    /// The run read back as its script: one line per retained step, each with
+    /// its source line and outcome. See [`ScriptTrail`].
+    ///
+    /// ```
+    /// # use lgwks_bot::script::Scope;
+    /// # use lgwks_bot::task::{Host, task};
+    /// lgwks_bot::script! {
+    ///     flow double(value: u32) -> u32:
+    ///         step multiply:
+    ///             value.saturating_mul(2)
+    /// }
+    /// let host = Host::builder("acme")?.build()?;
+    /// let doubling = task("doubling", |scope: Scope, value: u32| async move {
+    ///     double(&scope, value).await
+    /// })?;
+    /// let report = lgwks_bot::block_on(host.run(&doubling, 21));
+    /// assert_eq!(report.result().ok().copied(), Some(42));
+    /// let rendered = report.script_trail().to_string();
+    /// assert!(rendered.contains("flow double(value: u32) -> u32  -> ok"), "{rendered}");
+    /// assert!(rendered.contains("step multiply  -> ok"), "{rendered}");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn script_trail(&self) -> ScriptTrail<'_> {
+        ScriptTrail::new(&self.trail, self.dropped_steps)
     }
 
     /// How many step paths the ring dropped to stay within its capacity.
@@ -2309,6 +2347,9 @@ impl Host {
         ))
         .await;
 
+        // The task's own step settles before the ring is read, so the trail's
+        // first entry says how the run ended as every later entry does.
+        scope.settle(&outcome);
         let snapshot = trail.snapshot();
         let (disposition, output, error, needs) = match outcome {
             Ok(value) => (Disposition::Succeeded, Some(value), None, None),
@@ -2658,10 +2699,11 @@ impl Host {
             needs,
             repair,
         } = terminal;
-        let (steps, dropped_steps) = match trail {
-            TrailSnapshot::Taken((paths, dropped)) => (paths, dropped),
+        let (trail, dropped_steps) = match trail {
+            TrailSnapshot::Taken((entries, dropped)) => (entries, dropped),
             TrailSnapshot::Empty => (Vec::new(), 0),
         };
+        let steps = trail.iter().map(TrailEntry::shared_path).collect();
         // The two claims a report makes about durability, both derived from one
         // fact — whether this host holds a store — so they cannot disagree. A
         // report with a store says how many records it has; one without says
@@ -2700,6 +2742,7 @@ impl Host {
             error,
             elapsed: started.elapsed(),
             steps,
+            trail,
             dropped_steps,
             progress_capacity: self.inner.limits.progress_capacity(),
             effects,
@@ -2972,8 +3015,8 @@ impl Declined {
 /// and "no trail to report" must not look the same in a report a reader is
 /// reasoning from.
 enum TrailSnapshot {
-    /// The ring's contents, and how many paths it dropped.
-    Taken((Vec<Arc<str>>, usize)),
+    /// The ring's contents, and how many entries it dropped.
+    Taken((Vec<TrailEntry>, usize)),
     /// No ring existed: the run was refused before its scope was built.
     Empty,
 }

@@ -23,7 +23,7 @@ pub(crate) fn percentile(sorted: &[u128], per_mille: usize) -> u128 {
     sorted[rank.clamp(1, sorted.len()).saturating_sub(1)]
 }
 
-/// The percentiles of one measurement, in microseconds.
+/// The percentiles of one measurement, in the unit its samples were taken in.
 pub(crate) struct Summary {
     /// Median.
     p50: u128,
@@ -44,10 +44,15 @@ impl Summary {
         }
     }
 
-    /// The summary as one line.
+    /// The summary as one line, for samples taken in microseconds.
     pub(crate) fn line(&self, label: &str) -> String {
+        self.line_in(label, "us")
+    }
+
+    /// The summary as one line, for samples taken in `unit`.
+    pub(crate) fn line_in(&self, label: &str, unit: &str) -> String {
         format!(
-            "{label}: p50={}us p95={}us p99={}us",
+            "{label}: p50={}{unit} p95={}{unit} p99={}{unit}",
             self.p50, self.p95, self.p99
         )
     }

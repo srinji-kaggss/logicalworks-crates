@@ -10,7 +10,7 @@ use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
 
 use super::policy::Policy;
-use super::trail::Trail;
+use super::trail::{Mark, Outcome, Site, Trail};
 use super::{DEFAULT_TRAIL_STEPS, FlowError, MAX_DEPTH, MAX_TENANT_BYTES};
 
 // ── Tenant ──────────────────────────────────────────────────────────────────
@@ -190,6 +190,9 @@ struct ScopeInner {
     clock: Clock,
     /// The run this scope's records are keyed by, when a host minted one.
     run: Option<RunId>,
+    /// This step's entry in the trail, which [`Scope::settle`] completes;
+    /// `None` at the root, which no step entered.
+    mark: Option<Arc<Mark>>,
 }
 
 impl Scope {
@@ -282,6 +285,7 @@ impl Scope {
                 trail,
                 clock,
                 run,
+                mark: None,
             }),
         }
     }
@@ -302,12 +306,36 @@ impl Scope {
     /// [`FlowError::Cancelled`] if this scope is already cancelled, so no new
     /// step starts after a stop; [`FlowError::TooDeep`] past [`MAX_DEPTH`].
     pub fn enter(&self, step: &str) -> Result<Self, FlowError> {
-        self.descend(self.join(step), Stop::Own)
+        self.enter_from(step, None)
+    }
+
+    #[doc(hidden)]
+    /// [`Scope::enter`] for a step `script!` wrote at `site`, which its trail
+    /// entry carries. Called by `script!`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scope::enter`].
+    pub fn enter_at(&self, step: &str, site: &'static Site) -> Result<Self, FlowError> {
+        self.enter_from(step, Some(site))
+    }
+
+    /// Enter the named step, from `site` when a script line produced it.
+    pub(super) fn enter_from(
+        &self,
+        step: &str,
+        site: Option<&'static Site>,
+    ) -> Result<Self, FlowError> {
+        self.descend(self.join(step), Stop::Own, site)
     }
 
     /// Enter the named step sharing this scope's stop: a `retry`'s attempts.
-    pub(super) fn enter_sharing(&self, step: &str) -> Result<Self, FlowError> {
-        self.descend(self.join(step), Stop::Shared)
+    pub(super) fn enter_sharing(
+        &self,
+        step: &str,
+        site: Option<&'static Site>,
+    ) -> Result<Self, FlowError> {
+        self.descend(self.join(step), Stop::Shared, site)
     }
 
     /// Enter item `index` of the named step: one body of an [`each`](crate::script::each).
@@ -316,21 +344,44 @@ impl Scope {
     ///
     /// As [`Scope::enter`].
     pub fn item(&self, step: &str, index: usize) -> Result<Self, FlowError> {
-        self.descend(self.join(&format!("{step}#{index}")), Stop::Own)
+        self.descend(self.join(&format!("{step}#{index}")), Stop::Own, None)
+    }
+
+    #[doc(hidden)]
+    /// [`Scope::item`] for one iteration of a `for` that `script!` wrote at
+    /// `site`. Called by `script!`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scope::enter`].
+    pub fn item_at(
+        &self,
+        step: &str,
+        index: usize,
+        site: &'static Site,
+    ) -> Result<Self, FlowError> {
+        self.descend(self.join(&format!("{step}#{index}")), Stop::Own, Some(site))
     }
 
     /// Item `index` of the step this scope is: path `<this path>#index`, so an
     /// `each` body reads `sync/each:page#39`, not `sync/each:page/each:page#39`,
-    /// sharing the step's stop.
+    /// sharing the step's stop and its line.
     pub(super) fn numbered(&self, index: usize) -> Result<Self, FlowError> {
         self.descend(
             Arc::from(format!("{}#{index}", self.inner.path)),
             Stop::Shared,
+            self.inner.mark.as_ref().and_then(|mark| mark.site()),
         )
     }
 
-    /// A child scope at `path` with its own stop or this one's.
-    fn descend(&self, path: Arc<str>, stop: Stop) -> Result<Self, FlowError> {
+    /// A child scope at `path` with its own stop or this one's, entered from
+    /// `site` when a script line produced it.
+    fn descend(
+        &self,
+        path: Arc<str>,
+        stop: Stop,
+        site: Option<&'static Site>,
+    ) -> Result<Self, FlowError> {
         self.checkpoint()?;
         if self.inner.depth >= MAX_DEPTH {
             let refusal = Err(FlowError::TooDeep {
@@ -344,12 +395,13 @@ impl Scope {
         // dies halfway through a fan-out has still entered those items, and a
         // trail that only listed completed steps would under-report exactly the
         // run a reader most wants to see.
-        self.inner.trail.record(&path);
+        let depth = self.inner.depth.saturating_add(1);
+        let mark = self.inner.trail.record(&path, site, depth);
         Ok(Self {
             inner: Arc::new(ScopeInner {
                 tenant: self.inner.tenant.clone(),
-                path: Arc::clone(&path),
-                depth: self.inner.depth.saturating_add(1),
+                path,
+                depth,
                 token: match stop {
                     Stop::Own => self.inner.token.child_token(),
                     Stop::Shared => self.inner.token.clone(),
@@ -358,8 +410,33 @@ impl Scope {
                 trail: Arc::clone(&self.inner.trail),
                 clock: self.inner.clock.clone(),
                 run: self.inner.run,
+                mark: Some(mark),
             }),
         })
+    }
+
+    /// Record in the trail a step beneath this scope that enters no scope of
+    /// its own (a `within`), at `path`, from `site`; the caller settles it.
+    pub(super) fn mark(&self, path: &Arc<str>, site: &'static Site) -> Arc<Mark> {
+        self.inner
+            .trail
+            .record(path, Some(site), self.inner.depth.saturating_add(1))
+    }
+
+    #[doc(hidden)]
+    /// Record how this step ended, for its trail entry. The first settlement
+    /// stands, and a scope no step entered records nothing. Called by
+    /// `script!`.
+    pub fn settle<T>(&self, result: &Result<T, FlowError>) {
+        self.settle_with(|| Outcome::of(result));
+    }
+
+    /// [`Scope::settle`] with an outcome the caller derives, built only when
+    /// this step has not settled yet.
+    pub(super) fn settle_with(&self, outcome: impl FnOnce() -> Outcome) {
+        if let Some(ref mark) = self.inner.mark {
+            mark.settle(outcome);
+        }
     }
 
     /// The decisions shared by every step under this scope's root.
