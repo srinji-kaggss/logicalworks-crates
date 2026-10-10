@@ -32,6 +32,8 @@
 //! | `if cond:` / `else if cond:` / `else:` | as written |
 //! | `let x = <block>:` | the block's last line becomes `x` |
 //! | `run other(args)` | call another flow in this scope, await it, propagate its failure |
+//! | `observe domain::id of target` | poll the source the host's registry declares under `domain::id`, built from `target`, as a step of its own; bind it with a type, `let n: u16 = ..` |
+//! | `act domain::id on target with value` | run the action the host's registry declares under `domain::id`, built from `target`, on `value`, as a step of its own |
 //! | `give back value` | return from the flow |
 //! | `fail with reason` / `fail transiently with reason` | stop with a permanent / retryable failure |
 //!

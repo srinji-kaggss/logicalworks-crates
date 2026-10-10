@@ -303,10 +303,10 @@ fn simple(
     match lexicon::kind_of(line) {
         Some(Kind::GiveBack) => give_back(line, place, labels, run_shapes),
         Some(Kind::Fail) => fail_line(line, labels, run_shapes),
-        Some(Kind::Let) => Ok(Statement::Let(rewrite(tokens, labels, run_shapes, line))),
-        _ => Ok(match run_only(tokens, labels, run_shapes, line) {
+        Some(Kind::Let) => Ok(Statement::Let(rewrite(tokens, labels, run_shapes, line)?)),
+        _ => Ok(match run_only(tokens, labels, run_shapes, line)? {
             Some(call) => Statement::Run(call),
-            None => Statement::Rust(rewrite(tokens, labels, run_shapes, line)),
+            None => Statement::Rust(rewrite(tokens, labels, run_shapes, line)?),
         }),
     }
 }
@@ -332,7 +332,7 @@ fn give_back(
         tracing::debug!(error = ?refusal.as_ref().err(), "give_back: returning an error to the caller");
         return refusal;
     }
-    let value = rewrite(rest, labels, run_shapes, line);
+    let value = rewrite(rest, labels, run_shapes, line)?;
     run_shapes.push(shape(
         Kind::GiveBack,
         String::new(),
@@ -366,7 +366,7 @@ fn fail_line(
             "`fail with <reason>`",
         )?
     };
-    let reason = rewrite(rest, labels, run_shapes, line);
+    let reason = rewrite(rest, labels, run_shapes, line)?;
     run_shapes.push(shape(
         Kind::Fail,
         String::new(),
