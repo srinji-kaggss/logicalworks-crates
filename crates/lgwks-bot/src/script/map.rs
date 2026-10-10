@@ -186,7 +186,8 @@ impl Passthrough {
         Self { line, text }
     }
 
-    /// The source line.
+    /// Where it is written: 1-based, counted in the file that holds the
+    /// `script!`, the same numbering a step's `line()` and a compiler error use.
     #[must_use]
     pub const fn line(&self) -> u32 {
         self.line
