@@ -107,9 +107,10 @@ Alternatives rejected:
   same with a different home.
 
 The Rust-reader split (`syn` in scan, tree-sitter in `lgwks_ast`) is settled by
-measurement, not preference. Measure fidelity and speed on the estate's own
-sources, record the decision as an ADR, and route the losing reader through the
-winner.
+measurement, not preference: [ADR 0001](adr/0001-one-rust-reader.md) (#387)
+measured fidelity, speed, peak RSS and hostile nesting on this repository's own
+sources and chose `lgwks_ast`. Routing the scan, the losing reader, through it
+is #408.
 
 ## How we know it works
 

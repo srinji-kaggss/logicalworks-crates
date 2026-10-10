@@ -162,6 +162,11 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # `random`, which names the script tool's scratch trees (#384) so two runs on
 # one machine never share one.
 lgwks_std = { workspace = true, features = ["random"] }
+# `syn`, reached through the storefront that owns its edge (`macro` re-exports
+# it), so `examples/rust_readers.rs` can read the same files with both Rust
+# readers (#387). A dev edge on a workspace member: no third-party edge is
+# added, and the library never sees it.
+lgwks_deps = { workspace = true, features = ["macro"] }
 
 # `lgwks-ast script map|check`: every `script!` in a tree, read by the one
 # parser (#384). Built only with the tool selected.
@@ -180,6 +185,12 @@ required-features = ["lang-rust"]
 [[example]]
 name = "parse_budget"
 required-features = ["parser"]
+
+# The two Rust readers over one corpus (#387): fidelity, latency and, one
+# reader per process, peak RSS, for `docs/adr/0001-one-rust-reader.md`.
+[[example]]
+name = "rust_readers"
+required-features = ["lang-rust"]
 
 [lints]
 workspace = true
