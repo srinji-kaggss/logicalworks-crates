@@ -180,6 +180,35 @@ governance change and follows these rules:
 Newest first. Each entry names what changed, the receipts, and what it does
 **not** claim.
 
+### 2026-10-09 — T-rows: 35 of 36 exercised
+
+- Six `present` rows got tests that drive their falsifiers, all through the
+  shipped surface:
+  - T10: every predecessor state (failed, abandoned, unknown, skipped) decides its
+    dependent, over 42 seeds;
+  - T11: late evidence for a retried attempt is refused (`EvidenceStaleAttempt`
+    for the repeat, `EvidenceContradicted` for the Applied), and the retry
+    still settles on its own key;
+  - T14: the existing mid-append kill now also asserts that an unacknowledged
+    admission recovers as no attempt and owes no resend;
+  - T17: a dropped waiter releases its permit, and a successor host on the same
+    store resumes the in-flight run;
+  - T31: a review list served in pages of 100 is read across every page, and
+    the older client's concatenated `][` shape is refused;
+  - T21: a record naming a recycled pid is refused as `LeaderReused` and
+    signals nothing.
+
+  The fake `gh` now pages its review list the way the REST endpoint does. A new
+  `list-paginated` fault in `sim_review_path` puts the run's own review on the
+  third page.
+- Receipt at `83331802`: 251/251 named tests passed. 35 rows are `exercised`
+  with empty gaps.
+
+**Does not claim:** that T21 is exercised. It stays `present` because
+containment is Unix-only, and the Linux container leg runs these tests but
+records no receipt. It also does not claim that any row is `accepted`: that
+needs the release run's receipt at the rendered head.
+
 ### 2026-10-09 — Paired timing lands, main red on load, open PRs hardened
 
 - Merged [#392](https://github.com/srinji-kaggss/logicalworks-crates/pull/392)
@@ -691,7 +720,7 @@ unwired code is a wiring defect, not a closed item.
 | P1 | Flood decision-mean bound (#375) | Quarantined from Linux container legs 2026-10-08; enforced on mac lanes. #392 judges paired medians; #393 stops charging the lock wait (mac: 10/10 inside the bound at 2× ncpu load). Return: the container leg re-measured with the new instrument, then 20 consecutive green container runs |
 | P1 | Every gate under 5 minutes (#272) | PR wall 3m59s; one warm main run 240 s. Still needs five consecutive mains < 300 s, serial local < 300 s, cold build < 60 s / cold test < 90 s |
 | P1 | Saturation curve + VPS profile (#269) | Latency gap closed (#320: p99 ≤ 1.25× raw Tokio, 3.45 allocs/task). Still needs the 1–2 vCPU / 1–2 GB VPS profile and the README boxes |
-| P1 | Acceptance receipts (#271) | T01–T36 map + per-revision SQLite receipts landed (#374). Still needs the remaining `_tNN` renames, a macOS receipt leg, and the containment rows |
+| P1 | Acceptance receipts (#271) | T01–T36 map + per-revision SQLite receipts landed (#374); 35/36 rows `exercised` (2026-10-09). Still needs T21 receipted per backend (a Linux receipt leg), the remaining `_tNN` renames, and the release run that renders rows `accepted` |
 | P1 | Authoring frontier scale (#270) | `script!` arm + 3 guarantee tasks with negative controls landed (#374). Still needs 10 trials/cell, a third (frontier closed) model, and human authors |
 | P1 | Vendor wiring (#266) | Done in worktree, uncommitted: 924/924 packages covered, offline build 2m43.9s, negative control refuses. Blocked on the §7 secrets-pattern decision |
 | P1 | Descendant containment part 2 (#263) | Capture-before-kill, 4-round signalling, `CleanupSurvivors`, `process_escape` root cause all landed. Still needs Windows Job Objects (§7-gated) |

@@ -145,14 +145,17 @@ enum Fault {
     ListTruncated,
     /// The answer is larger than the capture ceiling, so it cannot be decoded.
     AnswerOversized,
+    /// The review list is served in pages and the run's own review is on the
+    /// third, which only a client that follows every page ever reads.
+    ListPaginated,
 }
 
 impl Fault {
     /// How many faults the family contains.
-    const VARIANTS: u64 = 10;
+    const VARIANTS: u64 = 11;
 
     /// Every fault's label, so a coverage test does not re-list the enum.
-    const LABELS: [&'static str; 10] = [
+    const LABELS: [&'static str; 11] = [
         "clean",
         "response-lost",
         "create-refused",
@@ -163,6 +166,7 @@ impl Fault {
         "list-not-json",
         "list-truncated",
         "answer-oversized",
+        "list-paginated",
     ];
 
     /// The fault for `index` at `offset`, drawn from the whole family.
@@ -177,7 +181,8 @@ impl Fault {
             6 => Self::ListOverCeiling,
             7 => Self::ListNotJson,
             8 => Self::ListTruncated,
-            _ => Self::AnswerOversized,
+            9 => Self::AnswerOversized,
+            _ => Self::ListPaginated,
         }
     }
 
@@ -194,6 +199,7 @@ impl Fault {
             Self::ListNotJson => "list-not-json",
             Self::ListTruncated => "list-truncated",
             Self::AnswerOversized => "answer-oversized",
+            Self::ListPaginated => "list-paginated",
         }
     }
 
@@ -223,7 +229,7 @@ impl Fault {
     /// defect the review ceiling exists to prevent, and the run must stay
     /// `Unknown`: the effect is real and its verification is not available.
     const fn can_be_verified(self) -> bool {
-        matches!(self, Self::Clean | Self::ResponseLost)
+        matches!(self, Self::Clean | Self::ResponseLost | Self::ListPaginated)
     }
 }
 
@@ -550,6 +556,10 @@ fn scenario_for(fault: Fault, head: &str) -> Result<Scenario, Box<dyn std::error
         Fault::ListNotJson => scenario.answers_reviews_with("garbage"),
         Fault::ListTruncated => scenario.answers_reviews_with("truncated"),
         Fault::AnswerOversized => scenario.created_body(BODY).floods(400),
+        // 250 older reviews in pages of 100, so the run's own review is record
+        // 251, on the third page: a verification that read one page would not
+        // find it and would have to report the publication unobserved.
+        Fault::ListPaginated => scenario.with_filler_reviews(250).with_review_pages(100),
     })
 }
 

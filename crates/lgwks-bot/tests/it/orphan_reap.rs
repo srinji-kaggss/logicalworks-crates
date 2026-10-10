@@ -160,15 +160,27 @@ fn a_killed_coordinators_lane_is_stopped_by_its_successor() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn an_identified_spawn_names_its_leader_and_stays_supervised() -> TestResult {
-    let scratch = Scratch::new("identified-spawn")?;
+/// A scratch directory and a leader that writes its own pid into it and then
+/// becomes a `sleep 300`, so the pid it wrote is the one that leads the group.
+///
+/// Returns the scratch (which removes the directory on drop), the file the pid
+/// lands in, and the spec that writes it.
+fn self_recording_leader(
+    name: &str,
+) -> Result<(Scratch, std::path::PathBuf, ProcessSpec), Box<dyn std::error::Error>> {
+    let scratch = Scratch::new(name)?;
     let leader_file = scratch.path().join("leader.pid");
     let mut spec = ProcessSpec::new("sh");
     spec.arg("-c").arg(format!(
         "echo $$ > {}; exec sleep 300",
         leader_file.display()
     ));
+    Ok((scratch, leader_file, spec))
+}
+
+#[test]
+fn an_identified_spawn_names_its_leader_and_stays_supervised() -> TestResult {
+    let (_scratch, leader_file, spec) = self_recording_leader("identified-spawn")?;
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         let mut supervisor = Supervisor::default();
@@ -196,6 +208,65 @@ fn an_identified_spawn_names_its_leader_and_stays_supervised() -> TestResult {
         assert!(
             wait_for_pid_gone(recorded, BUDGET).is_some(),
             "a supervised identified spawn is stopped by its supervisor's shutdown"
+        );
+        Ok(())
+    })
+}
+
+/// T21, PID reuse: a record whose pid is now held by a process that started at
+/// another instant is refused as `LeaderReused`, and that process is never
+/// signalled.
+///
+/// A pid is a number the kernel hands out again, so a record that outlives its
+/// leader can name a stranger. The start instant is what tells them apart, and
+/// the kernel will not recycle a pid on demand, so the reuse is presented the
+/// one way a test controls: a live, supervised leader and a record that names
+/// its pid with a start it never had. A reap that trusted the number would
+/// signal the live group. The refusal must name the process that actually holds
+/// the pid, and that process must still be running and still be owned, which
+/// the supervisor's own shutdown then shows by stopping it.
+#[test]
+fn a_record_naming_a_recycled_pid_signals_nothing_t21() -> TestResult {
+    let (_scratch, leader_file, spec) = self_recording_leader("recycled-pid")?;
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        let spawned = supervisor.spawn_process_identified(&spec).await?;
+        let pid = wait_for_pid(&leader_file, BUDGET).ok_or("the leader never recorded its pid")?;
+        let _backstop = LaneGuard(vec![pid]);
+        let holder = spawned.leader().clone();
+        let stale = ProcessIdentity::new(holder.pid(), &format!("{}0", holder.started()))?;
+        assert_ne!(stale, holder, "the stale record names another process");
+
+        match reap_orphaned_group(&stale)? {
+            OrphanReap::LeaderReused { holder: named } => assert_eq!(
+                named, holder,
+                "the refusal names the process that holds the pid now"
+            ),
+            other => {
+                let refusal = Err(format!(
+                    "a record whose start disagrees with the pid's holder must be refused as \
+                     reused, got {other:?}"
+                )
+                .into());
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a_record_naming_a_recycled_pid_signals_nothing_t21: returning an error to the caller");
+                return refusal;
+            }
+        }
+        assert!(
+            pid_is_alive(pid),
+            "the process holding the recycled number was not signalled"
+        );
+
+        let report = supervisor.shutdown().await;
+        assert_eq!(
+            report.outcomes().first().map(|outcome| outcome.task()),
+            Some(spawned.task()),
+            "the holder is still the supervisor's to stop"
+        );
+        assert!(
+            wait_for_pid_gone(pid, BUDGET).is_some(),
+            "and its own shutdown stops it"
         );
         Ok(())
     })
