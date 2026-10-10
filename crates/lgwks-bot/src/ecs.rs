@@ -1546,7 +1546,7 @@ impl AdmitScratch {
 
 /// The retry policy in force: one authority per world, like `Grants`.
 #[derive(Resource, Debug)]
-struct Policy(RetryPolicy);
+struct Policy(Retrying);
 
 /// The chains whose cached baseline cannot be trusted, and why.
 ///
@@ -3042,46 +3042,88 @@ impl fmt::Display for EffectEvidence {
     }
 }
 
-/// How many times an entry whose effect definitely did not happen is attempted.
+/// How many times an entry whose effect definitely did not happen is
+/// attempted, and how far apart.
 ///
-/// A policy rather than a constant, because the right number is a property of
-/// the action: a merge that transiently refuses wants several attempts, a
-/// process launch wants one. There is no measured basis for a default, so
-/// [`Self::DEFAULT`] is a declared guess and is named as one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryPolicy {
-    /// Attempts per entry, the first included. Non-zero: an entry that may
-    /// never be attempted is not a policy, it is pre-abandoned work.
-    max_attempts: NonZeroU32,
+/// This is [`lgwks_std::retry::RetryPolicy`], the estate's one retry type,
+/// and every field of it is honoured: `max_attempts` bounds attempts per
+/// entry, the first included; `base_delay` and `max_delay` space a retry
+/// after a definite failure; and `deadline` bounds the backoff one entry may
+/// accumulate. A retry is never slept for, because a tick never blocks: it is
+/// deferred. The entry stays where it is, a barrier to the entries behind it
+/// as any open entry is, until the bot's clock
+/// ([`EcsBuilder::with_clock`]) reaches the moment its backoff ends.
+pub use lgwks_std::retry::RetryPolicy;
+
+/// The retry policy an [`EcsBot`] runs under and the clock its backoff is
+/// read on, carried together because a backoff without a timeline is a
+/// number nothing can wait for.
+#[derive(Debug, Clone)]
+struct Retrying {
+    /// The declared policy.
+    policy: RetryPolicy,
+    /// The timeline a deferred retry is due on.
+    clock: Clock,
 }
 
-impl RetryPolicy {
-    /// One attempt per entry: the first definite failure abandons it.
-    pub const ONE_ATTEMPT: Self = Self {
-        max_attempts: NonZeroU32::MIN,
-    };
+/// The retry index past which every backoff is `max_delay`: the base doubles
+/// once per retry, and a `u128` of nanoseconds has no more doublings to give.
+const SATURATED_RETRY: u32 = u128::BITS;
 
-    /// The declared default: three attempts per entry, counting the first.
-    pub const DEFAULT: Self = Self {
-        // Total rather than panicking: a `const` has no error channel and
-        // `unwrap` is refused crate-wide. The `None` arm is unreachable, since
-        // three is not zero.
-        max_attempts: match NonZeroU32::new(3) {
-            Some(three) => three,
-            None => NonZeroU32::MIN,
-        },
-    };
-
-    /// A policy allowing `max_attempts` attempts per entry.
-    #[must_use]
-    pub const fn new(max_attempts: NonZeroU32) -> Self {
-        Self { max_attempts }
+impl Retrying {
+    /// Three attempts per entry, the first included, each retried on the next
+    /// tick with no backoff and no deadline, on the wall clock. There is no
+    /// measured basis for a default, so this is a declared guess and is named
+    /// as one.
+    fn declared() -> Self {
+        Self {
+            policy: RetryPolicy::new(3, Duration::ZERO, Duration::MAX),
+            clock: Clock::wall(),
+        }
     }
 
-    /// Attempts allowed per entry.
-    #[must_use]
-    pub const fn max_attempts(self) -> u32 {
-        self.max_attempts.get()
+    /// Attempts allowed per entry, the first included. Never zero: a policy
+    /// whose `max_attempts` was set to zero still makes the first attempt, as
+    /// the policy type itself documents.
+    fn budget(&self) -> u32 {
+        self.policy.max_attempts.max(1)
+    }
+
+    /// When an entry that has definitely failed `attempts` times may be
+    /// attempted again, on this bot's clock; `None` when the policy spends
+    /// nothing more on it, because its attempts are used or the backoff before
+    /// the next one would reach its deadline.
+    ///
+    /// No jitter is applied, so a retry's moment is a function of the policy,
+    /// the attempt count and the clock alone. That is what keeps a replayed
+    /// bot's schedule identical to the run it replays.
+    fn retry_at(&self, attempts: u32) -> Option<Duration> {
+        if !self
+            .policy
+            .should_retry(attempts, self.backoff_through(attempts))
+        {
+            return None;
+        }
+        let wait = self.policy.delay(attempts.saturating_sub(1), 0);
+        Some(self.clock.now().saturating_add(wait))
+    }
+
+    /// The backoff the policy schedules across the first `attempts` failures:
+    /// the delay after each one, summed. Its work is bounded independently of
+    /// `attempts`, because past [`SATURATED_RETRY`] every delay is the same
+    /// capped value and the rest of the sum is one product.
+    fn backoff_through(&self, attempts: u32) -> Duration {
+        let walked = attempts.min(SATURATED_RETRY);
+        let mut total = Duration::ZERO;
+        for retry in 0..walked {
+            total = total.saturating_add(self.policy.delay(retry, 0));
+        }
+        let rest = attempts.saturating_sub(walked);
+        total.saturating_add(
+            self.policy
+                .delay(SATURATED_RETRY, 0)
+                .saturating_mul(rest),
+        )
     }
 }
 
@@ -3105,6 +3147,9 @@ enum EntryState {
         attempts: u32,
         /// The failure.
         cause: String,
+        /// When the retry is due on the bot's clock: the moment the policy's
+        /// backoff after this failure ends. Not before it.
+        retry_at: Duration,
     },
     /// The effect may or may not have happened
     /// ([`BotError::EffectIndeterminate`]).
@@ -3170,6 +3215,7 @@ impl EntryState {
             Self::DefinitelyFailed {
                 attempts,
                 ref cause,
+                ..
             } => Some(TransitionHold::Failed {
                 attempts,
                 budget,
@@ -3788,7 +3834,7 @@ impl Ledger {
         id: WorkId,
         evidence: EffectEvidence,
         attempts: u32,
-        budget: u32,
+        retry: &Retrying,
     ) -> bool {
         let Some(state) = self.entry_mut(id) else {
             return false;
@@ -3798,18 +3844,16 @@ impl Ledger {
         }
         *state = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
-            EffectEvidence::NotApplied => {
-                if attempts < budget {
-                    EntryState::DefinitelyFailed {
-                        attempts,
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                } else {
-                    EntryState::Abandoned {
-                        reason: AbandonReason::AttemptsExhausted { attempts },
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                }
+            EffectEvidence::NotApplied => match retry.retry_at(attempts) {
+                Some(retry_at) => EntryState::DefinitelyFailed {
+                    attempts,
+                    cause: "effect not applied; its record landed on retry".into(),
+                    retry_at,
+                },
+                None => EntryState::Abandoned {
+                    reason: AbandonReason::AttemptsExhausted { attempts },
+                    cause: "effect not applied; its record landed on retry".into(),
+                },
             }
         };
         true
@@ -3823,7 +3867,7 @@ impl Ledger {
     /// wrapping: an attempt ordinal past `u32::MAX` would take the maximum,
     /// which reports an entry as further along than it is, and that is the
     /// direction a retry budget can absorb.
-    fn fail(&mut self, id: WorkId, error: &BotError, attempt: AttemptId, budget: u32) -> bool {
+    fn fail(&mut self, id: WorkId, error: &BotError, attempt: AttemptId, retry: &Retrying) -> bool {
         let attempts = u32::saturating_from(attempt.get());
         let Some(state) = self.entry_mut(id) else {
             return false;
@@ -3833,7 +3877,7 @@ impl Ledger {
         if !matches!(*state, EntryState::Unrecorded) {
             return false;
         }
-        *state = failure_state(error, attempts, budget);
+        *state = failure_state(error, attempts, retry);
         true
     }
 
@@ -4489,7 +4533,7 @@ fn resume(
 /// is worse still — it makes a retry policy depend on the wording of a message.
 /// The producer states what the failure establishes about the effect, the
 /// certainty carries it here, and this function is a total map over that.
-fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
+fn failure_state(error: &BotError, attempts: u32, retry: &Retrying) -> EntryState {
     // A post-effect recording failure is not a dispatch failure and is not
     // abandoned: the occurrence is already known, and the only work left is the
     // append. Mapped here rather than through `RetryClass` so `Never` keeps its
@@ -4509,12 +4553,18 @@ fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
     }
     let cause = error.to_string();
     match error.retry_class() {
-        // The effect definitely did not happen: a retry is a retry, and the
-        // budget bounds it.
-        RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-        RetryClass::Safe => EntryState::Abandoned {
-            reason: AbandonReason::AttemptsExhausted { attempts },
-            cause,
+        // The effect definitely did not happen: a retry is a retry, the policy
+        // spaces it, and its attempts and deadline bound it.
+        RetryClass::Safe => match retry.retry_at(attempts) {
+            Some(retry_at) => EntryState::DefinitelyFailed {
+                attempts,
+                cause,
+                retry_at,
+            },
+            None => EntryState::Abandoned {
+                reason: AbandonReason::AttemptsExhausted { attempts },
+                cause,
+            },
         },
         // It may have happened. Never attempted again without evidence, whatever
         // the budget says.
@@ -4868,6 +4918,9 @@ fn fire_plan(world: &mut World) {
 
     failures.resize_with(count, || None);
 
+    // Read once per walk, so every chain in a tick judges a backoff against
+    // the same moment.
+    let now = world.resource::<Policy>().0.clock.now();
     #[cfg(feature = "profile")]
     let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
@@ -4904,6 +4957,7 @@ fn fire_plan(world: &mut World) {
                     value,
                     index,
                     ledger,
+                    now,
                     &mut steps,
                     failure,
                 );
@@ -5005,6 +5059,7 @@ fn plan_chain(
     value: &Erased,
     index: usize,
     ledger: &Ledger,
+    now: Duration,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
@@ -5052,6 +5107,10 @@ fn plan_chain(
             // A known outcome whose record is missing is walked: the retry is
             // an append, not a dispatch, and `run_chain` takes that path.
             EntryState::RecordingFailed { .. } => {}
+            // Failed and backing off: not yet due, so it is neither attempted nor
+            // passed. The entries behind it wait with it, exactly as they wait
+            // behind any open entry.
+            EntryState::DefinitelyFailed { retry_at, .. } if retry_at > now => break,
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
         }
 
@@ -5154,7 +5213,7 @@ impl EcsBot {
         EcsBuilder {
             name: name.into(),
             chains: Vec::new(),
-            policy: RetryPolicy::DEFAULT,
+            policy: Retrying::declared(),
             effects: None,
             poll_deadline: DEFAULT_POLL_DEADLINE,
         }
@@ -5537,10 +5596,11 @@ impl EcsBot {
             mut steps,
             mut failures,
         } = plan;
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let retry = self.world.resource::<Policy>().0.clone();
+        let budget = retry.budget();
         #[cfg(feature = "profile")]
         let act_charge = Charge::new(TickStage::Act);
-        let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+        let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
         #[cfg(feature = "profile")]
         drop(act_charge);
 
@@ -6126,7 +6186,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         failures: &mut [Option<BotError>],
-        budget: u32,
+        retry: &Retrying,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -6147,7 +6207,7 @@ impl EcsBot {
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
-            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, budget).await;
+            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, retry).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a
             // caller gets, exactly as the synchronous walk had it — except that
@@ -6176,7 +6236,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         condition_failure: Option<BotError>,
-        budget: u32,
+        retry: &Retrying,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -6222,7 +6282,7 @@ impl EcsBot {
                         if self
                             .world
                             .non_send_mut::<Ledger>()
-                            .finish_recording(work, evidence, attempts, budget)
+                            .finish_recording(work, evidence, attempts, retry)
                             && evidence == EffectEvidence::Applied
                         {
                             fired = fired.saturating_add(1);
@@ -6329,7 +6389,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), retry);
                 failure = Some(error);
                 break;
             }
@@ -6403,7 +6463,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), retry);
                 failure = Some(error);
                 break;
             }
@@ -6416,7 +6476,7 @@ impl EcsBot {
                 Err(error) => {
                     self.world
                         .non_send_mut::<Ledger>()
-                        .fail(work, &error, key.attempt(), budget);
+                        .fail(work, &error, key.attempt(), retry);
                     failure = Some(error);
                     break;
                 }
@@ -6436,7 +6496,7 @@ impl EcsBot {
     /// handled.
     #[must_use]
     pub fn pending(&self) -> Vec<PendingWork> {
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let budget = self.world.resource::<Policy>().0.budget();
         self.world.non_send::<Ledger>().pending(budget)
     }
 
@@ -6717,7 +6777,7 @@ pub struct EcsBuilder {
     /// Chains finished so far.
     chains: Vec<EcsChain>,
     /// The retry policy every entry will run under.
-    policy: RetryPolicy,
+    policy: Retrying,
     /// The identity, the fence and the journal every dispatch goes through.
     ///
     /// `None` until [`Self::with_effects`] supplies one, and `build` refuses
@@ -6802,13 +6862,27 @@ impl EcsBuilder {
     /// Set the retry budget for entries whose effect definitely did not happen.
     ///
     /// Additive and defaulted: a caller that never calls this gets
-    /// [`RetryPolicy::DEFAULT`], which is what makes the budget a policy rather
+    /// the declared default (three attempts, no backoff), which is what makes
+    /// the budget a policy rather
     /// than a constant. Without it, "the work was given up on" would be a fact
     /// the caller could not influence, and a bot whose actions are idempotent
     /// would abandon work it could perfectly well retry.
     #[must_use]
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.policy = policy;
+        self.policy.policy = policy;
+        self
+    }
+
+    /// Read retry backoff on `clock` rather than on the wall clock.
+    ///
+    /// Additive and defaulted, like the policy it times: a bot that never
+    /// calls this waits out a backoff in real time. A virtual clock makes the
+    /// retry schedule a function of the clock its driver advances, so a test
+    /// waits out a backoff by advancing the clock rather than by sleeping, and
+    /// a restored clock carries a schedule across a restart.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.policy.clock = clock;
         self
     }
 
@@ -7046,7 +7120,7 @@ pub struct EcsObserveBuilder<S> {
     /// Tuples attached so far, each already erased for storage.
     entries: Vec<ChainEntry>,
     /// Carried from [`EcsBuilder`] alongside `policy`.
-    policy: RetryPolicy,
+    policy: Retrying,
     /// Carried from [`EcsBuilder`] alongside `policy`.
     poll_deadline: Duration,
 }
@@ -7059,7 +7133,7 @@ impl EcsBot {
         name: String,
         chains: Vec<EcsChain>,
         grants: &GrantSet,
-        policy: RetryPolicy,
+        policy: Retrying,
         effects: Option<EffectScope>,
         poll_deadline: Duration,
     ) -> Result<Self, BotError> {
@@ -9817,16 +9891,19 @@ pub(super) mod tests {
         // chain abandons on the first refusal instead of the third.
         let attempts = Rc::new(Cell::new(0));
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut bot = EcsBot::builder("impatient")
-            .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
-            .observe(Script::new(vec![200, 200, 200]))
-            .on(
-                |value: &u16| *value >= 200,
-                Refuses::undelivered(Rc::clone(&attempts)),
-            )
-            .on(|value: &u16| *value >= 200, Record(Rc::clone(&log)))
-            .with_effects(test_effects()?)
-            .build(&net_grants())?;
+        let mut bot = refuse_then_record(
+            EcsBot::builder("impatient")
+                .with_retry_policy(RetryPolicy::new(
+                    1,
+                    std::time::Duration::ZERO,
+                    std::time::Duration::MAX,
+                ))
+                .observe(Script::new(vec![200, 200, 200])),
+            &attempts,
+            &log,
+        )
+        .with_effects(test_effects()?)
+        .build(&net_grants())?;
 
         let error = refused(bot.tick(), |fired| {
             format!("a refusal was reported as {fired} fired")
@@ -9890,6 +9967,155 @@ pub(super) mod tests {
             log.borrow().is_empty(),
             "and the successor is behind the barrier again, because the retry failed too"
         );
+        Ok(())
+    }
+
+    /// `builder` with a refusing action and, behind it, one recording to `log`: the chain
+    /// every retry-policy test drives, so each one differs only in its policy.
+    fn refuse_then_record(
+        builder: EcsObserveBuilder<Script>,
+        attempts: &Rc<Cell<usize>>,
+        log: &Rc<RefCell<Vec<u16>>>,
+    ) -> EcsObserveBuilder<Script> {
+        builder
+            .on(
+                |value: &u16| *value >= 200,
+                Refuses::undelivered(Rc::clone(attempts)),
+            )
+            .on(|value: &u16| *value >= 200, Record(Rc::clone(log)))
+    }
+
+    /// The bot's retry policy and the clock it reads, for the backoff tests:
+    /// a ten-second base doubling per retry, three attempts, and the virtual
+    /// clock the test advances in place of waiting.
+    fn backing_off(deadline: std::time::Duration) -> (RetryPolicy, crate::clock::Clock) {
+        let mut policy = RetryPolicy::new(
+            3,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(60),
+        );
+        policy.deadline = deadline;
+        (
+            policy,
+            crate::clock::Clock::virtual_at(std::time::Duration::ZERO),
+        )
+    }
+
+    #[test]
+    fn a_retry_waits_out_its_backoff_on_the_bot_clock() -> TestResult {
+        // The policy's delay is honoured, not ignored: a definitely-failed entry
+        // is not attempted again until the clock passes the backoff after its
+        // failure, and the entry behind it waits with it.
+        let attempts = Rc::new(Cell::new(0));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let (policy, clock) = backing_off(std::time::Duration::MAX);
+        let mut bot = refuse_then_record(
+            EcsBot::builder("patient")
+                .with_retry_policy(policy)
+                .with_clock(clock.clone())
+                .observe(Script::new(vec![200, 200, 200, 200, 200])),
+            &attempts,
+            &log,
+        )
+        .with_effects(test_effects()?)
+        .build(&net_grants())?;
+
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the action's own error, got {error:?}"
+        );
+        assert_eq!(attempts.get(), 1, "the first attempt ran");
+
+        // Not yet due: nothing is attempted and nothing behind it fires.
+        clock.advance(std::time::Duration::from_secs(9))?;
+        let early = bot.tick();
+        assert!(
+            early.as_ref().map_or(true, |fired| *fired == 0),
+            "a tick inside the backoff fired work: {early:?}"
+        );
+        assert_eq!(attempts.get(), 1, "the retry waited for its backoff");
+        assert!(log.borrow().is_empty(), "the successor waited with it");
+
+        // Due: the second attempt runs, and its own backoff is twice the first.
+        clock.advance(std::time::Duration::from_secs(1))?;
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the retry's own error, got {error:?}"
+        );
+        assert_eq!(attempts.get(), 2, "the retry ran once its backoff ended");
+
+        clock.advance(std::time::Duration::from_secs(19))?;
+        let early = bot.tick();
+        assert!(
+            early.as_ref().map_or(true, |fired| *fired == 0),
+            "a tick inside the doubled backoff fired work: {early:?}"
+        );
+        assert_eq!(attempts.get(), 2, "the second backoff is twenty seconds");
+
+        clock.advance(std::time::Duration::from_secs(1))?;
+        let error = refused(bot.tick(), |fired| {
+            format!("a refusal was reported as {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::DomainError { .. }),
+            "expected the last attempt's own error, got {error:?}"
+        );
+        assert_eq!(attempts.get(), 3, "the third and last attempt ran");
+
+        // Attempts spent: no amount of waiting retries it again.
+        clock.advance(std::time::Duration::from_secs(3_600))?;
+        let error = refused(bot.tick(), |fired| {
+            format!("an abandoned prerequisite reported {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the abandoned chain to be reported, got {error:?}"
+        );
+        assert_eq!(attempts.get(), 3, "an exhausted entry is not retried");
+        assert!(log.borrow().is_empty(), "nor is its successor run");
+        Ok(())
+    }
+
+    #[test]
+    fn a_retry_whose_backoff_would_pass_the_deadline_is_abandoned() -> TestResult {
+        // Ten seconds, then twenty: the second retry would end thirty seconds
+        // of backoff in, past a fifteen-second deadline, so the second failure
+        // abandons the entry although an attempt remains in the budget.
+        let attempts = Rc::new(Cell::new(0));
+        let (policy, clock) = backing_off(std::time::Duration::from_secs(15));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = refuse_then_record(
+            EcsBot::builder("bounded")
+                .with_retry_policy(policy)
+                .with_clock(clock.clone())
+                .observe(Script::new(vec![200, 200, 200])),
+            &attempts,
+            &log,
+        )
+        .with_effects(test_effects()?)
+            .build(&net_grants())?;
+
+        refused(bot.tick(), |fired| format!("a refusal was reported as {fired} fired"))?;
+        clock.advance(std::time::Duration::from_secs(10))?;
+        refused(bot.tick(), |fired| format!("a refusal was reported as {fired} fired"))?;
+        assert_eq!(attempts.get(), 2, "the first retry fit inside the deadline");
+
+        clock.advance(std::time::Duration::from_secs(3_600))?;
+        let error = refused(bot.tick(), |fired| {
+            format!("an entry past its deadline reported {fired} fired")
+        })?;
+        assert!(
+            matches!(error, BotError::PendingTransition { .. }),
+            "expected the abandoned chain to be reported, got {error:?}"
+        );
+        assert_eq!(attempts.get(), 2, "the deadline abandoned it with an attempt left");
+        assert!(log.borrow().is_empty(), "nor was its successor run");
         Ok(())
     }
 

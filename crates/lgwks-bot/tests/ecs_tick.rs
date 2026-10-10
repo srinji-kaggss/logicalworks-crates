@@ -1651,7 +1651,7 @@ fn a_successful_public_poll_is_not_lost_when_a_sibling_refuses() -> TestResult {
 /// not been handled, it had been given up on, and those call for different
 /// responses from whoever owns the run.
 ///
-/// Under [`RetryPolicy::ONE_ATTEMPT`] the first definite failure spends the
+/// Under a one-attempt [`RetryPolicy`] the first definite failure spends the
 /// budget, so the entry is abandoned and the first tick reports the action's own
 /// typed error rather than a summary of it. The source then holds still. What
 /// the second tick owes the caller is the abandonment, named.
@@ -1659,7 +1659,7 @@ fn a_successful_public_poll_is_not_lost_when_a_sibling_refuses() -> TestResult {
 fn an_abandoned_entry_is_never_a_quiet_tick() -> TestResult {
     let attempts = Rc::new(Cell::new(0));
     let mut lonely = Bot::builder("abandoned-alone")
-        .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+        .with_retry_policy(one_attempt())
         .observe(Dial {
             value: Rc::new(Cell::new(1)),
         })
@@ -1765,7 +1765,7 @@ fn a_skipped_entry_does_not_block_its_successor() -> TestResult {
 /// An abandoned entry is a barrier to its successors.
 ///
 /// The long half of the counterexample, stated as the review states it: one
-/// chain — reserve a draft, then send it — under [`RetryPolicy::ONE_ATTEMPT`].
+/// chain — reserve a draft, then send it — under a one-attempt [`RetryPolicy`].
 /// The first action definitely fails, so the entry is abandoned and the first
 /// tick reports the action's own typed error. The source then holds still.
 ///
@@ -1787,7 +1787,7 @@ fn an_abandoned_entry_blocks_its_successors() -> TestResult {
     let refusing = Rc::new(Cell::new(true));
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut chained = Bot::builder("abandoned-then-blocked")
-        .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+        .with_retry_policy(one_attempt())
         .observe(Dial {
             value: Rc::new(Cell::new(1)),
         })
@@ -2143,4 +2143,10 @@ fn a_settlement_names_the_attempt_it_settles_and_no_other() -> TestResult {
     assert_eq!(bot.tick()?, 1, "the attempt after the refused report runs");
     assert!(bot.pending().is_empty(), "and the transition settles");
     Ok(())
+}
+
+/// One attempt per entry: the first definite failure abandons it, and no
+/// backoff or deadline is in play.
+fn one_attempt() -> RetryPolicy {
+    RetryPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::MAX)
 }
