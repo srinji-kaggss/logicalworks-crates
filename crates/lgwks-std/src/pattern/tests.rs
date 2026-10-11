@@ -1,3 +1,4 @@
+//! Unit tests for `pattern`, moved verbatim out of pattern.rs.
 
 use super::*;
 
