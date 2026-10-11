@@ -24,7 +24,7 @@ makes the proof load-bearing rather than decorative.
 
 `Observe::Output` must be `PartialEq`. `EcsObserveBuilder::observe` is where the
 requirement lands, on the call that closes a chain
-(`crates/lgwks-bot/src/ecs/builder.rs:459`), because the condition on this executor *is*
+(`crates/lgwks-bot/src/ecs/builder.rs:460`), because the condition on this executor *is*
 bevy's change detection, and a value that cannot be compared cannot be detected
 as changed. `Observe::poll` is `async fn` returning a future that is
 deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold

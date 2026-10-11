@@ -4,7 +4,7 @@ Part of [Authority in lgwks_bot](../authority.md).
 
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs/builder.rs:678`):
+the world (`crates/lgwks-bot/src/ecs/builder.rs:679`):
 
 ```rust
 world.insert_resource(Grants(grants.clone()));

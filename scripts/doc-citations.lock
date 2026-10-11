@@ -22,9 +22,9 @@ crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never ret
 crates/lgwks-bot/src/ecs/bot.rs:393	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs/bot.rs:445	// borrow of the plan would outlive the schedule that wrote it. An empty
 crates/lgwks-bot/src/ecs/bot.rs:568	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/builder.rs:459	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs/builder.rs:658	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs/builder.rs:678	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/builder.rs:460	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs/builder.rs:659	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:679	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/components.rs:71	pub(super) struct TickError(pub(super) Option<BotError>);
 crates/lgwks-bot/src/ecs/components.rs:614	/// chain's before committing anything.
 crates/lgwks-bot/src/ecs/ledger.rs:716	/// satisfied, so the entries behind it are unresolved through it.
