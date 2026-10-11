@@ -213,7 +213,7 @@ pub mod frontier;
 pub mod gate;
 /// One effect per key: POST through a retrying proxy without sending twice.
 ///
-/// [`IdempotentPost`](crate::idempotent::IdempotentPost) carries the
+/// [`crate::idempotent::IdempotentPost`] carries the
 /// caller-generated `Idempotency-Key` every attempt of one operation reuses,
 /// so a proxy that duplicates and replays requests still delivers exactly one
 /// effect. Wired rather than offered: an upstream credential refusal on this
@@ -264,21 +264,21 @@ pub mod language;
 /// a new way to perform anything.
 ///
 /// It sits on `script` because the checkpoint round-trips through the run store
-/// ([`crate::proposal::Checkpoint`] is [`Durable`](script::run_store::Durable)) and the
+/// ([`crate::proposal::Checkpoint`] is [`crate::script::run_store::Durable`]) and the
 /// artifact store is what a task's steps reach.
 ///
 /// # It is wired, and how
 ///
 /// Nothing in this module calls itself: a task body reaches the boundary through
 /// [`script::admit`], the one step a run uses to admit model or
-/// tool output. A [`Gate`](script::Gate) bundles the decoder, the surface and one
+/// tool output. A [`crate::script::Gate`] bundles the decoder, the surface and one
 /// **run-scoped** [`crate::proposal::PlanBudget`] and [`crate::proposal::RepairLedger`], and
 /// `admit` charges both — so the fourth identical refusal across four separate
-/// [`Host::run`](task::Host::run)s is a finite typed
+/// [`crate::task::Host::run`]s is a finite typed
 /// [`crate::proposal::Intervention`] rather than four refusals a caller must correlate.
 /// It enters its step, so a refusal reads `admit/plan` like every other located
-/// failure, and it returns [`FlowError::Refused`](script::FlowError::Refused) or
-/// [`FlowError::Intervention`](script::FlowError::Intervention), both typed and
+/// failure, and it returns [`crate::script::FlowError::Refused`] or
+/// [`crate::script::FlowError::Intervention`], both typed and
 /// both carrying the [`crate::proposal::Provenance`] of the exact refused bytes. When the
 /// run has a store installed, each refusal is recorded through it under
 /// `<step>/refusal` before the error is returned, so a run resumed on a fresh host
@@ -361,8 +361,8 @@ pub mod semantic;
 pub mod session;
 /// Cross-host time: monotonic deadlines, wall timestamps, and the skew bound.
 ///
-/// [`SkewBound`](crate::skew::SkewBound) is how far two honest clocks may disagree;
-/// [`MonoDeadline`](crate::skew::MonoDeadline) and [`WallStamp`](crate::skew::WallStamp) keep
+/// [`crate::skew::SkewBound`] is how far two honest clocks may disagree;
+/// [`crate::skew::MonoDeadline`] and [`crate::skew::WallStamp`] keep
 /// the deadline a lease carries apart from the timestamp a record shows. Wired
 /// rather than offered: [`Auth::check_remote`] judges
 /// a proof minted on one clock against a foreign reading within the bound
@@ -404,8 +404,8 @@ pub mod spec;
 /// [`stability::read_stable_file`], so every poll of a JSON-backed store is
 /// confirmed before it is reported.
 pub mod stability;
-/// The task front door: a [`Host`](task::Host) runs a
-/// [`Task`](task::Task) and returns a [`Report`](task::Report) (feature
+/// The task front door: a [`crate::task::Host`] runs a
+/// [`crate::task::Task`] and returns a [`crate::task::Report`] (feature
 /// `script`).
 ///
 /// The smallest complete path from "here is a typed body" to "here is a

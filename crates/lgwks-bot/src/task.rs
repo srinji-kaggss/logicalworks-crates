@@ -1,5 +1,5 @@
-//! The front door: a [`Host`][host] runs a [`Task`][task_type] and returns a
-//! [`Report`][report].
+//! The front door: a [`crate::task::Host`] runs a [`crate::task::Task`] and returns a
+//! [`crate::task::Report`].
 //!
 //! A consumer supplies a typed task and its body and receives a useful result
 //! without implementing orchestration. Nothing here requires a trait
@@ -9,10 +9,10 @@
 //!
 //! # Host once, task often
 //!
-//! The host is the installed owner: it holds the [`Tenant`][tenant], the root
+//! The host is the installed owner: it holds the [`crate::script::Tenant`], the root
 //! [`CancellationToken`][stop], the admission budget, the default deadline and
 //! the progress capacity. It is built once through a validated builder, its
-//! ceilings are readable through [`Host::limits`][limits], and a clone of a host shares
+//! ceilings are readable through [`crate::task::Host::limits`], and a clone of a host shares
 //! the same budget rather than minting a second one — the budget belongs to the
 //! host, not to the handle.
 //!
@@ -38,7 +38,7 @@
 //!
 //! # Admission is a budget, and a wait is not a deadlock
 //!
-//! A host admits at most [`HostLimits::max_concurrent_tasks`][ceiling] top-level runs at
+//! A host admits at most [`crate::task::HostLimits::max_concurrent_tasks`] top-level runs at
 //! once. A run that arrives when the budget is spent **waits** for a permit
 //! rather than being refused: the wait is cancellable by the host's token and
 //! is charged to the run's deadline, so a caller that stops the host or whose
@@ -56,7 +56,7 @@
 //! # A report never claims an external effect happened
 //!
 //! A local task performs no journaled effect, so every report carries
-//! [`EffectKnowledge::None`][none]. The field exists so durable work can extend
+//! [`crate::task::EffectKnowledge::None`]. The field exists so durable work can extend
 //! the vocabulary later without changing the type a caller reads, and so no
 //! caller can read a successful return as proof that a remote state changed.
 //!
@@ -67,21 +67,13 @@
 //! - The step trail is a bounded ring. Overflow loses the declared detail and
 //!   increments a counter; it never touches the disposition, the output or the
 //!   located error.
-//! - [`Host::block_on`][sync_entry] owns a runtime once and **refuses** to run inside an
+//! - [`crate::task::Host::block_on`] owns a runtime once and **refuses** to run inside an
 //!   existing runtime rather than parking a thread whose reactor the run needs.
 //! - Parallelism across cores is a different tool
 //!   ([`join_all_bounded`](crate::rt::task::join_all_bounded) on owned inputs).
 //!   Here, concurrency is for waiting on many things at once.
 //!
-//! [tenant]: crate::script::Tenant
 //! [stop]: crate::rt::sync::CancellationToken
-//! [none]: crate::task::EffectKnowledge::None
-//! [host]: crate::task::Host
-//! [task_type]: crate::task::Task
-//! [report]: crate::task::Report
-//! [limits]: crate::task::Host::limits
-//! [ceiling]: crate::task::HostLimits::max_concurrent_tasks
-//! [sync_entry]: crate::task::Host::block_on
 
 use std::fmt;
 use std::sync::atomic::AtomicU64;

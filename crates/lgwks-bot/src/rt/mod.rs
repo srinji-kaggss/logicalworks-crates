@@ -21,21 +21,21 @@
 //!
 //! - [`runtime`] — an explicitly owned runtime ([`Runtime`]),
 //!   its builder, a cloneable [`Handle`], and a free [`block_on`].
-//! - [`task`] — [`JoinSet`](crate::rt::task::JoinSet) and
-//!   [`join_all_bounded`](crate::rt::task::join_all_bounded): bounded-concurrency fan-out
+//! - [`task`] — [`crate::rt::task::JoinSet`] and
+//!   [`crate::rt::task::join_all_bounded`]: bounded-concurrency fan-out
 //!   that preserves input order and never exceeds the limit.
-//! - [`supervise`](crate::rt::supervise) — `Supervisor`: the way concurrent
+//! - [`crate::rt::supervise`] — `Supervisor`: the way concurrent
 //!   work, and a subprocess, is started. `Supervisor::default` is the ceiling
 //!   when the caller has no opinion; `Supervisor::spawn`,
 //!   `Supervisor::spawn_process` and `Supervisor::run_process` are the
 //!   starters — the first two report later, the last hands back what the child
 //!   wrote — and nothing here returns a handle to a running task or process, so
 //!   nothing can be started and then forgotten.
-//! - [`tenancy`](crate::rt::tenancy) — per-tenant capacity: the
-//!   [`TenancyPolicy`](crate::rt::tenancy::TenancyPolicy) a supervisor admits
-//!   under, the [`SpawnRefused`](crate::rt::tenancy::SpawnRefused) a
+//! - [`crate::rt::tenancy`] — per-tenant capacity: the
+//!   [`crate::rt::tenancy::TenancyPolicy`] a supervisor admits
+//!   under, the [`crate::rt::tenancy::SpawnRefused`] a
 //!   tenant-scoped spawn answers with, and the pure
-//!   [`DeficitRoundRobin`](crate::rt::tenancy::DeficitRoundRobin) core that
+//!   [`crate::rt::tenancy::DeficitRoundRobin`] core that
 //!   shares freed permits fairly between tenants with queued work.
 //! - [`time`] — `sleep`, `timeout`, `interval`, `Instant` (feature `time`).
 //! - [`clock`] — one declared logical clock that governs every deadline this
@@ -66,7 +66,7 @@
 //! A future can be awaited, and the runtime can drive one to completion, but no
 //! verb here hands a caller a droppable handle to a *running* task or process.
 //! Work that outlives the call is placed on a
-//! [`Supervisor`](crate::rt::supervise::Supervisor), which owns it, applies the
+//! [`crate::rt::supervise::Supervisor`], which owns it, applies the
 //! in-flight ceiling, and reports how each task or process ended:
 //!
 //! ```
@@ -85,7 +85,7 @@
 //!
 //! This is not a scheduler with realtime guarantees. Future completion order
 //! across worker threads is not deterministic; only the *result* order of
-//! [`join_all_bounded`](crate::rt::task::join_all_bounded) is.
+//! [`crate::rt::task::join_all_bounded`] is.
 
 // The clock lives at the crate root (`crate::clock`) because it is `std`-only
 // and the observation phase's per-poll deadline needs it in builds that have no

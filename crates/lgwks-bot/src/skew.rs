@@ -9,14 +9,14 @@
 //!
 //! This module names the three pieces and no more:
 //!
-//! - [`MonoDeadline`](crate::skew::MonoDeadline): a deadline on a monotonic clock, a duration since that
+//! - [`crate::skew::MonoDeadline`]: a deadline on a monotonic clock, a duration since that
 //!   clock's origin. No epoch, no host, nothing a second host can misread as
 //!   its own time.
-//! - [`WallStamp`](crate::skew::WallStamp): a wall-clock timestamp for records an operator reads after
+//! - [`crate::skew::WallStamp`]: a wall-clock timestamp for records an operator reads after
 //!   a restart. Never a deadline: nothing here compares one against a clock.
-//! - [`SkewBound`](crate::skew::SkewBound): how far two honest clocks may disagree, and the two judges
-//!   that apply it — [`lease_holds`](crate::skew::lease_holds) for time-bound authority and
-//!   [`epoch_holds`](crate::skew::epoch_holds) for generation fences.
+//! - [`crate::skew::SkewBound`]: how far two honest clocks may disagree, and the two judges
+//!   that apply it — [`crate::skew::lease_holds`] for time-bound authority and
+//!   [`crate::skew::epoch_holds`] for generation fences.
 //!
 //! The judges are pure predicates over readings, so a simulation drives them
 //! with two virtual clocks and asserts the same answers a deployment gets.
@@ -25,10 +25,10 @@
 //!
 //! Leases are minted in [`crate::gate::GrantSet`] and sealed into
 //! [`crate::cap::Auth`], which judges them on a foreign clock through
-//! [`Auth::check_remote`](crate::cap::Auth::check_remote) — the production
-//! caller of [`lease_holds`](crate::skew::lease_holds). Owner epochs are minted and compared in
+//! [`crate::cap::Auth::check_remote`] — the production
+//! caller of [`crate::skew::lease_holds`]. Owner epochs are minted and compared in
 //! [`crate::broker::Broker`], which this module does not touch: a generation
-//! is exact and needs no skew allowance, and [`epoch_holds`](crate::skew::epoch_holds) states that fact
+//! is exact and needs no skew allowance, and [`crate::skew::epoch_holds`] states that fact
 //! so a caller stops adding one. What crosses a host is the warrant's epoch
 //! plus its lease; the epoch half is fenced exactly, the lease half within
 //! the bound.
