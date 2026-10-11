@@ -146,7 +146,15 @@ def main() -> int:
     # A document deliberately kept out of the consumer index is named here with
     # its reason, so the way to exempt one is to write down why rather than to
     # move it somewhere the check does not reach.
-    NOT_INDEXED: dict[str, str] = {}
+    # The background-work guide was split under the 120-line `.md` law, and its
+    # parts are reached from the indexed page's own "The rest of this guide"
+    # list. The README table cannot take new rows until README.md itself is
+    # split under the same law (#433).
+    part_of_background_work = "a part of docs/guides/lgwks-bot/background-work.md, linked from it"
+    NOT_INDEXED: dict[str, str] = {
+        f"docs/guides/lgwks-bot/background-work-{part}.md": part_of_background_work
+        for part in ("processes", "output", "loops", "limits")
+    }
     indexed = {target for _, target, _ in documents}
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()

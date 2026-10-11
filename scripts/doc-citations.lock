@@ -71,7 +71,7 @@ crates/lgwks-bot/src/rt/supervise.rs:2822	pub async fn spawn_process_identified(
 crates/lgwks-bot/src/rt/supervise.rs:3066	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
 crates/lgwks-bot/src/rt/supervise.rs:5969	token.run_until_cancelled(body(iterations)),
 crates/lgwks-bot/src/rt/supervise.rs:6078	mod tests {
-crates/lgwks-bot/src/rt/task.rs:170	where
+crates/lgwks-bot/src/rt/task.rs:191	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
 crates/lgwks-bot/src/semantic.rs:356	pub const DEFAULT: Self = Self {
