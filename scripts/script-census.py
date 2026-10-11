@@ -97,6 +97,22 @@ def header_lines(steps: list[dict]) -> set[int]:
     return lines
 
 
+def header_span(lines: list[tuple[int, str]], start: int) -> set[int]:
+    """The lines of a flow header that opens at `start`: through the first ending in `:`.
+
+    The map names a flow by its first line, and a long signature wraps, so the
+    parameter and return lines that follow are header, not passthrough.
+    """
+    span: set[int] = set()
+    for number, raw in lines:
+        if number < start:
+            continue
+        span.add(number)
+        if raw.rstrip().endswith(":"):
+            break
+    return span
+
+
 def body_lines(text: list[str], start: int, column: int) -> list[tuple[int, str]]:
     """The 1-based lines of the invocation opening at `start`, to its closing delimiter."""
     depth = 0
@@ -128,10 +144,10 @@ def passthrough(document: dict, base: Path) -> tuple[list[tuple[str, int, str]],
         path = invocation["path"]
         text = sources.setdefault(path, (base / path).read_text(encoding="utf-8").splitlines())
         mapped = set()
-        for flow in invocation["map"]["flows"]:
-            mapped.add(int(flow["line"]))
-            mapped |= header_lines(flow["steps"])
         lines = body_lines(text, int(invocation["line"]), int(invocation["column"]))
+        for flow in invocation["map"]["flows"]:
+            mapped |= header_span(lines, int(flow["line"]))
+            mapped |= header_lines(flow["steps"])
         for number, raw in lines[1:-1]:
             stripped = raw.strip()
             if not stripped or stripped.startswith("//"):
@@ -250,6 +266,10 @@ class CensusRegression(unittest.TestCase):
         self.assertEqual(shape("let n = 3"), "let x = lit")
         inner = {"line": 9, "steps": []}
         self.assertEqual(header_lines([{"line": 4, "steps": [{"line": 6, "steps": [inner]}]}]), {4, 6, 9})
+
+    def test_a_wrapped_flow_signature_is_header_not_passthrough(self) -> None:
+        lines = [(3, "    flow f("), (4, "        stage: Stage,"), (5, "    ) -> u8:"), (6, "        x.y()")]
+        self.assertEqual(header_span(lines, 3), {3, 4, 5})
 
     def test_a_brace_on_its_own_line_still_opens_the_body(self) -> None:
         lines = body_lines(["lgwks_bot::script!", "{", "    flow f():", "}", "fn after() {}"], 1, 1)
