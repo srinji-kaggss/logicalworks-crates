@@ -10,9 +10,8 @@ use super::super::outcome::{CleanupReceipt, TaskOutcome};
 use super::super::supervisor::Supervisor;
 #[cfg(all(unix, feature = "process"))]
 use super::{
-    EpermGroupSignaller, FailingGroupObserver, ScriptedCapture, UnexpectedGroupSignaller,
-    armed_group, capture_group, group_seams, recording, sequence, settled_tasks, test_group,
-    whole_capture,
+    FailingGroupObserver, ScriptedCapture, armed_group, capture_group, group_seams, recording,
+    sequence, settled_tasks, test_group, whole_capture,
 };
 use crate::rt::runtime::block_on;
 #[cfg(feature = "process")]
@@ -37,42 +36,6 @@ fn a_reaped_or_recycled_group_id_is_never_signalled() {
         0,
         "cleanup and Drop must not signal after the owner has reaped the leader"
     );
-}
-
-#[cfg(all(unix, feature = "process"))]
-#[test]
-fn an_unsignalable_present_group_stays_pending_rather_than_failed() {
-    // macOS/BSD report EPERM for a further killpg against a group whose
-    // leader is an unreaped zombie. That is "the group is still there", not
-    // "the OS refused the kill", and reading it as a failure would report a
-    // deadline stop as a cleanup failure on those platforms.
-    let signaller = EpermGroupSignaller;
-    let observer = sequence(usize::MAX);
-    let mut group = test_group(&signaller, &observer, false);
-    assert_eq!(
-        block_on(group.cleanup()),
-        CleanupReceipt::CleanupPending,
-        "an unsignalable but still-present group is pending, not a failed kill"
-    );
-    assert!(
-        group.armed,
-        "an unresolved group must stay armed for the drop-time fallback"
-    );
-    drop(group);
-}
-
-#[cfg(all(unix, feature = "process"))]
-#[test]
-fn an_unexpected_signal_error_is_a_failed_cleanup() {
-    let signaller = UnexpectedGroupSignaller;
-    let observer = sequence(0);
-    let mut group = test_group(&signaller, &observer, false);
-    assert_eq!(
-        block_on(group.cleanup()),
-        CleanupReceipt::CleanupFailed,
-        "an unexpected errno remains a refused termination"
-    );
-    drop(group);
 }
 
 /// A group whose drain reports a named survivor, and the receipt that says so.

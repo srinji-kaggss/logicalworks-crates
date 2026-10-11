@@ -511,3 +511,142 @@ mod repeat;
 #[cfg(all(unix, feature = "process"))]
 mod sim;
 mod tenancy;
+
+// The cases INVARIANTS.md cites by path (INV-BOT-19, INV-BOT-151) live here,
+// at `rt::supervise::tests::<name>`, so the `invariants` lane resolves them.
+
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn an_unsignalable_present_group_stays_pending_rather_than_failed() {
+    use super::outcome::CleanupReceipt;
+    use crate::rt::runtime::block_on;
+
+    // macOS/BSD report EPERM for a further killpg against a group whose
+    // leader is an unreaped zombie. That is "the group is still there", not
+    // "the OS refused the kill", and reading it as a failure would report a
+    // deadline stop as a cleanup failure on those platforms.
+    let signaller = EpermGroupSignaller;
+    let observer = sequence(usize::MAX);
+    let mut group = test_group(&signaller, &observer, false);
+    assert_eq!(
+        block_on(group.cleanup()),
+        CleanupReceipt::CleanupPending,
+        "an unsignalable but still-present group is pending, not a failed kill"
+    );
+    assert!(
+        group.armed,
+        "an unresolved group must stay armed for the drop-time fallback"
+    );
+    drop(group);
+}
+
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn an_unexpected_signal_error_is_a_failed_cleanup() {
+    use super::outcome::CleanupReceipt;
+    use crate::rt::runtime::block_on;
+
+    let signaller = UnexpectedGroupSignaller;
+    let observer = sequence(0);
+    let mut group = test_group(&signaller, &observer, false);
+    assert_eq!(
+        block_on(group.cleanup()),
+        CleanupReceipt::CleanupFailed,
+        "an unexpected errno remains a refused termination"
+    );
+    drop(group);
+}
+
+/// A tenanted admission joins at most `REAP_PER_ADMISSION` finished
+/// tasks, so a tenant whose bodies end at once cannot charge its joins to
+/// the neighbour that admits next (#268's adversarial row), and the bounded
+/// reap still keeps the retained set at the in-flight ceiling.
+///
+/// The flood is created, not raced: every attacker body has finished before
+/// the neighbour's admission, so an unbounded reap would join all of them
+/// inside that one call. The second half drives 10,000 admissions of bodies
+/// that end at once, alternating tenants, and reads the retained set after
+/// each: it never exceeds the ceiling, because every call that finds two or
+/// more finished tasks joins two and places one.
+#[cfg(feature = "script")]
+#[test]
+fn a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::REAP_PER_ADMISSION;
+    use crate::rt::runtime::block_on;
+    use crate::rt::tenancy::TenancyPolicy;
+    use crate::script::Tenant;
+    use std::sync::atomic::AtomicUsize;
+
+    const LIMIT: usize = 64;
+    const FLOOD: usize = 32;
+    const ADMISSIONS: usize = 10_000;
+    // The bound is only a bound if it is smaller than the flood: an
+    // unbounded reap joins all `FLOOD` below, so a constant at or past it
+    // fails this test at compile time rather than passing vacuously.
+    const _: () = assert!(
+        REAP_PER_ADMISSION < FLOOD,
+        "a per-admission reap must be smaller than the flood it bounds"
+    );
+
+    block_on(async {
+        let mut supervisor = Supervisor::with_tenancy(LIMIT, TenancyPolicy::new(FLOOD, LIMIT));
+        let attacker = Tenant::new("attacker")?;
+        let neighbour = Tenant::new("neighbour")?;
+        let ended = Arc::new(AtomicUsize::new(0));
+        for _ in 0..FLOOD {
+            let ended = Arc::clone(&ended);
+            supervisor
+                .spawn_for(&attacker, move |_token| async move {
+                    ended.fetch_add(1, Ordering::SeqCst);
+                })
+                .await
+                .map_err(|refusal| format!("a flood body was refused: {refusal}"))?;
+        }
+        assert!(
+            yield_until(|| ended.load(Ordering::SeqCst) >= FLOOD, 10_000).await,
+            "the flood bodies never ended, so the premise of this test did not hold"
+        );
+        // Let every ended body's task complete in the set, not just run.
+        for _ in 0..FLOOD {
+            yield_now().await;
+        }
+        let before = supervisor.stats().succeeded;
+        supervisor
+            .spawn_for(&neighbour, |_token| async {})
+            .await
+            .map_err(|refusal| format!("the neighbour was refused: {refusal}"))?;
+        let joined = supervisor.stats().succeeded.saturating_sub(before);
+        assert!(
+            joined <= u64::try_from(REAP_PER_ADMISSION)?,
+            "the neighbour's admission joined {joined} of the flood's finished tasks; \
+                 at most {REAP_PER_ADMISSION} may land on its critical path"
+        );
+
+        let mut largest = 0_usize;
+        for admission in 0..ADMISSIONS {
+            let tenant = if admission % 2 == 0 {
+                &attacker
+            } else {
+                &neighbour
+            };
+            supervisor
+                .spawn_for(tenant, |_token| async {})
+                .await
+                .map_err(|refusal| format!("admission {admission} was refused: {refusal}"))?;
+            largest = largest.max(supervisor.set.len());
+            yield_now().await;
+        }
+        assert!(
+            largest <= LIMIT,
+            "the retained set reached {largest} tasks against an in-flight ceiling of {LIMIT}"
+        );
+        let report = supervisor.shutdown().await;
+        assert_eq!(
+            report.stats.succeeded,
+            u64::try_from(FLOOD + 1 + ADMISSIONS)?,
+            "every body is joined and counted by shutdown"
+        );
+        Ok(())
+    })
+}
