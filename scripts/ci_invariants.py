@@ -212,6 +212,17 @@ def resolution_candidates(modules: dict[str, set[str]], reference: str) -> list[
     return sorted(matches, key=lambda path: (path.count("::"), path))
 
 
+def invariant_registers(root: Path) -> list[Path]:
+    """The register's files: the root INVARIANTS.md, then each crate's own.
+
+    One register split by crate under the 120-line .md law (Director
+    2026-10-10): `crates/lgwks-bot/INVARIANTS.md` holds the INV-BOT rules. A
+    crate file the lane did not read would be a rule nobody checks, so every
+    `crates/*/INVARIANTS.md` is read, in a stable order.
+    """
+    return [root / "INVARIANTS.md", *sorted((root / "crates").glob("*/INVARIANTS.md"))]
+
+
 def builtin_invariants(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
     """Every `enforced by:` reference in INVARIANTS.md resolves to a real test.
 
@@ -221,7 +232,7 @@ def builtin_invariants(root: Path, env: dict[str, str], out=None) -> tuple[int, 
     to find out was to go looking by hand. So the references are checked here,
     against the module paths and items the sources actually define.
     """
-    text = (root / "INVARIANTS.md").read_text(encoding="utf-8")
+    text = "\n\n".join(path.read_text(encoding="utf-8") for path in invariant_registers(root))
 
     modules = collect_module_paths(root)
 
@@ -517,3 +528,38 @@ class InvariantReferenceResolution(unittest.TestCase):
             ),
             "a bare test name must remain resolvable",
         )
+
+
+class InvariantRegisterSplit(unittest.TestCase):
+    """The register is the root file plus each crate's: every part is checked."""
+
+    def test_the_bot_register_is_one_of_the_parts(self) -> None:
+        parts = [path.relative_to(REPO_ROOT).as_posix() for path in invariant_registers(REPO_ROOT)]
+        self.assertEqual(parts[0], "INVARIANTS.md")
+        self.assertIn("crates/lgwks-bot/INVARIANTS.md", parts)
+
+    def test_an_unresolvable_reference_in_a_crate_register_fails_the_lane(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for relative, text in {
+                "INVARIANTS.md": "",
+                "scripts/gate-lanes.toml": "",
+                "contract/INVARIANTS.toml": "",
+                "crates/demo/src/lib.rs": "fn real_case() {}\n",
+                "crates/demo/INVARIANTS.md": (
+                    "- **INV-DEMO-1** A rule. · enforced by: `no_such_case_anywhere`\n"
+                ),
+            }.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            code, detail = builtin_invariants(root, {})
+            self.assertEqual(code, 1, detail)
+            self.assertIn("INV-DEMO-1: `no_such_case_anywhere`", detail)
+            (root / "crates/demo/INVARIANTS.md").write_text(
+                "- **INV-DEMO-1** A rule. · enforced by: `real_case`\n", encoding="utf-8"
+            )
+            code, detail = builtin_invariants(root, {})
+            self.assertEqual(code, 0, detail)
