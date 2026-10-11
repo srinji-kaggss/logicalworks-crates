@@ -1,3 +1,4 @@
+//! Unit tests for `rt::cancel`, moved verbatim out of rt/cancel.rs.
 
 use super::CancellationToken;
 use crate::rt::runtime::block_on;
