@@ -245,6 +245,13 @@ fn serve_raw(reply: Vec<u8>) -> std::io::Result<(u16, thread::JoinHandle<std::io
         let mut head = Vec::new();
         loop {
             let n = stream.read(&mut request)?;
+            // EOF before the terminator: the client gave up mid-head (a
+            // reset-path test drops it on purpose). EOF is not an error, so
+            // `?` cannot end this loop; without this return a zero-byte read
+            // extends nothing and the fixture spins until the CI timeout.
+            if n == 0 {
+                return Ok(());
+            }
             head.extend_from_slice(&request[..n]);
             if head.windows(4).any(|window| window == b"\r\n\r\n") {
                 break;
