@@ -519,14 +519,14 @@ const OTHER_SUBJECTS: [&str; 5] = [
 /// rather than about this crate's shipped surface, and the phrases that would
 /// qualify them are not denials of a shipped operation.
 ///
-/// The three `dist_lease` entries are the same bargain for a different reason:
+/// The four `dist_lease` entries are the same bargain for a different reason:
 /// coordination-lease fencing (`LeaseAuthority::acquire`/`revoke` move the
 /// epoch past outstanding leases; proved by
 /// `dist_lease::a_revoked_lease_grants_nothing`) is a different subject from
 /// `GrantSet` capability lifetime, which has no `revoke` and is what this scan
 /// protects. A mention there claims supersession of a coordination lease, not
 /// revocation of a capability.
-const NOT_AUTHORITY_CLAIMS: [(&str, &str); 4] = [
+const NOT_AUTHORITY_CLAIMS: [(&str, &str); 5] = [
     (
         "docs/frontier.md",
         "the state-of-the-art survey: its mentions are published research and design \
@@ -536,6 +536,11 @@ const NOT_AUTHORITY_CLAIMS: [(&str, &str); 4] = [
         "crates/lgwks-bot/src/dist_lease.rs",
         "coordination-lease fencing with an explicit tested supersede operation, \
          not GrantSet capability revocation",
+    ),
+    (
+        "crates/lgwks-bot/src/dist_lease/coordinator.rs",
+        "the coordinator that fence moved out of dist_lease.rs (#319): its stale-lease \
+         refusals are the same coordination-lease supersession, not GrantSet revocation",
     ),
     (
         "crates/lgwks-bot/tests/it/dist_lease.rs",
@@ -610,18 +615,18 @@ fn unqualified_mentions(file: &str, text: &str) -> Vec<String> {
         // reports, and both ends are clamped to the text, so the slice is total:
         // a mention at either edge still gets its window rather than a
         // substitute for one.
-        let start = flat[..at]
-            .char_indices()
-            .nth_back(WINDOW)
-            .map_or(0, |(offset, _)| offset);
-        let end =
-            flat[at..]
-                .char_indices()
-                .nth(WINDOW)
-                .map_or(flat.len(), |(offset, character)| {
-                    at.saturating_add(offset)
-                        .saturating_add(character.len_utf8())
-                });
+        // A mention nearer an edge than the window starts or ends the context
+        // at that edge: the text itself is the bound, not a substituted value.
+        let start = match flat[..at].char_indices().nth_back(WINDOW) {
+            Some((offset, _)) => offset,
+            None => 0,
+        };
+        let end = match flat[at..].char_indices().nth(WINDOW) {
+            Some((offset, character)) => at
+                .saturating_add(offset)
+                .saturating_add(character.len_utf8()),
+            None => flat.len(),
+        };
         let window = &flat[start..end];
         let qualified = DENIALS
             .iter()
