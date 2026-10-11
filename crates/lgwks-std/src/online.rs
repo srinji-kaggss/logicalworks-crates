@@ -1,13 +1,13 @@
 //! `online` owns reachability probing with zero dependencies.
 //!
-//! [`probe`](crate::online::probe) tests one socket address;
-//! [`is_online`](crate::online::is_online) tests the public
+//! [`crate::online::probe`] tests one socket address;
+//! [`crate::online::is_online`] tests the public
 //! internet via anycast endpoints. Both return plain booleans: a failed
 //! probe is a signal, not an error.
 //!
-//! [`is_online`](crate::online::is_online) exercises the live internet and is
+//! [`crate::online::is_online`] exercises the live internet and is
 //! not covered by the hermetic test suite; pin your own endpoint with
-//! [`probe`](crate::online::probe) instead.
+//! [`crate::online::probe`] instead.
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::num::NonZeroU32;
@@ -150,12 +150,8 @@ mod tests {
 
     // These tests return `Result` rather than unwrapping: a bind refusal
     // reports its own `Debug` on failure, which is the same report `.unwrap`
-    // would have panicked with, without an `unwrap` in the tree.
-    //
-    // A dial that has to wait out its share parks rather than sleeps: this
-    // crate forbids `std::thread::sleep`, and `park_timeout` is the sanctioned
-    // synchronous wait. Each test only ever asserts that *at least* the share
-    // elapsed, so an unpark that returns early cannot make one pass.
+    // would have panicked with, without an `unwrap` in the tree. Budget tests
+    // drive a simulated clock, so no test here waits on wall time.
     #[test]
     fn open_port_probes_true() -> Result<(), std::io::Error> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -273,24 +269,32 @@ mod tests {
         );
     }
 
-    /// A deliberately slow resolver demonstrates the documented boundary:
-    /// its synchronous work is outside the socket timeout.
+    /// The documented boundary: resolution is the caller's synchronous step,
+    /// run once before any dial, so a resolver that fails reports unreachable
+    /// without a socket being opened or the connection budget being consulted.
+    /// Counted rather than timed, so a loaded host cannot change the verdict.
     #[test]
-    fn resolver_delay_is_outside_the_connection_budget() {
-        struct SlowResolver;
+    fn resolution_runs_once_before_any_dial() {
+        struct RefusingResolver<'calls>(&'calls std::cell::Cell<u32>);
 
-        impl ToSocketAddrs for SlowResolver {
+        impl ToSocketAddrs for RefusingResolver<'_> {
             type Iter = std::vec::IntoIter<SocketAddr>;
 
             fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-                std::thread::park_timeout(Duration::from_millis(80));
-                Ok(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 9))].into_iter())
+                self.0.set(self.0.get().saturating_add(1));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such host",
+                ))
             }
         }
 
-        let started = Instant::now();
-        assert!(!probe(SlowResolver, Duration::from_millis(10)));
-        assert!(started.elapsed() >= Duration::from_millis(80));
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            !probe(RefusingResolver(&calls), Duration::ZERO),
+            "a resolver failure is a false probe, not an error"
+        );
+        assert_eq!(calls.get(), 1, "the resolver runs exactly once per probe");
     }
 
     /// A whole multi-candidate failure is bounded by one budget: four

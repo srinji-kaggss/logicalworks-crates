@@ -1,6 +1,6 @@
 //! `retry` owns zero-dependency retry budgets for networked callers.
 //!
-//! A [`RetryPolicy`](crate::retry::RetryPolicy) is a pure value: attempts,
+//! A [`crate::retry::RetryPolicy`] is a pure value: attempts,
 //! exponential backoff, and a total deadline. It performs no I/O, spawns no
 //! threads, and holds no clock: the caller sleeps (via
 //! [`task`] synchronously or `lgwks_bot::rt::time`
@@ -28,7 +28,7 @@
 //! assert!(policy.deadline_exceeded(Duration::from_secs(6)));
 //! ```
 //!
-//! INV-STD-RETRY: [`RetryPolicy`](crate::retry::RetryPolicy) never sleeps, never reads a clock,
+//! INV-STD-RETRY: [`crate::retry::RetryPolicy`] never sleeps, never reads a clock,
 //! never allocates, and computes the exact capped delay for every `u32` retry
 //! index and every `Duration`. Its work is bounded independently of the retry
 //! index. The one-word jitter mapping is deterministic and modulo-biased; it

@@ -5,7 +5,7 @@
 //! controls, not by the host architecture. With the current rkyv defaults,
 //! archives are little-endian, aligned, and encode `usize`/`isize` as 32-bit
 //! values. A downstream feature unifier can select a different endianness,
-//! alignment, or pointer width. Use [`format_descriptor`](crate::wire::format_descriptor) to observe the
+//! alignment, or pointer width. Use [`crate::wire::format_descriptor()`] to observe the
 //! effective primitive format in this build and bind it, together with an
 //! application schema/version, in any durable or exchanged envelope.
 //!
