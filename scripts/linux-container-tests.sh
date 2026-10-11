@@ -21,7 +21,14 @@
 # Build output, the registry and the nextest binary live in named volumes, so a
 # run reuses what the last run built.
 #
+# `vps` is not a test suite: it runs the bench/async matrix under the 2-vCPU /
+# 2 GB profile the hyperscale axis names (#269). It builds uncapped, then runs
+# the built binary in a second container capped by cgroup (`--cpus=2
+# --memory=2g`, no swap), and writes each record under bench/async/vps/. It
+# runs alone, on a quiet host: a capped run beside other jobs measures them.
+#
 # Usage: scripts/linux-container-tests.sh [workspace|bot-full|appcui]...  (default: all three)
+#        scripts/linux-container-tests.sh vps
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,8 +81,35 @@ if [ "${#suites[@]}" -eq 0 ]; then
     suites=(workspace bot-full appcui)
 fi
 commands=()
+# The matrix the VPS profile runs: every bench/async door the M5 Pro tables
+# report, each writing its own record. Run inside the capped container.
+vps_bench=/target/release/lgwks-bench-async
+vps_out=bench/async/vps
+vps_commands=(
+    "mkdir -p ${vps_out}"
+    "nproc; grep -E '^(MemTotal|MemAvailable)' /proc/meminfo; cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max"
+    "${vps_bench} --rounds=15 --alloc-report --json=${vps_out}/results.json"
+    "${vps_bench} --tiers"
+    "${vps_bench} --matrix --json=${vps_out}/matrix.json"
+    "${vps_bench} --flood-split --rounds=41"
+    "${vps_bench} --saturation --window=1 --json=${vps_out}/saturation-backpressure.json"
+    "${vps_bench} --refusal --window=1 --json=${vps_out}/saturation-refuse.json"
+    "${vps_bench} --overload --bound=64 --knee=10000 --baseline-seconds=5 --overload-seconds=30 --recovery-seconds=90 --json=${vps_out}/overload.json"
+    # Last, because its widest tier may exceed the 2 GB cap: an OOM kill
+    # (exit 137) is the cap reached, and it is reported as that.
+    "${vps_bench} --inflight --json=${vps_out}/inflight.json || echo \"inflight: exit \$? under the 2 GB cap\""
+)
+if [ "${#suites[@]}" -gt 1 ]; then
+    for suite in "${suites[@]}"; do
+        if [ "${suite}" = vps ]; then
+            echo "linux-container-tests: vps runs alone; a capped run beside a suite measures the suite" >&2
+            exit 2
+        fi
+    done
+fi
 for suite in "${suites[@]}"; do
     case "${suite}" in
+        vps) commands+=("cargo build --locked --release --manifest-path bench/async/Cargo.toml") ;;
         workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
         bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
@@ -83,7 +117,7 @@ for suite in "${suites[@]}"; do
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc"
             "cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings"
         ) ;;
-        *) echo "linux-container-tests: unknown suite ${suite} (workspace, bot-full, appcui)" >&2; exit 2 ;;
+        *) echo "linux-container-tests: unknown suite ${suite} (workspace, bot-full, appcui, vps)" >&2; exit 2 ;;
     esac
 done
 
@@ -132,18 +166,27 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # there (the fake `gh`), so the mount says `exec`. The size is a ceiling, not a
 # reservation: a tmpfs holds only what is written to it, and it dies with the
 # container.
-exec docker run --rm --init \
-    --tmpfs /tmp:rw,exec,nosuid,size=3g \
-    --volume "${root}:/src" \
-    --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
-    --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
-    --volume lwc-ci-linux-tools:/opt/tools \
-    ${config_mount[@]+"${config_mount[@]}"} \
-    --env "${rustflags_var}=${container_rustflags}" \
-    --env CARGO_TARGET_DIR=/target \
-    --env NEXTEST_TEST_THREADS \
-    --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
-    --env RUSTC_WORKSPACE_WRAPPER= \
-    --workdir /src \
-    "rust:${toolchain}-bookworm" \
-    bash -c "${script}"
+run=(docker run --rm --init
+    --volume "${root}:/src"
+    --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target"
+    --volume lwc-ci-linux-registry:/usr/local/cargo/registry
+    --volume lwc-ci-linux-tools:/opt/tools
+    ${config_mount[@]+"${config_mount[@]}"}
+    --env "${rustflags_var}=${container_rustflags}"
+    --env CARGO_TARGET_DIR=/target
+    --env NEXTEST_TEST_THREADS
+    --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}"
+    --env RUSTC_WORKSPACE_WRAPPER=
+    --workdir /src)
+image="rust:${toolchain}-bookworm"
+if [ "${suites[*]}" != vps ]; then
+    exec "${run[@]}" --tmpfs /tmp:rw,exec,nosuid,size=3g "${image}" bash -c "${script}"
+fi
+# The build is uncapped, so the cap measures the run and not the compile. The
+# run's `/tmp` is a 64 MiB tmpfs: tmpfs pages count against the container's
+# memory cgroup, and the matrix writes nothing there.
+"${run[@]}" --tmpfs /tmp:rw,exec,nosuid,size=3g "${image}" bash -c "${script}"
+exec "${run[@]}" --tmpfs /tmp:rw,exec,nosuid,size=64m \
+    --cpus=2 --memory=2g --memory-swap=2g "${image}" \
+    bash -c "set -euo pipefail
+$(printf '%s\n' "${vps_commands[@]}")"
