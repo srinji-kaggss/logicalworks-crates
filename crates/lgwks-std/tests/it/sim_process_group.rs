@@ -155,7 +155,9 @@ impl Group {
     fn reap(&mut self) -> Result<Option<i32>, Box<dyn Error>> {
         let status = self.leader.wait()?;
         self.phase = Phase::Reaped;
-        let settled = settles_absent(self.id)? || holder_group(self.id)? == Some(self.id);
+        let settled = settles_absent(self.id)?
+            || holder_group(self.id)? == Some(self.id)
+            || only_inherited_zombies(self.id)?;
         let survivors = if settled {
             String::new()
         } else {
@@ -221,6 +223,28 @@ fn holder_group(pid: i32) -> Result<Option<i32>, Box<dyn Error>> {
     }
     let text = String::from_utf8_lossy(&listed.stdout);
     Ok(text.trim().parse().ok())
+}
+
+/// Whether everything left in group `id` is dead and owed to init alone: each
+/// row a zombie (`Z`) whose parent is pid 1.
+///
+/// A killed member is reparented to init, which reaps it on its own schedule;
+/// until then the zombie still holds the group id. Under load, launchd took
+/// longer than [`SETTLE`] (run 38114278750: `70831 70827 1 Z <defunct>`), and
+/// waiting on it raced init's scheduler against a wall clock. Nothing of the
+/// group can run any more, so the cleanup under test is complete; a member
+/// that is alive, or still parented to anyone but init, is not and still fails.
+fn only_inherited_zombies(id: i32) -> Result<bool, Box<dyn Error>> {
+    let listing = group_listing(id)?;
+    let rows: Vec<Vec<&str>> = listing
+        .split(" | ")
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| row.split_whitespace().collect())
+        .collect();
+    Ok(!rows.is_empty()
+        && rows.iter().all(|row| {
+            row.get(2) == Some(&"1") && row.get(3).is_some_and(|stat| stat.starts_with('Z'))
+        }))
 }
 
 /// Every process in group `id` as `pid ppid stat command`, for a failure
