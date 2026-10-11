@@ -306,7 +306,7 @@ group = "quality"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check"
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check && python3 scripts/script-census.py --test"
 ci_step = "Every script! in the repository reads"
 
 [[lane]]

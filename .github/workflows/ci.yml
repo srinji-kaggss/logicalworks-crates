@@ -426,7 +426,7 @@ jobs:
       # language refuses and on any file that is not Rust tokens, at the
       # line and column `cargo build` would report.
       - name: Every script! in the repository reads
-        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check
+        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check && python3 scripts/script-census.py --test
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
