@@ -58,10 +58,14 @@
 //!    [`AuthorityHandle`]. Two authorities for one domain are two current
 //!    epochs, and fencing cannot survive that: minting is the one thing that
 //!    must not be distributed.
-//! 3. Implement [`GrantChannel`] over the host transport with authenticated,
-//!    per-sender-ordered epoch announcements. Validate every grant against
-//!    the authority before acting on it — dispatch, end, finish, reconcile —
-//!    and treat a validation that never arrives as a wait, never as a grant.
+//! 3. Reach the authority through an authenticated [`GrantChannel`]. Under
+//!    the `net` feature, `TcpGrantChannel` is that channel and
+//!    `AuthorityServer` its far end: one keyed-BLAKE3-tagged request and reply
+//!    per question, the reply bound to a fresh random nonce so a recorded
+//!    answer cannot be replayed into a grant, and
+//!    [`Coordinator::with_fence`] validates every grant across it — dispatch,
+//!    end, finish, reconcile. A validation that never arrives is a wait,
+//!    never a grant.
 //! 4. Bound revoke-then-act windows by announcement delivery, and make the
 //!    window safe through the store: a dispatched-but-unended lane reconciles
 //!    as unknown, never as a pass, so a grant that slipped through just
@@ -95,7 +99,13 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::tenant_store::{RunStart, TenantStore, TenantStoreError};
+mod coordinator;
+#[cfg(feature = "net")]
+mod tcp;
+
+pub use coordinator::{Coordinator, DispatchError, Fence};
+#[cfg(feature = "net")]
+pub use tcp::{AuthorityServer, ServeReport, TcpGrantChannel, WireKey};
 
 /// Who holds a lease: the host and coordinator the authority granted to.
 ///
@@ -353,25 +363,35 @@ pub trait GrantChannel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ChannelError {
-    /// The private marker that keeps construction inside this module: a
-    /// partition is observed, never minted.
-    _private: (),
+    /// What the channel observed instead of an authenticated answer. Private,
+    /// and only ever a literal, so construction stays inside this module: a
+    /// partition is observed, never minted, and the reason carries no input.
+    reason: &'static str,
 }
 
 impl ChannelError {
     /// The partition, observed by a channel whose send never arrived.
     fn partitioned() -> Self {
-        Self { _private: () }
+        Self::unanswered("the hosts are partitioned")
+    }
+
+    /// No authenticated answer arrived, for the stated reason: a send that
+    /// failed, a reply that timed out, or one whose tag or nonce did not
+    /// match. Each fails closed exactly as a partition does.
+    fn unanswered(reason: &'static str) -> Self {
+        Self { reason }
     }
 }
 
 impl fmt::Display for ChannelError {
-    /// The refusal, naming the fact rather than the cause: the grant is
-    /// unvalidated, and an unvalidated grant is not a grant.
+    /// The refusal, naming what was observed: the grant is unvalidated, and
+    /// an unvalidated grant is not a grant.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "the grant never reached the lease authority: the hosts are partitioned, \
+        write!(
+            formatter,
+            "the grant got no authenticated answer from the lease authority ({}), \
              and an unvalidated grant is not a grant",
+            self.reason
         )
     }
 }
@@ -590,243 +610,5 @@ impl<T> WorkQueue<T> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
-    }
-}
-
-/// Why a coordinated grant was refused.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum DispatchError {
-    /// The lease is stale: a successor holds the grant, or it was revoked.
-    /// Nothing was written.
-    Lease(LeaseError),
-    /// The store refused: the device, the lock, a bound, or a row that no
-    /// longer matches. Nothing was half-written.
-    Store(TenantStoreError),
-}
-
-impl fmt::Display for DispatchError {
-    /// The refusal, in the vocabulary of the layer that raised it.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Lease(ref cause) => write!(formatter, "the grant is stale: {cause}"),
-            Self::Store(ref cause) => write!(formatter, "the run store refused: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for DispatchError {
-    /// The lease's or the store's own error.
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Lease(ref cause) => Some(cause),
-            Self::Store(ref cause) => Some(cause),
-        }
-    }
-}
-
-impl From<LeaseError> for DispatchError {
-    /// A stale lease reaches the caller as a stale grant, not as a store
-    /// refusal: the store was never touched.
-    fn from(cause: LeaseError) -> Self {
-        Self::Lease(cause)
-    }
-}
-
-impl From<TenantStoreError> for DispatchError {
-    /// A store refusal reaches the caller as itself, so a device fault never
-    /// reads as a fencing decision.
-    fn from(cause: TenantStoreError) -> Self {
-        Self::Store(cause)
-    }
-}
-
-/// One coordinator: a lease holder that commits every dispatch row to the
-/// durable store before the lane starts and reconciles dead coordinators
-/// after they die.
-///
-/// Every method takes the lease and checks it first: a stale coordinator
-/// cannot begin, dispatch, end, finish, or reconcile, and a refused grant
-/// writes nothing. The store is the [`TenantStore`](crate::tenant_store) the
-/// coordinator was built over, so the run state that survives coordinator
-/// loss is the keyed history, and a successor that reopens the same directory
-/// sees every commit the dead coordinator acknowledged.
-#[derive(Debug, Clone)]
-pub struct Coordinator {
-    /// The authority every grant is checked against.
-    authority: AuthorityHandle,
-    /// The durable keyed store every row is committed to.
-    store: TenantStore,
-    /// The host this coordinator runs on, and reconciles for.
-    host: String,
-}
-
-impl Coordinator {
-    /// A coordinator over `store` on `host`, with its own fresh authority.
-    ///
-    /// The authority is fresh per coordinator: two coordinators sharing one
-    /// authority coordinate, and two coordinators each minting are two
-    /// domains that must never share a store directory.
-    #[must_use]
-    pub fn new(store: TenantStore, host: &str) -> Self {
-        Self {
-            authority: AuthorityHandle::new(),
-            store,
-            host: host.to_owned(),
-        }
-    }
-
-    /// A coordinator over `store` on `host`, joining the domain `handle`
-    /// already validates.
-    ///
-    /// The multi-coordinator form of [`new`](Self::new): two coordinators over
-    /// one store share one handle, so a takeover stales the predecessor's
-    /// lease instead of forking the domain. Sharing a store across two
-    /// handles is the split-brain this type refuses by construction — see the
-    /// second-host obligations in the module documentation.
-    #[must_use]
-    pub fn with_authority(store: TenantStore, host: &str, authority: AuthorityHandle) -> Self {
-        Self {
-            authority,
-            store,
-            host: host.to_owned(),
-        }
-    }
-
-    /// The authority this coordinator validates against, shared with the
-    /// channels that carry its grants.
-    #[must_use]
-    pub fn handle(&self) -> AuthorityHandle {
-        self.authority.clone()
-    }
-
-    /// The host this coordinator runs on.
-    #[must_use]
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// Grant to the named coordinator, staling every outstanding lease.
-    #[must_use]
-    pub fn acquire(&self, holder: &str) -> Lease {
-        self.authority.acquire(holder)
-    }
-
-    /// Check the lease, then commit through `commit`.
-    ///
-    /// One gate for the five grants — begin, dispatch, end, finish, recover —
-    /// so the fence cannot drift between them: the store is touched only past
-    /// a current lease, and a stale one is refused before a byte moves.
-    fn checked<T>(
-        &self,
-        lease: &Lease,
-        commit: impl FnOnce() -> Result<T, TenantStoreError>,
-    ) -> Result<T, DispatchError> {
-        self.authority.check(lease)?;
-        Ok(commit()?)
-    }
-
-    /// Record a run and its lanes as pending, before any lane starts.
-    ///
-    /// # Errors
-    ///
-    /// [`DispatchError::Lease`] when the grant is stale;
-    /// [`DispatchError::Store`] when the store refuses.
-    pub fn begin_run(
-        &self,
-        lease: &Lease,
-        run: &RunStart<'_>,
-        lanes: &[&str],
-    ) -> Result<(), DispatchError> {
-        self.checked(lease, || self.store.begin_run(run, lanes))
-    }
-
-    /// Durable intent: the lane is about to start.
-    ///
-    /// Committed before the lane's process exists (V2-04): the caller starts
-    /// the process only after this returns, so a coordinator killed at any
-    /// instant leaves a record the next run reconciles.
-    ///
-    /// # Errors
-    ///
-    /// [`DispatchError::Lease`] when the grant is stale;
-    /// [`DispatchError::Store`] when the row is gone or past dispatch.
-    pub fn dispatch_lane(
-        &self,
-        lease: &Lease,
-        run_id: &str,
-        lane: usize,
-    ) -> Result<(), DispatchError> {
-        self.checked(lease, || self.store.lane_dispatched(run_id, lane))
-    }
-
-    /// The lane is terminal; its outcome is recorded once.
-    ///
-    /// # Errors
-    ///
-    /// [`DispatchError::Lease`] when the grant is stale;
-    /// [`DispatchError::Store`] when the row is gone or already ended.
-    pub fn end_lane(
-        &self,
-        lease: &Lease,
-        run_id: &str,
-        lane: usize,
-        outcome: &str,
-        detail: &str,
-        tail: &[u8],
-    ) -> Result<(), DispatchError> {
-        self.checked(lease, || {
-            self.store.lane_ended(run_id, lane, outcome, detail, tail)
-        })
-    }
-
-    /// Store the sealed record, or `false` when the run already ended.
-    ///
-    /// # Errors
-    ///
-    /// [`DispatchError::Lease`] when the grant is stale;
-    /// [`DispatchError::Store`] when the store refuses.
-    pub fn finish_run(
-        &self,
-        lease: &Lease,
-        run_id: &str,
-        verdict: &str,
-        finished_at: &str,
-        record: &str,
-        seal: &str,
-    ) -> Result<bool, DispatchError> {
-        self.checked(lease, || {
-            self.store
-                .finish_run(run_id, verdict, finished_at, record, seal)
-        })
-    }
-
-    /// Close every unfinished run on `dead_host`, transactionally each.
-    ///
-    /// The fencing half of recovery: the lease is checked first, so a stale
-    /// coordinator cannot reconcile — only the current grant may declare
-    /// another coordinator dead. Dispatched-but-unended lanes close as
-    /// unknown, never as a pass; undispatched lanes close as unmeasured.
-    /// Returns how many runs were open.
-    ///
-    /// # Errors
-    ///
-    /// [`DispatchError::Lease`] when the grant is stale;
-    /// [`DispatchError::Store`] when the store refuses.
-    pub fn recover(
-        &self,
-        lease: &Lease,
-        dead_host: &str,
-        now: &str,
-    ) -> Result<usize, DispatchError> {
-        self.checked(lease, || {
-            let mut closed = 0usize;
-            for open in self.store.open_runs(dead_host)? {
-                if self.store.abandon(open.run_id(), now)? {
-                    closed = closed.saturating_add(1);
-                }
-            }
-            Ok(closed)
-        })
     }
 }
