@@ -202,10 +202,11 @@ fn read_full_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
     Ok(head)
 }
 
-/// Joins the canned server, surfacing its refusal or a panic inside it.
-fn join_server(
-    server: thread::JoinHandle<std::io::Result<()>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Joins a fixture server and hands back what it returned, surfacing its
+/// refusal or a panic inside it.
+fn join_server<T>(
+    server: thread::JoinHandle<std::io::Result<T>>,
+) -> Result<T, Box<dyn std::error::Error>> {
     let served = match server.join() {
         Ok(served) => served,
         Err(payload) => {
@@ -225,8 +226,7 @@ fn join_server(
             );
         }
     };
-    served?;
-    Ok(())
+    Ok(served?)
 }
 
 /// Serve one raw response byte-for-byte.
@@ -509,9 +509,13 @@ fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error
     // the channel; the server's per-hop delay is a wait on that event, so it
     // ends with the client instead of running out a clock.
     let (done, client_done) = std::sync::mpsc::sync_channel::<()>(1);
+    // Counts requests the client made, not replies completed: a hop the
+    // deadline cut short still shows the client followed the redirect to it,
+    // and a count of completed replies would make the bound below a race
+    // between the per-hop gap and the deadline on a loaded host.
     let server = fixture_thread(move || -> std::io::Result<usize> {
-        let mut served = 0;
-        while served < 10 {
+        let mut requested = 0;
+        while requested < 10 {
             let (mut stream, _) = listener.accept()?;
             if !matches!(
                 client_done.try_recv(),
@@ -520,6 +524,7 @@ fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error
                 break;
             }
             let _ = read_request_head(&mut stream)?;
+            requested += 1;
             // A slow upstream: 200 ms per hop, well inside the per-phase
             // timeout, so only the whole-call deadline can stop the chain.
             let gap = client_done.recv_timeout(Duration::from_millis(200));
@@ -534,9 +539,8 @@ fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error
             if stream.write_all(reply.as_bytes()).is_err() {
                 break;
             }
-            served += 1;
         }
-        Ok(served)
+        Ok(requested)
     })?;
     let started = std::time::Instant::now();
     let result = get_with(
@@ -566,10 +570,11 @@ fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error
         elapsed < Duration::from_millis(1_500),
         "the deadline bounds the chain, not ten hops of 200 ms: {elapsed:?}"
     );
-    let served = server.join().map_err(|_| "redirect server panicked")??;
+    let requested = join_server(server)?;
     assert!(
-        (2..10).contains(&served),
-        "the chain made progress, then stopped at the deadline: {served} hops"
+        (2..10).contains(&requested),
+        "the client followed at least one redirect, then stopped at the deadline: \
+         {requested} requests"
     );
     Ok(())
 }
