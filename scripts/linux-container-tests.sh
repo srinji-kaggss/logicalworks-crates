@@ -119,6 +119,12 @@ $(printf '%s\n' "${commands[@]}")"
 # directory` partway through the bot-full suite. A runner runs one job at a
 # time, so its own volume has one writer. Outside CI the owner is `local`.
 target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+# The image is part of the volume's name too: cargo's fingerprints do not
+# record the C library a build linked against, so a binary a trixie build left
+# (glibc 2.39) was reused by a bookworm run and failed to load in it (`GLIBC_2.39
+# not found`, run 38099333925). One image, one volume.
+image="rust:${toolchain}-bookworm"
+image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
 
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
@@ -135,7 +141,7 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 exec docker run --rm --init \
     --tmpfs /tmp:rw,exec,nosuid,size=3g \
     --volume "${root}:/src" \
-    --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
+    --volume "lwc-ci-linux-target-${target_owner}-${image_tag}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
     ${config_mount[@]+"${config_mount[@]}"} \
@@ -145,5 +151,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "rust:${toolchain}-bookworm" \
+    "${image}" \
     bash -c "${script}"
