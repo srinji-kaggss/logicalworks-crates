@@ -8,14 +8,18 @@ use super::super::outcome::TaskOutcome;
 use super::super::supervisor::Supervisor;
 #[cfg(all(unix, feature = "process"))]
 use super::whole_capture;
-use super::{drain, settle, yield_until};
+use super::drain;
+#[cfg(feature = "script")]
+use super::{settle, yield_until};
 use crate::rt::clock::Clock;
 use crate::rt::runtime::block_on;
 use crate::rt::task::yield_now;
 #[cfg(feature = "script")]
 use crate::rt::tenancy::SpawnRefused;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "script")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
