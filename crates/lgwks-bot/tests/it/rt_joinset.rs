@@ -141,7 +141,7 @@ fn abort_all_cancels_every_owned_task_and_try_join_drains_them() -> TestResult {
 /// Drain one finished task through the non-waiting door, yielding the worker
 /// between tries so the engine can record the completion; the park ceiling only
 /// bounds a defect, so a door that never yields fails by name instead of hanging.
-async fn try_drain<R>(mut attempt: impl FnMut() -> Option<R>) -> Result<R, &'static str> {
+async fn try_drain<R>(mut attempt: impl FnMut() -> Option<R>) -> Result<R, String> {
     let drained = timeout(PARK_CEILING, async {
         loop {
             if let Some(joined) = attempt() {
@@ -152,7 +152,7 @@ async fn try_drain<R>(mut attempt: impl FnMut() -> Option<R>) -> Result<R, &'sta
     });
     drained
         .await
-        .map_err(|_elapsed| "try_join_next never yielded a finished task")
+        .map_err(|elapsed| format!("try_join_next never yielded a finished task: {elapsed}"))
 }
 
 #[test]
