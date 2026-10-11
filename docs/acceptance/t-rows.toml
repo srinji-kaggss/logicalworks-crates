@@ -347,7 +347,7 @@ tests = [
   "it::process_escape::shutdown_reports_every_draining_cleanup_rather_than_aborting_it",
   "it::gh_binding::a_hanging_client_is_stopped_as_a_whole_group_and_reports_no_exit_code",
   "it::orphan_reap::a_record_naming_a_recycled_pid_signals_nothing_t21",
-  "lgwks_bot::rt::supervise::tests::a_reaped_or_recycled_group_id_is_never_signalled",
+  "lgwks_bot::rt::supervise::tests::cleanup::a_reaped_or_recycled_group_id_is_never_signalled",
 ]
 
 [[row]]
