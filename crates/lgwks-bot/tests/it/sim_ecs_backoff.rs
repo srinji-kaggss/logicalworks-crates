@@ -19,6 +19,10 @@
 //! one `advance`, and the trace records instants on that clock, never wall
 //! time, which is what makes the same seed hash to the same trace.
 
+// The bot's clock is reached through `lgwks_bot::rt`, which exists only with
+// the `rt` feature; `cargo clippy --no-default-features` refused it unguarded.
+#![cfg(feature = "rt")]
+
 use crate::sim;
 
 // The band-declaration macro, defined once for the whole layer.
