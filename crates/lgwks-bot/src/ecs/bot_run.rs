@@ -57,19 +57,26 @@ impl EcsBot {
         for chain in 0..failures.len() {
             // `steps` is in `(chain, entry)` walk order, so the steps of `chain`
             // are the run at `start` — and a chain that recorded none contributes
-            // the empty run, because its first step is a later chain's.
+            // the empty run: its first step is a later chain's, `position` finds
+            // it at offset 0, and `end == start`.
             let end = match steps[start..].iter().position(|step| step.chain != chain) {
                 Some(offset) => start.saturating_add(offset),
                 None => steps.len(),
             };
-            let run = match steps.get(start) {
-                Some(step) if step.chain == chain => &steps[start..end],
-                _ => &[],
-            };
+            let run = &steps[start..end];
 
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
+            // A chain with no step and no failure has nothing to apply or
+            // report, and `run_chain` would answer `(0, None)` for it. Skipped
+            // rather than awaited, because building and polling that future —
+            // a state machine sized for every await in the walk — is what a
+            // quiet tick paid per chain in the act stage (#279).
+            if run.is_empty() && condition_failure.is_none() {
+                start = end;
+                continue;
+            }
             let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, retry).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a
