@@ -243,6 +243,40 @@ fn hostile_frames_are_refused_without_a_reply() -> TestResult {
     Ok(())
 }
 
+/// The documented stop path of a sized `serve`: it parks in `accept` with no
+/// deadline, and an owner ends it early by opening and dropping the
+/// connections its peers did not make. Each is refused and counted, and the
+/// call returns with the honest answer intact (#437 review: the accept wait
+/// is unbounded, so the way out of it is pinned).
+#[test]
+fn an_owner_ends_a_sized_serve_with_empty_connections() -> TestResult {
+    let authority = AuthorityHandle::new();
+    let (listener, addr) = loopback()?;
+    let server = AuthorityServer::new(authority.clone(), KEY, TIMEOUT);
+    let (validated, report) = thread::scope(|scope| -> TestResult<(bool, ServeReport)> {
+        let serving = scope.spawn(|| server.serve(&listener, 3));
+        let lease = authority.acquire("coord-a");
+        let validated = TcpGrantChannel::new(addr, KEY, TIMEOUT).validate(&lease);
+        // Opened whatever `validate` returned and never `?`-ed: the scope
+        // joins the server, so an early return here would park the test in
+        // the very accept this pins.
+        for _ in 0..2 {
+            drop(TcpStream::connect_timeout(&addr, TIMEOUT));
+        }
+        let report = joined(serving);
+        Ok((validated?, report))
+    })?;
+    assert!(validated, "the honest question is answered before the stop");
+    assert_eq!(report.answered(), 1, "only the honest question is answered");
+    assert_eq!(
+        report.refused(),
+        2,
+        "each empty connection is refused and counted"
+    );
+    assert_eq!(authority.epoch(), 1, "an empty connection moves nothing");
+    Ok(())
+}
+
 /// Relay one honest exchange from `proxy` to `server` and record the reply,
 /// then answer the next question on `proxy` with that recorded reply.
 fn relay_then_replay(proxy: &TcpListener, server: SocketAddr) -> TestResult<Vec<u8>> {

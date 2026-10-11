@@ -341,6 +341,20 @@ impl AuthorityServer {
     /// The bound is the caller's: a long-lived authority passes `usize::MAX`
     /// on a thread it owns, and a test passes the count it drives. A refused
     /// connection is closed without a reply, logged, and counted.
+    ///
+    /// # Blocking
+    ///
+    /// `timeout` bounds each connection's reads and writes, never the wait
+    /// for the next connection: between connections this call is parked in
+    /// `accept`, with no deadline, until a peer connects. If fewer than
+    /// `connections` peers ever connect, it does not return; with
+    /// `usize::MAX` it never returns, so that serving thread lives as long
+    /// as the process that owns it. Dropping or closing `listener` from
+    /// another thread does not wake a parked `accept` on every platform.
+    /// With a sized count, an owner ends the call early by opening and
+    /// dropping the connections its peers did not make. Each one sends no
+    /// request, so it is refused at its close and counted, and the call
+    /// returns once the count is reached.
     #[must_use]
     pub fn serve(&self, listener: &TcpListener, connections: usize) -> ServeReport {
         let mut report = ServeReport::default();
