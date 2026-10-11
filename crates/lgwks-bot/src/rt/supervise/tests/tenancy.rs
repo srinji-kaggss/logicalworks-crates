@@ -6,9 +6,9 @@ use super::super::lease::Lease;
 #[cfg(all(unix, feature = "process"))]
 use super::super::outcome::TaskOutcome;
 use super::super::supervisor::Supervisor;
+use super::drain;
 #[cfg(all(unix, feature = "process"))]
 use super::whole_capture;
-use super::drain;
 #[cfg(feature = "script")]
 use super::{settle, yield_until};
 use crate::rt::clock::Clock;
