@@ -1,8 +1,6 @@
 //! Tests for the semantic tier: the resolver against stub embedders.
 
-use super::{
-    Alias, Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver,
-};
+use super::{Alias, Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
 use crate::session::{AnswerDomain, DegradedReason, MatchTier, Question, Resolution, Resolver};
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -149,9 +147,7 @@ fn assert_vector(actual: &[f32], expected: &[f32]) {
         expected.len(),
         "vector length changed: {actual:?} vs {expected:?}"
     );
-    for (index, (actual_component, expected_component)) in
-        actual.iter().zip(expected).enumerate()
-    {
+    for (index, (actual_component, expected_component)) in actual.iter().zip(expected).enumerate() {
         assert!(
             (actual_component - expected_component).abs() < 1e-6,
             "component {index} was {actual_component}, expected {expected_component}"
@@ -293,15 +289,14 @@ fn a_runner_up_below_threshold_still_counts_against_the_margin()
 }
 
 #[test]
-fn a_below_threshold_runner_up_is_reported_in_the_lead()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_below_threshold_runner_up_is_reported_in_the_lead() -> Result<(), Box<dyn std::error::Error>> {
     // The same field with a wide margin: the winner is decisive, and the
     // number it reports must be the `0.02` it actually holds, not the `0.73`
     // of its own score reported over an emptied field.
     let (embedder, _) = stub(near_tie_vectors(), vec![0.0, 1.0], false)?;
     let policy = SemanticPolicy::new(0.72, 0.01)?;
-    let verdict = SemanticResolver::with_policy(embedder, policy)
-        .resolve("the usual", &ask(&the_field()));
+    let verdict =
+        SemanticResolver::with_policy(embedder, policy).resolve("the usual", &ask(&the_field()));
     assert!(
         matches!(
             verdict.resolution(),
@@ -318,8 +313,7 @@ fn a_below_threshold_runner_up_is_reported_in_the_lead()
 }
 
 #[test]
-fn an_option_below_the_threshold_is_not_a_candidate() -> Result<(), Box<dyn std::error::Error>>
-{
+fn an_option_below_the_threshold_is_not_a_candidate() -> Result<(), Box<dyn std::error::Error>> {
     let (embedder, calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], false)?;
     let resolver = SemanticResolver::new(embedder);
 
@@ -474,8 +468,8 @@ fn an_invalid_embedding_at_either_end_of_the_field_degrades()
 }
 
 #[test]
-fn a_field_of_unmeasurable_vectors_is_degraded_not_absent()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_field_of_unmeasurable_vectors_is_degraded_not_absent() -> Result<(), Box<dyn std::error::Error>>
+{
     // Every candidate invalid. The old code skipped all of them and
     // returned `Absent { best_score: 0.0 }`, which is the number a healthy
     // model returns for a field it looked at and rejected.
@@ -517,8 +511,7 @@ fn an_unmeasurable_embedding_is_named_apart_from_a_missing_embedder() {
 }
 
 #[test]
-fn a_failing_embedder_is_degraded_rather_than_absent() -> Result<(), Box<dyn std::error::Error>>
-{
+fn a_failing_embedder_is_degraded_rather_than_absent() -> Result<(), Box<dyn std::error::Error>> {
     let (embedder, _calls) = stub(paraphrase_vectors(), vec![0.0, 1.0], true)?;
     let resolution = resolve_with(embedder).into_resolution();
 

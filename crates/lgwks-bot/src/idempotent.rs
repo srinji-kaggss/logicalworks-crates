@@ -5,9 +5,9 @@
 //! two launches. This module is the discipline Temporal and Restate apply to
 //! the same hazard — at-least-once delivery with an idempotency key the
 //! receiver deduplicates on — expressed as one
-//! [`Execute`] adapter.
+//! [`crate::verb::Execute`] adapter.
 //!
-//! [`IdempotentPost`](crate::idempotent::IdempotentPost) POSTs with the caller-generated `Idempotency-Key` the
+//! [`crate::idempotent::IdempotentPost`] POSTs with the caller-generated `Idempotency-Key` the
 //! receiver dedups on ([`lgwks_std::http::Options::idempotency_key`]). Every
 //! retry of one operation reuses the key and the payload, so a replayed
 //! request is the same request and the upstream counts exactly one effect. A
@@ -17,10 +17,10 @@
 //!
 //! The failure vocabulary is the credential row's, reused rather than
 //! redeclared: an upstream 401/403/404 is
-//! [`BotError::CredentialRejected`]
-//! carrying its [`NeedSet`] repair (never a generic
+//! [`crate::error::BotError::CredentialRejected`]
+//! carrying its [`crate::spec::NeedSet`] repair (never a generic
 //! failure, never a silent retry — retrying the same credential gives the
-//! same refusal), and any other failure is a [`BotError::DomainError`] that
+//! same refusal), and any other failure is a [`crate::error::BotError::DomainError`] that
 //! says what the exchange established. A transport failure or a 5xx is
 //! `NotDelivered` — a retry **is** a retry here, because the key makes it one.
 //! That is the whole safety argument, and it is why the key is required
@@ -28,10 +28,10 @@
 //!
 //! # Bounds
 //!
-//! The body the adapter will send is capped at [`MAX_POST_BYTES`](crate::idempotent::MAX_POST_BYTES), the preview
-//! it keeps at [`BODY_PREVIEW`](crate::domain::net::BODY_PREVIEW) characters, and the exchange at
-//! [`POST_TIMEOUT_SECS`](crate::idempotent::POST_TIMEOUT_SECS) seconds — the same preview ceiling the
-//! [`domain::net`] probe reads under, referenced rather
+//! The body the adapter will send is capped at [`crate::idempotent::MAX_POST_BYTES`], the preview
+//! it keeps at [`crate::domain::net::BODY_PREVIEW`] characters, and the exchange at
+//! [`crate::idempotent::POST_TIMEOUT_SECS`] seconds — the same preview ceiling the
+//! [`crate::domain::net`] probe reads under, referenced rather
 //! than restated so the two cannot drift.
 
 use std::time::Duration;
