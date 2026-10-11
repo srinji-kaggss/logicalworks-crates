@@ -10,8 +10,9 @@ use super::super::outcome::{CleanupReceipt, TaskOutcome};
 use super::super::supervisor::Supervisor;
 #[cfg(all(unix, feature = "process"))]
 use super::{
-    FailingGroupObserver, ScriptedCapture, armed_group, capture_group, group_seams, recording,
-    sequence, settled_tasks, test_group, whole_capture,
+    EpermGroupSignaller, FailingGroupObserver, ScriptedCapture, UnexpectedGroupSignaller,
+    armed_group, capture_group, group_seams, recording, sequence, settled_tasks, test_group,
+    whole_capture,
 };
 use crate::rt::runtime::block_on;
 #[cfg(feature = "process")]
