@@ -3,8 +3,8 @@
 //! http(s) URIs before any socket opens.
 //!
 //! The API is blocking. From async code, run it on a blocking thread.
-//! HTTP error statuses (4xx/5xx) are returned as [`Response`](crate::http::Response),
-//! never as [`Error`](crate::http::Error): only transport failure, timeout,
+//! HTTP error statuses (4xx/5xx) are returned as [`crate::http::Response`],
+//! never as [`crate::http::Error`]: only transport failure, timeout,
 //! and invalid URLs error.
 //!
 //! Each call builds and drops its own connection agent: there is no
