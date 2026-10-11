@@ -96,11 +96,19 @@ pub(crate) async fn run_shell(
 /// pid at all, which is the standard liveness probe: it exits zero for a live
 /// process and non-zero once the pid is gone.
 fn is_alive(pid: &str) -> bool {
-    std::process::Command::new("kill")
+    match std::process::Command::new("kill")
         .arg("-0")
         .arg(pid)
         .status()
-        .is_ok_and(|status| status.success())
+    {
+        Ok(status) => status.success(),
+        // A probe that could not run proves nothing gone, so the pid counts as
+        // alive and the wait fails at its budget rather than passing blind.
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, pid, "is_alive: the kill -0 probe did not run");
+            true
+        }
+    }
 }
 
 /// Wait for `pid` to disappear, up to `budget`.
@@ -323,6 +331,102 @@ fn process_deadline_terminates_the_child_and_reports_its_cleanup() -> TestResult
         outcome.cleanup().is_some(),
         "the real process path must report its cleanup receipt"
     );
+    Ok(())
+}
+
+/// A descendant outside the group that keeps the stdout pipe open cannot hold
+/// the run past the drain bound, and the report names the holder.
+///
+/// Source: issue #263, the `gh_binding` flake, where a surviving descendant
+/// held a captured pipe and a 400 ms run lasted 30.6 s; and POSIX job control
+/// (`set -m`, XCU "sh"), which puts each background job in its own process
+/// group, beyond `killpg`'s reach. Requirement: a run ends at its bounds, not at
+/// a stranger's exit. On Linux with a cgroup scope the kernel kills the job
+/// too, so there the pipe closes and the run is whole; either way it is fast.
+#[test]
+fn a_descendant_holding_the_pipe_cannot_hold_the_run() -> TestResult {
+    use lgwks_bot::rt::supervise::{ContainmentMechanism, ResidualRisk};
+    let runtime = Runtime::new()?;
+    let (run, elapsed) = runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg("set -m; sleep 30 & echo $!; exit 0");
+        spec.capture_stdout(std::num::NonZeroUsize::MIN.saturating_add(63));
+        let started = Instant::now();
+        let run = supervisor
+            .run_process(&spec)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((run, started.elapsed()))
+    })?;
+    let holder = String::from_utf8_lossy(run.stdout().bytes())
+        .trim()
+        .to_owned();
+    // The job was moved out of the group on purpose; the test owns its end.
+    if !holder.is_empty() {
+        let _killed = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(&holder)
+            .status();
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the run lasted {elapsed:?}: the held pipe decided its length, not its bounds"
+    );
+    assert_eq!(run.exit_code(), Some(0), "the shell itself exited zero");
+    assert!(
+        !holder.is_empty(),
+        "what was read before the bound is kept: {:?}",
+        run.stdout()
+    );
+    let containment = run.containment();
+    assert!(
+        containment.residual_risk() == Some(ResidualRisk::DescriptorHeld)
+            || containment.mechanism() == ContainmentMechanism::CgroupKill,
+        "a held pipe must be named in the report: {containment:?}"
+    );
+    assert!(
+        !containment.is_complete() || containment.mechanism() == ContainmentMechanism::CgroupKill,
+        "a run whose pipe outlived it is not a whole cleanup: {containment:?}"
+    );
+    Ok(())
+}
+
+/// The control: a run whose pipes close with it reports no held descriptor
+/// and keeps every byte, so the drain bound is a ceiling, not a toll.
+///
+/// Source: issue #263 again, from the other side: the bound must not misreport
+/// the common case. Each of 20 runs is a fresh shell that writes two lines and
+/// exits; none may be named as holding a pipe.
+#[test]
+fn a_run_whose_pipes_close_reports_no_held_descriptor() -> TestResult {
+    use lgwks_bot::rt::supervise::ResidualRisk;
+    let runtime = Runtime::new()?;
+    let runs = runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        let mut runs = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let mut spec = ProcessSpec::new("sh");
+            spec.arg("-c").arg("echo out; echo err >&2; exit 0");
+            spec.capture_stdout(std::num::NonZeroUsize::MIN.saturating_add(63));
+            spec.capture_stderr(std::num::NonZeroUsize::MIN.saturating_add(63));
+            let run = supervisor
+                .run_process(&spec)
+                .await
+                .map_err(|error| error.to_string())?;
+            runs.push(run);
+        }
+        Ok::<_, String>(runs)
+    })?;
+    for run in &runs {
+        assert_eq!(run.stdout().bytes(), b"out\n", "stdout is whole: {run:?}");
+        assert_eq!(run.stderr().bytes(), b"err\n", "stderr is whole: {run:?}");
+        assert_ne!(
+            run.containment().residual_risk(),
+            Some(ResidualRisk::DescriptorHeld),
+            "a pipe that closed with its run is not held: {run:?}"
+        );
+    }
     Ok(())
 }
 

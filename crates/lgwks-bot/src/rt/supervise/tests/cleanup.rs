@@ -632,3 +632,109 @@ fn shutdown_report_keeps_pending_cleanup_and_emits_later_terminal_receipt()
     );
     Ok(())
 }
+
+/// The drain's re-signal fires only while the unreaped leader pins the id, and
+/// stops once the answer can no longer change.
+///
+/// Source: issue #263 (a straggler forked in the window `killpg` misses on XNU
+/// held a captured pipe) and POSIX `kill(2)`: a group id may be signalled only
+/// while something holds it, which the unreaped leader does. Each guard
+/// condition is exercised alone, so each one is shown to decide by itself.
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn the_drain_resignals_only_a_pinned_group_that_can_still_answer() {
+    let observer = sequence(usize::MAX);
+
+    let pinned = recording();
+    let mut group = test_group(&pinned, &observer, false);
+    assert!(
+        group.resignal_while_pinned(),
+        "a pinned, present group is re-signalled"
+    );
+    assert_eq!(
+        pinned.calls.load(Ordering::Relaxed),
+        1,
+        "exactly one signal per slice"
+    );
+    group.disarm();
+    drop(group);
+
+    let reaped = recording();
+    let mut group = test_group(&reaped, &observer, true);
+    assert!(
+        !group.resignal_while_pinned(),
+        "a reaped leader no longer pins the id"
+    );
+    group.disarm();
+    drop(group);
+    assert_eq!(
+        reaped.calls.load(Ordering::Relaxed),
+        0,
+        "a released id is never signalled"
+    );
+
+    let unnamed = recording();
+    let mut group = test_group(&unnamed, &observer, false);
+    group.group = 0;
+    assert!(
+        !group.resignal_while_pinned(),
+        "id 0 would name this process's own group"
+    );
+    assert_eq!(unnamed.calls.load(Ordering::Relaxed), 0);
+    group.disarm();
+    drop(group);
+
+    let absent = recording();
+    let mut group = test_group(&absent, &observer, false);
+    group.group_absent = true;
+    assert!(
+        !group.resignal_while_pinned(),
+        "an observed-absent group is not asked again"
+    );
+    assert_eq!(absent.calls.load(Ordering::Relaxed), 0);
+    group.disarm();
+    drop(group);
+
+    let zombie = EpermGroupSignaller;
+    let mut group = test_group(&zombie, &observer, false);
+    assert!(
+        group.resignal_while_pinned(),
+        "EPERM from a zombie-led group means present, so the drain keeps asking"
+    );
+    group.disarm();
+    drop(group);
+
+    let refusing = UnexpectedGroupSignaller;
+    let mut group = test_group(&refusing, &observer, false);
+    assert!(
+        !group.resignal_while_pinned(),
+        "a refused signal will not be accepted on a repeat"
+    );
+    group.disarm();
+    drop(group);
+}
+
+/// A held pipe is recorded as evidence over whatever limit came before it.
+///
+/// Source: issue #263. `note` is first-wins for limits of what was looked at;
+/// a held descriptor is a holder seen alive, and must not be hidden behind
+/// `LeaderExited`, which every self-exiting run records first.
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn a_held_descriptor_replaces_the_leader_exited_limit() {
+    let signaller = recording();
+    let observer = sequence(usize::MAX);
+    let mut group = test_group(&signaller, &observer, false);
+    group.mark_exited();
+    assert_eq!(
+        group.containment().residual_risk(),
+        Some(ResidualRisk::LeaderExited)
+    );
+    group.mark_descriptor_held();
+    assert_eq!(
+        group.containment().residual_risk(),
+        Some(ResidualRisk::DescriptorHeld)
+    );
+    assert!(!group.containment().is_complete());
+    group.disarm();
+}

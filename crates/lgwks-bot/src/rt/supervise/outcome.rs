@@ -234,6 +234,18 @@ pub enum ResidualRisk {
     /// The cleanup therefore reads no table, and the report names that rather
     /// than presenting an empty capture as an empty tree.
     LeaderExited,
+    /// A captured pipe was still open when the bounded drain after cleanup
+    /// ended, so something the run started still held it.
+    ///
+    /// The holder is a descendant out of the group's reach: one that called
+    /// `setsid`, one a job-control shell moved to its own group, or one forked
+    /// in a race the group signal missed and still alive after the drain
+    /// re-signalled the pinned group. The run returns at the bound instead of
+    /// lasting as long as that descendant does (#263), and its captured
+    /// streams hold what was read before the bound. This arm is evidence that a
+    /// process survived, not a limit of what was looked at, so it replaces
+    /// whatever arm was recorded before it.
+    DescriptorHeld,
 }
 
 /// What one cleanup attempt read, signalled, and could not account for.
@@ -355,6 +367,16 @@ impl Containment {
         if self.residual.is_none() {
             self.residual = Some(risk);
         }
+    }
+
+    /// Record that a captured pipe outlived the drain.
+    ///
+    /// Not first-wins like [`Self::note`]: the other arms say what the
+    /// mechanism could not see, and this one says a holder was seen alive, so
+    /// it is the fact a reader of the report needs first.
+    #[cfg(all(unix, feature = "process"))]
+    pub(super) fn record_held_descriptor(&mut self) {
+        self.residual = Some(ResidualRisk::DescriptorHeld);
     }
 }
 

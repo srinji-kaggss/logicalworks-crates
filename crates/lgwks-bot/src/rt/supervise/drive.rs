@@ -9,9 +9,11 @@ use crate::rt::cancel::CancellationToken;
 use crate::rt::clock::Clock;
 use crate::rt::io::{AsyncRead, AsyncReadExt};
 use crate::rt::process::CapturedStream;
+use crate::rt::task::yield_now;
 use std::io;
 use std::num::NonZeroUsize;
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 /// What happened while observing a supervised child without releasing its pid.
@@ -184,8 +186,22 @@ pub(super) async fn drive_process_observed(
         err_limit,
     } = bounds;
     let pid = child.group().ok();
-    let capture_out = capture(child.stdout.take(), out_limit, on_line);
-    let capture_err = capture(child.stderr.take(), err_limit, None);
+    let pipes = OpenPipes::default();
+    let abandon = CancellationToken::new();
+    let capture_out = capture(
+        child.stdout.take(),
+        out_limit,
+        on_line,
+        &abandon,
+        &pipes.stdout,
+    );
+    let capture_err = capture(
+        child.stderr.take(),
+        err_limit,
+        None,
+        &abandon,
+        &pipes.stderr,
+    );
     // Reading the pipes and waiting for the child are independent futures over
     // disjoint state; only the group is borrowed, and that borrow ends when
     // this future completes.
@@ -198,9 +214,13 @@ pub(super) async fn drive_process_observed(
             group.mark_exited();
         }
         let cleanup = group.cleanup().await;
+        drain_pipes(&mut group, &pipes, &abandon).await;
         (observation, cleanup)
     };
     let (stdout, stderr, (observation, mut receipt)) = join3(capture_out, capture_err, wait).await;
+    if !pipes.closed() {
+        group.mark_descriptor_held();
+    }
 
     if matches!(receipt, CleanupReceipt::CleanupFailed)
         && !matches!(observation, ProcessObservation::Exited)
@@ -264,6 +284,80 @@ pub(super) async fn drive_process_observed(
     }
 }
 
+/// How long one slice of the post-cleanup drain waits before it looks again.
+///
+/// The same 5 ms the exit observation polls at: short enough that a pipe that
+/// closes a moment after the cleanup costs the run one slice, and long enough
+/// that a held pipe costs a bounded number of group signals.
+const PIPE_DRAIN_SLICE: Duration = Duration::from_millis(5);
+
+/// How many slices the drain after cleanup waits for both pipes to close.
+///
+/// 20 slices of [`PIPE_DRAIN_SLICE`] is 100 ms: a killed group's members close
+/// their pipe ends within one scheduling round of their death, so a pipe still
+/// open after 100 ms of re-signalling is held by a process the group signal
+/// cannot reach. The bound is what keeps that process from deciding how long
+/// the run lasts (#263: one held pipe kept a 400 ms run alive for 30.6 s).
+const PIPE_DRAIN_SLICES: u32 = 20;
+
+/// Whether each captured pipe reached its end.
+///
+/// Set by the capture that owns the pipe and read by the drain that bounds
+/// it. Atomics rather than cells because a spawned process task must be
+/// `Send`, and the three futures that share these run on that one task.
+#[cfg(all(unix, feature = "process"))]
+#[derive(Default)]
+struct OpenPipes {
+    /// Whether stdout reached its end, or was never a pipe.
+    stdout: AtomicBool,
+    /// Whether stderr reached its end, or was never a pipe.
+    stderr: AtomicBool,
+}
+
+#[cfg(all(unix, feature = "process"))]
+impl OpenPipes {
+    /// Whether both pipes reached their end.
+    fn closed(&self) -> bool {
+        self.stdout.load(AtomicOrdering::Acquire) && self.stderr.load(AtomicOrdering::Acquire)
+    }
+}
+
+/// Give the captured pipes a bounded drain after cleanup, then abandon them.
+///
+/// The cleanup stopped what the group signal and the capture rounds reach. A
+/// pipe end can still be held by a descendant they do not reach, and a read to
+/// end-of-file would then last as long as that descendant: a `setsid` daemon,
+/// a job a job-control shell moved to its own group, or a child forked in the
+/// window `killpg` misses on XNU. So the drain waits at most
+/// [`PIPE_DRAIN_SLICES`] slices for both pipes to close, re-signalling the
+/// group on each slice while the unreaped leader still pins its id — that is
+/// what catches a forked straggler that is still a member. When the bound
+/// passes, `abandon` ends both reads with what they hold, and the driver
+/// records [`ResidualRisk::DescriptorHeld`](crate::rt::supervise::ResidualRisk::DescriptorHeld).
+///
+/// The precedent is `lgwks_deps::metadata::run_bounded`, which ends its call at
+/// the deadline even while a grandchild holds the pipe.
+#[cfg(all(unix, feature = "process"))]
+async fn drain_pipes(group: &mut ProcessGroup<'_>, pipes: &OpenPipes, abandon: &CancellationToken) {
+    // One reschedule first: a pipe that closed with the group has delivered its
+    // end-of-file to the reactor, and the captures see it once they are polled
+    // again, so the common case pays no slice at all.
+    yield_now().await;
+    let mut may_signal = true;
+    for _ in 0..PIPE_DRAIN_SLICES {
+        if pipes.closed() {
+            return;
+        }
+        if may_signal {
+            may_signal = group.resignal_while_pinned();
+        }
+        crate::rt::time::sleep(PIPE_DRAIN_SLICE).await;
+    }
+    if !pipes.closed() {
+        abandon.cancel();
+    }
+}
+
 /// Read a captured pipe to EOF, retaining at most `limit` bytes and counting
 /// every byte.
 ///
@@ -281,17 +375,26 @@ pub(super) async fn drive_process_observed(
 /// output. A trailing fragment with no newline is not delivered: a partial line
 /// is not a line, and a caller waiting for one must keep waiting for the
 /// newline rather than being woken by half a message.
+///
+/// `abandon` ends the read early with what it holds, and `closed` is set only
+/// when the read reached the pipe's end (or there was no pipe to read), so the
+/// driver can tell a drained pipe from an abandoned one. A read error also sets
+/// it: the pipe can no longer be read, so nothing is held open on its account.
 #[cfg(all(unix, feature = "process"))]
 pub(super) async fn capture<R>(
     reader: Option<R>,
     limit: Option<NonZeroUsize>,
     on_line: Option<LineObserver<'_>>,
+    abandon: &CancellationToken,
+    closed: &AtomicBool,
 ) -> CapturedStream
 where
     R: AsyncRead + Unpin,
 {
     let (Some(mut reader), Some(limit)) = (reader, limit) else {
-        // No pipe (inherited or null) or no capture policy: nothing retained.
+        // No pipe (inherited or null) or no capture policy: nothing retained,
+        // and dropping the reader closes this end, so nothing is held.
+        closed.store(true, AtomicOrdering::Release);
         return CapturedStream::default();
     };
     let cap = limit.get();
@@ -307,8 +410,15 @@ where
     let mut fragment: Vec<u8> = Vec::new();
     let mut dropped_from_fragment: u64 = 0;
     loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => break,
+        // The read is cancel-safe: abandoning it loses no byte already read.
+        let Some(result) = abandon.run_until_cancelled(reader.read(&mut buffer)).await else {
+            break;
+        };
+        match result {
+            Ok(0) => {
+                closed.store(true, AtomicOrdering::Release);
+                break;
+            }
             Ok(read) => {
                 // A `usize` wider than 64 bits saturates the counter, the same
                 // contract `saturating_add` keeps for a long-lived stream.
@@ -334,7 +444,10 @@ where
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(_) => {
+                closed.store(true, AtomicOrdering::Release);
+                break;
+            }
         }
     }
     CapturedStream::from_parts(bytes, total, truncated)

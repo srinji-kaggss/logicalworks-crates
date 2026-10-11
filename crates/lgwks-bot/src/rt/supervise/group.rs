@@ -588,6 +588,29 @@ impl<'ops> ProcessGroup<'ops> {
         let _collected = sweep_adopted();
     }
 
+    /// Signal the group once more while a captured pipe is still open, if that
+    /// is still safe and still useful.
+    ///
+    /// Safe only while the unreaped leader pins the id, which is why the driver
+    /// calls this before the reap and why a reaped guard sends nothing. Useless
+    /// once the group was observed absent or a signal was refused: neither a
+    /// repeat nor a wait changes those answers. Returns whether a signal was
+    /// sent, so the drain stops asking once the answer is no.
+    pub(super) fn resignal_while_pinned(&mut self) -> bool {
+        if self.leader_reaped || self.group <= 0 || self.group_absent {
+            return false;
+        }
+        matches!(
+            self.signal_group(),
+            GroupSignal::Delivered | GroupSignal::Present
+        )
+    }
+
+    /// Record that a captured pipe outlived the drain after cleanup.
+    pub(super) fn mark_descriptor_held(&mut self) {
+        self.containment.record_held_descriptor();
+    }
+
     /// What this cleanup read, signalled, and could not account for.
     ///
     /// Read by the driver to carry the report onto the outcome, and by [`Drop`] to
