@@ -152,6 +152,11 @@ fn read_full_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
         let n = stream.read(&mut request)?;
         if n == 0 {
+            #[cfg(feature = "trace")]
+            crate::trace::warn!(
+                header_bytes = head.len(),
+                "canned server: the peer closed before the header block ended"
+            );
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         head.extend_from_slice(&request[..n]);
@@ -183,6 +188,12 @@ fn read_full_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
     while received < content_length {
         let n = stream.read(&mut request)?;
         if n == 0 {
+            #[cfg(feature = "trace")]
+            crate::trace::warn!(
+                received,
+                content_length,
+                "canned server: the peer closed before the declared body arrived"
+            );
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         head.extend_from_slice(&request[..n]);
@@ -195,9 +206,25 @@ fn read_full_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8
 fn join_server(
     server: thread::JoinHandle<std::io::Result<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let served = server
-        .join()
-        .map_err(|_| "the canned server thread panicked before replying")?;
+    let served = match server.join() {
+        Ok(served) => served,
+        Err(payload) => {
+            // The payload is the server's own account of what went wrong, so it
+            // is carried into the failure rather than replaced by a generic one.
+            let message = match payload.downcast_ref::<&str>() {
+                Some(text) => (*text).to_owned(),
+                None => match payload.downcast_ref::<String>() {
+                    Some(text) => text.clone(),
+                    None => "a payload that is not text".to_owned(),
+                },
+            };
+            #[cfg(feature = "trace")]
+            crate::trace::error!(%message, "the canned server thread panicked before replying");
+            return Err(
+                format!("the canned server thread panicked before replying: {message}").into(),
+            );
+        }
+    };
     served?;
     Ok(())
 }
