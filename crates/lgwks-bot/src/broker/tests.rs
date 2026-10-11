@@ -1,3 +1,4 @@
+//! Unit tests for `broker`, moved verbatim out of broker.rs.
 
 use super::*;
 use crate::effect::{ActionDigest, ActionId, AttemptId, EnvironmentId, FlowRevision, RunId};
