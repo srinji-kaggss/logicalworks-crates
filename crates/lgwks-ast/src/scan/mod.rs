@@ -18,7 +18,8 @@
 //! Two grammar facts shape every detector. A method call has no node of its
 //! own: `x.f(a)` is a `call_expression` whose callee is a `field_expression`.
 //! And attributes and doc comments are siblings written before the item they
-//! annotate, not children of it, so [`item_attributes`] reads them backwards.
+//! annotate, not children of it, so the private `item_attributes` reads them
+//! backwards.
 
 mod binding;
 mod cfg;
