@@ -4,48 +4,6 @@ Capability checks in this crate answer one question: was this call covered by
 the grant set the bot was built with. They do not confine anything, and the
 boundary is worth reading before you design around it.
 
-## Admission happens at build, and reports the whole shortfall
-
-`EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs.rs:7155`):
-
-```rust
-let mut shortages: Vec<Shortage> = Vec::new();
-for chain in &chains {
-    shortages.extend(grants.uncovered(
-        chain.source.required_caps(),
-        &Demand::new(chain.source.domain_id()),
-    ));
-    for entry in &chain.entries {
-        shortages.extend(grants.uncovered(
-            entry.action.required_caps(),
-            &Demand::new(entry.action.domain_id()),
-        ));
-    }
-}
-if let Some(deficit) = Deficit::from_shortages(shortages) {
-    return Err(BotError::CapabilityDenied { deficit });
-}
-```
-
-So a bot that declares `bot.net` and is built with `GrantSet::empty()` fails
-before it ever ticks. The same gate runs on both terminal builder calls
-(`EcsBuilder::build` and `EcsObserveBuilder::build`), because both route through
-`assemble`.
-
-**One refusal carries every unmet requirement.** `BotError::CapabilityDenied`
-holds a `Deficit` (`crates/lgwks-bot/src/cap.rs:205`) — the whole difference
-between what the bot requires and what it was granted — rather than the first
-element of it. The shape matters more than it looks: a check that returns one
-missing capability at a time makes admission a loop where each pass reveals one
-more word, so a bot short of four capabilities takes four refusals to diagnose
-and the caller never holds the whole picture. Each `Shortage` also names the
-domain that declared it, because `bot.net` says what is missing and
-`gh::pr_status` says who is asking.
-`GrantSet::admit` (`crates/lgwks-bot/src/gate.rs:116`) is the same gate for a
-single requirement list, and `GrantSet::uncovered`
-(`crates/lgwks-bot/src/gate.rs:106`) is the total form both are built on.
-
 ## The refusal derives its own repair
 
 A `Deficit` already names every capability that would close it, so the caller
@@ -62,27 +20,6 @@ two-step composition — the deficit's set folded into the held set — and a te
 asserts both halves, because "the repair admits the requirement" and "the repair
 admits the missing capabilities" are different claims and only the second is
 true.
-
-## Every call presents a proof
-
-`GrantSet::issue` (`crates/lgwks-bot/src/gate.rs:131`) is the only path that
-constructs an `Auth`. Its constructor is crate-private
-(`crates/lgwks-bot/src/cap.rs:406`), and `Auth` is not `Serialize`, so authority
-cannot round-trip through JSON.
-
-Each verb takes an `(Auth, input)` tuple. `poll`, `execute_action`, and `query`
-call `Auth::check(&self.required_caps())?` before touching anything. `Evaluate`
-does not, because it takes no `Auth` at all: it is a boolean over already-observed
-state with no side effect to gate.
-
-Coverage is exact set membership, not subsumption
-(`crates/lgwks-bot/src/cap.rs:526`). A proof scoped to `bot.fs` presented to a
-source requiring `bot.net` is denied. A proof covering nothing authorizes
-nothing. Both cases have tests in `crates/lgwks-bot/src/spec.rs`
-(`wrong_scope_proof_is_denied_confused_deputy`, `call_with_empty_proof_is_denied_at_the_callee`).
-
-The framework mints a fresh proof per call from the grant set it retained, so you
-never thread an `Auth` through your own call sites for the chained path.
 
 ## A credential can lapse, and a receiver can refuse one
 
@@ -102,37 +39,6 @@ and `NeedSet::proposed_grants` turns it into a grant set. Both are
 again, so neither feeds a retry loop. The shipped `gh` adapter reports a
 refused token this way on its `Observe` verb and in every flow.
 
-## The grant set is a snapshot
-
-This is the part that surprises people. `EcsBot::assemble` clones the set into
-the world (`crates/lgwks-bot/src/ecs.rs:7175`):
-
-```rust
-world.insert_resource(Grants(grants.clone()));
-```
-
-`Grants` is a private resource holding that clone. `GrantSet`
-(`crates/lgwks-bot/src/gate.rs:14`) has three methods that add or inspect:
-`empty`, `all_shipped`, `grant`, plus `admit` and `issue`. There is no `revoke`,
-and no method that removes a capability.
-
-The consequences, stated plainly:
-
-- Dropping or changing the `GrantSet` you passed to `build` does not narrow the
-  bot. It keeps the authority it was admitted with for its whole life.
-- An `Auth` you hold stays valid for the capabilities it covers. It is a
-  capability-membership proof inside this process, not a signature and not an
-  identity. A proof minted from an expiring grant lapses when its lifetime has
-  passed (see "A credential can lapse" below), but that lifetime is fixed at the
-  mint and a built bot mints afresh on every call, so it does not narrow a
-  running bot.
-- Narrowing a running bot is a decision made outside this API. Build it from a
-  narrower set, or stop calling `tick`.
-
-If that is the property you need, it is not here yet. Live narrowing would need
-a linearization point, a token generation, and a defined answer for effects
-already in flight. None of those exist in the inspected source.
-
 ## It is not a sandbox
 
 `crates/lgwks-bot/src/cap.rs:15` states the ceiling in the module documentation:
@@ -148,40 +54,6 @@ crate does not intercept that, and nothing in the inspected source claims to.
 
 What you get instead is an answer to "what is this bot permitted to do", readable
 from its grant set rather than from a reading of every domain implementation.
-
-## There is no run-time capability hold, because it would be unreachable
-
-The obvious next step after a total refusal — an action denied while the bot is
-running, the entry held, the caller supplies the capability, the tick carries on
-from there — is **not implemented, and the reason is not effort. An action
-cannot be denied for want of a capability at run time.** Two facts make that so:
-
-- `EcsBot::assemble` admits every declared requirement before the world is built
-  (`crates/lgwks-bot/src/ecs.rs:7155`), so a bot whose declared requirements are
-  not granted does not exist to run.
-- Every per-call proof is minted from **the same list**. `run_any` calls
-  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:797`),
-  and the action then checks `call.0.check(self.required_caps())`. The two cannot
-  disagree, and nothing narrows `Grants` after `assemble` — the only writer is
-  `assemble` itself.
-
-So `Auth::check` cannot fail inside a running bot.
-`BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs.rs:4525`) is
-defensive rather than live. A hold was built on top of that arm and then removed,
-because machinery whose only caller is a contrived test is not a feature.
-
-The consequence worth knowing is the *reverse* of a hold, and it is a real gap:
-
-> **An action that declares `&[]` and performs a side effect passes the gate
-> silently.**
-
-The gate checks the declared set, and `&[]` is trivially covered — so "this
-action needs nothing" and "this action's author never said" are the same value,
-and the crate cannot tell them apart. Everything above about authority is a
-statement about the capabilities a domain **declares**. Making an undeclared
-capability detectable, or making a run-time hold meaningful, is a design change
-rather than a repair, and it is not made here.
 
 ## Capability names
 
@@ -219,3 +91,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `grant` is idempotent (`crates/lgwks-bot/src/gate.rs:59`), so granting a
 capability twice is the same as granting it once and you need not track what an
 earlier call added.
+
+## In this guide
+
+- [Admission happens at build, and reports the whole shortfall](authority/admission-happens-at-build-and-reports-the-whole-shortfall.md)
+- [Every call presents a proof](authority/every-call-presents-a-proof.md)
+- [The grant set is a snapshot](authority/the-grant-set-is-a-snapshot.md)
+- [There is no run-time capability hold, because it would be unreachable](authority/there-is-no-run-time-capability-hold-because-it-would-be-unreachable.md)
