@@ -109,6 +109,7 @@ async fn drain(
             Ok(value) => values.push(value),
             Err(error) if error.is_cancelled() => cancelled = cancelled.saturating_add(1),
             Err(error) => {
+                lgwks_std::trace::error!(tier, %error, "a joined task failed rather than finishing or being cancelled");
                 return Err(format!(
                     "tier {tier}: a task failed rather than finishing or being cancelled: {error}"
                 )
