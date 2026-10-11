@@ -127,6 +127,26 @@ def set_aside_interrupted(work: pathlib.Path, jobs: list) -> None:
 # ── summary ──────────────────────────────────────────────────────────────────
 
 
+def render_summary(summary: dict) -> str:
+    """The summary as JSON with one top-level key per line, and one line per
+    element of a list-valued key (one group per line).
+
+    `indent=2` put every nested field on its own line, so a 33-trial run wrote
+    1,181 lines, past the repository's 1,000-line file law. This shape is still
+    one valid JSON document and still diffs one group at a time.
+    """
+    lines = []
+    for key, value in summary.items():
+        if isinstance(value, list):
+            items = ",\n".join(f"    {json.dumps(item, sort_keys=True)}" for item in value)
+            body = f"[\n{items}\n  ]" if value else "[]"
+        else:
+            body = json.dumps(value, sort_keys=True)
+        lines.append(f"  {json.dumps(key)}: {body}")
+    return "{\n" + ",\n".join(lines) + "\n}\n"
+
+
+
 def median_or_none(values):
     numeric = [value for value in values if value is not None]
     if not numeric:
@@ -521,7 +541,7 @@ def main() -> int:
         "groups": summarize(records),
     }
     summary_path = run_dir / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    summary_path.write_text(render_summary(summary))
 
     print(f"\nwrote {out}")
     print(f"wrote {summary_path}")
