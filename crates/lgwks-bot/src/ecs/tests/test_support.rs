@@ -2,6 +2,39 @@
 
 use super::*;
 
+/// An action that always refuses, counting the attempts it received, in
+/// one of the two shapes a refusal takes.
+pub(super) struct Refuses {
+    pub(super) attempts: Rc<Cell<usize>>,
+    pub(super) domain: &'static str,
+    pub(super) certainty: DispatchCertainty,
+    pub(super) cause: &'static str,
+}
+
+impl Refuses {
+    /// Refuses after the attempt without delivering anything: a failure a
+    /// retry may cure.
+    pub(super) fn undelivered(attempts: Rc<Cell<usize>>) -> Self {
+        Self {
+            attempts,
+            domain: "test::refuses",
+            certainty: DispatchCertainty::NotDelivered,
+            cause: "refused",
+        }
+    }
+
+    /// Refuses permanently, before dispatch: the shape every "binding
+    /// required" domain has.
+    pub(super) fn permanently(attempts: Rc<Cell<usize>>) -> Self {
+        Self {
+            attempts,
+            domain: "test::permanent",
+            certainty: DispatchCertainty::Refused,
+            cause: "no binding is installed for this domain",
+        }
+    }
+}
+
 impl Execute for Refuses {
     type Input = u16;
     type Output = ();
