@@ -1,7 +1,8 @@
-# What these crates are for
+# Use cases and boundaries
 
-The use cases, the boundaries, and how the crates relate to the ones a reader
-meets first. Moved from the root README under the size law (#408).
+What each crate is for, what none of them is, and where they sit beside the
+crates a search finds first. Moved from the repository README, which keeps
+only the quickstart.
 
 ## Use cases
 

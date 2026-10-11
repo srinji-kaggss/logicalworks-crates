@@ -3,8 +3,8 @@
 **Two qualifications on "zero-dependency core", because at the crate level it is
 not true.** Only `--no-default-features --features core` pulls nothing at all;
 the *default* feature set includes `trace`, which is `tracing` +
-`tracing-subscriber`. `lgwks_std`'s README carries this caveat and the quickstart
-below assumes the default set.
+`tracing-subscriber`. `lgwks_std`'s README carries this caveat, and the
+[repository quickstart](../README.md#quickstart) assumes the default set.
 
 **The dependency graph, stated exactly.** `lgwks_std` and `lgwks_ast` depend on
 nothing in this workspace. `lgwks_bot` depends on `lgwks_std`, and optionally on
@@ -25,7 +25,7 @@ nothing in this workspace. `lgwks_bot` depends on `lgwks_std`, and optionally on
 | Capability-gated automation (Observe/Evaluate/Execute/Query) | `lgwks_bot` | default (sync) |
 | Async timers, channels, sockets, processes, signals | `lgwks_bot::rt` | `rt`, `time`, `sync`, `net`, `process`, `fs`, `signal` |
 | Parse Rust/Python/TS/JS/Go/Java/Swift in a tool | `lgwks_ast` | default (7 grammars) |
-| Rust source lint scan (zero-gate detectors) | `lgwks_ast` | `scan`; `tool` for the `lgwks-ast scan` CLI (#408) |
+| Rust source lint scan (zero-gate detectors) | `lgwks_ast` | `scan` (library), `tool` (the `lgwks-ast scan` binary) |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` |
 | Native terminal UI (AppCUI) | `lgwks_deps` | `appcui`, version =0.5.1 per `contract/APPROVED.toml` |

@@ -7,13 +7,12 @@ which moved is worse than no index, because the agent trusts it and stops
 looking. So this file is generated and never hand-edited, and CI re-runs this
 script and fails when the committed copy differs.
 
-The index has exactly one source per table: the crates table in `README.md` and
-the Documentation table in `docs/README.md` (moved there when the README was
-split under the 120-line `.md` law, #408). They are already the human-facing
+The index has exactly one source per table: the crates table of `README.md`
+and the Documentation table of `docs/README.md` (moved there when the README
+was split under the 120-line .md law). They are already the human-facing
 index, and a second list would be a second thing to drift out of date. This
-script reads those two tables,
-checks every path they name exists, checks no document in `docs/` is missing
-from the table, and writes `llms.txt`.
+script reads those two tables, checks every path they name exists, checks no
+document in `docs/` is missing from the table, and writes `llms.txt`.
 
 Usage:
     python3 scripts/gen-llms-txt.py
@@ -31,8 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
-# The Documentation table; its links are relative to `docs/`, as GitHub renders them.
-DOCS_INDEX = ROOT / "docs" / "README.md"
+# The Documentation table; its links are relative to `docs/`.
+INDEX = ROOT / "docs" / "README.md"
 OUTPUT = ROOT / "llms.txt"
 
 # Table rows whose first cell carries a link: `| [`path`](path) | description |`
@@ -127,18 +126,17 @@ def main() -> int:
         crates.append((crate, match.group(1), row_cells[-1]))
 
     documents: list[tuple[str, str, str]] = []
-    docs_index = DOCS_INDEX.read_text(encoding="utf-8")
-    for row in section("\n" + docs_index.replace("# Documentation", "## Documentation", 1), "Documentation", "docs/README.md"):
+    index = INDEX.read_text(encoding="utf-8")
+    for row in section(index, "Documentation", "docs/README.md"):
         match = LINK_ROW.match(row)
         if match is None:
             continue
-        path = (DOCS_INDEX.parent / match.group("target")).resolve()
-        description = cells(row)[-1]
+        link, description = match.group("target"), cells(row)[-1]
+        path = (INDEX.parent / link).resolve()
         if not path.is_file() or not path.is_relative_to(ROOT):
-            problems.append(f"docs/README.md names {match.group('target')}, which does not exist")
+            problems.append(f"the Documentation table names {link}, which does not exist")
             continue
-        target = path.relative_to(ROOT).as_posix()
-        documents.append((title_of(path), target, description))
+        documents.append((title_of(path), path.relative_to(ROOT).as_posix(), description))
 
     # A document nobody indexed is invisible to every reader that arrives
     # through this file, which for an agent is every reader.
@@ -152,13 +150,13 @@ def main() -> int:
     # A document deliberately kept out of the consumer index is named here with
     # its reason, so the way to exempt one is to write down why rather than to
     # move it somewhere the check does not reach.
-    NOT_INDEXED: dict[str, str] = {"docs/README.md": "it is the index itself"}
+    NOT_INDEXED: dict[str, str] = {"docs/README.md": "the index itself"}
     indexed = {target for _, target, _ in documents}
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()
         if relative in indexed or relative in NOT_INDEXED:
             continue
-        problems.append(f"{relative} exists but the docs/README.md Documentation table omits it")
+        problems.append(f"{relative} exists but the Documentation table in docs/README.md omits it")
 
     # A crate nobody indexed is invisible to every reader that arrives through
     # this file, which for an agent is every reader.
@@ -192,7 +190,7 @@ def main() -> int:
     out += ["", "## Documentation", ""]
     out += [f"- [{title}]({blob(target)}) — {description}" for title, target, description in documents]
 
-    # Only what the Documentation table does not already carry. The index
+    # Only what the Documentation table does not already carry. The README
     # indexes the changelog and the security policy, and listing them twice
     # would make the file look longer without making it say more.
     optional = [

@@ -5,11 +5,8 @@ runtime for long-running automation, a multi-language AST front end, a proc-macr
 support crate, and an audited dependency storefront. Each is usable on its own.
 Take one and ignore the rest.
 
-What the crates are for is [`docs/overview.md`](docs/overview.md); which one to
-reach for, and the dependency graph stated exactly, is
-[`docs/choosing-a-crate.md`](docs/choosing-a-crate.md). Every document is indexed
-in [`docs/README.md`](docs/README.md); to use a crate rather than change one,
-start with the [consumer guides](docs/guides/index.md).
+`lgwks_std`'s default features are not dependency-free; that caveat and the
+exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
 
 ## Crates
 
@@ -17,7 +14,7 @@ start with the [consumer guides](docs/guides/index.md).
 |---|---|---|---|
 | `lgwks_std` | 2.2.0 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging with default debugger install, time and calendars, hashing, ids, globs, process control |
 | `lgwks_bot` | 2.2.0 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
-| `lgwks_ast` | 1.1.0 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
+| `lgwks_ast` | 1.1.0 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code, plus `lgwks-ast scan`, the zero-gate source scan |
 | `lgwks_macros` | 1.1.1 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
 | `lgwks_deps` | 3.0.1 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
@@ -101,19 +98,21 @@ lgwks-deps init .         # write a fail-closed register
 lgwks-deps check .        # audit, and refuse any unowned external edge
 ```
 
-## Building and testing
+## Where to go next
 
-The gate is defined once in `scripts/gate-lanes.toml` and run with
-`./scripts/ci-local.sh`; [`AGENTS.md`](AGENTS.md) lists every check that must pass.
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) to contribute, and report vulnerabilities
-through [`SECURITY.md`](SECURITY.md), not as a public issue.
+- [Use cases and boundaries](docs/use-cases.md): what each crate is for, and is not.
+- [Choosing a crate](docs/choosing-a-crate.md): which crate and feature for a need.
+- [Documentation](docs/README.md): every guide, spec and decision record.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md); the checks a change must pass are in
+[`AGENTS.md`](AGENTS.md#checks-that-must-pass). Report vulnerabilities through
+the process in [`SECURITY.md`](SECURITY.md), not as a public issue.
 
 ## License
 
-Copyright 2026 Logical Works Incorporated; each crate ships its own `LICENSE`.
-`lgwks_std`, `lgwks_ast`, and `lgwks_deps` are Apache-2.0, for example
-[`crates/lgwks-std/LICENSE`](crates/lgwks-std/LICENSE). `lgwks_bot` is
-[MPL-2.0](crates/lgwks-bot/LICENSE): file-level copyleft, so the artefact the
-whole estate embeds cannot be taken, modified, and shipped closed. Both permit
-proprietary *use*; [`LICENSING.md`](LICENSING.md) states the rule, why the bot
-differs, and the commercial licence for the one case MPL-2.0 does not cover.
+Copyright 2026 Logical Works Incorporated. `lgwks_std`, `lgwks_ast` and
+`lgwks_deps` are Apache-2.0; `lgwks_bot` is [MPL-2.0](crates/lgwks-bot/LICENSE),
+file-level copyleft. Each crate ships its own `LICENSE`; [`LICENSING.md`](LICENSING.md)
+states the rule, why the bot differs, and the commercial licence.
