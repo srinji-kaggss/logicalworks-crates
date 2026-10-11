@@ -457,11 +457,35 @@ jobs:
         run: >
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features --features process -- -D warnings
+      # Two of the documentation lanes ride here rather than in the docs job.
+      # Run serially, the four rustdoc lanes plus the docs.rs lane made that
+      # job the run's critical path on every main run measured: 342 s and
+      # 386 s on quiet runs (38008765147, 38016146090), 647 s under load
+      # (38084108784), while this job finished in 45-64 s. These two build
+      # lgwks-std's narrow feature sets and the declared docs.rs sets, which
+      # the clippy matrix above has already resolved on this instance.
+      - name: Doc build for each lgwks-std feature alone
+        # The general case: a link between two optional modules where neither
+        # implies the other resolves under both boundary lanes. Each feature is
+        # documented alone, so every gated module is documented while every
+        # module it does not pull in is genuinely absent.
+        run: ./scripts/doc-lanes.sh per-feature
+      - name: docs.rs metadata names a buildable feature set
+        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
+        # and a failure there is invisible from the repository: the crate page
+        # just shows a build error. `all-features = true` on a crate whose
+        # features include platform-bound ones fails on every publish, which is
+        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
+        # compile off Apple targets. Build with the declared set so an
+        # unbuildable declaration fails here instead of on docs.rs.
+        run: python3 scripts/ci_local.py --lane docsrs-metadata
 
 
   # The documentation lanes, apart from the lints: rustdoc builds its own
   # output for each feature set, and beside clippy the two made one 513 s job
-  # (run 37633462471) whose halves share nothing but the checkout.
+  # (run 37633462471) whose halves share nothing but the checkout. The
+  # per-feature and docs.rs lanes moved back beside clippy once this job alone
+  # became the critical path (see the clippy job).
   docs:
     name: Docs and release gates
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-12]
@@ -489,21 +513,6 @@ jobs:
         # `--no-default-features` does not compile the module holding the link,
         # so a default-on to default-off link is invisible to both.
         run: ./scripts/doc-lanes.sh default
-      - name: Doc build for each lgwks-std feature alone
-        # The general case: a link between two optional modules where neither
-        # implies the other resolves under both boundary lanes. Each feature is
-        # documented alone, so every gated module is documented while every
-        # module it does not pull in is genuinely absent.
-        run: ./scripts/doc-lanes.sh per-feature
-      - name: docs.rs metadata names a buildable feature set
-        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
-        # and a failure there is invisible from the repository: the crate page
-        # just shows a build error. `all-features = true` on a crate whose
-        # features include platform-bound ones fails on every publish, which is
-        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
-        # compile off Apple targets. Build with the declared set so an
-        # unbuildable declaration fails here instead of on docs.rs.
-        run: python3 scripts/ci_local.py --lane docsrs-metadata
 
   # Every compile-only matrix: feature sets, targets, grammars, the Metal
   # storefronts and the standalone consumer packages. Each is `cargo check` or a
