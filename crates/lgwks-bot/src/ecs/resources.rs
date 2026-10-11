@@ -24,7 +24,7 @@ use crate::verb::RefreshReason;
 use super::admit::AdmitKind;
 #[cfg(doc)]
 use super::bot::EcsBot;
-use super::entry::RetryPolicy;
+use super::entry::{RetryReading, RetrySchedule};
 use super::work::AdmittedInput;
 
 /// A source's identity in the world.
@@ -194,9 +194,36 @@ impl AdmitScratch {
     }
 }
 
-/// The retry policy in force: one authority per world, like `Grants`.
+/// The retry schedule in force: one authority per world, like `Grants`.
 #[derive(Resource, Debug)]
-pub(super) struct Policy(pub(super) RetryPolicy);
+pub(super) struct Policy {
+    /// The policy and the clock its backoff is measured on.
+    pub(super) schedule: RetrySchedule,
+    /// The clock reading the current tick runs against, taken once when the
+    /// tick begins.
+    pub(super) now: Duration,
+}
+
+impl Policy {
+    /// A schedule, read at its clock's current instant.
+    pub(super) fn new(schedule: RetrySchedule) -> Self {
+        let now = schedule.clock.now();
+        Self { schedule, now }
+    }
+
+    /// Take this tick's one reading of the clock.
+    pub(super) fn begin_tick(&mut self) {
+        self.now = self.schedule.clock.now();
+    }
+
+    /// The schedule as the current tick reads it.
+    pub(super) fn reading(&self) -> RetryReading {
+        RetryReading {
+            policy: self.schedule.policy,
+            now: self.now,
+        }
+    }
+}
 
 /// The chains whose cached baseline cannot be trusted, and why.
 ///

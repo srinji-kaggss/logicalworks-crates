@@ -5,8 +5,11 @@ use std::time::Duration;
 use crate::effect::InputIdentity;
 use lgwks_deps::bevy_ecs::prelude::World;
 
+use lgwks_std::retry::RetryPolicy;
+
 use crate::broker::DispatchError;
 use crate::cap::{Deficit, Demand, Shortage};
+use crate::clock::Clock;
 use crate::effect::ActionId;
 use crate::error::BotError;
 use crate::gate::GrantSet;
@@ -18,7 +21,7 @@ use crate::verb::{Evaluate, Execute, Observe};
 use super::bot::EcsBot;
 use super::effects::Effects;
 use super::effects::RecordedOutcome;
-use super::entry::RetryPolicy;
+use super::entry::RetrySchedule;
 use super::fold::schedule;
 use super::fold::validate;
 use super::identity::derive_action_id;
@@ -48,6 +51,8 @@ use super::scope::EffectScope;
 #[cfg(doc)]
 use super::watchdog::DEFAULT_POLL_DEADLINE;
 use super::watchdog::MAX_POLL_DEADLINE;
+#[cfg(doc)]
+use super::work::AbandonReason;
 use super::work::EffectEvidence;
 use super::work::identify_output;
 use super::work::same_output;
@@ -173,7 +178,7 @@ pub struct EcsBuilder {
     /// Chains finished so far.
     pub(super) chains: Vec<EcsChain>,
     /// The retry policy every entry will run under.
-    pub(super) policy: RetryPolicy,
+    pub(super) policy: RetrySchedule,
     /// The identity, the fence and the journal every dispatch goes through.
     ///
     /// `None` until [`Self::with_effects`] supplies one, and `build` refuses
@@ -255,16 +260,39 @@ impl EcsBuilder {
         self
     }
 
-    /// Set the retry budget for entries whose effect definitely did not happen.
+    /// Set the retry policy for entries whose effect definitely did not happen.
     ///
-    /// Additive and defaulted: a caller that never calls this gets
-    /// [`RetryPolicy::DEFAULT`], which is what makes the budget a policy rather
-    /// than a constant. Without it, "the work was given up on" would be a fact
-    /// the caller could not influence, and a bot whose actions are idempotent
-    /// would abandon work it could perfectly well retry.
+    /// Every field is honoured. `max_attempts` bounds the attempts per entry,
+    /// the first included. After a definite failure the entry is held for
+    /// [`RetryPolicy::delay`] of the retry it would lead to, measured on the
+    /// bot's clock (see [`Self::with_clock`]) and jittered deterministically
+    /// per action, so `base_delay` and `max_delay` space the retries. The
+    /// `deadline` runs from the entry's first attempt of a generation and no
+    /// attempt begins at or past it: a retry whose backoff would end past it is
+    /// not scheduled, and one a late tick reaches past it is not begun. Either
+    /// way the entry is abandoned with [`AbandonReason::DeadlineExhausted`].
+    ///
+    /// Defaulted: a caller that never calls this gets three attempts, no
+    /// backoff and no deadline, the behaviour every bot had before the policy
+    /// carried time. A backoff is held in memory, so a restarted process
+    /// retries a backing-off entry on its first tick; the attempt count, which
+    /// the journal carries, still bounds it.
     #[must_use]
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.policy = policy;
+        self.policy.policy = policy;
+        self
+    }
+
+    /// Declare the clock retry backoffs and deadlines are measured on.
+    ///
+    /// Defaulted to [`Clock::wall`]. A [`Clock::virtual_at`] makes every
+    /// backoff a test's to drive: a tick before the clock reaches an entry's
+    /// `retry_at` holds it, and the first tick at or after it walks it. Source
+    /// polls are bounded by the wall watchdog whatever clock is declared here,
+    /// because a source that stopped answering is not waiting for time.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.policy.clock = clock;
         self
     }
 
@@ -502,7 +530,7 @@ pub struct EcsObserveBuilder<S> {
     /// Tuples attached so far, each already erased for storage.
     pub(super) entries: Vec<ChainEntry>,
     /// Carried from [`EcsBuilder`] alongside `policy`.
-    pub(super) policy: RetryPolicy,
+    pub(super) policy: RetrySchedule,
     /// Carried from [`EcsBuilder`] alongside `policy`.
     pub(super) poll_deadline: Duration,
 }
@@ -515,7 +543,7 @@ impl EcsBot {
         name: String,
         chains: Vec<EcsChain>,
         grants: &GrantSet,
-        policy: RetryPolicy,
+        policy: RetrySchedule,
         effects: Option<EffectScope>,
         poll_deadline: Duration,
     ) -> Result<Self, BotError> {
@@ -631,7 +659,7 @@ impl EcsBot {
         world.insert_resource(Grants(grants.clone()));
         world.insert_resource(Fired::default());
         world.insert_resource(TickError::default());
-        world.insert_resource(Policy(policy));
+        world.insert_resource(Policy::new(policy));
         world.insert_resource(PollBudget(poll_deadline));
 
         let mut order = Vec::with_capacity(chains.len());

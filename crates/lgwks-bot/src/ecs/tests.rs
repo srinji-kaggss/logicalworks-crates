@@ -10,7 +10,7 @@ use super::bot::EcsBot;
 use super::effects::Effects;
 use super::entry::AttemptRecord;
 use super::entry::EntryState;
-use super::entry::RetryPolicy;
+use super::entry::RetryReading;
 use super::entry::Transition;
 use super::fold::fire_plan;
 use super::fold::observe_fold;
@@ -22,6 +22,7 @@ use super::identity::hash_parts;
 use super::ledger::Ledger;
 use super::resources::Chains;
 use super::resources::Observed;
+use super::resources::Policy;
 use super::resources::Polled;
 use super::resources::TickError;
 use super::scope::EffectScope;
@@ -32,6 +33,7 @@ use super::work::AdmittedInput;
 use super::work::EffectEvidence;
 use super::work::PendingWork;
 use super::work::TransitionHold;
+use super::work::WorkId;
 use super::work::identify_output;
 use crate::EventId;
 use crate::broker::{Broker, DispatchError};
@@ -53,6 +55,7 @@ use lgwks_deps::bevy_ecs::{
     schedule::{IntoScheduleConfigs, LogLevel, Schedule, ScheduleBuildSettings},
 };
 use lgwks_std::hash::Hasher;
+use lgwks_std::retry::RetryPolicy;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -599,6 +602,7 @@ use test_support::{
 mod test_part_00;
 mod test_part_01;
 mod test_part_02;
+mod test_part_03;
 
 // The cases INVARIANTS.md cites by path (INV-BOT-41, -42, -123) live here,
 // at `ecs::tests::<name>`, so the `invariants` lane resolves them.

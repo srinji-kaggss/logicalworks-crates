@@ -3,7 +3,7 @@
 Pages of this guide: [polls and actions](failures.md) · [worked example](failures-example.md) · [uncertain effects](failures-effects.md) · [reporting order](failures-order.md)
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:564`) and `Bot::tick_async` is
+synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:565`) and `Bot::tick_async` is
 the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs/bot.rs:390`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
@@ -18,7 +18,7 @@ behind an indeterminate effect means.
 ## Case one: a poll failed
 
 Nothing ran. The `observe_fold` system returns before committing anything
-(`crates/lgwks-bot/src/ecs/ledger.rs:693`):
+(`crates/lgwks-bot/src/ecs/ledger.rs:766`):
 
 ```rust,ignore
 // Pass one: the first error, in declaration order.
@@ -53,7 +53,7 @@ Actions run in declaration order, but deciding and doing are two systems. The
 `fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
 a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
-(`crates/lgwks-bot/src/ecs/fold.rs:321`); the `run_steps` pass then awaits those steps
+(`crates/lgwks-bot/src/ecs/fold.rs:324`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
 (`crates/lgwks-bot/src/ecs/bot.rs:442`). It breaks on the first failure and records
 it, and there is no rollback:
@@ -71,7 +71,7 @@ means "this run did not finish", not "nothing happened".
 
 One consequence is easy to miss, and it is the reason the ledger exists.
 `observe_fold` commits the new values and bumps the revisions *before*
-`fire_plan` decides (`crates/lgwks-bot/src/ecs/fold.rs:321`), so selecting work by
+`fire_plan` decides (`crates/lgwks-bot/src/ecs/fold.rs:324`), so selecting work by
 `Changed<Revision>` alone means the next tick polls an unchanged source, finds
 nothing eligible, and never attempts the actions after the failure again. The
 work is lost, not queued.
@@ -82,8 +82,9 @@ opens a transition. Three consequences follow, and the example below asserts all
 three.
 
 - **The failed entry is retried while it has budget, even if the source never
-  moves again.** `RetryPolicy` sets the budget (three attempts by default;
-  `RetryPolicy::ONE_ATTEMPT` for a domain whose failures are always terminal).
+  moves again.** `lgwks_std::retry::RetryPolicy` sets it: attempts, a backoff
+  waited out on the bot's clock (`with_clock`), and a deadline from the first
+  attempt (three attempts, no wait, no deadline by default).
 - **Every entry of a transition runs against the one payload the transition was
   opened under.** The observed value is *moved* into the transition when it opens
   or resumes, so a retry after a failure reads the same input the entry that

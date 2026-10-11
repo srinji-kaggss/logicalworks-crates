@@ -11,6 +11,7 @@ use crate::verb::EffectLifetime;
 use crate::verb::Execute;
 
 use super::bot::EcsBot;
+use super::entry::RetryReading;
 use super::entry::Settled;
 use super::ledger::Ledger;
 use super::resources::Chains;
@@ -48,7 +49,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         failures: &mut [Option<BotError>],
-        budget: u32,
+        retry: &RetryReading,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -69,7 +70,7 @@ impl EcsBot {
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
-            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, budget).await;
+            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, retry).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a
             // caller gets, exactly as the synchronous walk had it — except that
@@ -98,7 +99,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         condition_failure: Option<BotError>,
-        budget: u32,
+        retry: &RetryReading,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -144,7 +145,7 @@ impl EcsBot {
                         if self
                             .world
                             .non_send_mut::<Ledger>()
-                            .finish_recording(work, evidence, attempts, budget)
+                            .finish_recording(work, evidence, attempts, retry)
                             && evidence == EffectEvidence::Applied
                         {
                             fired = fired.saturating_add(1);
@@ -194,6 +195,17 @@ impl EcsBot {
                 }
             }
 
+            // A retry that came due after its deadline is given up here, at the
+            // instant it would begin, rather than begun: the abandonment is the
+            // barrier the rest of the chain waits behind, and the tick reports it.
+            if self
+                .world
+                .non_send_mut::<Ledger>()
+                .expire_retry(work, retry)
+            {
+                break;
+            }
+
             // Written *before* the attempt, not after: a tick dropped while the
             // effect is in flight leaves this behind, and a record that says
             // "dispatched, outcome unknown" is what makes the next tick hold the
@@ -220,7 +232,7 @@ impl EcsBot {
             let (key, authority) = match self
                 .world
                 .non_send_mut::<Ledger>()
-                .begin_attempt(work, lifetime)
+                .begin_attempt(work, lifetime, retry)
                 .await
             {
                 Ok(pair) => pair,
@@ -252,7 +264,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), retry);
                 failure = Some(error);
                 break;
             }
@@ -326,7 +338,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), retry);
                 failure = Some(error);
                 break;
             }
@@ -339,7 +351,7 @@ impl EcsBot {
                 Err(error) => {
                     self.world
                         .non_send_mut::<Ledger>()
-                        .fail(work, &error, key.attempt(), budget);
+                        .fail(work, &error, key.attempt(), retry);
                     failure = Some(error);
                     break;
                 }
@@ -359,7 +371,7 @@ impl EcsBot {
     /// handled.
     #[must_use]
     pub fn pending(&self) -> Vec<PendingWork> {
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let budget = self.world.resource::<Policy>().reading().budget();
         self.world.non_send::<Ledger>().pending(budget)
     }
 

@@ -1,11 +1,14 @@
 //! Admission planning: which chains may consume which observed inputs.
 
+use std::time::Duration;
+
 use lgwks_deps::bevy_ecs::prelude::World;
 
 use crate::error::{BotError, RetryClass};
 use crate::spec::Erased;
 
 use super::entry::EntryState;
+use super::entry::RetryReading;
 use super::entry::Transition;
 use super::ledger::Ledger;
 use super::resources::Chains;
@@ -290,7 +293,9 @@ pub(super) fn resume(
 /// The three cases are the three things a caller has to be able to tell apart
 /// afterwards: a retry is a retry, a retry may be a duplicate, and a retry is
 /// pointless because the failure is not something another attempt can change. The
-/// budget is consulted only for the first of them.
+/// retry schedule is consulted only for the first of them, through
+/// [`RetryReading::after_definite_failure`]: `first` is when the entry's first
+/// attempt of this generation began and `entropy` jitters the backoff.
 ///
 /// The classification is [`BotError::retry_class`] and nothing else. The error's
 /// *variant* is not the question: `DomainError` is where a permanent refusal, a
@@ -299,7 +304,13 @@ pub(super) fn resume(
 /// is worse still — it makes a retry policy depend on the wording of a message.
 /// The producer states what the failure establishes about the effect, the
 /// certainty carries it here, and this function is a total map over that.
-pub(super) fn failure_state(error: &BotError, attempts: u32, budget: u32) -> EntryState {
+pub(super) fn failure_state(
+    error: &BotError,
+    attempts: u32,
+    retry: &RetryReading,
+    first: Duration,
+    entropy: u64,
+) -> EntryState {
     // A post-effect recording failure is not a dispatch failure and is not
     // abandoned: the occurrence is already known, and the only work left is the
     // append. Mapped here rather than through `RetryClass` so `Never` keeps its
@@ -321,11 +332,7 @@ pub(super) fn failure_state(error: &BotError, attempts: u32, budget: u32) -> Ent
     match error.retry_class() {
         // The effect definitely did not happen: a retry is a retry, and the
         // budget bounds it.
-        RetryClass::Safe if attempts < budget => EntryState::DefinitelyFailed { attempts, cause },
-        RetryClass::Safe => EntryState::Abandoned {
-            reason: AbandonReason::AttemptsExhausted { attempts },
-            cause,
-        },
+        RetryClass::Safe => retry.after_definite_failure(attempts, first, entropy, cause),
         // It may have happened. Never attempted again without evidence, whatever
         // the budget says.
         RetryClass::RequiresEvidence => EntryState::OutcomeUnknown { attempts, cause },

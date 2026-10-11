@@ -192,6 +192,7 @@ mod sim_continuation_seal;
 mod sim_credential;
 mod sim_dispatch;
 mod sim_dist_lease;
+mod sim_ecs_backoff;
 mod sim_epoch_identity;
 mod sim_group_commit;
 mod sim_inspect;

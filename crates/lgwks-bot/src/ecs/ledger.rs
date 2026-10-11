@@ -1,5 +1,7 @@
 //! The ledger of outstanding work, settled across ticks.
 
+use std::time::Duration;
+
 #[cfg(doc)]
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
 
@@ -15,9 +17,12 @@ use crate::verb::EffectLifetime;
 use super::admit::failure_state;
 use super::effects::Effects;
 use super::entry::EntryState;
+use super::entry::RetryAdmission;
+use super::entry::RetryReading;
 use super::entry::Settled;
 use super::entry::SettledAttempt;
 use super::entry::Transition;
+use super::entry::backoff_entropy;
 use super::identity::derive_action_digest;
 use super::identity::derive_input_stamp;
 use super::work::AbandonReason;
@@ -187,10 +192,16 @@ impl Ledger {
     /// The warrant is handed back rather than consumed here because the handoff
     /// is the caller's: it runs after the payload the attempt acts on is in
     /// hand, and it presents the warrant at [`Broker::revalidate`] on the way in.
+    ///
+    /// `retry` is the tick's reading of the retry schedule. An entry still
+    /// inside its backoff, or whose deadline has passed, is refused here as well
+    /// as stopped by the walk, so a second caller cannot retry it by reaching
+    /// past the plan.
     pub(super) async fn begin_attempt(
         &mut self,
         id: WorkId,
         lifetime: EffectLifetime,
+        retry: &RetryReading,
     ) -> Result<(EffectKey, Authority), BotError> {
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
@@ -209,14 +220,18 @@ impl Ledger {
             .get_mut(id.chain())
             .and_then(Option::as_mut)
             .ok_or_else(no_such_work)?;
-        let state = transition
+        let startable = match *transition
             .entries
-            .get_mut(id.entry())
-            .ok_or_else(no_such_work)?;
-        if !matches!(
-            *state,
-            EntryState::NotStarted | EntryState::DefinitelyFailed { .. }
-        ) {
+            .get(id.entry())
+            .ok_or_else(no_such_work)?
+        {
+            EntryState::NotStarted => true,
+            EntryState::DefinitelyFailed { .. } => {
+                transition.retry_admission(id.entry(), retry) == Some(RetryAdmission::Begin)
+            }
+            _ => false,
+        };
+        if !startable {
             let refusal = Err(no_such_work());
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "begin_attempt: returning an error to the caller");
             return refusal;
@@ -275,6 +290,9 @@ impl Ledger {
             .get_mut(id.entry())
             .ok_or_else(no_such_work)?;
         record.begun = Some(attempt);
+        if record.first_begun.is_none() {
+            record.first_begun = Some(retry.now);
+        }
         if let Some(state) = transition.entries.get_mut(id.entry()) {
             *state = EntryState::Unrecorded;
         }
@@ -352,15 +370,16 @@ impl Ledger {
     /// Close an entry whose outcome is known and whose record has now landed.
     ///
     /// `Applied` retires the entry. `NotApplied` leaves it eligible for a fresh
-    /// attempt under the budget — a new attempt is a response to "the effect
-    /// did not happen", not a retry of the recording failure.
+    /// attempt under the retry schedule — a new attempt is a response to "the
+    /// effect did not happen", not a retry of the recording failure.
     pub(super) fn finish_recording(
         &mut self,
         id: WorkId,
         evidence: EffectEvidence,
         attempts: u32,
-        budget: u32,
+        retry: &RetryReading,
     ) -> bool {
+        let (first, entropy) = self.backoff_basis(id, attempts, retry.now);
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -369,21 +388,74 @@ impl Ledger {
         }
         *state = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
-            EffectEvidence::NotApplied => {
-                if attempts < budget {
-                    EntryState::DefinitelyFailed {
-                        attempts,
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                } else {
-                    EntryState::Abandoned {
-                        reason: AbandonReason::AttemptsExhausted { attempts },
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                }
-            }
+            EffectEvidence::NotApplied => retry.after_definite_failure(
+                attempts,
+                first,
+                entropy,
+                "effect not applied; its record landed on retry".into(),
+            ),
         };
         true
+    }
+
+    /// Give up on an entry whose retry came due after its deadline, and say so.
+    ///
+    /// Called where a retry would begin. `true` when the entry was abandoned,
+    /// which makes it the barrier the rest of its chain waits behind.
+    pub(super) fn expire_retry(&mut self, id: WorkId, retry: &RetryReading) -> bool {
+        let Some(transition) = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        let Some(RetryAdmission::Expired { elapsed }) =
+            transition.retry_admission(id.entry(), retry)
+        else {
+            return false;
+        };
+        let Some(state) = transition.entries.get_mut(id.entry()) else {
+            return false;
+        };
+        let EntryState::DefinitelyFailed {
+            attempts,
+            ref mut cause,
+            ..
+        } = *state
+        else {
+            return false;
+        };
+        let cause = std::mem::take(cause);
+        *state = EntryState::Abandoned {
+            reason: AbandonReason::DeadlineExhausted { attempts, elapsed },
+            cause,
+        };
+        true
+    }
+
+    /// What a definite failure's backoff is measured from, and what jitters it.
+    ///
+    /// The first attempt's start is the deadline's origin. An entry with no
+    /// recorded start was begun by nothing this ledger saw, so the failure
+    /// itself is the origin: the deadline then runs from the earliest instant
+    /// this process can vouch for, never from one it would have to invent.
+    fn backoff_basis(&self, id: WorkId, attempts: u32, now: Duration) -> (Duration, u64) {
+        let first = match self
+            .transitions
+            .get(id.chain())
+            .and_then(Option::as_ref)
+            .and_then(|transition| transition.attempts.get(id.entry()))
+            .and_then(|record| record.first_begun)
+        {
+            Some(first) => first,
+            None => now,
+        };
+        let entropy = match self.action_of(id) {
+            Some(action) => backoff_entropy(action, attempts),
+            None => u64::from(attempts),
+        };
+        (first, entropy)
     }
 
     /// Record what a failed attempt means for the entry it was made on.
@@ -399,9 +471,10 @@ impl Ledger {
         id: WorkId,
         error: &BotError,
         attempt: AttemptId,
-        budget: u32,
+        retry: &RetryReading,
     ) -> bool {
         let attempts = u32::saturating_from(attempt.get());
+        let (first, entropy) = self.backoff_basis(id, attempts, retry.now);
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -410,7 +483,7 @@ impl Ledger {
         if !matches!(*state, EntryState::Unrecorded) {
             return false;
         }
-        *state = failure_state(error, attempts, budget);
+        *state = failure_state(error, attempts, retry, first, entropy);
         true
     }
 

@@ -15,7 +15,7 @@ use super::profile::{self, Charge, TickProfile, TickStage};
 
 use super::builder::EcsBuilder;
 use super::builder::materialize_chain;
-use super::entry::RetryPolicy;
+use super::entry::RetrySchedule;
 use super::fold::put_plan_buffers;
 use super::ledger::Ledger;
 use super::resources::ChangeTicks;
@@ -66,7 +66,7 @@ impl EcsBot {
         EcsBuilder {
             name: name.into(),
             chains: Vec::new(),
-            policy: RetryPolicy::DEFAULT,
+            policy: RetrySchedule::declared_default(),
             effects: None,
             poll_deadline: DEFAULT_POLL_DEADLINE,
         }
@@ -449,10 +449,11 @@ impl EcsBot {
             mut steps,
             mut failures,
         } = plan;
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let retry = self.world.resource::<Policy>().reading();
+        let budget = retry.budget();
         #[cfg(feature = "profile")]
         let act_charge = Charge::new(TickStage::Act);
-        let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+        let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
         #[cfg(feature = "profile")]
         drop(act_charge);
 
@@ -489,7 +490,7 @@ impl EcsBot {
         let ledger = self.world.non_send::<Ledger>();
         match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {
-                work,
+                work: Box::new(work),
                 outstanding: ledger.unresolved_count(budget),
             }),
             None => Ok(self.world.resource::<Fired>().0),
@@ -580,6 +581,9 @@ impl EcsBot {
     pub(super) fn begin_tick(&mut self) {
         self.world.resource_mut::<Fired>().0 = 0;
         self.world.resource_mut::<TickError>().0 = None;
+        // One reading of the bot clock for the whole tick, so every backoff a
+        // tick judges is judged at the same instant.
+        self.world.resource_mut::<Policy>().begin_tick();
         // The previous tick's report is history, not this tick's. Overwritten
         // rather than appended so a caller reading it before the next tick sees
         // the tick it just ran and not a union of every tick the bot has ever

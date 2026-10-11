@@ -9,7 +9,7 @@ boundary is worth reading before you design around it.
 ## Admission happens at build, and reports the whole shortfall
 
 `EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs/builder.rs:611`):
+(`crates/lgwks-bot/src/ecs/builder.rs:639`):
 
 ```rust
 let mut shortages: Vec<Shortage> = Vec::new();
