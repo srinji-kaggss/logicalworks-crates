@@ -338,19 +338,29 @@ fn process_deadline_terminates_the_child_and_reports_its_cleanup() -> TestResult
 /// the run past the drain bound, and the report names the holder.
 ///
 /// Source: issue #263, the `gh_binding` flake, where a surviving descendant
-/// held a captured pipe and a 400 ms run lasted 30.6 s; and POSIX job control
-/// (`set -m`, XCU "sh"), which puts each background job in its own process
-/// group, beyond `killpg`'s reach. Requirement: a run ends at its bounds, not at
-/// a stranger's exit. On Linux with a cgroup scope the kernel kills the job
-/// too, so there the pipe closes and the run is whole; either way it is fast.
+/// held a captured pipe and a 400 ms run lasted 30.6 s; and POSIX `setpgid(2)`,
+/// through which the descendant moves itself into a group of its own, beyond
+/// `killpg`'s reach. The move is the descendant's own `setpgrp`, not shell job
+/// control: `set -m` needs a terminal, and without one (a CI container) dash
+/// refuses it, the job stays in the group, and the escape never happens.
+/// Requirement: a run ends at its bounds, not at a stranger's exit. On Linux
+/// with a cgroup scope the kernel kills the escaped process too, so there the
+/// pipe closes and the run is whole; either way it is fast.
 #[test]
 fn a_descendant_holding_the_pipe_cannot_hold_the_run() -> TestResult {
     use lgwks_bot::rt::supervise::{ContainmentMechanism, ResidualRisk};
     let runtime = Runtime::new()?;
     let (run, elapsed) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
-        let mut spec = ProcessSpec::new("sh");
-        spec.arg("-c").arg("set -m; sleep 30 & echo $!; exit 0");
+        // The leader exits only after the child has left the group: the child
+        // closes its end of a private pipe after `setpgrp`, and the leader's
+        // read returns on that close. No timing decides whether it escaped.
+        let mut spec = ProcessSpec::new("perl");
+        spec.arg("-e").arg(
+            "pipe(R, W); my $p = fork; die unless defined $p; \
+             if ($p) { close W; <R>; print qq($p\\n); exit 0 } \
+             close R; setpgrp(0, 0); close W; sleep 30",
+        );
         spec.capture_stdout(std::num::NonZeroUsize::MIN.saturating_add(63));
         let started = Instant::now();
         let run = supervisor
@@ -373,7 +383,7 @@ fn a_descendant_holding_the_pipe_cannot_hold_the_run() -> TestResult {
         elapsed < Duration::from_secs(5),
         "the run lasted {elapsed:?}: the held pipe decided its length, not its bounds"
     );
-    assert_eq!(run.exit_code(), Some(0), "the shell itself exited zero");
+    assert_eq!(run.exit_code(), Some(0), "the leader itself exited zero");
     assert!(
         !holder.is_empty(),
         "what was read before the bound is kept: {:?}",
