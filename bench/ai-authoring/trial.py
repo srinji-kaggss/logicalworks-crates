@@ -213,6 +213,18 @@ NO_FUTURES_TASK_WHY = (
 # ── one trial ────────────────────────────────────────────────────────────────
 
 
+def trial_id_of(job: dict) -> str:
+    """The trial's directory name and package seed.
+
+    The profile is in the id, so two profiles of one (model, api, task) never
+    share a package name and therefore never share a `-C metadata`: a shared
+    one would let one trial's oracle binary stand in for another's, which is
+    the same defect the per-trial package name exists to prevent.
+    """
+    profile = job.get("profile", "")
+    return f"{sanitize(job['model'])}__{job['api']}__{job['task']}__{profile or 'none'}__t{job['trial']}"
+
+
 def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     model = job["model"]
     api = job["api"]
@@ -221,11 +233,7 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     mode = job["mode"]
     profile = job.get("profile", "")
 
-    # The profile is in the trial id, so two profiles of one (model, api, task)
-    # never share a package name and therefore never share a `-C metadata`: a
-    # shared one would let one trial's oracle binary stand in for another's,
-    # which is the same defect the per-trial package name exists to prevent.
-    trial_id = f"{sanitize(model)}__{api}__{task}__{profile or 'none'}__t{trial}"
+    trial_id = trial_id_of(job)
     package = package_for(trial_id)
     trial_dir = work / trial_id
     # Each run owns a fresh work directory, so a trial directory never exists

@@ -56,6 +56,37 @@ def cell(rows: list) -> dict:
     }
 
 
+def full_pass(row: dict) -> bool:
+    """Compiled, and every oracle clause of the task passed."""
+    return bool(row["compiled"]) and row["oracle_total"] > 0 and (
+        row["oracle_pass_count"] == row["oracle_total"]
+    )
+
+
+def wilson(passed: int, n: int) -> tuple:
+    """The 95% Wilson score interval for `passed` of `n`, as fractions.
+
+    Wilson rather than the normal approximation because the cells are small and
+    sit at 0 or n often: the normal interval collapses to a point there and
+    would let two cells of 10/10 and 8/10 read as different (#270: no claim
+    over overlapping intervals).
+    """
+    if n == 0:
+        return (0.0, 1.0)
+    z = 1.959963984540054
+    p = passed / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = (z / (1 + z * z / n)) * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def pass_cell(rows: list) -> str:
+    """`k/n [lo, hi]`: full passes and their 95% interval, in percent."""
+    passed = sum(1 for row in rows if full_pass(row))
+    low, high = wilson(passed, len(rows))
+    return f"{passed}/{len(rows)} [{low * 100:.0f}, {high * 100:.0f}]"
+
+
 def fmt(value, suffix: str = "") -> str:
     """One table cell: an int, a one-decimal float, or an em dash for `None`."""
     if value is None:
@@ -107,6 +138,27 @@ def main() -> int:
             f"| {task} | {api} | {numbers['n']} | {fmt(numbers['pass_rate'])} | "
             f"{fmt(numbers['repairs_median'])} | {fmt(numbers['lines_median'])} |"
         )
+
+    print("\n## Full passes per (task, arm), all models, with 95% Wilson intervals\n")
+    arms = sorted({row["api"] for row in records})
+    print("| task | " + " | ".join(arms) + " |")
+    print("|---|" + "---|" * len(arms))
+    by_task_arm = group(records, "task", "api")
+    for task in sorted({row["task"] for row in records}):
+        cells = [pass_cell(by_task_arm[(task, arm)]) if (task, arm) in by_task_arm else "—" for arm in arms]
+        print(f"| {task} | " + " | ".join(cells) + " |")
+
+    print("\n## Full passes per (model, task, arm), with 95% Wilson intervals\n")
+    print("| model | task | " + " | ".join(arms) + " |")
+    print("|---|---|" + "---|" * len(arms))
+    by_cell = group(records, "model", "task", "api")
+    for model in sorted({row["model"] for row in records}):
+        for task in sorted({row["task"] for row in records}):
+            cells = [
+                pass_cell(by_cell[(model, task, arm)]) if (model, task, arm) in by_cell else "—"
+                for arm in arms
+            ]
+            print(f"| `{model}` | {task} | " + " | ".join(cells) + " |")
     return 0
 
 

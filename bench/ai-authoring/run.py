@@ -49,12 +49,79 @@ from trial import (  # noqa: E402
     ORCHESTRATION_TOKENS,
     oracle_test_names,
     run_job,
+    trial_id_of,
 )
 
 #: `regrade.py` grades a run through this module's names; they are its interface.
 __all__ = ["ORACLE_CRATE_TOKEN", "TASKS_DIR", "TEST_LINE", "oracle_test_names", "run_timed_cargo"]
 
 RESULTS_MUTEX = threading.Lock()
+
+#: Where a run records its work root and commit, so `--resume` finds both.
+MANIFEST = "run.json"
+
+#: Every finished trial, appended and fsynced as it lands. The 2026-10-11 matrix
+#: (990 trials, hours of model calls) held its records in memory until the last
+#: trial: a crash, a kill or a dead battery at hour fourteen would have kept
+#: none. This log is what `--resume` reads; the sorted `results.jsonl` replaces
+#: it when the run ends.
+PARTIAL = "results.partial.jsonl"
+
+
+def append_durably(path: pathlib.Path, record: dict) -> None:
+    """Append one record as a line and fsync it before returning."""
+    with path.open("a") as handle:
+        handle.write(json.dumps(record) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def resume_state(run_dir: pathlib.Path, mode: str, bot_sha: str):
+    """`(run_dir, work, finished records by trial id)` for an interrupted run.
+
+    Refused when the run finished, was another mode, or ran at another commit:
+    trials graded against two different crate trees are not one measurement.
+    A torn last line (the interruption landed mid-append) is dropped, and that
+    trial runs again.
+    """
+    run_dir = run_dir.resolve()
+    manifest = json.loads((run_dir / MANIFEST).read_text())
+    if (run_dir / "results.jsonl").exists():
+        raise SystemExit(f"{run_dir} finished; there is nothing to resume")
+    if manifest["mode"] != mode:
+        raise SystemExit(f"{run_dir} is a {manifest['mode']} run, not {mode}")
+    if manifest["lgwks_bot_sha"] != bot_sha:
+        raise SystemExit(
+            f"{run_dir} ran at {manifest['lgwks_bot_sha']}, HEAD is {bot_sha}; "
+            "check that commit out to resume it"
+        )
+    done = {}
+    partial = run_dir / PARTIAL
+    lines = partial.read_text().splitlines() if partial.exists() else []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("trial_id") not in (None, "crashed"):
+            done[record["trial_id"]] = record
+    return run_dir, pathlib.Path(manifest["work"]), done
+
+
+def set_aside_interrupted(work: pathlib.Path, jobs: list) -> None:
+    """Rename each unfinished trial's directory so its rerun starts clean.
+
+    Renamed, not deleted: what an interrupted trial left is evidence of the
+    interruption, and a trial directory is never reused (`run_job` refuses one
+    that exists).
+    """
+    for job in jobs:
+        trial_dir = work / trial_id_of(job)
+        if trial_dir.exists():
+            attempt = 1
+            while trial_dir.with_name(f"{trial_dir.name}.interrupted-{attempt}").exists():
+                attempt += 1
+            trial_dir.rename(trial_dir.with_name(f"{trial_dir.name}.interrupted-{attempt}"))
 
 
 # ── summary ──────────────────────────────────────────────────────────────────
@@ -192,6 +259,15 @@ def main() -> int:
         default=os.environ.get("AI_AUTHORING_CMD", "cmd"),
         help="the model CLI to invoke (default: cmd, or $AI_AUTHORING_CMD)",
     )
+    parser.add_argument(
+        "--resume",
+        type=pathlib.Path,
+        default=None,
+        help=(
+            "an interrupted run's results directory: its finished trials are kept "
+            "and only the rest run, in its own work root, at the same commit"
+        ),
+    )
     args = parser.parse_args()
 
     models = [item for item in args.models.split(",") if item]
@@ -207,19 +283,25 @@ def main() -> int:
             + ", ".join(sorted(PROFILES))
         )
     mode = "mutants" if args.mutants else ("dry" if args.dry_run else "models")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + mode
-    # A run never reuses or overwrites another run's evidence: both the work root
-    # and the results directory are new, and an existing one is a refusal.
-    work = (args.work or pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lgwks-ai-authoring-{stamp}").resolve()
-    work.mkdir(parents=True, exist_ok=False)
-    run_dir = args.out or (HERE / "runs" / stamp)
-    run_dir = run_dir if run_dir.is_absolute() else (REPO / run_dir)
-    run_dir.mkdir(parents=True, exist_ok=False)
-    out = run_dir / "results.jsonl"
-
     bot_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(REPO), capture_output=True, text=True, check=False
     ).stdout.strip()
+    if args.resume is not None:
+        run_dir, work, done = resume_state(args.resume, mode, bot_sha)
+    else:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + mode
+        # A run never reuses or overwrites another run's evidence: both the work
+        # root and the results directory are new, and an existing one is a refusal.
+        work = (args.work or pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lgwks-ai-authoring-{stamp}").resolve()
+        work.mkdir(parents=True, exist_ok=False)
+        run_dir = args.out or (HERE / "runs" / stamp)
+        run_dir = run_dir if run_dir.is_absolute() else (REPO / run_dir)
+        run_dir.mkdir(parents=True, exist_ok=False)
+        (run_dir / MANIFEST).write_text(
+            json.dumps({"work": str(work), "mode": mode, "lgwks_bot_sha": bot_sha}) + "\n"
+        )
+        done = {}
+    out = run_dir / "results.jsonl"
 
     jobs = []
     if args.mutants:
@@ -319,45 +401,60 @@ def main() -> int:
         for item in skipped:
             print(f"  {item['task']}/{item['api']}: {item['why']}")
 
-    records = []
+    records = [done[trial_id_of(job)] for job in jobs if trial_id_of(job) in done]
+    jobs = [job for job in jobs if trial_id_of(job) not in done]
+    if args.resume is not None:
+        print(f"resuming: {len(records)} trial(s) kept, {len(jobs)} to run")
+        set_aside_interrupted(work, jobs)
+    def run_and_record(job: dict) -> dict:
+        """Run one trial and append its record durably before returning.
+
+        The append is the worker's, not the collecting loop's: the loop runs
+        behind the workers, so a record appended there could be lost to an
+        interruption after its trial finished (the resume probe lost two of
+        three that way). A crashed trial is a recorded trial.
+        """
+        try:
+            record = run_job(job, work, bot_sha)
+        except Exception as error:
+            record = {
+                "model": job["model"],
+                "api": job["api"],
+                "task": job["task"],
+                "profile": job.get("profile", ""),
+                "trial": job["trial"],
+                "trial_id": "crashed",
+                "mode": job["mode"],
+                "compiled": False,
+                "repairs": 0,
+                "oracle": {},
+                "oracle_pass_count": 0,
+                "oracle_total": 0,
+                "cleanup_ok": False,
+                "oracle_wall_ms": 0.0,
+                "oracle_peak_rss_bytes": None,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "model_wall_ms": 0,
+                "compile_wall_ms": 0,
+                "consumer_lines": 0,
+                "orchestration_sites": 0,
+                "orchestration_site_tokens": {},
+                "orchestration_token_list": list(ORCHESTRATION_TOKENS),
+                "lockfile": "",
+                "lgwks_bot_sha": bot_sha,
+                "error": str(error),
+                "lib_rs": "",
+            }
+        with RESULTS_MUTEX:
+            append_durably(run_dir / PARTIAL, record)
+        return record
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
-        futures = {pool.submit(run_job, job, work, bot_sha): job for job in jobs}
+        futures = [pool.submit(run_and_record, job) for job in jobs]
         for future in concurrent.futures.as_completed(futures):
-            job = futures[future]
-            try:
-                record = future.result()
-            except Exception as error:  # a crashed trial is a recorded trial
-                record = {
-                    "model": job["model"],
-                    "api": job["api"],
-                    "task": job["task"],
-                    "profile": job.get("profile", ""),
-                    "trial": job["trial"],
-                    "trial_id": "crashed",
-                    "mode": job["mode"],
-                    "compiled": False,
-                    "repairs": 0,
-                    "oracle": {},
-                    "oracle_pass_count": 0,
-                    "oracle_total": 0,
-                    "cleanup_ok": False,
-                    "oracle_wall_ms": 0.0,
-                    "oracle_peak_rss_bytes": None,
-                    "tokens_in": 0,
-                    "tokens_out": 0,
-                    "model_wall_ms": 0,
-                    "compile_wall_ms": 0,
-                    "consumer_lines": 0,
-                    "orchestration_sites": 0,
-                    "orchestration_site_tokens": {},
-                    "orchestration_token_list": list(ORCHESTRATION_TOKENS),
-                    "lockfile": "",
-                    "lgwks_bot_sha": bot_sha,
-                    "error": str(error),
-                    "lib_rs": "",
-                }
-            with RESULTS_MUTEX:
-                records.append(record)
+            record = future.result()
+            records.append(record)
             print(
                 f"{record['model']:28} {record['api']:4} {record['task']:10} "
                 f"{record.get('profile') or '-':13} t{record['trial']} "
@@ -375,10 +472,17 @@ def main() -> int:
             row["trial"],
         )
     )
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as handle:
+    # The sorted file replaces nothing until it is whole: written beside its
+    # final name, then renamed over it, so an interruption here still leaves
+    # the partial log every finished trial was appended to.
+    staged = out.with_name(out.name + ".staged")
+    with staged.open("w") as handle:
         for record in records:
             handle.write(json.dumps(record) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(staged, out)
+    (run_dir / PARTIAL).unlink(missing_ok=True)
 
     summary = {
         "generated_by": "bench/ai-authoring/run.py",
