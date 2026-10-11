@@ -1,8 +1,8 @@
-"""The gate's builtin lanes: checks implemented here rather than shelled out.
+#!/usr/bin/env python3
+"""The local gate's builtin lanes: checks the gate runs in-process rather than
+as a shell command, keyed by the ``builtin`` name in ``scripts/gate-lanes.toml``.
 
-Split from ``ci_local.py`` under the size law (#408). Each checker takes the
-repository root and the child environment and returns ``(exit code, detail)``;
-``BUILTINS`` maps a lane's ``builtin`` name to its checker.
+Split out of ``scripts/ci_local.py`` under the size law (Director 2026-10-10).
 """
 
 from __future__ import annotations
@@ -23,9 +23,6 @@ FORBIDDEN_PREFIXES = (
     "node_modules/",
     ".codegraph/",
 )
-
-
-# ── builtins ────────────────────────────────────────────────────────────────
 
 
 def _iter_rust_sources(root: Path):

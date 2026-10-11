@@ -50,31 +50,43 @@ import concurrent.futures
 import contextlib
 import hashlib
 import importlib
+import json
 import os
 import platform
+import re
 import shutil
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
+import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The builtin checkers and the process helpers live beside this file (#408,
-# split under the size law); a run from any working directory still finds them.
+# The builtins, the invariants resolver and the child-process helpers live
+# in their own modules (size law, Director 2026-10-10); they are imported here
+# so `ci_local.<name>` keeps resolving for every caller.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ci_builtins import BUILTINS  # noqa: E402
+from ci_builtins import BUILTINS, FORBIDDEN_PREFIXES  # noqa: E402
 from ci_process import (  # noqa: E402
+    _CHILDREN,
+    _CHILDREN_LOCK,
     _STOPPING,
-    _capture,
-    _child_env,
     _git,
-    _run_command,
-    _stamp,
+    _run_argv,
+    _run_capture,
+    _spawn,
+    _stop,
     _stop_all_children,
-    gate_scratch,
 )
+
+# The repository this script gates, for the self-regression block at the bottom.
+# `Path(__file__).resolve().parent.parent` rather than the process CWD, so the
+# tests read the same tree whatever directory they were invoked from.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 MANIFEST_REL = "scripts/gate-lanes.toml"
 
@@ -193,6 +205,109 @@ def missing_needs(lane: Lane, root: Path) -> list[str]:
 
 def platform_applies(lane: Lane) -> bool:
     return not lane.platforms or sys.platform in lane.platforms
+
+
+def _run_command(command: str, root: Path, env: dict[str, str], out=None) -> int:
+    return _spawn(["bash", "-c", command], root, env, out)
+
+
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _child_env(root: Path, scratch: Path | None = None, target: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    cargo = Path.home() / ".cargo" / "bin"
+    env["PATH"] = f"{cargo}{os.pathsep}{env.get('PATH', '')}"
+    env["CARGO_INCREMENTAL"] = "0"
+    env["CARGO_TERM_COLOR"] = "never"
+    env.setdefault("RUST_BACKTRACE", "1")
+    if scratch is not None:
+        env["TMPDIR"] = f"{scratch}{os.sep}"
+    if target is not None:
+        env["CARGO_TARGET_DIR"] = str(target)
+    return env
+
+
+# ── scratch ─────────────────────────────────────────────────────────────────
+
+SCRATCH_PREFIX = "lgwks-gate-"
+# 4 GiB of 512-byte sectors. A RAM disk takes memory only as it is written; the
+# simulation suites leave ~400 KB behind and peak far below this.
+RAM_DISK_SECTORS = 8 * 1024 * 1024
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _owner_pid(name: str) -> int | None:
+    suffix = name[len(SCRATCH_PREFIX):]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _reclaim_stale_scratch() -> None:
+    """Remove scratch volumes whose gate process is gone (kill -9, power loss)."""
+    if sys.platform == "darwin":
+        for volume in Path("/Volumes").glob(f"{SCRATCH_PREFIX}*"):
+            pid = _owner_pid(volume.name)
+            if pid is not None and not _pid_alive(pid):
+                _capture(["diskutil", "eject", str(volume)], Path("/"))
+    shm = Path("/dev/shm")
+    if shm.is_dir():
+        for directory in shm.glob(f"{SCRATCH_PREFIX}*"):
+            pid = _owner_pid(directory.name)
+            if pid is not None and not _pid_alive(pid):
+                shutil.rmtree(directory, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def gate_scratch(wanted: bool):
+    """Yield a RAM-backed directory for the run's TMPDIR, or None.
+
+    None means the lanes use the ordinary temporary directory; the run is then
+    slower, never different. Creating the volume is best-effort for the same
+    reason: a host that cannot make one still runs every lane.
+    """
+    if not wanted:
+        yield None
+        return
+    _reclaim_stale_scratch()
+    name = f"{SCRATCH_PREFIX}{os.getpid()}"
+    if sys.platform == "darwin" and shutil.which("hdiutil") and shutil.which("diskutil"):
+        attached = _capture(["hdiutil", "attach", "-nomount", f"ram://{RAM_DISK_SECTORS}"], Path("/"))
+        device = next((word for word in attached.split() if word.startswith("/dev/disk")), None)
+        if device is not None:
+            erased = subprocess.run(
+                ["diskutil", "erasevolume", "APFS", name, device],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            volume = Path("/Volumes") / name
+            try:
+                if erased.returncode == 0 and volume.is_dir():
+                    yield volume
+                    return
+            finally:
+                _capture(["hdiutil", "detach", device, "-force"], Path("/"))
+    shm = Path("/dev/shm")
+    if sys.platform.startswith("linux") and shm.is_dir() and os.access(shm, os.W_OK):
+        directory = shm / name
+        directory.mkdir(exist_ok=True)
+        try:
+            yield directory
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+        return
+    yield None
 
 
 # ── execution ───────────────────────────────────────────────────────────────
@@ -414,6 +529,14 @@ def build_receipt(
         "",
     ]
     return "\n".join(lines)
+
+
+def _capture(argv: list[str], root: Path) -> str:
+    try:
+        completed = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "missing"
+    return (completed.stdout or completed.stderr).strip() or "missing"
 
 
 # ── entry point ─────────────────────────────────────────────────────────────
