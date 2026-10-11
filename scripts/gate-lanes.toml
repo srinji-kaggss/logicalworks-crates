@@ -456,9 +456,9 @@ command = """\
 cargo nextest run --locked -p lgwks_std --no-default-features --features hash && \
 cargo nextest run --locked -p lgwks_std --no-default-features --features pattern && \
 cargo nextest run --locked -p lgwks_std --no-default-features --features json && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features ron\
+cargo nextest run --locked -p lgwks_std --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --no-default-features --features sign\
 """
-ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron)"
+ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)"
 needs = ["bin:cargo-nextest"]
 
 [[lane]]
