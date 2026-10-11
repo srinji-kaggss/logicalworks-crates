@@ -23,8 +23,8 @@
 #             lane with "ci" in surfaces that runs as a named step.
 #   ci_job    the job `name:` in ci.yml for a lane that runs as unnamed `run:`
 #             steps of a whole job (the AppCUI matrix).
-#   builtin   instead of `command`, the name of a check implemented inside
-#             `ci_local.py`. Used for the scanners that must be unit-tested
+#   builtin   instead of `command`, the name of a check implemented in
+#             `ci_builtins.py`. Used for the scanners that must be unit-tested
 #             against fixture trees rather than shelled out. When such a lane
 #             runs in CI, the step is `python3 scripts/ci_local.py --lane <id>`.
 #   needs     prerequisites checked before the lane runs. A missing one makes a
@@ -297,7 +297,7 @@ group = "quality"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- scan"
 ci_step = "Scan reports zero findings"
 
 [[lane]]

@@ -97,7 +97,13 @@ script = ["dep:lgwks_deps", "dep:tracing"]
 # in `lgwks-deps` because `script` already depends on `lgwks_deps` for
 # `proc_macro2`, and `lgwks_deps` depending back on this crate is a cycle Cargo
 # refuses.
-tool = ["script", "dep:lgwks_std"]
+tool = ["script", "scan", "dep:lgwks_std"]
+# The zero-gate source detectors (INV-SCAN-ZERO, #408), `lgwks_ast::scan` and
+# `lgwks-ast scan [PATH...]`. They read Rust through this crate's grammar, so
+# the gate is no longer a second Rust parser: the `syn` scan they replace lived
+# in `lgwks_deps`, which cannot depend on this crate without a cycle. No edge is
+# added; `lang-rust` brings the grammar and `tracing` it already uses.
+scan = ["lang-rust"]
 full = [
     "lang-rust",
     "lang-python",
@@ -147,8 +153,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"], optio
 # a crate: the `Tree` built here is the type `StrDoc` holds.
 tree-sitter = { version = "0.27", optional = true }
 # The token streams `script` reads (feature `script`, #383), through the
-# storefront that owns the edge; `default-features = false` keeps the `scan`
-# detectors out, so the macro's build pulls `proc-macro2` and nothing else here.
+# storefront that owns the edge, so the macro's build pulls `proc-macro2` and
+# nothing else here.
 lgwks_deps = { workspace = true, features = ["script"], optional = true }
 # The script tool's tree walk and JSON (feature `tool`, #384).
 lgwks_std = { workspace = true, features = ["json"], optional = true }

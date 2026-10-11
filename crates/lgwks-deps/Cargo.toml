@@ -16,22 +16,16 @@ keywords = ["dependencies", "audit", "supply-chain", "cargo", "debug"]
 # Depending on serde_json directly here would make the checker its own first
 # bypass.
 #
-# syn is the one exception to the zero-dependency gate-tool rule, and it is
-# not self-refuting: a Rust parser is the only honest way to police Rust
-# source (the `scan` subcommand carries the same fallible-check detectors, so
-# every repository here runs the same verdicts from one binary). Pinned to the same
-# major already vetted for serde's derive stack. `scan` is a default
-# feature so `cargo install lgwks_deps` keeps working with no flags;
-# embedders who only call `check_dependencies` can disable default features.
+# The default build is the gate alone, with no third-party edge: the zero-gate
+# source detectors moved to `lgwks-ast scan` (#408), which reads Rust through
+# the one grammar, so `syn` is no longer a gate-tool exception here.
 [features]
-default = ["scan"]
-scan = ["dep:syn", "dep:proc-macro2"]
+default = []
 # Proc-macro authoring storefront: the Rust grammar (`syn`), token streams
 # (`proc-macro2`) and quasi-quoting (`quote`) a first-party proc-macro crate
 # needs. `lgwks_macros` is the one consumer; it reaches all three through the
 # re-exports below, so this crate stays the only author of each edge. Default
-# off: selecting `scan` does not pull `quote`, and a runtime consumer pulls
-# none of the three.
+# off: a runtime consumer pulls none of the three.
 macro = ["dep:syn", "dep:proc-macro2", "dep:quote"]
 # The token stream the `script!` language is read from (`lgwks_ast`'s `script`
 # feature, #383): `proc-macro2` with span locations and nothing else, so a tool
@@ -49,8 +43,8 @@ appcui = ["dep:appcui"]
 # registry; `ml-candle-metal` adds the macOS Metal backend to that set.
 # `ml-tokenizers` is the HuggingFace subword tokenizer used for tokenizer
 # parity with the reference runtime. All three stay default-off, so the default
-# `scan` build and every consumer that does not select them pull none of
-# Candle's closure.
+# build and every consumer that does not select them pull none of Candle's
+# closure.
 ml-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
 ml-candle-metal = ["ml-candle", "candle-transformers/metal"]
 ml-tokenizers = ["dep:tokenizers"]
@@ -89,7 +83,7 @@ bevy-state = ["bevy-ecs", "dep:bevy_state"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
-syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
+syn = { version = "2", features = ["full", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 quote = { version = "1", optional = true }
 gpui = { version = "0.2", optional = true }

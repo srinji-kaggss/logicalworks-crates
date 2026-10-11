@@ -9,30 +9,37 @@
 //! every invocation to `lgwks_ast::script::parse`, so the tool and the compiler
 //! cannot disagree about a script: there is no second reader to drift.
 //!
+//! `lgwks-ast scan [--json] [PATH...]` runs the zero-gate source detectors
+//! (INV-SCAN-ZERO, #408) through `lgwks_ast::scan`, the same grammar.
+//!
 //! A `PATH` that is a directory is walked for `.rs` files, skipping build
 //! output and vendored trees; a file is read as given; no `PATH` means `.`.
 //! `--json` writes one document to stdout for an agent. The exit status is 0
-//! when nothing is refused, 2 when a script is refused or a file cannot be
-//! read, and 2 with the usage for an unknown command.
+//! when nothing is refused or found, 2 when a script is refused, a finding is
+//! reported or a file cannot be read, and 2 with the usage for an unknown
+//! command.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use lgwks_ast::scan::scan_path;
 use lgwks_ast::script::{Invocation, read_source};
 use lgwks_std::fs::{Descend, FileKind, WalkOptions, walk_dir_entries};
 use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
 const USAGE: &str = "usage: lgwks-ast script map|check [--json] [PATH...]\n\
+       lgwks-ast scan [--json] [PATH...]\n\
 \n\
   map    print every script!'s architecture map, as its ARCHITECTURE renders\n\
   check  print only what the script! language refuses; exit 2 if anything is\n\
+  scan   the zero-gate detectors; exit 2 on any finding or unreadable file\n\
   --json one JSON document on stdout instead of text\n\
   PATH   a directory to walk for .rs files, or one file; default `.`\n";
 
 /// Directory names never walked: build output, vendored and foreign trees,
-/// and version-control metadata, the same set `lgwks-deps scan` skips.
+/// and version-control metadata.
 const SKIPPED: [&str; 7] = [
     "target",
     "vendor",
@@ -99,14 +106,15 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Parse the arguments and run `script map` or `script check`.
+/// Parse the arguments and run `scan`, `script map` or `script check`.
 fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
-    let verb = match (
+    let (verb, operands) = match (
         args.first().map(String::as_str),
         args.get(1).map(String::as_str),
     ) {
-        (Some("script"), Some("map")) => Verb::Map,
-        (Some("script"), Some("check")) => Verb::Check,
+        (Some("script"), Some("map")) => (Some(Verb::Map), args.get(2..)),
+        (Some("script"), Some("check")) => (Some(Verb::Check), args.get(2..)),
+        (Some("scan"), _) => (None, args.get(1..)),
         (Some("-h" | "--help" | "help"), _) => {
             write!(out, "{USAGE}")?;
             return Ok(ExitCode::SUCCESS);
@@ -116,7 +124,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
             return Ok(ExitCode::from(2));
         }
     };
-    let Some(rest) = args.get(2..) else {
+    let Some(rest) = operands else {
         write!(err, "{USAGE}")?;
         return Ok(ExitCode::from(2));
     };
@@ -137,6 +145,9 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     if roots.is_empty() {
         roots.push(PathBuf::from("."));
     }
+    let Some(verb) = verb else {
+        return scan_roots(&roots, json, out, err);
+    };
     let mut readings = Vec::new();
     for root in &roots {
         match files_under(root) {
@@ -392,6 +403,103 @@ fn write_json(verb: Verb, readings: &[FileReading], out: &mut impl Write) -> io:
     ]);
     writeln!(out, "{document}")?;
     Ok(if totals.refused == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+/// `scan`: every zero-gate finding under the roots (INV-SCAN-ZERO, #408).
+///
+/// Text: one `{path}:{line}: [{rule}] {snippet}` line per finding on stdout,
+/// one `scan error: ..` line per file that could not be read or parsed on
+/// stderr, then `OK  scan clean — N files, zero findings` on stdout (exit 0)
+/// or `REFUSED  scan: ..` on stderr (exit 2). Every file is read before the
+/// verdict, so one refusal does not hide the findings in the rest. `--json`
+/// writes the same verdict as one document on stdout, with the same status.
+fn scan_roots(
+    roots: &[PathBuf],
+    json: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    let mut files = 0_usize;
+    let mut findings = Vec::new();
+    let mut unreadable = Vec::new();
+    for root in roots {
+        let paths = match files_under(root) {
+            Ok(paths) => paths,
+            Err(failure) => {
+                unreadable.push((root.display().to_string(), failure));
+                continue;
+            }
+        };
+        for path in paths {
+            files = files.saturating_add(1);
+            let shown = path.display().to_string();
+            match scan_path(&path) {
+                Ok(hits) => findings.extend(hits.into_iter().map(|hit| (shown.clone(), hit))),
+                Err(failure) => unreadable.push((shown, failure.to_string())),
+            }
+        }
+    }
+    let clean = findings.is_empty() && unreadable.is_empty();
+    if json {
+        let found = findings
+            .iter()
+            .map(|found| {
+                let (ref path, ref hit) = *found;
+                object(vec![
+                    ("path", Value::from(path.as_str())),
+                    ("line", Value::from(hit.line())),
+                    ("rule", Value::from(hit.rule())),
+                    ("snippet", Value::from(hit.snippet())),
+                ])
+            })
+            .collect();
+        let refused = unreadable
+            .iter()
+            .map(|failed| {
+                let (ref path, ref message) = *failed;
+                object(vec![
+                    ("path", Value::from(path.as_str())),
+                    ("message", Value::from(message.as_str())),
+                ])
+            })
+            .collect();
+        let document = object(vec![
+            ("verb", Value::from("scan")),
+            ("files", Value::from(files)),
+            ("findings", Value::Array(found)),
+            ("unreadable", Value::Array(refused)),
+        ]);
+        writeln!(out, "{document}")?;
+    } else {
+        for found in &findings {
+            let (ref path, ref hit) = *found;
+            writeln!(
+                out,
+                "{path}:{}: [{}] {}",
+                hit.line(),
+                hit.rule(),
+                hit.snippet()
+            )?;
+        }
+        for failed in &unreadable {
+            writeln!(err, "scan error: {}", failed.1)?;
+        }
+        if clean {
+            writeln!(out, "OK  scan clean — {files} files, zero findings")?;
+        } else {
+            writeln!(
+                err,
+                "REFUSED  scan: {} findings and {} unreadable across {files} files",
+                findings.len(),
+                unreadable.len()
+            )?;
+        }
+    }
+    Ok(if clean {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)

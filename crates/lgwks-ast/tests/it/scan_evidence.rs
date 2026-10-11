@@ -5,7 +5,7 @@
 //! asserted through the same entry point the gate uses, the `scan` subcommand,
 //! and over sources rather than bare snippets.
 
-#![cfg(feature = "scan")]
+#![cfg(feature = "tool")]
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ pub fn load_plain(path: &str) -> Vec<u8> {
 /// harmless and cannot be read as another test's fixture, because the name
 /// belongs to one test and the next run clears it before writing.
 fn scratch(label: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let path = std::env::temp_dir().join(format!("lgwks-deps-scan-{label}"));
+    let path = std::env::temp_dir().join(format!("lgwks-ast-scan-{label}"));
     if path.exists() {
         std::fs::remove_dir_all(&path)?;
     }
@@ -64,8 +64,8 @@ fn scratch(label: &str) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Runs the scanner over a path through the CLI the gate invokes.
 fn run_scan(target: &Path) -> Result<Output, Box<dyn Error>> {
-    let binary = std::env::var_os("CARGO_BIN_EXE_lgwks-deps")
-        .ok_or("Cargo did not provide the lgwks-deps test binary")?;
+    let binary = std::env::var_os("CARGO_BIN_EXE_lgwks-ast")
+        .ok_or("Cargo did not provide the lgwks-ast test binary")?;
     Ok(Command::new(binary)
         .args(["scan", target.to_str().ok_or("scratch path is not UTF-8")?])
         .output()?)

@@ -10,7 +10,8 @@ statement = "Every authored external dependency edge names an admitted semantic 
 scope = "lgwks_deps"
 owner = "lgwks_deps"
 enforcement = "static-check"
-enforced_by = "crates/lgwks-deps/src/lib.rs"
+# The audit's own unit tests, split from lib.rs under the size law (#408).
+enforced_by = "crates/lgwks-deps/src/tests.rs"
 approved_by = "maintainer"
 approved_on = "2026-09-20"
 review = "crates/lgwks-deps/src/lib.rs"

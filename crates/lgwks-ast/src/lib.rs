@@ -47,3 +47,10 @@ pub use parser::*;
 /// tree `lgwks_macros::script!` compiles and any tool reads.
 #[cfg(feature = "script")]
 pub mod script;
+
+/// The zero-gate source detectors (INV-SCAN-ZERO, #408): `scan::scan_source`
+/// reports a silenced error, an unlogged error return, a lint allowance, an
+/// overlong try chain or a paraphrase docstring, read through the one Rust
+/// grammar this crate parses with, and refuses a file it cannot read.
+#[cfg(feature = "scan")]
+pub mod scan;

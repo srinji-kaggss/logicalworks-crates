@@ -420,7 +420,7 @@ jobs:
       # an invariant nothing checked. It is a lane now, and it refuses on any
       # finding rather than reporting a count.
       - name: Scan reports zero findings
-        run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
+        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- scan
       # #384: every `script!` in the tree, read by the one parser the macro
       # calls (SL-2), without compiling it. Refuses on any construct the
       # language refuses and on any file that is not Rust tokens, at the

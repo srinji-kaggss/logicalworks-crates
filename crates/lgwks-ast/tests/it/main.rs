@@ -10,10 +10,14 @@
 mod content_detection;
 mod hostile;
 mod parse_deadline;
+mod scan_evidence;
+mod scan_fixtures;
+mod scan_sim_model;
 mod script_tool;
 mod sim_diagnostics;
 mod sim_parse_bounds;
 mod sim_parse_deadline;
+mod sim_scan_detectors;
 mod sim_script_find;
 
 /// A scratch directory that dies with the test that made it, the one every
@@ -37,3 +41,8 @@ mod seed;
 #[cfg(feature = "lang-rust")]
 #[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
 mod seed_helpers;
+/// Named draws and the replay receipt the scan simulation shares with
+/// `lgwks_deps`' policy families, over the same seed substrate.
+#[cfg(feature = "scan")]
+#[path = "../../../lgwks-deps/tests/support/sim.rs"]
+mod sim;
