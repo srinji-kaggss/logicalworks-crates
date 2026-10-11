@@ -150,3 +150,37 @@ fn a_late_retry_past_the_deadline_is_given_up_not_begun() -> TestResult {
     );
     Ok(())
 }
+
+/// The empty chain `run_steps` skips (#279) is the one `run_chain` would have
+/// answered `(0, None)` for, and with a condition failure it reports that
+/// failure: the skip's equivalence rests on `run_chain`'s tail
+/// (`failure.or(condition_failure)`), so the tail is pinned directly and a
+/// later edit to it cannot quietly make the skip drop a report (#446 review).
+#[test]
+fn an_empty_chain_runs_nothing_and_reports_only_its_condition_failure() -> TestResult {
+    let attempts = Rc::new(Cell::new(0));
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let policy = RetryPolicy::new(4, Duration::ZERO, Duration::MAX);
+    let mut bot = refusing_bot(policy, &clock, &attempts)?;
+    let retry = reading(&mut bot);
+
+    let (fired, failure) = settle(bot.run_chain(&[], None, &retry))?;
+    assert_eq!(fired, 0, "an empty chain fires nothing");
+    assert!(failure.is_none(), "and reports nothing: {failure:?}");
+
+    let work = WorkId { chain: 0, entry: 0 };
+    let condition = BotError::NoSuchWork { work };
+    let (fired, failure) = settle(bot.run_chain(&[], Some(condition), &retry))?;
+    assert_eq!(fired, 0, "a chain stopped by its condition fires nothing");
+    assert!(
+        matches!(failure, Some(BotError::NoSuchWork { work: reported }) if reported == work),
+        "the condition failure is the chain's report: {failure:?}"
+    );
+    assert_eq!(attempts.get(), 0, "no action ran");
+    assert!(
+        first_hold(&bot).is_none(),
+        "the ledger is untouched: {:?}",
+        first_hold(&bot)
+    );
+    Ok(())
+}
