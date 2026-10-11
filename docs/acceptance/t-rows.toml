@@ -203,8 +203,8 @@ tests = [
   "it::wrong_identity_evidence::every_wrong_identity_field_is_refused_and_the_correct_one_is_not",
   "it::wrong_identity_evidence::a_settlement_carrying_another_runs_identity_is_refused",
   "it::wrong_identity_evidence::a_refused_settlement_leaves_a_real_file_journal_byte_identical",
-  "it::wrong_identity_evidence::a_checked_counter_exhaustion_never_aliases_an_issued_identity",
-  "it::wrong_identity_evidence::a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable",
+  "it::wrong_identity_evidence::counter::a_checked_counter_exhaustion_never_aliases_an_issued_identity",
+  "it::wrong_identity_evidence::counter::a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable",
   "it::sim_dispatch::store_isolation_r00",
   "it::sim_dispatch::store_isolation_r01",
 ]
