@@ -146,7 +146,19 @@ def main() -> int:
     # A document deliberately kept out of the consumer index is named here with
     # its reason, so the way to exempt one is to write down why rather than to
     # move it somewhere the check does not reach.
-    NOT_INDEXED: dict[str, str] = {}
+    # The four parts of the background-work guide, split from it under the
+    # 120-line .md law (#263). Each is linked by name from the indexed
+    # `docs/guides/lgwks-bot/background-work.md`, so an agent that reads the
+    # index reaches them in one hop. They join the README table when README.md
+    # (346 lines) is itself split under the same law (#416-#419); pre-commit
+    # refuses any edit to it until then.
+    part = "is a part of docs/guides/lgwks-bot/background-work.md, linked from it"
+    NOT_INDEXED: dict[str, str] = {
+        "docs/guides/lgwks-bot/background-limits.md": part,
+        "docs/guides/lgwks-bot/background-processes.md": part,
+        "docs/guides/lgwks-bot/bounded-loops.md": part,
+        "docs/guides/lgwks-bot/framed-output.md": part,
+    }
     indexed = {target for _, target, _ in documents}
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()
