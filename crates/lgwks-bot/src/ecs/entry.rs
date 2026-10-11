@@ -1,23 +1,15 @@
-//! Per-entry retry policy, attempt state and transitions.
+//! Per-entry retry schedule, attempt state and transitions.
 
 use std::fmt;
-use std::num::NonZeroU32;
+use std::time::Duration;
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
+use lgwks_std::retry::RetryPolicy;
 
-use crate::effect::{ActionDigest, AttemptId, EffectKey};
+use crate::clock::Clock;
+use crate::effect::{ActionDigest, ActionId, AttemptId, EffectKey};
 use crate::spec::Erased;
 #[cfg(doc)]
 use crate::verb::Observe;
-
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
 
 use super::work::AbandonReason;
 use super::work::AdmittedInput;
@@ -27,47 +19,150 @@ use super::work::WorkId;
 #[cfg(doc)]
 use crate::spec::ObserveAny;
 
-/// How many times an entry whose effect definitely did not happen is attempted.
+/// The policy a bot runs when the caller declares none: three attempts per
+/// entry, no backoff, no total deadline.
 ///
-/// A policy rather than a constant, because the right number is a property of
-/// the action: a merge that transiently refuses wants several attempts, a
-/// process launch wants one. There is no measured basis for a default, so
-/// [`Self::DEFAULT`] is a declared guess and is named as one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryPolicy {
-    /// Attempts per entry, the first included. Non-zero: an entry that may
-    /// never be attempted is not a policy, it is pre-abandoned work.
-    pub(super) max_attempts: NonZeroU32,
+/// The behaviour every bot had before the policy carried time, kept as the
+/// default so a bot that never names a policy retries exactly as it did. There
+/// is no measured basis for three; it is a declared guess and is named as one.
+pub(super) fn default_policy() -> RetryPolicy {
+    RetryPolicy::new(3, Duration::ZERO, Duration::MAX)
 }
 
-impl RetryPolicy {
-    /// One attempt per entry: the first definite failure abandons it.
-    pub const ONE_ATTEMPT: Self = Self {
-        max_attempts: NonZeroU32::MIN,
-    };
+/// The retry policy a bot declared, and the clock its backoff is measured on.
+///
+/// One value because they are one authority: a backoff is a duration, and a
+/// duration means nothing until a clock says when it started. The clock is the
+/// bot's declared one (INV-BOT-30), so a test that drives a virtual clock
+/// drives every backoff with it and a three-hour backoff costs one `advance`.
+#[derive(Debug, Clone)]
+pub(super) struct RetrySchedule {
+    /// What the caller declared.
+    pub(super) policy: RetryPolicy,
+    /// What its durations are measured on.
+    pub(super) clock: Clock,
+}
 
-    /// The declared default: three attempts per entry, counting the first.
-    pub const DEFAULT: Self = Self {
-        // Total rather than panicking: a `const` has no error channel and
-        // `unwrap` is refused crate-wide. The `None` arm is unreachable, since
-        // three is not zero.
-        max_attempts: match NonZeroU32::new(3) {
-            Some(three) => three,
-            None => NonZeroU32::MIN,
-        },
-    };
+impl RetrySchedule {
+    /// The schedule a bot runs when the caller declares neither part.
+    pub(super) fn declared_default() -> Self {
+        Self {
+            policy: default_policy(),
+            clock: Clock::wall(),
+        }
+    }
+}
 
-    /// A policy allowing `max_attempts` attempts per entry.
-    #[must_use]
-    pub const fn new(max_attempts: NonZeroU32) -> Self {
-        Self { max_attempts }
+/// Whether a definitely-failed entry may be retried at one clock reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryAdmission {
+    /// Its backoff has not ended: the entry is held.
+    Wait,
+    /// Its backoff has ended inside the deadline: the retry may begin.
+    Begin,
+    /// Its backoff has ended, but past the deadline: no retry may begin.
+    Expired {
+        /// Bot-clock time from the first attempt to this reading.
+        elapsed: Duration,
+    },
+}
+
+/// The retry schedule as one tick reads it: the policy, and one reading of the
+/// clock taken when the tick began.
+///
+/// One reading per tick rather than one per decision, so every entry a tick
+/// walks is judged against the same instant and a tick's decisions do not
+/// depend on how long the entries before them took to run.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RetryReading {
+    /// What the caller declared.
+    pub(super) policy: RetryPolicy,
+    /// The bot clock when the tick began.
+    pub(super) now: Duration,
+}
+
+impl RetryReading {
+    /// Attempts allowed per entry, the first included. A policy that names
+    /// zero means one, which is how the std policy reads its own field.
+    pub(super) fn budget(&self) -> u32 {
+        self.policy.max_attempts.max(1)
     }
 
-    /// Attempts allowed per entry.
-    #[must_use]
-    pub const fn max_attempts(self) -> u32 {
-        self.max_attempts.get()
+    /// Whether an entry whose backoff ends at `retry_at`, and whose first
+    /// attempt began at `first`, may be retried now.
+    ///
+    /// The deadline is checked again here, at the instant a retry would begin,
+    /// and not only when the failure scheduled it: a bot ticked less often than
+    /// its backoffs reaches a due retry late, and late can be past the deadline.
+    pub(super) fn admission(&self, retry_at: Duration, first: Option<Duration>) -> RetryAdmission {
+        if retry_at > self.now {
+            return RetryAdmission::Wait;
+        }
+        let Some(first) = first else {
+            return RetryAdmission::Begin;
+        };
+        let elapsed = self.now.saturating_sub(first);
+        if self.policy.deadline_exceeded(elapsed) {
+            RetryAdmission::Expired { elapsed }
+        } else {
+            RetryAdmission::Begin
+        }
     }
+
+    /// What a definite failure means for an entry: held for its backoff, or
+    /// given up on.
+    ///
+    /// `attempts` counts the failed one, and `first` is when the entry's first
+    /// attempt in this generation began. The backoff is the policy's delay for
+    /// the retry this failure would lead to, jittered by `entropy`; the
+    /// deadline bounds the retry rather than the failure, so a retry whose
+    /// backoff would end at or past the deadline is refused now instead of
+    /// being scheduled for a moment the policy already forbids.
+    pub(super) fn after_definite_failure(
+        &self,
+        attempts: u32,
+        first: Duration,
+        entropy: u64,
+        cause: String,
+    ) -> EntryState {
+        if attempts >= self.budget() {
+            return EntryState::Abandoned {
+                reason: AbandonReason::AttemptsExhausted { attempts },
+                cause,
+            };
+        }
+        let retry_at = self
+            .now
+            .saturating_add(self.policy.delay(attempts.saturating_sub(1), entropy));
+        if self.policy.deadline_exceeded(retry_at.saturating_sub(first)) {
+            return EntryState::Abandoned {
+                reason: AbandonReason::DeadlineExhausted {
+                    attempts,
+                    elapsed: self.now.saturating_sub(first),
+                },
+                cause,
+            };
+        }
+        EntryState::DefinitelyFailed {
+            attempts,
+            cause,
+            retry_at,
+        }
+    }
+}
+
+/// The jitter entropy for one retry of one action: deterministic, so a replay
+/// of the same run schedules the same backoffs.
+///
+/// Both halves of the action identity and the attempt count are folded in, so
+/// two entries that failed on the same tick do not retry in lockstep and one
+/// entry's successive retries do not all land on the same fraction of their
+/// backoff.
+pub(super) fn backoff_entropy(action: ActionId, attempts: u32) -> u64 {
+    let bytes = action.id().get().get().to_le_bytes();
+    let [low @ .., _, _, _, _, _, _, _, _] = bytes;
+    let [_, _, _, _, _, _, _, _, high @ ..] = bytes;
+    u64::from_le_bytes(low) ^ u64::from_le_bytes(high).rotate_left(attempts)
 }
 
 /// The state of one entry within a transition.
@@ -90,6 +185,8 @@ pub(super) enum EntryState {
         attempts: u32,
         /// The failure.
         cause: String,
+        /// When, on the bot clock, the backoff ends and a retry may begin.
+        retry_at: Duration,
     },
     /// The effect may or may not have happened
     /// ([`BotError::EffectIndeterminate`]).
@@ -155,10 +252,12 @@ impl EntryState {
             Self::DefinitelyFailed {
                 attempts,
                 ref cause,
+                retry_at,
             } => Some(TransitionHold::Failed {
                 attempts,
                 budget,
                 cause: cause.clone(),
+                retry_at,
             }),
             Self::OutcomeUnknown {
                 attempts,
@@ -209,6 +308,12 @@ pub(super) struct AttemptRecord {
     /// whichever attempt happened to be current when a repeat arrived is how a
     /// report about one attempt comes to authorise another.
     pub(super) settled: Option<SettledAttempt>,
+    /// When, on the bot clock, the first attempt of this generation began.
+    ///
+    /// What the policy's total deadline is measured from. Set once by the
+    /// first [`Ledger::begin_attempt`] and never moved, so a retry cannot buy
+    /// itself a fresh deadline by being a retry.
+    pub(super) first_begun: Option<Duration>,
 }
 
 /// The attempt one settlement was about, and the evidence it carried.
@@ -361,6 +466,16 @@ impl Transition {
             attempts: vec![AttemptRecord::default(); previous.entries.len()],
             value,
         }
+    }
+
+    /// How a retry of `entry` stands at `retry`'s reading, or `None` when the
+    /// entry is not one a retry is scheduled for.
+    pub(super) fn retry_admission(&self, entry: usize, retry: &RetryReading) -> Option<RetryAdmission> {
+        let EntryState::DefinitelyFailed { retry_at, .. } = *self.entries.get(entry)? else {
+            return None;
+        };
+        let first = self.attempts.get(entry).and_then(|record| record.first_begun);
+        Some(retry.admission(retry_at, first))
     }
 
     /// Whether any entry is still unresolved.

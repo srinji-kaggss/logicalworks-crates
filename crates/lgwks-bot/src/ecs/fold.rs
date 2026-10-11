@@ -32,6 +32,8 @@ use super::admit::plan_inputs;
 use super::admit::resume;
 use super::admit::revision_of;
 use super::entry::EntryState;
+use super::entry::RetryAdmission;
+use super::entry::RetryReading;
 use super::entry::Transition;
 use super::ledger::Ledger;
 use super::resources::AdmitScratch;
@@ -45,6 +47,7 @@ use super::resources::Moved;
 use super::resources::Observed;
 use super::resources::Order;
 use super::resources::Plan;
+use super::resources::Policy;
 use super::resources::PollBudget;
 use super::resources::Polled;
 use super::resources::Revision;
@@ -421,6 +424,7 @@ pub(super) fn fire_plan(world: &mut World) {
         {
             let chains = world.non_send::<Chains>();
             let ledger = world.non_send::<Ledger>();
+            let retry = world.resource::<Policy>().reading();
             if let (Some(chain), Some(value), Some(failure)) = (
                 chains.0.get(index),
                 transition.value.as_ref(),
@@ -430,8 +434,11 @@ pub(super) fn fire_plan(world: &mut World) {
                     chain,
                     &transition,
                     value,
-                    index,
-                    ledger,
+                    Walk {
+                        index,
+                        ledger,
+                        retry,
+                    },
                     &mut steps,
                     failure,
                 );
@@ -517,6 +524,20 @@ pub(super) fn put_plan_buffers(
     plan.failures = failures;
 }
 
+/// Where one chain's walk is, and the instant it is judged at.
+///
+/// One value rather than three arguments: the chain's index, the ledger it
+/// reads and the tick's retry reading travel together into every walk.
+#[derive(Clone, Copy)]
+pub(super) struct Walk<'ledger> {
+    /// The chain being walked.
+    pub(super) index: usize,
+    /// The ledger the walk reads.
+    pub(super) ledger: &'ledger Ledger,
+    /// The retry schedule at the tick's clock reading.
+    pub(super) retry: RetryReading,
+}
+
 /// Record the decisions one chain's walk reaches, in entry order.
 ///
 /// Only the decisions a walk can make without attempting anything are taken
@@ -535,11 +556,15 @@ pub(super) fn plan_chain(
     chain: &EcsChain,
     transition: &Transition,
     value: &Erased,
-    index: usize,
-    ledger: &Ledger,
+    walk: Walk<'_>,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
+    let Walk {
+        index,
+        ledger,
+        retry,
+    } = walk;
     for (entry_index, entry) in chain.entries.iter().enumerate() {
         let Some(state) = transition.entries.get(entry_index) else {
             continue;
@@ -584,6 +609,16 @@ pub(super) fn plan_chain(
             // A known outcome whose record is missing is walked: the retry is
             // an append, not a dispatch, and `run_chain` takes that path.
             EntryState::RecordingFailed { .. } => {}
+            // Inside its backoff: held, and a barrier like any other held entry.
+            // The tick that finds it reports it with the instant the backoff
+            // ends, and the first tick at or after that instant walks it.
+            EntryState::DefinitelyFailed { .. }
+                if transition.retry_admission(entry_index, &retry) == Some(RetryAdmission::Wait) =>
+            {
+                break;
+            }
+            // A retry past its deadline is walked to the attempt, where the
+            // driver gives it up instead of beginning it.
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
         }
 

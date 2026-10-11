@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::time::Duration;
 
 // `self` is load-bearing: the `Component` and `Resource` derives expand to
 // `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
@@ -182,6 +183,18 @@ pub enum AbandonReason {
         /// How many attempts were made.
         attempts: u32,
     },
+    /// The retry policy's total deadline would pass before the next attempt
+    /// could begin. The effect definitely did not happen on any attempt made;
+    /// like [`Self::AttemptsExhausted`], nothing further is attempted without
+    /// evidence.
+    DeadlineExhausted {
+        /// How many attempts were made.
+        attempts: u32,
+        /// Bot-clock time from the first attempt to the instant the bot found
+        /// the deadline spent: the last failure, or the tick a late retry came
+        /// due on.
+        elapsed: Duration,
+    },
     /// The failure is one no retry can fix: a refused capability, a type
     /// mismatch behind an erased verb, a malformed action input. Retrying would
     /// spend an attempt to learn the same answer.
@@ -221,6 +234,10 @@ pub enum TransitionHold {
     },
     /// The effect definitely did not happen, and the attempt budget remains.
     Failed {
+        /// When, on the bot's declared clock, the policy's backoff ends. No
+        /// tick attempts the entry before then; the first tick at or after it
+        /// does.
+        retry_at: Duration,
         /// Attempts made so far, including the failed one.
         attempts: u32,
         /// The budget this entry is allowed.
@@ -273,12 +290,14 @@ impl fmt::Display for TransitionHold {
                  settled"
             ),
             Self::Failed {
+                retry_at,
                 attempts,
                 budget,
                 ref cause,
             } => write!(
                 f,
-                "did not happen: attempt {attempts} of {budget} failed with {}",
+                "did not happen: attempt {attempts} of {budget} failed with {}; \
+                 retried from {retry_at:?} on the bot clock",
                 Escaped(cause)
             ),
             Self::OutcomeUnknown {
@@ -302,6 +321,12 @@ impl fmt::Display for TransitionHold {
                 AbandonReason::AttemptsExhausted { attempts } => write!(
                     f,
                     "given up on after {attempts} attempts: {}",
+                    Escaped(cause)
+                ),
+                AbandonReason::DeadlineExhausted { attempts, elapsed } => write!(
+                    f,
+                    "given up on after {attempts} attempts in {elapsed:?}: the next would \
+                     begin past the retry deadline: {}",
                     Escaped(cause)
                 ),
                 AbandonReason::Terminal => {

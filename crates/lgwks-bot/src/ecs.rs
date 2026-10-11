@@ -193,7 +193,7 @@ mod work;
 pub use bot::EcsBot;
 pub use builder::EcsBuilder;
 pub use builder::EcsObserveBuilder;
-pub use entry::RetryPolicy;
+pub use lgwks_std::retry::RetryPolicy;
 pub use resources::ForcedRefresh;
 pub use resources::StalledSource;
 pub use resources::SupersededObservation;
