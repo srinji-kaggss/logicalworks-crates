@@ -18,6 +18,8 @@
 #
 # The image is the repository's pinned toolchain (`rust-toolchain.toml`) and
 # nextest is the version the host runs, so the two legs differ only in the OS.
+# It is Debian trixie: its util-linux 2.41 `setpriv` applies Landlock rules,
+# which `Confinement::Landlock` wraps (#337); bookworm's 2.38 cannot.
 # Build output, the registry and the nextest binary live in named volumes, so a
 # run reuses what the last run built.
 #
@@ -145,5 +147,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "rust:${toolchain}-bookworm" \
+    "rust:${toolchain}-trixie" \
     bash -c "${script}"

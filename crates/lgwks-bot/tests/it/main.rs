@@ -199,6 +199,7 @@ mod sim_inspect_wiring;
 mod sim_journal;
 mod sim_journal_liveness;
 mod sim_journal_tail;
+mod sim_landlock;
 mod sim_network;
 mod sim_observe_refresh;
 mod sim_process;
