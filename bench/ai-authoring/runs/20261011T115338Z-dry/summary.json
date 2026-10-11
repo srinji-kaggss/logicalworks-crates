@@ -1,0 +1,71 @@
+{
+  "generated_by": "bench/ai-authoring/run.py",
+  "lgwks_bot_sha": "d55ee4e225b19f0ada61d0aec8da3cac239eb329",
+  "protocol": {
+    "same_prompt_skeleton": true,
+    "same_sheet_budget": "each API sheet <= 250 lines, except the lexicon arm's: its sheet is the generated docs/script-lexicon.md, whose budget is one page (<= 4k tokens, #385) rather than a line count",
+    "same_oracle": true,
+    "hidden_oracle": true,
+    "repair_budget": 4,
+    "cargo_serialized": "one cargo process at a time under an fcntl lock",
+    "closed_book": "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills",
+    "profiles": [
+      "first-time",
+      "expert-hurry",
+      "anxious",
+      "misuser",
+      "agent"
+    ],
+    "profile_text_is_fixed": "each profile is one fixed persona preamble prepended to the same prompt skeleton; the framing, the API sheet, the oracle, the repair budget and the sandbox are identical across profiles",
+    "oracle_measured_under_time_l": "oracle_wall_ms is the wall time of the cargo test invocation that runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is that process's maximum resident set size in bytes, or null on a host with no /usr/bin/time",
+    "cleanup_ok_is_the_drop_clause": "cleanup_ok is true only when the task's 'dropping the future leaves nothing live' oracle test passed; a crate that never compiled reports false rather than a cleanup result",
+    "skipped_cells": [
+      {
+        "task": "recovery",
+        "api": "old",
+        "why": "the old rt surface has no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+      },
+      {
+        "task": "recovery",
+        "api": "futures",
+        "why": "the futures sheet offers no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "model": "__dry-run__",
+      "api": "fan",
+      "task": "recovery",
+      "profile": "first-time",
+      "n": 1,
+      "compiled": 1,
+      "cleanup_ok_all": true,
+      "repairs_mean": 0,
+      "repairs_median": 0,
+      "oracle_pass_rate": 1.0,
+      "oracle_per_trial": [
+        {
+          "trial": 0,
+          "compiled": true,
+          "cleanup_ok": true,
+          "oracle_pass_count": 5,
+          "oracle_total": 5,
+          "oracle": {
+            "a_first_attempt_completes": "pass",
+            "a_resume_does_not_rerun_a_completed_unit": "pass",
+            "the_effect_is_applied_exactly_once": "pass",
+            "the_overall_deadline_is_honoured": "pass",
+            "dropping_the_future_leaves_no_unit_live": "pass"
+          }
+        }
+      ],
+      "tokens_in_median": 0,
+      "tokens_out_median": 0,
+      "consumer_lines_median": 101,
+      "orchestration_sites_median": 7,
+      "oracle_wall_ms_median": 6429.835,
+      "oracle_peak_rss_bytes_median": 208535552
+    }
+  ]
+}
