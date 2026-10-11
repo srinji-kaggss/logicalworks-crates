@@ -56,8 +56,10 @@ pub fn band_of(index: usize) -> Band {
     if let Some(band) = table.get(index) {
         return *band;
     }
-    let (Some(last), Ok(beyond)) = (table.last(), u64::try_from(index.saturating_sub(table.len())))
-    else {
+    let (Some(last), Ok(beyond)) = (
+        table.last(),
+        u64::try_from(index.saturating_sub(table.len())),
+    ) else {
         return Band::new(0, 1);
     };
     Band::new(

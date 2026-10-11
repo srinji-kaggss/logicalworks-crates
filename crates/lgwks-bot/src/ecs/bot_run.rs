@@ -1,8 +1,5 @@
 //! Running chain steps and resolving held effects.
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
 #[cfg(doc)]
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
 
@@ -13,20 +10,13 @@ use crate::verb::EffectLifetime;
 #[cfg(doc)]
 use crate::verb::Execute;
 
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
-
 use super::bot::EcsBot;
+use super::entry::RetryReading;
 use super::entry::Settled;
 use super::ledger::Ledger;
 use super::resources::Chains;
 use super::resources::Decision;
 use super::resources::Grants;
-use super::entry::RetryReading;
 use super::resources::Policy;
 use super::resources::Step;
 use super::work::EffectEvidence;
@@ -208,7 +198,11 @@ impl EcsBot {
             // A retry that came due after its deadline is given up here, at the
             // instant it would begin, rather than begun: the abandonment is the
             // barrier the rest of the chain waits behind, and the tick reports it.
-            if self.world.non_send_mut::<Ledger>().expire_retry(work, retry) {
+            if self
+                .world
+                .non_send_mut::<Ledger>()
+                .expire_retry(work, retry)
+            {
                 break;
             }
 

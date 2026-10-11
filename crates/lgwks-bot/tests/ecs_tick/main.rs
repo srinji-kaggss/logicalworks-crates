@@ -62,13 +62,13 @@ use yield_once::YieldOnce;
 mod ledger_more_tests;
 mod ledger_tests;
 mod runtime_tests;
+#[cfg(all(feature = "io", feature = "net"))]
+use runtime_tests::socket_source_on_the_shipped_runtime;
 use runtime_tests::{
     a_cancelled_tick_leaves_the_bot_usable, immediate_verbs_on_the_shipped_runtime,
     refusal_current_thread, refusal_one_worker, runtime_independent_verbs_on_the_sync_adapter,
     sibling_channel_completion, timer_effects_in_order,
 };
-#[cfg(all(feature = "io", feature = "net"))]
-use runtime_tests::socket_source_on_the_shipped_runtime;
 
 /// What a test reports when its precondition did not hold.
 ///
@@ -189,9 +189,7 @@ enum ChildEnd {
 /// exits, and hands what it read over a one-slot channel. The parent keeps the
 /// `Child`, so at the deadline it can still kill it; the kill closes the pipe,
 /// the reader finishes, and the scope joins it, so no thread outlives the call.
-fn run_to_deadline(
-    mut child: std::process::Child,
-) -> Result<ChildEnd, Box<dyn std::error::Error>> {
+fn run_to_deadline(mut child: std::process::Child) -> Result<ChildEnd, Box<dyn std::error::Error>> {
     let mut stdout = child
         .stdout
         .take()

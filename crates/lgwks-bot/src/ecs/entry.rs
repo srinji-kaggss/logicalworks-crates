@@ -134,7 +134,10 @@ impl RetryReading {
         let retry_at = self
             .now
             .saturating_add(self.policy.delay(attempts.saturating_sub(1), entropy));
-        if self.policy.deadline_exceeded(retry_at.saturating_sub(first)) {
+        if self
+            .policy
+            .deadline_exceeded(retry_at.saturating_sub(first))
+        {
             return EntryState::Abandoned {
                 reason: AbandonReason::DeadlineExhausted {
                     attempts,
@@ -470,11 +473,18 @@ impl Transition {
 
     /// How a retry of `entry` stands at `retry`'s reading, or `None` when the
     /// entry is not one a retry is scheduled for.
-    pub(super) fn retry_admission(&self, entry: usize, retry: &RetryReading) -> Option<RetryAdmission> {
+    pub(super) fn retry_admission(
+        &self,
+        entry: usize,
+        retry: &RetryReading,
+    ) -> Option<RetryAdmission> {
         let EntryState::DefinitelyFailed { retry_at, .. } = *self.entries.get(entry)? else {
             return None;
         };
-        let first = self.attempts.get(entry).and_then(|record| record.first_begun);
+        let first = self
+            .attempts
+            .get(entry)
+            .and_then(|record| record.first_begun);
         Some(retry.admission(retry_at, first))
     }
 

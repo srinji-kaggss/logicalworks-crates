@@ -3,10 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
-
 use crate::broker::{Authority, Broker, DispatchError, prepare_dispatch};
 use crate::effect::{
     ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch,
@@ -16,13 +12,6 @@ use crate::journal::{
     JournalPosition,
 };
 use crate::verb::EffectLifetime;
-
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
 
 use super::identity::changed_outcome;
 use super::identity::derive_action_digest;

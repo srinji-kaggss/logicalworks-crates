@@ -878,8 +878,8 @@ pub enum BotError {
 mod class;
 mod display;
 
-pub use class::{DispatchCertainty, RetryClass};
 pub(crate) use class::unbound_domain;
+pub use class::{DispatchCertainty, RetryClass};
 pub(crate) use display::Escaped;
 
 #[cfg(test)]

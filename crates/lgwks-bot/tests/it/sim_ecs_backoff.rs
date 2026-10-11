@@ -126,7 +126,9 @@ fn failed(bot: &Bot) -> Result<(Duration, u32), String> {
         Some(TransitionHold::Failed {
             retry_at, attempts, ..
         }) => Ok((retry_at, attempts)),
-        other => Err(format!("a refused attempt leaves the entry Failed, not {other:?}")),
+        other => Err(format!(
+            "a refused attempt leaves the entry Failed, not {other:?}"
+        )),
     }
 }
 
@@ -184,9 +186,14 @@ fn a_retry_waits_out_its_backoff(band: Band) -> TestResult {
                 );
             }
             clock.advance(retry_at.saturating_sub(clock.now()))?;
-            sim.trace.record_number("retry_at_ns", u64::try_from(retry_at.as_nanos())?);
+            sim.trace
+                .record_number("retry_at_ns", u64::try_from(retry_at.as_nanos())?);
         }
-        assert_eq!(bot.tick()?, 1, "the first tick at the backoff's end lands the effect");
+        assert_eq!(
+            bot.tick()?,
+            1,
+            "the first tick at the backoff's end lands the effect"
+        );
         assert!(hold_of(&bot).is_none(), "nothing is held once it lands");
         assert_eq!(
             action.entries(),
@@ -194,8 +201,10 @@ fn a_retry_waits_out_its_backoff(band: Band) -> TestResult {
             "each refusal was retried once and the last attempt landed"
         );
         for (instant, attempt) in action.entered.borrow().iter().zip(1_u64..) {
-            sim.trace
-                .record_number("entered_ns", u64::try_from(instant.as_nanos())?.saturating_add(attempt));
+            sim.trace.record_number(
+                "entered_ns",
+                u64::try_from(instant.as_nanos())?.saturating_add(attempt),
+            );
         }
         Ok(())
     })
@@ -211,7 +220,11 @@ fn no_attempt_begins_past_the_deadline(band: Band) -> TestResult {
         let max_attempts = sim.rng().between(2, 40);
         let clock = Clock::virtual_at(Duration::ZERO);
         let action = Flaky::new(usize::MAX, &clock);
-        let mut bot = bot_over(RetryPolicy::new(max_attempts, base, deadline), &clock, action.clone())?;
+        let mut bot = bot_over(
+            RetryPolicy::new(max_attempts, base, deadline),
+            &clock,
+            action.clone(),
+        )?;
 
         let mut ended = None;
         for _ in 0..max_attempts {
@@ -232,7 +245,9 @@ fn no_attempt_begins_past_the_deadline(band: Band) -> TestResult {
         let first = *entered.first().ok_or("the first attempt ran")?;
         let last = *entered.last().ok_or("an attempt ran")?;
         assert!(
-            entered.iter().all(|instant| instant.saturating_sub(first) < deadline),
+            entered
+                .iter()
+                .all(|instant| instant.saturating_sub(first) < deadline),
             "every attempt began inside the deadline: {entered:?} against {deadline:?}"
         );
         let ran = u32::try_from(entered.len())?;
@@ -256,9 +271,15 @@ fn no_attempt_begins_past_the_deadline(band: Band) -> TestResult {
             matches!(after, Err(BotError::PendingTransition { .. })),
             "an abandoned entry is reported, never retried: {after:?}"
         );
-        assert_eq!(action.entered.borrow().len(), entered.len(), "nothing runs after the end");
-        sim.trace.record_number("attempts", u64::try_from(entered.len())?);
-        sim.trace.record_number("last_ns", u64::try_from(last.as_nanos())?);
+        assert_eq!(
+            action.entered.borrow().len(),
+            entered.len(),
+            "nothing runs after the end"
+        );
+        sim.trace
+            .record_number("attempts", u64::try_from(entered.len())?);
+        sim.trace
+            .record_number("last_ns", u64::try_from(last.as_nanos())?);
         Ok(())
     })
 }
@@ -287,7 +308,10 @@ fn a_zero_deadline_gives_up_after_the_first_failure() -> TestResult {
         hold_of(&bot)
     );
     clock.advance(Duration::from_secs(60))?;
-    assert!(matches!(bot.tick(), Err(BotError::PendingTransition { .. })));
+    assert!(matches!(
+        bot.tick(),
+        Err(BotError::PendingTransition { .. })
+    ));
     assert_eq!(action.entries(), 1, "no retry is ever begun");
     Ok(())
 }

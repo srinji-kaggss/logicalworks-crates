@@ -1,8 +1,5 @@
 //! The ledger of outstanding work, settled across ticks.
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
 use std::time::Duration;
 
 #[cfg(doc)]
@@ -17,22 +14,15 @@ use crate::journal::{EffectJournal, JournalError};
 use crate::spec::Erased;
 use crate::verb::EffectLifetime;
 
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
-
 use super::admit::failure_state;
 use super::effects::Effects;
 use super::entry::EntryState;
 use super::entry::RetryAdmission;
 use super::entry::RetryReading;
-use super::entry::backoff_entropy;
 use super::entry::Settled;
 use super::entry::SettledAttempt;
 use super::entry::Transition;
+use super::entry::backoff_entropy;
 use super::identity::derive_action_digest;
 use super::identity::derive_input_stamp;
 use super::work::AbandonReason;
@@ -230,7 +220,11 @@ impl Ledger {
             .get_mut(id.chain())
             .and_then(Option::as_mut)
             .ok_or_else(no_such_work)?;
-        let startable = match *transition.entries.get(id.entry()).ok_or_else(no_such_work)? {
+        let startable = match *transition
+            .entries
+            .get(id.entry())
+            .ok_or_else(no_such_work)?
+        {
             EntryState::NotStarted => true,
             EntryState::DefinitelyFailed { .. } => {
                 transition.retry_admission(id.entry(), retry) == Some(RetryAdmission::Begin)
@@ -409,10 +403,15 @@ impl Ledger {
     /// Called where a retry would begin. `true` when the entry was abandoned,
     /// which makes it the barrier the rest of its chain waits behind.
     pub(super) fn expire_retry(&mut self, id: WorkId, retry: &RetryReading) -> bool {
-        let Some(transition) = self.transitions.get_mut(id.chain()).and_then(Option::as_mut) else {
+        let Some(transition) = self
+            .transitions
+            .get_mut(id.chain())
+            .and_then(Option::as_mut)
+        else {
             return false;
         };
-        let Some(RetryAdmission::Expired { elapsed }) = transition.retry_admission(id.entry(), retry)
+        let Some(RetryAdmission::Expired { elapsed }) =
+            transition.retry_admission(id.entry(), retry)
         else {
             return false;
         };

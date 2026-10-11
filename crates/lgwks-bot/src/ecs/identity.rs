@@ -2,22 +2,12 @@
 
 use std::num::NonZeroU128;
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
 use lgwks_std::hash::{Digest, Hasher};
 
 use crate::journal::frame::SaturatingFrom;
 
 use crate::effect::{ActionDigest, ActionId, EffectKey, FlowRevision, Id128};
 use crate::journal::{EventKind, JournalError};
-
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
 
 /// The domain separator for an [`ActionId`] derived from a bot's structure.
 ///

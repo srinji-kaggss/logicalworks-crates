@@ -1,7 +1,7 @@
 //! The ledger's repairs, continued: payload binding and attempt identity.
 
-use super::*;
 use super::ledger_tests::{Noted, binding};
+use super::*;
 
 /// An action that refuses a fixed number of attempts, then succeeds.
 ///

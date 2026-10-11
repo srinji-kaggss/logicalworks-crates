@@ -8,7 +8,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs/fold.rs:645`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs/fold.rs:636`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
   than absolute: the steps `fire_plan` recorded before the failing condition are
   still run, so an effect the walk had already cleared does take effect, while
@@ -45,6 +45,6 @@ in declaration order and `run_steps` runs them in that same order, parking the
 first failure it saw and reporting that one, while the chains behind the failing
 one still run and still record their work. `TickError` is a resource rather than
 a return value because an exclusive system returns `()` and cannot propagate
-(`crates/lgwks-bot/src/ecs/resources.rs:85`); `tick` takes it after the schedule runs, and
+(`crates/lgwks-bot/src/ecs/resources.rs:78`); `tick` takes it after the schedule runs, and
 it takes precedence over the `PendingTransition` report because it carries the
 typed variant a retry classifier matches on.

@@ -54,9 +54,15 @@ fn the_ledger_refuses_an_attempt_inside_its_backoff() -> TestResult {
     let clock = Clock::virtual_at(Duration::ZERO);
     let policy = RetryPolicy::new(4, Duration::from_secs(10), Duration::MAX);
     let mut bot = refusing_bot(policy, &clock, &attempts)?;
-    refused(bot.tick(), |fired| format!("a refusing action fired {fired}"))?;
+    refused(bot.tick(), |fired| {
+        format!("a refusing action fired {fired}")
+    })?;
     let Some(TransitionHold::Failed { retry_at, .. }) = first_hold(&bot) else {
-        return Err(format!("the refusal leaves the entry Failed: {:?}", first_hold(&bot)).into());
+        return Err(format!(
+            "the refusal leaves the entry Failed: {:?}",
+            first_hold(&bot)
+        )
+        .into());
     };
     let work = WorkId { chain: 0, entry: 0 };
     if let Some(early) = retry_at.checked_sub(Duration::from_nanos(1)) {
@@ -83,13 +89,20 @@ fn the_ledger_refuses_an_attempt_inside_its_backoff() -> TestResult {
         EffectLifetime::Local,
         &retry,
     ))?;
-    assert!(at_end.is_ok(), "the backoff's own end admits the attempt: {at_end:?}");
+    assert!(
+        at_end.is_ok(),
+        "the backoff's own end admits the attempt: {at_end:?}"
+    );
     assert!(
         matches!(first_hold(&bot), Some(TransitionHold::Unrecorded)),
         "the begun attempt is held as in flight: {:?}",
         first_hold(&bot)
     );
-    assert_eq!(attempts.get(), 1, "the ledger began the attempt; nothing ran it");
+    assert_eq!(
+        attempts.get(),
+        1,
+        "the ledger began the attempt; nothing ran it"
+    );
     Ok(())
 }
 
@@ -130,6 +143,10 @@ fn a_late_retry_past_the_deadline_is_given_up_not_begun() -> TestResult {
         "the fourth tick finds the deadline spent and begins nothing: {:?}",
         first_hold(&bot)
     );
-    assert_eq!(attempts.get(), 3, "three attempts ran, all inside the deadline");
+    assert_eq!(
+        attempts.get(),
+        3,
+        "three attempts ran, all inside the deadline"
+    );
     Ok(())
 }
