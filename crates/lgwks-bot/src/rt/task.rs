@@ -67,6 +67,28 @@ use std::future::Future;
 /// remaining tasks). Blocking and local tasks are likewise absent; blocking
 /// work needs an explicit non-preemptible owner, not a method on this async
 /// owner.
+///
+/// The set is built and used like this:
+///
+/// ```
+/// let mut set = lgwks_bot::rt::task::JoinSet::<u8>::new();
+/// assert!(set.is_empty());
+/// set.abort_all();
+/// ```
+///
+/// and has no way to detach a task, which this example proves by refusing
+/// to compile (#415). The example above is the same code without the call,
+/// so this one fails on the missing method and not on anything else:
+///
+/// ```compile_fail
+/// let mut set = lgwks_bot::rt::task::JoinSet::<u8>::new();
+/// assert!(set.is_empty());
+/// set.detach_all();
+/// ```
+///
+/// Dropping the set, `abort_all`, a single task's [`AbortHandle`] and
+/// `try_join_next` are each witnessed directly at 100, 1,000 and 10,000
+/// owned tasks in `tests/it/rt_joinset_ownership.rs`.
 pub struct JoinSet<T> {
     /// The engine set kept private so callers cannot detach its tasks.
     inner: lgwks_deps::tokio::task::JoinSet<T>,
