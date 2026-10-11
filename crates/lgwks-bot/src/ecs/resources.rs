@@ -21,13 +21,6 @@ use crate::spec::{ChainEntry, Erased, ObserveAny, Witness};
 use crate::verb::Observe;
 use crate::verb::RefreshReason;
 
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
-
 use super::admit::AdmitKind;
 #[cfg(doc)]
 use super::bot::EcsBot;

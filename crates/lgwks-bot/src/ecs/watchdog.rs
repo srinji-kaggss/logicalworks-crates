@@ -8,9 +8,6 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
 #[cfg(doc)]
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
 
@@ -21,14 +18,14 @@ use crate::spec::Erased;
 #[cfg(doc)]
 use crate::verb::Observe;
 
+#[cfg(doc)]
+use super::builder::EcsBuilder;
 // The one declared clock every deadline in this crate names (INV-BOT-30). Only
 // its wall watchdog is read below — a source that stopped answering is not
 // waiting for time, so a logical counter a caller can advance is the wrong
 // authority for it — but it is reached through the crate's clock rather than
 // through a free-floating `Instant`, which is what makes the elapsed time that
 // cancelled a poll traceable to a named authority.
-#[cfg(doc)]
-use super::builder::EcsBuilder;
 use crate::clock::Clock;
 
 /// Upper bound on sources polled simultaneously by one tick. A source poll may

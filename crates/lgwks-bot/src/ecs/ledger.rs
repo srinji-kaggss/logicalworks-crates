@@ -1,8 +1,5 @@
 //! The ledger of outstanding work, settled across ticks.
 
-// `self` is load-bearing: the `Component` and `Resource` derives expand to
-// `bevy_ecs::…` paths, so the crate name has to be in scope at the use site even
-// though every edge in this crate is written through the `lgwks_deps` facade.
 #[cfg(doc)]
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
 
@@ -14,13 +11,6 @@ use crate::error::BotError;
 use crate::journal::{EffectJournal, JournalError};
 use crate::spec::Erased;
 use crate::verb::EffectLifetime;
-
-// The one declared clock every deadline in this crate names (INV-BOT-30). Only
-// its wall watchdog is read below — a source that stopped answering is not
-// waiting for time, so a logical counter a caller can advance is the wrong
-// authority for it — but it is reached through the crate's clock rather than
-// through a free-floating `Instant`, which is what makes the elapsed time that
-// cancelled a poll traceable to a named authority.
 
 use super::admit::failure_state;
 use super::effects::Effects;
