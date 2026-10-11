@@ -4,10 +4,10 @@
 //! thread using `std::task::Wake` and a condition variable, with zero background
 //! reactors and zero external dependencies. The one pool is for blocking work:
 //! it is bounded (512 threads, or the one ceiling
-//! [`configure_blocking_pool`](crate::task::configure_blocking_pool) fixes
+//! [`crate::task::configure_blocking_pool()`] fixes
 //! once before first use), created on first use, and its threads exit after
 //! ten idle seconds, so a process with no blocking work holds no thread.
-//! [`shutdown_blocking_pool`](crate::task::shutdown_blocking_pool) closes
+//! [`crate::task::shutdown_blocking_pool()`] closes
 //! admission, lets the admitted jobs finish, and joins every pool thread
 //! within a caller-given deadline.
 //!
@@ -19,9 +19,9 @@
 //! - [`spawn_blocking`] runs one blocking closure on the bounded blocking pool
 //!   and returns a future for its result, so a blocking syscall (file read,
 //!   HTTP) does not stall the sibling futures driven by [`join_all`] or
-//!   [`block_on`]. [`try_spawn_blocking`](crate::task::try_spawn_blocking) is
+//!   [`block_on`]. [`crate::task::try_spawn_blocking()`] is
 //!   the same with a bounded queue and a typed
-//!   [`SpawnError`](crate::task::SpawnError) instead of an unbounded wait.
+//!   [`crate::task::SpawnError`] instead of an unbounded wait.
 //!
 //! Together these replace `tokio`, `futures`, `pollster`, and `async-trait`
 //! for applications that only need to await futures, await a bounded set of
