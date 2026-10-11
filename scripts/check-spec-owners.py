@@ -28,13 +28,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFINITION = re.compile(r"\*\*([A-Z]{2,3})-(\d{2})\.\*\*")
-# The families whose every id must be owned. AI, LC and PR join when their
-# unowned ids (AI-01/08/09, LC-14/15/16, PR-01) are owned or given a reason.
-CHECKED = ("DX",)
+# The families whose every id must be owned. PR joins when PR-01 is owned:
+# the review path has no read-only profile yet, so a profile without the
+# publication right cannot be shown to stop at a draft (#421).
+CHECKED = ("DX", "AI", "LC")
 EXEMPT = {
     "DX-02": "a vocabulary (Task, Host, Report), not a behaviour: T01 drives exactly those three names",
     "DX-12": "a release discipline (published API changes, compiled examples): held by the "
     "readme-quickstart lane and the CHANGELOG, not by a falsifier row",
+    "AI-01": "the umbrella over AI-02..09: the executing half is owned by T26-T30, the writing half "
+    "by the bench/ai-authoring model matrix (#270), which is an evaluation, not a falsifier",
+    "AI-09": "an evaluation protocol (fixed models, matched budgets, variance): held by "
+    "bench/ai-authoring's run.py and its README, not by a falsifier row",
+    "LC-14": "an implementation discipline: held by the workspace clippy contract (as_conversions, "
+    "arithmetic_side_effects forbidden) and the rust-guard, not by a behaviour a row can falsify",
+    "LC-15": "a performance requirement: held by the measured async benchmarks of #269, not by a "
+    "pass/fail row",
+    "LC-16": "a structure rule (no new crate or dependency): held by `lgwks-deps check` and the size law",
 }
 
 
@@ -86,8 +96,9 @@ class SpecOwnerRegression(unittest.TestCase):
         self.assertEqual(required([{"requires": "DX-01/see below/05"}]), {"DX-01"})
 
     def test_an_unrequired_id_is_reported_and_an_owned_one_is_not(self) -> None:
-        found = {"DX-98": "a.spec.md", "DX-01": "a.spec.md", "DX-99": "a.spec.md", "LC-99": "b.spec.md"}
-        self.assertEqual(unowned(found, {"DX-01"}), ["DX-98", "DX-99"])
+        found = {"DX-98": "a.spec.md", "DX-01": "a.spec.md", "LC-99": "b.spec.md", "PR-99": "c.spec.md"}
+        # LC is checked, so its unowned id is reported; PR is not checked yet.
+        self.assertEqual(unowned(found, {"DX-01"}), ["DX-98", "LC-99"])
 
     def test_an_exempt_id_is_not_reported(self) -> None:
         self.assertEqual(unowned({"DX-02": "a.spec.md", "DX-12": "a.spec.md"}, set()), [])

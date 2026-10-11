@@ -539,7 +539,7 @@ tests = [
 
 [[row]]
 id = "T33"
-requires = "PR-07/08"
+requires = "PR-07/08/AI-08"
 row = "Provider accepts review but response is lost; reconciliation finds and verifies the exact review, or remains Unknown. No duplicate post. Test partially submitted reviews/comments."
 state = "exercised"
 gap = ""
@@ -557,7 +557,7 @@ tests = [
 
 [[row]]
 id = "T34"
-requires = "PR-09/10"
+requires = "PR-09/10/AI-08"
 row = "Real readback proves exact IDs/state/subject/payload; lost read permission reports unverified/blocking state while retaining applied-effect evidence."
 state = "exercised"
 gap = ""
