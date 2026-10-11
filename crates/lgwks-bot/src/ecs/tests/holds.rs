@@ -72,6 +72,7 @@ fn an_attempt_whose_outcome_was_never_recorded_is_held_not_replayed() -> TestRes
             .ok_or("the chain declares no entries")? = AttemptRecord {
             begun: Some(AttemptId::FIRST),
             settled: None,
+            first_begun_at: None,
         };
         bot.world.non_send_mut::<Ledger>().put(0, Some(transition));
     }

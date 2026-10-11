@@ -337,7 +337,7 @@ fn one_attempt_is_a_policy_a_caller_can_declare() -> TestResult {
     let attempts = Rc::new(Cell::new(0));
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut bot = EcsBot::builder("impatient")
-        .with_retry_policy(RetryPolicy::ONE_ATTEMPT)
+        .with_retry_policy(RetryPolicy::new(1, Duration::ZERO, Duration::MAX))
         .observe(Script::new(vec![200, 200, 200]))
         .on(
             |value: &u16| *value >= 200,

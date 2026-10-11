@@ -12,7 +12,6 @@ use std::task::{Context, Poll, Waker};
 
 use super::attempts::AttemptRecord;
 use super::attempts::EntryState;
-use super::attempts::RetryPolicy;
 use super::attempts::Transition;
 use super::bot::EcsBot;
 use super::components::Chains;
@@ -767,6 +766,7 @@ const TEST_ENV: &str = "2122232425262728292a2b2c2d2e2f30";
 /// The flow revision every test dispatches from.
 const TEST_FLOW: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
+mod backoff;
 mod change_detection;
 mod holds;
 mod identity_and_scale;

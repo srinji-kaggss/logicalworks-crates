@@ -5,20 +5,22 @@ use super::ActionId;
 use super::AttemptId;
 use super::Authority;
 use super::BotError;
+use super::Duration;
 use super::EffectJournal;
 use super::EffectKey;
 use super::EffectLifetime;
 use super::Erased;
 use super::JournalError;
 use super::attempts::EntryState;
+use super::attempts::RetryTurn;
 use super::attempts::Settled;
 use super::attempts::SettledAttempt;
 use super::attempts::Transition;
+use super::attempts::jitter_entropy;
 use super::effects::Effects;
 use super::identity::derive_action_digest;
 use super::identity::derive_input_stamp;
 use super::plan::failure_state;
-use super::work::AbandonReason;
 use super::work::EffectEvidence;
 use super::work::PendingWork;
 use super::work::TransitionHold;
@@ -190,6 +192,7 @@ impl Ledger {
         &mut self,
         id: WorkId,
         lifetime: EffectLifetime,
+        now: Duration,
     ) -> Result<(EffectKey, Authority), BotError> {
         let no_such_work = || BotError::NoSuchWork { work: id };
         let action = self.action_of(id).ok_or_else(no_such_work)?;
@@ -274,6 +277,11 @@ impl Ledger {
             .get_mut(id.entry())
             .ok_or_else(no_such_work)?;
         record.begun = Some(attempt);
+        // The deadline's origin is the generation's first attempt, so it is
+        // set once and a retry never moves it.
+        if record.first_begun_at.is_none() {
+            record.first_begun_at = Some(now);
+        }
         if let Some(state) = transition.entries.get_mut(id.entry()) {
             *state = EntryState::Unrecorded;
         }
@@ -358,8 +366,9 @@ impl Ledger {
         id: WorkId,
         evidence: EffectEvidence,
         attempts: u32,
-        budget: u32,
+        turn: RetryTurn,
     ) -> bool {
+        let (first, entropy) = self.retry_origin(id, attempts, turn.now);
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -368,21 +377,40 @@ impl Ledger {
         }
         *state = match evidence {
             EffectEvidence::Applied => EntryState::Succeeded,
-            EffectEvidence::NotApplied => {
-                if attempts < budget {
-                    EntryState::DefinitelyFailed {
-                        attempts,
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                } else {
-                    EntryState::Abandoned {
-                        reason: AbandonReason::AttemptsExhausted { attempts },
-                        cause: "effect not applied; its record landed on retry".into(),
-                    }
-                }
-            }
+            EffectEvidence::NotApplied => turn.definite_failure(
+                attempts,
+                first,
+                entropy,
+                "effect not applied; its record landed on retry".into(),
+            ),
         };
         true
+    }
+
+    /// Where an entry's retry deadline is measured from, and the entropy its
+    /// next backoff's jitter is drawn from.
+    ///
+    /// An entry with no recorded first attempt measures from `now`: an attempt
+    /// this ledger never began has spent none of its deadline in this process.
+    /// An entry with no action has no identity to draw entropy from, and takes
+    /// zero, which jitters nothing off the backoff — the full delay, which is
+    /// the conservative side of a retry.
+    fn retry_origin(&self, id: WorkId, attempts: u32, now: Duration) -> (Duration, u64) {
+        let first = match self
+            .transitions
+            .get(id.chain())
+            .and_then(Option::as_ref)
+            .and_then(|transition| transition.attempts.get(id.entry()))
+            .and_then(|record| record.first_begun_at)
+        {
+            Some(first) => first,
+            None => now,
+        };
+        let entropy = match self.action_of(id) {
+            Some(action) => jitter_entropy(action, attempts),
+            None => 0,
+        };
+        (first, entropy)
     }
 
     /// Record what a failed attempt means for the entry it was made on.
@@ -398,9 +426,10 @@ impl Ledger {
         id: WorkId,
         error: &BotError,
         attempt: AttemptId,
-        budget: u32,
+        turn: RetryTurn,
     ) -> bool {
         let attempts = u32::saturating_from(attempt.get());
+        let (first, entropy) = self.retry_origin(id, attempts, turn.now);
         let Some(state) = self.entry_mut(id) else {
             return false;
         };
@@ -409,7 +438,7 @@ impl Ledger {
         if !matches!(*state, EntryState::Unrecorded) {
             return false;
         }
-        *state = failure_state(error, attempts, budget);
+        *state = failure_state(error, attempts, turn, first, entropy);
         true
     }
 

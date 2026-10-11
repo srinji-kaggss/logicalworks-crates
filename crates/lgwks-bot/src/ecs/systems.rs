@@ -6,6 +6,7 @@ use super::Changed;
 #[cfg(feature = "profile")]
 use super::Charge;
 use super::DispatchCertainty;
+use super::Duration;
 use super::Erased;
 use super::LogLevel;
 use super::Schedule;
@@ -27,6 +28,7 @@ use super::components::Moved;
 use super::components::Observed;
 use super::components::Order;
 use super::components::Plan;
+use super::components::Policy;
 use super::components::PollBudget;
 use super::components::Polled;
 use super::components::Revision;
@@ -384,6 +386,10 @@ pub(super) fn fire_plan(world: &mut World) {
 
     failures.resize_with(count, || None);
 
+    // One reading of the retry policy's clock for the whole walk, so every
+    // backoff this tick compares against is compared against the same instant.
+    let now = world.resource::<Policy>().0.at_now().now;
+
     #[cfg(feature = "profile")]
     let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
@@ -419,7 +425,7 @@ pub(super) fn fire_plan(world: &mut World) {
                     &transition,
                     value,
                     index,
-                    ledger,
+                    Walk { ledger, now },
                     &mut steps,
                     failure,
                 );
@@ -505,6 +511,16 @@ pub(super) fn put_plan_buffers(
     plan.failures = failures;
 }
 
+/// What one tick's walk reads but never writes: the ledger's recovered facts,
+/// and the instant every retry backoff is compared against.
+#[derive(Clone, Copy)]
+struct Walk<'w> {
+    /// The ledger, for the actions recovery holds.
+    ledger: &'w Ledger,
+    /// The retry policy's clock, read once for the whole walk.
+    now: Duration,
+}
+
 /// Record the decisions one chain's walk reaches, in entry order.
 ///
 /// Only the decisions a walk can make without attempting anything are taken
@@ -524,10 +540,11 @@ fn plan_chain(
     transition: &Transition,
     value: &Erased,
     index: usize,
-    ledger: &Ledger,
+    walk: Walk<'_>,
     steps: &mut Vec<Step>,
     failure: &mut Option<BotError>,
 ) {
+    let Walk { ledger, now } = walk;
     for (entry_index, entry) in chain.entries.iter().enumerate() {
         let Some(state) = transition.entries.get(entry_index) else {
             continue;
@@ -572,6 +589,10 @@ fn plan_chain(
             // A known outcome whose record is missing is walked: the retry is
             // an append, not a dispatch, and `run_chain` takes that path.
             EntryState::RecordingFailed { .. } => {}
+            // A retry whose backoff has not elapsed on the policy's clock is
+            // held, and so is everything behind it: the entry is a
+            // prerequisite of its successor whether it is due or not.
+            EntryState::DefinitelyFailed { due, .. } if due > now => break,
             EntryState::NotStarted | EntryState::DefinitelyFailed { .. } => {}
         }
 

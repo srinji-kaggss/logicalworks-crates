@@ -4,7 +4,7 @@ Part of [Authority in lgwks_bot](../authority.md).
 
 
 `EcsBot::assemble` walks every source and every action before the world is built
-(`crates/lgwks-bot/src/ecs/builder.rs:615`):
+(`crates/lgwks-bot/src/ecs/builder.rs:658`):
 
 ```rust
 let mut shortages: Vec<Shortage> = Vec::new();

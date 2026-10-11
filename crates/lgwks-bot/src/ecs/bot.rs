@@ -18,7 +18,7 @@ use super::TickProfile;
 #[cfg(feature = "profile")]
 use super::TickStage;
 use super::World;
-use super::attempts::RetryPolicy;
+use super::attempts::Retrying;
 use super::builder::EcsBuilder;
 use super::builder::materialize_chain;
 use super::components::ChangeTicks;
@@ -69,7 +69,7 @@ impl EcsBot {
         EcsBuilder {
             name: name.into(),
             chains: Vec::new(),
-            policy: RetryPolicy::DEFAULT,
+            policy: Retrying::declared(),
             effects: None,
             poll_deadline: DEFAULT_POLL_DEADLINE,
         }
@@ -452,10 +452,10 @@ impl EcsBot {
             mut steps,
             mut failures,
         } = plan;
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let turn = self.world.resource::<Policy>().0.at_now();
         #[cfg(feature = "profile")]
         let act_charge = Charge::new(TickStage::Act);
-        let (fired, failure) = self.run_steps(&steps, &mut failures, budget).await;
+        let (fired, failure) = self.run_steps(&steps, &mut failures, turn).await;
         #[cfg(feature = "profile")]
         drop(act_charge);
 
@@ -489,6 +489,7 @@ impl EcsBot {
         // true. That includes an abandonment, which is the case this used to
         // miss: it asks the tick for nothing, so it looks finished from inside
         // the walk, but it is work nobody resolved.
+        let budget = turn.budget();
         let ledger = self.world.non_send::<Ledger>();
         match ledger.first_unresolved(budget) {
             Some(work) => Err(BotError::PendingTransition {

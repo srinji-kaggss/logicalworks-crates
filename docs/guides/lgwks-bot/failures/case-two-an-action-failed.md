@@ -7,7 +7,7 @@ Actions run in declaration order, but deciding and doing are two systems. The
 `fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
 a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
-(`crates/lgwks-bot/src/ecs/systems.rs:319`); the `run_steps` pass then awaits those steps
+(`crates/lgwks-bot/src/ecs/systems.rs:321`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
 (`crates/lgwks-bot/src/ecs/bot.rs:445`). It breaks on the first failure and records
 it, and there is no rollback:
@@ -25,7 +25,7 @@ means "this run did not finish", not "nothing happened".
 
 One consequence is easy to miss, and it is the reason the ledger exists.
 `observe_fold` commits the new values and bumps the revisions *before*
-`fire_plan` decides (`crates/lgwks-bot/src/ecs/systems.rs:319`), so selecting work by
+`fire_plan` decides (`crates/lgwks-bot/src/ecs/systems.rs:321`), so selecting work by
 `Changed<Revision>` alone means the next tick polls an unchanged source, finds
 nothing eligible, and never attempts the actions after the failure again. The
 work is lost, not queued.
@@ -36,8 +36,12 @@ opens a transition. Three consequences follow, and the example below asserts all
 three.
 
 - **The failed entry is retried while it has budget, even if the source never
-  moves again.** `RetryPolicy` sets the budget (three attempts by default;
-  `RetryPolicy::ONE_ATTEMPT` for a domain whose failures are always terminal).
+  moves again.** `lgwks_std::retry::RetryPolicy` sets the budget (three
+  attempts by default, retried on the next tick; `RetryPolicy::new(1, ..)` for
+  a domain whose failures are always terminal). Its backoff holds a retry, and
+  the entries behind it, until the delay has elapsed on the bot's `Clock`
+  (`with_clock`), and its deadline abandons the entry with
+  `AbandonReason::DeadlineExceeded` once the next backoff would reach it.
 - **Every entry of a transition runs against the one payload the transition was
   opened under.** The observed value is *moved* into the transition when it opens
   or resumes, so a retry after a failure reads the same input the entry that

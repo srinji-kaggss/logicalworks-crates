@@ -1,7 +1,7 @@
 # What a failed tick means
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:567`) and `Bot::tick_async` is
+synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:568`) and `Bot::tick_async` is
 the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs/bot.rs:393`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
@@ -16,7 +16,7 @@ behind an indeterminate effect means.
 ## Case one: a poll failed
 
 Nothing ran. The `observe_fold` system returns before committing anything
-(`crates/lgwks-bot/src/ecs/ledger.rs:687`):
+(`crates/lgwks-bot/src/ecs/ledger.rs:716`):
 
 ```rust,ignore
 // Pass one: the first error, in declaration order.
@@ -63,7 +63,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs/systems.rs:598`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs/systems.rs:619`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
   than absolute: the steps `fire_plan` recorded before the failing condition are
   still run, so an effect the walk had already cleared does take effect, while

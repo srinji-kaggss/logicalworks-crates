@@ -168,6 +168,15 @@ pub enum AbandonReason {
         /// How many attempts were made.
         attempts: u32,
     },
+    /// The retry policy's deadline is spent: the next backoff would reach it,
+    /// or it had already passed. Measured on the bot's declared clock from the
+    /// entry's first attempt in this generation. The effect definitely did not
+    /// happen on any attempt made; as with an exhausted budget, evidence is
+    /// the way past it.
+    DeadlineExceeded {
+        /// How many attempts were made.
+        attempts: u32,
+    },
     /// The failure is one no retry can fix: a refused capability, a type
     /// mismatch behind an erased verb, a malformed action input. Retrying would
     /// spend an attempt to learn the same answer.
@@ -288,6 +297,11 @@ impl fmt::Display for TransitionHold {
                 AbandonReason::AttemptsExhausted { attempts } => write!(
                     f,
                     "given up on after {attempts} attempts: {}",
+                    Escaped(cause)
+                ),
+                AbandonReason::DeadlineExceeded { attempts } => write!(
+                    f,
+                    "given up on after {attempts} attempts, its retry deadline spent: {}",
                     Escaped(cause)
                 ),
                 AbandonReason::Terminal => {

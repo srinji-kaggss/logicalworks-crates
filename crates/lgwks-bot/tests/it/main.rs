@@ -97,6 +97,9 @@ mod liveness_fixtures;
 #[path = "../support/scratch.rs"]
 mod scratch;
 
+#[path = "../support/undelivered.rs"]
+mod undelivered;
+
 #[cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "script"))]
 #[path = "../support/tenancy_harness.rs"]
 mod tenancy_harness;
@@ -138,6 +141,8 @@ mod dist_lease;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
+#[cfg(all(feature = "rt", feature = "time", feature = "sync", feature = "macros"))]
+mod ecs_ledger;
 mod effect_identity;
 mod effect_journal;
 mod ephemeral;

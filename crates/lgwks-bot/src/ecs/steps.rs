@@ -8,6 +8,7 @@ use super::EffectKey;
 use super::EffectLifetime;
 use super::Erased;
 use super::RefreshReason;
+use super::attempts::RetryTurn;
 use super::attempts::Settled;
 use super::bot::EcsBot;
 use super::components::Chains;
@@ -473,7 +474,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         failures: &mut [Option<BotError>],
-        budget: u32,
+        turn: RetryTurn,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -495,7 +496,7 @@ impl EcsBot {
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
-            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, budget).await;
+            let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, turn).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a
             // caller gets, exactly as the synchronous walk had it — except that
@@ -524,7 +525,7 @@ impl EcsBot {
         &mut self,
         steps: &[Step],
         condition_failure: Option<BotError>,
-        budget: u32,
+        turn: RetryTurn,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
@@ -570,7 +571,7 @@ impl EcsBot {
                         if self
                             .world
                             .non_send_mut::<Ledger>()
-                            .finish_recording(work, evidence, attempts, budget)
+                            .finish_recording(work, evidence, attempts, turn)
                             && evidence == EffectEvidence::Applied
                         {
                             fired = fired.saturating_add(1);
@@ -650,7 +651,7 @@ impl EcsBot {
             let (key, authority) = match self
                 .world
                 .non_send_mut::<Ledger>()
-                .begin_attempt(work, lifetime)
+                .begin_attempt(work, lifetime, turn.now)
                 .await
             {
                 Ok(pair) => pair,
@@ -682,7 +683,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), turn);
                 failure = Some(error);
                 break;
             }
@@ -756,7 +757,7 @@ impl EcsBot {
                 };
                 self.world
                     .non_send_mut::<Ledger>()
-                    .fail(work, &error, key.attempt(), budget);
+                    .fail(work, &error, key.attempt(), turn);
                 failure = Some(error);
                 break;
             }
@@ -769,7 +770,7 @@ impl EcsBot {
                 Err(error) => {
                     self.world
                         .non_send_mut::<Ledger>()
-                        .fail(work, &error, key.attempt(), budget);
+                        .fail(work, &error, key.attempt(), turn);
                     failure = Some(error);
                     break;
                 }
@@ -789,7 +790,7 @@ impl EcsBot {
     /// handled.
     #[must_use]
     pub fn pending(&self) -> Vec<PendingWork> {
-        let budget = self.world.resource::<Policy>().0.max_attempts();
+        let budget = self.world.resource::<Policy>().0.budget();
         self.world.non_send::<Ledger>().pending(budget)
     }
 

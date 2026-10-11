@@ -511,10 +511,10 @@ pub fn retry_admissible(facts: &RetryFacts) -> RetryDecision {
 
     let mut reasons = Vec::new();
 
-    if facts.attempts_used >= facts.policy.max_attempts() {
+    if facts.attempts_used >= facts.policy.max_attempts.max(1) {
         reasons.push(RetryRefusal::BudgetExhausted {
             attempts_used: facts.attempts_used,
-            max_attempts: facts.policy.max_attempts(),
+            max_attempts: facts.policy.max_attempts.max(1),
         });
     }
     if !facts.authority_live {
@@ -587,6 +587,12 @@ mod tests {
         Ok(ActionDigest::from_tagged("blake3_256", OTHER_DIGEST_HEX)?)
     }
 
+    /// Three attempts, the budget these facts are judged against. Only the
+    /// count is read by the rule; the policy's durations are its caller's.
+    fn three_attempts() -> RetryPolicy {
+        RetryPolicy::new(3, Duration::ZERO, Duration::MAX)
+    }
+
     /// An unresolved attempt under a live authority and nothing else claimed:
     /// zero attempts made, zero elapsed, and the shared payload.
     ///
@@ -597,7 +603,7 @@ mod tests {
     /// testing what their names say.
     fn unresolved() -> Result<RetryFacts, Box<dyn std::error::Error>> {
         Ok(RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             RetryClass::RequiresEvidence,
             dispatched(DIGEST_HEX)?,
@@ -609,7 +615,7 @@ mod tests {
     /// Facts that permit a retry, so each test changes exactly one thing.
     fn permissive(class: RetryClass) -> Result<RetryFacts, Box<dyn std::error::Error>> {
         Ok(RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             class,
             dispatched(DIGEST_HEX)?,
@@ -658,7 +664,7 @@ mod tests {
     #[test]
     fn a_spent_budget_refuses_and_names_the_numbers() -> TestResult {
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             3,
             RetryClass::RequiresEvidence,
             dispatched(DIGEST_HEX)?,
@@ -680,7 +686,7 @@ mod tests {
     #[test]
     fn one_attempt_policy_exhausts_after_the_first() -> TestResult {
         let facts = RetryFacts::new(
-            RetryPolicy::ONE_ATTEMPT,
+            RetryPolicy::new(1, Duration::ZERO, Duration::MAX),
             1,
             RetryClass::Safe,
             dispatched(DIGEST_HEX)?,
@@ -707,7 +713,7 @@ mod tests {
     fn authority_defaults_to_refusing() -> TestResult {
         // The builder is not called for authority, so nothing was established.
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             RetryClass::Safe,
             dispatched(DIGEST_HEX)?,
@@ -724,7 +730,7 @@ mod tests {
     #[test]
     fn a_changed_intent_is_not_a_retry() -> TestResult {
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             RetryClass::Safe,
             dispatched(DIGEST_HEX)?,
@@ -850,7 +856,7 @@ mod tests {
         // Both halves hold, and the decision reports the one that needs no
         // contract to justify.
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             RetryClass::RequiresEvidence,
             dispatched(DIGEST_HEX)?,
@@ -867,7 +873,7 @@ mod tests {
     #[test]
     fn applied_evidence_is_not_proof_of_non_application() -> TestResult {
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             0,
             RetryClass::RequiresEvidence,
             dispatched(DIGEST_HEX)?,
@@ -886,7 +892,7 @@ mod tests {
     #[test]
     fn every_failing_conjunct_is_reported() -> TestResult {
         let facts = RetryFacts::new(
-            RetryPolicy::DEFAULT,
+            three_attempts(),
             3,
             RetryClass::RequiresEvidence,
             dispatched(DIGEST_HEX)?,

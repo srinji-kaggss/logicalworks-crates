@@ -21,19 +21,19 @@ crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs/bot.rs:393	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs/bot.rs:445	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs/bot.rs:567	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/builder.rs:416	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs/builder.rs:615	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs/builder.rs:635	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/bot.rs:568	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/builder.rs:459	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs/builder.rs:658	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:678	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/components.rs:71	pub(super) struct TickError(pub(super) Option<BotError>);
-crates/lgwks-bot/src/ecs/components.rs:613	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs/ledger.rs:687	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs/ledger.rs:766	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs/plan.rs:337	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs/systems.rs:207	*slot = Some(value);
-crates/lgwks-bot/src/ecs/systems.rs:319	pub(super) fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs/systems.rs:482	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs/systems.rs:598	*failure = Some(error);
+crates/lgwks-bot/src/ecs/components.rs:614	/// chain's before committing anything.
+crates/lgwks-bot/src/ecs/ledger.rs:716	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs/ledger.rs:799	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs/plan.rs:342	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs/systems.rs:209	*slot = Some(value);
+crates/lgwks-bot/src/ecs/systems.rs:321	pub(super) fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs/systems.rs:488	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs/systems.rs:619	*failure = Some(error);
 crates/lgwks-bot/src/error.rs:211	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {

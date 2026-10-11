@@ -9,7 +9,7 @@ from there — is **not implemented, and the reason is not effort. An action
 cannot be denied for want of a capability at run time.** Two facts make that so:
 
 - `EcsBot::assemble` admits every declared requirement before the world is built
-  (`crates/lgwks-bot/src/ecs/builder.rs:615`), so a bot whose declared requirements are
+  (`crates/lgwks-bot/src/ecs/builder.rs:658`), so a bot whose declared requirements are
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` calls
   `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:797`),
@@ -19,7 +19,7 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
 
 So `Auth::check` cannot fail inside a running bot.
 `BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs/plan.rs:337`) is
+that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs/plan.rs:342`) is
 defensive rather than live. A hold was built on top of that arm and then removed,
 because machinery whose only caller is a contrived test is not a feature.
 

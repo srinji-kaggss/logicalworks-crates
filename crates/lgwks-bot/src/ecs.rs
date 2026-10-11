@@ -168,7 +168,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::num::{NonZeroU32, NonZeroU128};
+use std::num::NonZeroU128;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -265,7 +265,6 @@ mod steps;
 mod systems;
 mod watchdog;
 mod work;
-pub use attempts::RetryPolicy;
 pub use bot::EcsBot;
 pub use builder::EcsBuilder;
 pub use builder::EcsObserveBuilder;
@@ -278,6 +277,7 @@ pub use components::TickReport;
 pub use identity::EffectScope;
 #[cfg(feature = "ephemeral")]
 pub use identity::EphemeralError;
+pub use lgwks_std::retry::RetryPolicy;
 pub use work::AbandonReason;
 pub(crate) use work::AdmittedInput;
 pub use work::EffectEvidence;

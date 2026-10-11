@@ -15,7 +15,7 @@ use super::Resource;
 use super::Source;
 use super::Witness;
 use super::World;
-use super::attempts::RetryPolicy;
+use super::attempts::Retrying;
 use super::bevy_ecs;
 use super::plan::AdmitKind;
 use super::work::AdmittedInput;
@@ -187,9 +187,10 @@ impl AdmitScratch {
     }
 }
 
-/// The retry policy in force: one authority per world, like `Grants`.
+/// The retry policy in force and its clock: one authority per world, like
+/// `Grants`.
 #[derive(Resource, Debug)]
-pub(super) struct Policy(pub(super) RetryPolicy);
+pub(super) struct Policy(pub(super) Retrying);
 
 /// The chains whose cached baseline cannot be trusted, and why.
 ///
