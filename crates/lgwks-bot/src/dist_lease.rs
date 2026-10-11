@@ -76,6 +76,7 @@
 //!
 //! [`WorkQueue`]: crate::dist_lease::WorkQueue
 //! [`Coordinator`]: crate::dist_lease::Coordinator
+//! [`Coordinator::with_fence`]: crate::dist_lease::Coordinator::with_fence
 //! [`LeaseError::StaleEpoch`]: crate::dist_lease::LeaseError::StaleEpoch
 //! [`Overfull`]: crate::dist_lease::Overfull
 //! [`AuthorityHandle`]: crate::dist_lease::AuthorityHandle
