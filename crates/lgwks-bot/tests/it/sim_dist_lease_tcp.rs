@@ -63,9 +63,10 @@ fn run(seed: u64, genuine: &[u8]) -> TestResult<String> {
         for _ in 0..FRAMES {
             let (frame, record) = damage(&mut stream, genuine)?;
             let reply = send_raw(addr, &frame)?;
-            if !reply.is_empty() {
-                return Err(format!("seed {seed}: a damaged frame {record:?} was answered").into());
-            }
+            assert!(
+                reply.is_empty(),
+                "seed {seed}: a damaged frame {record:?} was answered"
+            );
             trace.update(&record);
         }
         Ok(())

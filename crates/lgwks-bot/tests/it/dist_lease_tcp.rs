@@ -59,6 +59,15 @@ pub(crate) fn loopback() -> TestResult<(TcpListener, SocketAddr)> {
     Ok((listener, addr))
 }
 
+/// The value a scoped thread returned; a thread that panicked re-raises its
+/// panic here, so the test fails with the thread's own message.
+fn joined<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 /// Serve exactly `connections` for `authority` while `client` runs, and
 /// return the client's value with the server's report.
 ///
@@ -80,7 +89,7 @@ pub(crate) fn with_server<T>(
                 drop(TcpStream::connect(addr));
             }
         }
-        let report = serving.join().map_err(|_| "the server thread panicked")?;
+        let report = joined(serving);
         Ok((outcome?, report))
     })
 }
@@ -97,10 +106,7 @@ pub(crate) fn captured_acquire(holder: &str) -> TestResult<Vec<u8>> {
         let mut frame = vec![0u8; HEADER.saturating_add(holder.len()).saturating_add(32)];
         stream.read_exact(&mut frame)?;
         drop(stream);
-        let unanswered = asking.join().map_err(|_| "the asking thread panicked")?;
-        if !unanswered {
-            return Err("an unanswered acquire must fail closed".into());
-        }
+        assert!(joined(asking), "an unanswered acquire must fail closed");
         Ok(frame)
     })
 }
@@ -267,13 +273,13 @@ fn a_replayed_reply_is_refused() -> TestResult {
         let (proxy, proxy_addr) = loopback()?;
         let channel = TcpGrantChannel::new(proxy_addr, KEY, TIMEOUT);
         thread::scope(|scope| {
-            let relay =
-                scope.spawn(|| relay_then_replay(&proxy, server).map_err(|e| e.to_string()));
+            let relay = scope
+                .spawn(|| relay_then_replay(&proxy, server).map_err(|error| error.to_string()));
             let lease = authority.acquire("coord-a");
             let honest = channel.validate(&lease);
             let successor = authority.acquire("coord-b");
             let replayed = channel.validate(&lease);
-            let recorded = relay.join().map_err(|_| "the relay thread panicked")??;
+            let recorded = joined(relay)?;
             Ok((honest?, replayed, recorded.len(), successor.epoch()))
         })
     })?;

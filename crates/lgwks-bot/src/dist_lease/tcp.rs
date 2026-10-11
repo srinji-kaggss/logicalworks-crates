@@ -68,8 +68,10 @@ impl Op {
 /// Why a frame was refused, on either end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
-    /// The socket failed, timed out, or closed early.
-    Io,
+    /// The socket failed, timed out, or closed early, with the OS's kind.
+    Io(std::io::ErrorKind),
+    /// The frame is shorter than its fixed layout.
+    Short,
     /// The frame does not open with this protocol's magic.
     Magic,
     /// The request names no known question.
@@ -92,7 +94,8 @@ impl Refusal {
     /// The refusal in words, for the log and for [`ChannelError`].
     const fn reason(self) -> &'static str {
         match self {
-            Self::Io => "the socket failed, timed out or closed early",
+            Self::Io(_) => "the socket failed, timed out or closed early",
+            Self::Short => "the frame is shorter than its layout",
             Self::Magic => "the frame is not a lease-channel frame",
             Self::Op => "the request asks no known question",
             Self::Oversize => "the holder name is longer than 256 bytes",
@@ -103,6 +106,20 @@ impl Refusal {
             Self::ZeroTimeout => "a zero timeout bounds nothing",
         }
     }
+}
+
+/// Log `refusal` where it is decided, then hand it back as the error.
+///
+/// Every refusal on either end goes through here, so each leaves a trace line
+/// naming its reason before any caller sees the value.
+fn refuse<T>(refusal: Refusal) -> Result<T, Refusal> {
+    lgwks_std::trace::debug!(refusal = ?refusal, reason = refusal.reason(), "dist_lease: frame refused");
+    Err(refusal)
+}
+
+/// The refusal for a socket error, keeping the OS's kind.
+fn io(error: std::io::Error) -> Refusal {
+    Refusal::Io(error.kind())
 }
 
 impl From<Refusal> for ChannelError {
@@ -134,11 +151,11 @@ impl WireKey {
 
     /// Whether `tag` is the tag over `frame`, compared in constant time.
     fn verifies(&self, frame: &[u8], tag: &[u8]) -> Result<(), Refusal> {
-        let tag = <[u8; TAG]>::try_from(tag).map_err(|_| Refusal::Tag)?;
+        let tag = field::<TAG>(tag, 0)?;
         if self.tag(frame).ct_eq(&Digest::from_bytes(tag)) {
             Ok(())
         } else {
-            Err(Refusal::Tag)
+            refuse(Refusal::Tag)
         }
     }
 }
@@ -153,25 +170,28 @@ impl fmt::Debug for WireKey {
 /// Bound every read and write on `stream` by `timeout`.
 fn bound(stream: &TcpStream, timeout: Duration) -> Result<(), Refusal> {
     if timeout.is_zero() {
-        return Err(Refusal::ZeroTimeout);
+        return refuse(Refusal::ZeroTimeout);
     }
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|_| Refusal::Io)
+        .map_err(io)
 }
 
 /// Read exactly `buffer.len()` bytes, or refuse.
 fn fill(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<(), Refusal> {
-    stream.read_exact(buffer).map_err(|_| Refusal::Io)
+    stream.read_exact(buffer).map_err(io)
 }
 
 /// The `N` bytes of `bytes` at `at`, or a refusal when the frame is shorter.
 fn field<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N], Refusal> {
-    bytes
+    match bytes
         .get(at..at.saturating_add(N))
         .and_then(|part| <[u8; N]>::try_from(part).ok())
-        .ok_or(Refusal::Io)
+    {
+        Some(found) => Ok(found),
+        None => refuse(Refusal::Short),
+    }
 }
 
 /// A request as the server read and verified it.
@@ -187,9 +207,12 @@ struct Request {
 /// Encode and tag one request.
 fn encode_request(key: &WireKey, op: Op, nonce: [u8; 16], name: &str) -> Result<Vec<u8>, Refusal> {
     if name.len() > MAX_NAME {
-        return Err(Refusal::Oversize);
+        return refuse(Refusal::Oversize);
     }
-    let length = u16::try_from(name.len()).map_err(|_| Refusal::Oversize)?;
+    let length = u16::try_from(name.len()).map_err(|error| {
+        lgwks_std::trace::debug!(%error, "dist_lease: a holder name length does not fit the wire");
+        Refusal::Oversize
+    })?;
     let mut frame = Vec::with_capacity(HEADER.saturating_add(name.len()).saturating_add(TAG));
     frame.extend_from_slice(&REQUEST_MAGIC);
     frame.push(op.code());
@@ -207,25 +230,30 @@ fn read_request(stream: &mut TcpStream, key: &WireKey) -> Result<Request, Refusa
     let mut header = [0u8; HEADER];
     fill(stream, &mut header)?;
     if field::<4>(&header, 0)? != REQUEST_MAGIC {
-        return Err(Refusal::Magic);
+        return refuse(Refusal::Magic);
     }
     let op = match field::<1>(&header, 4)? {
         [1] => Op::Check,
         [2] => Op::Acquire,
-        _ => return Err(Refusal::Op),
+        _ => return refuse(Refusal::Op),
     };
     let length = usize::from(u16::from_le_bytes(field::<2>(&header, 21)?));
     if length > MAX_NAME {
-        return Err(Refusal::Oversize);
+        return refuse(Refusal::Oversize);
     }
     let mut rest = vec![0u8; length.saturating_add(TAG)];
     fill(stream, &mut rest)?;
-    let (name, tag) = rest.split_at_checked(length).ok_or(Refusal::Io)?;
+    let Some((name, tag)) = rest.split_at_checked(length) else {
+        return refuse(Refusal::Short);
+    };
     let mut signed = Vec::with_capacity(HEADER.saturating_add(length));
     signed.extend_from_slice(&header);
     signed.extend_from_slice(name);
     key.verifies(&signed, tag)?;
-    let name = std::str::from_utf8(name).map_err(|_| Refusal::Utf8)?;
+    let name = std::str::from_utf8(name).map_err(|error| {
+        lgwks_std::trace::debug!(%error, "dist_lease: a holder name is not UTF-8");
+        Refusal::Utf8
+    })?;
     Ok(Request {
         op,
         nonce: field::<16>(&header, 5)?,
@@ -246,13 +274,15 @@ fn encode_reply(key: &WireKey, nonce: [u8; 16], epoch: u64) -> Vec<u8> {
 
 /// Verify one reply against the nonce asked, returning the epoch it carries.
 fn decode_reply(key: &WireKey, nonce: [u8; 16], frame: &[u8]) -> Result<u64, Refusal> {
-    let (body, tag) = frame.split_at_checked(BODY).ok_or(Refusal::Io)?;
+    let Some((body, tag)) = frame.split_at_checked(BODY) else {
+        return refuse(Refusal::Short);
+    };
     if field::<4>(body, 0)? != REPLY_MAGIC {
-        return Err(Refusal::Magic);
+        return refuse(Refusal::Magic);
     }
     key.verifies(body, tag)?;
     if field::<16>(body, 4)? != nonce {
-        return Err(Refusal::Nonce);
+        return refuse(Refusal::Nonce);
     }
     Ok(u64::from_le_bytes(field::<8>(body, 20)?))
 }
@@ -315,13 +345,11 @@ impl AuthorityServer {
     pub fn serve(&self, listener: &TcpListener, connections: usize) -> ServeReport {
         let mut report = ServeReport::default();
         for incoming in listener.incoming().take(connections) {
-            match incoming
-                .map_err(|_| Refusal::Io)
-                .and_then(|stream| self.answer(stream))
-            {
+            match incoming.map_err(io).and_then(|stream| self.answer(stream)) {
                 Ok(()) => report.answered = report.answered.saturating_add(1),
                 Err(refusal) => {
                     lgwks_std::trace::warn!(
+                        refusal = ?refusal,
                         reason = refusal.reason(),
                         "dist_lease: authority refused a connection without a reply"
                     );
@@ -342,7 +370,7 @@ impl AuthorityServer {
         };
         stream
             .write_all(&encode_reply(&self.key, request.nonce, epoch))
-            .map_err(|_| Refusal::Io)
+            .map_err(io)
     }
 }
 
@@ -383,14 +411,16 @@ impl TcpGrantChannel {
     /// The exchange behind [`ask`](Self::ask), refusing at the first fault.
     fn exchange(&self, op: Op, name: &str) -> Result<u64, Refusal> {
         if self.timeout.is_zero() {
-            return Err(Refusal::ZeroTimeout);
+            return refuse(Refusal::ZeroTimeout);
         }
-        let nonce = lgwks_std::random::bytes::<16>().map_err(|_| Refusal::Entropy)?;
+        let nonce = lgwks_std::random::bytes::<16>().map_err(|error| {
+            lgwks_std::trace::warn!(%error, "dist_lease: no entropy for a nonce");
+            Refusal::Entropy
+        })?;
         let frame = encode_request(&self.key, op, nonce, name)?;
-        let mut stream =
-            TcpStream::connect_timeout(&self.addr, self.timeout).map_err(|_| Refusal::Io)?;
+        let mut stream = TcpStream::connect_timeout(&self.addr, self.timeout).map_err(io)?;
         bound(&stream, self.timeout)?;
-        stream.write_all(&frame).map_err(|_| Refusal::Io)?;
+        stream.write_all(&frame).map_err(io)?;
         let mut reply = [0u8; REPLY];
         fill(&mut stream, &mut reply)?;
         decode_reply(&self.key, nonce, &reply)
