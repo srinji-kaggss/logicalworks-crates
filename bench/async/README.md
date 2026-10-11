@@ -31,26 +31,17 @@ a load above ~20 are contaminated and are marked; the paired
 facade-versus-baseline columns inside a point are not, because both sides of a
 point experience the same load.
 
-## The 1–2 vCPU / 1–2 GB VPS profile was NOT measured
+## The 2 vCPU / 2 GB VPS profile
 
-Stated plainly because the axis it belongs to asks for it: **no number in this
-file is a VPS figure.** macOS exposes no cgroup, no `taskset`, no `taskpolicy`
-CPU set and no `cpulimit` — all four were checked on the reference host and all
-four are absent — so there is no way to present a run on this machine as that
-profile's. The closest thing that *can* be run here is `--workers=<n>`, which
-pins the scheduler's thread count, and the measurement below says exactly why it
-is not a substitute:
-
-**`--workers=2` produced knees identical to `--workers=15` at every bound**
-(`saturation-workers2.json` against `saturation-backpressure.json`): 5,000 /
-5,000 / 20,000 / 20,000 / 80,000 / 80,000 offered per second, agreeing to within
-0.5% on the achieved rate. The reason is measurable and is not a null result:
-every body in the sweep is a timer, so the knee is a property of the ceiling's
-capacity and not of how many workers drain it. A 2-vCPU profile differs from
-this host in cores, cache, memory bandwidth and scheduler, **and** it would be
-driving a CPU-bound workload rather than a timer-bound one. A CPU-bound body
-would make the two configurations differ; this one does not, and publishing it
-as a VPS measurement would be a category error with a number attached.
+Measured on 2026-10-11 under a cgroup cap of 2 CPUs and 2 GiB in a Linux
+container (`scripts/linux-container-tests.sh vps`), every door of this matrix:
+the closed-loop facade cost is **1.14x–1.39x** raw Tokio (inside the 2x
+target), a million concurrently admitted tasks fit under the cap on both sides,
+and after twice the knee for 30 s the facade's p99 returned to baseline in
+509 ms where the baseline's did not within 90 s. Tables and caveats are in
+[vps.md](vps.md). macOS has no cgroup, which is why the host tables below are
+not VPS figures; `--workers=2` on the host was not a substitute, since every
+saturation body is a timer and its knees matched `--workers=15` exactly.
 
 ## Where each measurement is
 
@@ -62,6 +53,7 @@ as a VPS measurement would be a category error with a number attached.
 | [In-flight tiers and the concurrency ladder](inflight.md) | That many tasks concurrently admitted, against throughput through 64 slots. |
 | [Allocation attribution](allocations.md) | Every allocation window priced separately, and why the latency target is a different target. |
 | [Closed-loop results and the workload matrix](results.md) | The scenario table, every §3 matrix row with its receipt, and the committed records. |
+| [The 2 vCPU / 2 GB VPS profile](vps.md) | The same matrix under a cgroup cap, with the cap as the container read it. |
 
 ## What this says, stated before the reader draws a conclusion
 
@@ -79,8 +71,8 @@ baseline's 2,595 at a million concurrent tasks.
 
 ## What this does not claim
 
-- **No VPS figure.** No number here is a 1–2 vCPU / 1–2 GB measurement, and the
-  reason is stated above with the measurement that supports it.
+- The VPS figures are a cgroup-capped container on this host, not a rented
+  VPS; [vps.md](vps.md) states what that does and does not stand in for.
 - No third engine is in this comparison. It is a cost decomposition of a facade
   against its own baseline, **not** a leaderboard and not a claim about any other
   scheduler.
