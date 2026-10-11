@@ -591,9 +591,9 @@ mod test_support;
 pub(crate) use test_support::test_effects;
 use test_support::{
     AltTick, CountsU32, FaultJournal, NeedsCaps, NoSettlementRoom, PrefixProbe,
-    PrefixProbeNextSchema, PrefixProbeTail, Refuses, RefusesToEvaluate, SCRIPT, SwappedEntryJournal,
-    TEST_ENV, TEST_FLOW, TEST_RUN, Unpolled, counting_bot, held_key, indeterminate_once_bot,
-    net_grants, refused, test_effects_with,
+    PrefixProbeNextSchema, PrefixProbeTail, Refuses, RefusesToEvaluate, SCRIPT,
+    SwappedEntryJournal, TEST_ENV, TEST_FLOW, TEST_RUN, Unpolled, counting_bot, held_key,
+    indeterminate_once_bot, net_grants, refused, test_effects_with,
 };
 
 mod test_part_00;
