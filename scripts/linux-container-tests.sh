@@ -22,6 +22,10 @@
 # run reuses what the last run built.
 #
 # Usage: scripts/linux-container-tests.sh [workspace|bot-full|appcui]...  (default: all three)
+#
+# bot-full runs under nextest's `ci` profile, which writes the JUnit report the
+# acceptance receipt is recorded from (#271): the workspace is mounted at /src,
+# so the report lands in this checkout's target/nextest/ci/junit.xml.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,7 +81,7 @@ commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
         workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
-        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)'") ;;
+        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc"
