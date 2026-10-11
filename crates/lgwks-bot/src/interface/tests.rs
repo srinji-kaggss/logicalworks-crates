@@ -1,3 +1,4 @@
+//! Unit tests for `interface`, moved verbatim out of interface.rs.
 
 use super::*;
 
