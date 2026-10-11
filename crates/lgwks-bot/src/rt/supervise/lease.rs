@@ -5,6 +5,7 @@ use super::tenancy_support;
 use crate::rt::sync::OwnedSemaphorePermit;
 #[cfg(feature = "script")]
 use crate::script::Tenant;
+#[cfg(feature = "script")]
 use std::sync::Arc;
 /// One in-flight admission: the permit, and — when the supervisor was built
 /// with a [`TenancyPolicy`] — the tenant the permit is charged to.
