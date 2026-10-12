@@ -80,6 +80,16 @@ runs:
     # directory per job instead held 25 copies of the dependency graph per
     # instance (206 GiB on 2026-10-07) and left each copy warm only for the job
     # that happened to land on that instance last.
+    #
+    # Incremental sessions are the exception: they are discarded at every job
+    # start. A session is a cache of one tree's codegen units, and the next job
+    # on the instance builds another branch's tree. Run 38100544425 built
+    # c1a87ea43, which has no `ecs/work.rs`, and linked an lgwks_bot rlib whose
+    # own codegen units called `ecs::work` symbols left by an earlier
+    # refactor/ecs-split-401 job: `undefined symbol: drop_glue::<ecs::work::
+    # PendingWork>` in two jobs on two instances. Dependencies are never built
+    # incrementally, so the warm dependency graph is kept, and CARGO_INCREMENTAL
+    # stays on within the job, where every build is of the one checked-out tree.
     - name: Persistent target directory
       shell: bash
       run: |
@@ -87,6 +97,11 @@ runs:
         target="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)/target/${RUNNER_NAME}/shared"
         mkdir -p "${target}"
         echo "CARGO_TARGET_DIR=${target}" >> "${GITHUB_ENV}"
+        for sessions in "${target}"/*/incremental "${target}"/*/*/incremental; do
+          if [ -d "${sessions}" ]; then
+            find "${sessions}" -mindepth 1 -delete
+          fi
+        done
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
         if [ "${free_kib}" -lt "$(( ${{ inputs.min-free-gib }} * 1024 * 1024 ))" ]; then
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"

@@ -184,7 +184,7 @@ required = true
 # wrote. It reads XML and records into SQLite, so the job needs no Rust
 # toolchain and no build -- it costs seconds, and it does not run the suite a
 # second time.
-command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\""
+command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && python3 scripts/acceptance-receipts.py --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
 ci_step = "Record acceptance receipts"
 
 [[lane]]

@@ -9,6 +9,7 @@
 Cargo.toml:137	print_stderr = "forbid"
 Cargo.toml:138	print_stdout = "forbid"
 crates/lgwks-ast/src/parser.md:77	The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
+crates/lgwks-ast/src/parser.rs:3169	const DECLARED_GRAMMARS: usize = 28;
 crates/lgwks-ast/src/parser.rs:3321	let mut covered: Vec<&str> = Vec::new();
 crates/lgwks-ast/src/parser.rs:3326	assert_eq!(
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated

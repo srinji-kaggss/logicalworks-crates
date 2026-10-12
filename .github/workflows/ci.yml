@@ -330,7 +330,7 @@ jobs:
     # XML files, so it costs seconds rather than adding a second execution of
     # the tests the shards already ran between them.
     name: Acceptance receipts
-    needs: tests_bot_full
+    needs: [tests_bot_full, tests_linux]
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     env:
@@ -342,8 +342,13 @@ jobs:
         with:
           pattern: lgwks-bot-junit-*
           path: acceptance-artifact
+      - name: Download the Linux lgwks-bot JUnit report
+        uses: actions/download-artifact@v4
+        with:
+          name: acceptance-junit-linux
+          path: acceptance-linux
       - name: Record acceptance receipts
-        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && python3 scripts/acceptance-receipts.py --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64
       - name: Upload acceptance receipt
         uses: actions/upload-artifact@v4
         with:
@@ -398,6 +403,17 @@ jobs:
           nextest: "true"
       - name: Run the workspace and lgwks-bot full suites on Linux
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
+      # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
+      # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so
+      # the receipt job records it as its own platform.
+      - name: Upload Linux lgwks-bot JUnit report
+        if: matrix.suite != 'workspace'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-junit-linux
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 7
 
   # Lints, the rustdoc lanes and the two release-build gates. Clippy and
   # rustdoc compile the same dependency graph as `cargo check`, so they share a
