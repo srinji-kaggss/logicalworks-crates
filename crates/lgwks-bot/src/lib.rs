@@ -375,6 +375,10 @@ mod sim_stream;
 /// here because `error.rs` is past the size law.
 #[cfg(test)]
 mod sim_error;
+/// The lexicon resolver's verdicts, simulated; declared here beside the other
+/// in-crate simulations.
+#[cfg(test)]
+mod sim_language;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
