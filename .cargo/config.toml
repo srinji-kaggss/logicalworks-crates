@@ -8,5 +8,18 @@
 #
 # The wrapper composes with RUSTC_WRAPPER (sccache) in the order
 # `$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`.
+#
+# sccache holds every rustc invocation's output, so a crate compiled at a
+# revision already compiled returns its artifact instead of running rustc again.
+# That is what makes a rebuild after a change the cost of the changed crates
+# alone rather than of the graph above them.
 [build]
 rustc-workspace-wrapper = "clippy-driver"
+rustc-wrapper = "sccache"
+
+# The LLVM linker, not Apple's ld. ld64.lld links the test binaries several
+# times faster than the default linker; the link step is a large share of a
+# rebuild once the compiles themselves are cached.
+[target.aarch64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld"]
