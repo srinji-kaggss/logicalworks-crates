@@ -10,10 +10,15 @@
 mod content_detection;
 mod hostile;
 mod parse_deadline;
+mod scan_bounds;
+mod scan_cases;
+mod scan_evidence;
+mod scan_verdicts;
 mod script_tool;
 mod sim_diagnostics;
 mod sim_parse_bounds;
 mod sim_parse_deadline;
+mod sim_scan_detectors;
 mod sim_script_find;
 
 /// A scratch directory that dies with the test that made it, the one every
@@ -37,3 +42,10 @@ mod seed;
 #[cfg(feature = "lang-rust")]
 #[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
 mod seed_helpers;
+
+/// The estate's draws over that substrate (`pick_named`, `coin`) and the replay
+/// receipt, which `lgwks_deps`' simulations share: one copy, so a seed means one
+/// stream in every crate. The scan simulation is its only user here.
+#[cfg(feature = "scan")]
+#[path = "../../../lgwks-deps/tests/support/sim.rs"]
+mod sim;

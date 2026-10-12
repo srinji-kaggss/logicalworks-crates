@@ -1,5 +1,6 @@
 //! `lgwks-ast script map|check [--json] [PATH...]`: every `script!` in a tree,
-//! read by the one parser (SL-2, #384).
+//! read by the one parser (SL-2, #384); and `lgwks-ast scan [--json] [PATH...]`,
+//! the zero-gate source detectors (INV-SCAN-ZERO, #408).
 //!
 //! `map` prints each invocation's architecture map, written exactly as the
 //! `ARCHITECTURE` the macro emits for it renders. `check` prints only what the
@@ -9,11 +10,16 @@
 //! every invocation to `lgwks_ast::script::parse`, so the tool and the compiler
 //! cannot disagree about a script: there is no second reader to drift.
 //!
+//! `scan` runs the five detectors of `lgwks_ast::scan` over every file and
+//! prints one `path:line: [rule] evidence` line per finding. A file the checked
+//! parse refuses (syntax, size, nesting or time) is reported and counted, never
+//! passed.
+//!
 //! A `PATH` that is a directory is walked for `.rs` files, skipping build
 //! output and vendored trees; a file is read as given; no `PATH` means `.`.
 //! `--json` writes one document to stdout for an agent. The exit status is 0
-//! when nothing is refused, 2 when a script is refused or a file cannot be
-//! read, and 2 with the usage for an unknown command.
+//! when nothing is refused, 2 when a script is refused, a finding stands or a
+//! file cannot be read, and 2 with the usage for an unknown command.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -25,14 +31,17 @@ use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
 const USAGE: &str = "usage: lgwks-ast script map|check [--json] [PATH...]\n\
+       lgwks-ast scan [--json] [PATH...]\n\
 \n\
   map    print every script!'s architecture map, as its ARCHITECTURE renders\n\
   check  print only what the script! language refuses; exit 2 if anything is\n\
+  scan   run the zero-gate detectors (error swallow, unlogged returns, lint\n\
+         allowances, try chains, docs); exit 2 on any finding or refused file\n\
   --json one JSON document on stdout instead of text\n\
   PATH   a directory to walk for .rs files, or one file; default `.`\n";
 
 /// Directory names never walked: build output, vendored and foreign trees,
-/// and version-control metadata, the same set `lgwks-deps scan` skips.
+/// and version-control metadata.
 const SKIPPED: [&str; 7] = [
     "target",
     "vendor",
@@ -59,6 +68,8 @@ enum Verb {
     Map,
     /// Only the refusals.
     Check,
+    /// Every finding of the zero-gate detectors.
+    Scan,
 }
 
 impl Verb {
@@ -67,6 +78,15 @@ impl Verb {
         match self {
             Self::Map => "map",
             Self::Check => "check",
+            Self::Scan => "scan",
+        }
+    }
+
+    /// How many leading arguments name the verb: `script map` is two.
+    const fn words(self) -> usize {
+        match self {
+            Self::Map | Self::Check => 2,
+            Self::Scan => 1,
         }
     }
 }
@@ -99,7 +119,7 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Parse the arguments and run `script map` or `script check`.
+/// Parse the arguments and run `script map`, `script check` or `scan`.
 fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     let verb = match (
         args.first().map(String::as_str),
@@ -107,6 +127,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     ) {
         (Some("script"), Some("map")) => Verb::Map,
         (Some("script"), Some("check")) => Verb::Check,
+        (Some("scan"), _) => Verb::Scan,
         (Some("-h" | "--help" | "help"), _) => {
             write!(out, "{USAGE}")?;
             return Ok(ExitCode::SUCCESS);
@@ -116,7 +137,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
             return Ok(ExitCode::from(2));
         }
     };
-    let Some(rest) = args.get(2..) else {
+    let Some(rest) = args.get(verb.words()..) else {
         write!(err, "{USAGE}")?;
         return Ok(ExitCode::from(2));
     };
@@ -136,6 +157,9 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
         .collect();
     if roots.is_empty() {
         roots.push(PathBuf::from("."));
+    }
+    if verb == Verb::Scan {
+        return scan_roots(&roots, json, out, err);
     }
     let mut readings = Vec::new();
     for root in &roots {
@@ -406,4 +430,163 @@ fn object(fields: Vec<(&str, Value)>) -> Value {
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<Map<String, Value>>(),
     )
+}
+
+/// One file's scan: its path as the caller named it, and what the detectors
+/// found, or why the file could not be scanned at all.
+#[cfg(feature = "scan")]
+struct ScanReading {
+    /// The path as given on the command line, joined to the walk's relative path.
+    path: PathBuf,
+    /// The findings, or the refusal: a file the scan cannot read is never passed.
+    outcome: Result<Vec<lgwks_ast::scan::Hit>, String>,
+}
+
+/// Scan one file: read it under the byte bound, then run the detectors.
+#[cfg(feature = "scan")]
+fn scan_file(path: PathBuf) -> ScanReading {
+    let outcome = read_bounded(&path).and_then(|text| {
+        lgwks_ast::scan::scan_source(&text, &path.display().to_string())
+            .map_err(|refusal| refusal.to_string())
+    });
+    ScanReading { path, outcome }
+}
+
+/// `lgwks-ast scan`: every file under `roots` through the five detectors.
+///
+/// Findings go to stdout one per line as `path:line: [rule] evidence`; a file the
+/// scan refuses goes to stderr. Nothing stops at the first problem, so one run
+/// names them all, and the exit status is 2 when there is any.
+#[cfg(feature = "scan")]
+fn scan_roots(
+    roots: &[PathBuf],
+    json: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    let mut readings = Vec::new();
+    for root in roots {
+        match files_under(root) {
+            Ok(files) => readings.extend(files.into_iter().map(scan_file)),
+            Err(error) => readings.push(ScanReading {
+                path: root.clone(),
+                outcome: Err(error),
+            }),
+        }
+    }
+    let files = readings.len();
+    let findings: usize = readings
+        .iter()
+        .map(|reading| match reading.outcome {
+            Ok(ref hits) => hits.len(),
+            Err(_) => 0,
+        })
+        .sum();
+    let refused = readings
+        .iter()
+        .filter(|reading| reading.outcome.is_err())
+        .count();
+    if json {
+        write_scan_json(&readings, (files, findings, refused), out)?;
+    } else {
+        write_scan_text(&readings, out, err)?;
+        if findings == 0 && refused == 0 {
+            writeln!(out, "OK  scan clean — {files} files, zero findings")?;
+        } else {
+            let unread = if refused == 0 {
+                String::new()
+            } else {
+                format!(", {refused} files refused")
+            };
+            writeln!(
+                err,
+                "REFUSED  scan: {findings} findings across {files} files{unread}"
+            )?;
+        }
+    }
+    Ok(if findings == 0 && refused == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+/// The human form of a scan: one line per finding, one per refused file.
+#[cfg(feature = "scan")]
+fn write_scan_text(
+    readings: &[ScanReading],
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<()> {
+    for reading in readings {
+        match reading.outcome {
+            Ok(ref hits) => {
+                for hit in hits {
+                    writeln!(
+                        out,
+                        "{}:{}: [{}] {}",
+                        reading.path.display(),
+                        hit.line(),
+                        hit.rule(),
+                        hit.snippet()
+                    )?;
+                }
+            }
+            Err(ref failure) => writeln!(err, "scan error: {failure}")?,
+        }
+    }
+    Ok(())
+}
+
+/// The agent form of a scan: one JSON document on stdout. `counts` is the
+/// files read, the findings, and the files refused.
+#[cfg(feature = "scan")]
+fn write_scan_json(
+    readings: &[ScanReading],
+    counts: (usize, usize, usize),
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let mut found = Vec::new();
+    let mut refused = Vec::new();
+    for reading in readings {
+        let path = reading.path.display().to_string();
+        match reading.outcome {
+            Ok(ref hits) => {
+                for hit in hits {
+                    found.push(object(vec![
+                        ("path", Value::from(path.as_str())),
+                        ("line", Value::from(hit.line())),
+                        ("rule", Value::from(hit.rule())),
+                        ("snippet", Value::from(hit.snippet())),
+                    ]));
+                }
+            }
+            Err(ref failure) => refused.push(object(vec![
+                ("path", Value::from(path.as_str())),
+                ("message", Value::from(failure.as_str())),
+            ])),
+        }
+    }
+    let (files, findings, refusals) = counts;
+    let document = object(vec![
+        ("verb", Value::from("scan")),
+        ("files", Value::from(files)),
+        ("findings", Value::from(findings)),
+        ("refused", Value::from(refusals)),
+        ("hits", Value::Array(found)),
+        ("unscanned", Value::Array(refused)),
+    ]);
+    writeln!(out, "{document}")
+}
+
+/// Without the `scan` feature the verb exists and says what it needs.
+#[cfg(not(feature = "scan"))]
+fn scan_roots(
+    _roots: &[PathBuf],
+    _json: bool,
+    _out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    writeln!(err, "lgwks-ast: scan needs the `scan` feature")?;
+    Ok(ExitCode::from(2))
 }
