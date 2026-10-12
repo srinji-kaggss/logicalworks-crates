@@ -19,7 +19,8 @@ use lgwks_ast::script::{
 };
 use lgwks_deps::proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
 use lgwks_deps::quote::{ToTokens, quote};
-use lgwks_deps::syn::{Error, Result};
+
+use crate::error::{Error, Result};
 
 /// The runtime every expansion calls into.
 fn runtime() -> TokenStream {

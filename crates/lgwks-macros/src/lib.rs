@@ -70,9 +70,10 @@
 //! [`Scope`]: https://docs.rs/lgwks_bot/latest/lgwks_bot/script/struct.Scope.html
 
 mod emit;
+mod error;
 
+use error::Error;
 use lgwks_deps::proc_macro2::TokenStream;
-use lgwks_deps::syn::Error;
 
 /// Expand an indented orchestration script into `async fn`s over
 /// `lgwks_bot::script` and an `ARCHITECTURE` map. See the crate
