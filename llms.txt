@@ -16,6 +16,8 @@ Development index. Every link below resolves against `main` as it stood when thi
 
 ## Documentation
 
+- [Use cases and boundaries](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/use-cases.md) — What each crate is for, what none of them is, how they differ from the crates a search finds first, agent security and in-process background work.
+- [Choosing a crate](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/choosing-a-crate.md) — Which crate and feature for a need, the exact dependency graph, and the default-feature caveat on the zero-dependency core.
 - [Consumer guides](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/index.md) — Choose a crate, and which symbols are stable versus main-only.
 - [lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/index.md) — `lgwks_bot`: purpose, non-goals, and the supported versions.
 - [Getting started with lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/getting-started.md) — One source, one condition, one effect, compiled and run.
