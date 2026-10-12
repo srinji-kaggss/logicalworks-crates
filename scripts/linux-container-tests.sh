@@ -120,6 +120,18 @@ $(printf '%s\n' "${commands[@]}")"
 # time, so its own volume has one writer. Outside CI the owner is `local`.
 target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 
+# The toolchain's components live in a volume too. `rust-toolchain.toml` asks
+# for clippy and rustfmt and the image ships neither, so a `--rm` container
+# downloaded both from static.rust-lang.org on every run, and every network
+# blip failed the leg before a test ran (run 38182457101: `error decoding
+# response body` on the channel manifest; run 38180197921: `component download
+# failed for clippy`). An empty named volume is seeded from the image's
+# /usr/local/rustup on first mount, so the components download once and stay.
+# Named by toolchain, so a pin change starts a fresh volume rather than mixing
+# two toolchains, and by runner, for the one-writer reason the target volume
+# has: two first-time installs into one rustup home would race.
+rustup_volume="lwc-ci-linux-rustup-$(printf '%s' "${toolchain}" | tr -c 'A-Za-z0-9_.-' '-')-${target_owner}"
+
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
 # a killed descendant stays a zombie that `kill(pid, 0)` still reports present.
@@ -138,6 +150,7 @@ exec docker run --rm --init \
     --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
+    --volume "${rustup_volume}:/usr/local/rustup" \
     ${config_mount[@]+"${config_mount[@]}"} \
     --env "${rustflags_var}=${container_rustflags}" \
     --env CARGO_TARGET_DIR=/target \
