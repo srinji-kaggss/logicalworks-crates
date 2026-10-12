@@ -62,6 +62,8 @@ mod sim_similarity_sweep;
 mod sim_task_public;
 mod sim_tenant_isolation;
 mod sim_time_profile;
+#[cfg(feature = "trace")]
+mod sim_trace;
 mod sim_wire;
 mod similarity_evidence_contract;
 mod similarity_public_api;
