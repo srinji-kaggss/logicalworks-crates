@@ -184,6 +184,7 @@ mod sim_cancel_under_load;
 mod sim_cas;
 mod sim_cas_corrupt;
 mod sim_cas_disk;
+mod sim_cas_execute;
 mod sim_change_ticks;
 mod sim_clock;
 mod sim_clock_kill;

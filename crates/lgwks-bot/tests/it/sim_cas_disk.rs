@@ -68,11 +68,21 @@ pub(crate) struct Model {
 impl Model {
     /// The version the model holds for `name`; a record never written is at
     /// [`NO_VERSION`].
-    fn version(&self, name: &str) -> u64 {
+    pub(crate) fn version(&self, name: &str) -> u64 {
         match self.records.get(name) {
             Some(&(version, _)) => version,
             None => NO_VERSION,
         }
+    }
+
+    /// Fold in a write the store reported applied.
+    pub(crate) fn applied(&mut self, name: String, version: u64, value: String) {
+        self.records.insert(name, (version, value));
+    }
+
+    /// Fold in a conflict the store reported recorded.
+    pub(crate) fn conflicted(&mut self) {
+        self.conflicts = self.conflicts.saturating_add(1);
     }
 }
 
@@ -142,7 +152,7 @@ pub(crate) fn step(
                     "a write to {name} naming {current} installed {version}"
                 ));
             }
-            model.records.insert(name, (version, value));
+            model.applied(name, version, value);
             trace.record_number("applied", version);
         }
         Ok(version) => {
@@ -160,7 +170,7 @@ pub(crate) fn step(
                     "a conflict on {name} named {named}/{found}, the write saw {expected} against {current}"
                 ));
             }
-            model.conflicts = model.conflicts.saturating_add(1);
+            model.conflicted();
             trace.record_number("conflict", found);
         }
         Err(error) => {
