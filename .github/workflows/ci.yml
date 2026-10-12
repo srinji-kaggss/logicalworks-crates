@@ -573,7 +573,7 @@ jobs:
           cargo nextest run --locked -p lgwks_std --no-default-features --features trace
           cargo nextest run --locked -p lgwks_std --no-default-features --features random
           cargo nextest run --locked -p lgwks_std --no-default-features --features http
-      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron)
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "0"
         run: |
@@ -581,7 +581,7 @@ jobs:
           cargo nextest run --locked -p lgwks_std --no-default-features --features hash
           cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
           cargo nextest run --locked -p lgwks_std --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --no-default-features --features ron
+          cargo nextest run --locked -p lgwks_std --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --no-default-features --features sign
 
 
   # The lgwks-deps storefronts, the target matrix and the standalone consumers,

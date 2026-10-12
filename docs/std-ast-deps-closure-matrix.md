@@ -101,8 +101,7 @@ independently.
 [#167](https://github.com/srinji-kaggss/logicalworks-crates/issues/167),
 [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168),
 [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169).
-
-Every issue in both lists above is closed as of 2026-10-05.
+Every issue in both lists is closed as of 2026-10-05.
 
 **Assurance workstreams X1–X4:** X1 (constant-time hashing) was measured and closed
 by #275; X2 (fallible thread admission) was closed by #264 — the `task` row now
@@ -111,10 +110,11 @@ blocking pool; X3 (entropy failure meaning) was closed by #276: the refusal
 carries the OS's own code, its portable `io::ErrorKind` and a kind that
 distinguishes "no source on this target" from "the OS refused", and the output
 buffer's state after a refusal is documented and tested rather than assumed. X4
-(feature-isolated ergonomics) has no issue of its own and stays open against the
-`process` and `trace` rows. The rows marked **assurance-gap** stay marked until
-their owners close.
+(feature-isolated ergonomics), owned by #417: the `tests-std-per-feature-{a,b,c}`
+lanes test each feature alone (at `d55ee4e22`, 370–431 tests per feature, all
+passing), and `sign`, missing from every shard, joined shard b. `process` refuses
+off Unix with `Unsupported`; `trace` installs no global subscriber.
+**assurance-gap** rows stay marked until their owners close.
 
-**Nothing here converts an unresolved promise into a green checkbox.** A row
-marked `unexercised-gap` or `assurance-gap` is a real, named, owned gap, and
-this page exists so that it is visible rather than rounded up.
+**Nothing here converts an unresolved promise into a green checkbox:** a gap
+row is a real, named, owned gap, shown rather than rounded up.
