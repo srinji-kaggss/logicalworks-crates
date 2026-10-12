@@ -310,10 +310,17 @@ impl RecordStore {
     /// the persist fails, in which case nothing was applied.
     pub fn write(&self, record: &str, expected: u64, value: &str) -> Result<u64, CasError> {
         let mut state = lock(&self.state);
-        let found = state
-            .records
-            .get(record)
-            .map_or(NO_VERSION, Record::version);
+        // The next state is built on a copy and installed only once it is on
+        // disk: a persist that fails must leave memory as the file has it, or
+        // the live store reports a write (or a conflict) a reopen never sees
+        // (`sim_cas_disk::a_failed_persist_applies_nothing`).
+        let mut next = state.clone();
+        // A record never written is at version zero, which is what an
+        // expected zero creates against.
+        let found = match next.records.get(record) {
+            Some(existing) => existing.version(),
+            None => NO_VERSION,
+        };
         if found != expected {
             let entry = ConflictEntry {
                 record: record.to_owned(),
@@ -321,12 +328,13 @@ impl RecordStore {
                 found,
                 stamped: WallStamp::now(),
             };
-            state.conflicts.push_back(entry);
-            if state.conflicts.len() > MAX_CONFLICTS {
-                state.conflicts.pop_front();
-                state.evicted = state.evicted.saturating_add(1);
+            next.conflicts.push_back(entry);
+            if next.conflicts.len() > MAX_CONFLICTS {
+                next.conflicts.pop_front();
+                next.evicted = next.evicted.saturating_add(1);
             }
-            persist(&self.path, &state)?;
+            persist(&self.path, &next)?;
+            *state = next;
             lgwks_std::trace::warn!(
                 "cas store write: refusing the write to {record} that named version {expected} against version {found}"
             );
@@ -337,14 +345,15 @@ impl RecordStore {
             });
         }
         let version = expected.saturating_add(1).max(1);
-        state.records.insert(
+        next.records.insert(
             record.to_owned(),
             Record {
                 version,
                 value: value.to_owned(),
             },
         );
-        persist(&self.path, &state)?;
+        persist(&self.path, &next)?;
+        *state = next;
         Ok(version)
     }
 }
