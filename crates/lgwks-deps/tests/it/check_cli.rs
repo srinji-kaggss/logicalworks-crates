@@ -911,5 +911,4 @@ fn adoption_mode_over_a_clean_tree_still_passes() -> TestResult {
     Ok(())
 }
 
-
 mod ast_surface;
