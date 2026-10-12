@@ -32,6 +32,7 @@ mod wire_record;
 
 mod glob_public;
 mod pattern_external;
+mod process_parity;
 mod prop_codecs;
 mod serde_facade_consumers;
 mod sim_codec;
