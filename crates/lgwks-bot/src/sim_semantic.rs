@@ -169,15 +169,8 @@ impl Scenario {
 }
 
 /// Every drawn scenario under each seed.
-fn sweep(mut check: impl FnMut(u64, &mut Stream, &Scenario) -> Outcome) -> Outcome {
-    for seed in SEEDS {
-        let mut stream = Stream::new(seed);
-        for _ in 0..DRAWS {
-            let scenario = Scenario::from_stream(&mut stream)?;
-            check(seed, &mut stream, &scenario)?;
-        }
-    }
-    Ok(())
+fn sweep(check: impl FnMut(u64, &mut Stream, &Scenario) -> Outcome) -> Outcome {
+    crate::sim_stream::sweep(&SEEDS, DRAWS, Scenario::from_stream, check)
 }
 
 #[test]

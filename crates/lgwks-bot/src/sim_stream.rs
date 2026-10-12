@@ -55,3 +55,24 @@ pub(crate) fn fold(digest: u64, bytes: &[u8]) -> u64 {
 
 /// The FNV-1a 64 offset basis, where every receipt starts.
 pub(crate) const RECEIPT_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// Draws `draws` scenarios under each of `seeds` and checks each one.
+///
+/// The one sweep loop the in-module families share: a scenario is drawn from
+/// the seed's stream, then checked with the same stream, so whatever a check
+/// draws is part of the seed's trace too.
+pub(crate) fn sweep<S>(
+    seeds: &[u64],
+    draws: usize,
+    mut draw: impl FnMut(&mut Stream) -> Result<S, String>,
+    mut check: impl FnMut(u64, &mut Stream, &S) -> Result<(), String>,
+) -> Result<(), String> {
+    for &seed in seeds {
+        let mut stream = Stream::new(seed);
+        for _ in 0..draws {
+            let scenario = draw(&mut stream)?;
+            check(seed, &mut stream, &scenario)?;
+        }
+    }
+    Ok(())
+}

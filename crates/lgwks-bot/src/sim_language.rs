@@ -122,15 +122,8 @@ fn retyped(stream: &mut Stream, text: &str) -> Result<String, String> {
 }
 
 /// Every drawn question under each seed.
-fn sweep(mut check: impl FnMut(u64, &mut Stream, &Drawn) -> Outcome) -> Outcome {
-    for seed in SEEDS {
-        let mut stream = Stream::new(seed);
-        for _ in 0..DRAWS {
-            let drawn = Drawn::from_stream(&mut stream)?;
-            check(seed, &mut stream, &drawn)?;
-        }
-    }
-    Ok(())
+fn sweep(check: impl FnMut(u64, &mut Stream, &Drawn) -> Outcome) -> Outcome {
+    crate::sim_stream::sweep(&SEEDS, DRAWS, Drawn::from_stream, check)
 }
 
 #[test]
