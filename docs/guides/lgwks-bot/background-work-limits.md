@@ -15,7 +15,7 @@ not how quickly the OS tears the group down.
 
 **Cancellation drops a future. That is not the same as stopping a thread.** The
 implementation races each iteration with `token.run_until_cancelled(body(...))`
-(`crates/lgwks-bot/src/rt/supervise.rs:5969`), which drops the body's future. A
+(`crates/lgwks-bot/src/rt/supervise/repeat.rs:160`), which drops the body's future. A
 body that is awaiting returns promptly. What happens to work a body handed to
 another thread is not established by the inspected source: `spawn_blocking`
 hands the closure to a pool thread and offers no abort, and its bound is a
@@ -38,7 +38,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:2033`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise/supervisor.rs:198`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 
@@ -48,7 +48,7 @@ and `spawn_blocking` are for a build with no async runtime. There is a
 
 ## What the tests exercise
 
-`crates/lgwks-bot/src/rt/supervise.rs:6078` runs the module's own tests under the
+`crates/lgwks-bot/src/rt/supervise.rs:222` runs the module's own tests under the
 ordinary workspace test run. They cover an iteration budget stopping at its
 limit, an `Ongoing` budget stopping at a cancel, cancellation interrupting a body
 that is still awaiting, `try_spawn` refusing at the bound rather than growing,

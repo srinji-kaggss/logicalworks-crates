@@ -10,7 +10,7 @@
 //! report [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
 //! Windows has no process groups, so a "group" there is the tree below a root
 //! process (`kill_process_group` stops the root and everything the process
-//! table names as descended from it), and [`ProcessJob`] is its kernel-level
+//! table names as descended from it), and `ProcessJob` is its kernel-level
 //! owner, the counterpart of a cgroup.
 //!
 //! The module is split by responsibility: this file holds the group and child

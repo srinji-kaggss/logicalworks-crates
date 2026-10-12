@@ -21,6 +21,15 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'
 
+# process_fire starts a 1,111-process tree per test (#263), and the per-user
+# process limit (`ulimit -u`) is what bounds it: 4,000 on macOS. Three of them
+# beside each other would reach it, and a tree that cannot fork its thousandth
+# leaf proves nothing about containment. Each takes every test slot.
+[[profile.default.overrides]]
+filter = 'package(lgwks_bot) & binary(it) & test(/^process_fire::/)'
+threads-required = 'num-test-threads'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 # The storefront consumers (INV-DEP-9) are one test per family, and every one is
 # a `cargo check` into the same target directory. Run side by side, all but one
 # park on cargo's lock and that wait counts against their own slow-timeout, so
