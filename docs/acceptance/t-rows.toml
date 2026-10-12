@@ -221,7 +221,7 @@ tests = [
   "it::proposal::a_ledger_of_distinct_failures_reaches_its_own_intervention",
   "it::repair::the_root_budget_stays_charged_across_repair_and_resume_t13",
   "it::repair::a_denied_repair_costs_nothing",
-  "it::sim_repair::a_spent_budget_refuses_every_later_attempt",
+  "it::sim_repair::budget::a_spent_budget_refuses_every_later_attempt",
   "it::t_rows_default::a_repair_charges_the_root_budget_and_never_resets_it_t13",
   "it::sim_t_rows_default::repairs_charge_exactly_their_spend_for_every_seed_t13",
 ]
@@ -381,7 +381,7 @@ tests = [
   "it::repair::a_custom_capability_outside_the_ticket_is_refused",
   "it::repair::a_repair_runs_the_blocked_remainder_without_rerunning_the_analysis",
   "it::repair::a_blocked_run_leaves_its_finished_analysis_recorded",
-  "it::sim_repair::a_wide_need_set_costs_one_analysis",
+  "it::sim_repair::reach::a_wide_need_set_costs_one_analysis",
   "it::sim_spec_materialize::generated_specs_admit_exactly_their_injected_needs",
   "it::t_rows_default::a_first_step_reach_is_blocked_at_admission_costing_nothing_t23",
   "it::sim_t_rows_default::shortfalls_name_exactly_the_seeded_subset_for_every_seed_t23",
@@ -397,8 +397,8 @@ tests = [
   "it::repair::a_ticket_from_an_older_epoch_is_refused_as_stale_t24",
   "it::repair::a_denied_repair_leaves_the_run_blocked_with_its_authority_unchanged",
   "it::repair::an_over_wide_grant_is_refused_rather_than_narrowed",
-  "it::sim_repair::a_bounded_sweep_repairs_every_ticket_once",
-  "it::sim_repair::every_repair_charges_the_root_budget_once",
+  "it::sim_repair::budget::a_bounded_sweep_repairs_every_ticket_once",
+  "it::sim_repair::budget::every_repair_charges_the_root_budget_once",
   "it::t_rows_default::a_ticket_applies_once_and_a_denied_or_wide_grant_changes_nothing_t24",
   "it::sim_t_rows_default::tickets_apply_once_for_every_seed_t24",
 ]
