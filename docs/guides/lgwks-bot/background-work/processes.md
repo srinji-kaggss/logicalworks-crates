@@ -102,11 +102,11 @@ and the run reports the same `CleanupReceipt` a supervised task would.
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:980`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process/run.rs:130`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
-(`crates/lgwks-bot/src/rt/process.rs:64`) keeps its first `limit` bytes — the
+(`crates/lgwks-bot/src/rt/process.rs:55`) keeps its first `limit` bytes — the
 ceiling is a `NonZeroUsize`, so it cannot be unbounded — keeps draining the pipe
 so a child that writes past the ceiling never blocks, and reports the exact
 byte total with a `truncated` flag. The retained buffer is sized once to the
