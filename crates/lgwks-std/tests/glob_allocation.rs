@@ -10,6 +10,11 @@
 //! warmed six-token match cost at least six allocations and a warmed
 //! twelve-token match at least twelve. After warm capacity both are zero.
 
+// The probe's `unsafe` is text this file writes out, never code it compiles;
+// the crate's lint table admits `unsafe` for the darwin syscall module only,
+// so this file says so itself (#345).
+#![forbid(unsafe_code)]
+
 #[path = "support/consumer_probe.rs"]
 mod consumer_probe;
 
