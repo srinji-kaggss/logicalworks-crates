@@ -55,6 +55,8 @@ mod sim_pattern;
 mod sim_process_group;
 mod sim_random_error;
 mod sim_retry_arithmetic;
+#[cfg(feature = "ron")]
+mod sim_ron;
 mod sim_seeded;
 mod sim_shared_policy_tiers;
 mod sim_sign;
