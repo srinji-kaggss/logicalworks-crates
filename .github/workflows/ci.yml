@@ -50,10 +50,14 @@ on:
 # tests are still bounded inside the suite by nextest's `slow-timeout` with
 # `terminate-after`.
 #
-# One compiler slot per job, not two: an opt-level-3 rustc holds ~0.9 GiB, and
-# two slots per job plus the linkers filled swap to 96% and killed six jobs of
-# run 37675264254 at once. Warm compiles take seconds at one slot; transitions
-# take the 30-minute bound above instead of dying.
+# Compiler slots follow what a job compiles, not one rule for all. rustc draws
+# its codegen threads from cargo's slots, so at one slot a job's opt-level-3
+# lgwks-bot compile ran on one core: 6 m 55 s of an 8 m 16 s build on run
+# 38304128455, the run's critical path. The three jobs that compile lgwks-bot's
+# test binaries take three slots, the check, doc and opt-level-0 jobs two, the
+# rest one. Every job at two slots once filled swap to 96% and killed six jobs
+# (run 37675264254); this spends the slots where the codegen is, and the
+# per-feature checks and second LTO links it removed are compiles no job runs.
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
@@ -112,7 +116,7 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           test-share: "6"
-          build-share: "1"
+          build-share: "3"
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
@@ -160,6 +164,9 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
+          nextest: "true"
+          test-share: "4"
+          build-share: "2"
       - name: Verify lockfile is up-to-date
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
@@ -208,6 +215,20 @@ jobs:
         run: python3 scripts/check-doc-citations.py
       - name: Root README quickstart matches its compiled example
         run: python3 scripts/ci_local.py --lane readme-quickstart
+      # The second lgwks-std per-feature shard (see the feature-matrix job). The
+      # file checks above take two minutes and build nothing, so this instance
+      # has the room. The workspace wrapper is restored for it: each run is
+      # that feature's isolated build, and the lints are part of that build.
+      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+          RUSTC_WORKSPACE_WRAPPER: clippy-driver
+        run: |
+          set -eu
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features hash
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features pattern
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features json
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features sign
 
   # The two results the checks list names on every pull request. Each reads the
   # report its lane wrote in the job above and passes only on that lane's own
@@ -262,7 +283,7 @@ jobs:
           # INV-BOT-156) under the run's process-table storm — the grace is
           # calibrated for loaded, not oversubscribed, hosts.
           test-share: "8"
-          build-share: "1"
+          build-share: "3"
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
@@ -301,8 +322,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "2"
-          build-share: "1"
+          test-share: "3"
+          build-share: "2"
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
@@ -317,12 +338,13 @@ jobs:
       - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+          RUSTC_WORKSPACE_WRAPPER: clippy-driver
         run: |
           set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --no-default-features --features process
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features wire
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features online
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features fs-raw
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features process
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. No
@@ -376,7 +398,7 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           test-share: "6"
-          build-share: "1"
+          build-share: "3"
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
@@ -428,20 +450,28 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          build-share: "1"
+          build-share: "2"
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
       # so 433 findings sat in shipped source while the name was advertised as
       # an invariant nothing checked. It is a lane now, and it refuses on any
       # finding rather than reporting a count.
+      # The two tool runs build optimised binaries without the release profile's
+      # fat LTO: the link-time pass was most of a 3 m 28 s build for a tool that
+      # reads files for seconds (run 38304128455), and what it reports does not
+      # depend on how its own binary was linked.
       - name: Scan reports zero findings
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
       # #384: every `script!` in the tree, read by the one parser the macro
       # calls (SL-2), without compiling it. Refuses on any construct the
       # language refuses and on any file that is not Rust tokens, at the
       # line and column `cargo build` would report.
       - name: Every script! in the repository reads
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check
       - name: Clippy feature matrix
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
@@ -488,7 +518,7 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          build-share: "1"
+          build-share: "2"
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
@@ -537,51 +567,33 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "3"
-          build-share: "1"
+          test-share: "4"
+          build-share: "2"
       - name: Check lgwks-std feature matrix
         run: |
           set -eu
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
-      # Every lgwks-std feature alone, executed (one nextest run per feature
-      # with nothing else on, #276). These suites are compile-bound and tiny:
-      # each builds lgwks-std once under one feature and runs a few hundred
-      # unit tests, so they compile at opt-level 0 — the workspace default of
-      # opt-level 2 spends ~25 s compiling what runs for seconds, and the
+      # Every lgwks-std feature alone, built for every target and executed
+      # (one nextest run per feature with nothing else on, #276), so each run
+      # is also that feature's isolated build. These suites are compile-bound
+      # and tiny: each builds lgwks-std once under one feature and runs a few
+      # hundred unit tests, so they compile at opt-level 0 — the workspace
+      # default spends ~25 s compiling what runs for seconds, and the
       # assertions, overflows and debuginfo settings are unchanged, so the
-      # same tests prove the same things sooner.
+      # same tests prove the same things sooner. Shard b runs in the gate job
+      # and shard c beside the saturation tiers, so no instance holds more
+      # than five of them.
       - name: Run lgwks-std per-feature tests, shard a (core trace random http)
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "0"
         run: |
           set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features core
-          cargo nextest run --locked -p lgwks_std --no-default-features --features trace
-          cargo nextest run --locked -p lgwks_std --no-default-features --features random
-          cargo nextest run --locked -p lgwks_std --no-default-features --features http
-      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)
-        env:
-          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --no-default-features --features hash
-          cargo nextest run --locked -p lgwks_std --no-default-features --features pattern
-          cargo nextest run --locked -p lgwks_std --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --no-default-features --features sign
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features core
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features trace
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features random
+          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features http
 
 
   # The lgwks-deps storefronts, the target matrix and the standalone consumers,
@@ -669,7 +681,7 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          build-share: "1"
+          build-share: "2"
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
@@ -703,6 +715,13 @@ jobs:
         # stack once and runs every grammar in one process. The no-default and
         # all-features legs stay separate — they are two more feature sets, not
         # 28, and each is a different resolution the combined call cannot make.
+        #
+        # Opt-level 0, as the per-feature suites: each leg parses a fixture per
+        # grammar in milliseconds, and at the workspace's opt-level 3 the
+        # combined leg spent 3 m 59 s compiling lgwks-std, lgwks-deps and
+        # lgwks-ast (run 38304128455). Assertions are unchanged.
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
         run: |
           set -u
           failed=0
