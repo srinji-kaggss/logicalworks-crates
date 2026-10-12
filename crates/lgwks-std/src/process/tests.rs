@@ -5,7 +5,25 @@ use std::fmt::Write as _;
 use std::os::unix::process::CommandExt as _;
 
 #[cfg(target_os = "linux")]
-use super::capture::{proc_stat_says_running, status_has_kill_pending};
+use super::capture::{proc_stat_says_running, stat_parent, status_has_kill_pending};
+
+/// The `/proc` table snapshot reads a stat line's parent after the last `)`,
+/// so a command name holding spaces and parentheses cannot shift it (#345).
+#[test]
+#[cfg(target_os = "linux")]
+fn a_stat_line_names_its_parent_after_the_command() {
+    assert_eq!(
+        stat_parent("4242 (a (tricky) name) S 77 4242 4242 0 -1 0"),
+        Some(77),
+        "the parent is the second field after the command name"
+    );
+    assert_eq!(stat_parent("4242 (cut"), None, "a cut line names no parent");
+    assert_eq!(
+        stat_parent("4242 (sh) S notapid"),
+        None,
+        "a non-numeric parent is refused, not guessed"
+    );
+}
 use super::*;
 
 #[test]

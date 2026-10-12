@@ -81,8 +81,9 @@ pub enum ContainmentMechanism {
     ///
     /// The portable reading, used on every Unix without a per-process child list
     /// and as the fallback when that list cannot be read. On macOS it is one
-    /// `sysctl(KERN_PROC)` syscall (#345); elsewhere it costs one `ps`
-    /// invocation. Either way it reads one row per process on the host, so it is
+    /// `sysctl(KERN_PROC)` syscall and on Linux one `/proc/<pid>/stat` read per
+    /// process (#345); on any other Unix it costs one `ps` invocation. Either
+    /// way it reads one row per process on the host, so it is
     /// the slower of the two readings and the one a high-concurrency cleanup pays
     /// most for.
     ProcessTableSnapshot,
@@ -593,8 +594,13 @@ fn read_table_zombies() -> io::Result<BTreeMap<i32, bool>> {
 /// knows which of the two reads failed, and a non-zero exit is a refusal rather
 /// than an empty table — an empty reading here would say "this host has no
 /// processes" when the truth is "the reading failed". macOS reads its table
-/// through `sysctl` instead (#345).
-#[cfg(all(unix, not(target_os = "macos"), feature = "process"))]
+/// through `sysctl` and Linux through `/proc` instead (#345).
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "linux"),
+    feature = "process"
+))]
 fn read_ps_table(columns: &[&str], caller: &'static str) -> io::Result<Vec<String>> {
     let mut arguments = vec!["-A"];
     for column in columns {
@@ -786,8 +792,51 @@ fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
         .collect())
 }
 
+/// Every `(pid, ppid)` pair of the host's process table, read from `/proc`.
+///
+/// Linux: one `/proc/<pid>/stat` read per process, with no process spawn
+/// (#345). This is the fallback the per-process child walk takes when the
+/// root's own `/proc` entry is gone (it exited, or never existed); before, that
+/// fallback spawned `ps`, which a host without `ps` refused. A pid that exits
+/// between the listing and its read has no row, which is what it is.
+#[cfg(all(target_os = "linux", feature = "process"))]
+fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
+    let mut pairs = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if let Some(parent) = read_proc_stat(pid).as_deref().and_then(stat_parent) {
+            pairs.push((pid, parent));
+        }
+    }
+    Ok(pairs)
+}
+
+/// The parent pid a `/proc/<pid>/stat` line names: field 4, the second after
+/// the command name, which may itself hold spaces and parentheses.
+#[cfg(all(target_os = "linux", feature = "process"))]
+pub(super) fn stat_parent(stat: &str) -> Option<i32> {
+    stat.rfind(')')
+        .and_then(|end| stat.get(end.saturating_add(1)..))
+        .and_then(|fields| fields.split_ascii_whitespace().nth(1))
+        .and_then(|parent| parent.parse::<i32>().ok())
+}
+
 /// Every `(pid, ppid)` pair of the host's process table, from one `ps` read.
-#[cfg(all(unix, not(target_os = "macos"), feature = "process"))]
+///
+/// The reading for a Unix that is neither Linux nor macOS.
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "linux"),
+    feature = "process"
+))]
 fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
     let mut pairs = Vec::new();
     for row in read_ps_table(&["pid=", "ppid="], "capture_table_snapshot")? {
@@ -805,8 +854,9 @@ fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
 /// Capture the tree from one `pid`/`ppid` snapshot of the whole process table.
 ///
 /// The portable reading, and the one every Unix without a per-process child list
-/// uses. It reads one row per process on the host — one `sysctl` on macOS, one
-/// `ps` invocation elsewhere — and it races more than the per-process walk: a
+/// uses. It reads one row per process on the host — one `sysctl` on macOS,
+/// `/proc` on Linux, one `ps` invocation elsewhere — and it races more than the
+/// per-process walk: a
 /// process that forks while the snapshot is taken is a row the snapshot cannot
 /// contain. The walk is therefore tried first wherever one exists, and this is
 /// the fallback and the default everywhere else.
