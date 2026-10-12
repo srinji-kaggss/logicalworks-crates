@@ -18,12 +18,14 @@
 #
 # The image is the repository's pinned toolchain (`rust-toolchain.toml`) and
 # nextest is the version the host runs, so the two legs differ only in the OS.
-# It is Debian trixie: its util-linux 2.41 `setpriv` applies Landlock rules,
-# which `Confinement::Landlock` wraps (#337); bookworm's 2.38 cannot.
 # Build output, the registry and the nextest binary live in named volumes, so a
 # run reuses what the last run built.
 #
 # Usage: scripts/linux-container-tests.sh [workspace|bot-full|appcui]...  (default: all three)
+#
+# bot-full runs under nextest's `ci` profile, which writes the JUnit report the
+# acceptance receipt is recorded from (#271): the workspace is mounted at /src,
+# so the report lands in this checkout's target/nextest/ci/junit.xml.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -79,7 +81,7 @@ commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
         workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
-        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)'") ;;
+        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc"
@@ -125,6 +127,8 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # record the C library a build linked against, so a binary a trixie build left
 # (glibc 2.39) was reused by a bookworm run and failed to load in it (`GLIBC_2.39
 # not found`, run 38099333925). One image, one volume.
+# It is Debian trixie: its util-linux 2.41 `setpriv` applies Landlock rules,
+# which `Confinement::Landlock` wraps (#337); bookworm's 2.38 cannot.
 image="rust:${toolchain}-trixie"
 image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
 

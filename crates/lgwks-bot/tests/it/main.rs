@@ -171,6 +171,7 @@ mod request_key;
 mod resume_liveness;
 mod retry_proxy;
 mod rt_async_tier;
+mod rt_joinset;
 mod rt_process;
 mod rt_process_files;
 mod rt_runtime_stack;
