@@ -371,6 +371,10 @@ pub mod skew;
 /// The seeded draw stream the in-module simulations share.
 #[cfg(test)]
 mod sim_stream;
+/// The error vocabulary's escaping and retry-class promises, simulated; declared
+/// here because `error.rs` is past the size law.
+#[cfg(test)]
+mod sim_error;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
