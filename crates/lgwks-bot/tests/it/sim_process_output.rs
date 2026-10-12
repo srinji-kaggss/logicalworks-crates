@@ -684,7 +684,6 @@ fn room_without_a_record_is_the_ceiling_band_01() -> TestResult {
     room_without_a_record_is_the_ceiling(Band::new(96, 8))
 }
 
-
 /// The one payload byte a tenant's records carry, from its index.
 ///
 /// 26 tenants rather than unbounded indices, so a tier of 10,000 children shares
