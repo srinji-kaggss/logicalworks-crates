@@ -378,13 +378,21 @@ pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
         #[cfg(target_os = "macos")]
         StartScheme::Kinfo => kinfo_start(leader.pid)?,
         #[cfg(not(target_os = "linux"))]
-        StartScheme::Proc => return Err(unreadable_scheme("a /proc process identity", "Linux")),
+        StartScheme::Proc => {
+            let refusal = Err(unreadable_scheme("a /proc process identity", "Linux"));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "reap_orphaned_group: returning an error to the caller");
+            return refusal;
+        }
         #[cfg(not(target_os = "macos"))]
         StartScheme::Kinfo => {
-            return Err(unreadable_scheme(
+            let refusal = Err(unreadable_scheme(
                 "a kernel-record process identity",
                 "macOS",
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "reap_orphaned_group: returning an error to the caller");
+            return refusal;
         }
     };
     let Some(started) = holder else {
