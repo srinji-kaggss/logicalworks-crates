@@ -86,6 +86,9 @@ pub mod vendor;
 mod edge;
 mod license;
 mod refusal;
+/// The origin and label predicates, model-checked against a reference.
+#[cfg(test)]
+mod sim_edge;
 #[cfg(test)]
 mod tests;
 mod tier;
@@ -858,7 +861,10 @@ pub fn check_verdict(
     contract_path: Option<&Path>,
 ) -> Result<metadata::Collected<Verdict>, GateError> {
     let lock_path = root.join("Cargo.lock");
-    let contract_path = contract_path.map_or_else(|| root.join(CONTRACT_PATH), Path::to_path_buf);
+    let contract_path = match contract_path {
+        Some(path) => path.to_path_buf(),
+        None => root.join(CONTRACT_PATH),
+    };
     ensure_contract_file(&contract_path)?;
     let register = Contract::parse(&read(&contract_path)?).map_err(GateError::Contract)?;
     // Parsed, not merely read. Reading proved the file exists; parsing is what
