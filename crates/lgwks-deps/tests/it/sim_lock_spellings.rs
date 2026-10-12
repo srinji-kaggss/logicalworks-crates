@@ -19,36 +19,16 @@
 
 use lgwks_deps::lock::{self, LockError};
 
-use crate::sim::{Rng, Trace};
+use crate::sim::{Failure, Rng, Trace, refuse, replay_sweep};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), Failure>;
 
 /// Seeds per scenario: parsing is pure, so the sweep is wide.
 const SEEDS: u64 = 1024;
 
-/// Return a typed failure, emitting it first.
-fn refuse<T>(cause: impl Into<String>) -> Result<T, Box<dyn std::error::Error>> {
-    let refusal: Result<T, Box<dyn std::error::Error>> = Err(cause.into().into());
-    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sim_lock_spellings: a scenario failed");
-    refusal
-}
-
-/// Run `body` twice per seed and require the two traces to hash alike.
-fn sweep(name: &str, mut body: impl FnMut(&mut Rng, &mut Trace) -> TestResult) -> TestResult {
-    for seed in 1..=SEEDS {
-        let mut first = Trace::new();
-        body(&mut Rng::new(seed), &mut first)
-            .map_err(|error| format!("{name}: seed {seed}: {error}"))?;
-        let mut again = Trace::new();
-        body(&mut Rng::new(seed), &mut again)
-            .map_err(|error| format!("{name}: seed {seed}: {error}"))?;
-        if first.hash() != again.hash() {
-            return refuse(format!(
-                "{name}: seed {seed} did not replay to the same trace"
-            ));
-        }
-    }
-    Ok(())
+/// Every scenario here, over the same seeds.
+fn sweep(name: &str, body: impl FnMut(&mut Rng, &mut Trace) -> TestResult) -> TestResult {
+    replay_sweep(name, SEEDS, body)
 }
 
 /// Where a package came from, as `Cargo.lock` encodes it.
