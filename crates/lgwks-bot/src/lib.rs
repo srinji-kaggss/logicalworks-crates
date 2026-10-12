@@ -379,6 +379,9 @@ mod sim_error;
 /// in-crate simulations.
 #[cfg(test)]
 mod sim_language;
+/// The semantic tier behind the lexicon, simulated with a scripted embedder.
+#[cfg(test)]
+mod sim_semantic;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
