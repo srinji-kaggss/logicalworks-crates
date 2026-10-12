@@ -6,8 +6,10 @@ import pathlib
 import re
 import shutil
 import sys
+import time
 
 from harness import API_DIR, REPO, TASKS_DIR, run_group
+from opencode import NO_TOOLS, is_opencode, opencode_argv, opencode_env, parse_opencode, wall_line
 
 #: The lexicon-only arm's whole context is the generated one-page lexicon
 #: (#385), read from where the generator writes it rather than from a copy that
@@ -165,6 +167,20 @@ def call_model(
             "a model trial must be closed-book, and this runner enforces that with "
             "macOS sandbox-exec, which this host lacks"
         )
+    profile = closed_book_profile(scratch, work)
+    if is_opencode(cmd):
+        # OpenCode runs under the same profile with every home it touches moved
+        # into scratch (`opencode.py`), so the sandbox is unchanged across CLIs.
+        started = time.monotonic()
+        done = run_group(
+            ["sandbox-exec", "-p", profile, *opencode_argv(cmd, model)],
+            scratch,
+            opencode_env(scratch),
+            timeout,
+            stdin_text=NO_TOOLS + prompt,
+        )
+        elapsed = (time.monotonic() - started) * 1000.0
+        return done.stdout + "\n" + wall_line(elapsed) + "\n", done.stderr
     # Read-only plan mode, never a stripped permission check: the whole prompt
     # arrives on stdin and the reply is one fenced block, so an author needs no
     # tool that writes or runs anything. The 2026-10-03/04 runs passed `--yolo`;
@@ -173,7 +189,7 @@ def call_model(
     argv = [
         "sandbox-exec",
         "-p",
-        closed_book_profile(scratch, work),
+        profile,
         cmd,
         "-p",
         "--permission-mode",
@@ -198,6 +214,9 @@ def call_model(
 
 def parse_ndjson(raw: str):
     """Parse the final NDJSON result line: (final_text, tokens_in, tokens_out, ms)."""
+    events = parse_opencode(raw)
+    if events is not None:
+        return events
     for line in reversed(raw.splitlines()):
         line = line.strip()
         if not line.startswith("{"):

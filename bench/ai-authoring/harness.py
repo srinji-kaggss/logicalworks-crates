@@ -40,6 +40,54 @@ TEST_FN = re.compile(r"#\[test\]\s*(?:pub\s+)?fn\s+(?P<name>[A-Za-z0-9_]+)")
 CARGO_MUTEX = threading.Lock()
 
 
+# ── the run's token ceiling ──────────────────────────────────────────────────
+
+
+class TokenBudget:
+    """A hard ceiling on the input plus output tokens of every model call in a run.
+
+    Director 2026-10-12: a run's model calls come in under 1.2M tokens combined,
+    or the test is rejected. A call is admitted only when the tokens already
+    spent plus every outstanding reservation plus this call's reservation fit
+    under the ceiling; it settles to its measured count when it returns. The
+    reservation is sized above any reply a single-step call can make, so the
+    measured total stays under the ceiling, and `spent` is what the run reports.
+    """
+
+    def __init__(self, ceiling: int, spent: int = 0):
+        self.ceiling = ceiling
+        self.spent = spent
+        self.reserved = 0
+        self.refused = 0
+        self._lock = threading.Lock()
+
+    def admit(self, reservation: int) -> bool:
+        with self._lock:
+            if self.spent + self.reserved + reservation > self.ceiling:
+                self.refused += 1
+                return False
+            self.reserved += reservation
+            return True
+
+    def settle(self, reservation: int, used: int) -> None:
+        with self._lock:
+            self.reserved -= reservation
+            self.spent += used
+
+
+#: The reservation for one call: the stock agent's measured prompt (about 10k
+#: tokens, cache reads included), the prompt text at three characters per token,
+#: and a reply ceiling above the most one step can emit: Meta Muse stopped at its
+#: 32,000-token length cap on `capture` (30,584 reasoning plus 1,416 output,
+#: 2026-10-12), so no admitted call can push the run past its ceiling.
+CALL_OVERHEAD_TOKENS = 12_000
+REPLY_CEILING_TOKENS = 34_000
+
+
+def reservation_for(prompt: str) -> int:
+    return CALL_OVERHEAD_TOKENS + len(prompt) // 3 + REPLY_CEILING_TOKENS
+
+
 # ── cargo serialization ──────────────────────────────────────────────────────
 
 

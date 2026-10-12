@@ -37,7 +37,7 @@ import time
 # from any working directory and `regrade.py` can load this file by path.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from harness import HERE, ORACLE_CRATE_TOKEN, REPO, TASKS_DIR, TEST_LINE, run_timed_cargo  # noqa: E402
+from harness import HERE, ORACLE_CRATE_TOKEN, REPO, TASKS_DIR, TEST_LINE, TokenBudget, run_timed_cargo  # noqa: E402
 from prompts import DEFAULT_PROFILES, PROFILES  # noqa: E402
 from trial import (  # noqa: E402
     NEW_ONLY_TASK_WHY,
@@ -265,6 +265,16 @@ def main() -> int:
     )
     parser.add_argument("--max-repairs", type=int, default=4)
     parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=1_200_000,
+        help=(
+            "hard ceiling on the run's model input plus output tokens (Director "
+            "2026-10-12: 1.2M); a call that would cross it is refused and its "
+            "trial recorded as budget_refused"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="use the canned reference solutions instead of a model",
@@ -423,6 +433,13 @@ def main() -> int:
 
     records = [done[trial_id_of(job)] for job in jobs if trial_id_of(job) in done]
     jobs = [job for job in jobs if trial_id_of(job) not in done]
+    # One ceiling for the whole run, resumed trials' tokens included.
+    budget = TokenBudget(
+        args.token_budget,
+        spent=sum(row.get("tokens_in", 0) + row.get("tokens_out", 0) for row in done.values()),
+    )
+    for job in jobs:
+        job["budget"] = budget
     if args.resume is not None:
         print(f"resuming: {len(records)} trial(s) kept, {len(jobs)} to run")
         set_aside_interrupted(work, jobs)
@@ -537,13 +554,19 @@ def main() -> int:
                 "compiled reports false rather than a cleanup result"
             ),
             "skipped_cells": skipped,
+            "token_budget": {
+                "ceiling": args.token_budget,
+                "spent_input_plus_output": budget.spent,
+                "calls_refused": budget.refused,
+            },
         },
         "groups": summarize(records),
     }
     summary_path = run_dir / "summary.json"
     summary_path.write_text(render_summary(summary))
 
-    print(f"\nwrote {out}")
+    print(f"\ntokens (input + output): {budget.spent} of {args.token_budget}; calls refused: {budget.refused}")
+    print(f"wrote {out}")
     print(f"wrote {summary_path}")
 
     if args.mutants:

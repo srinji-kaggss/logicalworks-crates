@@ -24,6 +24,7 @@ member.
 | [The runner](runner.md) | What `run.py` does per trial, the metrics it records, and the lockfile every trial shares. |
 | [Results through 2026-10-04](history.md) | The profile matrix and the four-arm comparison against the ecosystem standard, on aggregate and pipeline. |
 | [Recovery, re-measured](recovery.md) | The three rig defects behind recovery's first 2/20, found one per run, and the regrade. |
+| [Guarantee tasks under a token ceiling, 2026-10-12](results-2026-10-12.md) | Meta Muse on `futures`, `script` and `lexicon` across the three guarantee tasks, at 455,548 tokens against a 1.2M ceiling. No arm wins. |
 | [The guarantee tasks and their controls](guarantees.md) | The `script!` arm, the three tasks whose oracles fail a solution lacking the guarantee, and the reference and mutant controls. |
 
 ## How to rerun
@@ -38,8 +39,11 @@ AI_AUTHORING_CMD=<cli> python3 bench/ai-authoring/run.py \
     --trials 2 --parallel 6
 ```
 
-`--profiles` defaults to all five and `--tasks` to all six. The default model
-ids are `stealth/space-bunny-alpha` and `deepseek/deepseek-v4.1-flash`. A model
+`AI_AUTHORING_CMD=opencode` drives OpenCode instead (`opencode.py`), with
+`--models opencode/<id>`: each call gets its own home, temp and XDG directories
+inside the trial scratch, so it reads no user rules, session or sibling answer.
+
+`--profiles` defaults to all five and `--tasks` to all six. A model
 call must be closed-book and this runner enforces that with macOS
 `sandbox-exec`, so a host without it refuses rather than running the model
 open-book against the hidden oracle. The trial template builds

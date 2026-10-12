@@ -20,6 +20,7 @@ from harness import (
     TEST_FN,
     TEST_LINE,
     parse_peak_rss,
+    reservation_for,
     run_cargo,
     run_timed_cargo,
 )
@@ -213,6 +214,32 @@ NO_FUTURES_TASK_WHY = (
 # ── one trial ────────────────────────────────────────────────────────────────
 
 
+def budgeted_call(job: dict, prompt: str, scratch: pathlib.Path, work: pathlib.Path):
+    """One model call under the run's `TokenBudget`, parsed; `None` when refused.
+
+    Returns `(raw, text, tokens_in, tokens_out, model_ms)`. A refused call never
+    reaches the model, so it costs nothing and the ceiling holds.
+    """
+    budget = job.get("budget")
+    reservation = reservation_for(prompt)
+    if budget is not None and not budget.admit(reservation):
+        return None
+    used = 0
+    try:
+        try:
+            stdout, stderr = call_model(job["cmd"], job["model"], prompt, scratch, work)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", "model call exceeded the 900 s timeout"
+        text, tokens_in, tokens_out, model_ms = parse_ndjson(stdout)
+        if not text.strip():
+            text, tokens_in, tokens_out, model_ms = parse_ndjson(stderr)
+        used = tokens_in + tokens_out
+        return stdout + "\n" + stderr, text, tokens_in, tokens_out, model_ms
+    finally:
+        if budget is not None:
+            budget.settle(reservation, used)
+
+
 def trial_id_of(job: dict) -> str:
     """The trial's directory name and package seed.
 
@@ -253,17 +280,26 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     model_wall_ms = 0
     repairs = 0
     raw_calls = []
+    budget_refused = False
 
     if mode == "model":
         source_prompt = full_prompt(task, api, profile)
-        try:
-            stdout, stderr = call_model(job["cmd"], model, source_prompt, scratch, work)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", "model call exceeded the 900 s timeout"
-        raw_calls.append(stdout + "\n" + stderr)
-        text, tokens_in, tokens_out, model_wall_ms = parse_ndjson(stdout)
-        if not text.strip():
-            text, tokens_in, tokens_out, model_wall_ms = parse_ndjson(stderr)
+        called = budgeted_call(job, source_prompt, scratch, work)
+        if called is None:
+            # Past the ceiling: the trial is recorded as never run, not as failed.
+            return {
+                "model": model, "api": api, "task": task, "profile": profile,
+                "trial": trial, "trial_id": trial_id, "mode": mode,
+                "budget_refused": True, "compiled": False, "repairs": 0,
+                "oracle": {}, "oracle_pass_count": 0, "oracle_total": 0,
+                "cleanup_ok": False, "oracle_wall_ms": 0.0, "oracle_peak_rss_bytes": None,
+                "tokens_in": 0, "tokens_out": 0, "model_wall_ms": 0, "compile_wall_ms": 0,
+                "consumer_lines": 0, "orchestration_sites": 0, "orchestration_site_tokens": {},
+                "orchestration_token_list": list(ORCHESTRATION_TOKENS),
+                "lockfile": "", "lgwks_bot_sha": bot_sha, "lib_rs": "",
+            }
+        raw, text, tokens_in, tokens_out, model_wall_ms = called
+        raw_calls.append(raw)
         code = extract_rust_block(text)
     else:
         # The lexicon arm writes the same `script!` language from a different
@@ -305,17 +341,13 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
     # Compile, and for a real model, re-prompt on failure up to the repair budget.
     compiled, build_log = attempt(code)
     while not compiled and mode == "model" and repairs < job["max_repairs"]:
+        called = budgeted_call(job, repair_prompt(source_prompt, code, build_log), scratch, work)
+        if called is None:
+            budget_refused = True
+            break
         repairs += 1
-        try:
-            stdout, stderr = call_model(
-                job["cmd"], model, repair_prompt(source_prompt, code, build_log), scratch, work
-            )
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", "model call exceeded the 900 s timeout"
-        raw_calls.append(stdout + "\n" + stderr)
-        text, more_in, more_out, more_ms = parse_ndjson(stdout)
-        if not text.strip():
-            text, more_in, more_out, more_ms = parse_ndjson(stderr)
+        raw, text, more_in, more_out, more_ms = called
+        raw_calls.append(raw)
         tokens_in += more_in
         tokens_out += more_out
         model_wall_ms += more_ms
@@ -383,6 +415,7 @@ def run_job(job: dict, work: pathlib.Path, bot_sha: str) -> dict:
         "trial": trial,
         "trial_id": trial_id,
         "mode": mode,
+        "budget_refused": budget_refused,
         "compiled": compiled,
         "repairs": repairs,
         "oracle": oracle,
