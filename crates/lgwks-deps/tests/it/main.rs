@@ -33,6 +33,7 @@ mod metadata_public_api;
 mod origin_binding;
 mod prop_parsers;
 mod sim_dependency_policy;
+mod sim_invariant_register;
 mod sim_license_policy;
 mod sim_lockfile;
 mod sim_metadata_dimensions;
