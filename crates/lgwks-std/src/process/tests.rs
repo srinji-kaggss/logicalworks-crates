@@ -1,5 +1,6 @@
 //! Unit tests for the process primitives, capture, identity and reaping.
 
+#[cfg(unix)]
 use std::fmt::Write as _;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -140,6 +141,7 @@ fn an_exited_child_is_reported_exited_and_stays_reapable() -> Result<(), Box<dyn
 
 /// The id `i32::MAX` can never name a process on a supported platform, so a
 /// vacancy probe is decidable rather than a race with the next fork.
+#[cfg(unix)]
 const VACANT: i32 = i32::MAX;
 
 /// `ESRCH`, "no such process", on every Unix this feature targets.
@@ -147,6 +149,7 @@ const VACANT: i32 = i32::MAX;
 /// Read as the raw code rather than as an [`std::io::ErrorKind`]: macOS
 /// classifies `ESRCH` as uncategorised where Linux calls it `NotFound`, so
 /// the kind is a property of the platform and the errno is the fact.
+#[cfg(unix)]
 const ESRCH: i32 = 3;
 
 /// A tree the tests build and tear down: `sh` with `depth` backgrounded
