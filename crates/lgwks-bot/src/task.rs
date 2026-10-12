@@ -101,7 +101,7 @@ mod request;
 mod store;
 mod submit;
 
-pub use builder::{HostBuilder, HostError, HostLimits};
+pub use builder::{Admission, HostBuilder, HostError, HostLimits};
 pub use host::Host;
 
 pub use definition::{DefinitionIdentity, Drift, UNVERSIONED_CODEC};
