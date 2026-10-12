@@ -5,9 +5,12 @@
 //! The reader is line-oriented on purpose. Taking a TOML parser as a dependency
 //! in order to police dependencies would be self-refuting, and the subset
 //! `Cargo.lock` uses (`[[package]]` blocks of `key = "value"` pairs) needs no
-//! general parser. Anything outside that subset is skipped rather than guessed
-//! at, and a `[[package]]` block missing a name is reported, never silently
-//! dropped.
+//! general parser. That subset is read in every spelling TOML gives it —
+//! whitespace inside the header brackets, quoted keys, literal strings,
+//! trailing comments — because a spelling skipped is a package dropped or a
+//! registry crate read as local. Anything outside the subset is skipped rather
+//! than guessed at, and a `[[package]]` block missing a name is reported,
+//! never silently dropped.
 //!
 //! A package with no `source` key is local: a workspace member or a path
 //! dependency. That is Cargo's own encoding of "this came from the filesystem,
@@ -182,7 +185,10 @@ fn handle_header(
         // byte, so `index` cannot approach `usize::MAX` and this cannot
         // saturate.
         opened_at: index.saturating_add(1),
-        open: line == "[[package]]",
+        // Every TOML spelling of the header opens a block: one the reader
+        // skipped would drop a package from the audited graph
+        // (`sim_lock_spellings`).
+        open: array_table_key(line) == Some("package"),
         ..Pending::default()
     };
     Ok(())
@@ -303,29 +309,80 @@ fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError
     Ok(())
 }
 
-/// Whether `key` is a bare TOML key the reader will accept.
+/// Splits a TOML string at the start of `text` into its content and what
+/// follows the closing quote: a basic string (`"…"`, where `\"` does not close
+/// it) or a literal string (`'…'`). `None` when `text` opens no string or the
+/// string is unterminated on this line.
 ///
-/// Only bare keys are read. A quoted key, which is how a v1 `[metadata]` table
-/// spells its `"checksum foo 0.1.0 (registry+…)"` rows, fails this test, so
-/// those rows are skipped rather than mistaken for package fields.
-fn valid_toml_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '_' || character == '-'
-        })
-}
-
-/// Splits `key = "value"` into its parts. Returns `None` for anything else,
-/// including the quoted-key lines a v1 `[metadata]` table carries.
-fn key_and_value(line: &str) -> Option<(&str, &str)> {
-    let (key, value) = line.split_once('=')?;
-    let key = key.trim();
-    if !valid_toml_key(key) {
+/// The content is returned as written: an escape inside a basic string stays
+/// raw. Cargo writes none in the keys the audit reads (names, versions,
+/// sources and checksums are ASCII without quotes or backslashes).
+fn quoted(text: &str) -> Option<(&str, &str)> {
+    let mut characters = text.char_indices();
+    let (_, open) = characters.next()?;
+    if open != '"' && open != '\'' {
         return None;
     }
-    let value = value.trim();
-    let unquoted = value.strip_prefix('"')?.strip_suffix('"')?;
-    Some((key, unquoted))
+    let mut escaped = false;
+    for (at, character) in characters {
+        if escaped {
+            escaped = false;
+        } else if open == '"' && character == '\\' {
+            escaped = true;
+        } else if character == open {
+            return Some((text.get(1..at)?, text.get(at.saturating_add(1)..)?));
+        }
+    }
+    None
+}
+
+/// Splits a TOML key (bare, basic-quoted or literal-quoted) from the start of
+/// `text`. A quoted key names the same field as its bare spelling, as TOML
+/// v1.0.0 says, so `"source" = …` is the `source` key.
+fn key(text: &str) -> Option<(&str, &str)> {
+    if let Some(split) = quoted(text) {
+        return Some(split);
+    }
+    let end = match text.find(|character: char| {
+        !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+    }) {
+        Some(end) => end,
+        None => text.len(),
+    };
+    if end == 0 {
+        return None;
+    }
+    Some(text.split_at(end))
+}
+
+/// Whether what follows a value or a header is nothing or a comment.
+fn ends_line(tail: &str) -> bool {
+    let tail = tail.trim();
+    tail.is_empty() || tail.starts_with('#')
+}
+
+/// The key of an array-of-tables header, in any spelling TOML allows:
+/// whitespace inside the brackets (`[[ package ]]`), a quoted key, and a
+/// comment after the closing brackets. `None` for a `[table]` header, a
+/// dotted key, or anything else.
+fn array_table_key(line: &str) -> Option<&str> {
+    let inner = line.strip_prefix("[[")?.trim_start();
+    let (name, rest) = key(inner)?;
+    let tail = rest.trim_start().strip_prefix("]]")?;
+    ends_line(tail).then_some(name)
+}
+
+/// Splits `key = "value"` into its parts, in any spelling TOML allows for a
+/// string assignment: a bare or quoted key, a basic or literal string, any
+/// whitespace around `=`, and a trailing comment. Returns `None` for anything
+/// else: an array opener, an array row, a comment line, a non-string value.
+/// A quoted `[metadata]` row parses here too, but only a `[[package]]` block
+/// reads fields, so it is never taken for one.
+fn key_and_value(line: &str) -> Option<(&str, &str)> {
+    let (name, rest) = key(line)?;
+    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+    let (value, tail) = quoted(rest)?;
+    ends_line(tail).then_some((name, value))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
