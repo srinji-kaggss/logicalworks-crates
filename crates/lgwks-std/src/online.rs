@@ -273,8 +273,10 @@ mod tests {
     /// run once before any dial, so a resolver that fails reports unreachable
     /// without a socket being opened or the connection budget being consulted.
     /// Counted rather than timed, so a loaded host cannot change the verdict.
+    /// The name is the one INV-STD-ONLINE-1 cites: a zero budget still runs the
+    /// resolver, so resolution is outside the connection budget.
     #[test]
-    fn resolution_runs_once_before_any_dial() {
+    fn resolver_delay_is_outside_the_connection_budget() {
         struct RefusingResolver<'calls>(&'calls std::cell::Cell<u32>);
 
         impl ToSocketAddrs for RefusingResolver<'_> {
