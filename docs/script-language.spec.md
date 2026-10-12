@@ -1,20 +1,11 @@
 # The script language: one lexicon, one parser
 
 Status: **Director direction of 2026-10-08; proposed, not implemented.**
-Baseline: `a23ad5890`. Tracker: [#390](https://github.com/srinji-kaggss/logicalworks-crates/issues/390),
-the ordered queue that names the issue making each rule true. Code-shaped
-blocks are design examples, labelled `text`. **Open decision (the Director's):**
-where the one parser lives — a default-off `script` feature of `lgwks_ast` (the
-proposal below) or a sixth member the Director names; #383 waits on it.
+Baseline: `a23ad5890`. Tracker: [#390](https://github.com/srinji-kaggss/logicalworks-crates/issues/390), the ordered queue that names the issue making each rule true. Code-shaped blocks are design examples, labelled `text`. **Open decision (the Director's):** where the one parser lives — a default-off `script` feature of `lgwks_ast` (the proposal below) or a sixth member the Director names; #383 waits on it.
 
 ## What the language is for
 
-These crates are the public interface the estate writes most of its boilerplate
-against. `script!` is the opinionated part of that interface: a small set of
-loaded words, each of which compiles to code that already carries the estate's
-rules. The model is WalkMe's internal vocabulary, where a few named building
-blocks (`swt` for a function, `shoutout` for a modal) carry the product, taken
-one level lower: each word here is an orchestration primitive.
+These crates are the public interface the estate writes most of its boilerplate against. `script!` is the opinionated part of that interface: a small set of loaded words, each of which compiles to code that already carries the estate's rules. The model is WalkMe's internal vocabulary, where a few named building blocks (`swt` for a function, `shoutout` for a modal) carry the product, taken one level lower: each word here is an orchestration primitive.
 
 The language serves two readers:
 
@@ -87,17 +78,9 @@ Three facts constrain the choice:
 Because of the third fact, one function from tokens to a tree can serve both
 the macro and offline tools.
 
-**Proposal.** Move the script parser and the lexicon into `lgwks_ast`, behind a
-default-off `script` feature that pulls only `proc-macro2` and never
-tree-sitter, so the macro's build cost does not grow. `lgwks_macros` becomes a
-shim: it takes the macro input, calls `lgwks_ast::script::parse` and emits. The
-`proc-macro2` edge is registered in `contract/APPROVED.toml` like any other
-edge.
+**Proposal.** Move the script parser and the lexicon into `lgwks_ast`, behind a default-off `script` feature that pulls only `proc-macro2` and never tree-sitter, so the macro's build cost does not grow. `lgwks_macros` becomes a shim: it takes the macro input, calls `lgwks_ast::script::parse` and emits. The `proc-macro2` edge is registered in `contract/APPROVED.toml` like any other edge.
 
-This supersedes "`lgwks_ast` is finished" in AGENTS.md and "never grow
-`lgwks_ast`" in INV-DEP-1. The parser crate becomes the one parser. Both lines
-change in the PR that moves the code, together with the register's
-`frozen_surfaces` entry (INV-DEP-16).
+This supersedes "`lgwks_ast` is finished" in AGENTS.md and "never grow `lgwks_ast`" in INV-DEP-1. The parser crate becomes the one parser. Both lines change in the PR that moves the code, together with the register's `frozen_surfaces` entry (INV-DEP-16).
 
 Alternatives rejected:
 
@@ -126,10 +109,7 @@ Outcomes, not axis rows:
 - **Human review.** For the same trials, count the defects a reader found from
   the lines and the trail alone.
 - **Size.** Lines per flow against the equivalent hand-written Rust.
-- **Passthrough share.** The share of passthrough lines across estate scripts.
-  It is a signal for SL-7 and never a gate, because a gated share would be
-  gamed. Each flow's map lists its passthrough lines, and
-  `scripts/passthrough-census.py` ranks their shapes; the procedure that
-  reads the census is `docs/script-word-admission.md` (#389).
+- **Passthrough share.** The share of passthrough lines across estate scripts: a signal for SL-7, never a gate, because a gated share would be gamed.
+  Each flow's map lists its passthrough lines; `scripts/passthrough-census.py` ranks their shapes and `docs/script-word-admission.md` reads the census (#389).
 
 None of these has been measured for the lexicon-only cell yet.
