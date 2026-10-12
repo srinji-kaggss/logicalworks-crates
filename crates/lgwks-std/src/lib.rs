@@ -37,8 +37,9 @@
 //!   `process::kill_process_group` (signal a whole group) and
 //!   `process::child_has_exited_without_reaping` (observe an exit *without*
 //!   releasing the pid, which is what stops the OS reissuing a group id under a
-//!   supervisor that still owes signals to it). Adds `rustix/process`
-//!   (Unix-only).
+//!   supervisor that still owes signals to it). Unix adds `rustix/process`;
+//!   Windows reaches `kernel32` directly (`process::ProcessJob` is its job
+//!   object) and adds no dependency.
 //! - `full` — all of the above.
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
@@ -77,7 +78,7 @@ pub mod online;
 /// Compiled regex matching with a linear-time guarantee (feature `pattern`).
 #[cfg(feature = "pattern")]
 pub mod pattern;
-/// Supervised subprocess termination (feature `process`, Unix-only).
+/// Supervised subprocess termination (feature `process`, Unix and Windows).
 #[cfg(feature = "process")]
 pub mod process;
 /// OS entropy (feature `random`).
