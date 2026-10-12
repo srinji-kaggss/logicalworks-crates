@@ -8,5 +8,15 @@
 #
 # The wrapper composes with RUSTC_WRAPPER (sccache) in the order
 # `$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`.
+#
+# sccache holds every rustc invocation's output, so a crate compiled at a
+# revision already compiled returns its artifact instead of running rustc again.
 [build]
 rustc-workspace-wrapper = "clippy-driver"
+rustc-wrapper = "sccache"
+
+# The LLVM linker, not Apple's ld: the link step is a large share of a
+# from-scratch build and ld64.lld is several times faster.
+[target.aarch64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld"]
