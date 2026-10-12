@@ -11,13 +11,13 @@ impl Supervisor {
     ) {
         // The engine's id is the only identity a `JoinError` carries, which is
         // why the map exists at all; the success path has it in the value too,
-        // and the two agree. Read through `as_ref` so the match below can
-        // consume `joined` by value, and through `map_or_else` rather than a
-        // pattern on a reference, which this crate's
-        // `clippy::pattern_type_mismatch` refuses.
-        let raw = joined
-            .as_ref()
-            .map_or_else(|error| error.id(), |pair| pair.0);
+        // and the two agree. Bound by `ref` so the match below can still
+        // consume `joined` by value; a pattern on a reference is what this
+        // crate's `clippy::pattern_type_mismatch` refuses.
+        let raw = match joined {
+            Ok((ref id, _)) => *id,
+            Err(ref error) => error.id(),
+        };
         let outcome = match joined {
             Ok((_, TaskEnd::Completed)) => {
                 self.succeeded = self.succeeded.saturating_add(1);

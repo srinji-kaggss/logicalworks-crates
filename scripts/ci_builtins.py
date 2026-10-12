@@ -108,7 +108,11 @@ def builtin_contract_drift(root: Path, env: dict[str, str], out=None) -> tuple[i
     manifest_path = root / "crates/lgwks-std/Cargo.toml"
     readme_path = root / "crates/lgwks-std/README.md"
     parsed = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    # A platform-bound edge (`[target.'cfg(unix)'.dependencies]`) is still an
+    # authored dependency the README must name (#263 moved rustix there).
     manifest_deps = set(parsed["dependencies"].keys())
+    for table in parsed.get("target", {}).values():
+        manifest_deps.update(table.get("dependencies", {}).keys())
 
     text = readme_path.read_text(encoding="utf-8")
     marker = "## Dependency philosophy"
