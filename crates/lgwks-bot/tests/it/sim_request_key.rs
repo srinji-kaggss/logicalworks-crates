@@ -680,7 +680,6 @@ fn expired_deadlines_are_recorded(band: Band) -> TestResult {
     Ok(())
 }
 
-
 /// The same seed produces the same trace hash, twice, over the stop family.
 ///
 /// The stop family is the one whose whole claim is a *replay receipt*: a key
