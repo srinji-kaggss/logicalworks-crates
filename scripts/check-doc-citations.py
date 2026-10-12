@@ -237,6 +237,31 @@ def collect(
     return entries, sites, skipped, failures
 
 
+# The closure matrix's Part 1 promises one row per `lgwks_std` module and names
+# this script as the check. Until 2026-10-11 nothing checked it, and `sign`
+# (#316) landed with no row for four days (#416).
+STD_LIB = "crates/lgwks-std/src/lib.rs"
+STD_MATRIX = "docs/std-ast-deps-closure-matrix-std.md"
+PUB_MOD = re.compile(r"^pub mod (?P<name>\w+);", re.MULTILINE)
+MATRIX_ROW = re.compile(r"^\|\s*\d+\s*\|\s*`(?P<name>\w+)`", re.MULTILINE)
+
+
+def inventory_failures(repo: Path) -> list[str]:
+    """Where `lib.rs`'s public modules and the matrix's module rows disagree.
+
+    Both directions: a module with no row is unaccounted for, and a row with no
+    module describes code that is not there.
+    """
+    lib, matrix = repo / STD_LIB, repo / STD_MATRIX
+    if not lib.is_file() or not matrix.is_file():
+        return [f"{STD_MATRIX}: cannot compare against {STD_LIB}, one of them is missing"]
+    modules = set(PUB_MOD.findall(lib.read_text(encoding="utf-8")))
+    rows = set(MATRIX_ROW.findall(matrix.read_text(encoding="utf-8")))
+    failures = [f"{STD_MATRIX}: no row for `pub mod {name}` in {STD_LIB}" for name in sorted(modules - rows)]
+    failures += [f"{STD_MATRIX}: row `{name}` names no `pub mod` in {STD_LIB}" for name in sorted(rows - modules)]
+    return failures
+
+
 def report(failures: list[str], limit: int) -> None:
     shown = failures[:limit]
     for failure in shown:
@@ -269,6 +294,7 @@ def main() -> int:
     lock = repo / LOCK_NAME
 
     entries, sites, skipped, failures = collect(repo)
+    failures += inventory_failures(repo)
 
     if failures:
         print(f"{len(failures)} unresolvable citation(s):", file=sys.stderr)

@@ -91,6 +91,29 @@ def repository_url() -> str:
     return url.rstrip("/")
 
 
+MARKDOWN_LINK = re.compile(r"\]\((?P<target>[^)#\s]+)(?:#[^)]*)?\)")
+
+
+def linked_from(documents: set[str]) -> set[str]:
+    """Every repository document a link in one of `documents` resolves to.
+
+    Relative links resolve against the linking page's directory, the way a
+    reader's browser resolves them; a link that leaves the repository or
+    names no file is not counted.
+    """
+    found: set[str] = set()
+    for document in documents:
+        page = ROOT / document
+        for match in MARKDOWN_LINK.finditer(page.read_text(encoding="utf-8")):
+            target = match.group("target")
+            if "://" in target:
+                continue
+            resolved = (page.parent / target).resolve()
+            if resolved.is_file() and resolved.is_relative_to(ROOT):
+                found.add(resolved.relative_to(ROOT).as_posix())
+    return found
+
+
 def main() -> int:
     readme = README.read_text(encoding="utf-8")
     repo = repository_url()
@@ -146,11 +169,18 @@ def main() -> int:
     # A document deliberately kept out of the consumer index is named here with
     # its reason, so the way to exempt one is to write down why rather than to
     # move it somewhere the check does not reach.
+    # A guide split under the 120-line .md law keeps one entry page in the
+    # README table and links its parts from it. A part is reachable in one hop
+    # from the index, so it is accepted only when an indexed document really
+    # links to it: the link must exist and resolve, which a name list could not
+    # check. README.md (346 lines) joins them to its table when it is itself
+    # split under the same law (#416-#419).
     NOT_INDEXED: dict[str, str] = {}
     indexed = {target for _, target, _ in documents}
+    linked = linked_from(indexed)
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()
-        if relative in indexed or relative in NOT_INDEXED:
+        if relative in indexed or relative in NOT_INDEXED or relative in linked:
             continue
         problems.append(f"{relative} exists but the README Documentation table omits it")
 
