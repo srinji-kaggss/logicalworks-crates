@@ -102,28 +102,33 @@ fn running(token: &str) -> std::io::Result<usize> {
         .count())
 }
 
+/// What `script` prints, for a measurement line; a shell that cannot run is
+/// reported in the line itself, since the reading is diagnostic.
+fn shell_reading(script: &str) -> String {
+    match std::process::Command::new("sh")
+        .args(["-c", script])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Err(error) => format!("unreadable ({error})"),
+    }
+}
+
 /// The per-user process cap, as the shell reports it.
 fn process_cap() -> String {
-    std::process::Command::new("sh")
-        .args(["-c", "ulimit -u"])
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_else(|error| format!("unreadable ({error})"))
+    shell_reading("ulimit -u")
 }
 
 /// This process's resident set in KiB, sampled from the process table.
 fn resident_kib() -> String {
     // The shell's parent is this test process.
-    std::process::Command::new("sh")
-        .args(["-c", "ps -o rss= -p $PPID"])
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_else(|error| format!("unreadable ({error})"))
+    shell_reading("ps -o rss= -p $PPID")
 }
 
 /// Write one measured line where `--no-capture` shows it.
 fn report(line: &str) {
-    if let Err(error) = writeln!(std::io::stderr(), "process_fire: {line}") {
+    let mut sink = std::io::stderr().lock();
+    if let Err(error) = writeln!(sink, "process_fire: {line}") {
         lgwks_std::trace::debug!(%error, "process_fire: the measurement line was not written");
     }
 }
@@ -161,7 +166,7 @@ async fn table_is_empty(token: &str) -> Result<Duration, Box<dyn std::error::Err
             return Ok(started.elapsed());
         }
         if started.elapsed() >= BUDGET {
-            return Err(
+            break Err(
                 format!("{left} of {LEAVES} leaves still run {BUDGET:?} after the stop").into(),
             );
         }
@@ -178,7 +183,7 @@ async fn outcome(supervisor: &mut Supervisor) -> Result<TaskOutcome, Box<dyn std
             return Ok(outcome);
         }
         if started.elapsed() >= REPORT {
-            return Err("the supervisor never reported the stopped tree".into());
+            break Err("the supervisor never reported the stopped tree".into());
         }
         sleep(Duration::from_millis(5)).await;
     }
@@ -191,12 +196,12 @@ fn assert_cancelled_clean(outcome: &TaskOutcome, latency: Duration) -> TestResul
         matches!(*outcome, TaskOutcome::Cancelled { .. }),
         "a stopped tree is reported cancelled, got {outcome:?}"
     );
-    let Some(cleanup) = outcome.cleanup() else {
-        return Err("a cancelled process carries a cleanup receipt".into());
-    };
-    let Some(containment) = outcome.containment() else {
-        return Err("a cancelled process carries a containment report".into());
-    };
+    let cleanup = outcome
+        .cleanup()
+        .ok_or("a cancelled process carries a cleanup receipt")?;
+    let containment = outcome
+        .containment()
+        .ok_or("a cancelled process carries a containment report")?;
     assert!(
         cleanup.survivors().is_empty() && containment.survivors().is_empty(),
         "the receipt names survivors of a tree it stopped: {cleanup:?} {containment:?}"
@@ -211,16 +216,22 @@ fn assert_cancelled_clean(outcome: &TaskOutcome, latency: Duration) -> TestResul
     Ok(())
 }
 
+/// A supervisor holding one running thousand-leaf tree named by `token`.
+async fn supervising_a_tree(token: &str) -> Result<Supervisor, Box<dyn std::error::Error>> {
+    let mut supervisor = Supervisor::default();
+    supervisor
+        .spawn_process(&shell(&tree_script(token)))
+        .await?;
+    tree_is_up(token).await?;
+    Ok(supervisor)
+}
+
 #[test]
 fn a_cancelled_thousand_process_tree_leaves_no_survivor() -> TestResult {
     let token = token(1);
     let runtime = Runtime::new()?;
     runtime.block_on(async {
-        let mut supervisor = Supervisor::default();
-        supervisor
-            .spawn_process(&shell(&tree_script(&token)))
-            .await?;
-        tree_is_up(&token).await?;
+        let mut supervisor = supervising_a_tree(&token).await?;
         let started = Instant::now();
         supervisor.cancel();
         let outcome = outcome(&mut supervisor).await?;
@@ -237,11 +248,7 @@ fn a_shut_down_thousand_process_tree_leaves_no_survivor() -> TestResult {
     let token = token(2);
     let runtime = Runtime::new()?;
     runtime.block_on(async {
-        let mut supervisor = Supervisor::default();
-        supervisor
-            .spawn_process(&shell(&tree_script(&token)))
-            .await?;
-        tree_is_up(&token).await?;
+        let supervisor = supervising_a_tree(&token).await?;
         let started = Instant::now();
         let drained = supervisor.shutdown().await;
         let latency = started.elapsed();
@@ -269,11 +276,7 @@ fn a_dropped_supervisor_stops_a_thousand_process_tree() -> TestResult {
     let token = token(3);
     let runtime = Runtime::new()?;
     runtime.block_on(async {
-        let mut supervisor = Supervisor::default();
-        supervisor
-            .spawn_process(&shell(&tree_script(&token)))
-            .await?;
-        tree_is_up(&token).await?;
+        let supervisor = supervising_a_tree(&token).await?;
         let started = Instant::now();
         drop(supervisor);
         let emptied = table_is_empty(&token).await?;
