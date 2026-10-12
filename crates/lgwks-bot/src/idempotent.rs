@@ -290,6 +290,10 @@ impl verb::Execute for IdempotentPost {
 }
 
 #[cfg(test)]
+#[path = "sim_idempotent.rs"]
+mod sim_idempotent;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
