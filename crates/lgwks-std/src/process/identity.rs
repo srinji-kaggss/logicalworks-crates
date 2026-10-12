@@ -12,13 +12,12 @@
 
 use std::io;
 
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 use super::unsupported;
+#[cfg(all(any(unix, windows), feature = "process"))]
+use super::{DescendantSet, capture_descendants, kill_process, kill_process_group};
 #[cfg(all(unix, feature = "process"))]
-use super::{
-    DescendantSet, capture_descendants, invalid_pid, kill_process, kill_process_group,
-    process_exists,
-};
+use super::{invalid_pid, process_exists};
 
 /// The longest start token a [`ProcessIdentity`] carries, in bytes.
 ///
@@ -39,6 +38,10 @@ const PS_SCHEME: &str = "ps:";
 /// (macOS `kinfo_proc.p_starttime`, #345).
 const KINFO_SCHEME: &str = "kinfo:";
 
+/// The prefix of a start instant read from `GetProcessTimes` (Windows): the
+/// creation `FILETIME` in 100 ns intervals since 1601.
+const WIN_SCHEME: &str = "win:";
+
 /// The separator between a pid and its start token in the rendered form.
 const IDENTITY_SEPARATOR: char = '/';
 
@@ -48,7 +51,7 @@ const IDENTITY_SEPARATOR: char = '/';
 /// reading travels with it and a successor re-reads the start the same way the
 /// record was made, rather than comparing a `/proc` tick count with a `ps` date
 /// and calling the difference a reuse.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum StartScheme {
     /// Linux: the boot id and the start tick from `/proc/<pid>/stat`.
@@ -57,6 +60,8 @@ enum StartScheme {
     Ps,
     /// macOS: the kernel's start instant from `sysctl(KERN_PROC_PID)`.
     Kinfo,
+    /// Windows: the creation instant from `GetProcessTimes`.
+    Win,
 }
 
 /// A process, named by its pid and the instant the OS records it started.
@@ -124,9 +129,11 @@ impl ProcessIdentity {
 
     /// The reading that produced the start token, decided by its prefix, which
     /// every constructor has already validated.
-    #[cfg(all(unix, feature = "process"))]
+    #[cfg(all(any(unix, windows), feature = "process"))]
     fn scheme(&self) -> StartScheme {
-        if self.started.starts_with(PROC_SCHEME) {
+        if self.started.starts_with(WIN_SCHEME) {
+            StartScheme::Win
+        } else if self.started.starts_with(PROC_SCHEME) {
             StartScheme::Proc
         } else if self.started.starts_with(KINFO_SCHEME) {
             StartScheme::Kinfo
@@ -244,6 +251,7 @@ fn validate_start(started: &str) -> Result<(), ProcessIdentityError> {
     if started.starts_with(PROC_SCHEME)
         || started.starts_with(PS_SCHEME)
         || started.starts_with(KINFO_SCHEME)
+        || started.starts_with(WIN_SCHEME)
     {
         Ok(())
     } else {
@@ -296,11 +304,25 @@ pub fn identify_process(pid: i32) -> io::Result<Option<ProcessIdentity>> {
     Ok(started.map(|started| ProcessIdentity { pid, started }))
 }
 
+/// The identity of the process `pid` names now: `win:<creation>`, the
+/// `GetProcessTimes` creation instant, exact to 100 ns. `None` when no process
+/// holds the id. A process this process may not open is an error, never `None`.
+#[cfg(all(windows, feature = "process"))]
+pub fn identify_process(pid: i32) -> io::Result<Option<ProcessIdentity>> {
+    let id = super::windows::pid_u32(pid)?;
+    Ok(
+        super::windows::creation(&super::windows::NATIVE, id)?.map(|created| ProcessIdentity {
+            pid,
+            started: format!("{WIN_SCHEME}{created}"),
+        }),
+    )
+}
+
 /// The identity of the process `pid` names now.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`].
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn identify_process(pid: i32) -> io::Result<Option<ProcessIdentity>> {
     let _ = pid;
     Err(unsupported("process identify_process is Unix-only"))
@@ -386,6 +408,9 @@ pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
                 "macOS",
             ));
         }
+        StartScheme::Win => {
+            return Err(unreadable_scheme("a Windows process identity", "Windows"));
+        }
     };
     let Some(started) = holder else {
         return Ok(OrphanReap::LeaderGone);
@@ -398,32 +423,63 @@ pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
             },
         });
     }
-    let descendants = match capture_descendants(leader.pid) {
+    stop_matching_leader(leader.pid)
+}
+
+/// Stop the leader `pid` and its tree: capture the descendants first, then
+/// the group, the leader by pid, and every descendant by pid.
+#[cfg(all(any(unix, windows), feature = "process"))]
+fn stop_matching_leader(pid: i32) -> io::Result<OrphanReap> {
+    let descendants = match capture_descendants(pid) {
         Ok(captured) => captured,
         Err(error) => {
             // The group signal below still reaches every member that stayed in
             // the group; the empty capture says no table was read.
             #[cfg(feature = "trace")]
-            crate::trace::debug!(pid = leader.pid, error = %error, "reap_orphaned_group: the descendants could not be captured");
+            crate::trace::debug!(pid, error = %error, "reap_orphaned_group: the descendants could not be captured");
             #[cfg(not(feature = "trace"))]
             let _unreported = error;
             DescendantSet::default()
         }
     };
-    stopped_unless_refused(kill_process_group(leader.pid))?;
-    stopped_unless_refused(kill_process(leader.pid))?;
+    stopped_unless_refused(kill_process_group(pid))?;
+    stopped_unless_refused(kill_process(pid))?;
     for pid in descendants.pids() {
         stopped_unless_refused(kill_process(*pid))?;
     }
     Ok(OrphanReap::Signalled { descendants })
 }
 
+/// Stop the tree `leader` led, if `leader` is still the process holding its
+/// id: the same comparison as on Unix, against the `win:` creation instant, so
+/// an id Windows reissued to a stranger reads as reused and nothing is sent.
+#[cfg(all(windows, feature = "process"))]
+pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
+    if leader.scheme() != StartScheme::Win {
+        return Err(unreadable_scheme("a non-Windows process identity", "Unix"));
+    }
+    let id = super::windows::pid_u32(leader.pid)?;
+    let Some(created) = super::windows::creation(&super::windows::NATIVE, id)? else {
+        return Ok(OrphanReap::LeaderGone);
+    };
+    let started = format!("{WIN_SCHEME}{created}");
+    if started != leader.started {
+        return Ok(OrphanReap::LeaderReused {
+            holder: ProcessIdentity {
+                pid: leader.pid,
+                started,
+            },
+        });
+    }
+    stop_matching_leader(leader.pid)
+}
+
 /// Stop the process group `leader` led, if `leader` is still the process holding
 /// its pid.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`].
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
     let _ = leader;
     Err(unsupported("process reap_orphaned_group is Unix-only"))
@@ -432,7 +488,7 @@ pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 /// The refusal for a record whose reading only `platform` can make. Every
 /// host reaches it for one scheme or the other: no target is both Linux and
 /// macOS.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn unreadable_scheme(what: &str, platform: &str) -> io::Error {
     let refusal = io::Error::new(
         io::ErrorKind::Unsupported,
@@ -445,12 +501,14 @@ fn unreadable_scheme(what: &str, platform: &str) -> io::Error {
 
 /// A signal answered "no such process" reached a target that had already
 /// stopped, which is what the signal was for; every other refusal stands.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn stopped_unless_refused(signalled: io::Result<()>) -> io::Result<()> {
+    #[cfg(unix)]
+    let absent = rustix::io::Errno::SRCH.raw_os_error();
+    #[cfg(windows)]
+    let absent = super::windows::ERROR_INVALID_PARAMETER;
     match signalled {
-        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
-            Ok(())
-        }
+        Err(error) if error.raw_os_error() == Some(absent) => Ok(()),
         other => other,
     }
 }

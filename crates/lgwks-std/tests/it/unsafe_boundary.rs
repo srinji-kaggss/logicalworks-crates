@@ -1,12 +1,14 @@
-//! The boundary around the one `unsafe` module (#345, Director 2026-10-12).
+//! The boundary around the two `unsafe` modules (#345, #263, Director
+//! 2026-10-12).
 //!
 //! `lgwks_std` carries its own copy of the workspace lint table because Cargo
 //! cannot lower one inherited lint, and the copy differs in exactly one entry:
 //! `unsafe_code = "allow"`, for the macOS `sysctl` syscall in
-//! `src/process/darwin.rs`. The compiler no longer refuses `unsafe` anywhere in
-//! this crate, so these two tests are what keep the exception to that file:
-//! the table cannot drift from the workspace's, and no other source file may
-//! write `unsafe`.
+//! `src/process/darwin.rs` and the Windows `kernel32` calls in
+//! `src/process/windows.rs`. The compiler no longer refuses `unsafe` anywhere
+//! in this crate, so these two tests are what keep the exception to those two
+//! files: the table cannot drift from the workspace's, and no other source file
+//! may write `unsafe`. Linux reaches its kernel through `rustix` and holds none.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -78,7 +80,7 @@ fn lint_table_matches_the_workspace_but_for_unsafe() -> Result<(), Box<dyn std::
     assert_eq!(
         actual.remove("rust.unsafe_code").as_deref(),
         Some("allow"),
-        "lgwks_std admits the darwin syscall module"
+        "lgwks_std admits the darwin and windows syscall modules"
     );
     assert_eq!(
         actual, expected,
@@ -115,15 +117,18 @@ const UNSAFE_OPENERS: [&str; 5] = [
 /// write `unsafe` into a downstream package they build separately).
 const FORBIDS_UNSAFE: &str = "#![forbid(unsafe_code)]";
 
-/// No source or test file of this crate writes `unsafe` except the darwin
-/// syscall module and its own tests, and a file that forbids `unsafe` code
-/// itself is held to that by the compiler.
+/// No source or test file of this crate writes `unsafe` except the darwin and
+/// windows syscall modules and their own tests, and a file that forbids
+/// `unsafe` code itself is held to that by the compiler.
 #[test]
-fn only_the_darwin_syscall_module_uses_unsafe() -> Result<(), Box<dyn std::error::Error>> {
+fn only_the_darwin_and_windows_syscall_modules_use_unsafe() -> Result<(), Box<dyn std::error::Error>>
+{
     let crate_dir = workspace()?.join("crates/lgwks-std");
     let admitted = [
         crate_dir.join("src/process/darwin.rs"),
         crate_dir.join("src/process/darwin/tests.rs"),
+        crate_dir.join("src/process/windows.rs"),
+        crate_dir.join("src/process/windows/tests.rs"),
     ];
     let mut files = Vec::new();
     rust_files(&crate_dir.join("src"), &mut files)?;
@@ -148,12 +153,17 @@ fn only_the_darwin_syscall_module_uses_unsafe() -> Result<(), Box<dyn std::error
     }
     assert!(
         offenders.is_empty(),
-        "unsafe outside src/process/darwin.rs: {offenders:?}"
+        "unsafe outside src/process/darwin.rs and src/process/windows.rs: {offenders:?}"
     );
     let darwin = std::fs::read_to_string(&admitted[0])?;
     assert!(
         darwin.contains("unsafe extern \"C\""),
-        "the admitted module is the one that declares the syscall"
+        "the admitted macOS module is the one that declares the syscall"
+    );
+    let windows = std::fs::read_to_string(&admitted[2])?;
+    assert!(
+        windows.contains("unsafe extern \"system\""),
+        "the admitted Windows module is the one that declares kernel32"
     );
     Ok(())
 }

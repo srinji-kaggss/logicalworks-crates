@@ -16,12 +16,12 @@
 //! needs that case closed needs a kernel-level owner (a cgroup, or a Windows job
 //! object), neither of which this crate has.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
 
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 use super::unsupported;
 #[cfg(all(unix, feature = "process"))]
 use super::{errno_to_io, invalid_pid, pid_from_raw};
@@ -40,7 +40,7 @@ pub const MAX_CAPTURED_DESCENDANTS: usize = 4096;
 ///
 /// A descendant tree deeper than this is a program that forks without bound,
 /// which the capture reports as truncated rather than following for ever.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_CAPTURED_DEPTH: usize = 64;
 
 /// How many thread directories of one process the Linux walk reads.
@@ -103,6 +103,12 @@ pub enum ContainmentMechanism {
     /// The completeness claim rests on that intersection
     /// (`adopted_descendants`), not on the group alone.
     SubreaperAdoption,
+    /// Windows: the tree's job object, stopped by `TerminateJobObject`.
+    ///
+    /// The kernel owns the membership (`ProcessJob::members`), so a descendant
+    /// that outlived its parent is still in the job and dies with it, and no
+    /// snapshot race applies to the members it holds.
+    JobObject,
 }
 
 impl ContainmentMechanism {
@@ -118,6 +124,7 @@ impl ContainmentMechanism {
     pub const fn strongest(self, other: Self) -> Self {
         match (self, other) {
             (Self::CgroupKill, _) | (_, Self::CgroupKill) => Self::CgroupKill,
+            (Self::JobObject, _) | (_, Self::JobObject) => Self::JobObject,
             (Self::SubreaperAdoption, _) | (_, Self::SubreaperAdoption) => Self::SubreaperAdoption,
             (Self::ProcChildrenTree, _) | (_, Self::ProcChildrenTree) => Self::ProcChildrenTree,
             (Self::ProcessTableSnapshot, _) | (_, Self::ProcessTableSnapshot) => {
@@ -273,10 +280,23 @@ pub fn capture_descendants(root: i32) -> io::Result<DescendantSet> {
 
 /// Every process descended from `root` at the moment of the call.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// Windows: one Toolhelp snapshot, with each pair whose child predates its
+/// parent dropped as a reused id (see `windows::snapshot`). Windows keeps a
+/// process's recorded parent after the parent exits, so unlike Unix an orphan
+/// is still named by its dead parent's id; the stranger filter is what stops a
+/// reissued id adopting it.
+#[cfg(all(windows, feature = "process"))]
+pub fn capture_descendants(root: i32) -> io::Result<DescendantSet> {
+    super::windows::pid_u32(root)?;
+    capture_table_snapshot(root)
+}
+
+/// Every process descended from `root` at the moment of the call.
+///
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`] rather than a fabricated empty tree,
 /// because an empty set and a tree nobody looked for are different facts.
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn capture_descendants(root: i32) -> io::Result<DescendantSet> {
     let _ = root;
     Err(unsupported("process capture_descendants is Unix-only"))
@@ -304,11 +324,20 @@ pub fn kill_process(pid: i32) -> io::Result<()> {
     rustix::process::kill_process(target, rustix::process::Signal::KILL).map_err(errno_to_io)
 }
 
+/// Terminate the single process `pid`.
+///
+/// An id no process holds is `ERROR_INVALID_PARAMETER`, the Windows `ESRCH`; a
+/// process that already exited counts as stopped.
+#[cfg(all(windows, feature = "process"))]
+pub fn kill_process(pid: i32) -> io::Result<()> {
+    super::windows::terminate(&super::windows::NATIVE, super::windows::pid_u32(pid)?)
+}
+
 /// Send SIGKILL to the single process `pid`.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`].
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn kill_process(pid: i32) -> io::Result<()> {
     let _ = pid;
     Err(unsupported("process kill_process is Unix-only"))
@@ -346,11 +375,18 @@ pub fn process_exists(pid: i32) -> io::Result<bool> {
     }
 }
 
+/// Whether `pid` currently names a process: one that runs, one that exited
+/// while something holds its object, or one this process may not open.
+#[cfg(all(windows, feature = "process"))]
+pub fn process_exists(pid: i32) -> io::Result<bool> {
+    super::windows::exists(&super::windows::NATIVE, super::windows::pid_u32(pid)?)
+}
+
 /// Whether `pid` currently names a process.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`].
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn process_exists(pid: i32) -> io::Result<bool> {
     let _ = pid;
     Err(unsupported("process process_exists is Unix-only"))
@@ -446,11 +482,27 @@ pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
     Ok(running)
 }
 
+/// Every pid in `pids` that is still running: its exit code is `STILL_ACTIVE`.
+///
+/// An exited process whose object is still held is not running, like a zombie.
+/// A process this process may not open is reported running, the answer that
+/// claims less.
+#[cfg(all(windows, feature = "process"))]
+pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
+    let mut running = BTreeSet::new();
+    for pid in pids {
+        if super::windows::running(&super::windows::NATIVE, super::windows::pid_u32(*pid)?)? {
+            running.insert(*pid);
+        }
+    }
+    Ok(running)
+}
+
 /// Every pid in `pids` that is still running, read in one pass of the table.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`].
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn running_processes(pids: &[i32]) -> io::Result<BTreeSet<i32>> {
     let _ = pids;
     Err(unsupported("process running_processes is Unix-only"))
@@ -729,7 +781,7 @@ pub(super) fn read_proc_children(pid: i32) -> std::io::Result<Vec<i32>> {
 /// a host with many processes from making a capture grow, and both report
 /// themselves through [`DescendantSet::is_truncated`] rather than by returning
 /// short.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn walk_descendants(
     root: i32,
     mechanism: ContainmentMechanism,
@@ -774,7 +826,7 @@ fn walk_descendants(
 }
 
 /// Sort and deduplicate a captured id list.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn finish(mut set: DescendantSet) -> DescendantSet {
     set.pids.sort_unstable();
     set.pids.dedup();
@@ -851,6 +903,16 @@ fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
     Ok(pairs)
 }
 
+/// Every `(pid, ppid)` pair of the host's process table, from one Toolhelp
+/// snapshot (Windows), the stranger filter already applied.
+#[cfg(all(windows, feature = "process"))]
+fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
+    Ok(super::windows::snapshot(&super::windows::NATIVE)?
+        .into_iter()
+        .filter_map(|(pid, parent)| Some((i32::try_from(pid).ok()?, i32::try_from(parent).ok()?)))
+        .collect())
+}
+
 /// Capture the tree from one `pid`/`ppid` snapshot of the whole process table.
 ///
 /// The portable reading, and the one every Unix without a per-process child list
@@ -860,7 +922,7 @@ fn parent_pairs() -> io::Result<Vec<(i32, i32)>> {
 /// process that forks while the snapshot is taken is a row the snapshot cannot
 /// contain. The walk is therefore tried first wherever one exists, and this is
 /// the fallback and the default everywhere else.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn capture_table_snapshot(root: i32) -> io::Result<DescendantSet> {
     let mut children_of: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
     for (pid, parent) in parent_pairs()? {

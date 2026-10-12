@@ -90,6 +90,9 @@ getrandom = { version = "0.4", optional = true }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 iri-string = { version = "0.7", optional = true }
+
+# Unix only: Windows reaches its kernel through `kernel32` in `process/windows.rs`.
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "fs"], optional = true }
 
 [dev-dependencies]
@@ -99,12 +102,12 @@ tempfile = "3.20"
 # The workspace lint table, copied because Cargo cannot override one inherited
 # lint (`workspace = true` admits no per-member entry). ONE line differs:
 # `unsafe_code = "allow"`, for the direct syscalls behind FFI isolation the
-# Director admitted on 2026-10-12 (#345, `src/process/darwin.rs`). A source
+# Director admitted on 2026-10-12 (#345, #263, `src/process/darwin.rs` and `src/process/windows.rs`). A source
 # `#[allow(unsafe_code)]` is a suppression rust-guard refuses, and under the
 # workspace's `forbid` it would be E0453, so the exception lives here instead.
 # Two tests hold it closed: `lint_table_matches_the_workspace_but_for_unsafe`
 # (every other entry equals the workspace's) and
-# `only_the_darwin_syscall_module_uses_unsafe` (no other file in this crate
+# `only_the_darwin_and_windows_syscall_modules_use_unsafe` (no other file in this crate
 # writes `unsafe`).
 [lints.rust]
 missing_docs = "deny"
