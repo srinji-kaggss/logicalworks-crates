@@ -243,6 +243,19 @@ pub enum Refusal {
         /// Number of dependency-edge refusals the posture stood down.
         refusals: usize,
     },
+    /// The root manifest or the cargo config overrides where dependency bytes
+    /// come from: a `[patch]` or `[replace]` table, or a source replacement
+    /// other than crates.io read from `vendored-sources` (#266).
+    ///
+    /// `cargo metadata` still names the approved package under an override,
+    /// so the edge audit alone would pass a build that compiles other bytes.
+    DependencyOverride {
+        /// The file declaring it, relative to the repository root.
+        file: String,
+        /// The table or key, as written: `[patch.crates-io]`, or
+        /// `source.crates-io.replace-with = "mirror"`.
+        table: String,
+    },
 }
 
 /// How a refusal prints a bit the entry authored.
@@ -422,6 +435,15 @@ impl fmt::Display for Refusal {
                  violations; adoption mode reports refusals, it does not make them \
                  pass — register the edges or re-enable enforcement"
             ),
+            Self::DependencyOverride {
+                ref file,
+                ref table,
+            } => write!(
+                formatter,
+                "{file} declares {table}, which replaces dependency bytes the register \
+                 approved; remove it (the one admitted override is \
+                 `[source.crates-io] replace-with = \"vendored-sources\"`)"
+            ),
         }
     }
 }
@@ -455,6 +477,9 @@ impl Refusal {
             | Self::VendorTierConflict { ref krate, .. }
             | Self::UnknownSurface { ref krate, .. } => krate,
             Self::AdoptionModeRefusals { .. } | Self::LicensePolicyUndeclared { .. } => "<policy>",
+            // An override is about a file's table, not one crate: a `[patch]`
+            // can carry many packages, and a source replacement carries them all.
+            Self::DependencyOverride { .. } => "<override>",
         }
     }
 
