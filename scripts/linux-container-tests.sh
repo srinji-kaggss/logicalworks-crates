@@ -22,6 +22,10 @@
 # run reuses what the last run built.
 #
 # Usage: scripts/linux-container-tests.sh [workspace|bot-full|appcui]...  (default: all three)
+#
+# bot-full runs under nextest's `ci` profile, which writes the JUnit report the
+# acceptance receipt is recorded from (#271): the workspace is mounted at /src,
+# so the report lands in this checkout's target/nextest/ci/junit.xml.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,7 +81,7 @@ commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
         workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
-        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full -E 'not test(saturation_r32_tier)'") ;;
+        bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc"
@@ -119,6 +123,12 @@ $(printf '%s\n' "${commands[@]}")"
 # directory` partway through the bot-full suite. A runner runs one job at a
 # time, so its own volume has one writer. Outside CI the owner is `local`.
 target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+# The image is part of the volume's name too: cargo's fingerprints do not
+# record the C library a build linked against, so a binary a trixie build left
+# (glibc 2.39) was reused by a bookworm run and failed to load in it (`GLIBC_2.39
+# not found`, run 38099333925). One image, one volume.
+image="rust:${toolchain}-bookworm"
+image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
 
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
@@ -135,7 +145,7 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 exec docker run --rm --init \
     --tmpfs /tmp:rw,exec,nosuid,size=3g \
     --volume "${root}:/src" \
-    --volume "lwc-ci-linux-target-${target_owner}-$(IFS=-; echo "${suites[*]}"):/target" \
+    --volume "lwc-ci-linux-target-${target_owner}-${image_tag}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
     ${config_mount[@]+"${config_mount[@]}"} \
@@ -145,5 +155,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "rust:${toolchain}-bookworm" \
+    "${image}" \
     bash -c "${script}"
