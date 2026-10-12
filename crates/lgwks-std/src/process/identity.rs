@@ -409,7 +409,10 @@ pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
             ));
         }
         StartScheme::Win => {
-            return Err(unreadable_scheme("a Windows process identity", "Windows"));
+            let refusal = Err(unreadable_scheme("a Windows process identity", "Windows"));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "reap_orphaned_group: returning an error to the caller");
+            return refusal;
         }
     };
     let Some(started) = holder else {
@@ -456,7 +459,10 @@ fn stop_matching_leader(pid: i32) -> io::Result<OrphanReap> {
 #[cfg(all(windows, feature = "process"))]
 pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
     if leader.scheme() != StartScheme::Win {
-        return Err(unreadable_scheme("a non-Windows process identity", "Unix"));
+        let refusal = Err(unreadable_scheme("a non-Windows process identity", "Unix"));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "reap_orphaned_group: returning an error to the caller");
+        return refusal;
     }
     let id = super::windows::pid_u32(leader.pid)?;
     let Some(created) = super::windows::creation(&super::windows::NATIVE, id)? else {

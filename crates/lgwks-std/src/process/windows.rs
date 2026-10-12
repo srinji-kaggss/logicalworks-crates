@@ -94,8 +94,12 @@ pub(super) struct ProcessEntry {
 impl ProcessEntry {
     /// An entry with `dwSize` set, as `Process32FirstW` requires.
     fn sized() -> io::Result<Self> {
-        let size = u32::try_from(std::mem::size_of::<Self>())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "PROCESSENTRY32W size"))?;
+        let size = u32::try_from(std::mem::size_of::<Self>()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("PROCESSENTRY32W size: {error}"),
+            )
+        })?;
         Ok(Self {
             size,
             _usage: 0,
@@ -246,6 +250,16 @@ impl Drop for Owned<'_> {
     }
 }
 
+/// `error` as the `Err` of `call`, traced on the way out so the caller's value
+/// is also a signal.
+fn refused<T>(error: io::Error, call: &'static str) -> io::Result<T> {
+    #[cfg(feature = "trace")]
+    crate::trace::debug!(error = %error, call, "windows process call: returning an error to the caller");
+    #[cfg(not(feature = "trace"))]
+    let _unreported = call;
+    Err(error)
+}
+
 /// Whether `handle` is `INVALID_HANDLE_VALUE` (all bits set).
 fn is_invalid(handle: Handle) -> bool {
     handle.addr() == usize::MAX
@@ -277,7 +291,7 @@ fn exit_code_of(owned: &Owned<'_>) -> io::Result<u32> {
     // SAFETY: `owned.handle` is open; `code` is a live `u32` the call writes.
     let read = unsafe { (owned.api.exit_code)(owned.handle, &raw mut code) };
     if read == 0 {
-        return Err((owned.api.last_error)());
+        return refused((owned.api.last_error)(), "GetExitCodeProcess");
     }
     Ok(code)
 }
@@ -317,7 +331,10 @@ pub(super) fn terminate(api: &Api, pid: u32) -> io::Result<()> {
         PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
     )?
     else {
-        return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER));
+        return refused(
+            io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER),
+            "terminate: OpenProcess",
+        );
     };
     // SAFETY: `owned.handle` is open with `PROCESS_TERMINATE`.
     let stopped = unsafe { (owned.api.terminate_process)(owned.handle, 1) };
@@ -337,7 +354,10 @@ pub(super) fn terminate(api: &Api, pid: u32) -> io::Result<()> {
 /// keeps the id from being reissued — the Windows form of "exited, not reaped".
 pub(super) fn exited(api: &Api, pid: u32) -> io::Result<bool> {
     let Some(owned) = open(api, pid, SYNCHRONIZE)? else {
-        return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER));
+        return refused(
+            io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER),
+            "exited: OpenProcess",
+        );
     };
     // SAFETY: `owned.handle` is open with `SYNCHRONIZE`; a zero timeout polls.
     let waited = unsafe { (owned.api.wait)(owned.handle, 0) };
@@ -366,7 +386,7 @@ pub(super) fn creation(api: &Api, pid: u32) -> io::Result<Option<u64>> {
         )
     };
     if read == 0 {
-        return Err((owned.api.last_error)());
+        return refused((owned.api.last_error)(), "GetProcessTimes");
     }
     let [l0, l1, l2, l3] = created.low.to_le_bytes();
     let [h0, h1, h2, h3] = created.high.to_le_bytes();
@@ -414,7 +434,7 @@ fn snapshot_rows(api: &Api) -> io::Result<Vec<(u32, u32)>> {
     // handle or `INVALID_HANDLE_VALUE`.
     let handle = unsafe { (api.snapshot)(TH32CS_SNAPPROCESS, 0) };
     if handle.is_null() || is_invalid(handle) {
-        return Err((api.last_error)());
+        return refused((api.last_error)(), "CreateToolhelp32Snapshot");
     }
     let owned = Owned { api, handle };
     let mut entry = ProcessEntry::sized()?;
@@ -424,10 +444,13 @@ fn snapshot_rows(api: &Api) -> io::Result<Vec<(u32, u32)>> {
     let mut more = unsafe { (owned.api.first)(owned.handle, &raw mut entry) };
     while more != 0 {
         if rows.len() >= MAX_SNAPSHOT_ROWS {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                format!("the process snapshot passed its {MAX_SNAPSHOT_ROWS}-row bound"),
-            ));
+            return refused(
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!("the process snapshot passed its {MAX_SNAPSHOT_ROWS}-row bound"),
+                ),
+                "Process32NextW",
+            );
         }
         rows.push((entry.pid, entry.parent));
         // SAFETY: as for the first call; `entry` is still live and sized.
@@ -565,13 +588,17 @@ impl ProcessJob {
         // default security; nothing is read through a pointer.
         let handle = unsafe { (api.create_job)(std::ptr::null_mut(), std::ptr::null()) };
         if handle.is_null() {
-            return Err((api.last_error)());
+            return refused((api.last_error)(), "CreateJobObjectW");
         }
         let job = Self { api, handle };
         let mut limit = ExtendedLimit::default();
         limit.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let size = u32::try_from(std::mem::size_of::<ExtendedLimit>())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "job limit size"))?;
+        let size = u32::try_from(std::mem::size_of::<ExtendedLimit>()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("job limit size: {error}"),
+            )
+        })?;
         // SAFETY: `job.handle` is open; `limit` is a live `#[repr(C)]` value of
         // the `size` bytes named, which the call only reads.
         let armed = unsafe {
@@ -583,7 +610,7 @@ impl ProcessJob {
             )
         };
         if armed == 0 {
-            return Err((job.api.last_error)());
+            return refused((job.api.last_error)(), "SetInformationJobObject");
         }
         Ok(job)
     }
@@ -597,13 +624,16 @@ impl ProcessJob {
     pub fn assign(&self, pid: i32) -> io::Result<()> {
         let pid = pid_u32(pid)?;
         let Some(owned) = open(&self.api, pid, PROCESS_SET_QUOTA | PROCESS_TERMINATE)? else {
-            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER));
+            return refused(
+                io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER),
+                "assign: OpenProcess",
+            );
         };
         // SAFETY: both handles are open; the job was made by this struct and
         // `owned` carries the rights `AssignProcessToJobObject` requires.
         let assigned = unsafe { (self.api.assign_job)(self.handle, owned.handle) };
         if assigned == 0 {
-            return Err((self.api.last_error)());
+            return refused((self.api.last_error)(), "AssignProcessToJobObject");
         }
         Ok(())
     }
@@ -617,7 +647,7 @@ impl ProcessJob {
         // SAFETY: `handle` is the open job; the exit code is a plain value.
         let stopped = unsafe { (self.api.terminate_job)(self.handle, 1) };
         if stopped == 0 {
-            return Err((self.api.last_error)());
+            return refused((self.api.last_error)(), "TerminateJobObject");
         }
         Ok(())
     }
@@ -637,8 +667,12 @@ impl ProcessJob {
             listed: 0,
             ids: [0; JOB_LIST_CAPACITY],
         });
-        let size = u32::try_from(std::mem::size_of::<PidList>())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "job list size"))?;
+        let size = u32::try_from(std::mem::size_of::<PidList>()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("job list size: {error}"),
+            )
+        })?;
         let mut returned: u32 = 0;
         // SAFETY: `handle` is the open job; `list` is a live `#[repr(C)]` value
         // of the `size` bytes named, and `returned` a live `u32`; the call
@@ -656,7 +690,7 @@ impl ProcessJob {
         if read == 0 {
             let error = (self.api.last_error)();
             if error.raw_os_error() != Some(ERROR_MORE_DATA) {
-                return Err(error);
+                return refused(error, "QueryInformationJobObject");
             }
             more = true;
         }

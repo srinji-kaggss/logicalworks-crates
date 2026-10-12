@@ -69,7 +69,7 @@ async fn outcome(supervisor: &mut Supervisor) -> Result<TaskOutcome, Box<dyn std
             return Ok(outcome);
         }
         if started.elapsed() >= BUDGET {
-            return Err("the supervisor never reported the stopped job".into());
+            break Err("the supervisor never reported the stopped job".into());
         }
         sleep(Duration::from_millis(5)).await;
     }

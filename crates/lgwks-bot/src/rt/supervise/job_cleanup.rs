@@ -213,9 +213,10 @@ mod tests {
         fn terminate(&self) -> io::Result<()> {
             self.terminated.fetch_add(1, Ordering::Relaxed);
             if self.refuse {
-                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(())
             }
-            Ok(())
         }
 
         fn members(&self) -> io::Result<JobReading> {

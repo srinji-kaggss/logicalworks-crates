@@ -132,11 +132,14 @@ fn start(spec: &ProcessSpec, bounds: &RunBounds) -> io::Result<JobChild> {
         Ok(pid) => pid,
         Err(error) => {
             abandon(child);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+            let refusal = Err(io::Error::new(io::ErrorKind::InvalidData, error));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "start: the child id does not fit an i32");
+            return refusal;
         }
     };
     if let Err(error) = job.assign(pid) {
         abandon(child);
+        lgwks_std::trace::debug!(error = %error, pid, "start: the child could not join its job");
         return Err(error);
     }
     adopt_early_forks(&job, pid);
