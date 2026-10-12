@@ -661,6 +661,10 @@ pub fn upstream_credential_rejection(domain: &str, status: u16, required: &[Cap]
 }
 
 #[cfg(test)]
+#[path = "sim_cap.rs"]
+mod sim_cap;
+
+#[cfg(test)]
 mod tests {
     use super::{Auth, Cap, Deficit, Demand};
     use crate::error::{BotError, DispatchCertainty};

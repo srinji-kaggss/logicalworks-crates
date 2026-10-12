@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use crate::script::scope::{NameFault, name_fault};
+use crate::sim_stream::{RECEIPT_START, Stream, fold};
 use crate::script::{FlowError, MAX_TENANT_BYTES, Tenant};
 use crate::task::name::{MAX_TASK_NAME_BYTES, TaskName};
 use crate::task::{MAX_REQUEST_KEY_BYTES, RequestKey};
@@ -52,48 +53,30 @@ const REFUSED: &[u8] = b" /\\\t\n\r\"'`$;|&<>*?[]{}()#%!@,=+~^";
 /// A family's result.
 type Outcome = Result<(), String>;
 
-/// SplitMix64: a seeded stream with no state beyond one word, so a seed is a
-/// replayable trace.
-struct Stream(u64);
-
-impl Stream {
-    /// The next word.
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^ (mixed >> 31)
-    }
-
-    /// A drawn index in `0..bound`, from the word's low sixteen bits: every
-    /// bound here is far below 65,536, so the bias is under one part in a
-    /// hundred. An empty range has no index to draw, and is refused.
-    fn below(&mut self, bound: usize) -> Result<usize, String> {
-        let [low, high, ..] = self.next().to_le_bytes();
-        usize::from(u16::from_le_bytes([low, high]))
-            .checked_rem(bound)
-            .ok_or_else(|| "an index drawn from an empty range".to_owned())
-    }
-
-    /// A drawn byte of `set`.
-    fn pick(&mut self, set: &[u8]) -> Result<u8, String> {
-        let at = self.below(set.len())?;
-        set.get(at).copied().ok_or_else(|| format!("{at} is outside a {}-byte set", set.len()))
-    }
-
+/// The names this simulation draws, over the crate's shared stream.
+trait Names {
     /// A legal name of exactly `length` bytes.
-    fn legal(&mut self, length: usize) -> Result<String, String> {
-        (0..length).map(|_| self.pick(ALPHABET).map(char::from)).collect()
-    }
+    fn legal(&mut self, length: usize) -> Result<String, String>;
 
     /// A legal name of `length` bytes with one refused byte planted in it,
-    /// and where it was planted.
+    /// where it was planted, and the byte.
+    fn planted(&mut self, length: usize) -> Result<(String, usize, u8), String>;
+}
+
+impl Names for Stream {
+    fn legal(&mut self, length: usize) -> Result<String, String> {
+        (0..length)
+            .map(|_| self.choose(ALPHABET).map(char::from))
+            .collect()
+    }
+
     fn planted(&mut self, length: usize) -> Result<(String, usize, u8), String> {
         let mut bytes = self.legal(length)?.into_bytes();
         let at = self.below(bytes.len())?;
-        let byte = self.pick(REFUSED)?;
-        let slot = bytes.get_mut(at).ok_or("the planted byte is inside the name")?;
+        let byte = self.choose(REFUSED)?;
+        let slot = bytes
+            .get_mut(at)
+            .ok_or("the planted byte is inside the name")?;
         *slot = byte;
         let name = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         Ok((name, at, byte))
@@ -139,7 +122,7 @@ fn draw(stream: &mut Stream, max: usize) -> Result<String, String> {
 /// Every drawn name under each seed, against ceiling `max`.
 fn sweep(max: usize, mut check: impl FnMut(u64, &str) -> Outcome) -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         for _ in 0..DRAWS {
             let name = draw(&mut stream, max)?;
             check(seed, &name)?;
@@ -169,7 +152,7 @@ fn sim_name_fault_matches_the_rule_as_stated() -> Outcome {
 /// held byte for byte.
 fn sim_a_legal_name_is_admitted_and_held_byte_for_byte() -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         for _ in 0..DRAWS {
             let length = stream.below(MAX_TENANT_BYTES)?.saturating_add(1);
             let name = stream.legal(length)?;
@@ -193,7 +176,7 @@ fn sim_a_legal_name_is_admitted_and_held_byte_for_byte() -> Outcome {
 /// The ceiling is admitted and one byte past it is refused, for every type.
 fn sim_the_ceiling_is_admitted_and_one_past_it_refused() -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         for _ in 0..64 {
             let at_tenant = stream.legal(MAX_TENANT_BYTES)?;
             let past_tenant = stream.legal(MAX_TENANT_BYTES.saturating_add(1))?;
@@ -229,7 +212,7 @@ fn sim_the_ceiling_is_admitted_and_one_past_it_refused() -> Outcome {
 /// count fits is `TooLong` once its bytes do not, and `BadChar` otherwise.
 fn sim_bytes_not_characters_decide_the_ceiling() -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         for _ in 0..DRAWS {
             let characters = stream.below(MAX_TENANT_BYTES)?.saturating_add(1);
             let name = "é".repeat(characters);
@@ -254,7 +237,7 @@ fn sim_bytes_not_characters_decide_the_ceiling() -> Outcome {
 /// both too long and badly spelled is reported as too long.
 fn sim_a_planted_byte_is_refused_wherever_it_lands() -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         for _ in 0..DRAWS {
             let length = stream.below(MAX_TENANT_BYTES)?.saturating_add(1);
             let (name, at, planted) = stream.planted(length)?;
@@ -331,7 +314,7 @@ fn sim_the_three_types_agree_with_one_rule() -> Outcome {
 /// order of the names themselves, whatever order they were inserted in.
 fn sim_tenants_order_by_name() -> Outcome {
     for seed in SEEDS {
-        let mut stream = Stream(seed);
+        let mut stream = Stream::new(seed);
         let mut by_tenant = BTreeMap::new();
         let mut names = Vec::new();
         for index in 0..256_usize {
@@ -351,14 +334,12 @@ fn sim_tenants_order_by_name() -> Outcome {
 
 /// The FNV-1a hash of every verdict drawn under `seed`.
 fn verdict_trace(seed: u64) -> Result<u64, String> {
-    let mut stream = Stream(seed);
-    let mut trace = 0xcbf2_9ce4_8422_2325_u64;
+    let mut stream = Stream::new(seed);
+    let mut trace = RECEIPT_START;
     for _ in 0..DRAWS {
         let name = draw(&mut stream, MAX_TENANT_BYTES)?;
         let verdict = format!("{name}={:?};", name_fault(&name, MAX_TENANT_BYTES));
-        for byte in verdict.bytes() {
-            trace = (trace ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        trace = fold(trace, verdict.as_bytes());
     }
     Ok(trace)
 }

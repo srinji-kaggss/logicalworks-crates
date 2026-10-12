@@ -368,6 +368,9 @@ pub mod session;
 /// a proof minted on one clock against a foreign reading within the bound
 /// (issue #278, row 2).
 pub mod skew;
+/// The seeded draw stream the in-module simulations share.
+#[cfg(test)]
+mod sim_stream;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
