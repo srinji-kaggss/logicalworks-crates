@@ -33,6 +33,11 @@
 //! wording of a diagnostic message is a policy that changes when someone edits
 //! the message.
 
+// The rendering of every variant lives in `error/render.rs`, beside the
+// `Escaped` adapter each untrusted field goes through, and the certainty map a
+// retry policy reads lives in `error/certainty.rs`. This file is the
+// vocabulary alone, so a new variant is reviewed here and its rendering and its
+// retry answer are each one compile error away.
 use std::time::Duration;
 
 use super::broker::DispatchError;
