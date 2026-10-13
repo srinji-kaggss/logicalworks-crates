@@ -2,7 +2,7 @@
 # checked that it supports the sentence citing it.
 #
 # One entry per cited line: `<source path>:<line>` TAB `<the line, stripped>`.
-# Generated and checked by `scripts/check-doc-citations.py`; regenerate with
+# Generated and checked by the `check-doc-citations` binary of `lgwks_deps`; regenerate with
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.

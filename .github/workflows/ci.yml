@@ -227,7 +227,7 @@ jobs:
         # that is not a judgement call — the file exists, and the line exists
         # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
         # repository; the script names that exemption rather than guessing.
-        run: python3 scripts/check-doc-citations.py
+        run: cargo run --locked -p lgwks_deps --bin check-doc-citations
       - name: Root README quickstart matches its compiled example
         run: python3 scripts/ci_local.py --lane readme-quickstart
       # The second lgwks-std per-feature shard (see the feature-matrix job). The

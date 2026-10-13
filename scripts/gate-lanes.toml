@@ -329,7 +329,7 @@ ci_step = "llms.txt matches the documentation index"
 id = "doc-citations"
 surfaces = "local ci"
 required = true
-command = "python3 scripts/check-doc-citations.py"
+command = "cargo run --locked -p lgwks_deps --bin check-doc-citations"
 ci_step = "Documentation citations resolve"
 
 [[lane]]
