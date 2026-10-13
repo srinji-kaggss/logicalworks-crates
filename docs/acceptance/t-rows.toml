@@ -340,7 +340,7 @@ id = "T21"
 requires = "LC-10"
 row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
 state = "present"
-gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal; the row is not yet receipted per backend: the Linux container leg runs these tests in CI but records no receipt, and containment is Unix-only."
+gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal, and the row is receipted on macOS and Linux (the Linux container's bot-full JUnit, recorded as linux-aarch64); containment is still Unix-only, so no Windows backend is receipted until #263."
 tests = [
   "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group_t21",
   "it::process_escape::a_session_escape_is_captured_and_stopped_by_pid",
@@ -539,7 +539,7 @@ tests = [
 
 [[row]]
 id = "T33"
-requires = "PR-07/08"
+requires = "PR-07/08/AI-08"
 row = "Provider accepts review but response is lost; reconciliation finds and verifies the exact review, or remains Unknown. No duplicate post. Test partially submitted reviews/comments."
 state = "exercised"
 gap = ""
@@ -557,7 +557,7 @@ tests = [
 
 [[row]]
 id = "T34"
-requires = "PR-09/10"
+requires = "PR-09/10/AI-08"
 row = "Real readback proves exact IDs/state/subject/payload; lost read permission reports unverified/blocking state while retaining applied-effect evidence."
 state = "exercised"
 gap = ""

@@ -85,7 +85,11 @@ id = "std-first"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py"
+# The audit is the `check-std-first` binary, ported from the Python script it
+# replaces because a repository holds Rust and C++ only. Its own tests moved
+# with it: they are unit tests of the binary, run by the workspace test lanes,
+# so no `--test` flag is needed to keep the audit tested.
+command = "cargo run --locked -p lgwks_deps --bin check-std-first"
 ci_step = "Audit std-first and lgwks_std-first"
 
 [[lane]]
@@ -184,7 +188,7 @@ required = true
 # wrote. It reads XML and records into SQLite, so the job needs no Rust
 # toolchain and no build -- it costs seconds, and it does not run the suite a
 # second time.
-command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\""
+command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && python3 scripts/acceptance-receipts.py --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
 ci_step = "Record acceptance receipts"
 
 [[lane]]
@@ -345,7 +349,7 @@ id = "requirements"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-requirements.py"
+command = "python3 scripts/check-requirements.py && python3 scripts/check-spec-owners.py --test"
 ci_step = "Requirements sentences unedited without supersession"
 
 [[lane]]
@@ -400,26 +404,14 @@ id = "feat-std"
 group = "check"
 surfaces = "local ci"
 required = true
-# Every one of the twelve non-`full` features, each alone, plus the two
-# boundary sets. `core`, `trace`, `random`, `ron` and `process` were missing from
-# this list and so were never built by anything except the rustdoc lane: a
-# feature that silently needs another feature is exactly what an isolated build
-# refuses to hide. (#276)
+# The three boundary sets: none, the default, and every feature. Each of the
+# twelve non-`full` features alone is built by its per-feature lane below with
+# `--all-targets`, which compiles every target a `cargo check --all-targets`
+# checks and then runs the tests; checking each one here as well compiled every
+# feature set twice, 52 s apiece on one compiler slot (run 38304128455). (#276)
 command = """\
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features && \
 cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features\
 """
 ci_step = "Check lgwks-std feature matrix"
@@ -439,10 +431,10 @@ group = "std-per-feature"
 surfaces = "local ci"
 required = true
 command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features core && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features trace && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features random && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features http\
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features core && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features trace && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features random && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features http\
 """
 ci_step = "Run lgwks-std per-feature tests, shard a (core trace random http)"
 needs = ["bin:cargo-nextest"]
@@ -453,12 +445,12 @@ group = "std-per-feature"
 surfaces = "local ci"
 required = true
 command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features hash && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features pattern && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features json && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features ron\
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features hash && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features pattern && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features json && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features sign\
 """
-ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron)"
+ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)"
 needs = ["bin:cargo-nextest"]
 
 [[lane]]
@@ -467,10 +459,10 @@ group = "std-per-feature"
 surfaces = "local ci"
 required = true
 command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features wire && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features online && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features process\
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features wire && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features online && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features fs-raw && \
+cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features process\
 """
 ci_step = "Run lgwks-std per-feature tests, shard c (wire online fs-raw process)"
 needs = ["bin:cargo-nextest"]

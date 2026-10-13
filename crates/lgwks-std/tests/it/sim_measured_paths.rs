@@ -176,14 +176,18 @@ fn retry_delay_latency_is_flat_across_the_attempt_range() {
     let iterations = 200_000;
     // The entropy changes every iteration so the call cannot be hoisted, and
     // is consumed below so the result is not discarded with `let _ =`.
+    //
+    // The arms alternate call by call (`measure_paired`), never one after the
+    // other: a CI lane on a saturated host (job 114400279042) measured them
+    // sequentially and read a burst that landed only on the second arm as
+    // cost — p50 125 vs 83ns, the large arm *faster*, yet p99 209 vs 1084ns.
     let mut small_total = Duration::ZERO;
-    let small = Percentiles::measure(iterations, |index| {
-        small_total += policy.delay(index % 2, u64::from(index));
-    });
     let mut large_total = Duration::ZERO;
-    let large = Percentiles::measure(iterations, |index| {
-        large_total += policy.delay(u32::MAX, u64::from(index));
-    });
+    let (small, large) = Percentiles::measure_paired(
+        iterations,
+        |index| small_total += policy.delay(index % 2, u64::from(index)),
+        |index| large_total += policy.delay(u32::MAX, u64::from(index)),
+    );
     assert!(
         small_total > Duration::ZERO && large_total > Duration::ZERO,
         "both attempt ranges must produce real delays: {small_total:?} and {large_total:?}"
