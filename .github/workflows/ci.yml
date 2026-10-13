@@ -59,6 +59,14 @@ on:
 # (run 37675264254); this spends the slots where the codegen is, and the
 # per-feature checks and second LTO links it removed are compiles no job runs.
 
+# The pull-request lane (Director, 2026-10-13: a PR check is under 5 minutes).
+# A PR runs four jobs: gate checks, clippy and scan, the workspace tests with
+# the simulation and journey evidence, and the lgwks-bot full tests. Every other
+# job carries `if: github.event_name != 'pull_request'` and runs on each push to
+# `main`, so the Linux, Windows, saturation, per-feature, docs and target
+# matrices prove the merged tree. No command or test changed; only when each
+# job runs.
+
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
 # never is: that run is the record of what shipped. Each `main` push is its own
@@ -311,6 +319,7 @@ jobs:
   # It compiles only lgwks-bot and this one test binary.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full)
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
     timeout-minutes: 20
     env:
@@ -352,6 +361,7 @@ jobs:
     # XML files, so it costs seconds rather than adding a second execution of
     # the tests the shards already ran between them.
     name: Acceptance receipts
+    if: github.event_name != 'pull_request'
     needs: [tests_bot_full, tests_linux]
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
@@ -385,6 +395,7 @@ jobs:
   # whose threads it sizes for.
   tests_nodefault:
     name: Tests (lgwks-bot no default features)
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
     timeout-minutes: 30
     env:
@@ -410,6 +421,7 @@ jobs:
   # target volume.
   tests_linux:
     name: Tests (Linux container)
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
     timeout-minutes: 20
     strategy:
@@ -510,6 +522,7 @@ jobs:
   # (run 37633462471) whose halves share nothing but the checkout.
   docs:
     name: Docs and release gates
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-12]
     timeout-minutes: 30
     steps:
@@ -546,6 +559,7 @@ jobs:
   # of the same feature sets (#276): one job per feature set, still.
   feature-matrix:
     name: lgwks-std feature matrix and per-feature tests
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 30
     steps:
@@ -585,6 +599,7 @@ jobs:
   # as one job they took 454 s (run 37633462471).
   storefront-matrix:
     name: Target and storefront matrix
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
     timeout-minutes: 30
     steps:
@@ -631,6 +646,7 @@ jobs:
   # instance measures the clippy pass.
   timing_gates:
     name: Timing gates (dudect, async fairness)
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
     timeout-minutes: 20
     steps:
@@ -657,6 +673,7 @@ jobs:
   # neither half builds what the other does.
   feature-matrix-bot-ast:
     name: Feature matrix (lgwks-bot, lgwks-ast)
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-11]
     timeout-minutes: 20
     steps:
@@ -754,6 +771,7 @@ jobs:
 
   appcui-native:
     name: AppCUI native storefront
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -785,6 +803,7 @@ jobs:
   # 194 s, and behind the AppCUI steps it made that leg the run's longest job.
   gpui-windows:
     name: GPUI Windows renderer
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
