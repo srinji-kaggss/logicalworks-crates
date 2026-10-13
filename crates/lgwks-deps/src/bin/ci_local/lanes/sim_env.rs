@@ -507,3 +507,5 @@ fn sim_only_known_variables_are_added_band_1() {
 fn sim_only_known_variables_are_added_band_2() {
     over_band(2, only_known_variables_are_added);
 }
+
+mod bands;
