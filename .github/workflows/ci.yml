@@ -231,40 +231,6 @@ jobs:
       - name: Root README quickstart matches its compiled example
         run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
 
-  # The second lgwks-std per-feature shard (see the feature-matrix job), in a job
-  # of its own. On the gate job it ran behind the file checks and the pair took
-  # 5 m 16 s against a 5-minute limit; apart, the checks take 2 m 20 s and these
-  # five isolated builds fit beside them. The workspace wrapper is restored: each
-  # run is that feature's isolated build, and the lints are part of that build.
-  tests_std_features_b:
-    name: lgwks-std per-feature tests, shard b
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: std-features-b
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
-      - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)
-        env:
-          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
-          RUSTC_WORKSPACE_WRAPPER: clippy-driver
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features hash
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features pattern
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features json
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features ron && cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features sign
 
   # The two results the checks list names on every pull request. Each reads the
   # report its lane wrote in the job above and passes only on that lane's own
@@ -400,39 +366,6 @@ jobs:
       # shards).
       - name: Run lgwks-bot saturation tiers
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
-
-  # The third lgwks-std per-feature shard, in a job of its own: beside the
-  # saturation tiers it ran past the 5-minute limit (run 38395269833). Same
-  # opt-level-0 reasoning as shard b.
-  tests_std_features_c:
-    name: lgwks-std per-feature tests, shard c
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: std-features-c
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
-      - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
-        env:
-          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
-          RUSTC_WORKSPACE_WRAPPER: clippy-driver
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features wire
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features online
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features fs-raw
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features process
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
@@ -612,8 +545,6 @@ jobs:
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
         run: >
-          cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml
-          --all-targets --all-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --all-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
@@ -622,8 +553,6 @@ jobs:
           --all-targets --features tokio-full -- -D warnings
       - name: Clippy no default features
         run: >
-          cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml
-          --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
@@ -683,51 +612,9 @@ jobs:
       # lgwks-bot/lgwks-ast matrix job below: that instance finished in under a
       # minute while this one held them for four of its nine (run 38339936125).
 
-  # Every compile-only matrix: feature sets, targets, grammars, the Metal
-  # storefronts and the standalone consumer packages. Each is `cargo check` or a
-  # nested build over the same dependency graph, so one target serves them.
-  # The lgwks-std per-feature EXECUTION lanes live here too, beside the checks
-  # of the same feature sets (#276): one job per feature set, still.
-  feature-matrix:
-    name: lgwks-std feature matrix and per-feature tests
-    # Local, not hosted: `http_alloc` bounds the client's median latency at 8x a
-    # bare exchange, and on a hosted Linux VM it read 1124 us against 67 us
-    # (run 38372549097), a ratio the local machine does not produce. That
-    # difference is a finding about the client on Linux, kept as a gate here
-    # until it is explained, not loosened to make a hosted job pass.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "4"
-          build-share: "2"
-      # The three lgwks-std boundary checks run in the lgwks-bot/lgwks-ast
-      # matrix job below, whose instance was idle after 48 s.
-      # Every lgwks-std feature alone, built for every target and executed
-      # (one nextest run per feature with nothing else on, #276), so each run
-      # is also that feature's isolated build. These suites are compile-bound
-      # and tiny: each builds lgwks-std once under one feature and runs a few
-      # hundred unit tests, so they compile at opt-level 0 — the workspace
-      # default spends ~25 s compiling what runs for seconds, and the
-      # assertions, overflows and debuginfo settings are unchanged, so the
-      # same tests prove the same things sooner. Shard b runs in the gate job
-      # and shard c beside the saturation tiers, so no instance holds more
-      # than five of them.
-      - name: Run lgwks-std per-feature tests, shard a (core trace random http)
-        env:
-          CARGO_PROFILE_TEST_OPT_LEVEL: "0"
-        run: |
-          set -eu
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features core
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features trace
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features random
-          cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features http
-
+  # The compile-only matrices that remain: targets, grammars, the Metal
+  # storefronts and the standalone consumer packages. lgwks_std has no feature
+  # subsets to test: every module is part of it (Director, 2026-10-13).
 
   # The lgwks-deps storefronts, the target matrix and the standalone consumers,
   # apart from the lgwks-std feature matrix: the two share no feature set, and
@@ -815,18 +702,6 @@ jobs:
         with:
           toolchain: "1.99.0"
           build-share: "2"
-      - name: Check lgwks-std feature matrix
-        run: |
-          set -eu
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
-      - name: Doc build for each lgwks-std feature alone
-        # The general case: a link between two optional modules where neither
-        # implies the other resolves under both boundary lanes. Each feature is
-        # documented alone, so every gated module is documented while every
-        # module it does not pull in is genuinely absent.
-        run: ./scripts/doc-lanes.sh per-feature
       - name: docs.rs metadata names a buildable feature set
         # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
         # and a failure there is invisible from the repository: the crate page
