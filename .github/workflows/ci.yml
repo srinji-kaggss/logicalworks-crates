@@ -372,8 +372,14 @@ jobs:
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
+      # The lane's own command, with the tiers this leg runs set in
+      # SATURATION_FILTER (unset, the command selects all three), as the
+      # sharded lanes set PARTITION: the gate-parity check compares this text
+      # with scripts/gate-lanes.toml.
       - name: Run lgwks-bot saturation tiers
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E '${{ matrix.filter }}'
+        env:
+          SATURATION_FILTER: ${{ matrix.filter }}
+        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
@@ -462,7 +468,7 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-      - name: The Linux image carries sqlite3
+      - name: Install sqlite3 into the Linux container image
         # The acceptance-receipt binary holds its receipts through the sqlite3
         # command-line program. A hosted Linux runner has it and `rust:bookworm`
         # does not, so two of its journey tests failed in the container with
