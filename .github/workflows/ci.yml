@@ -59,17 +59,23 @@ on:
 # (run 37675264254); this spends the slots where the codegen is, and the
 # per-feature checks and second LTO links it removed are compiles no job runs.
 
-# Supersede rather than duplicate. Two `pull_request` events in one group are
-# the same branch pushed twice, so the older run is cancelled. A run on `main`
-# never is: that run is the record of what shipped. Each `main` push is its own
-# group, keyed by commit: sharing one group made a merge's run sit pending until
-# the previous merge's run finished (measured 2026-09-30: 678 s queued before a
-# 293 s run), because a concurrency group admits one run at a time. A pull
-# request is keyed by its number, not its branch name: two fork PRs from
-# branches that share a name (`patch-1`) would otherwise cancel each other.
+# One run at a time, because the budget is a wall clock and the machine is one
+# machine. This block used to give every branch its own group, so four pull
+# requests executed at once against thirteen pinned runner instances: measured
+# 2026-10-13, eight instances were held by other runs, and one required job
+# (Build and workspace tests, pinned to lwc-3) stayed queued past an hour with no
+# runner assigned while lwc-3 ran a different run's job. The header above says
+# what the layout assumes — "every self-hosted job runs on one machine" — and a
+# share of the machine means nothing while four runs divide it. So the group is
+# the workflow, and the machine's capacity is the queue.
+#
+# Runs are still superseded rather than queued in a pile: GitHub keeps only the
+# newest pending run per group, so a branch pushed twice waits once and runs the
+# newer tree. `main` keeps its place in the queue rather than being cancelled;
+# its run is the record of what shipped, which is why cancel-in-progress is off.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.ref_name != 'main' }}
+  group: ci
+  cancel-in-progress: false
 
 # The same value as `[profile.test] debug` in Cargo.toml, which cargo already
 # reads; it is repeated here for the cache. Swatinem/rust-cache keys on every
