@@ -239,17 +239,30 @@ runs:
     # timed-out job leaves the rest, and nothing else ever removes them: on
     # 2026-10-13 lwc-3's `debug/deps` held 445,426 entries, most of them these,
     # in a 62 GiB target, and the machine was past its 256 GB cap with them.
-    # An instance runs one job at a time and this directory is the instance's
-    # own (see the first step), so when this step runs no rustc is writing
-    # here: every such object is dead, and no age or size threshold is needed
-    # to tell it from a live one. The globs are the ones the incremental
+    #
+    # The sweep runs beside the build, not before it. Run inline it was still
+    # deleting after 301 s on lwc-3 and the 5-minute job limit cancelled the
+    # job (run 38469573599), so a dirty target would have failed the job that
+    # cleaned it. What it may delete is fixed by a marker made when the step
+    # starts: an object not newer than the marker was written before this job
+    # began, so it is not this job's and no compile of this job can need it,
+    # and anything this job's compiles write is newer and is left alone. It
+    # runs at the lowest priority with every descriptor closed, so neither the
+    # build nor the runner waits on it; the runner's cleanup ends it with the
+    # job, and what it had deleted stays deleted, so a backlog too large for
+    # one job drains across several. The globs are the ones the incremental
     # sweep above uses: the host profile directories and the per-target ones.
     - name: Codegen objects left by killed compiles
       shell: bash
       run: |
         set -euo pipefail
-        for deps in "${CARGO_TARGET_DIR}"/*/deps "${CARGO_TARGET_DIR}"/*/*/deps; do
-          if [ -d "${deps}" ]; then
-            find "${deps}" -maxdepth 1 -name '*.rcgu.o' -delete
-          fi
-        done
+        marker="${RUNNER_TEMP}/codegen-sweep-marker"
+        : > "${marker}"
+        (
+          for deps in "${CARGO_TARGET_DIR}"/*/deps "${CARGO_TARGET_DIR}"/*/*/deps; do
+            if [ -d "${deps}" ]; then
+              nice -n 19 find "${deps}" -maxdepth 1 -name '*.rcgu.o' ! -newer "${marker}" -delete
+            fi
+          done
+        ) < /dev/null > /dev/null 2>&1 &
+        disown
