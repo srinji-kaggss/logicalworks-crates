@@ -160,7 +160,9 @@ fn run_quietly(program: &str, args: &[&str]) {
         .status();
     match outcome {
         Ok(status) if status.success() => {}
-        Ok(status) => lgwks_std::trace::debug!(program, ?status, "a scratch command did not succeed"),
+        Ok(status) => {
+            lgwks_std::trace::debug!(program, ?status, "a scratch command did not succeed")
+        }
         Err(error) => lgwks_std::trace::debug!(%error, program, "a scratch command could not run"),
     }
 }
@@ -173,7 +175,10 @@ fn make_ram_disk(name: &str) -> Option<(PathBuf, Detach)> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&attached.stdout).into_owned();
-    let device = text.split_whitespace().find(|word| word.starts_with("/dev/disk"))?.to_owned();
+    let device = text
+        .split_whitespace()
+        .find(|word| word.starts_with("/dev/disk"))?
+        .to_owned();
     let erased = Command::new("diskutil")
         .args(["erasevolume", "APFS", name, &device])
         .stdin(Stdio::null())
@@ -230,10 +235,17 @@ fn reclaim_stale(temp: &Path) {
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        let Some(name) = file_name.strip_suffix(".lock").filter(|stem| stem.starts_with(PREFIX)) else {
+        let Some(name) = file_name
+            .strip_suffix(".lock")
+            .filter(|stem| stem.starts_with(PREFIX))
+        else {
             continue;
         };
-        let old_enough = match entry.metadata().and_then(|meta| meta.modified()).map(|stamp| stamp.elapsed()) {
+        let old_enough = match entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|stamp| stamp.elapsed())
+        {
             Ok(Ok(age)) => age >= FRESH,
             Ok(Err(_)) | Err(_) => false,
         };

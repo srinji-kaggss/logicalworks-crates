@@ -31,14 +31,22 @@ fn without_visibility(line: &str) -> &str {
         None => after,
     };
     let spaced = after_scope.trim_start();
-    if spaced.len() == after_scope.len() { line } else { spaced }
+    if spaced.len() == after_scope.len() {
+        line
+    } else {
+        spaced
+    }
 }
 
 /// The text after `keyword` and the whitespace that must follow it.
 fn after_word<'line>(line: &'line str, keyword: &str) -> Option<&'line str> {
     let rest = line.strip_prefix(keyword)?;
     let spaced = rest.trim_start();
-    if spaced.len() == rest.len() { None } else { Some(spaced) }
+    if spaced.len() == rest.len() {
+        None
+    } else {
+        Some(spaced)
+    }
 }
 
 /// A lowercase identifier at the front of `text`, and what follows it.
@@ -104,7 +112,11 @@ fn module_opener(line: &str) -> Option<(String, usize)> {
 /// A bench function: `fn name(` at the start of a line.
 fn bench_function(line: &str) -> Option<String> {
     let (name, rest) = identifier(after_word(line, "fn")?)?;
-    if rest.trim_start().starts_with('(') { Some(name) } else { None }
+    if rest.trim_start().starts_with('(') {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 /// The position after a raw-string opener at `at`, and its closing delimiter.
@@ -125,19 +137,32 @@ fn raw_opener(chars: &[char], at: usize) -> Option<(usize, String)> {
     if chars.get(cursor) != Some(&'"') {
         return None;
     }
-    Some((cursor.saturating_add(1), format!("\"{}", "#".repeat(hashes))))
+    Some((
+        cursor.saturating_add(1),
+        format!("\"{}", "#".repeat(hashes)),
+    ))
 }
 
 /// The first position at or after `from` where `needle` starts.
 fn find_at(chars: &[char], needle: &str, from: usize) -> Option<usize> {
     let wanted: Vec<char> = needle.chars().collect();
-    (from..chars.len()).find(|&at| chars.get(at..at.saturating_add(wanted.len())) == Some(wanted.as_slice()))
+    (from..chars.len())
+        .find(|&at| chars.get(at..at.saturating_add(wanted.len())) == Some(wanted.as_slice()))
 }
 
 /// The position after `count` hex digits starting at `start`.
 fn after_hex(chars: &[char], start: usize, count: usize) -> Option<usize> {
-    let digits = chars.iter().skip(start).take(count).filter(|ch| ch.is_ascii_hexdigit()).count();
-    if digits == count { Some(start.saturating_add(count)) } else { None }
+    let digits = chars
+        .iter()
+        .skip(start)
+        .take(count)
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .count();
+    if digits == count {
+        Some(start.saturating_add(count))
+    } else {
+        None
+    }
 }
 
 /// The position after a `\u{...}` escape whose `u` is at `u_at`.
@@ -146,22 +171,46 @@ fn after_unicode(chars: &[char], u_at: usize) -> Option<usize> {
         return None;
     }
     let digits_at = u_at.saturating_add(2);
-    let run = chars.iter().skip(digits_at).take_while(|ch| ch.is_ascii_hexdigit()).count();
+    let run = chars
+        .iter()
+        .skip(digits_at)
+        .take_while(|ch| ch.is_ascii_hexdigit())
+        .count();
     let close = digits_at.saturating_add(run);
-    if run > 0 && chars.get(close) == Some(&'}') { Some(close.saturating_add(1)) } else { None }
+    if run > 0 && chars.get(close) == Some(&'}') {
+        Some(close.saturating_add(1))
+    } else {
+        None
+    }
 }
 
 /// How many characters a character literal at `at` spans, or `None` for a lifetime.
 fn char_literal_len(chars: &[char], at: usize) -> Option<usize> {
     let first = chars.get(at.saturating_add(1)).copied()?;
     if first != '\\' {
-        return if first != '\'' && chars.get(at.saturating_add(2)) == Some(&'\'') { Some(3) } else { None };
+        return if first != '\'' && chars.get(at.saturating_add(2)) == Some(&'\'') {
+            Some(3)
+        } else {
+            None
+        };
     }
     let escape_at = at.saturating_add(2);
     let escaped = chars.get(escape_at).copied()?;
-    let hex_form = if escaped == 'x' { after_hex(chars, escape_at.saturating_add(1), 2) } else { None };
-    let unicode_form = if escaped == 'u' { after_unicode(chars, escape_at) } else { None };
-    let plain_form = if escaped == '\n' { None } else { Some(escape_at.saturating_add(1)) };
+    let hex_form = if escaped == 'x' {
+        after_hex(chars, escape_at.saturating_add(1), 2)
+    } else {
+        None
+    };
+    let unicode_form = if escaped == 'u' {
+        after_unicode(chars, escape_at)
+    } else {
+        None
+    };
+    let plain_form = if escaped == '\n' {
+        None
+    } else {
+        Some(escape_at.saturating_add(1))
+    };
     [hex_form, unicode_form, plain_form]
         .into_iter()
         .flatten()
@@ -232,10 +281,16 @@ pub(super) fn inline_module_items(source: &str) -> BTreeMap<Vec<String>, BTreeSe
         }
         if at_line_start && !ch.is_whitespace() {
             at_line_start = false;
-            let line: String = chars.iter().skip(index).take_while(|next| **next != '\n').collect();
+            let line: String = chars
+                .iter()
+                .skip(index)
+                .take_while(|next| **next != '\n')
+                .collect();
             if let Some((name, brace_at)) = module_opener(&line) {
                 stack.push((name, depth));
-                found.entry(stack.iter().map(|entry| entry.0.clone()).collect()).or_default();
+                found
+                    .entry(stack.iter().map(|entry| entry.0.clone()).collect())
+                    .or_default();
                 index = index.saturating_add(brace_at);
                 continue;
             }
@@ -264,7 +319,11 @@ pub(super) fn inline_module_items(source: &str) -> BTreeMap<Vec<String>, BTreeSe
 /// The module path a source file defines, from its place under `crates/`.
 fn module_prefix(root: &Path, path: &Path) -> Vec<String> {
     let crates = root.join("crates");
-    let inner = if let Ok(stripped) = path.strip_prefix(&crates) { stripped } else { path };
+    let inner = if let Ok(stripped) = path.strip_prefix(&crates) {
+        stripped
+    } else {
+        path
+    };
     let mut parts: Vec<String> = inner
         .components()
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -306,9 +365,16 @@ pub(super) fn collect_module_paths(root: &Path) -> Result<Modules, GateError> {
                 items.insert(name);
             }
         }
-        modules.entry(module_path.clone()).or_default().extend(items.iter().cloned());
+        modules
+            .entry(module_path.clone())
+            .or_default()
+            .extend(items.iter().cloned());
         if has_inline_tests {
-            let tests_path = if module_path.is_empty() { "tests".to_owned() } else { format!("{module_path}::tests") };
+            let tests_path = if module_path.is_empty() {
+                "tests".to_owned()
+            } else {
+                format!("{module_path}::tests")
+            };
             modules.entry(tests_path).or_default().extend(items);
         }
         for (nested, inner) in inline_module_items(&source) {
@@ -322,9 +388,18 @@ pub(super) fn collect_module_paths(root: &Path) -> Result<Modules, GateError> {
     // as missing, and the only way to pass would be to stop checking the claim.
     for path in rust_files_under(&root.join("bench"), &["target", "runs"])? {
         let shown = relative(root, &path);
-        let stem = if let Some(stripped) = shown.strip_suffix(".rs") { stripped } else { shown.as_str() };
+        let stem = if let Some(stripped) = shown.strip_suffix(".rs") {
+            stripped
+        } else {
+            shown.as_str()
+        };
         let items = modules.entry(stem.replace('/', "::")).or_default();
-        items.extend(read(&path)?.lines().map(str::trim_start).filter_map(bench_function));
+        items.extend(
+            read(&path)?
+                .lines()
+                .map(str::trim_start)
+                .filter_map(bench_function),
+        );
     }
     Ok(modules)
 }
@@ -336,11 +411,31 @@ mod tests {
 
     #[test]
     fn items_are_found_with_their_visibility_and_qualifiers() {
-        assert_eq!(function_item("pub(crate) async fn load_it(x: u8)"), Some("load_it".to_owned()), "scoped and async");
-        assert_eq!(function_item("const unsafe fn zero()"), Some("zero".to_owned()), "const unsafe");
-        assert_eq!(function_item("fn Upper()"), None, "uppercase names are not collected");
-        assert_eq!(module_declaration("pub mod wire;"), Some(("wire".to_owned(), false)), "a file module");
-        assert_eq!(module_declaration("mod tests {"), Some(("tests".to_owned(), true)), "an inline module");
+        assert_eq!(
+            function_item("pub(crate) async fn load_it(x: u8)"),
+            Some("load_it".to_owned()),
+            "scoped and async"
+        );
+        assert_eq!(
+            function_item("const unsafe fn zero()"),
+            Some("zero".to_owned()),
+            "const unsafe"
+        );
+        assert_eq!(
+            function_item("fn Upper()"),
+            None,
+            "uppercase names are not collected"
+        );
+        assert_eq!(
+            module_declaration("pub mod wire;"),
+            Some(("wire".to_owned(), false)),
+            "a file module"
+        );
+        assert_eq!(
+            module_declaration("mod tests {"),
+            Some(("tests".to_owned(), true)),
+            "an inline module"
+        );
         assert_eq!(module_declaration("modest;"), None, "a longer word");
     }
 
@@ -351,15 +446,27 @@ mod tests {
         );
         let outer = found.get(&vec!["outer".to_owned()]);
         let inner = found.get(&vec!["outer".to_owned(), "tests".to_owned()]);
-        assert_eq!(outer.map(|items| items.iter().cloned().collect::<Vec<_>>()), Some(vec!["helper".to_owned()]), "outer");
-        assert_eq!(inner.map(|items| items.iter().cloned().collect::<Vec<_>>()), Some(vec!["inner_case".to_owned()]), "inner");
+        assert_eq!(
+            outer.map(|items| items.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["helper".to_owned()]),
+            "outer"
+        );
+        assert_eq!(
+            inner.map(|items| items.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["inner_case".to_owned()]),
+            "inner"
+        );
     }
 
     #[test]
     fn raw_strings_hide_their_braces() {
-        let found = inline_module_items("mod holder {\n    const TEXT: &str = r#\"}\"#;\n    fn after() {}\n}\n");
+        let found = inline_module_items(
+            "mod holder {\n    const TEXT: &str = r#\"}\"#;\n    fn after() {}\n}\n",
+        );
         assert_eq!(
-            found.get(&vec!["holder".to_owned()]).map(|items| items.contains("after")),
+            found
+                .get(&vec!["holder".to_owned()])
+                .map(|items| items.contains("after")),
             Some(true),
             "the raw string's brace does not close the module"
         );
@@ -368,8 +475,20 @@ mod tests {
     #[test]
     fn a_source_path_becomes_its_module_path() {
         let root = Path::new("/repo");
-        assert_eq!(module_prefix(root, Path::new("/repo/crates/lgwks-std/src/hex.rs")), vec!["lgwks-std", "hex"], "a module file");
-        assert_eq!(module_prefix(root, Path::new("/repo/crates/lgwks-std/src/lib.rs")), vec!["lgwks-std"], "the crate root");
-        assert_eq!(module_prefix(root, Path::new("/repo/crates/lgwks-std/src/fs/mod.rs")), vec!["lgwks-std", "fs"], "a directory module");
+        assert_eq!(
+            module_prefix(root, Path::new("/repo/crates/lgwks-std/src/hex.rs")),
+            vec!["lgwks-std", "hex"],
+            "a module file"
+        );
+        assert_eq!(
+            module_prefix(root, Path::new("/repo/crates/lgwks-std/src/lib.rs")),
+            vec!["lgwks-std"],
+            "the crate root"
+        );
+        assert_eq!(
+            module_prefix(root, Path::new("/repo/crates/lgwks-std/src/fs/mod.rs")),
+            vec!["lgwks-std", "fs"],
+            "a directory module"
+        );
     }
 }

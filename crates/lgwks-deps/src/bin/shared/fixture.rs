@@ -20,13 +20,19 @@ impl Fixture {
                 Ok(()) => return Ok(Self { root }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
-                    return Err(io::Error::new(error.kind(), format!("{}: {error}", root.display())));
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", root.display()),
+                    ));
                 }
             }
         }
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!("no free scratch directory named {prefix}-<n> under {}", base.display()),
+            format!(
+                "no free scratch directory named {prefix}-<n> under {}",
+                base.display()
+            ),
         ))
     }
 

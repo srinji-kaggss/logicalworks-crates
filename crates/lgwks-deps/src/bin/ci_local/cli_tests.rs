@@ -95,7 +95,11 @@ fn git(root: &Path, arguments: &[&str]) -> Result<String, Box<dyn Error>> {
         .stdin(Stdio::null())
         .output()?;
     if !output.status.success() {
-        return Err(format!("git {arguments:?} failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+        return Err(format!(
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -145,13 +149,18 @@ fn receipt_text(root: &Path) -> Result<String, Box<dyn Error>> {
 
 /// A local lane block.
 fn lane(id: &str, extra: &str) -> String {
-    format!("[[lane]]\nid = \"{id}\"\nsurfaces = \"local\"\nrequired = true\nfast = true\n{extra}\n")
+    format!(
+        "[[lane]]\nid = \"{id}\"\nsurfaces = \"local\"\nrequired = true\nfast = true\n{extra}\n"
+    )
 }
 
 #[test]
 fn all_prerequisites_present_is_green() -> TestResult {
     let alpha = "[[lane]]\nid = \"alpha\"\nsurfaces = \"local ci\"\nrequired = true\nfast = true\ncommand = \"true\"\nci_step = \"Alpha\"\n";
-    let fixture = seeded(&manifest(&[alpha, &lane("beta", "builtin = \"artifacts\"")]))?;
+    let fixture = seeded(&manifest(&[
+        alpha,
+        &lane("beta", "builtin = \"artifacts\""),
+    ]))?;
     let done = run_cli(&["--fast", "--receipt"], fixture.path());
     assert_eq!(done.code, 0, "{}", done.both());
     for wanted in ["passed: 2", "failed: 0", "blocked: 0"] {
@@ -167,9 +176,16 @@ fn a_required_lane_with_a_missing_need_is_blocked_not_skipped() -> TestResult {
         "command = \"true\"\nneeds = [\"bin:definitely-not-a-real-binary\"]",
     )]))?;
     let done = run_cli(&["--fast"], fixture.path());
-    assert_ne!(done.code, 0, "a missing required dependency must not green the gate");
+    assert_ne!(
+        done.code, 0,
+        "a missing required dependency must not green the gate"
+    );
     assert!(done.both().contains("blocked"), "{}", done.both());
-    assert!(done.both().contains("bin:definitely-not-a-real-binary"), "{}", done.both());
+    assert!(
+        done.both().contains("bin:definitely-not-a-real-binary"),
+        "{}",
+        done.both()
+    );
     Ok(())
 }
 
@@ -182,7 +198,11 @@ fn an_absent_smoke_helper_blocks_package_smoke() -> TestResult {
     let done = run_cli(&["--fast"], fixture.path());
     assert_ne!(done.code, 0);
     assert!(done.both().contains("blocked"), "{}", done.both());
-    assert!(done.both().contains("lgwks-std-package-smoke.sh"), "{}", done.both());
+    assert!(
+        done.both().contains("lgwks-std-package-smoke.sh"),
+        "{}",
+        done.both()
+    );
     Ok(())
 }
 
@@ -204,7 +224,10 @@ fn a_non_executable_smoke_helper_blocks_package_smoke() -> TestResult {
 #[test]
 fn an_optional_platform_lane_is_skipped_never_passed() -> TestResult {
     let optional = "[[lane]]\nid = \"gpui-macos\"\nsurfaces = \"local ci\"\nrequired = false\nfast = true\ncommand = \"true\"\nci_step = \"Check normal GPUI renderer feature\"\nplatforms = [\"nonexistent-os\"]\nneeds = [\"bin:xcodebuild\"]\nreason = \"needs the Xcode Metal toolchain\"\n";
-    let fixture = seeded(&manifest(&[&lane("always", "command = \"true\""), optional]))?;
+    let fixture = seeded(&manifest(&[
+        &lane("always", "command = \"true\""),
+        optional,
+    ]))?;
     let done = run_cli(&["--fast", "--receipt"], fixture.path());
     assert_eq!(done.code, 0, "{}", done.both());
     assert!(done.out.contains("gpui-macos"), "{}", done.out);
@@ -219,7 +242,10 @@ fn an_optional_platform_lane_is_skipped_never_passed() -> TestResult {
 #[test]
 fn a_ci_only_lane_is_named_as_uncovered() -> TestResult {
     let ci_only = "[[lane]]\nid = \"grammar-matrix\"\nsurfaces = \"ci\"\nrequired = true\ncommand = \"true\"\nci_step = \"Execute the lgwks-ast grammar matrix\"\nreason = \"CI runs it as a bash loop\"\n";
-    let fixture = seeded(&manifest(&[&lane("local-one", "command = \"true\""), ci_only]))?;
+    let fixture = seeded(&manifest(&[
+        &lane("local-one", "command = \"true\""),
+        ci_only,
+    ]))?;
     let done = run_cli(&["--fast", "--receipt"], fixture.path());
     assert_eq!(done.code, 0, "{}", done.both());
     let text = receipt_text(fixture.path())?;
@@ -233,17 +259,36 @@ fn a_ci_only_lane_is_named_as_uncovered() -> TestResult {
 fn a_forbidden_file_already_committed_fails() -> TestResult {
     let fixture = Fixture::claim(&std::env::temp_dir(), "lgwks-ci-local-test")?;
     git(fixture.path(), &["init", "-q", "-b", "main"])?;
-    put(fixture.path(), "scripts/gate-lanes.toml", &manifest(&[&lane("artifacts", "builtin = \"artifacts\"")]))?;
+    put(
+        fixture.path(),
+        "scripts/gate-lanes.toml",
+        &manifest(&[&lane("artifacts", "builtin = \"artifacts\"")]),
+    )?;
     put(fixture.path(), "target/leaked.rlib", "derived\n")?;
     put(fixture.path(), "keep.txt", "ok\n")?;
     git(fixture.path(), &["add", "-f", "."])?;
     let tree = git(fixture.path(), &["write-tree"])?;
-    let id = git(fixture.path(), &["commit-tree", &tree, "-m", "commit a derived artifact on purpose"])?;
+    let id = git(
+        fixture.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-m",
+            "commit a derived artifact on purpose",
+        ],
+    )?;
     git(fixture.path(), &["update-ref", "refs/heads/main", &id])?;
     let done = run_cli(&["--fast"], fixture.path());
-    assert_ne!(done.code, 0, "a committed derived artifact must refuse the gate");
+    assert_ne!(
+        done.code, 0,
+        "a committed derived artifact must refuse the gate"
+    );
     assert!(done.both().contains("fail"), "{}", done.both());
-    assert!(done.both().contains("target/leaked.rlib"), "{}", done.both());
+    assert!(
+        done.both().contains("target/leaked.rlib"),
+        "{}",
+        done.both()
+    );
     Ok(())
 }
 
@@ -254,7 +299,11 @@ fn a_staged_but_uncommitted_forbidden_file_fails() -> TestResult {
     git(fixture.path(), &["add", "-f", "graphify-out/dump.json"])?;
     let done = run_cli(&["--fast"], fixture.path());
     assert_ne!(done.code, 0);
-    assert!(done.both().contains("graphify-out/dump.json"), "{}", done.both());
+    assert!(
+        done.both().contains("graphify-out/dump.json"),
+        "{}",
+        done.both()
+    );
     Ok(())
 }
 
@@ -282,7 +331,12 @@ fn the_receipt_records_the_full_commit_tree_and_untracked_inputs() -> TestResult
     let tree = git(fixture.path(), &["rev-parse", "HEAD^{tree}"])?;
     assert!(text.contains(&format!("- commit: `{head}`")), "{text}");
     assert!(text.contains(&format!("- tree: `{tree}`")), "{text}");
-    for wanted in ["UNVERIFIED", "scratch.txt", "keep.txt", "untracked: `scratch.txt`"] {
+    for wanted in [
+        "UNVERIFIED",
+        "scratch.txt",
+        "keep.txt",
+        "untracked: `scratch.txt`",
+    ] {
         assert!(text.contains(wanted), "{wanted} in {text}");
     }
     assert!(!text.contains("identity: **verified**"), "{text}");
@@ -324,12 +378,16 @@ fn an_unknown_lane_is_a_usage_error() {
 #[test]
 fn lane_mode_runs_exactly_the_named_lane() -> TestResult {
     let alpha = "[[lane]]\nid = \"alpha\"\nsurfaces = \"local ci\"\nrequired = true\ncommand = \"true\"\nci_step = \"Alpha\"\n";
-    let beta = "[[lane]]\nid = \"beta\"\nsurfaces = \"local\"\nrequired = true\ncommand = \"false\"\n";
+    let beta =
+        "[[lane]]\nid = \"beta\"\nsurfaces = \"local\"\nrequired = true\ncommand = \"false\"\n";
     let fixture = seeded(&manifest(&[alpha, beta]))?;
     let done = run_cli(&["--lane", "alpha"], fixture.path());
     assert_eq!(done.code, 0, "{}", done.both());
     assert!(done.out.contains("alpha: pass"), "{}", done.out);
-    let (_, table) = done.out.rsplit_once('─').ok_or("the run printed no table")?;
+    let (_, table) = done
+        .out
+        .rsplit_once('─')
+        .ok_or("the run printed no table")?;
     assert!(!table.contains("beta"), "beta must not run: {table}");
     Ok(())
 }
@@ -352,8 +410,14 @@ fn lanes_in_different_groups_are_in_flight_at_the_same_time() -> TestResult {
             theirs = theirs.display()
         )
     };
-    let one = lane("rendezvous-one", &format!("command = '''{}'''", meet(&first, &second)));
-    let two = lane("rendezvous-two", &format!("command = '''{}'''", meet(&second, &first)));
+    let one = lane(
+        "rendezvous-one",
+        &format!("command = '''{}'''", meet(&first, &second)),
+    );
+    let two = lane(
+        "rendezvous-two",
+        &format!("command = '''{}'''", meet(&second, &first)),
+    );
     let fixture = seeded(&manifest(&[&one, &two]))?;
     let done = run_cli(&[], fixture.path());
     assert_eq!(done.code, 0, "{}", done.both());
@@ -364,7 +428,10 @@ fn lanes_in_different_groups_are_in_flight_at_the_same_time() -> TestResult {
 
 #[test]
 fn a_failing_lane_prints_its_own_output() -> TestResult {
-    let failing = lane("reason-one", "command = \"echo the-reason-it-failed; exit 3\"");
+    let failing = lane(
+        "reason-one",
+        "command = \"echo the-reason-it-failed; exit 3\"",
+    );
     let passing = lane("reason-two", "command = \"true\"");
     let fixture = seeded(&manifest(&[&failing, &passing]))?;
     let done = run_cli(&[], fixture.path());

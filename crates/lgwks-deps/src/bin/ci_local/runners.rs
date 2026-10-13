@@ -27,10 +27,17 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
             continue;
         }
         let tables = read_tables(&read(&manifest)?);
-        let Some(docs) = tables.iter().find(|table| table.path == "package.metadata.docs.rs") else {
+        let Some(docs) = tables
+            .iter()
+            .find(|table| table.path == "package.metadata.docs.rs")
+        else {
             continue;
         };
-        let Some(name) = tables.iter().find(|table| table.path == "package").and_then(|table| text(table, "name")) else {
+        let Some(name) = tables
+            .iter()
+            .find(|table| table.path == "package")
+            .and_then(|table| text(table, "name"))
+        else {
             continue;
         };
         let mut command = argv(&["cargo", "doc", "--no-deps", "--locked", "-p", name]);
@@ -43,7 +50,11 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
             Some(found) => found.join(","),
             None => String::new(),
         };
-        let label = if features.is_empty() { "(defaults only)".to_owned() } else { features.clone() };
+        let label = if features.is_empty() {
+            "(defaults only)".to_owned()
+        } else {
+            features.clone()
+        };
         if !features.is_empty() {
             command.push("--features".to_owned());
             command.push(features);
@@ -54,12 +65,17 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
         return Ok(pass("no crate declares [package.metadata.docs.rs]"));
     }
     let mut env = context.env.clone();
-    env.insert("RUSTDOCFLAGS".to_owned(), "-D warnings --cfg docsrs".to_owned());
+    env.insert(
+        "RUSTDOCFLAGS".to_owned(),
+        "-D warnings --cfg docsrs".to_owned(),
+    );
     let mut log = vec![format!("cargo doc plans: {}", commands.len())];
     for planned in &commands {
         let shown = planned.1.join(" ");
         log.push(format!("  {}: {shown}", planned.0));
-        let code = context.children.run(&planned.1, context.root, &env, context.out);
+        let code = context
+            .children
+            .run(&planned.1, context.root, &env, context.out);
         if code != 0 {
             log.push(format!("failed (exit {code}): {shown}"));
             return Ok(refuse(log.join("\n")));
@@ -70,7 +86,10 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
 
 /// A JSON object's boolean under `section` and `key`, if it is one.
 fn flag_at(report: &Value, section: &str, key: &str) -> Option<bool> {
-    report.get(section).and_then(|inner| inner.get(key)).and_then(Value::as_bool)
+    report
+        .get(section)
+        .and_then(|inner| inner.get(key))
+        .and_then(Value::as_bool)
 }
 
 /// The first `limit` characters of `text`, for a failure message.
@@ -100,7 +119,20 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
     let mut env: BTreeMap<String, String> = context.env.clone();
     env.insert("LGWKS_LOG".to_owned(), "info".to_owned());
     env.insert("LGWKS_LOG_FORMAT".to_owned(), "json".to_owned());
-    let command = argv(&["cargo", "run", "--quiet", "--locked", "-p", "lgwks_deps", "--bin", "lgwks-deps", "--", "debug", ".", "--json"]);
+    let command = argv(&[
+        "cargo",
+        "run",
+        "--quiet",
+        "--locked",
+        "-p",
+        "lgwks_deps",
+        "--bin",
+        "lgwks-deps",
+        "--",
+        "debug",
+        ".",
+        "--json",
+    ]);
     let success = context.children.capture(&command, context.root, &env);
     if success.code != 0 {
         return Ok(refuse(format!(
@@ -112,7 +144,11 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
     }
     let report: Value = match json::from_str(&success.stdout) {
         Ok(report) => report,
-        Err(error) => return Ok(refuse(format!("debug success journey did not return JSON: {error}"))),
+        Err(error) => {
+            return Ok(refuse(format!(
+                "debug success journey did not return JSON: {error}"
+            )));
+        }
     };
     let missing: Vec<&str> = REQUIRED_CHECKS
         .iter()
@@ -125,8 +161,12 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
             "debug success journey missing admitted checks: admitted={admitted:?} missing={missing:?}"
         )));
     }
-    if !success.stderr.contains("debugger installed") || !success.stderr.contains("debug doctor completed") {
-        return Ok(refuse("debug success journey did not emit install and completion lifecycle events".to_owned()));
+    if !success.stderr.contains("debugger installed")
+        || !success.stderr.contains("debug doctor completed")
+    {
+        return Ok(refuse(
+            "debug success journey did not emit install and completion lifecycle events".to_owned(),
+        ));
     }
     let fixture = Fixture::claim(&std::env::temp_dir(), "lgwks-debug-e2e")?;
     let manifest_dir = fixture.path().join("crates").join("lgwks-std");
@@ -134,13 +174,19 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
         path: manifest_dir.clone(),
         cause,
     })?;
-    write_file(&fixture.path().join("Cargo.lock"), "# debugger e2e fixture\n")?;
+    write_file(
+        &fixture.path().join("Cargo.lock"),
+        "# debugger e2e fixture\n",
+    )?;
     let manifest = read(&context.root.join("crates/lgwks-std/Cargo.toml"))?;
     let refused_manifest = manifest
         .replace(", \"dep:tracing-subscriber\"", "")
         .replace("    \"dep:tracing-subscriber\",\n", "");
     if refused_manifest == manifest {
-        return Ok(refuse("debug fail-closed fixture could not remove dep:tracing-subscriber from trace".to_owned()));
+        return Ok(refuse(
+            "debug fail-closed fixture could not remove dep:tracing-subscriber from trace"
+                .to_owned(),
+        ));
     }
     write_file(&manifest_dir.join("Cargo.toml"), &refused_manifest)?;
     let mut fail_command = command;
@@ -159,13 +205,27 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
     }
     let refused_report: Value = match json::from_str(&refused.stdout) {
         Ok(report) => report,
-        Err(error) => return Ok(refuse(format!("debug fail-closed journey did not return JSON: {error}"))),
+        Err(error) => {
+            return Ok(refuse(format!(
+                "debug fail-closed journey did not return JSON: {error}"
+            )));
+        }
     };
     if refused_report.get("admitted").and_then(Value::as_bool) != Some(false) {
-        return Ok(refuse(format!("debug fail-closed journey admitted a broken trace surface: {refused_report:?}")));
+        return Ok(refuse(format!(
+            "debug fail-closed journey admitted a broken trace surface: {refused_report:?}"
+        )));
     }
-    if flag_at(&refused_report, "checks", "trace_includes_tracing_subscriber") != Some(false) {
-        return Ok(refuse("debug fail-closed journey did not name the missing tracing-subscriber feature edge".to_owned()));
+    if flag_at(
+        &refused_report,
+        "checks",
+        "trace_includes_tracing_subscriber",
+    ) != Some(false)
+    {
+        return Ok(refuse(
+            "debug fail-closed journey did not name the missing tracing-subscriber feature edge"
+                .to_owned(),
+        ));
     }
     Ok(pass(
         "successful end-to-end journey result: debug_json_exit=0 admitted=true lifecycle=installed+completed; \
@@ -183,12 +243,19 @@ pub(super) fn percent(numerator: usize, denominator: usize) -> String {
         Some(value) if value > 0 => value,
         Some(_) | None => 0,
     };
-    format!("{}.{:04}%", scaled.div_euclid(10_000), scaled.rem_euclid(10_000))
+    format!(
+        "{}.{:04}%",
+        scaled.div_euclid(10_000),
+        scaled.rem_euclid(10_000)
+    )
 }
 
 /// Whether the text does not continue a word.
 fn ends_word(text: &str) -> bool {
-    !text.chars().next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    !text
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 /// Whether `rest` (after `#[`) opens a `test` attribute, bare or path-qualified.
@@ -200,7 +267,9 @@ fn is_test_attribute(rest: &str) -> bool {
     }
     for (index, _) in rest.match_indices("::") {
         let prefix_end = index.saturating_add(2);
-        let in_path = head(rest, prefix_end).chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':');
+        let in_path = head(rest, prefix_end)
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':');
         if in_path
             && let Some(after) = tail(rest, prefix_end).strip_prefix("test")
             && ends_word(after)
@@ -218,7 +287,9 @@ fn source_visible_test_counts(root: &Path) -> Result<(usize, usize), GateError> 
     for path in rust_files_under(&root.join("crates"), &["target"])? {
         let shown = format!("/{}", relative(root, &path));
         let in_sim_source = shown.contains("/tests/sim/")
-            || path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("sim_"));
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("sim_"));
         for line in read(&path)?.lines() {
             if let Some(rest) = line.trim().strip_prefix("#[")
                 && is_test_attribute(rest)
@@ -243,7 +314,11 @@ fn binary_name_of(suite: &Value) -> &str {
 
 /// How many of a nextest listing's cases there are, and how many are simulations.
 fn listed_counts(payload: &Value) -> (usize, usize) {
-    let total = match payload.get("test-count").and_then(Value::as_u64).map(usize::try_from) {
+    let total = match payload
+        .get("test-count")
+        .and_then(Value::as_u64)
+        .map(usize::try_from)
+    {
         Some(Ok(count)) if count > 0 => count,
         Some(Ok(_) | Err(_)) | None => 0,
     };
@@ -272,8 +347,19 @@ fn listed_counts(payload: &Value) -> (usize, usize) {
 
 /// Prove deterministic simulation coverage by executable and source views.
 pub(super) fn simulation_evidence(context: &Context<'_>) -> Result<Verdict, GateError> {
-    let command = argv(&["cargo", "nextest", "list", "--workspace", "--locked", "--message-format", "json", "--cargo-quiet"]);
-    let listed = context.children.capture(&command, context.root, context.env);
+    let command = argv(&[
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--locked",
+        "--message-format",
+        "json",
+        "--cargo-quiet",
+    ]);
+    let listed = context
+        .children
+        .capture(&command, context.root, context.env);
     if listed.code != 0 {
         return Ok(refuse(format!(
             "nextest listing failed: exit={} stdout={:?} stderr={:?}",
@@ -291,14 +377,20 @@ pub(super) fn simulation_evidence(context: &Context<'_>) -> Result<Verdict, Gate
         return Ok(refuse("nextest listing reported no tests".to_owned()));
     }
     if simulated.saturating_mul(2) < total {
-        return Ok(refuse(format!("simulation tests below half in nextest listing: sim={simulated} total={total}")));
+        return Ok(refuse(format!(
+            "simulation tests below half in nextest listing: sim={simulated} total={total}"
+        )));
     }
     let (source_total, source_sim) = source_visible_test_counts(context.root)?;
     if source_total == 0 {
-        return Ok(refuse("source-visible test counter found no tests".to_owned()));
+        return Ok(refuse(
+            "source-visible test counter found no tests".to_owned(),
+        ));
     }
     if source_sim.saturating_mul(2) < source_total {
-        return Ok(refuse(format!("source-visible simulation tests below half: sim={source_sim} total={source_total}")));
+        return Ok(refuse(format!(
+            "source-visible simulation tests below half: sim={source_sim} total={source_total}"
+        )));
     }
     Ok(pass(&format!(
         "successful simulation result: nextest_sim={simulated} nextest_total={total} nextest_percent={}; \
@@ -325,7 +417,10 @@ mod tests {
     fn a_test_attribute_is_bare_or_path_qualified_and_whole_word() {
         assert!(is_test_attribute("test]"), "bare");
         assert!(is_test_attribute("tokio::test]"), "qualified");
-        assert!(is_test_attribute("tokio::test(flavor = \"x\")]"), "with arguments");
+        assert!(
+            is_test_attribute("tokio::test(flavor = \"x\")]"),
+            "with arguments"
+        );
         assert!(!is_test_attribute("test_case(1)]"), "a longer word");
         assert!(!is_test_attribute("cfg(test)]"), "a cfg");
     }
@@ -337,7 +432,11 @@ mod tests {
               \"p::sim_a\": {\"binary-name\": \"sim_a\", \"testcases\": {\"one\": {}, \"two\": {}}},\
               \"p::it\": {\"binary-name\": \"it\", \"testcases\": {\"sim_x::case\": {}, \"plain::case\": {}}}}}",
         )?;
-        assert_eq!(listed_counts(&payload), (4, 3), "a whole sim binary and a sim module count");
+        assert_eq!(
+            listed_counts(&payload),
+            (4, 3),
+            "a whole sim binary and a sim module count"
+        );
         Ok(())
     }
 }

@@ -13,7 +13,13 @@ use super::toml_subset::{read_tables, text};
 use super::{Context, GateError, Verdict, fail, read};
 
 /// Build output and caches that must never be tracked or staged.
-const FORBIDDEN_PREFIXES: [&str; 5] = ["target/", "graphify-out/", ".lgwks/", "node_modules/", ".codegraph/"];
+const FORBIDDEN_PREFIXES: [&str; 5] = [
+    "target/",
+    "graphify-out/",
+    ".lgwks/",
+    "node_modules/",
+    ".codegraph/",
+];
 
 /// How many lines after a suppression its `reason` may sit within.
 const REASON_WINDOW: usize = 7;
@@ -55,10 +61,18 @@ pub(super) fn rust_files_under(directory: &Path, skip: &[&str]) -> Result<Vec<Pa
 }
 
 /// Adds the `.rs` files under `directory` to `found`.
-fn collect_rust(directory: &Path, skip: &[&str], found: &mut Vec<PathBuf>, depth: usize) -> Result<(), GateError> {
+fn collect_rust(
+    directory: &Path,
+    skip: &[&str],
+    found: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), GateError> {
     if depth > 64 {
         return fail(
-            GateError::Manifest(format!("{}: nested deeper than 64 directories", directory.display())),
+            GateError::Manifest(format!(
+                "{}: nested deeper than 64 directories",
+                directory.display()
+            )),
             "collect_rust",
         );
     }
@@ -87,7 +101,11 @@ fn collect_rust(directory: &Path, skip: &[&str], found: &mut Vec<PathBuf>, depth
 /// The directories directly under `crates/`, sorted.
 pub(super) fn crate_directories(root: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = match fs::read_dir(root.join("crates")) {
-        Ok(reader) => reader.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect(),
+        Ok(reader) => reader
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect(),
         Err(error) => {
             lgwks_std::trace::debug!(%error, "there is no crates directory");
             Vec::new()
@@ -136,7 +154,10 @@ pub(super) fn unwrap_scan(context: &Context<'_>) -> Result<Verdict, GateError> {
             for (index, line) in lines.iter().enumerate() {
                 let number = index.saturating_add(1);
                 if line.contains(FORBIDDEN_CALL) && !tests_at.is_some_and(|start| number >= start) {
-                    hits.push(format!("unwrap outside tests: {}:{number}", relative(context.root, &path)));
+                    hits.push(format!(
+                        "unwrap outside tests: {}:{number}",
+                        relative(context.root, &path)
+                    ));
                 }
             }
         }
@@ -196,7 +217,10 @@ pub(super) fn suppressions(context: &Context<'_>) -> Result<Verdict, GateError> 
 fn forbidden_in(label: &str, listing: &str, offenders: &mut Vec<String>) {
     for name in listing.split('\0').filter(|name| !name.is_empty()) {
         let normalized = name.replace('\\', "/");
-        if FORBIDDEN_PREFIXES.iter().any(|prefix| normalized.starts_with(prefix)) {
+        if FORBIDDEN_PREFIXES
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
+        {
             offenders.push(format!("{label}: {normalized}"));
         }
     }
@@ -260,7 +284,11 @@ fn expect(chars: &[char], at: usize, word: &str) -> Option<usize> {
 
 /// A run of ASCII digits at `at`, and the position after it.
 fn digits(chars: &[char], at: usize) -> Option<(String, usize)> {
-    let run: String = chars.iter().skip(at).take_while(|ch| ch.is_ascii_digit()).collect();
+    let run: String = chars
+        .iter()
+        .skip(at)
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
     if run.is_empty() {
         None
     } else {
@@ -286,7 +314,11 @@ fn assignment_pin(chars: &[char], at: usize, name: &str) -> Option<(String, Stri
     let after_name = expect(chars, at, name)?;
     let after_equals = skip_space(chars, expect(chars, skip_space(chars, after_name), "=")?);
     let at_value = if chars.get(after_equals) == Some(&'{') {
-        let after_key = expect(chars, skip_space(chars, after_equals.saturating_add(1)), "version")?;
+        let after_key = expect(
+            chars,
+            skip_space(chars, after_equals.saturating_add(1)),
+            "version",
+        )?;
         skip_space(chars, expect(chars, skip_space(chars, after_key), "=")?)
     } else {
         after_equals
@@ -337,11 +369,22 @@ fn stale_pins(body: &str, name: &str, version: &str) -> Vec<String> {
 }
 
 /// A field of the `[package]` table of the manifest at `relative_path`.
-fn package_field(context: &Context<'_>, relative_path: &str, key: &str) -> Result<String, GateError> {
+fn package_field(
+    context: &Context<'_>,
+    relative_path: &str,
+    key: &str,
+) -> Result<String, GateError> {
     let tables = read_tables(&read(&context.root.join(relative_path))?);
-    match tables.iter().find(|table| table.path == "package").and_then(|table| text(table, key)) {
+    match tables
+        .iter()
+        .find(|table| table.path == "package")
+        .and_then(|table| text(table, key))
+    {
         Some(found) => Ok(found.to_owned()),
-        None => fail(GateError::Manifest(format!("{relative_path}: no [package] {key}")), "package_field"),
+        None => fail(
+            GateError::Manifest(format!("{relative_path}: no [package] {key}")),
+            "package_field",
+        ),
     }
 }
 
@@ -377,7 +420,9 @@ pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError
     let manifest_deps = declared_in_manifest(context)?;
     let readme = read(&context.root.join("crates/lgwks-std/README.md"))?;
     let Some(start) = readme.find("## Dependency philosophy") else {
-        return Ok(refuse("README dependency philosophy section missing".to_owned()));
+        return Ok(refuse(
+            "README dependency philosophy section missing".to_owned(),
+        ));
     };
     let section: String = tail(&readme, start).chars().take(1800).collect();
     let readme_deps: BTreeSet<String> = bolded_names(&section).into_iter().collect();
@@ -391,7 +436,9 @@ pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError
     }
     let repository = package_field(context, "crates/lgwks-std/Cargo.toml", "repository")?;
     if repository != "https://github.com/srinji-kaggss/logicalworks-crates" {
-        return Ok(refuse(format!("Unexpected package repository URL: {repository}")));
+        return Ok(refuse(format!(
+            "Unexpected package repository URL: {repository}"
+        )));
     }
     let mut pins = Vec::new();
     for (name, directory) in [
@@ -400,7 +447,14 @@ pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError
         ("lgwks_ast", "lgwks-ast"),
         ("lgwks_deps", "lgwks-deps"),
     ] {
-        pins.push((name, package_field(context, &format!("crates/{directory}/Cargo.toml"), "version")?));
+        pins.push((
+            name,
+            package_field(
+                context,
+                &format!("crates/{directory}/Cargo.toml"),
+                "version",
+            )?,
+        ));
     }
     let mut documents = vec![context.root.join("README.md")];
     documents.extend(
@@ -419,9 +473,14 @@ pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError
         }
     }
     if bad.is_empty() {
-        Ok(pass("README dependency philosophy and version pins track the manifests"))
+        Ok(pass(
+            "README dependency philosophy and version pins track the manifests",
+        ))
     } else {
-        Ok(refuse(format!("Stale README version pins:\n{}", bad.join("\n"))))
+        Ok(refuse(format!(
+            "Stale README version pins:\n{}",
+            bad.join("\n")
+        )))
     }
 }
 
@@ -452,11 +511,17 @@ pub(super) fn readme_quickstart(context: &Context<'_>) -> Result<Verdict, GateEr
     };
     let blocks = rust_blocks(section);
     let Some(only) = blocks.first().filter(|_| blocks.len() == 1) else {
-        return Ok(refuse(format!("expected one rust block under Quickstart, found {}", blocks.len())));
+        return Ok(refuse(format!(
+            "expected one rust block under Quickstart, found {}",
+            blocks.len()
+        )));
     };
     let readme_block = only.trim();
     let example = read(&context.root.join("crates/lgwks-bot/examples/quickstart.rs"))?;
-    let kept: Vec<&str> = example.split('\n').filter(|line| !line.starts_with("//!")).collect();
+    let kept: Vec<&str> = example
+        .split('\n')
+        .filter(|line| !line.starts_with("//!"))
+        .collect();
     let body = kept.join("\n");
     let body = body.trim();
     if readme_block == body {
@@ -484,20 +549,49 @@ mod tests {
     fn stale_pins_compare_major_and_minor_in_both_shapes() {
         let body = "lgwks_std = \"0.4\"\nlgwks_std = { version = \"0.5.2\", features = [] }\n| `lgwks_std` | 0.4.1 |\n| `lgwks_std` | 0.5.0 |\nlgwks_bot = \"9.9\"\n";
         let stale = stale_pins(body, "lgwks_std", "0.5.3");
-        assert_eq!(stale.len(), 2, "one assignment and one table row are stale: {stale:?}");
-        assert!(stale.iter().all(|entry| entry.ends_with("(manifest is 0.5.3)")), "{stale:?}");
-        assert!(stale.iter().any(|entry| entry.starts_with("lgwks_std = \"0.4\"")), "{stale:?}");
-        assert!(stale.iter().any(|entry| entry.starts_with("| `lgwks_std` | 0.4.1 |")), "{stale:?}");
+        assert_eq!(
+            stale.len(),
+            2,
+            "one assignment and one table row are stale: {stale:?}"
+        );
+        assert!(
+            stale
+                .iter()
+                .all(|entry| entry.ends_with("(manifest is 0.5.3)")),
+            "{stale:?}"
+        );
+        assert!(
+            stale
+                .iter()
+                .any(|entry| entry.starts_with("lgwks_std = \"0.4\"")),
+            "{stale:?}"
+        );
+        assert!(
+            stale
+                .iter()
+                .any(|entry| entry.starts_with("| `lgwks_std` | 0.4.1 |")),
+            "{stale:?}"
+        );
     }
 
     #[test]
     fn bold_names_need_their_closing_stars() {
-        assert_eq!(bolded_names("- **serde** ok\n- **json_v2**\n- **open\n"), vec!["serde", "json_v2"], "closed names only");
+        assert_eq!(
+            bolded_names("- **serde** ok\n- **json_v2**\n- **open\n"),
+            vec!["serde", "json_v2"],
+            "closed names only"
+        );
     }
 
     #[test]
     fn rust_blocks_are_the_fenced_rust_only() {
-        let blocks = rust_blocks("a\n```rust\nfn main() {}\n```\nb\n```toml\nx = 1\n```\n```rust\nlet y = 2;\n```\n");
-        assert_eq!(blocks, vec!["fn main() {}\n", "let y = 2;\n"], "only rust fences");
+        let blocks = rust_blocks(
+            "a\n```rust\nfn main() {}\n```\nb\n```toml\nx = 1\n```\n```rust\nlet y = 2;\n```\n",
+        );
+        assert_eq!(
+            blocks,
+            vec!["fn main() {}\n", "let y = 2;\n"],
+            "only rust fences"
+        );
     }
 }

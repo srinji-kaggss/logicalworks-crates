@@ -7,17 +7,23 @@
 //! cannot catch a signal, so the gate that is itself killed is covered by a
 //! watchdog: a small `bash` process in a group of its own that reads the groups
 //! the gate started over a pipe, and stops them all when that pipe closes.
+//!
+//! The scheduler is here too: it is what starts those children, one worker
+//! thread per group of lanes that share a feature set.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
+
+use super::lanes::{Lane, child_env, run_lane};
+use super::{Console, LaneResult, report};
 
 /// The longest one child may run.
 const RUN_BOUND: Duration = Duration::from_secs(3600);
@@ -162,7 +168,11 @@ impl Children {
 
     /// Runs `work`, which owns the child `pgid` leads, bounded by [`RUN_BOUND`].
     /// `None` when the bound passed and the group had to be stopped.
-    fn supervise<T: Send>(&self, pgid: u32, work: impl FnOnce() -> io::Result<T> + Send) -> Option<io::Result<T>> {
+    fn supervise<T: Send>(
+        &self,
+        pgid: u32,
+        work: impl FnOnce() -> io::Result<T> + Send,
+    ) -> Option<io::Result<T>> {
         self.register(pgid);
         let slot: Mutex<Option<io::Result<T>>> = Mutex::new(None);
         let ready = Condvar::new();
@@ -190,7 +200,13 @@ impl Children {
     }
 
     /// Runs `argv` in its own process group, its output to `out` when given.
-    pub(super) fn run(&self, argv: &[String], root: &Path, env: &BTreeMap<String, String>, out: Option<&File>) -> i32 {
+    pub(super) fn run(
+        &self,
+        argv: &[String],
+        root: &Path,
+        env: &BTreeMap<String, String>,
+        out: Option<&File>,
+    ) -> i32 {
         if self.is_stopping() {
             return STOPPED;
         }
@@ -207,7 +223,9 @@ impl Children {
         if let Some(file) = out {
             match (file.try_clone(), file.try_clone()) {
                 (Ok(stdout), Ok(stderr)) => {
-                    command.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+                    command
+                        .stdout(Stdio::from(stdout))
+                        .stderr(Stdio::from(stderr));
                 }
                 (Err(error), _) | (_, Err(error)) => {
                     lgwks_std::trace::debug!(%error, "a lane's log could not be shared with its child");
@@ -234,7 +252,12 @@ impl Children {
     }
 
     /// Runs `argv` in its own process group and captures what it prints.
-    pub(super) fn capture(&self, argv: &[String], root: &Path, env: &BTreeMap<String, String>) -> Captured {
+    pub(super) fn capture(
+        &self,
+        argv: &[String],
+        root: &Path,
+        env: &BTreeMap<String, String>,
+    ) -> Captured {
         let refused = |why: String| Captured {
             code: UNRUNNABLE,
             stdout: String::new(),
@@ -286,7 +309,11 @@ impl Children {
     /// Waits up to [`GRACE`] for the live set to empty.
     fn wait_empty(&self) {
         let held = guard(&self.live);
-        if self.changed.wait_timeout_while(held, GRACE, |live| !live.is_empty()).is_err() {
+        if self
+            .changed
+            .wait_timeout_while(held, GRACE, |live| !live.is_empty())
+            .is_err()
+        {
             lgwks_std::trace::debug!("the live set was poisoned while waiting");
         }
     }
@@ -309,7 +336,11 @@ impl Children {
     #[cfg(test)]
     pub(super) fn wait_until_live(&self, count: usize) {
         let held = guard(&self.live);
-        if self.changed.wait_while(held, |live| live.len() < count).is_err() {
+        if self
+            .changed
+            .wait_while(held, |live| live.len() < count)
+            .is_err()
+        {
             lgwks_std::trace::debug!("the live set was poisoned while waiting");
         }
     }
@@ -343,6 +374,137 @@ fn start_watchdog() -> Option<Watchdog> {
     }
 }
 
+/// The directory cargo builds into, made absolute under `root`.
+fn target_base(root: &Path) -> PathBuf {
+    let configured = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+    match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join("target"),
+    }
+}
+
+/// One group of lanes that run in order in one target directory.
+struct Group<'table> {
+    /// `gate-<group>` for a named group, `lane-<id>` for a lane on its own.
+    key: String,
+    /// The lanes, in the table's order.
+    lanes: Vec<&'table Lane>,
+}
+
+/// Groups `selected` by feature set, cargo groups first: they are the long poles.
+fn group_lanes<'table>(selected: &[&'table Lane]) -> Vec<Group<'table>> {
+    let mut groups: Vec<Group<'table>> = Vec::new();
+    for lane in selected {
+        let key = match lane.group.as_deref() {
+            Some(name) => format!("gate-{name}"),
+            None => format!("lane-{}", lane.id),
+        };
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.lanes.push(lane),
+            None => groups.push(Group {
+                key,
+                lanes: vec![lane],
+            }),
+        }
+    }
+    groups.sort_by_key(|group| !group.key.starts_with("gate-"));
+    groups
+}
+
+/// The pieces a parallel run shares between its workers.
+struct Shared<'run> {
+    /// The repository root.
+    root: &'run Path,
+    /// The scratch directory for `TMPDIR`.
+    scratch: Option<&'run Path>,
+    /// The base of the per-group target directories.
+    base: &'run Path,
+    /// The children the gate owns.
+    children: &'run Children,
+    /// Where lines are printed.
+    console: &'run Console,
+    /// The groups still to run.
+    queue: Mutex<VecDeque<Group<'run>>>,
+    /// Every finished lane.
+    results: Mutex<Vec<LaneResult>>,
+}
+
+/// Runs one group's lanes in order.
+fn run_group(shared: &Shared<'_>, group: &Group<'_>) {
+    let named = group.key.starts_with("gate-");
+    let target = shared.base.join(&group.key);
+    let env = child_env(
+        shared.scratch,
+        if named { Some(target.as_path()) } else { None },
+    );
+    for lane in &group.lanes {
+        if shared.children.is_stopping() {
+            return;
+        }
+        let tag = if named {
+            format!("  [{}]", group.key)
+        } else {
+            String::new()
+        };
+        shared.console.say(&format!("==> {}{tag}", lane.id));
+        let log = shared
+            .base
+            .join("gate-logs")
+            .join(format!("{}.log", lane.id));
+        let result = run_lane(lane, shared.root, &env, Some(&log), shared.children);
+        report(shared.console, &result, Some(&log));
+        guard(&shared.results).push(result);
+    }
+}
+
+/// Runs lane groups concurrently; lanes inside one group run in order.
+pub(super) fn run_parallel(
+    selected: &[&Lane],
+    root: &Path,
+    scratch: Option<&Path>,
+    jobs: usize,
+    children: &Children,
+    console: &Console,
+) -> Vec<LaneResult> {
+    let groups = group_lanes(selected);
+    let workers = jobs.max(1).min(groups.len().max(1));
+    let base = target_base(root);
+    let shared = Shared {
+        root,
+        scratch,
+        base: &base,
+        children,
+        console,
+        queue: Mutex::new(groups.into()),
+        results: Mutex::new(Vec::new()),
+    };
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = guard(&shared.queue).pop_front();
+                    match next {
+                        Some(group) => run_group(&shared, &group),
+                        None => return,
+                    }
+                }
+            });
+        }
+    });
+    let mut finished = match shared.results.into_inner() {
+        Ok(found) => found,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut ordered = Vec::new();
+    for lane in selected {
+        if let Some(at) = finished.iter().position(|result| result.lane_id == lane.id) {
+            ordered.push(finished.swap_remove(at));
+        }
+    }
+    ordered
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Children, code_of};
@@ -373,14 +535,23 @@ mod tests {
     #[test]
     fn a_missing_program_is_unrunnable_not_a_pass() {
         let children = Children::new(false);
-        let code = children.run(&argv(&["definitely-not-a-real-program"]), Path::new("."), &env(), None);
+        let code = children.run(
+            &argv(&["definitely-not-a-real-program"]),
+            Path::new("."),
+            &env(),
+            None,
+        );
         assert_eq!(code, 125, "a child that cannot start is 125");
     }
 
     #[test]
     fn captured_output_and_code_come_back_together() {
         let children = Children::new(false);
-        let done = children.capture(&argv(&["sh", "-c", "echo out; echo err >&2; exit 4"]), Path::new("."), &env());
+        let done = children.capture(
+            &argv(&["sh", "-c", "echo out; echo err >&2; exit 4"]),
+            Path::new("."),
+            &env(),
+        );
         assert_eq!(done.code, 4, "the code");
         assert_eq!(done.stdout.trim(), "out", "stdout");
         assert_eq!(done.stderr.trim(), "err", "stderr");
@@ -390,19 +561,32 @@ mod tests {
     fn stopping_the_gate_stops_what_it_started() -> TestResult {
         let children = Children::new(false);
         let code = thread::scope(|scope| -> Result<i32, Box<dyn Error>> {
-            let runner = scope.spawn(|| children.run(&argv(&["sh", "-c", "exec sleep 60"]), Path::new("."), &env(), None));
+            let runner = scope.spawn(|| {
+                children.run(
+                    &argv(&["sh", "-c", "exec sleep 60"]),
+                    Path::new("."),
+                    &env(),
+                    None,
+                )
+            });
             children.wait_until_live(1);
             children.stop_all();
             runner.join().map_err(|_| "the runner panicked".into())
         })?;
         assert_eq!(code, 143, "TERM reads as 128 + 15");
-        assert_eq!(children.run(&argv(&["true"]), Path::new("."), &env(), None), 130, "nothing starts after a stop");
+        assert_eq!(
+            children.run(&argv(&["true"]), Path::new("."), &env(), None),
+            130,
+            "nothing starts after a stop"
+        );
         Ok(())
     }
 
     #[test]
     fn a_signal_death_reads_as_128_plus_the_signal() -> TestResult {
-        let done = std::process::Command::new("sh").args(["-c", "kill -s KILL $$"]).status()?;
+        let done = std::process::Command::new("sh")
+            .args(["-c", "kill -s KILL $$"])
+            .status()?;
         assert_eq!(code_of(done), 137, "KILL is 9");
         Ok(())
     }

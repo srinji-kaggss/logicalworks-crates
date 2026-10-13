@@ -21,7 +21,13 @@ pub(super) fn repository_files(repo: &Path) -> Option<BTreeSet<PathBuf>> {
     let listing = match Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
     {
         Ok(listing) => listing,
@@ -43,7 +49,11 @@ pub(super) fn repository_files(repo: &Path) -> Option<BTreeSet<PathBuf>> {
 }
 
 /// Every `.rs` file under `directory`, recursively, added to `out`.
-fn rust_files_under(directory: &Path, depth: usize, out: &mut BTreeSet<PathBuf>) -> Result<(), AuditError> {
+fn rust_files_under(
+    directory: &Path,
+    depth: usize,
+    out: &mut BTreeSet<PathBuf>,
+) -> Result<(), AuditError> {
     if depth > MAX_DEPTH {
         return fail(
             AuditError::TooDeep {
@@ -143,7 +153,13 @@ pub(super) fn cleaned_text(path: &Path) -> Result<String, AuditError> {
     };
     Ok(text
         .lines()
-        .map(|line| if line.trim_start().starts_with("//") { "" } else { line })
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                ""
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -163,7 +179,10 @@ pub(super) fn owning_crate<'a>(
         .components()
         .filter_map(|part| match part {
             Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => None,
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => None,
         })
         .collect();
     if parts.len() < 2 || parts.first().map(String::as_str) != Some("crates") {
@@ -221,19 +240,30 @@ mod tests {
     fn ignored_build_output_is_not_source_and_a_new_file_is() -> TestResult {
         let scratch = Scratch::new()?;
         let repo = &scratch.root;
-        if !Command::new("git").arg("init").arg("-q").arg(repo).status()?.success() {
+        if !Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(repo)
+            .status()?
+            .success()
+        {
             return Err("git init failed".into());
         }
         fs::write(repo.join(".gitignore"), "target/\n")?;
         let kept = repo.join("crates/demo/tests/unstaged.rs");
-        let generated = repo.join("crates/demo/tests/fixtures/app/target/debug/build/out/private.rs");
+        let generated =
+            repo.join("crates/demo/tests/fixtures/app/target/debug/build/out/private.rs");
         for path in [&kept, &generated] {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::write(path, "use serde_core::Serialize;\n")?;
         }
-        assert_eq!(source_files(repo)?, vec![kept], "only the repository's own file");
+        assert_eq!(
+            source_files(repo)?,
+            vec![kept],
+            "only the repository's own file"
+        );
         Ok(())
     }
 
@@ -242,17 +272,27 @@ mod tests {
         let scratch = Scratch::new()?;
         let path = scratch.root.join("a.rs");
         fs::write(&path, "let a = 1;\n  // use serde::Value;\nlet b = 2;\n")?;
-        assert_eq!(cleaned_text(&path)?, "let a = 1;\n\nlet b = 2;", "the comment line is empty");
+        assert_eq!(
+            cleaned_text(&path)?,
+            "let a = 1;\n\nlet b = 2;",
+            "the comment line is empty"
+        );
         Ok(())
     }
 
     #[test]
     fn a_source_file_belongs_to_the_crate_of_its_directory() {
-        let by_directory: BTreeMap<String, String> =
-            [("fake".to_owned(), "lgwks_fake".to_owned())].into_iter().collect();
+        let by_directory: BTreeMap<String, String> = [("fake".to_owned(), "lgwks_fake".to_owned())]
+            .into_iter()
+            .collect();
         let repo = Path::new("/repo");
         assert_eq!(
-            owning_crate(repo, Path::new("/repo/crates/fake/src/lib.rs"), &by_directory).map(String::as_str),
+            owning_crate(
+                repo,
+                Path::new("/repo/crates/fake/src/lib.rs"),
+                &by_directory
+            )
+            .map(String::as_str),
             Some("lgwks_fake"),
             "the directory names the crate"
         );

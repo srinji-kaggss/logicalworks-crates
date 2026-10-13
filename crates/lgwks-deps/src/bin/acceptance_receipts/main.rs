@@ -49,8 +49,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 use junit::{Outcomes, is_asked_for, junit_command, match_outcome, merge_junit, run_nextest};
 use render::{
-    Header, Row, committed_table, export_json, filter_expression, first_difference, load_rows, partial_rows, passed_count, py_float,
-    render_table, replace_table,
+    Header, Row, committed_table, export_json, filter_expression, first_difference, load_rows,
+    partial_rows, passed_count, py_float, render_table, replace_table,
 };
 use store::{NewRun, Run, Store, Tested, connect};
 
@@ -121,7 +121,10 @@ struct Args {
 }
 
 /// The value after a flag.
-fn flag_value<'argument>(remaining: &mut impl Iterator<Item = &'argument String>, flag: &str) -> Result<String, Failure> {
+fn flag_value<'argument>(
+    remaining: &mut impl Iterator<Item = &'argument String>,
+    flag: &str,
+) -> Result<String, Failure> {
     match remaining.next() {
         Some(found) => Ok(found.clone()),
         None => Err(Failure(format!("{flag} needs a value"))),
@@ -163,7 +166,8 @@ fn parse_args(arguments: &[String]) -> Result<Args, Failure> {
             "--export" => args.export = Some(flag_value(&mut remaining, "--export")?),
             "--platform" => args.platform = Some(flag_value(&mut remaining, "--platform")?),
             "--from-junit" => {
-                args.from_junit.push(PathBuf::from(flag_value(&mut remaining, "--from-junit")?));
+                args.from_junit
+                    .push(PathBuf::from(flag_value(&mut remaining, "--from-junit")?));
                 while let Some(next) = remaining.next_if(|candidate| !candidate.starts_with("--")) {
                     args.from_junit.push(PathBuf::from(next));
                 }
@@ -176,7 +180,12 @@ fn parse_args(arguments: &[String]) -> Result<Args, Failure> {
 
 /// What `program` prints for `arguments`, trimmed, if it succeeds.
 fn printed(program: &str, arguments: &[&str], root: &Path) -> Option<String> {
-    let output = Command::new(program).args(arguments).current_dir(root).stdin(Stdio::null()).output().ok()?;
+    let output = Command::new(program)
+        .args(arguments)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
@@ -215,9 +224,29 @@ fn default_db_path() -> PathBuf {
 }
 
 /// Writes a line, logging a failure to write.
-fn say(stream: &mut impl Write, text: &str) {
+fn say(stream: &mut dyn Write, text: &str) {
     if let Err(error) = writeln!(stream, "{text}") {
         lgwks_std::trace::debug!(%error, "a line could not be written");
+    }
+}
+
+/// The two output streams of a run.
+struct Streams<'sink> {
+    /// Standard output.
+    out: &'sink mut dyn Write,
+    /// Standard error.
+    err: &'sink mut dyn Write,
+}
+
+impl Streams<'_> {
+    /// A line on standard output.
+    fn tell(&mut self, text: &str) {
+        say(self.out, text);
+    }
+
+    /// A line on standard error.
+    fn warn(&mut self, text: &str) {
+        say(self.err, text);
     }
 }
 
@@ -256,7 +285,7 @@ fn platform_of(args: &Args) -> String {
 }
 
 /// `--check`: the committed table must be what the map and the receipt render.
-fn check_table(plan: &Plan<'_>, store: &Store, out: &mut impl Write, err: &mut impl Write) -> Result<u8, Failure> {
+fn check_table(plan: &Plan<'_>, store: &Store, streams: &mut Streams<'_>) -> Result<u8, Failure> {
     let args = plan.args;
     let platform = platform_of(args);
     let spec_path = args.root.join(&args.spec);
@@ -269,27 +298,21 @@ fn check_table(plan: &Plan<'_>, store: &Store, out: &mut impl Write, err: &mut i
     let wanted = render_table(plan.rows, &run, &results, plan.head);
     let found = committed_table(&spec_text)?;
     if found != wanted {
-        say(
-            err,
-            &format!(
-                "acceptance-receipts: the committed per-row table in {} is not what the map and the receipt render. Re-record with --write-table and commit the result.",
-                args.spec
-            ),
-        );
+        streams.warn(&format!(
+            "acceptance-receipts: the committed per-row table in {} is not what the map and the receipt render. Re-record with --write-table and commit the result.",
+            args.spec
+        ));
         for line in first_difference(&found, &wanted) {
-            say(err, &format!("  {line}"));
+            streams.warn(&format!("  {line}"));
         }
         return Ok(1);
     }
-    say(
-        out,
-        &format!(
-            "acceptance-receipts: the committed table in {} matches the map and the receipt for {} in {}",
-            args.spec,
-            head_of(plan.revision, 8),
-            plan.db_path.display()
-        ),
-    );
+    streams.tell(&format!(
+        "acceptance-receipts: the committed table in {} matches the map and the receipt for {} in {}",
+        args.spec,
+        head_of(plan.revision, 8),
+        plan.db_path.display()
+    ));
     Ok(0)
 }
 
@@ -309,7 +332,8 @@ struct Observation {
 fn observe(plan: &Plan<'_>) -> Result<Observation, Failure> {
     let args = plan.args;
     if args.from_junit.is_empty() {
-        let (outcomes, elapsed) = run_nextest(&args.root, plan.expression, &args.package, &args.features)?;
+        let (outcomes, elapsed) =
+            run_nextest(&args.root, plan.expression, &args.package, &args.features)?;
         return Ok(Observation {
             outcomes,
             elapsed,
@@ -365,7 +389,7 @@ fn rounded(seconds: f64) -> f64 {
 }
 
 /// Records a run, then writes and prints what was asked for.
-fn record(plan: &Plan<'_>, store: &Store, out: &mut impl Write, err: &mut impl Write) -> Result<u8, Failure> {
+fn record(plan: &Plan<'_>, store: &Store, streams: &mut Streams<'_>) -> Result<u8, Failure> {
     let args = plan.args;
     let observation = observe(plan)?;
     let (results, failures) = judge(plan.rows, &observation.outcomes);
@@ -389,13 +413,13 @@ fn record(plan: &Plan<'_>, store: &Store, out: &mut impl Write, err: &mut impl W
     )?;
     let run = store.read_run(plan.revision, &args.features, &observation.platform)?;
     let stored = store.read_results(plan.revision, &args.features, &observation.platform)?;
-    report(plan, &observation, &run, &stored, out, err)?;
+    report(plan, &observation, &run, &stored, streams)?;
     if failures.is_empty() {
         return Ok(0);
     }
-    say(err, &format!("named tests not passing: {}", failures.len()));
+    streams.warn(&format!("named tests not passing: {}", failures.len()));
     for failure in failures.iter().take(20) {
-        say(err, &format!("  {failure}"));
+        streams.warn(&format!("  {failure}"));
     }
     Ok(1)
 }
@@ -435,13 +459,16 @@ fn report(
     observation: &Observation,
     run: &Run,
     stored: &[Tested],
-    out: &mut impl Write,
-    err: &mut impl Write,
+    streams: &mut Streams<'_>,
 ) -> Result<(), Failure> {
     let args = plan.args;
     let requested: usize = plan.rows.iter().map(|row| row.tests.len()).sum();
     let passed: usize = plan.rows.iter().map(|row| passed_count(row, stored)).sum();
-    let asked: Vec<String> = plan.rows.iter().flat_map(|row| row.tests.iter().cloned()).collect();
+    let asked: Vec<String> = plan
+        .rows
+        .iter()
+        .flat_map(|row| row.tests.iter().cloned())
+        .collect();
     let mut unrequested: Vec<&str> = observation
         .outcomes
         .iter()
@@ -451,42 +478,43 @@ fn report(
     unrequested.sort_unstable();
     unrequested.dedup();
     if !unrequested.is_empty() && args.from_junit.is_empty() {
-        say(
-            err,
-            &format!(
-                "acceptance-receipts: {} test(s) the filter ran that no row names: {}",
-                unrequested.len(),
-                unrequested.join(", ")
-            ),
-        );
+        streams.warn(&format!(
+            "acceptance-receipts: {} test(s) the filter ran that no row names: {}",
+            unrequested.len(),
+            unrequested.join(", ")
+        ));
     }
     if args.write_table {
         write_table(plan, run, stored)?;
-        say(out, &format!("rewrote the generated table in {}", args.spec));
+        streams.tell(&format!("rewrote the generated table in {}", args.spec));
     }
     if let Some(path) = args.export.as_deref() {
         write_export(plan, path, run, stored)?;
-        say(out, &format!("exported the receipt for {} to {path}", head_of(plan.revision, 8)));
+        streams.tell(&format!(
+            "exported the receipt for {} to {path}",
+            head_of(plan.revision, 8)
+        ));
     }
     let partial = partial_rows(plan.rows, stored, plan.revision, plan.head);
-    let partial_names = if partial.is_empty() { "-".to_owned() } else { partial.join(",") };
-    say(
-        out,
-        &format!(
-            "receipt {} revision={} rows={} tests_passed={passed}/{requested} rows_still_partial={} partial={partial_names} wall={}s spec={}",
-            plan.db_path.display(),
-            plan.revision,
-            plan.rows.len(),
-            partial.len(),
-            py_float(rounded(observation.elapsed)),
-            plan.header.spec
-        ),
-    );
+    let partial_names = if partial.is_empty() {
+        "-".to_owned()
+    } else {
+        partial.join(",")
+    };
+    streams.tell(&format!(
+        "receipt {} revision={} rows={} tests_passed={passed}/{requested} rows_still_partial={} partial={partial_names} wall={}s spec={}",
+        plan.db_path.display(),
+        plan.revision,
+        plan.rows.len(),
+        partial.len(),
+        py_float(rounded(observation.elapsed)),
+        plan.header.spec
+    ));
     Ok(())
 }
 
 /// Runs with `arguments` and returns the exit status.
-fn execute(arguments: &[String], out: &mut impl Write, err: &mut impl Write) -> Result<u8, Failure> {
+fn execute(arguments: &[String], streams: &mut Streams<'_>) -> Result<u8, Failure> {
     let args = parse_args(arguments)?;
     let (header, rows) = load_rows(&args.root.join(&args.map))?;
     let expression = filter_expression(&rows)?;
@@ -504,13 +532,10 @@ fn execute(arguments: &[String], out: &mut impl Write, err: &mut impl Write) -> 
         None => default_db_path(),
     };
     if args.dry_run {
-        say(
-            out,
-            &format!(
-                "cargo nextest run --locked -p {} --features {} --message-format libtest-json-plus --no-fail-fast -E '{expression}'",
-                args.package, args.features
-            ),
-        );
+        streams.tell(&format!(
+            "cargo nextest run --locked -p {} --features {} --message-format libtest-json-plus --no-fail-fast -E '{expression}'",
+            args.package, args.features
+        ));
         return Ok(0);
     }
     let store = connect(&db_path)?;
@@ -524,9 +549,9 @@ fn execute(arguments: &[String], out: &mut impl Write, err: &mut impl Write) -> 
         expression: &expression,
     };
     if args.check {
-        return check_table(&plan, &store, out, err);
+        return check_table(&plan, &store, streams);
     }
-    record(&plan, &store, out, err)
+    record(&plan, &store, streams)
 }
 
 fn main() -> ExitCode {
@@ -534,10 +559,14 @@ fn main() -> ExitCode {
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
     let (mut out, mut err) = (stdout.lock(), stderr.lock());
-    match execute(&arguments, &mut out, &mut err) {
+    let mut streams = Streams {
+        out: &mut out,
+        err: &mut err,
+    };
+    match execute(&arguments, &mut streams) {
         Ok(code) => ExitCode::from(code),
         Err(failure) => {
-            say(&mut err, &format!("acceptance-receipts: {failure}"));
+            streams.warn(&format!("acceptance-receipts: {failure}"));
             ExitCode::from(2)
         }
     }

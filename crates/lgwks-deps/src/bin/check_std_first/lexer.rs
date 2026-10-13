@@ -62,7 +62,11 @@ fn blank(out: &mut [char], start: usize, end: usize) {
 
 /// The index of the first `target` in `chars` at or after `from`, else `chars.len()`.
 fn find_char_or_end(chars: &[char], target: char, from: usize) -> usize {
-    match chars.iter().skip(from).position(|candidate| *candidate == target) {
+    match chars
+        .iter()
+        .skip(from)
+        .position(|candidate| *candidate == target)
+    {
         Some(offset) => from.saturating_add(offset),
         None => chars.len(),
     }
@@ -145,7 +149,11 @@ pub(super) fn code_only(text: &str) -> String {
                 } else {
                     index.saturating_add(2)
                 };
-                let end = match chars.iter().skip(from).position(|candidate| *candidate == '\'') {
+                let end = match chars
+                    .iter()
+                    .skip(from)
+                    .position(|candidate| *candidate == '\'')
+                {
                     Some(offset) => from.saturating_add(offset).saturating_add(1),
                     None => length,
                 };
@@ -296,7 +304,10 @@ fn use_at(code: &str, start: usize) -> Option<(String, usize)> {
         return None;
     }
     let (body, _) = spaced.split_once(';')?;
-    let consumed = code.len().saturating_sub(spaced.len()).saturating_add(body.len());
+    let consumed = code
+        .len()
+        .saturating_sub(spaced.len())
+        .saturating_add(body.len());
     Some((body.to_owned(), consumed.saturating_add(1)))
 }
 
@@ -428,7 +439,11 @@ mod tests {
     fn a_use_line_inside_a_multiline_string_is_not_a_statement() {
         // The refuse.rs shape that put prose into the crate list (#195).
         let source = "let m = \"flows stop here: \\\n    use `?` or `.or_fail()?` (permanent)\";\nuse std::fmt;\n";
-        assert_eq!(scan_uses(source), vec!["std::fmt"], "only the real statement");
+        assert_eq!(
+            scan_uses(source),
+            vec!["std::fmt"],
+            "only the real statement"
+        );
     }
 
     #[test]
@@ -438,9 +453,19 @@ mod tests {
                       let q = '\"'; let e = '\\''; // tokio::spawn\n\
                       use lgwks_std::json;\n";
         let code = code_only(source);
-        assert_eq!(scan_uses(source), vec!["lgwks_std::json"], "only the real statement");
-        assert!(!code.contains("tokio::"), "the comment and the raw string are blanked");
-        assert!(!code.contains("regex::"), "the nested block comment is blanked");
+        assert_eq!(
+            scan_uses(source),
+            vec!["lgwks_std::json"],
+            "only the real statement"
+        );
+        assert!(
+            !code.contains("tokio::"),
+            "the comment and the raw string are blanked"
+        );
+        assert!(
+            !code.contains("regex::"),
+            "the nested block comment is blanked"
+        );
     }
 
     #[test]
@@ -448,7 +473,11 @@ mod tests {
         let source = "fn f<'a>(x: &'a str) -> &'a str { serde_json::from_str(x) }\n\"\n\"";
         let code = code_only(source);
         assert_eq!(code.len(), source.len(), "offsets are preserved");
-        assert_eq!(code.matches('\n').count(), source.matches('\n').count(), "newlines are kept");
+        assert_eq!(
+            code.matches('\n').count(),
+            source.matches('\n').count(),
+            "newlines are kept"
+        );
         assert!(code.contains("serde_json::"), "code stays code");
         assert!(code.contains("'a"), "a lifetime is not a literal");
     }
@@ -456,26 +485,46 @@ mod tests {
     #[test]
     fn a_use_tree_reaches_its_roots_and_binds_its_names() {
         let (roots, names) = use_tree("std::collections::{BTreeMap, BTreeSet}", "");
-        assert_eq!(roots.into_iter().collect::<Vec<_>>(), vec!["std"], "one root");
+        assert_eq!(
+            roots.into_iter().collect::<Vec<_>>(),
+            vec!["std"],
+            "one root"
+        );
         assert_eq!(
             names.into_iter().collect::<Vec<_>>(),
             vec!["BTreeMap", "BTreeSet"],
             "both names bound"
         );
         let (roots, names) = use_tree("a::b::{self, c as d}", "");
-        assert_eq!(roots.into_iter().collect::<Vec<_>>(), vec!["a"], "self keeps the root");
-        assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["b", "d"], "self binds its parent");
+        assert_eq!(
+            roots.into_iter().collect::<Vec<_>>(),
+            vec!["a"],
+            "self keeps the root"
+        );
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["b", "d"],
+            "self binds its parent"
+        );
     }
 
     #[test]
     fn modules_and_path_reaches_are_found_at_word_boundaries() {
-        let code = "mod cap;\npub mod wire { }\nlet x = amod y;\nserde::a(); lgwks_deps::tokio::b();";
+        let code =
+            "mod cap;\npub mod wire { }\nlet x = amod y;\nserde::a(); lgwks_deps::tokio::b();";
         assert_eq!(
             module_names(code).into_iter().collect::<Vec<_>>(),
             vec!["cap", "wire"],
             "declared modules only"
         );
-        assert_eq!(path_reaches(code, "serde").len(), 1, "a bare path is a reach");
-        assert!(path_reaches(code, "tokio").is_empty(), "a path through the storefront is not");
+        assert_eq!(
+            path_reaches(code, "serde").len(),
+            1,
+            "a bare path is a reach"
+        );
+        assert!(
+            path_reaches(code, "tokio").is_empty(),
+            "a path through the storefront is not"
+        );
     }
 }

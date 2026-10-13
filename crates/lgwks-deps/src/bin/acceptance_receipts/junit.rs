@@ -152,7 +152,10 @@ fn read_tag(inside: &str) -> Option<Tag> {
     while !rest.is_empty() {
         let (key, after_key) = rest.split_once('=')?;
         let after_key = after_key.trim_start();
-        let quote = after_key.chars().next().filter(|ch| *ch == '"' || *ch == '\'')?;
+        let quote = after_key
+            .chars()
+            .next()
+            .filter(|ch| *ch == '"' || *ch == '\'')?;
         let (value, remainder) = tail_of(after_key, 1).split_once(quote)?;
         attributes.push((key.trim().to_owned(), decode_entities(value)));
         rest = remainder.trim_start();
@@ -178,7 +181,10 @@ struct Case {
 
 /// The attribute `key` of a tag.
 fn attribute(tag: &Tag, key: &str) -> Option<String> {
-    tag.attributes.iter().find(|pair| pair.0 == key).map(|pair| pair.1.clone())
+    tag.attributes
+        .iter()
+        .find(|pair| pair.0 == key)
+        .map(|pair| pair.1.clone())
 }
 
 /// Every `<testcase>` of a well-formed XML document, or why it is not one.
@@ -257,7 +263,10 @@ fn millis_of(path: &Path, time: Option<String>) -> Result<f64, Failure> {
         Some(seconds) => match seconds.trim().parse::<f64>() {
             Ok(parsed) => Ok(parsed * 1000.0),
             Err(_) => fail(
-                format!("{} has a testcase time {seconds:?} that is not a number", path.display()),
+                format!(
+                    "{} has a testcase time {seconds:?} that is not a number",
+                    path.display()
+                ),
                 "millis_of",
             ),
         },
@@ -276,15 +285,28 @@ fn millis_of(path: &Path, time: Option<String>) -> Result<f64, Failure> {
 pub(super) fn parse_junit(path: &Path) -> Result<Outcomes, Failure> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) => return fail(format!("{} is not readable JUnit XML: {error}", path.display()), "parse_junit"),
+        Err(error) => {
+            return fail(
+                format!("{} is not readable JUnit XML: {error}", path.display()),
+                "parse_junit",
+            );
+        }
     };
     let cases = match read_cases(&text) {
         Ok(cases) => cases,
-        Err(problem) => return fail(format!("{} is not readable JUnit XML: {problem}", path.display()), "parse_junit"),
+        Err(problem) => {
+            return fail(
+                format!("{} is not readable JUnit XML: {problem}", path.display()),
+                "parse_junit",
+            );
+        }
     };
     if cases.is_empty() {
         return fail(
-            format!("{} holds no <testcase> elements; it is not a test report", path.display()),
+            format!(
+                "{} holds no <testcase> elements; it is not a test report",
+                path.display()
+            ),
             "parse_junit",
         );
     }
@@ -312,7 +334,10 @@ pub(super) fn parse_junit(path: &Path) -> Result<Outcomes, Failure> {
     }
     if outcomes.is_empty() {
         return fail(
-            format!("{} names no testcase, so it cannot answer for any row", path.display()),
+            format!(
+                "{} names no testcase, so it cannot answer for any row",
+                path.display()
+            ),
             "parse_junit",
         );
     }
@@ -349,7 +374,10 @@ pub(super) fn merge_junit(paths: &[PathBuf]) -> Result<Outcomes, Failure> {
 
 /// What the CI job it is reading from actually ran.
 pub(super) fn junit_command(paths: &[PathBuf], package: &str, features: &str) -> String {
-    let names: Vec<String> = paths.iter().map(|path| path.display().to_string()).collect();
+    let names: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     format!(
         "cargo nextest run --locked -p {package} --features {features} --profile ci --partition count:4 (JUnit reports: {})",
         names.join(", ")
@@ -384,31 +412,66 @@ fn read_event(line: &str) -> Option<(String, Observed)> {
 ///
 /// `libtest-json-plus` is the only nextest format that reports each test by name as
 /// it finishes, so a crash or a kill cannot silently become a pass.
-pub(super) fn run_nextest(root: &Path, expression: &str, package: &str, features: &str) -> Result<(Outcomes, f64), Failure> {
+pub(super) fn run_nextest(
+    root: &Path,
+    expression: &str,
+    package: &str,
+    features: &str,
+) -> Result<(Outcomes, f64), Failure> {
     let started = Instant::now();
     let done = Command::new("cargo")
-        .args(["nextest", "run", "--locked", "-p", package, "--features", features])
-        .args(["--message-format", "libtest-json-plus", "--no-fail-fast", "-E", expression])
+        .args([
+            "nextest",
+            "run",
+            "--locked",
+            "-p",
+            package,
+            "--features",
+            features,
+        ])
+        .args([
+            "--message-format",
+            "libtest-json-plus",
+            "--no-fail-fast",
+            "-E",
+            expression,
+        ])
         .env("NEXTEST_EXPERIMENTAL_LIBTEST_JSON", "1")
         .current_dir(root)
         .stdin(Stdio::null())
         .output();
     let output = match done {
         Ok(output) => output,
-        Err(error) => return fail(format!("cargo nextest could not run: {error}"), "run_nextest"),
+        Err(error) => {
+            return fail(
+                format!("cargo nextest could not run: {error}"),
+                "run_nextest",
+            );
+        }
     };
     let elapsed = started.elapsed().as_secs_f64();
     let mut outcomes = Outcomes::new();
     let printed = String::from_utf8_lossy(&output.stdout).into_owned();
-    for line in printed.lines().map(str::trim).filter(|line| line.starts_with('{')) {
+    for line in printed
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('{'))
+    {
         if let Some((name, observed)) = read_event(line) {
             record(&mut outcomes, name, observed);
         }
     }
     if outcomes.is_empty() {
         let code = output.status.code();
-        let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(600).collect();
-        return fail(format!("nextest reported no per-test events; exit={code:?} stderr={stderr}"), "run_nextest");
+        let stderr: String = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .chars()
+            .take(600)
+            .collect();
+        return fail(
+            format!("nextest reported no per-test events; exit={code:?} stderr={stderr}"),
+            "run_nextest",
+        );
     }
     Ok((outcomes, elapsed))
 }
@@ -444,7 +507,11 @@ mod tests {
     }
 
     /// Writes a report into the fixture and returns its path.
-    fn write_report(fixture: &Fixture, name: &str, cases: &[(&str, &str)]) -> Result<PathBuf, Box<dyn Error>> {
+    fn write_report(
+        fixture: &Fixture,
+        name: &str,
+        cases: &[(&str, &str)],
+    ) -> Result<PathBuf, Box<dyn Error>> {
         let path = fixture.path().join(name);
         fs::write(&path, junit_document(cases))?;
         Ok(path)
@@ -484,13 +551,34 @@ mod tests {
         let path = write_report(
             &fixture,
             "one.xml",
-            &[("a::ok_case", "ok"), ("a::bad_case", "failed"), ("a::skipped_case", "ignored")],
+            &[
+                ("a::ok_case", "ok"),
+                ("a::bad_case", "failed"),
+                ("a::skipped_case", "ignored"),
+            ],
         )?;
         let found = parse_junit(&path)?;
-        let status = |name: &str| found.iter().find(|entry| entry.0 == name).map(|entry| entry.1.status.clone());
-        assert_eq!(status("a::ok_case").as_deref(), Some("ok"), "a bare testcase passes");
-        assert_eq!(status("a::bad_case").as_deref(), Some("failed"), "a failure child fails it");
-        assert_eq!(status("a::skipped_case").as_deref(), Some("ignored"), "a skipped child ignores it");
+        let status = |name: &str| {
+            found
+                .iter()
+                .find(|entry| entry.0 == name)
+                .map(|entry| entry.1.status.clone())
+        };
+        assert_eq!(
+            status("a::ok_case").as_deref(),
+            Some("ok"),
+            "a bare testcase passes"
+        );
+        assert_eq!(
+            status("a::bad_case").as_deref(),
+            Some("failed"),
+            "a failure child fails it"
+        );
+        assert_eq!(
+            status("a::skipped_case").as_deref(),
+            Some("ignored"),
+            "a skipped child ignores it"
+        );
         assert!(read_cases("<a><b></a></b>").is_err(), "crossed tags");
         assert!(read_cases("<a></a><b></b>").is_err(), "two roots");
         let hidden = read_cases("<a><!-- <testcase name=\"x\"> --></a>")?;
@@ -523,12 +611,36 @@ mod tests {
 
     #[test]
     fn a_map_entry_matches_its_nextest_spelling_and_nothing_longer() {
-        assert_eq!(names_for("it::a::one"), vec!["it::a::one".to_owned(), "a::one".to_owned()], "longest first");
+        assert_eq!(
+            names_for("it::a::one"),
+            vec!["it::a::one".to_owned(), "a::one".to_owned()],
+            "longest first"
+        );
         let outcomes = vec![
-            ("lgwks_bot::it$a::one".to_owned(), Observed { status: "ok".to_owned(), millis: 1.0 }),
-            ("lgwks_bot::it$a::one_more".to_owned(), Observed { status: "failed".to_owned(), millis: 2.0 }),
+            (
+                "lgwks_bot::it$a::one".to_owned(),
+                Observed {
+                    status: "ok".to_owned(),
+                    millis: 1.0,
+                },
+            ),
+            (
+                "lgwks_bot::it$a::one_more".to_owned(),
+                Observed {
+                    status: "failed".to_owned(),
+                    millis: 2.0,
+                },
+            ),
         ];
-        assert_eq!(match_outcome(&outcomes, "it::a::one").map(|found| found.status), Some("ok".to_owned()), "its own spelling");
-        assert_eq!(match_outcome(&outcomes, "it::a::on").map(|found| found.status), None, "a prefix is not a match");
+        assert_eq!(
+            match_outcome(&outcomes, "it::a::one").map(|found| found.status),
+            Some("ok".to_owned()),
+            "its own spelling"
+        );
+        assert_eq!(
+            match_outcome(&outcomes, "it::a::on").map(|found| found.status),
+            None,
+            "a prefix is not a match"
+        );
     }
 }

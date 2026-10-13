@@ -150,7 +150,9 @@ fn identity_offsets(text: &str) -> Vec<usize> {
 fn spawn_offsets(text: &str) -> Vec<usize> {
     text.match_indices(SPAWN_PATH)
         .filter(|&(index, _)| {
-            let after = tail(text, index.saturating_add(SPAWN_PATH.len())).chars().next();
+            let after = tail(text, index.saturating_add(SPAWN_PATH.len()))
+                .chars()
+                .next();
             !word_before(text, index) && !after.is_some_and(is_word)
         })
         .map(|(index, _)| index)
@@ -184,12 +186,35 @@ fn entropy_offsets(text: &str) -> Vec<usize> {
 /// positives gets switched off.
 pub(super) fn std_first_hits(text: &str) -> Vec<(usize, &'static str)> {
     let mut hits = Vec::new();
-    hits.extend(hex_offsets(text).into_iter().map(|offset| (offset, WHY_HEX)));
-    hits.extend(text.match_indices(BASE64_ALPHABET).map(|(offset, _)| (offset, WHY_BASE64)));
-    hits.extend(ffi_offsets(text).into_iter().map(|offset| (offset, WHY_FFI)));
-    hits.extend(identity_offsets(text).into_iter().map(|offset| (offset, WHY_ID)));
-    hits.extend(spawn_offsets(text).into_iter().map(|offset| (offset, WHY_SPAWN)));
-    hits.extend(entropy_offsets(text).into_iter().map(|offset| (offset, WHY_ENTROPY)));
+    hits.extend(
+        hex_offsets(text)
+            .into_iter()
+            .map(|offset| (offset, WHY_HEX)),
+    );
+    hits.extend(
+        text.match_indices(BASE64_ALPHABET)
+            .map(|(offset, _)| (offset, WHY_BASE64)),
+    );
+    hits.extend(
+        ffi_offsets(text)
+            .into_iter()
+            .map(|offset| (offset, WHY_FFI)),
+    );
+    hits.extend(
+        identity_offsets(text)
+            .into_iter()
+            .map(|offset| (offset, WHY_ID)),
+    );
+    hits.extend(
+        spawn_offsets(text)
+            .into_iter()
+            .map(|offset| (offset, WHY_SPAWN)),
+    );
+    hits.extend(
+        entropy_offsets(text)
+            .into_iter()
+            .map(|offset| (offset, WHY_ENTROPY)),
+    );
     hits
 }
 
@@ -231,7 +256,11 @@ fn storefront_paths(code: &str) -> Vec<String> {
             .chars()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
             .collect();
-        if first.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_') {
+        if first
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        {
             names.push(first);
         }
     }
@@ -251,8 +280,10 @@ pub(super) fn storefront_consumers(
     owned: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, AuditError> {
     let own_src = "crates/lgwks-deps/src/";
-    let mut consumers: BTreeMap<String, BTreeSet<String>> =
-        owned.iter().map(|name| (name.clone(), BTreeSet::new())).collect();
+    let mut consumers: BTreeMap<String, BTreeSet<String>> = owned
+        .iter()
+        .map(|name| (name.clone(), BTreeSet::new()))
+        .collect();
     for path in files {
         let relative = super::posix_relative(repo, path);
         let code = code_only(&cleaned_text(path)?);
@@ -371,16 +402,34 @@ mod tests {
     fn a_facade_path_in_another_crate_consumes_and_a_reexport_does_not() -> TestResult {
         let found = consumers_of(
             &[
-                ("crates/lgwks-deps/src/lib.rs", "pub use gpui::{self, App as GpuiApp};\npub use bevy_ecs;\n"),
-                ("crates/lgwks-deps/tests/fixtures/app/src/main.rs", "use lgwks_deps::gpui::App;\n"),
-                ("crates/lgwks-bot/src/ecs.rs", "use lgwks_deps::{bevy_ecs::{self, prelude::World}};\n"),
-                ("crates/lgwks-bot/src/note.rs", "// lgwks_deps::gpui\nlet s = \"lgwks_deps::gpui\";\n"),
+                (
+                    "crates/lgwks-deps/src/lib.rs",
+                    "pub use gpui::{self, App as GpuiApp};\npub use bevy_ecs;\n",
+                ),
+                (
+                    "crates/lgwks-deps/tests/fixtures/app/src/main.rs",
+                    "use lgwks_deps::gpui::App;\n",
+                ),
+                (
+                    "crates/lgwks-bot/src/ecs.rs",
+                    "use lgwks_deps::{bevy_ecs::{self, prelude::World}};\n",
+                ),
+                (
+                    "crates/lgwks-bot/src/note.rs",
+                    "// lgwks_deps::gpui\nlet s = \"lgwks_deps::gpui\";\n",
+                ),
             ],
             &["gpui", "bevy_ecs"],
         )?;
-        assert_eq!(found.get("gpui").map(BTreeSet::len), Some(0), "nothing consumes gpui");
         assert_eq!(
-            found.get("bevy_ecs").map(|users| users.iter().cloned().collect::<Vec<_>>()),
+            found.get("gpui").map(BTreeSet::len),
+            Some(0),
+            "nothing consumes gpui"
+        );
+        assert_eq!(
+            found
+                .get("bevy_ecs")
+                .map(|users| users.iter().cloned().collect::<Vec<_>>()),
             Some(vec!["crates/lgwks-bot/src/ecs.rs".to_owned()]),
             "the bot consumes bevy_ecs through the facade"
         );
@@ -391,17 +440,29 @@ mod tests {
     fn the_storefronts_own_source_past_lib_rs_consumes() -> TestResult {
         let found = consumers_of(
             &[
-                ("crates/lgwks-deps/src/scan.rs", "let f = syn::parse_file(t);\n"),
-                ("crates/lgwks-deps/src/report.rs", "let g = not_gpui::App::new();\n"),
+                (
+                    "crates/lgwks-deps/src/scan.rs",
+                    "let f = syn::parse_file(t);\n",
+                ),
+                (
+                    "crates/lgwks-deps/src/report.rs",
+                    "let g = not_gpui::App::new();\n",
+                ),
             ],
             &["syn", "gpui"],
         )?;
         assert_eq!(
-            found.get("syn").map(|users| users.iter().cloned().collect::<Vec<_>>()),
+            found
+                .get("syn")
+                .map(|users| users.iter().cloned().collect::<Vec<_>>()),
             Some(vec!["crates/lgwks-deps/src/scan.rs".to_owned()]),
             "scan.rs uses syn"
         );
-        assert_eq!(found.get("gpui").map(BTreeSet::len), Some(0), "a longer name is not gpui");
+        assert_eq!(
+            found.get("gpui").map(BTreeSet::len),
+            Some(0),
+            "a longer name is not gpui"
+        );
         Ok(())
     }
 
@@ -409,8 +470,22 @@ mod tests {
     fn the_marker_must_match_consumption_in_both_directions() {
         let approved: BTreeMap<String, Record> = [
             ("gpui", record("lgwks_deps", &["lgwks_deps"], "A GPU UI.")),
-            ("candle_core", record("lgwks_deps", &["lgwks_deps"], &format!("{POLICY_ONLY} tensors."))),
-            ("tokio", record("lgwks_deps", &["lgwks_deps"], &format!("{POLICY_ONLY} runtime."))),
+            (
+                "candle_core",
+                record(
+                    "lgwks_deps",
+                    &["lgwks_deps"],
+                    &format!("{POLICY_ONLY} tensors."),
+                ),
+            ),
+            (
+                "tokio",
+                record(
+                    "lgwks_deps",
+                    &["lgwks_deps"],
+                    &format!("{POLICY_ONLY} runtime."),
+                ),
+            ),
             ("syn", record("lgwks_deps", &["lgwks_deps"], "Parsing.")),
         ]
         .into_iter()
@@ -423,18 +498,30 @@ mod tests {
             ("syn", vec!["x.rs"]),
         ]
         .into_iter()
-        .map(|(name, users)| (name.to_owned(), users.into_iter().map(str::to_owned).collect()))
+        .map(|(name, users)| {
+            (
+                name.to_owned(),
+                users.into_iter().map(str::to_owned).collect(),
+            )
+        })
         .collect();
         let found = policy_only_findings(&approved, &consumers);
-        assert_eq!(found.len(), 2, "one unmarked-unused, one marked-used: {found:?}");
+        assert_eq!(
+            found.len(),
+            2,
+            "one unmarked-unused, one marked-used: {found:?}"
+        );
         assert!(
-            found.iter().any(|line| line.contains("`gpui` — POLICY-ONLY: no workspace code consumes")),
+            found
+                .iter()
+                .any(|line| line.contains("`gpui` — POLICY-ONLY: no workspace code consumes")),
             "{found:?}"
         );
         assert!(
             found
                 .iter()
-                .any(|line| line.contains("`tokio` — POLICY-ONLY: marked") && line.contains("crates/lgwks-bot/src/lib.rs")),
+                .any(|line| line.contains("`tokio` — POLICY-ONLY: marked")
+                    && line.contains("crates/lgwks-bot/src/lib.rs")),
             "{found:?}"
         );
     }
@@ -443,7 +530,10 @@ mod tests {
     fn only_edges_admitting_the_storefront_alone_are_judged() {
         let approved: BTreeMap<String, Record> = [
             ("gpui", record("lgwks_deps", &["lgwks_deps"], "")),
-            ("proptest", record("lgwks_deps", &["lgwks_std", "lgwks_deps"], "")),
+            (
+                "proptest",
+                record("lgwks_deps", &["lgwks_std", "lgwks_deps"], ""),
+            ),
             ("regex", record("lgwks_std", &["lgwks_std"], "")),
         ]
         .into_iter()
@@ -461,23 +551,46 @@ mod tests {
         // Each pattern is split across a `concat!` so this test file does not
         // itself contain what the audit looks for.
         let text = concat!(
-            "format!(\"{:0", "2x}\", b); ",
-            "ext", "ern \"C\"fn; ",
-            "std::proc", "ess::id(); ",
-            "std::thr", "ead::spawn(f); ",
-            "ra", "nd::random(); ",
-            "let s = std::thr", "ead::spawnx();"
+            "format!(\"{:0",
+            "2x}\", b); ",
+            "ext",
+            "ern \"C\"fn; ",
+            "std::proc",
+            "ess::id(); ",
+            "std::thr",
+            "ead::spawn(f); ",
+            "ra",
+            "nd::random(); ",
+            "let s = std::thr",
+            "ead::spawnx();"
         );
         let hits = std_first_hits(text);
         let reasons: Vec<&str> = hits.iter().map(|&(_, why)| why).collect();
-        assert!(reasons.iter().any(|why| why.contains("hand-formatted hex")), "{reasons:?}");
-        assert!(reasons.iter().any(|why| why.contains("raw FFI")), "{reasons:?}");
-        assert!(reasons.iter().any(|why| why.contains("used as an identity")), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|why| why.contains("hand-formatted hex")),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|why| why.contains("raw FFI")),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|why| why.contains("used as an identity")),
+            "{reasons:?}"
+        );
         assert_eq!(
-            reasons.iter().filter(|why| why.contains("untracked thread")).count(),
+            reasons
+                .iter()
+                .filter(|why| why.contains("untracked thread"))
+                .count(),
             1,
             "spawn is found and spawnx is not"
         );
-        assert!(reasons.iter().any(|why| why.contains("entropy")), "{reasons:?}");
+        assert!(
+            reasons.iter().any(|why| why.contains("entropy")),
+            "{reasons:?}"
+        );
     }
 }

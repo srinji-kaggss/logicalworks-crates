@@ -121,7 +121,11 @@ fn quote(text: &str) -> String {
 
 /// A real number as an SQL literal.
 fn real(value: f64) -> String {
-    if value.is_finite() { format!("{value:?}") } else { "0.0".to_owned() }
+    if value.is_finite() {
+        format!("{value:?}")
+    } else {
+        "0.0".to_owned()
+    }
 }
 
 /// Runs `sqlite3` with `arguments`, `script` on its input, and returns what it printed.
@@ -152,7 +156,10 @@ fn sqlite(arguments: &[&str], script: &str) -> Result<String, Failure> {
     };
     if !output.status.success() {
         return fail(
-            format!("sqlite3 refused: {}", String::from_utf8_lossy(&output.stderr).trim()),
+            format!(
+                "sqlite3 refused: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
             "sqlite",
         );
     }
@@ -268,7 +275,12 @@ impl Store {
     /// that by picking one would let the wrong run satisfy the claim. A CI job reads
     /// back a Linux receipt from a machine that is not Linux, and a lookup keyed on
     /// the reader would find nothing.
-    pub(super) fn read_run(&self, revision: &str, feature_set: &str, platform: &str) -> Result<Run, Failure> {
+    pub(super) fn read_run(
+        &self,
+        revision: &str,
+        feature_set: &str,
+        platform: &str,
+    ) -> Result<Run, Failure> {
         let rows = self.query(&format!(
             "SELECT revision, platform, feature_set, package, command, wall_seconds, run_at FROM run \
              WHERE revision = {} AND platform = {} AND feature_set = {};",
@@ -294,7 +306,15 @@ impl Store {
             row.get("wall_seconds").and_then(Value::as_f64),
             text("run_at"),
         ) {
-            (Some(revision), Some(platform), Some(feature_set), Some(package), Some(command), Some(wall_seconds), Some(run_at)) => Ok(Run {
+            (
+                Some(revision),
+                Some(platform),
+                Some(feature_set),
+                Some(package),
+                Some(command),
+                Some(wall_seconds),
+                Some(run_at),
+            ) => Ok(Run {
                 revision,
                 platform,
                 feature_set,
@@ -308,7 +328,12 @@ impl Store {
     }
 
     /// Every `(row_id, test)` outcome the revision recorded.
-    pub(super) fn read_results(&self, revision: &str, feature_set: &str, platform: &str) -> Result<Vec<Tested>, Failure> {
+    pub(super) fn read_results(
+        &self,
+        revision: &str,
+        feature_set: &str,
+        platform: &str,
+    ) -> Result<Vec<Tested>, Failure> {
         let rows = self.query(&format!(
             "SELECT row_id, test, status, duration_ms FROM test_result \
              WHERE revision = {} AND platform = {} AND feature_set = {};",
@@ -318,17 +343,25 @@ impl Store {
         ))?;
         if rows.is_empty() {
             return fail(
-                format!("the receipt for revision {revision} records no test results; a partial receipt cannot render a table"),
+                format!(
+                    "the receipt for revision {revision} records no test results; a partial receipt cannot render a table"
+                ),
                 "read_results",
             );
         }
         let mut found = Vec::new();
         for row in &rows {
             let text = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
-            let (Some(row_id), Some(test), Some(status), Some(duration_ms)) =
-                (text("row_id"), text("test"), text("status"), row.get("duration_ms").and_then(Value::as_f64))
-            else {
-                return fail("a recorded result is missing a column".to_owned(), "read_results");
+            let (Some(row_id), Some(test), Some(status), Some(duration_ms)) = (
+                text("row_id"),
+                text("test"),
+                text("status"),
+                row.get("duration_ms").and_then(Value::as_f64),
+            ) else {
+                return fail(
+                    "a recorded result is missing a column".to_owned(),
+                    "read_results",
+                );
             };
             found.push(Tested {
                 row_id,
@@ -343,8 +376,15 @@ impl Store {
     /// How many rows a counting query returns; for the idempotence tests.
     #[cfg(test)]
     pub(super) fn count(&self, table: &str, revision: &str) -> Result<u64, Failure> {
-        let rows = self.query(&format!("SELECT COUNT(*) AS n FROM {table} WHERE revision = {};", quote(revision)))?;
-        match rows.first().and_then(|row| row.get("n")).and_then(Value::as_u64) {
+        let rows = self.query(&format!(
+            "SELECT COUNT(*) AS n FROM {table} WHERE revision = {};",
+            quote(revision)
+        ))?;
+        match rows
+            .first()
+            .and_then(|row| row.get("n"))
+            .and_then(Value::as_u64)
+        {
             Some(count) => Ok(count),
             None => fail("a count was not a number".to_owned(), "count"),
         }
@@ -406,8 +446,16 @@ mod tests {
         let store = connect(&fixture.path().join("receipts.sqlite"))?;
         store.record_run(&run_at("rev-one"), &three_results())?;
         store.record_run(&run_at("rev-one"), &three_results())?;
-        assert_eq!(store.count("run", "rev-one")?, 1, "a re-run overwrites its own run, not adds a second");
-        assert_eq!(store.count("test_result", "rev-one")?, 3, "and does not duplicate the test results");
+        assert_eq!(
+            store.count("run", "rev-one")?,
+            1,
+            "a re-run overwrites its own run, not adds a second"
+        );
+        assert_eq!(
+            store.count("test_result", "rev-one")?,
+            3,
+            "and does not duplicate the test results"
+        );
         Ok(())
     }
 
@@ -417,10 +465,25 @@ mod tests {
         let store = connect(&fixture.path().join("receipts.sqlite"))?;
         store.record_run(&run_at("rev-one"), &three_results())?;
         store.record_run(&run_at("rev-two"), &three_results())?;
-        assert_eq!(store.read_run("rev-one", "full", "Darwin-arm64")?.revision, "rev-one", "the first");
-        assert_eq!(store.read_run("rev-two", "full", "Darwin-arm64")?.revision, "rev-two", "the second");
-        let absent = store.read_run("rev-absent", "full", "Darwin-arm64").err().map(|failure| failure.0);
-        assert_eq!(absent.map(|text| text.contains("rev-absent")), Some(true), "a missing revision is named");
+        assert_eq!(
+            store.read_run("rev-one", "full", "Darwin-arm64")?.revision,
+            "rev-one",
+            "the first"
+        );
+        assert_eq!(
+            store.read_run("rev-two", "full", "Darwin-arm64")?.revision,
+            "rev-two",
+            "the second"
+        );
+        let absent = store
+            .read_run("rev-absent", "full", "Darwin-arm64")
+            .err()
+            .map(|failure| failure.0);
+        assert_eq!(
+            absent.map(|text| text.contains("rev-absent")),
+            Some(true),
+            "a missing revision is named"
+        );
         Ok(())
     }
 
@@ -430,7 +493,11 @@ mod tests {
         let path = fixture.path().join("not-a-database.sqlite");
         fs::write(&path, b"this is not a sqlite file at all")?;
         let refused = connect(&path).err().map(|failure| failure.0);
-        assert_eq!(refused.map(|text| text.contains("not a SQLite database")), Some(true), "a foreign file");
+        assert_eq!(
+            refused.map(|text| text.contains("not a SQLite database")),
+            Some(true),
+            "a foreign file"
+        );
         Ok(())
     }
 
@@ -442,8 +509,15 @@ mod tests {
             "INSERT INTO run (seq, revision, platform, feature_set, package, command, wall_seconds, run_at) \
              VALUES (99, 'rev-partial', 'Darwin-arm64', 'full', 'lgwks_bot', 'cmd', 1.0, '2026-10-05T00:00:00Z');",
         )?;
-        let refused = store.read_results("rev-partial", "full", "Darwin-arm64").err().map(|failure| failure.0);
-        assert_eq!(refused.map(|text| text.contains("records no test results")), Some(true), "no results");
+        let refused = store
+            .read_results("rev-partial", "full", "Darwin-arm64")
+            .err()
+            .map(|failure| failure.0);
+        assert_eq!(
+            refused.map(|text| text.contains("records no test results")),
+            Some(true),
+            "no results"
+        );
         Ok(())
     }
 }

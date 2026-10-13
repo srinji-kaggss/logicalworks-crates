@@ -107,7 +107,10 @@ fn bullets(text: &str) -> Vec<(String, String)> {
         }
         let body_start = text.len().saturating_sub(after_run.len()).saturating_add(2);
         let body_rest = tail(text, body_start);
-        let end = [body_rest.find("\n- **"), body_rest.find("\n\n")].into_iter().flatten().min();
+        let end = [body_rest.find("\n- **"), body_rest.find("\n\n")]
+            .into_iter()
+            .flatten()
+            .min();
         let body = match end {
             Some(stop) => head(body_rest, stop),
             None => body_rest,
@@ -153,7 +156,10 @@ fn backticked(clause: &str) -> Vec<String> {
 
 /// Whether the text after `at` in `text` does not continue a word.
 fn word_ends_at(text: &str, at: usize) -> bool {
-    !tail(text, at).chars().next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    !tail(text, at)
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 /// Whether the clause writes `` `reference` lane ``.
@@ -182,17 +188,24 @@ fn all_of(text: &str, allowed: impl Fn(char) -> bool) -> bool {
 /// Whether `text` is `[A-Za-z0-9_]+(::[A-Za-z0-9_]+)+`.
 fn is_qualified_path(text: &str) -> bool {
     let parts: Vec<&str> = text.split("::").collect();
-    parts.len() >= 2 && parts.iter().all(|part| all_of(part, |ch| ch.is_ascii_alphanumeric() || ch == '_'))
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|part| all_of(part, |ch| ch.is_ascii_alphanumeric() || ch == '_'))
 }
 
 /// Whether `text` is `[a-z0-9_]+`.
 fn is_bare_name(text: &str) -> bool {
-    all_of(text, |ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    all_of(text, |ch| {
+        ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'
+    })
 }
 
 /// Whether `text` is `[a-z0-9-]+`.
 fn is_dashed_name(text: &str) -> bool {
-    all_of(text, |ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    all_of(text, |ch| {
+        ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'
+    })
 }
 
 /// The `scripts/...` path of a script reference, with an optional interpreter.
@@ -208,7 +221,9 @@ fn script_path(reference: &str) -> Option<&str> {
         None => reference,
     };
     let file = path.strip_prefix("scripts/")?;
-    if all_of(file, |ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')) {
+    if all_of(file, |ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')
+    }) {
         Some(path)
     } else {
         None
@@ -217,8 +232,14 @@ fn script_path(reference: &str) -> Option<&str> {
 
 /// The `tests/...rs` or `src/...rs` path of a test-file reference.
 fn test_file_path(reference: &str) -> Option<&str> {
-    let inner = reference.strip_prefix("tests/").or_else(|| reference.strip_prefix("src/"))?;
-    if inner.ends_with(".rs") && all_of(inner, |ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/' | '-')) {
+    let inner = reference
+        .strip_prefix("tests/")
+        .or_else(|| reference.strip_prefix("src/"))?;
+    if inner.ends_with(".rs")
+        && all_of(inner, |ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/' | '-')
+        })
+    {
         Some(reference)
     } else {
         None
@@ -227,9 +248,13 @@ fn test_file_path(reference: &str) -> Option<&str> {
 
 /// Whether `text` holds a word of 7 to 40 lowercase hex digits, as a commit id does.
 fn has_commit_id(text: &str) -> bool {
-    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')).any(|word| {
-        (7..=40).contains(&word.len()) && word.chars().all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
-    })
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .any(|word| {
+            (7..=40).contains(&word.len())
+                && word
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+        })
 }
 
 /// What the lane has learned while checking references.
@@ -266,7 +291,10 @@ fn declared_binaries(root: &Path) -> BTreeSet<String> {
         let Ok(manifest) = std::fs::read_to_string(directory.join("Cargo.toml")) else {
             continue;
         };
-        for table in read_tables(&manifest).iter().filter(|table| table.path == "bin" && table.array) {
+        for table in read_tables(&manifest)
+            .iter()
+            .filter(|table| table.path == "bin" && table.array)
+        {
             if let Some(name) = text(table, "name") {
                 names.insert(name.to_owned());
             }
@@ -309,26 +337,43 @@ fn unresolved_item(evidence: &Evidence<'_>, name: &str, reference: &str) -> Stri
 }
 
 /// Checks one backticked `reference` of the invariant `name`.
-fn check_reference(evidence: &Evidence<'_>, name: &str, reference: &str, clause: &str, tally: &mut Tally) {
+fn check_reference(
+    evidence: &Evidence<'_>,
+    name: &str,
+    reference: &str,
+    clause: &str,
+    tally: &mut Tally,
+) {
     if evidence.lanes.contains(reference) && names_lane(clause, reference) {
         tally.count();
         return;
     }
     if has_lane_marker(clause) && is_dashed_name(reference) {
-        tally.missing.push(format!("{name}: `{reference}` is named as a lane but is not in scripts/gate-lanes.toml"));
+        tally.missing.push(format!(
+            "{name}: `{reference}` is named as a lane but is not in scripts/gate-lanes.toml"
+        ));
         return;
     }
     if is_qualified_path(reference) || is_bare_name(reference) {
         tally.count();
-        if !evidence.lanes.contains(reference) && resolution_candidates(evidence.modules, reference).is_empty() {
-            tally.missing.push(unresolved_item(evidence, name, reference));
+        if !evidence.lanes.contains(reference)
+            && resolution_candidates(evidence.modules, reference).is_empty()
+        {
+            tally
+                .missing
+                .push(unresolved_item(evidence, name, reference));
         }
         return;
     }
-    if let Some(lane) = reference.strip_suffix(" lane").filter(|front| is_dashed_name(front)) {
+    if let Some(lane) = reference
+        .strip_suffix(" lane")
+        .filter(|front| is_dashed_name(front))
+    {
         tally.count();
         if !evidence.lanes.contains(lane) {
-            tally.missing.push(format!("{name}: `{lane}` is not a lane in scripts/gate-lanes.toml"));
+            tally.missing.push(format!(
+                "{name}: `{lane}` is not a lane in scripts/gate-lanes.toml"
+            ));
         }
         return;
     }
@@ -337,17 +382,26 @@ fn check_reference(evidence: &Evidence<'_>, name: &str, reference: &str, clause:
         let target = evidence.root.join(script);
         if !target.exists() {
             if !has_successor_binary(evidence, script) {
-                tally.missing.push(format!("{name}: {script} does not exist"));
+                tally
+                    .missing
+                    .push(format!("{name}: {script} does not exist"));
             }
         } else if !is_executable_file(&target) {
-            tally.missing.push(format!("{name}: {script} is not executable, so the gate cannot run it"));
+            tally.missing.push(format!(
+                "{name}: {script} is not executable, so the gate cannot run it"
+            ));
         }
         return;
     }
     if let Some(suffix) = test_file_path(reference) {
         tally.count();
-        if !crate_directories(evidence.root).iter().any(|directory| directory.join(suffix).exists()) {
-            tally.missing.push(format!("{name}: {suffix} matches no test file under crates/"));
+        if !crate_directories(evidence.root)
+            .iter()
+            .any(|directory| directory.join(suffix).exists())
+        {
+            tally.missing.push(format!(
+                "{name}: {suffix} matches no test file under crates/"
+            ));
         }
         return;
     }
@@ -355,7 +409,10 @@ fn check_reference(evidence: &Evidence<'_>, name: &str, reference: &str, clause:
         .chars()
         .take_while(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || *ch == '-')
         .collect();
-    let spaced = tail(reference, first.len()).chars().next().is_some_and(char::is_whitespace);
+    let spaced = tail(reference, first.len())
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace);
     if !first.is_empty() && spaced && evidence.lanes.contains(&first) {
         tally.count();
     }
@@ -380,7 +437,10 @@ fn ids_between_stars(text: &str) -> BTreeSet<String> {
 /// The ids the authored register `contract/INVARIANTS.toml` declares.
 fn authored_ids(text: &str) -> BTreeSet<String> {
     text.lines()
-        .filter_map(|line| line.strip_prefix("id = \"").and_then(|rest| rest.split_once('"')))
+        .filter_map(|line| {
+            line.strip_prefix("id = \"")
+                .and_then(|rest| rest.split_once('"'))
+        })
         .filter(|found| found.0.starts_with("INV-"))
         .map(|found| found.0.to_owned())
         .collect()
@@ -415,7 +475,9 @@ pub(super) fn invariants(context: &Context<'_>) -> Result<Verdict, GateError> {
             None => String::new(),
         };
         if clause.trim().is_empty() && !has_commit_id(&flattened) {
-            tally.missing.push(format!("{name}: no `enforced by:` clause and no `why:` commit to check"));
+            tally.missing.push(format!(
+                "{name}: no `enforced by:` clause and no `why:` commit to check"
+            ));
             continue;
         }
         for reference in backticked(&clause) {
@@ -429,7 +491,10 @@ pub(super) fn invariants(context: &Context<'_>) -> Result<Verdict, GateError> {
         .collect();
     let unregistered = prose.difference(&authored).count();
     let note = if unregistered == 0 {
-        format!("all {} prose invariants are in contract/INVARIANTS.toml", prose.len())
+        format!(
+            "all {} prose invariants are in contract/INVARIANTS.toml",
+            prose.len()
+        )
     } else {
         format!(
             "{unregistered} of {} prose invariants are not yet in contract/INVARIANTS.toml, so no gate checks them",
@@ -437,10 +502,15 @@ pub(super) fn invariants(context: &Context<'_>) -> Result<Verdict, GateError> {
         )
     };
     if !tally.missing.is_empty() {
-        return Ok(refuse(format!("INVARIANTS.md enforcement references do not resolve:\n{}", tally.missing.join("\n"))));
+        return Ok(refuse(format!(
+            "INVARIANTS.md enforcement references do not resolve:\n{}",
+            tally.missing.join("\n")
+        )));
     }
     if tally.referenced == 0 {
-        return Ok(refuse("INVARIANTS.md parsed zero enforcement references; the parser is broken".to_owned()));
+        return Ok(refuse(
+            "INVARIANTS.md parsed zero enforcement references; the parser is broken".to_owned(),
+        ));
     }
     Ok(pass(&format!(
         "{} INVARIANTS.md enforcement references resolve to real tests; {note}",
@@ -452,9 +522,9 @@ pub(super) fn invariants(context: &Context<'_>) -> Result<Verdict, GateError> {
 mod tests {
     use super::{backticked, bullets, has_commit_id, invariants, lane_ids, resolution_candidates};
     use crate::fixture::Fixture;
-    use crate::{Context, Verdict};
     use crate::modules::collect_module_paths;
     use crate::process::Children;
+    use crate::{Context, Verdict};
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
@@ -493,7 +563,11 @@ mod tests {
     /// tables, and the given further files.
     fn tree_of(register: &str, files: &[(&str, &str)]) -> Result<Fixture, Box<dyn Error>> {
         let fixture = Fixture::claim(&std::env::temp_dir(), "lgwks-invariants-test")?;
-        for entry in [("INVARIANTS.md", register), ("scripts/gate-lanes.toml", ""), ("contract/INVARIANTS.toml", "")] {
+        for entry in [
+            ("INVARIANTS.md", register),
+            ("scripts/gate-lanes.toml", ""),
+            ("contract/INVARIANTS.toml", ""),
+        ] {
             write_fixture(fixture.path(), entry.0, entry.1)?;
         }
         for entry in files {
@@ -505,7 +579,11 @@ mod tests {
     #[test]
     fn the_honest_register_resolves() -> TestResult {
         let verdict = lane(&repo())?;
-        assert_eq!(verdict.code, 0, "the shipped INVARIANTS.md must resolve: {}", verdict.detail);
+        assert_eq!(
+            verdict.code, 0,
+            "the shipped INVARIANTS.md must resolve: {}",
+            verdict.detail
+        );
         Ok(())
     }
 
@@ -527,9 +605,13 @@ mod tests {
     #[test]
     fn crate_directory_and_rust_path_spellings_are_one_module() -> TestResult {
         let modules = collect_module_paths(&repo())?;
-        assert!(!resolution_candidates(&modules, "lgwks_std::hex::decode_into").is_empty(), "both spellings");
         assert!(
-            !resolution_candidates(&modules, "strict_refuses_the_first_unreadable_directory").is_empty(),
+            !resolution_candidates(&modules, "lgwks_std::hex::decode_into").is_empty(),
+            "both spellings"
+        );
+        assert!(
+            !resolution_candidates(&modules, "strict_refuses_the_first_unreadable_directory")
+                .is_empty(),
             "a bare name"
         );
         Ok(())
@@ -541,12 +623,21 @@ mod tests {
             "",
             &[
                 ("crates/demo/src/lib.rs", "fn real_case() {}\n"),
-                ("crates/demo/INVARIANTS.md", "- **INV-DEMO-1** A rule. · enforced by: `no_such_case_anywhere`\n"),
+                (
+                    "crates/demo/INVARIANTS.md",
+                    "- **INV-DEMO-1** A rule. · enforced by: `no_such_case_anywhere`\n",
+                ),
             ],
         )?;
         let refused = lane(fixture.path())?;
         assert_eq!(refused.code, 1, "{}", refused.detail);
-        assert!(refused.detail.contains("INV-DEMO-1: `no_such_case_anywhere`"), "{}", refused.detail);
+        assert!(
+            refused
+                .detail
+                .contains("INV-DEMO-1: `no_such_case_anywhere`"),
+            "{}",
+            refused.detail
+        );
         write_fixture(
             fixture.path(),
             "crates/demo/INVARIANTS.md",
@@ -561,32 +652,61 @@ mod tests {
     fn a_retired_python_script_resolves_to_its_binary_only() -> TestResult {
         let fixture = tree_of(
             "- **INV-DEMO-2** A rule. · enforced by: `python3 scripts/check-demo.py`\n",
-            &[("crates/demo/src/lib.rs", ""), ("crates/demo/Cargo.toml", "[package]\nname = \"demo\"\n")],
+            &[
+                ("crates/demo/src/lib.rs", ""),
+                ("crates/demo/Cargo.toml", "[package]\nname = \"demo\"\n"),
+            ],
         )?;
         let without = lane(fixture.path())?;
-        assert_eq!(without.code, 1, "no binary of that name: {}", without.detail);
+        assert_eq!(
+            without.code, 1,
+            "no binary of that name: {}",
+            without.detail
+        );
         write_fixture(
             fixture.path(),
             "crates/demo/Cargo.toml",
             "[package]\nname = \"demo\"\n\n[[bin]]\nname = \"check-demo\"\npath = \"src/main.rs\"\n",
         )?;
         let with = lane(fixture.path())?;
-        assert_eq!(with.code, 0, "the binary replaced the script: {}", with.detail);
+        assert_eq!(
+            with.code, 0,
+            "the binary replaced the script: {}",
+            with.detail
+        );
         Ok(())
     }
 
     #[test]
     fn bullets_split_at_the_next_bullet_or_blank_line() {
-        let found = bullets("- **INV-A-1** one\n  continued\n- **INV-B-2** two\n\nprose\n- **INV-C-3** three");
+        let found = bullets(
+            "- **INV-A-1** one\n  continued\n- **INV-B-2** two\n\nprose\n- **INV-C-3** three",
+        );
         let names: Vec<&str> = found.iter().map(|entry| entry.0.as_str()).collect();
-        assert_eq!(names, vec!["INV-A-1", "INV-B-2", "INV-C-3"], "three bullets");
-        assert_eq!(found.first().map(|entry| entry.1.contains("continued")), Some(true), "a wrapped body stays whole");
-        assert_eq!(found.get(1).map(|entry| entry.1.contains("prose")), Some(false), "a blank line ends the body");
+        assert_eq!(
+            names,
+            vec!["INV-A-1", "INV-B-2", "INV-C-3"],
+            "three bullets"
+        );
+        assert_eq!(
+            found.first().map(|entry| entry.1.contains("continued")),
+            Some(true),
+            "a wrapped body stays whole"
+        );
+        assert_eq!(
+            found.get(1).map(|entry| entry.1.contains("prose")),
+            Some(false),
+            "a blank line ends the body"
+        );
     }
 
     #[test]
     fn lanes_commits_and_backticks_are_read_as_the_lane_reads_them() {
-        assert_eq!(lane_ids("id = \"a-b\"\nci_step = \"x\"\nid = \"c\"\n").len(), 2, "two lane ids");
+        assert_eq!(
+            lane_ids("id = \"a-b\"\nci_step = \"x\"\nid = \"c\"\n").len(),
+            2,
+            "two lane ids"
+        );
         assert!(has_commit_id("fixed in 1a2b3c4d"), "a commit id");
         assert!(!has_commit_id("issue #160 and v1.2"), "not a commit id");
         assert_eq!(

@@ -43,11 +43,23 @@ pub(super) fn read_lock(path: &Path) -> Result<BTreeMap<Key, String>, CiteError>
         };
         let key = key.trim();
         let Some((file, number)) = key.rsplit_once(':') else {
-            return fail(CiteError::BadLockKey { key: key.to_owned() }, "read_lock");
+            return fail(
+                CiteError::BadLockKey {
+                    key: key.to_owned(),
+                },
+                "read_lock",
+            );
         };
         let number = match number.parse::<u64>() {
             Ok(number) => number,
-            Err(_) => return fail(CiteError::BadLockKey { key: key.to_owned() }, "read_lock"),
+            Err(_) => {
+                return fail(
+                    CiteError::BadLockKey {
+                        key: key.to_owned(),
+                    },
+                    "read_lock",
+                );
+            }
         };
         entries.insert((file.to_owned(), number), text.to_owned());
     }
@@ -144,6 +156,10 @@ mod tests {
         let key = ("docs/x.md".to_owned(), 12);
         assert_eq!(spell(&key), "docs/x.md:12", "a key reads path:line");
         assert_eq!(clip("abcdef", 3), "abc", "the first characters");
-        assert_eq!(text_of(&BTreeMap::new(), &key), "", "an absent key reads empty");
+        assert_eq!(
+            text_of(&BTreeMap::new(), &key),
+            "",
+            "an absent key reads empty"
+        );
     }
 }

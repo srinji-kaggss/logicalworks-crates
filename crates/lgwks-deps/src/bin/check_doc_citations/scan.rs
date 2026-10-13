@@ -11,8 +11,10 @@ use super::{CiteError, Collected, MAX_DEPTH, fail, read};
 const EXTENSIONS: [&str; 8] = ["rs", "py", "sh", "toml", "md", "json", "yml", "yaml"];
 
 /// Documents that cite a different repository, and are therefore not checked.
-const EXTERNAL_PAGES: [(&str, &str); 1] =
-    [("docs/bevy-admission.md", "cites the Bevy repository, not this one")];
+const EXTERNAL_PAGES: [(&str, &str); 1] = [(
+    "docs/bevy-admission.md",
+    "cites the Bevy repository, not this one",
+)];
 
 /// The std library file whose public modules the closure matrix must list.
 const STD_LIB: &str = "crates/lgwks-std/src/lib.rs";
@@ -157,7 +159,11 @@ pub(super) fn line_numbers(spec: &str) -> Vec<u64> {
 /// Why `line` cannot be the source of a citation, if it cannot.
 pub(super) fn unsupportive_reason(line: &str) -> Option<&'static str> {
     let stripped = line.trim();
-    if !stripped.is_empty() && stripped.chars().all(|ch| matches!(ch, '}' | ']' | ')' | ';')) {
+    if !stripped.is_empty()
+        && stripped
+            .chars()
+            .all(|ch| matches!(ch, '}' | ']' | ')' | ';'))
+    {
         return Some("it is only a closing delimiter");
     }
     match stripped {
@@ -201,7 +207,11 @@ fn is_markdown(path: &Path) -> bool {
 }
 
 /// Every `.md` file under `directory` (any depth), added to `out`.
-fn markdown_under(directory: &Path, depth: usize, out: &mut BTreeSet<PathBuf>) -> Result<(), CiteError> {
+fn markdown_under(
+    directory: &Path,
+    depth: usize,
+    out: &mut BTreeSet<PathBuf>,
+) -> Result<(), CiteError> {
     if depth > MAX_DEPTH {
         return fail(
             CiteError::TooDeep {
@@ -282,9 +292,10 @@ fn check_citation(page: &str, citation: &Citation, lines: &[String], collected: 
             continue;
         };
         if cited_line.trim().is_empty() {
-            collected
-                .failures
-                .push(format!("{page}: {} — line {number} is blank", citation.whole));
+            collected.failures.push(format!(
+                "{page}: {} — line {number} is blank",
+                citation.whole
+            ));
             continue;
         }
         if let Some(reason) = unsupportive_reason(cited_line) {
@@ -296,8 +307,14 @@ fn check_citation(page: &str, citation: &Citation, lines: &[String], collected: 
             continue;
         }
         let key = (citation.path.clone(), number);
-        collected.entries.insert(key.clone(), cited_line.trim().to_owned());
-        collected.sites.entry(key).or_default().push(page.to_owned());
+        collected
+            .entries
+            .insert(key.clone(), cited_line.trim().to_owned());
+        collected
+            .sites
+            .entry(key)
+            .or_default()
+            .push(page.to_owned());
     }
 }
 
@@ -401,8 +418,12 @@ mod tests {
 
     #[test]
     fn a_citation_is_a_path_an_extension_a_colon_and_lines() {
-        let found = citations("see `crates/a/src/x.rs:12` and docs/y.md:3-5, z.toml:7,9 and a.rs:x");
-        let wholes: Vec<&str> = found.iter().map(|citation| citation.whole.as_str()).collect();
+        let found =
+            citations("see `crates/a/src/x.rs:12` and docs/y.md:3-5, z.toml:7,9 and a.rs:x");
+        let wholes: Vec<&str> = found
+            .iter()
+            .map(|citation| citation.whole.as_str())
+            .collect();
         assert_eq!(
             wholes,
             vec!["crates/a/src/x.rs:12", "docs/y.md:3-5", "z.toml:7,9"],
@@ -412,14 +433,29 @@ mod tests {
 
     #[test]
     fn a_range_and_a_scatter_name_every_line() {
-        assert_eq!(line_numbers("1408-1411"), vec![1408, 1411], "a range names its ends");
-        assert_eq!(line_numbers("7, 9"), vec![7, 9], "a scatter names each line");
+        assert_eq!(
+            line_numbers("1408-1411"),
+            vec![1408, 1411],
+            "a range names its ends"
+        );
+        assert_eq!(
+            line_numbers("7, 9"),
+            vec![7, 9],
+            "a scatter names each line"
+        );
     }
 
     #[test]
     fn a_delimiter_or_empty_comment_supports_no_claim() {
-        assert!(unsupportive_reason("   });  ").is_some(), "a closing delimiter");
-        assert_eq!(unsupportive_reason("///"), Some("it is an empty `///`"), "empty doc line");
+        assert!(
+            unsupportive_reason("   });  ").is_some(),
+            "a closing delimiter"
+        );
+        assert_eq!(
+            unsupportive_reason("///"),
+            Some("it is an empty `///`"),
+            "empty doc line"
+        );
         assert_eq!(unsupportive_reason("fn f() {}"), None, "real code");
     }
 
@@ -432,6 +468,10 @@ mod tests {
             "only column-zero pub mod lines"
         );
         let rows = matrix_rows("| 1 | `json` | x |\n|  22 |`hash`| y |\n| a | `no` |\n");
-        assert_eq!(rows.into_iter().collect::<Vec<_>>(), vec!["hash", "json"], "numbered rows");
+        assert_eq!(
+            rows.into_iter().collect::<Vec<_>>(),
+            vec!["hash", "json"],
+            "numbered rows"
+        );
     }
 }

@@ -168,7 +168,10 @@ fn keyed<'a>(line: &'a str, indent: usize, key: &str) -> Option<&'a str> {
 
 /// Strips surrounding single or double quotes from a scalar.
 fn unquote(value: &str) -> String {
-    value.trim().trim_matches(|ch| ch == '\'' || ch == '"').to_owned()
+    value
+        .trim()
+        .trim_matches(|ch| ch == '\'' || ch == '"')
+        .to_owned()
 }
 
 /// Reads the workflow's jobs and their command steps.

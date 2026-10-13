@@ -33,14 +33,24 @@ use std::process::ExitCode;
 
 use lexer::{Kind, code_only, line_of, module_names, path_reaches, statements, use_tree};
 use manifest::Record;
+use scans::{
+    POLICY_ONLY, policy_only_findings, std_first_hits, storefront_consumers, storefront_only,
+};
 use toml_subset::{Table, read_tables};
-use scans::{POLICY_ONLY, policy_only_findings, std_first_hits, storefront_consumers, storefront_only};
 
 /// The deepest directory nesting the source walk accepts.
 pub(crate) const MAX_DEPTH: usize = 64;
 
 /// The standard library, plus the relative-path prefixes every module may write.
-const CLEAN_ROOTS: [&str; 7] = ["std", "core", "alloc", "proc_macro", "crate", "self", "super"];
+const CLEAN_ROOTS: [&str; 7] = [
+    "std",
+    "core",
+    "alloc",
+    "proc_macro",
+    "crate",
+    "self",
+    "super",
+];
 
 /// The surface that implements the capabilities the `STD-FIRST` patterns are
 /// about, so the one place its own reference implementation may live.
@@ -96,11 +106,20 @@ pub(crate) enum AuditError {
 impl fmt::Display for AuditError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => write!(formatter, "{}: {cause}", path.display()),
+            Self::Io {
+                ref path,
+                ref cause,
+            } => write!(formatter, "{}: {cause}", path.display()),
             Self::TooDeep { ref path } => {
-                write!(formatter, "{}: nested deeper than {MAX_DEPTH} directories", path.display())
+                write!(
+                    formatter,
+                    "{}: nested deeper than {MAX_DEPTH} directories",
+                    path.display()
+                )
             }
-            Self::Manifest { ref path, missing } => write!(formatter, "{}: {missing}", path.display()),
+            Self::Manifest { ref path, missing } => {
+                write!(formatter, "{}: {missing}", path.display())
+            }
         }
     }
 }
@@ -213,7 +232,10 @@ fn justification(record: Option<&Record>) -> String {
 /// pattern matches the recorded number. Only the checkout the binary was built
 /// from carries them: a deliberately failing control elsewhere would otherwise
 /// drown in noise.
-fn valid_exemptions(repo: &Path, findings: &mut Vec<String>) -> Result<BTreeSet<String>, AuditError> {
+fn valid_exemptions(
+    repo: &Path,
+    findings: &mut Vec<String>,
+) -> Result<BTreeSet<String>, AuditError> {
     let mut valid = BTreeSet::new();
     let home = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let same = match (fs::canonicalize(repo), fs::canonicalize(&home)) {
@@ -232,7 +254,11 @@ fn valid_exemptions(repo: &Path, findings: &mut Vec<String>) -> Result<BTreeSet<
         }
         let text = read(&target)?;
         let lines: Vec<&str> = text.lines().collect();
-        let Some(actual) = exemption.line.checked_sub(1).and_then(|index| lines.get(index)) else {
+        let Some(actual) = exemption
+            .line
+            .checked_sub(1)
+            .and_then(|index| lines.get(index))
+        else {
             findings.push(format!(
                 "{key} — STALE EXEMPTION: the file has {} line(s)",
                 lines.len()
@@ -310,7 +336,11 @@ fn scan_crate(
             for offset in path_reaches(&code, name) {
                 let number = line_of(&code, offset);
                 if declared.contains(name) {
-                    audit.reached.entry(name.clone()).or_default().insert(crate_name.to_owned());
+                    audit
+                        .reached
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(crate_name.to_owned());
                     continue;
                 }
                 if resolvable.contains(name) {
@@ -334,7 +364,11 @@ fn scan_crate(
                 if root.is_empty() || clean.contains(&root) {
                     continue;
                 }
-                audit.reached.entry(root.clone()).or_default().insert(crate_name.to_owned());
+                audit
+                    .reached
+                    .entry(root.clone())
+                    .or_default()
+                    .insert(crate_name.to_owned());
                 if resolvable.contains(&root) {
                     continue;
                 }
@@ -370,7 +404,11 @@ fn register_findings(
     for (dep, crates) in &audit.reached {
         let consumers: Vec<&String> = crates
             .iter()
-            .filter(|name| members.get(*name).is_some_and(|member| member.declared.contains(dep)))
+            .filter(|name| {
+                members
+                    .get(*name)
+                    .is_some_and(|member| member.declared.contains(dep))
+            })
             .collect();
         if consumers.is_empty() {
             continue;
@@ -403,8 +441,10 @@ fn audit_repository(repo: &Path) -> Result<Audit, AuditError> {
         .iter()
         .map(|(name, member)| (member.directory_name.clone(), name.clone()))
         .collect();
-    let mut by_crate: BTreeMap<String, Vec<PathBuf>> =
-        members.keys().map(|name| (name.clone(), Vec::new())).collect();
+    let mut by_crate: BTreeMap<String, Vec<PathBuf>> = members
+        .keys()
+        .map(|name| (name.clone(), Vec::new()))
+        .collect();
     let mut findings = Vec::new();
     for path in &source {
         match files::owning_crate(repo, path, &by_directory) {
@@ -424,8 +464,10 @@ fn audit_repository(repo: &Path) -> Result<Audit, AuditError> {
         }
     }
     let exempt = valid_exemptions(repo, &mut findings)?;
-    let declared_anywhere: BTreeSet<String> =
-        members.values().flat_map(|member| member.declared.iter().cloned()).collect();
+    let declared_anywhere: BTreeSet<String> = members
+        .values()
+        .flat_map(|member| member.declared.iter().cloned())
+        .collect();
     let foreign: BTreeSet<String> = approved
         .keys()
         .cloned()
@@ -469,13 +511,23 @@ fn justify(
     if audit.reached.is_empty() {
         return Ok(());
     }
-    writeln!(out, "Crates reached past std / lgwks_std / lgwks_bot / lgwks_ast / lgwks_deps:")?;
+    writeln!(
+        out,
+        "Crates reached past std / lgwks_std / lgwks_bot / lgwks_ast / lgwks_deps:"
+    )?;
     for (dep, crates) in &audit.reached {
         let declaring: Vec<&String> = crates
             .iter()
-            .filter(|name| members.get(*name).is_some_and(|member| member.declared.contains(dep)))
+            .filter(|name| {
+                members
+                    .get(*name)
+                    .is_some_and(|member| member.declared.contains(dep))
+            })
             .collect();
-        let through: Vec<&String> = crates.iter().filter(|name| !declaring.contains(name)).collect();
+        let through: Vec<&String> = crates
+            .iter()
+            .filter(|name| !declaring.contains(name))
+            .collect();
         writeln!(out, "  {dep} — declared by {declaring:?}")?;
         if !through.is_empty() {
             writeln!(out, "    resolved through a surface by {through:?}")?;
@@ -487,7 +539,11 @@ fn justify(
     let names = if policy_only.is_empty() {
         "none".to_owned()
     } else {
-        policy_only.iter().map(|name| name.as_str()).collect::<Vec<_>>().join(", ")
+        policy_only
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     writeln!(
         out,
@@ -500,7 +556,12 @@ fn justify(
 }
 
 /// Runs the audit and reports; the exit code is the verdict.
-fn execute(root: &Path, with_justify: bool, out: &mut impl Write, err: &mut impl Write) -> Result<u8, Box<dyn std::error::Error>> {
+fn execute(
+    root: &Path,
+    with_justify: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<u8, Box<dyn std::error::Error>> {
     let audit = audit_repository(root)?;
     if with_justify {
         justify(out, &audit, &workspace(root)?, &register(root)?)?;
@@ -514,7 +575,11 @@ fn execute(root: &Path, with_justify: bool, out: &mut impl Write, err: &mut impl
     }
     let members = workspace(root)?.len();
     let reached: Vec<&str> = audit.reached.keys().map(String::as_str).collect();
-    let list = if reached.is_empty() { "none".to_owned() } else { reached.join(", ") };
+    let list = if reached.is_empty() {
+        "none".to_owned()
+    } else {
+        reached.join(", ")
+    };
     writeln!(
         out,
         "std-first holds: {} source file(s) across {members} crate(s); {} crate(s) reached past \
@@ -566,7 +631,10 @@ mod tests {
         let mut err = Vec::new();
         let code = execute(&root, false, &mut out, &mut err)?;
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-        assert!(String::from_utf8_lossy(&out).starts_with("std-first holds:"), "the verdict line");
+        assert!(
+            String::from_utf8_lossy(&out).starts_with("std-first holds:"),
+            "the verdict line"
+        );
         Ok(())
     }
 }

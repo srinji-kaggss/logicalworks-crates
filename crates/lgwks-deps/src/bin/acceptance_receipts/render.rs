@@ -30,7 +30,14 @@ const TABLE_END: &str = "<!-- acceptance-table: end -->";
 /// The evidence ladder. A receipt may confirm a state at or below the one the map
 /// claims; it can never promote one on its own, and the head is what promotes a row
 /// to `accepted`.
-const LADDER: [&str; 6] = ["planned", "missing", "present", "exercised", "independently_evidenced", "accepted"];
+const LADDER: [&str; 6] = [
+    "planned",
+    "missing",
+    "present",
+    "exercised",
+    "independently_evidenced",
+    "accepted",
+];
 
 /// States a row may hold when the receipt observed every named test passing.
 const OBSERVED_WHEN_ALL_PASS: [&str; 3] = ["exercised", "independently_evidenced", "accepted"];
@@ -57,7 +64,11 @@ pub(super) struct Header {
 
 /// A float as Python prints it: `1.0`, not `1`.
 pub(super) fn py_float(value: f64) -> String {
-    if value.fract() == 0.0 { format!("{value:.1}") } else { format!("{value}") }
+    if value.fract() == 0.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
 }
 
 /// Whether `id` is `T` and two digits.
@@ -77,7 +88,10 @@ fn text_or_empty(table: &Table, key: &str) -> String {
 /// Reads the map: its header, then every row in file order.
 pub(super) fn load_rows(map_path: &Path) -> Result<(Header, Vec<Row>), Failure> {
     if !map_path.is_file() {
-        return fail(format!("row map not found: {}", map_path.display()), "load_rows");
+        return fail(
+            format!("row map not found: {}", map_path.display()),
+            "load_rows",
+        );
     }
     let source = match std::fs::read_to_string(map_path) {
         Ok(source) => source,
@@ -88,7 +102,10 @@ pub(super) fn load_rows(map_path: &Path) -> Result<(Header, Vec<Row>), Failure> 
     let schema = top.and_then(|table| raw(table, "schema"));
     if schema != Some("1") {
         return fail(
-            format!("{} declares schema {schema:?}, and this reader understands schema 1", map_path.display()),
+            format!(
+                "{} declares schema {schema:?}, and this reader understands schema 1",
+                map_path.display()
+            ),
             "load_rows",
         );
     }
@@ -97,12 +114,18 @@ pub(super) fn load_rows(map_path: &Path) -> Result<(Header, Vec<Row>), Failure> 
         None => String::new(),
     };
     let mut rows: Vec<Row> = Vec::new();
-    for table in tables.iter().filter(|table| table.path == "row" && table.array) {
+    for table in tables
+        .iter()
+        .filter(|table| table.path == "row" && table.array)
+    {
         let row = build_row(table, &rows)?;
         rows.push(row);
     }
     if rows.is_empty() {
-        return fail(format!("row map has no [[row]] entries: {}", map_path.display()), "load_rows");
+        return fail(
+            format!("row map has no [[row]] entries: {}", map_path.display()),
+            "load_rows",
+        );
     }
     Ok((Header { spec }, rows))
 }
@@ -121,7 +144,10 @@ fn build_row(table: &Table, earlier: &[Row]) -> Result<Row, Failure> {
     };
     let state = text_or_empty(table, "state");
     if !LADDER.contains(&state.as_str()) {
-        return fail(format!("{id} claims state {state:?}, which is not on the ladder"), "build_row");
+        return fail(
+            format!("{id} claims state {state:?}, which is not on the ladder"),
+            "build_row",
+        );
     }
     Ok(Row {
         id,
@@ -171,7 +197,10 @@ pub(super) fn filter_expression(rows: &[Row]) -> Result<String, Failure> {
     if names.is_empty() {
         return fail("no test names to run".to_owned(), "filter_expression");
     }
-    let alternation: Vec<String> = names.iter().map(|name| format!("^{}$", regex_escape(name))).collect();
+    let alternation: Vec<String> = names
+        .iter()
+        .map(|name| format!("^{}$", regex_escape(name)))
+        .collect();
     Ok(format!("test(/{}/)", alternation.join("|")))
 }
 
@@ -181,7 +210,13 @@ pub(super) fn filter_expression(rows: &[Row]) -> Result<String, Failure> {
 /// stays `present` even when every named test passes, because the gap sentence, not
 /// the test count, is what holds it there. The single promotion is `accepted`, and
 /// it requires the receipt's revision to be the head being rendered.
-pub(super) fn observed_state(claimed: &str, passed: usize, total: usize, revision: &str, head: &str) -> String {
+pub(super) fn observed_state(
+    claimed: &str,
+    passed: usize,
+    total: usize,
+    revision: &str,
+    head: &str,
+) -> String {
     if total == 0 {
         return "planned".to_owned();
     }
@@ -195,27 +230,48 @@ pub(super) fn observed_state(claimed: &str, passed: usize, total: usize, revisio
 }
 
 /// The recorded outcome of a row's test.
-fn find_result<'found>(results: &'found [Tested], row_id: &str, test: &str) -> Option<&'found Tested> {
-    results.iter().find(|found| found.row_id == row_id && found.test == test)
+fn find_result<'found>(
+    results: &'found [Tested],
+    row_id: &str,
+    test: &str,
+) -> Option<&'found Tested> {
+    results
+        .iter()
+        .find(|found| found.row_id == row_id && found.test == test)
 }
 
 /// How many of a row's named tests the receipt records as passing.
 pub(super) fn passed_count(row: &Row, results: &[Tested]) -> usize {
     row.tests
         .iter()
-        .filter(|test| find_result(results, &row.id, test).is_some_and(|found| found.status == "ok"))
+        .filter(|test| {
+            find_result(results, &row.id, test).is_some_and(|found| found.status == "ok")
+        })
         .count()
 }
 
 /// The state a row reads as in this receipt.
 pub(super) fn row_state(row: &Row, results: &[Tested], revision: &str, head: &str) -> String {
-    observed_state(&row.state, passed_count(row, results), row.tests.len(), revision, head)
+    observed_state(
+        &row.state,
+        passed_count(row, results),
+        row.tests.len(),
+        revision,
+        head,
+    )
 }
 
 /// The rows that read as still partial in this receipt.
-pub(super) fn partial_rows<'rows>(rows: &'rows [Row], results: &[Tested], revision: &str, head: &str) -> Vec<&'rows str> {
+pub(super) fn partial_rows<'rows>(
+    rows: &'rows [Row],
+    results: &[Tested],
+    revision: &str,
+    head: &str,
+) -> Vec<&'rows str> {
     rows.iter()
-        .filter(|row| !OBSERVED_WHEN_ALL_PASS.contains(&row_state(row, results, revision, head).as_str()))
+        .filter(|row| {
+            !OBSERVED_WHEN_ALL_PASS.contains(&row_state(row, results, revision, head).as_str())
+        })
         .map(|row| row.id.as_str())
         .collect()
 }
@@ -272,9 +328,13 @@ pub(super) fn render_table(rows: &[Row], run: &Run, results: &[Tested], head: &s
 /// The byte range of the generated block, markers included.
 fn block_range(spec_text: &str) -> Result<(usize, usize), Failure> {
     match (spec_text.find(TABLE_START), spec_text.find(TABLE_END)) {
-        (Some(start), Some(end)) if end >= start => Ok((start, end.saturating_add(TABLE_END.len()))),
+        (Some(start), Some(end)) if end >= start => {
+            Ok((start, end.saturating_add(TABLE_END.len())))
+        }
         _ => fail(
-            format!("the generated table's markers are missing or out of order; expected {TABLE_START:?} before {TABLE_END:?}"),
+            format!(
+                "the generated table's markers are missing or out of order; expected {TABLE_START:?} before {TABLE_END:?}"
+            ),
             "block_range",
         ),
     }
@@ -287,7 +347,11 @@ fn block_range(spec_text: &str) -> Result<(usize, usize), Failure> {
 /// a reader to guess which one a run produced.
 pub(super) fn replace_table(spec_text: &str, table: &str) -> Result<String, Failure> {
     let (start, end) = block_range(spec_text)?;
-    Ok(format!("{}{table}{}", head_of(spec_text, start), tail_of(spec_text, end)))
+    Ok(format!(
+        "{}{table}{}",
+        head_of(spec_text, start),
+        tail_of(spec_text, end)
+    ))
 }
 
 /// The block currently between the markers, or a refusal.
@@ -295,7 +359,10 @@ pub(super) fn committed_table(spec_text: &str) -> Result<String, Failure> {
     let (start, end) = block_range(spec_text)?;
     match spec_text.get(start..end) {
         Some(block) => Ok(block.to_owned()),
-        None => fail("the generated table's markers split a character".to_owned(), "committed_table"),
+        None => fail(
+            "the generated table's markers split a character".to_owned(),
+            "committed_table",
+        ),
     }
 }
 
@@ -343,11 +410,20 @@ fn exported_test(row: &Row, test: &str, results: &[Tested]) -> Value {
 ///
 /// The database is the store; this is the copy a build can attach to a run, so it
 /// carries the same facts rather than a summary of them.
-pub(super) fn export_json(rows: &[Row], run: &Run, results: &[Tested], head: &str) -> Result<String, Failure> {
+pub(super) fn export_json(
+    rows: &[Row],
+    run: &Run,
+    results: &[Tested],
+    head: &str,
+) -> Result<String, Failure> {
     let rendered: Vec<Value> = rows
         .iter()
         .map(|row| {
-            let tests: Vec<Value> = row.tests.iter().map(|test| exported_test(row, test, results)).collect();
+            let tests: Vec<Value> = row
+                .tests
+                .iter()
+                .map(|test| exported_test(row, test, results))
+                .collect();
             json!({
                 "id": row.id,
                 "requires": row.requires,
@@ -371,14 +447,18 @@ pub(super) fn export_json(rows: &[Row], run: &Run, results: &[Tested], head: &st
     });
     match json::to_string_pretty(&payload) {
         Ok(rendered_text) => Ok(format!("{rendered_text}\n")),
-        Err(error) => fail(format!("the receipt could not be exported: {error}"), "export_json"),
+        Err(error) => fail(
+            format!("the receipt could not be exported: {error}"),
+            "export_json",
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Row, committed_table, filter_expression, first_difference, observed_state, py_float, render_table, replace_table, test_name,
+        Row, committed_table, filter_expression, first_difference, observed_state, py_float,
+        render_table, replace_table, test_name,
     };
     use crate::store::{Run, Tested};
 
@@ -417,16 +497,20 @@ mod tests {
 
     /// The three fake tests with the given statuses.
     fn fake_results(statuses: [&str; 3]) -> Vec<Tested> {
-        [("T01", "it::a::one_t01"), ("T01", "it::a::two_t01"), ("T02", "it::b::one_t02")]
-            .iter()
-            .zip(statuses)
-            .map(|(named, status)| Tested {
-                row_id: named.0.to_owned(),
-                test: named.1.to_owned(),
-                status: status.to_owned(),
-                duration_ms: 1.5,
-            })
-            .collect()
+        [
+            ("T01", "it::a::one_t01"),
+            ("T01", "it::a::two_t01"),
+            ("T02", "it::b::one_t02"),
+        ]
+        .iter()
+        .zip(statuses)
+        .map(|(named, status)| Tested {
+            row_id: named.0.to_owned(),
+            test: named.1.to_owned(),
+            status: status.to_owned(),
+            duration_ms: 1.5,
+        })
+        .collect()
     }
 
     #[test]
@@ -434,16 +518,27 @@ mod tests {
         let rows = fake_rows("accepted", "accepted");
         let results = fake_results(["ok", "ok", "ok"]);
         let at_head = render_table(&rows, &fake_run("old"), &results, "old");
-        assert!(at_head.contains("| T01 | accepted |"), "a receipt at the head may promote a row to accepted");
+        assert!(
+            at_head.contains("| T01 | accepted |"),
+            "a receipt at the head may promote a row to accepted"
+        );
         let stale = render_table(&rows, &fake_run("old"), &results, "newer");
-        assert!(stale.contains("| T01 | exercised |"), "a receipt for an older revision must not render accepted");
+        assert!(
+            stale.contains("| T01 | exercised |"),
+            "a receipt for an older revision must not render accepted"
+        );
         assert!(stale.contains("| T02 | exercised |"), "{stale}");
     }
 
     #[test]
     fn a_green_run_never_promotes_a_partial_row() {
         let rows = fake_rows("exercised", "present");
-        let table = render_table(&rows, &fake_run("rev"), &fake_results(["ok", "ok", "ok"]), "rev");
+        let table = render_table(
+            &rows,
+            &fake_run("rev"),
+            &fake_results(["ok", "ok", "ok"]),
+            "rev",
+        );
         assert!(table.contains("| T02 | present | 1/1 |"), "{table}");
         assert!(!table.contains("| T02 | exercised |"), "{table}");
         assert!(table.contains("Still partial: T02."), "{table}");
@@ -452,35 +547,80 @@ mod tests {
     #[test]
     fn a_failing_test_lowers_the_row_to_present() {
         let rows = fake_rows("exercised", "present");
-        let table = render_table(&rows, &fake_run("rev"), &fake_results(["ok", "failed", "ok"]), "rev");
+        let table = render_table(
+            &rows,
+            &fake_run("rev"),
+            &fake_results(["ok", "failed", "ok"]),
+            "rev",
+        );
         assert!(table.contains("| T01 | present | 1/2 |"), "{table}");
     }
 
     #[test]
     fn a_missing_named_test_reads_as_not_passed() {
         let rows = fake_rows("exercised", "present");
-        let table = render_table(&rows, &fake_run("rev"), &fake_results(["ok", "missing", "missing"]), "rev");
+        let table = render_table(
+            &rows,
+            &fake_run("rev"),
+            &fake_results(["ok", "missing", "missing"]),
+            "rev",
+        );
         assert!(table.contains("| T01 | present | 1/2 |"), "{table}");
         assert!(table.contains("| T02 | missing | 0/1 |"), "{table}");
     }
 
     #[test]
     fn the_state_ladder_only_lowers() {
-        assert_eq!(observed_state("exercised", 0, 0, "a", "a"), "planned", "no tests named");
-        assert_eq!(observed_state("exercised", 1, 2, "a", "a"), "present", "some passed");
-        assert_eq!(observed_state("exercised", 0, 2, "a", "a"), "missing", "none passed");
-        assert_eq!(observed_state("accepted", 2, 2, "a", "b"), "exercised", "a stale accepted");
-        assert_eq!(observed_state("present", 2, 2, "a", "a"), "present", "a claim is never raised");
+        assert_eq!(
+            observed_state("exercised", 0, 0, "a", "a"),
+            "planned",
+            "no tests named"
+        );
+        assert_eq!(
+            observed_state("exercised", 1, 2, "a", "a"),
+            "present",
+            "some passed"
+        );
+        assert_eq!(
+            observed_state("exercised", 0, 2, "a", "a"),
+            "missing",
+            "none passed"
+        );
+        assert_eq!(
+            observed_state("accepted", 2, 2, "a", "b"),
+            "exercised",
+            "a stale accepted"
+        );
+        assert_eq!(
+            observed_state("present", 2, 2, "a", "a"),
+            "present",
+            "a claim is never raised"
+        );
     }
 
     #[test]
-    fn the_block_is_replaced_between_its_markers_or_refused() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_block_is_replaced_between_its_markers_or_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
         let spec = "before\n<!-- acceptance-table: start -->\nold\n<!-- acceptance-table: end -->\nafter\n";
-        let replaced = replace_table(spec, "<!-- acceptance-table: start -->\nnew\n<!-- acceptance-table: end -->")?;
-        assert_eq!(replaced, "before\n<!-- acceptance-table: start -->\nnew\n<!-- acceptance-table: end -->\nafter\n", "swapped");
+        let replaced = replace_table(
+            spec,
+            "<!-- acceptance-table: start -->\nnew\n<!-- acceptance-table: end -->",
+        )?;
+        assert_eq!(
+            replaced,
+            "before\n<!-- acceptance-table: start -->\nnew\n<!-- acceptance-table: end -->\nafter\n",
+            "swapped"
+        );
         assert!(committed_table(spec)?.contains("old"), "read back");
-        assert!(replace_table("no markers here", "x").is_err(), "no markers is a refusal, not an append");
-        assert_eq!(first_difference("a\nb", "a\nc").len(), 2, "the first differing line, both sides");
+        assert!(
+            replace_table("no markers here", "x").is_err(),
+            "no markers is a refusal, not an append"
+        );
+        assert_eq!(
+            first_difference("a\nb", "a\nc").len(),
+            2,
+            "the first differing line, both sides"
+        );
         Ok(())
     }
 
@@ -488,7 +628,10 @@ mod tests {
     fn the_filter_anchors_every_name_and_escapes_it() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(test_name("it::a::one"), "a::one", "the binary prefix goes");
         let expression = filter_expression(&fake_rows("exercised", "present"))?;
-        assert_eq!(expression, "test(/^a::one_t01$|^a::two_t01$|^b::one_t02$/)", "anchored and sorted");
+        assert_eq!(
+            expression, "test(/^a::one_t01$|^a::two_t01$|^b::one_t02$/)",
+            "anchored and sorted"
+        );
         assert_eq!(py_float(1.0), "1.0", "a whole number keeps its point");
         assert_eq!(py_float(19.304), "19.304", "a fraction is itself");
         Ok(())

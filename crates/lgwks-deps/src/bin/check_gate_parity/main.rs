@@ -60,7 +60,10 @@ enum ParityError {
 impl fmt::Display for ParityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => write!(formatter, "{}: {cause}", path.display()),
+            Self::Io {
+                ref path,
+                ref cause,
+            } => write!(formatter, "{}: {cause}", path.display()),
         }
     }
 }
@@ -128,7 +131,12 @@ fn step_segments(run: &str) -> Vec<String> {
     }
     logical
         .iter()
-        .flat_map(|line| line.replace("||", "&&").split("&&").map(normalise).collect::<Vec<_>>())
+        .flat_map(|line| {
+            line.replace("||", "&&")
+                .split("&&")
+                .map(normalise)
+                .collect::<Vec<_>>()
+        })
         .filter(|segment| !segment.is_empty())
         .collect()
 }
@@ -189,12 +197,18 @@ fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
             continue;
         }
         if lane.ci_step.is_none() && lane.ci_job.is_none() {
-            problems.push(format!("{}: ci lane names neither ci_step nor ci_job", lane.id));
+            problems.push(format!(
+                "{}: ci lane names neither ci_step nor ci_job",
+                lane.id
+            ));
             continue;
         }
         if let Some(ci_step) = lane.ci_step.as_deref() {
             let Some(step) = steps_by_name.get(ci_step) else {
-                problems.push(format!("{}: ci_step {ci_step:?} is not a step in ci.yml", lane.id));
+                problems.push(format!(
+                    "{}: ci_step {ci_step:?} is not a step in ci.yml",
+                    lane.id
+                ));
                 continue;
             };
             if let Some(owner) = claimed_steps.get(ci_step) {
@@ -205,7 +219,10 @@ fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
             }
             claimed_steps.insert(ci_step.to_owned(), lane.id.clone());
             if lane.builtin.is_some() {
-                let expected = format!("cargo run --locked -p lgwks_deps --bin ci-local -- --lane {}", lane.id);
+                let expected = format!(
+                    "cargo run --locked -p lgwks_deps --bin ci-local -- --lane {}",
+                    lane.id
+                );
                 if !normalise(&step.run).contains(&expected) {
                     let shown: String = normalise(&step.run).chars().take(80).collect();
                     problems.push(format!(
@@ -233,7 +250,10 @@ fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
             if job_names.contains(ci_job) {
                 claimed_jobs.insert(ci_job.to_owned(), lane.id.clone());
             } else {
-                problems.push(format!("{}: ci_job {ci_job:?} is not a job in ci.yml", lane.id));
+                problems.push(format!(
+                    "{}: ci_job {ci_job:?} is not a job in ci.yml",
+                    lane.id
+                ));
             }
         }
     }
@@ -342,7 +362,9 @@ mod tests {
 
     /// The `rust = "..."` pin of a lane table.
     fn pinned(manifest: &str) -> Result<String, Box<dyn Error>> {
-        let start = manifest.find("rust = \"").ok_or("the manifest pins no rust")?;
+        let start = manifest
+            .find("rust = \"")
+            .ok_or("the manifest pins no rust")?;
         let rest = manifest
             .get(start.saturating_add("rust = \"".len())..)
             .ok_or("the pin is cut off")?;
@@ -353,17 +375,32 @@ mod tests {
     #[test]
     fn the_repository_currently_agrees() -> TestResult {
         let (manifest, workflow) = files()?;
-        assert_eq!(check_parity(&manifest, &workflow), Vec::<String>::new(), "the gate agrees");
+        assert_eq!(
+            check_parity(&manifest, &workflow),
+            Vec::<String>::new(),
+            "the gate agrees"
+        );
         Ok(())
     }
 
     #[test]
     fn a_required_checker_removed_from_ci_fails() -> TestResult {
         let (manifest, workflow) = files()?;
-        let mutated = workflow.replace("      - name: Check formatting", "      - name: Skipped formatting");
+        let mutated = workflow.replace(
+            "      - name: Check formatting",
+            "      - name: Skipped formatting",
+        );
         let problems = check_parity(&manifest, &mutated);
-        assert!(!problems.is_empty(), "renaming a gate step must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("Check formatting")), "{problems:?}");
+        assert!(
+            !problems.is_empty(),
+            "renaming a gate step must break parity"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("Check formatting")),
+            "{problems:?}"
+        );
         Ok(())
     }
 
@@ -372,8 +409,16 @@ mod tests {
         let (manifest, workflow) = files()?;
         let mutated = manifest.replacen("ci_step = \"Check formatting\"\n", "", 1);
         let problems = check_parity(&mutated, &workflow);
-        assert!(!problems.is_empty(), "dropping a lane's ci_step must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("Check formatting")), "{problems:?}");
+        assert!(
+            !problems.is_empty(),
+            "dropping a lane's ci_step must break parity"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("Check formatting")),
+            "{problems:?}"
+        );
         Ok(())
     }
 
@@ -385,8 +430,16 @@ mod tests {
             "command = \"cargo fmt --all\"",
         );
         let problems = check_parity(&shortened, &workflow);
-        assert!(!problems.is_empty(), "a substituted command must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("cargo fmt --all")), "{problems:?}");
+        assert!(
+            !problems.is_empty(),
+            "a substituted command must break parity"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("cargo fmt --all")),
+            "{problems:?}"
+        );
         let wholesale = manifest.replace(
             "command = \"cargo fmt --all -- --check\"",
             "command = \"cargo clippy --workspace --all-targets --locked -- -D warnings\"",
@@ -421,8 +474,16 @@ mod tests {
             "grep -rn '\\.unwrap()' crates",
         );
         let problems = check_parity(&manifest, &mutated);
-        assert!(!problems.is_empty(), "a pasted builtin body must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("unwrap-scan")), "{problems:?}");
+        assert!(
+            !problems.is_empty(),
+            "a pasted builtin body must break parity"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("unwrap-scan")),
+            "{problems:?}"
+        );
         Ok(())
     }
 
@@ -430,11 +491,18 @@ mod tests {
     fn a_toolchain_mismatch_fails() -> TestResult {
         let (manifest, workflow) = files()?;
         let pin = pinned(&manifest)?;
-        let mutated = manifest.replacen(&format!("rust = \"{pin}\""), "rust = \"0.0.0-mismatch\"", 1);
-        assert_ne!(mutated, manifest, "the mutation must actually change the manifest");
+        let mutated =
+            manifest.replacen(&format!("rust = \"{pin}\""), "rust = \"0.0.0-mismatch\"", 1);
+        assert_ne!(
+            mutated, manifest,
+            "the mutation must actually change the manifest"
+        );
         let problems = check_parity(&mutated, &workflow);
         assert!(!problems.is_empty(), "a toolchain drift must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("toolchain")), "{problems:?}");
+        assert!(
+            problems.iter().any(|problem| problem.contains("toolchain")),
+            "{problems:?}"
+        );
         Ok(())
     }
 
@@ -453,7 +521,12 @@ mod tests {
             "the other jobs still agree"
         );
         let problems = check_parity(&manifest, &mutated);
-        assert!(problems.iter().any(|problem| problem.contains("0.0.0-drifted")), "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("0.0.0-drifted")),
+            "{problems:?}"
+        );
         Ok(())
     }
 
@@ -465,8 +538,16 @@ mod tests {
             "      - name: Check formatting\n      - name: Check spelling\n        run: codespell",
         );
         let problems = check_parity(&manifest, &mutated);
-        assert!(!problems.is_empty(), "an unclaimed gate step must break parity");
-        assert!(problems.iter().any(|problem| problem.contains("Check spelling")), "{problems:?}");
+        assert!(
+            !problems.is_empty(),
+            "an unclaimed gate step must break parity"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("Check spelling")),
+            "{problems:?}"
+        );
         Ok(())
     }
 }

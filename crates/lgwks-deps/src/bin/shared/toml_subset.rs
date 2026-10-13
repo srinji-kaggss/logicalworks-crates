@@ -241,11 +241,23 @@ fn strings_in(raw: &str) -> Vec<String> {
             let start = index.saturating_add(3);
             let mut end = start;
             while end < chars.len() && !starts_at(&chars, end, quote) {
-                end = end.saturating_add(if ch == '"' && chars[end] == '\\' { 2 } else { 1 });
+                end = end.saturating_add(if ch == '"' && chars[end] == '\\' {
+                    2
+                } else {
+                    1
+                });
             }
-            let body: String = chars.iter().skip(start).take(end.saturating_sub(start)).collect();
+            let body: String = chars
+                .iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
             let body = without_first_newline(body);
-            found.push(if ch == '"' { unescape(&body, true) } else { body });
+            found.push(if ch == '"' {
+                unescape(&body, true)
+            } else {
+                body
+            });
             index = end.saturating_add(3);
         } else if ch == '"' {
             let start = index.saturating_add(1);
@@ -253,7 +265,11 @@ fn strings_in(raw: &str) -> Vec<String> {
             while end < chars.len() && chars[end] != '"' {
                 end = end.saturating_add(if chars[end] == '\\' { 2 } else { 1 });
             }
-            let body: String = chars.iter().skip(start).take(end.saturating_sub(start)).collect();
+            let body: String = chars
+                .iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
             found.push(unescape(&body, false));
             index = end.saturating_add(1);
         } else if ch == '\'' {
@@ -262,7 +278,13 @@ fn strings_in(raw: &str) -> Vec<String> {
             while end < chars.len() && chars[end] != '\'' {
                 end = end.saturating_add(1);
             }
-            found.push(chars.iter().skip(start).take(end.saturating_sub(start)).collect());
+            found.push(
+                chars
+                    .iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect(),
+            );
             index = end.saturating_add(1);
         } else {
             index = index.saturating_add(1);
@@ -306,7 +328,11 @@ fn key_value(trimmed: &str) -> Option<(String, &str)> {
             Some(_) => {}
             None if ch == '"' || ch == '\'' => quote = Some(ch),
             None if ch == '=' => {
-                let key = trimmed.get(..index)?.trim().trim_matches(['"', '\'']).to_owned();
+                let key = trimmed
+                    .get(..index)?
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_owned();
                 let rest = trimmed.get(index.saturating_add(1)..)?;
                 return Some((key, rest));
             }

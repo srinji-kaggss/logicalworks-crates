@@ -59,18 +59,17 @@ mod utc;
 #[cfg(test)]
 mod cli_tests;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::thread;
 use std::time::Instant;
 
-use lanes::{Lane, Manifest, load_lanes, missing_needs, platform_applies, platform_name};
-use process::Children;
+use lanes::{Lane, Manifest, child_env, load_lanes, run_lane};
+use process::{Children, run_parallel};
 use receipt::{build_receipt, capture_line, format_table, host, tree_identity};
 use scratch::Scratch;
 use utc::stamp;
@@ -97,8 +96,14 @@ pub(crate) enum GateError {
 impl fmt::Display for GateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } if path.as_os_str().is_empty() => write!(formatter, "{cause}"),
-            Self::Io { ref path, ref cause } => write!(formatter, "{}: {cause}", path.display()),
+            Self::Io {
+                ref path,
+                ref cause,
+            } if path.as_os_str().is_empty() => write!(formatter, "{cause}"),
+            Self::Io {
+                ref path,
+                ref cause,
+            } => write!(formatter, "{}: {cause}", path.display()),
             Self::Manifest(ref what) | Self::Usage(ref what) => write!(formatter, "{what}"),
         }
     }
@@ -214,7 +219,7 @@ impl Console {
     }
 
     /// Writes a line to standard output.
-    fn say(&self, text: &str) {
+    pub(crate) fn say(&self, text: &str) {
         Self::line(&self.out, text);
     }
 
@@ -235,175 +240,6 @@ impl Console {
     }
 }
 
-/// The environment lanes run in.
-fn child_env(scratch: Option<&Path>, target: Option<&Path>) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = std::env::vars_os()
-        .map(|entry| (entry.0.to_string_lossy().into_owned(), entry.1.to_string_lossy().into_owned()))
-        .collect();
-    let existing = path_of(&env);
-    if let Some(home) = env.get("HOME") {
-        let cargo = Path::new(home).join(".cargo").join("bin");
-        env.insert("PATH".to_owned(), format!("{}:{existing}", cargo.display()));
-    }
-    env.insert("CARGO_INCREMENTAL".to_owned(), "0".to_owned());
-    env.insert("CARGO_TERM_COLOR".to_owned(), "never".to_owned());
-    env.entry("RUST_BACKTRACE".to_owned()).or_insert_with(|| "1".to_owned());
-    if let Some(directory) = scratch {
-        env.insert("TMPDIR".to_owned(), format!("{}/", directory.display()));
-    }
-    if let Some(directory) = target {
-        env.insert("CARGO_TARGET_DIR".to_owned(), directory.display().to_string());
-    }
-    env
-}
-
-/// The `PATH` a lane's needs are checked against.
-fn path_of(env: &BTreeMap<String, String>) -> String {
-    match env.get("PATH") {
-        Some(path) if !path.is_empty() => path.clone(),
-        Some(_) | None => String::new(),
-    }
-}
-
-/// Runs a builtin lane by name.
-fn run_builtin(name: &str, context: &Context<'_>) -> Result<Verdict, GateError> {
-    match name {
-        "unwrap-scan" => builtins::unwrap_scan(context),
-        "suppressions" => builtins::suppressions(context),
-        "artifacts" => builtins::artifacts(context),
-        "invariants" => invariants::invariants(context),
-        "contract-drift" => builtins::contract_drift(context),
-        "docsrs-metadata" => runners::docsrs_metadata(context),
-        "readme-quickstart" => builtins::readme_quickstart(context),
-        "debug-e2e" => runners::debug_e2e(context),
-        "simulation-evidence" => runners::simulation_evidence(context),
-        _ => Ok(Verdict {
-            code: 2,
-            detail: format!("unknown builtin {name:?}"),
-        }),
-    }
-}
-
-/// Opens a lane's log, making its directory.
-fn open_log(path: &Path) -> Result<File, GateError> {
-    if let Some(parent) = path.parent()
-        && let Err(cause) = fs::create_dir_all(parent)
-    {
-        return fail(
-            GateError::Io {
-                path: parent.to_path_buf(),
-                cause,
-            },
-            "open_log",
-        );
-    }
-    match File::create(path) {
-        Ok(file) => Ok(file),
-        Err(cause) => fail(
-            GateError::Io {
-                path: path.to_path_buf(),
-                cause,
-            },
-            "open_log",
-        ),
-    }
-}
-
-/// What a lane did, before it is timed and stamped.
-struct Outcome {
-    /// How it ended.
-    status: Status,
-    /// What there is to say about it.
-    detail: String,
-}
-
-/// Runs a lane that applies and has its needs, writing to `log`.
-fn execute_lane(
-    lane: &Lane,
-    root: &Path,
-    env: &BTreeMap<String, String>,
-    log: Option<&Path>,
-    children: &Children,
-) -> Result<Outcome, GateError> {
-    let file = match log {
-        Some(path) => Some(open_log(path)?),
-        None => None,
-    };
-    if let Some(name) = lane.builtin.as_deref() {
-        let context = Context {
-            root,
-            env,
-            children,
-            out: file.as_ref(),
-        };
-        let verdict = run_builtin(name, &context)?;
-        if let Some(mut sink) = file.as_ref()
-            && let Err(error) = writeln!(sink, "{}", verdict.detail)
-        {
-            lgwks_std::trace::debug!(%error, "a lane's log could not be written");
-        }
-        let status = if verdict.code == 0 { Status::Pass } else { Status::Fail };
-        return Ok(Outcome {
-            status,
-            detail: verdict.detail,
-        });
-    }
-    let command = match lane.command.as_deref() {
-        Some(command) => command.to_owned(),
-        None => String::new(),
-    };
-    let code = children.run(&["bash".to_owned(), "-c".to_owned(), command], root, env, file.as_ref());
-    if code == 0 {
-        Ok(Outcome {
-            status: Status::Pass,
-            detail: String::new(),
-        })
-    } else {
-        Ok(Outcome {
-            status: Status::Fail,
-            detail: format!("exit {code}"),
-        })
-    }
-}
-
-/// Runs one lane, or says why it did not run.
-fn run_lane(lane: &Lane, root: &Path, env: &BTreeMap<String, String>, log: Option<&Path>, children: &Children) -> LaneResult {
-    let started = stamp();
-    let clock = Instant::now();
-    let finish = |status: Status, detail: String| LaneResult {
-        lane_id: lane.id.clone(),
-        status,
-        started: started.clone(),
-        ended: stamp(),
-        detail,
-        seconds: clock.elapsed().as_secs_f64(),
-    };
-    if !platform_applies(lane) {
-        return finish(
-            Status::Skip,
-            format!("out of scope for {}; declared for {:?}", platform_name(), lane.platforms),
-        );
-    }
-    let missing = match missing_needs(lane, root, &path_of(env)) {
-        Ok(missing) => missing,
-        Err(error) => return finish(Status::Fail, error.to_string()),
-    };
-    if !missing.is_empty() {
-        let status = if lane.required { Status::Blocked } else { Status::Skip };
-        let need_list = missing.join(", ");
-        let detail = if lane.reason.is_empty() {
-            format!("missing prerequisite(s): {need_list}")
-        } else {
-            format!("missing prerequisite(s): {need_list} ({})", lane.reason)
-        };
-        return finish(status, detail);
-    }
-    match execute_lane(lane, root, env, log, children) {
-        Ok(outcome) => finish(outcome.status, outcome.detail),
-        Err(error) => finish(Status::Fail, format!("the lane could not run: {error}")),
-    }
-}
-
 /// The last lines of a log.
 fn log_tail(log: &Path) -> String {
     match fs::read_to_string(log) {
@@ -420,8 +256,13 @@ fn log_tail(log: &Path) -> String {
 }
 
 /// Prints a lane's result line, and a failed lane's log.
-fn report(console: &Console, result: &LaneResult, log: Option<&Path>) {
-    let head = format!("<== {}: {} ({:.1} s)", result.lane_id, result.status.label(), result.seconds);
+pub(crate) fn report(console: &Console, result: &LaneResult, log: Option<&Path>) {
+    let head = format!(
+        "<== {}: {} ({:.1} s)",
+        result.lane_id,
+        result.status.label(),
+        result.seconds
+    );
     let line = match result.detail.lines().next() {
         Some(first) => format!("{head} — {first}"),
         None => head,
@@ -435,133 +276,6 @@ fn report(console: &Console, result: &LaneResult, log: Option<&Path>) {
     } else {
         console.say(&line);
     }
-}
-
-/// The directory cargo builds into, made absolute under `root`.
-fn target_base(root: &Path) -> PathBuf {
-    let configured = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
-    match configured {
-        Some(path) if path.is_absolute() => path,
-        Some(path) => root.join(path),
-        None => root.join("target"),
-    }
-}
-
-/// One group of lanes that run in order in one target directory.
-struct Group<'table> {
-    /// `gate-<group>` for a named group, `lane-<id>` for a lane on its own.
-    key: String,
-    /// The lanes, in the table's order.
-    lanes: Vec<&'table Lane>,
-}
-
-/// Groups `selected` by feature set, cargo groups first: they are the long poles.
-fn group_lanes<'table>(selected: &[&'table Lane]) -> Vec<Group<'table>> {
-    let mut groups: Vec<Group<'table>> = Vec::new();
-    for lane in selected {
-        let key = match lane.group.as_deref() {
-            Some(name) => format!("gate-{name}"),
-            None => format!("lane-{}", lane.id),
-        };
-        match groups.iter_mut().find(|group| group.key == key) {
-            Some(group) => group.lanes.push(lane),
-            None => groups.push(Group {
-                key,
-                lanes: vec![lane],
-            }),
-        }
-    }
-    groups.sort_by_key(|group| !group.key.starts_with("gate-"));
-    groups
-}
-
-/// The pieces a parallel run shares between its workers.
-struct Shared<'run> {
-    /// The repository root.
-    root: &'run Path,
-    /// The scratch directory for `TMPDIR`.
-    scratch: Option<&'run Path>,
-    /// The base of the per-group target directories.
-    base: &'run Path,
-    /// The children the gate owns.
-    children: &'run Children,
-    /// Where lines are printed.
-    console: &'run Console,
-    /// The groups still to run.
-    queue: Mutex<VecDeque<Group<'run>>>,
-    /// Every finished lane.
-    results: Mutex<Vec<LaneResult>>,
-}
-
-/// Runs one group's lanes in order.
-fn run_group(shared: &Shared<'_>, group: &Group<'_>) {
-    let named = group.key.starts_with("gate-");
-    let target = shared.base.join(&group.key);
-    let env = child_env(shared.scratch, if named { Some(target.as_path()) } else { None });
-    for lane in &group.lanes {
-        if shared.children.is_stopping() {
-            return;
-        }
-        let tag = if named { format!("  [{}]", group.key) } else { String::new() };
-        shared.console.say(&format!("==> {}{tag}", lane.id));
-        let log = shared.base.join("gate-logs").join(format!("{}.log", lane.id));
-        let result = run_lane(lane, shared.root, &env, Some(&log), shared.children);
-        report(shared.console, &result, Some(&log));
-        match shared.results.lock() {
-            Ok(mut held) => held.push(result),
-            Err(poisoned) => poisoned.into_inner().push(result),
-        }
-    }
-}
-
-/// Runs lane groups concurrently; lanes inside one group run in order.
-fn run_parallel(
-    selected: &[&Lane],
-    root: &Path,
-    scratch: Option<&Path>,
-    jobs: usize,
-    children: &Children,
-    console: &Console,
-) -> Vec<LaneResult> {
-    let groups = group_lanes(selected);
-    let workers = jobs.max(1).min(groups.len().max(1));
-    let base = target_base(root);
-    let shared = Shared {
-        root,
-        scratch,
-        base: &base,
-        children,
-        console,
-        queue: Mutex::new(groups.into()),
-        results: Mutex::new(Vec::new()),
-    };
-    thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let next = match shared.queue.lock() {
-                        Ok(mut held) => held.pop_front(),
-                        Err(poisoned) => poisoned.into_inner().pop_front(),
-                    };
-                    match next {
-                        Some(group) => run_group(&shared, &group),
-                        None => return,
-                    }
-                }
-            });
-        }
-    });
-    let mut finished = match shared.results.into_inner() {
-        Ok(found) => found,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let mut ordered = Vec::new();
-    for lane in selected {
-        if let Some(at) = finished.iter().position(|result| result.lane_id == lane.id) {
-            ordered.push(finished.swap_remove(at));
-        }
-    }
-    ordered
 }
 
 /// What the command line asked for.
@@ -581,7 +295,10 @@ struct Options {
 }
 
 /// The value after a flag.
-fn flag_value<'argument>(remaining: &mut impl Iterator<Item = &'argument String>, flag: &str) -> Result<String, GateError> {
+fn flag_value<'argument>(
+    remaining: &mut impl Iterator<Item = &'argument String>,
+    flag: &str,
+) -> Result<String, GateError> {
     match remaining.next() {
         Some(found) => Ok(found.clone()),
         None => Err(GateError::Usage(format!("ci-local: {flag} needs a value"))),
@@ -610,10 +327,18 @@ fn parse_options(arguments: &[String]) -> Result<Options, GateError> {
                 let text = flag_value(&mut remaining, "--jobs")?;
                 match text.parse::<usize>() {
                     Ok(count) => options.jobs = Some(count),
-                    Err(_) => return Err(GateError::Usage(format!("ci-local: --jobs wants a number, got {text:?}"))),
+                    Err(_) => {
+                        return Err(GateError::Usage(format!(
+                            "ci-local: --jobs wants a number, got {text:?}"
+                        )));
+                    }
                 }
             }
-            other => return Err(GateError::Usage(format!("ci-local: unknown argument {other:?}"))),
+            other => {
+                return Err(GateError::Usage(format!(
+                    "ci-local: unknown argument {other:?}"
+                )));
+            }
         }
     }
     Ok(options)
@@ -625,7 +350,10 @@ fn is_local(lane: &&Lane) -> bool {
 }
 
 /// The lanes the options select.
-fn select<'table>(manifest: &'table Manifest, options: &Options) -> Result<Vec<&'table Lane>, GateError> {
+fn select<'table>(
+    manifest: &'table Manifest,
+    options: &Options,
+) -> Result<Vec<&'table Lane>, GateError> {
     if !options.lanes.is_empty() {
         let mut unknown: Vec<&str> = options
             .lanes
@@ -635,12 +363,24 @@ fn select<'table>(manifest: &'table Manifest, options: &Options) -> Result<Vec<&
             .collect();
         unknown.sort_unstable();
         if !unknown.is_empty() {
-            return Err(GateError::Usage(format!("ci-local: unknown lane id(s): {}", unknown.join(", "))));
+            return Err(GateError::Usage(format!(
+                "ci-local: unknown lane id(s): {}",
+                unknown.join(", ")
+            )));
         }
-        return Ok(manifest.lanes.iter().filter(|lane| options.lanes.contains(&lane.id)).collect());
+        return Ok(manifest
+            .lanes
+            .iter()
+            .filter(|lane| options.lanes.contains(&lane.id))
+            .collect());
     }
     if options.fast {
-        return Ok(manifest.lanes.iter().filter(|lane| lane.fast).filter(is_local).collect());
+        return Ok(manifest
+            .lanes
+            .iter()
+            .filter(|lane| lane.fast)
+            .filter(is_local)
+            .collect());
     }
     Ok(manifest.lanes.iter().filter(is_local).collect())
 }
@@ -671,7 +411,10 @@ fn print_header(console: &Console, root: &Path, identity: &receipt::TreeIdentity
         ));
     }
     console.say(&format!("  host:    {}", host()));
-    console.say(&format!("  rustc:   {}", capture_line(&["rustc", "--version"], root)));
+    console.say(&format!(
+        "  rustc:   {}",
+        capture_line(&["rustc", "--version"], root)
+    ));
     console.say(&format!("  mode:    {mode}"));
     console.say(&format!("  started: {}", stamp()));
 }
@@ -691,7 +434,14 @@ fn run_selected(
         None => "system temporary directory".to_owned(),
     };
     console.say(&format!("  scratch: {shown}"));
-    console.say(&format!("  mode:    {}", if parallel { "parallel groups" } else { "one lane at a time" }));
+    console.say(&format!(
+        "  mode:    {}",
+        if parallel {
+            "parallel groups"
+        } else {
+            "one lane at a time"
+        }
+    ));
     let results = if parallel {
         let jobs = match options.jobs {
             Some(count) if count > 0 => count,
@@ -738,7 +488,9 @@ fn write_receipt(
             Ok(())
         }
         Err(error) => {
-            console.warn(&format!("ci-local: the receipt could not be written: {error}"));
+            console.warn(&format!(
+                "ci-local: the receipt could not be written: {error}"
+            ));
             Err(2)
         }
     }
@@ -763,14 +515,25 @@ pub(crate) fn run(arguments: &[String], console: &Console) -> u8 {
     let manifest = match load_lanes(&root) {
         Ok(manifest) => manifest,
         Err(error) => {
-            console.warn(&format!("ci-local: cannot load {}: {error}", lanes::MANIFEST_REL));
+            console.warn(&format!(
+                "ci-local: cannot load {}: {error}",
+                lanes::MANIFEST_REL
+            ));
             return 2;
         }
     };
     if options.list {
         for lane in &manifest.lanes {
-            let kind = if lane.required { "required" } else { "optional" };
-            console.say(&format!("{:<22} {:<9} {kind}", lane.id, lane.surfaces.join(" ")));
+            let kind = if lane.required {
+                "required"
+            } else {
+                "optional"
+            };
+            console.say(&format!(
+                "{:<22} {:<9} {kind}",
+                lane.id,
+                lane.surfaces.join(" ")
+            ));
         }
         return 0;
     }
@@ -807,8 +570,16 @@ pub(crate) fn run(arguments: &[String], console: &Console) -> u8 {
     console.warn("\nrefused lanes:");
     for result in refused {
         match result.detail.lines().next() {
-            Some(line) => console.warn(&format!("  - {}: {} — {line}", result.lane_id, result.status.label())),
-            None => console.warn(&format!("  - {}: {}", result.lane_id, result.status.label())),
+            Some(line) => console.warn(&format!(
+                "  - {}: {} — {line}",
+                result.lane_id,
+                result.status.label()
+            )),
+            None => console.warn(&format!(
+                "  - {}: {}",
+                result.lane_id,
+                result.status.label()
+            )),
         }
     }
     1

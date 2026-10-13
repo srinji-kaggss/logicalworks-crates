@@ -37,7 +37,10 @@ const OPTIONAL: [(&str, &str); 6] = [
         "REQUIREMENTS.md",
         "Immutable product requirements, superseded never edited",
     ),
-    ("INVARIANTS.md", "Short enforced rule list for this repository"),
+    (
+        "INVARIANTS.md",
+        "Short enforced rule list for this repository",
+    ),
     (
         "contract/APPROVED.toml",
         "Every approved external edge, and its owner",
@@ -77,7 +80,10 @@ enum IndexError {
 impl fmt::Display for IndexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => {
+            Self::Io {
+                ref path,
+                ref cause,
+            } => {
                 write!(formatter, "cannot read {}: {cause}", path.display())
             }
             Self::NoSection { source, heading } => {
@@ -88,7 +94,11 @@ impl fmt::Display for IndexError {
                 write!(formatter, "crates/lgwks-std/Cargo.toml names no repository")
             }
             Self::TooDeep { ref path } => {
-                write!(formatter, "{} is nested past {MAX_DEPTH} levels", path.display())
+                write!(
+                    formatter,
+                    "{} is nested past {MAX_DEPTH} levels",
+                    path.display()
+                )
             }
             Self::Inconsistent(ref problems) => write!(formatter, "{}", problems.join("\nerror: ")),
         }
@@ -395,7 +405,11 @@ fn linked_from(root: &Path, documents: &[String]) -> Result<Vec<String>, IndexEr
 }
 
 /// Every `.md` file under `directory`, sorted.
-fn markdown_under(directory: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), IndexError> {
+fn markdown_under(
+    directory: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), IndexError> {
     if depth > MAX_DEPTH {
         return fail(
             IndexError::TooDeep {
@@ -445,7 +459,9 @@ fn crates_table(readme: &str, problems: &mut Vec<String>) -> Result<Vec<Row>, In
             None => None,
         };
         let Some(link) = link else {
-            problems.push(format!("crates table row for {crate_name} has no docs.rs link"));
+            problems.push(format!(
+                "crates table row for {crate_name} has no docs.rs link"
+            ));
             continue;
         };
         crates.push(Row {
@@ -471,7 +487,9 @@ fn documents_table(
         };
         let candidate = directory_of(index_path, root).join(link);
         let Some(path) = file_under(root, &candidate) else {
-            problems.push(format!("the Documentation table names {link}, which does not exist"));
+            problems.push(format!(
+                "the Documentation table names {link}, which does not exist"
+            ));
             continue;
         };
         let Some(name) = relative(root, &path) else {
@@ -577,7 +595,10 @@ fn render(
         String::new(),
     ];
     for row in crates {
-        out.push(format!("- [{}]({}) — {}", row.name, row.link, row.description));
+        out.push(format!(
+            "- [{}]({}) — {}",
+            row.name, row.link, row.description
+        ));
     }
     out.push(String::new());
     out.push("## Documentation".to_owned());
@@ -662,7 +683,10 @@ mod tests {
 
     #[test]
     fn a_link_row_names_its_target_and_a_plain_row_names_none() {
-        assert_eq!(link_row("| [`a.md`](guides/a.md) | text |"), Some("guides/a.md"));
+        assert_eq!(
+            link_row("| [`a.md`](guides/a.md) | text |"),
+            Some("guides/a.md")
+        );
         assert_eq!(link_row("| plain | text |"), None);
         assert_eq!(link_row("| [`a`]() | text |"), None);
     }

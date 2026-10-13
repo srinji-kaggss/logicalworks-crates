@@ -80,7 +80,10 @@ enum SpecError {
 impl fmt::Display for SpecError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => {
+            Self::Io {
+                ref path,
+                ref cause,
+            } => {
                 write!(formatter, "cannot read {}: {cause}", path.display())
             }
         }
@@ -147,7 +150,10 @@ fn definitions(text: &str) -> Vec<String> {
         let Some((id, length)) = id_prefix(tail) else {
             continue;
         };
-        if tail.get(length..).is_some_and(|after| after.starts_with(".**")) {
+        if tail
+            .get(length..)
+            .is_some_and(|after| after.starts_with(".**"))
+        {
             found.push(id);
         }
     }
@@ -340,10 +346,22 @@ mod tests {
 
     #[test]
     fn a_slash_list_names_every_id() {
-        assert_eq!(required_in("DX-01/03/04"), vec!["DX-01", "DX-03", "DX-04"], "a slash list");
-        assert_eq!(required_in("DX-05/LC-08"), vec!["DX-05", "LC-08"], "a second family");
+        assert_eq!(
+            required_in("DX-01/03/04"),
+            vec!["DX-01", "DX-03", "DX-04"],
+            "a slash list"
+        );
+        assert_eq!(
+            required_in("DX-05/LC-08"),
+            vec!["DX-05", "LC-08"],
+            "a second family"
+        );
         // A part that is not an id breaks the run: a number after it has no family.
-        assert_eq!(required_in("DX-01/see below/05"), vec!["DX-01"], "a broken run");
+        assert_eq!(
+            required_in("DX-01/see below/05"),
+            vec!["DX-01"],
+            "a broken run"
+        );
     }
 
     #[test]
@@ -357,7 +375,11 @@ mod tests {
 
     #[test]
     fn a_requires_line_gives_its_quoted_value() {
-        assert_eq!(requires_value("requires = \"DX-01/03\""), Some("DX-01/03"), "a row");
+        assert_eq!(
+            requires_value("requires = \"DX-01/03\""),
+            Some("DX-01/03"),
+            "a row"
+        );
         assert_eq!(requires_value("row = \"requires\""), None, "another key");
     }
 
@@ -374,7 +396,11 @@ mod tests {
         .collect();
         let owned: BTreeSet<String> = ["DX-01".to_owned()].into_iter().collect();
         // LC is checked, so its unowned id is reported; PR is not checked yet.
-        assert_eq!(unowned(&found, &owned), vec!["DX-98", "LC-99"], "unowned ids in order");
+        assert_eq!(
+            unowned(&found, &owned),
+            vec!["DX-98", "LC-99"],
+            "unowned ids in order"
+        );
     }
 
     #[test]
@@ -383,7 +409,10 @@ mod tests {
             .into_iter()
             .map(|(key, page)| (key.to_owned(), page.to_owned()))
             .collect();
-        assert!(unowned(&found, &BTreeSet::new()).is_empty(), "exempt ids are not reported");
+        assert!(
+            unowned(&found, &BTreeSet::new()).is_empty(),
+            "exempt ids are not reported"
+        );
     }
 
     #[test]
@@ -395,7 +424,10 @@ mod tests {
             .map(|&(id, _)| id)
             .filter(|id| !found.contains_key(*id))
             .collect();
-        assert!(stale.is_empty(), "exemptions naming no defined id: {stale:?}");
+        assert!(
+            stale.is_empty(),
+            "exemptions naming no defined id: {stale:?}"
+        );
         Ok(())
     }
 
@@ -405,7 +437,12 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = execute(&root, &mut out, &mut err)?;
-        assert_eq!(code, 0, "unowned requirements: {}", String::from_utf8_lossy(&err));
+        assert_eq!(
+            code,
+            0,
+            "unowned requirements: {}",
+            String::from_utf8_lossy(&err)
+        );
         Ok(())
     }
 }

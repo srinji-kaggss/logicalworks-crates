@@ -122,7 +122,9 @@ pub(super) fn consumers_of(raw: &str) -> BTreeSet<String> {
 
 /// The text or raw value of the entry `key` of an array-of-tables element.
 fn field(table: &Table, key: &str) -> Option<String> {
-    text(table, key).or_else(|| raw(table, key)).map(str::to_owned)
+    text(table, key)
+        .or_else(|| raw(table, key))
+        .map(str::to_owned)
 }
 
 /// `contract/APPROVED.toml` keyed by crate name, dashes normalised to underscores.
@@ -133,7 +135,10 @@ fn field(table: &Table, key: &str) -> Option<String> {
 /// merged: the first keeps its owner and every record's consumers are admitted.
 pub(super) fn approvals(tables: &[Table]) -> BTreeMap<String, Record> {
     let mut merged: BTreeMap<String, Record> = BTreeMap::new();
-    for table in tables.iter().filter(|table| table.path == "approved" && table.array) {
+    for table in tables
+        .iter()
+        .filter(|table| table.path == "approved" && table.array)
+    {
         let Some(raw_name) = field(table, "crate") else {
             continue;
         };
@@ -174,9 +179,15 @@ mod tests {
     #[test]
     fn a_manifest_names_its_crate_and_every_declared_dependency() {
         let tables = read_tables(MANIFEST);
-        assert_eq!(crate_name(&tables).as_deref(), Some("lgwks_demo"), "dashes become underscores");
         assert_eq!(
-            declared_dependencies(&tables).into_iter().collect::<Vec<_>>(),
+            crate_name(&tables).as_deref(),
+            Some("lgwks_demo"),
+            "dashes become underscores"
+        );
+        assert_eq!(
+            declared_dependencies(&tables)
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec!["lgwks_std", "proptest", "rustix", "serde"],
             "inline, dotted, sub-table and target forms all count; features do not"
         );
@@ -184,8 +195,13 @@ mod tests {
 
     #[test]
     fn a_workspace_lists_its_members_across_lines() {
-        let tables = read_tables("[workspace]\nmembers = [\n  \"crates/a\", # one\n  \"crates/b\",\n]\n");
-        assert_eq!(workspace_members(&tables), vec!["crates/a", "crates/b"], "a multi-line array");
+        let tables =
+            read_tables("[workspace]\nmembers = [\n  \"crates/a\", # one\n  \"crates/b\",\n]\n");
+        assert_eq!(
+            workspace_members(&tables),
+            vec!["crates/a", "crates/b"],
+            "a multi-line array"
+        );
     }
 
     #[test]
@@ -194,12 +210,20 @@ mod tests {
             [[approved]]\ncrate = \"tracing\"\nowner = \"lgwks_ast\"\nallowed_consumers = \"lgwks-ast, lgwks_std\"\n";
         let merged = approvals(&read_tables(register));
         let record = merged.get("tracing");
-        assert_eq!(record.map(|found| found.owner.as_deref()), Some(Some("lgwks_std")), "first owner wins");
+        assert_eq!(
+            record.map(|found| found.owner.as_deref()),
+            Some(Some("lgwks_std")),
+            "first owner wins"
+        );
         assert_eq!(
             record.map(|found| found.consumers.iter().cloned().collect::<Vec<_>>()),
             Some(vec!["lgwks_ast".to_owned(), "lgwks_std".to_owned()]),
             "consumers are the union"
         );
-        assert_eq!(record.and_then(|found| found.reason.clone()).as_deref(), Some("a b"), "a continued line folds");
+        assert_eq!(
+            record.and_then(|found| found.reason.clone()).as_deref(),
+            Some("a b"),
+            "a continued line folds"
+        );
     }
 }

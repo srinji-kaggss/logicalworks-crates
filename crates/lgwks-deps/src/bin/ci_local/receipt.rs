@@ -32,7 +32,12 @@ impl TreeIdentity {
 
 /// What `git` prints for `args` in `root`, if it succeeds.
 pub(super) fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(root).stdin(Stdio::null()).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -65,7 +70,11 @@ fn digest_of(root: &Path, text: &str) -> Option<String> {
     drop(input);
     let output = child.wait_with_output().ok()?;
     let printed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if printed.is_empty() { None } else { Some(printed.chars().take(16).collect()) }
+    if printed.is_empty() {
+        None
+    } else {
+        Some(printed.chars().take(16).collect())
+    }
 }
 
 /// A value, or `unknown` when git could not say.
@@ -99,7 +108,8 @@ fn read_status(status: &str) -> (Vec<String>, Vec<String>) {
 /// The identity of the tree under `root`.
 pub(super) fn tree_identity(root: &Path) -> TreeIdentity {
     let listed = git_text(root, &["ls-files", "-s"]);
-    let (dirty, untracked) = read_status(&git_text(root, &["status", "--porcelain", "-uall", "-z"]));
+    let (dirty, untracked) =
+        read_status(&git_text(root, &["status", "--porcelain", "-uall", "-z"]));
     TreeIdentity {
         commit: trimmed_or_unknown(git(root, &["rev-parse", "HEAD"])),
         tree: trimmed_or_unknown(git(root, &["rev-parse", "HEAD^{tree}"])),
@@ -127,7 +137,11 @@ pub(super) fn capture_line(argv: &[&str], root: &Path) -> String {
             let printed = String::from_utf8_lossy(&done.stdout).trim().to_owned();
             if printed.is_empty() {
                 let errored = String::from_utf8_lossy(&done.stderr).trim().to_owned();
-                if errored.is_empty() { "missing".to_owned() } else { errored }
+                if errored.is_empty() {
+                    "missing".to_owned()
+                } else {
+                    errored
+                }
             } else {
                 printed
             }
@@ -143,7 +157,12 @@ pub(super) fn host() -> String {
 
 /// The counts of results by status.
 pub(super) fn counts_line(results: &[LaneResult]) -> String {
-    let count = |wanted: Status| results.iter().filter(|result| result.status == wanted).count();
+    let count = |wanted: Status| {
+        results
+            .iter()
+            .filter(|result| result.status == wanted)
+            .count()
+    };
     format!(
         "passed: {}   failed: {}   blocked: {}   skipped: {}",
         count(Status::Pass),
@@ -210,8 +229,18 @@ pub(super) fn build_receipt(
             identity.dirty.len(),
             identity.untracked.len()
         ));
-        lines.extend(identity.dirty.iter().map(|entry| format!("  - changed: `{entry}`")));
-        lines.extend(identity.untracked.iter().map(|entry| format!("  - untracked: `{entry}`")));
+        lines.extend(
+            identity
+                .dirty
+                .iter()
+                .map(|entry| format!("  - changed: `{entry}`")),
+        );
+        lines.extend(
+            identity
+                .untracked
+                .iter()
+                .map(|entry| format!("  - untracked: `{entry}`")),
+        );
     }
     lines.extend([
         String::new(),
@@ -226,7 +255,13 @@ pub(super) fn build_receipt(
     ]);
     for lane in manifest.lanes.iter().filter(|lane| is_local(lane)) {
         if let Some(result) = results.iter().find(|found| found.lane_id == lane.id) {
-            let detail: String = result.detail.replace('|', "\\|").replace('\n', " ").chars().take(200).collect();
+            let detail: String = result
+                .detail
+                .replace('|', "\\|")
+                .replace('\n', " ")
+                .chars()
+                .take(200)
+                .collect();
             lines.push(format!(
                 "| {} | **{}** | {} | {} | {detail} |",
                 lane.id,
@@ -236,8 +271,16 @@ pub(super) fn build_receipt(
             ));
         }
     }
-    lines.extend([String::new(), "## Not covered by this surface".to_owned(), String::new()]);
-    let uncovered: Vec<&Lane> = manifest.lanes.iter().filter(|lane| !is_local(lane)).collect();
+    lines.extend([
+        String::new(),
+        "## Not covered by this surface".to_owned(),
+        String::new(),
+    ]);
+    let uncovered: Vec<&Lane> = manifest
+        .lanes
+        .iter()
+        .filter(|lane| !is_local(lane))
+        .collect();
     if uncovered.is_empty() {
         lines.push("- none".to_owned());
     }
@@ -259,8 +302,13 @@ mod tests {
 
     #[test]
     fn porcelain_status_splits_dirty_from_untracked_and_skips_a_rename_source() {
-        let (dirty, untracked) = read_status(" M keep.txt\0?? scratch.txt\0R  new.txt\0old.txt\0A  added.txt\0");
-        assert_eq!(dirty, vec!["M keep.txt", "R new.txt", "A added.txt"], "changed entries");
+        let (dirty, untracked) =
+            read_status(" M keep.txt\0?? scratch.txt\0R  new.txt\0old.txt\0A  added.txt\0");
+        assert_eq!(
+            dirty,
+            vec!["M keep.txt", "R new.txt", "A added.txt"],
+            "changed entries"
+        );
         assert_eq!(untracked, vec!["scratch.txt"], "untracked entries");
     }
 }

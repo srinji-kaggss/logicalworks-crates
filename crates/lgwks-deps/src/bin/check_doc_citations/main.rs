@@ -62,12 +62,22 @@ enum CiteError {
 impl fmt::Display for CiteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => write!(formatter, "{}: {cause}", path.display()),
+            Self::Io {
+                ref path,
+                ref cause,
+            } => write!(formatter, "{}: {cause}", path.display()),
             Self::BadLockKey { ref key } => {
-                write!(formatter, "{LOCK_NAME}: bad key {key:?}, expected <path>:<line>")
+                write!(
+                    formatter,
+                    "{LOCK_NAME}: bad key {key:?}, expected <path>:<line>"
+                )
             }
             Self::TooDeep { ref path } => {
-                write!(formatter, "{} is nested past {MAX_DEPTH} levels", path.display())
+                write!(
+                    formatter,
+                    "{} is nested past {MAX_DEPTH} levels",
+                    path.display()
+                )
             }
         }
     }
@@ -135,7 +145,11 @@ fn cited_by(collected: &Collected, key: &Key) -> String {
         Some(pages) => pages.iter().collect(),
         None => BTreeSet::new(),
     };
-    pages.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+    pages
+        .into_iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Prints structural failures and the reason the lock was left alone.
@@ -145,7 +159,11 @@ fn report_failures(options: &Options, failures: &[String], err: &mut impl Write)
         writeln!(err, "  {failure}")?;
     }
     if failures.len() > options.limit {
-        writeln!(err, "  … and {} more", failures.len().saturating_sub(options.limit))?;
+        writeln!(
+            err,
+            "  … and {} more",
+            failures.len().saturating_sub(options.limit)
+        )?;
     }
     writeln!(
         err,
@@ -167,9 +185,18 @@ fn update_lock(
     if !found.moved.is_empty() {
         writeln!(err, "{} cited line(s) changed text:", found.moved.len())?;
         for key in found.moved.iter().take(options.limit) {
-            writeln!(err, "  {}  (cited by {})", spell(key), cited_by(collected, key))?;
+            writeln!(
+                err,
+                "  {}  (cited by {})",
+                spell(key),
+                cited_by(collected, key)
+            )?;
             writeln!(err, "    was: {}", clip(&text_of(locked, key), 100))?;
-            writeln!(err, "    now: {}", clip(&text_of(&collected.entries, key), 100))?;
+            writeln!(
+                err,
+                "    now: {}",
+                clip(&text_of(&collected.entries, key), 100)
+            )?;
         }
     }
     if !found.stale.is_empty() {
@@ -188,7 +215,11 @@ fn update_lock(
         found.stale.len(),
         skipped_note(collected)
     )?;
-    Ok(if read_lock(&lock_path)? == collected.entries { 0 } else { 1 })
+    Ok(if read_lock(&lock_path)? == collected.entries {
+        0
+    } else {
+        1
+    })
 }
 
 /// Prints how the citations drifted from the lock.
@@ -207,7 +238,12 @@ fn report_drift(
             found.unpinned.len()
         )?;
         for key in found.unpinned.iter().take(options.limit) {
-            writeln!(err, "  {}  {}", spell(key), clip(&text_of(&collected.entries, key), 80))?;
+            writeln!(
+                err,
+                "  {}  {}",
+                spell(key),
+                clip(&text_of(&collected.entries, key), 80)
+            )?;
         }
     }
     if !found.moved.is_empty() {
@@ -219,9 +255,18 @@ fn report_drift(
             found.moved.len()
         )?;
         for key in found.moved.iter().take(options.limit) {
-            writeln!(err, "  {}  (cited by {})", spell(key), cited_by(collected, key))?;
+            writeln!(
+                err,
+                "  {}  (cited by {})",
+                spell(key),
+                cited_by(collected, key)
+            )?;
             writeln!(err, "    pinned: {}", clip(&text_of(locked, key), 100))?;
-            writeln!(err, "    found:  {}", clip(&text_of(&collected.entries, key), 100))?;
+            writeln!(
+                err,
+                "    found:  {}",
+                clip(&text_of(&collected.entries, key), 100)
+            )?;
         }
     }
     if !found.stale.is_empty() {
@@ -249,7 +294,9 @@ fn execute(
     err: &mut impl Write,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let mut collected = collect(&options.root)?;
-    collected.failures.extend(inventory_failures(&options.root)?);
+    collected
+        .failures
+        .extend(inventory_failures(&options.root)?);
     if !collected.failures.is_empty() {
         report_failures(options, &collected.failures, err)?;
         return Ok(1);
@@ -347,7 +394,12 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = execute(&options, &mut out, &mut err)?;
-        assert_eq!(code, 0, "the lock must verify: {}", String::from_utf8_lossy(&err));
+        assert_eq!(
+            code,
+            0,
+            "the lock must verify: {}",
+            String::from_utf8_lossy(&err)
+        );
         Ok(())
     }
 }

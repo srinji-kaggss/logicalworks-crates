@@ -39,21 +39,81 @@ const LOCK_HEADER: &str = "\
 
 /// SHA-256 round constants (FIPS 180-4, section 4.2.2).
 const ROUND: [u32; 64] = [
-    0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5, 0x3956_c25b, 0x59f1_11f1, 0x923f_82a4,
-    0xab1c_5ed5, 0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3, 0x72be_5d74, 0x80de_b1fe,
-    0x9bdc_06a7, 0xc19b_f174, 0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc, 0x2de9_2c6f,
-    0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da, 0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
-    0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967, 0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc,
-    0x5338_0d13, 0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85, 0xa2bf_e8a1, 0xa81a_664b,
-    0xc24b_8b70, 0xc76c_51a3, 0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070, 0x19a4_c116,
-    0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5, 0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
-    0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208, 0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7,
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
     0xc671_78f2,
 ];
 
 /// SHA-256 initial hash value (FIPS 180-4, section 5.3.3).
 const INITIAL: [u32; 8] = [
-    0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab,
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
     0x5be0_cd19,
 ];
 
@@ -91,7 +151,10 @@ enum CheckError {
 impl fmt::Display for CheckError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Io { ref path, ref cause } => write!(formatter, "{}: {cause}", path.display()),
+            Self::Io {
+                ref path,
+                ref cause,
+            } => write!(formatter, "{}: {cause}", path.display()),
             Self::NoBlockquote { id } => write!(
                 formatter,
                 "REQUIREMENTS.md: R{id} has no normative blockquote. A requirement without a \
@@ -186,7 +249,16 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
             .wrapping_add(schedule[round.saturating_sub(7)])
             .wrapping_add(high);
     }
-    let [mut aa, mut bb, mut cc, mut dd, mut ee, mut ff, mut gg, mut hh] = *state;
+    let [
+        mut aa,
+        mut bb,
+        mut cc,
+        mut dd,
+        mut ee,
+        mut ff,
+        mut gg,
+        mut hh,
+    ] = *state;
     for (constant, word) in ROUND.iter().zip(schedule.iter()) {
         let sum_e = ee.rotate_right(6) ^ ee.rotate_right(11) ^ ee.rotate_right(25);
         let choose = (ee & ff) ^ (!ee & gg);
@@ -357,7 +429,10 @@ fn parse_requirements(text: &str) -> Result<Parsed, CheckError> {
             continue;
         };
         index = index.saturating_add(1);
-        while lines.get(index).is_some_and(|blank| blank.trim().is_empty()) {
+        while lines
+            .get(index)
+            .is_some_and(|blank| blank.trim().is_empty())
+        {
             index = index.saturating_add(1);
         }
         let mut quote: Vec<&str> = Vec::new();
@@ -406,8 +481,7 @@ fn parse_lock(text: &str) -> Result<BTreeMap<u64, Locked>, CheckError> {
         }
         let number = offset.saturating_add(1);
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        let (Some(key), Some(digest), Some(sentence)) =
-            (parts.first(), parts.get(1), parts.get(2))
+        let (Some(key), Some(digest), Some(sentence)) = (parts.first(), parts.get(1), parts.get(2))
         else {
             return fail(CheckError::BadLockRow { line: number }, "parse_lock");
         };
@@ -458,7 +532,9 @@ fn compare(
     let mut changed = Vec::new();
     for (id, sentence) in sentences {
         let Some(old) = locked.get(id) else {
-            problems.push(format!("R{id}: present in REQUIREMENTS.md, absent from the lock"));
+            problems.push(format!(
+                "R{id}: present in REQUIREMENTS.md, absent from the lock"
+            ));
             changed.push(*id);
             continue;
         };
@@ -472,7 +548,9 @@ fn compare(
     }
     for id in locked.keys() {
         if !sentences.contains_key(id) {
-            problems.push(format!("R{id}: present in the lock, absent from REQUIREMENTS.md"));
+            problems.push(format!(
+                "R{id}: present in the lock, absent from REQUIREMENTS.md"
+            ));
             changed.push(*id);
         }
     }
@@ -557,7 +635,10 @@ fn execute(
         return Ok(1);
     }
     if update {
-        writeln!(out, "{LOCK_NAME} already matches REQUIREMENTS.md; nothing to do")?;
+        writeln!(
+            out,
+            "{LOCK_NAME} already matches REQUIREMENTS.md; nothing to do"
+        )?;
         return Ok(0);
     }
     writeln!(
@@ -608,7 +689,11 @@ mod tests {
     /// 56-byte message that forces a second block.
     #[test]
     fn the_digest_matches_the_published_sha256_vectors() -> TestResult {
-        assert_eq!(digest_of("")?, "e3b0c44298fc", "SHA-256 of the empty message");
+        assert_eq!(
+            digest_of("")?,
+            "e3b0c44298fc",
+            "SHA-256 of the empty message"
+        );
         assert_eq!(digest_of("abc")?, "ba7816bf8f01", "SHA-256 of abc");
         assert_eq!(
             digest_of("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")?,
@@ -620,7 +705,11 @@ mod tests {
 
     #[test]
     fn a_heading_names_its_id_and_a_plain_line_names_none() {
-        assert_eq!(heading_id("### R12. Human mess is in scope"), Some(12), "a heading");
+        assert_eq!(
+            heading_id("### R12. Human mess is in scope"),
+            Some(12),
+            "a heading"
+        );
         assert_eq!(heading_id("### R12 no dot"), None, "no dot");
         assert_eq!(heading_id("## R12. wrong level"), None, "wrong level");
         assert_eq!(heading_id("### R. no id"), None, "no digits");
@@ -638,7 +727,11 @@ mod tests {
     fn the_log_heading_and_its_ids_are_found() {
         assert!(is_log_heading("## Supersession log"), "the heading");
         assert!(!is_log_heading("### Supersession log"), "a deeper heading");
-        assert_eq!(log_ids("R3 and R41, not XR5 or R6x"), vec![3, 41], "standalone ids");
+        assert_eq!(
+            log_ids("R3 and R41, not XR5 or R6x"),
+            vec![3, 41],
+            "standalone ids"
+        );
     }
 
     #[test]
@@ -675,8 +768,14 @@ mod tests {
             Some("abc"),
             "the digest is read"
         );
-        assert!(parse_lock("R7 abc sentence\n").is_err(), "spaces are not tabs");
-        assert!(parse_lock("X7\tabc\tsentence\n").is_err(), "the id must start with R");
+        assert!(
+            parse_lock("R7 abc sentence\n").is_err(),
+            "spaces are not tabs"
+        );
+        assert!(
+            parse_lock("X7\tabc\tsentence\n").is_err(),
+            "the id must start with R"
+        );
         Ok(())
     }
 
