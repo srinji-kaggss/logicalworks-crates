@@ -38,20 +38,30 @@ def _iter_rust_sources(root: Path):
 
 
 def builtin_unwrap_scan(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:
-    """Ban ``.unwrap()`` in ``crates/*/src`` outside each file's ``mod tests``."""
+    """Ban ``.unwrap()`` in ``crates/*/src``, read as code, tests included.
+
+    Two defects this replaces. It matched raw text, so a fixture that *spells* an
+    unwrap was reported as one: `crates/lgwks-bot/src/inspect/engine/tests.rs`
+    holds `"fn f() { g().unwrap(); }"` as the subject its inspection is asked to
+    report, and the scan read that text as a call (#508 #510 #511). And it
+    exempted everything at or after a `mod tests` line, which is an exception the
+    rule does not have — an unwrap is an unwrap wherever it is written.
+
+    `code_only` blanks comments and literals while keeping every offset and line
+    number, so a finding still names the line a reader can open, and what is
+    judged is code everywhere, tests included.
+    """
+    from rust_source import code_only
+
     hits: list[str] = []
     for path in _iter_rust_sources(root):
-        lines = path.read_text(encoding="utf-8").splitlines()
-        tests_at = next((i + 1 for i, line in enumerate(lines) if "mod tests" in line), None)
-        for number, line in enumerate(lines, start=1):
-            if ".unwrap()" not in line:
-                continue
-            if tests_at is not None and number >= tests_at:
-                continue
-            hits.append(f"{path.relative_to(root)}:{number}")
+        code = code_only(path.read_text(encoding="utf-8"))
+        for number, line in enumerate(code.splitlines(), start=1):
+            if ".unwrap()" in line:
+                hits.append(f"{path.relative_to(root)}:{number}")
     if hits:
-        return 1, "\n".join(f"unwrap outside tests: {hit}" for hit in hits)
-    return 0, "no unwrap outside tests"
+        return 1, "\n".join(f"unwrap: {hit}" for hit in hits)
+    return 0, "no unwrap in code"
 
 
 def builtin_suppressions(root: Path, env: dict[str, str], out=None) -> tuple[int, str]:

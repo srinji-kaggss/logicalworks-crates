@@ -136,6 +136,10 @@ lgwks_std = { workspace = true, features = ["random"] }
 name = "lgwks-deps"
 path = "src/main.rs"
 
+[[bin]]
+name = "check-std-first"
+path = "src/bin/check_std_first/main.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

@@ -109,9 +109,6 @@ done
 if [ \"\$(/opt/tools/cargo-nextest --version 2>/dev/null | awk 'NR==1 {print \$2}')\" != '${nextest}' ]; then
     curl -fsSL 'https://get.nexte.st/${nextest}/${nextest_platform}' | tar -xz -C /opt/tools
 fi
-case ' ${container_rustflags} ' in
-    *fuse-ld=lld*) command -v ld.lld >/dev/null || { apt-get update -qq && apt-get install -y -qq lld >/dev/null; } ;;
-esac
 export PATH=/opt/tools:\$PATH
 rustc --version
 $(printf '%s\n' "${commands[@]}")"
@@ -129,6 +126,36 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # not found`, run 38099333925). One image, one volume.
 image="rust:${toolchain}-bookworm"
 image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
+
+# The linker the machine's cargo configuration names (lld) is not in the image,
+# and a `--rm` container forgets whatever it installs, so installing it inside
+# the run fetched it from the Debian mirror every time: one slow mirror held a
+# job for 6.5 minutes and then failed it with `cannot find 'ld'` (run
+# 38316346444). A derived image carries it instead, built once per machine and
+# toolchain and reused by every later run; the volumes below are unchanged, so
+# the build caches stay warm.
+run_image="${image}"
+case " ${container_rustflags} " in
+    *fuse-ld=lld*)
+        run_image="lwc-ci-${image_tag}-lld"
+        if ! docker image inspect "${run_image}" >/dev/null 2>&1; then
+            printf 'FROM %s\nRUN apt-get update -qq && apt-get install -y -qq lld && rm -rf /var/lib/apt/lists/*\n' "${image}" |
+                docker build -q -t "${run_image}" -
+        fi
+        ;;
+esac
+
+# The toolchain's components live in a volume too. `rust-toolchain.toml` asks
+# for clippy and rustfmt and the image ships neither, so a `--rm` container
+# downloaded both from static.rust-lang.org on every run, and every network
+# blip failed the leg before a test ran (run 38182457101: `error decoding
+# response body` on the channel manifest; run 38180197921: `component download
+# failed for clippy`). An empty named volume is seeded from the image's
+# /usr/local/rustup on first mount, so the components download once and stay.
+# Named by toolchain, so a pin change starts a fresh volume rather than mixing
+# two toolchains, and by runner, for the one-writer reason the target volume
+# has: two first-time installs into one rustup home would race.
+rustup_volume="lwc-ci-linux-rustup-$(printf '%s' "${toolchain}" | tr -c 'A-Za-z0-9_.-' '-')-${target_owner}"
 
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
@@ -148,6 +175,7 @@ exec docker run --rm --init \
     --volume "lwc-ci-linux-target-${target_owner}-${image_tag}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
+    --volume "${rustup_volume}:/usr/local/rustup" \
     ${config_mount[@]+"${config_mount[@]}"} \
     --env "${rustflags_var}=${container_rustflags}" \
     --env CARGO_TARGET_DIR=/target \
@@ -155,5 +183,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "${image}" \
+    "${run_image}" \
     bash -c "${script}"

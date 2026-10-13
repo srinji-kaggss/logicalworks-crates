@@ -74,8 +74,8 @@ propose growing it into a fourth surface.
 | Every authored external edge has an owner | enforced by a gate | `cargo run -p lgwks_deps -- check .` (gate lane `deps-register`); `contract/APPROVED.toml` |
 | `lgwks_std` and `lgwks_ast` author edges directly under the grandfather clause | enforced | `contract/APPROVED.toml`; `scripts/check-std-first.py` reads the *source*, not the manifest |
 | Feature-gated storefront capabilities are default-off | present | `crates/lgwks-deps/Cargo.toml` `[features]` |
-| **`appcui` / `gpui` / `candle` / `bevy` are admitted dependencies** | **admitted-not-implemented** | An approved edge in `contract/APPROVED.toml` is a recorded policy decision. **It is not a CUA product, a model runtime, or a delivered capability, and no row here claims one is.** |
-| Authored-edge assurance vs resolved transitive bytes, patches, source replacement, vendor integrity | **assurance-gap** | A no-deps graph is not a supply-chain proof → [#158](https://github.com/srinji-kaggss/logicalworks-crates/issues/158) |
+| **`appcui` / `gpui` / `candle-*` / `tokenizers` / `bevy_app` / `bevy_time` / `bevy_state` are admitted dependencies** | **admitted-not-implemented**, marked by a gate | An approved edge is a recorded policy decision, **not a CUA product, a model runtime, or a delivered capability.** Each record's `reason` opens with `policy-only:`; `scripts/check-std-first.py` (lane `std-first`) refuses an unconsumed storefront edge left unmarked and a consumed one still marked (#418). `bevy_ecs` is consumed (`lgwks_bot::ecs`) and is not marked. |
+| Authored-edge assurance vs resolved transitive bytes, patches, source replacement, vendor integrity | **assurance-gap** | A no-deps graph is not a supply-chain proof. Transitive bytes: cargo checks each `.crate` against `Cargo.lock`'s sha256 under `--locked`. Vendor integrity (`check_coverage`, unwired), source replacement and a `[patch]`/`[replace]` refusal → [#266](https://github.com/srinji-kaggss/logicalworks-crates/issues/266) (open; was #158, closed) |
 | Unambiguous register parsing, complete member records, collector error-path cleanup | unexercised-gap | [#157](https://github.com/srinji-kaggss/logicalworks-crates/issues/157), [#159](https://github.com/srinji-kaggss/logicalworks-crates/issues/159) |
 | Every selected capability has a usable public import path downstream | unexercised-gap | Declared-but-unexported `bevy_app`/`bevy_time`/`bevy_state` → [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169) |
 
@@ -101,8 +101,7 @@ independently.
 [#167](https://github.com/srinji-kaggss/logicalworks-crates/issues/167),
 [#168](https://github.com/srinji-kaggss/logicalworks-crates/issues/168),
 [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169).
-
-Every issue in both lists above is closed as of 2026-10-05.
+Every issue in both lists is closed as of 2026-10-05.
 
 **Assurance workstreams X1–X4:** X1 (constant-time hashing) was measured and closed
 by #275; X2 (fallible thread admission) was closed by #264 — the `task` row now
@@ -111,10 +110,11 @@ blocking pool; X3 (entropy failure meaning) was closed by #276: the refusal
 carries the OS's own code, its portable `io::ErrorKind` and a kind that
 distinguishes "no source on this target" from "the OS refused", and the output
 buffer's state after a refusal is documented and tested rather than assumed. X4
-(feature-isolated ergonomics) has no issue of its own and stays open against the
-`process` and `trace` rows. The rows marked **assurance-gap** stay marked until
-their owners close.
+(feature-isolated ergonomics), owned by #417: the `tests-std-per-feature-{a,b,c}`
+lanes test each feature alone (at `d55ee4e22`, 370–431 tests per feature, all
+passing), and `sign`, missing from every shard, joined shard b. `process` refuses
+off Unix with `Unsupported`; `trace` installs no global subscriber.
+**assurance-gap** rows stay marked until their owners close.
 
-**Nothing here converts an unresolved promise into a green checkbox.** A row
-marked `unexercised-gap` or `assurance-gap` is a real, named, owned gap, and
-this page exists so that it is visible rather than rounded up.
+**Nothing here converts an unresolved promise into a green checkbox:** a gap
+row is a real, named, owned gap, shown rather than rounded up.
