@@ -100,7 +100,7 @@ jobs:
   build:
     name: Build and workspace tests
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
-    timeout-minutes: 30
+    timeout-minutes: 5
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
@@ -155,7 +155,7 @@ jobs:
   gate:
     name: Gate checks
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-4]
-    timeout-minutes: 20
+    timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -266,7 +266,7 @@ jobs:
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
-    timeout-minutes: 30
+    timeout-minutes: 5
     # One job, so the full feature set is compiled once (see the header).
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -312,7 +312,7 @@ jobs:
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
-    timeout-minutes: 20
+    timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -387,7 +387,7 @@ jobs:
     name: Tests (lgwks-bot no default features)
     # A GitHub-hosted runner, for the capacity reason given on the docs job.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -419,7 +419,7 @@ jobs:
     # the shared machine and measured 8 to 10 minutes. The script runs the same
     # suites natively on a Linux host.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -458,7 +458,7 @@ jobs:
   clippy:
     name: Clippy and scan
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -529,7 +529,7 @@ jobs:
     # jobs and this one measured 8m44s there (run 38339936125). Every step and
     # command is as it was; only the capacity under them changed.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -575,7 +575,7 @@ jobs:
     # difference is a finding about the client on Linux, kept as a gate here
     # until it is explained, not loosened to make a hosted job pass.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -614,7 +614,7 @@ jobs:
   storefront-matrix:
     name: Target and storefront matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -660,7 +660,7 @@ jobs:
   timing_gates:
     name: Timing gates (dudect, async fairness)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -686,7 +686,7 @@ jobs:
   feature-matrix-bot-ast:
     name: Feature matrix (lgwks-bot, lgwks-ast)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-11]
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -783,7 +783,7 @@ jobs:
   appcui-native:
     name: AppCUI native storefront
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 5
     strategy:
       matrix:
         # The mac leg rides the Linux-workspace instance, not the bot-full
@@ -814,7 +814,7 @@ jobs:
   gpui-windows:
     name: GPUI Windows renderer
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
