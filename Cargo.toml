@@ -32,6 +32,15 @@ lgwks_deps = { version = "3.0.1", path = "crates/lgwks-deps", default-features =
 opt-level = 3
 lto = true
 
+# Debuginfo is the single largest cost of a from-scratch build and nothing in
+# the workspace reads it (no debugger, no backtrace consumer beyond the file and
+# line, which the panic message carries). `debug = 0` and a wide codegen split
+# keep a full rebuild inside the budget; `debug-assertions` and `overflow-checks`
+# are separate settings and stay on, so every assertion and trap still fires.
+[profile.dev]
+debug = 0
+codegen-units = 256
+
 # Tests run optimized. The simulation suites are CPU-bound, and at opt-level 0
 # `sim_scale` on 4 threads took 39.9 s (114 s CPU) against 12.1 s (19.5 s CPU)
 # at opt-level 1, for 7.6 s more compile (measured 2026-09-30). Opt-level 2
