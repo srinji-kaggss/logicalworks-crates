@@ -125,6 +125,11 @@ jobs:
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Build all workspace targets
+        # A cold cache cannot finish this inside the job's 5 minutes, and a job
+        # the runner cancels at its limit saves no cache, so the next run is
+        # cold again. The step stops at 3 minutes instead, the job fails, and
+        # the post step saves what compiled; each run resumes where it stopped.
+        timeout-minutes: 3
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
         run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
@@ -290,6 +295,8 @@ jobs:
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
       # the acceptance job can build one receipt from the suite's own output.
@@ -331,6 +338,8 @@ jobs:
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-std full-feature tests
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 3
         run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
   # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a real
@@ -365,6 +374,8 @@ jobs:
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
       - name: Run lgwks-bot saturation tiers
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 3
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
 
   acceptance_receipts:
@@ -431,6 +442,8 @@ jobs:
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot no-default-feature tests
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
@@ -482,6 +495,8 @@ jobs:
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Run the workspace and lgwks-bot full suites on Linux
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 3
         env:
           PARTITION: ${{ matrix.partition }}
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
