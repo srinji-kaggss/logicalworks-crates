@@ -251,7 +251,7 @@ fn path_of(env: &BTreeMap<String, String>) -> String {
 
 /// The environment lanes run in.
 pub(super) fn child_env(scratch: Option<&Path>, target: Option<&Path>) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = std::env::vars_os()
+    let vars = std::env::vars_os()
         .map(|entry| {
             (
                 entry.0.to_string_lossy().into_owned(),
@@ -259,12 +259,27 @@ pub(super) fn child_env(scratch: Option<&Path>, target: Option<&Path>) -> BTreeM
             )
         })
         .collect();
+    child_env_from(vars, scratch, target)
+}
+
+/// The environment lanes run in, given the environment `ci-local` was started in.
+fn child_env_from(
+    mut env: BTreeMap<String, String>,
+    scratch: Option<&Path>,
+    target: Option<&Path>,
+) -> BTreeMap<String, String> {
     let existing = path_of(&env);
     if let Some(home) = env.get("HOME") {
         let cargo = Path::new(home).join(".cargo").join("bin");
         env.insert("PATH".to_owned(), format!("{}:{existing}", cargo.display()));
     }
-    env.insert("CARGO_INCREMENTAL".to_owned(), "0".to_owned());
+    // A caller that already chose incremental compilation keeps its choice: cargo
+    // fingerprints the setting, so a lane that forced `0` over the workflow's `1`
+    // rebuilt every workspace test target the earlier steps had just built. The
+    // `simulation-evidence` lane's `nextest list` spent 2 m 43 s on that rebuild
+    // and the Build job hit its 5-minute limit (run 38407172423).
+    env.entry("CARGO_INCREMENTAL".to_owned())
+        .or_insert_with(|| "0".to_owned());
     env.insert("CARGO_TERM_COLOR".to_owned(), "never".to_owned());
     env.entry("RUST_BACKTRACE".to_owned())
         .or_insert_with(|| "1".to_owned());
@@ -439,8 +454,24 @@ pub(super) fn run_lane(
 
 #[cfg(test)]
 mod tests {
-    use super::flag;
+    use super::{child_env_from, flag};
     use crate::toml_subset::{list, read_tables, text};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_lane_keeps_the_incremental_setting_its_caller_chose() {
+        let chosen = BTreeMap::from([("CARGO_INCREMENTAL".to_owned(), "1".to_owned())]);
+        assert_eq!(
+            child_env_from(chosen, None, None).get("CARGO_INCREMENTAL"),
+            Some(&"1".to_owned()),
+            "an explicit setting is not overwritten"
+        );
+        assert_eq!(
+            child_env_from(BTreeMap::new(), None, None).get("CARGO_INCREMENTAL"),
+            Some(&"0".to_owned()),
+            "unset, a lane builds without incremental state"
+        );
+    }
 
     #[test]
     fn a_lane_table_reads_strings_flags_lists_and_multiline_commands() -> Result<(), String> {
