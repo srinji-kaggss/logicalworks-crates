@@ -105,6 +105,13 @@ runs:
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
         if [ "${free_kib}" -lt "$(( ${{ inputs.min-free-gib }} * 1024 * 1024 ))" ]; then
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
+          # cargo refuses to clean a directory without its CACHEDIR.TAG (run
+          # 38410708974: `missing or invalid CACHEDIR.TAG` failed every job on
+          # lwc-3 at 36 GiB free). The directory is this action's own, so the
+          # tag is written first and the clean then runs.
+          if [ ! -f "${target}/CACHEDIR.TAG" ]; then
+            printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n' > "${target}/CACHEDIR.TAG"
+          fi
           cargo clean --target-dir "${target}"
         fi
     # Temporary files on a RAM disk owned by this runner instance. Rust's
