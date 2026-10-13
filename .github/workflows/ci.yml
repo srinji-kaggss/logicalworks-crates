@@ -385,7 +385,8 @@ jobs:
   # whose threads it sizes for.
   tests_nodefault:
     name: Tests (lgwks-bot no default features)
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
+    # A GitHub-hosted runner, for the capacity reason given on the docs job.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -393,12 +394,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "6"
-          build-share: "3"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: nodefault
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
@@ -510,15 +515,23 @@ jobs:
   # (run 37633462471) whose halves share nothing but the checkout.
   docs:
     name: Docs and release gates
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-12]
+    # A GitHub-hosted runner: the local machine's 15 cores were shared by 13
+    # jobs and this one measured 8m44s there (run 38339936125). Every step and
+    # command is as it was; only the capacity under them changed.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          build-share: "2"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: docs
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
@@ -546,17 +559,23 @@ jobs:
   # of the same feature sets (#276): one job per feature set, still.
   feature-matrix:
     name: lgwks-std feature matrix and per-feature tests
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
+    # A GitHub-hosted runner, for the capacity reason given on the docs job.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "4"
-          build-share: "2"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: std-matrix
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       # The three lgwks-std boundary checks run in the lgwks-bot/lgwks-ast
       # matrix job below, whose instance was idle after 48 s.
       # Every lgwks-std feature alone, built for every target and executed
