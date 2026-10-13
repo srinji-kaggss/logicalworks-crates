@@ -201,6 +201,12 @@ jobs:
         # source for the two failures a manifest cannot show: a `use` no
         # manifest declares, and a capability hand-rolled beside the
         # `lgwks_std` module that already provides it.
+        #
+        # The audit is the `check-std-first` binary, ported from the Python
+        # script it replaces because a repository holds Rust and C++ only. Its
+        # own tests moved with it: they are unit tests of the binary now, run by
+        # the workspace test lane above rather than behind a `--test` flag, so
+        # the audit is still tested by the same run that reports it.
         run: cargo run --locked -p lgwks_deps --bin check-std-first
       - name: Forbid unwrap outside tests
         # Safety bar: library code fails loud with typed errors or named
