@@ -344,8 +344,10 @@ jobs:
   # 254 s in one job (run 38365526454). The 10,000 tier is CPU-bound, 50,000
   # process starts, and on a self-hosted instance beside twelve other jobs it
   # ran past the 5-minute limit in its test step alone, with the build cached
-  # (run 38407172423: 5 m 14 s). It has a job of its own on a hosted runner,
-  # whose cores nothing else shares; the 100 and 1,000 tiers stay on lwc-12.
+  # (run 38407172423: 5 m 14 s). A hosted runner has 3 cores: the test was
+  # still running 2 m 27 s in when the job limit cancelled it, after a 1 m 11 s
+  # build and two minutes of setup (run 38416328077). So the 10,000 tier has an
+  # instance of its own, apart from the 100 and 1,000 tiers on lwc-12.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -354,6 +356,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - tiers: "10000"
+            instance: lwc-2
+            filter: "test(=saturation_r32_tier_10000)"
           - tiers: "100 and 1000"
             instance: lwc-12
             filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
@@ -379,35 +384,6 @@ jobs:
       - name: Run lgwks-bot saturation tiers
         env:
           SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
-
-  tests_bot_saturation_10000:
-    name: Saturation tiers (lgwks-bot full) (10000)
-    runs-on: macos-latest
-    timeout-minutes: 5
-    env:
-      RUSTC_WORKSPACE_WRAPPER: ""
-    steps:
-      - uses: actions/checkout@v4
-      - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99.0"
-      - name: Install lld, the linker the repository's cargo configuration names
-        run: brew install lld
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: saturation-10000
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
-      - name: Run lgwks-bot saturation tiers
-        # Stops before the job limit so the cache is saved.
-        timeout-minutes: 4
-        env:
-          SATURATION_FILTER: test(=saturation_r32_tier_10000)
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
 
   acceptance_receipts:
@@ -531,10 +507,17 @@ jobs:
   # Lints, the rustdoc lanes and the two release-build gates. Clippy and
   # rustdoc compile the same dependency graph as `cargo check`, so they share a
   # target; the release gates run last, on the build the scan step left.
+  # Three legs, each on its own hosted runner: the whole job took 5 m 18 s and
+  # was cancelled before its last two steps (run 38416328077). Every step is
+  # unchanged and runs in exactly one leg.
   clippy:
-    name: Clippy and scan
+    name: Clippy and scan (${{ matrix.part }})
     runs-on: macos-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [workspace, scan, reduced]
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -549,8 +532,9 @@ jobs:
         with:
           save-if: "true"
           cache-on-failure: "true"
-          key: clippy
+          key: clippy-${{ matrix.part }}
       - name: Clippy all workspace targets
+        if: matrix.part == 'workspace'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
       # so 433 findings sat in shipped source while the name was advertised as
@@ -561,6 +545,7 @@ jobs:
       # reads files for seconds (run 38304128455), and what it reports does not
       # depend on how its own binary was linked.
       - name: Scan reports zero findings
+        if: matrix.part == 'scan'
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
@@ -569,10 +554,12 @@ jobs:
       # language refuses and on any file that is not Rust tokens, at the
       # line and column `cargo build` would report.
       - name: Every script! in the repository reads
+        if: matrix.part == 'scan'
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check
       - name: Clippy feature matrix
+        if: matrix.part == 'workspace'
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal
         # toolchain and is checked by its own lane in the matrix job).
         run: >
@@ -583,6 +570,7 @@ jobs:
           cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml
           --all-targets --features tokio-full -- -D warnings
       - name: Clippy no default features
+        if: matrix.part == 'reduced'
         run: >
           cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml
           --all-targets --no-default-features -- -D warnings &&
@@ -591,6 +579,7 @@ jobs:
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
           --all-targets --no-default-features --features parser -- -D warnings
       - name: Clippy process-only
+        if: matrix.part == 'reduced'
         # `process` alone is a supported consumer shape: a bot that starts
         # children and nothing else. It was missing from the matrix, so a
         # deadline path naming the `time` module compiled under `--all-features`
