@@ -535,21 +535,9 @@ jobs:
         # `--no-default-features` does not compile the module holding the link,
         # so a default-on to default-off link is invisible to both.
         run: ./scripts/doc-lanes.sh default
-      - name: Doc build for each lgwks-std feature alone
-        # The general case: a link between two optional modules where neither
-        # implies the other resolves under both boundary lanes. Each feature is
-        # documented alone, so every gated module is documented while every
-        # module it does not pull in is genuinely absent.
-        run: ./scripts/doc-lanes.sh per-feature
-      - name: docs.rs metadata names a buildable feature set
-        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
-        # and a failure there is invisible from the repository: the crate page
-        # just shows a build error. `all-features = true` on a crate whose
-        # features include platform-bound ones fails on every publish, which is
-        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
-        # compile off Apple targets. Build with the declared set so an
-        # unbuildable declaration fails here instead of on docs.rs.
-        run: python3 scripts/ci_local.py --lane docsrs-metadata
+      # The per-feature doc build and the docs.rs metadata build run in the
+      # lgwks-bot/lgwks-ast matrix job below: that instance finished in under a
+      # minute while this one held them for four of its nine (run 38339936125).
 
   # Every compile-only matrix: feature sets, targets, grammars, the Metal
   # storefronts and the standalone consumer packages. Each is `cargo check` or a
@@ -569,12 +557,8 @@ jobs:
           nextest: "true"
           test-share: "4"
           build-share: "2"
-      - name: Check lgwks-std feature matrix
-        run: |
-          set -eu
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
-          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+      # The three lgwks-std boundary checks run in the lgwks-bot/lgwks-ast
+      # matrix job below, whose instance was idle after 48 s.
       # Every lgwks-std feature alone, built for every target and executed
       # (one nextest run per feature with nothing else on, #276), so each run
       # is also that feature's isolated build. These suites are compile-bound
@@ -682,6 +666,27 @@ jobs:
         with:
           toolchain: "1.99.0"
           build-share: "2"
+      - name: Check lgwks-std feature matrix
+        run: |
+          set -eu
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
+          cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
+      - name: Doc build for each lgwks-std feature alone
+        # The general case: a link between two optional modules where neither
+        # implies the other resolves under both boundary lanes. Each feature is
+        # documented alone, so every gated module is documented while every
+        # module it does not pull in is genuinely absent.
+        run: ./scripts/doc-lanes.sh per-feature
+      - name: docs.rs metadata names a buildable feature set
+        # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
+        # and a failure there is invisible from the repository: the crate page
+        # just shows a build error. `all-features = true` on a crate whose
+        # features include platform-bound ones fails on every publish, which is
+        # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
+        # compile off Apple targets. Build with the declared set so an
+        # unbuildable declaration fails here instead of on docs.rs.
+        run: python3 scripts/ci_local.py --lane docsrs-metadata
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu
