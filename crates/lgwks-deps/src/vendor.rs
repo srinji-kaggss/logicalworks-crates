@@ -493,14 +493,18 @@ source = "git+https://example.com/org/git-crate#abc123"
                     format!("the wall clock reads before the Unix epoch: {before_epoch}")
                 })?
                 .as_nanos();
-            // The discriminator is nanos plus the sequence, which is INV-DEP-6's
-            // prescription and what this comment already concluded: the atomic
-            // separates two tests on two threads of one binary (the clock's
-            // granularity is coarser than a nanosecond, so the timestamp alone
-            // does not), and the nanoseconds separate two runs. A process id is
-            // not in the name because the OS reuses it, so it names no run.
+            // The discriminator is the process id, nanos and the sequence. The
+            // atomic separates two tests on two threads of one process, and the
+            // nanoseconds separate two runs, but neither separates two tests in
+            // two processes: nextest runs every test in its own process, each
+            // starts its counter at zero, and the clock's granularity is coarser
+            // than a nanosecond, so two processes starting in one tick shared a
+            // root and one `Drop` removed the directory the other was filling
+            // (run 38316346444, `EINVAL`). Two live processes never share a pid,
+            // and a reused pid still differs in the nanosecond clock.
             let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-vendor-test-{clock}-{}",
+                "lgwks-deps-vendor-test-{}-{clock}-{}",
+                std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(root.join("tree/covered-crate"))?;
@@ -604,6 +608,22 @@ source = "git+https://example.com/org/git-crate#abc123"
             tree_for(&fixture.root.join("bare")),
             Err(VendorError::NoTree { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_fixture_root_names_the_process_that_made_it() -> TestResult {
+        let fixture = Fixture::create()?;
+        let name = fixture
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("a fixture root has a UTF-8 final component")?;
+        let expected = format!("lgwks-deps-vendor-test-{}-", std::process::id());
+        assert!(
+            name.starts_with(&expected),
+            "{name} must begin with {expected}: two processes must not share a root"
+        );
         Ok(())
     }
 
