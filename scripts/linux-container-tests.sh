@@ -91,6 +91,18 @@ for suite in "${suites[@]}"; do
     esac
 done
 
+# A Linux host is the Linux the container existed to provide, so the suites run
+# on it directly: the same commands, with the host's own init reaping orphans
+# and its own /tmp. The container below is for a macOS machine only, where it
+# cost an image, a VM sharing the machine's cores, and 8 to 10 minutes of
+# contended wall on the critical path.
+if [ "$(uname -s)" = Linux ]; then
+    for command in "${commands[@]}"; do
+        eval "${command}"
+    done
+    exit 0
+fi
+
 script="set -euo pipefail
 # A job killed mid-unpack (a timeout on a transition run) leaves a package
 # directory with no .cargo-ok, and the next unpack of that package fails

@@ -415,7 +415,10 @@ jobs:
   # target volume.
   tests_linux:
     name: Tests (Linux container)
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
+    # A GitHub-hosted Linux kernel: the container this job used lived in a VM on
+    # the shared machine and measured 8 to 10 minutes. The script runs the same
+    # suites natively on a Linux host.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -424,10 +427,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: linux-${{ matrix.suite }}
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run the workspace and lgwks-bot full suites on Linux
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
