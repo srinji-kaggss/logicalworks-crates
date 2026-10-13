@@ -99,7 +99,7 @@ jobs:
   # lanes that need the workspace built run after the shard that built it.
   build:
     name: Build and workspace tests
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
+    runs-on: macos-latest
     timeout-minutes: 5
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
@@ -111,12 +111,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "6"
-          build-share: "3"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: workspace
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
@@ -154,19 +158,24 @@ jobs:
   # and the job that compiles it need not wait on them.
   gate:
     name: Gate checks
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-4]
+    runs-on: macos-latest
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "4"
-          build-share: "2"
+          components: clippy, rustfmt
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: gate
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Verify lockfile is up-to-date
         run: >
           cargo metadata --locked --format-version 1 >/dev/null ||
@@ -265,7 +274,7 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
+    runs-on: macos-latest
     timeout-minutes: 5
     # One job, so the full feature set is compiled once (see the header).
     env:
@@ -274,16 +283,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          # Eight is the share this suite was green at: ten threads failed the
-          # drain-grace test (`shutdown_reports_every_draining_cleanup_...`,
-          # INV-BOT-156) under the run's process-table storm — the grace is
-          # calibrated for loaded, not oversubscribed, hosts.
-          test-share: "8"
-          build-share: "3"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: bot-full
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
@@ -311,19 +320,24 @@ jobs:
   # It compiles only lgwks-bot and this one test binary.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full)
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
+    runs-on: macos-latest
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          nextest: "true"
-          test-share: "3"
-          build-share: "2"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: saturation
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
@@ -457,15 +471,20 @@ jobs:
   # target; the release gates run last, on the build the scan step left.
   clippy:
     name: Clippy and scan
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
+    runs-on: macos-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
-          build-share: "2"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: clippy
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # INV-SCAN-ZERO. `scan` was the gate's own debt ledger and no lane ran it,
