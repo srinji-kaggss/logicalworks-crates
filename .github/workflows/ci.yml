@@ -217,7 +217,7 @@ jobs:
         # that arrives through this file.
         run: |
           set -eu
-          python3 scripts/gen-llms-txt.py
+          cargo run --locked -p lgwks_deps --bin llms-txt
           git diff --exit-code -- llms.txt
       - name: Documentation citations resolve
         # The guides cite `path:NNN` for each factual claim, and every merge

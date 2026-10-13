@@ -322,7 +322,7 @@ needs = ["script:scripts/doc-lanes.sh"]
 id = "llms-txt"
 surfaces = "local ci"
 required = true
-command = "python3 scripts/gen-llms-txt.py && git diff --exit-code -- llms.txt"
+command = "cargo run --locked -p lgwks_deps --bin llms-txt && git diff --exit-code -- llms.txt"
 ci_step = "llms.txt matches the documentation index"
 
 [[lane]]
