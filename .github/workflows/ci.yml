@@ -341,8 +341,11 @@ jobs:
   # process boundary) in a job of their own, beside the suite rather than after
   # it: the 10,000 tier alone is 50,000 process starts and about two minutes.
   # It compiles only lgwks-bot and this one test binary. The three tiers took
-  # 254 s in one job (run 38365526454), so the 10,000 tier runs on one instance
-  # and the 100 and 1,000 tiers on another, each under the 5-minute limit.
+  # 254 s in one job (run 38365526454). The 10,000 tier is CPU-bound, 50,000
+  # process starts, and on a self-hosted instance beside twelve other jobs it
+  # ran past the 5-minute limit in its test step alone, with the build cached
+  # (run 38407172423: 5 m 14 s). It has a job of its own on a hosted runner,
+  # whose cores nothing else shares; the 100 and 1,000 tiers stay on lwc-12.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -351,9 +354,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - tiers: "10000"
-            instance: lwc-6
-            filter: "test(=saturation_r32_tier_10000)"
           - tiers: "100 and 1000"
             instance: lwc-12
             filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
@@ -379,6 +379,35 @@ jobs:
       - name: Run lgwks-bot saturation tiers
         env:
           SATURATION_FILTER: ${{ matrix.filter }}
+        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
+
+  tests_bot_saturation_10000:
+    name: Saturation tiers (lgwks-bot full) (10000)
+    runs-on: macos-latest
+    timeout-minutes: 5
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"
+          cache-on-failure: "true"
+          key: saturation-10000
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
+      - name: Run lgwks-bot saturation tiers
+        # Stops before the job limit so the cache is saved.
+        timeout-minutes: 4
+        env:
+          SATURATION_FILTER: test(=saturation_r32_tier_10000)
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
 
   acceptance_receipts:
