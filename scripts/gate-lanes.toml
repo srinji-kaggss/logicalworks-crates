@@ -625,3 +625,15 @@ ci_step = "Check Candle Metal storefront features"
 platforms = ["darwin"]
 needs = ["bin:xcodebuild"]
 reason = "needs the Xcode Metal toolchain"
+
+# The repository's ruleset requires a check named "Clippy and scan", and the lint
+# job is a matrix whose legs report under their own names. This row carries the
+# required name and passes only when the matrix's aggregate result, which is
+# `success` only if every leg succeeded, says so.
+[[lane]]
+id = "clippy-verdict"
+surfaces = "ci"
+required = true
+command = "test \"${LEGS}\" = success"
+ci_step = "Every clippy leg passed"
+reason = "dedicated PR check row whose job name is the ruleset's required Clippy and scan"

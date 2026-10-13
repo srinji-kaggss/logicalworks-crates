@@ -234,3 +234,22 @@ runs:
       if: inputs.nextest == 'true'
       shell: bash
       run: cargo nextest --version
+    # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
+    # directory. rustc deletes its own when it finishes, so a cancelled or
+    # timed-out job leaves the rest, and nothing else ever removes them: on
+    # 2026-10-13 lwc-3's `debug/deps` held 445,426 entries, most of them these,
+    # in a 62 GiB target, and the machine was past its 256 GB cap with them.
+    # An instance runs one job at a time and this directory is the instance's
+    # own (see the first step), so when this step runs no rustc is writing
+    # here: every such object is dead, and no age or size threshold is needed
+    # to tell it from a live one. The globs are the ones the incremental
+    # sweep above uses: the host profile directories and the per-target ones.
+    - name: Codegen objects left by killed compiles
+      shell: bash
+      run: |
+        set -euo pipefail
+        for deps in "${CARGO_TARGET_DIR}"/*/deps "${CARGO_TARGET_DIR}"/*/*/deps; do
+          if [ -d "${deps}" ]; then
+            find "${deps}" -maxdepth 1 -name '*.rcgu.o' -delete
+          fi
+        done

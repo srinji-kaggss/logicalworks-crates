@@ -903,3 +903,24 @@ jobs:
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
           --target-dir target
           --no-default-features --features gpui --example gpui
+
+  # The repository's ruleset requires a check named exactly "Clippy and scan".
+  # The lint job above is a matrix, whose legs report as "Clippy and scan
+  # (workspace)", "(scan)" and "(reduced)", so no check of the required name was
+  # ever reported and a pull request could not satisfy the ruleset. This job is
+  # that name. Its verdict is the matrix's own: `needs.clippy.result` is
+  # `success` only when every leg succeeded, so a leg added or renamed above
+  # needs no change here, and a failed or cancelled leg fails this row.
+  clippy_verdict:
+    name: Clippy and scan
+    needs: clippy
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every clippy leg passed
+        env:
+          LEGS: ${{ needs.clippy.result }}
+        run: |
+          echo "clippy and scan legs: ${LEGS}"
+          test "${LEGS}" = success
