@@ -679,7 +679,9 @@ jobs:
   # The declared target matrix, one leg per group of targets. Run in one job it
   # took over 7 minutes (run 38412846693: the sixth of seven targets was
   # reached at 5 m 29 s with the cancel at 5 m 00 s), so each leg holds the
-  # targets it is named for and the host triple the script always adds.
+  # targets it is named for and the host triple the script always adds. Only
+  # registered, online instances may be named: lwc-6 and lwc-1 are offline
+  # (runner list, 2026-10-13) and a job pinned to one waits for ever.
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -692,9 +694,7 @@ jobs:
             instance: lwc-4
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
             instance: lwc-5
-          - targets: x86_64-unknown-freebsd aarch64-linux-android
-            instance: lwc-6
-          - targets: aarch64-apple-ios
+          - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-7
     steps:
       - uses: actions/checkout@v4
