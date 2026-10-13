@@ -120,7 +120,10 @@ fn shared_subset_matches_the_pinned_vendored_upstream() -> Result<(), Box<dyn Er
     // carries and no other job can move it. The comparison against our matcher
     // is unchanged.
     let upstream = scratch.path().join("glob-upstream.rs");
-    fs::write(&upstream, include_str!("../../../../vendor/glob/src/lib.rs"))?;
+    fs::write(
+        &upstream,
+        include_str!("../../../../vendor/glob/src/lib.rs"),
+    )?;
     let library = scratch.path().join("libglob.rlib");
     let library_build = Command::new("rustc")
         .arg("--crate-name")
