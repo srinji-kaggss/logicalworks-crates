@@ -462,6 +462,23 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
+      - name: The Linux image carries sqlite3
+        # The acceptance-receipt binary holds its receipts through the sqlite3
+        # command-line program. A hosted Linux runner has it and `rust:bookworm`
+        # does not, so two of its journey tests failed in the container with
+        # `the sqlite3 command-line program is required` (run 38404124109).
+        # The suite script reuses the derived image it finds under this name,
+        # so the image is rebuilt here with sqlite3 beside lld; with the layers
+        # cached it costs a second.
+        run: |
+          set -eu
+          export PATH="/Applications/OrbStack.app/Contents/MacOS/xbin:${HOME}/.orbstack/bin:${PATH}"
+          export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
+          toolchain="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' rust-toolchain.toml | sed -n 1p)"
+          image="rust:${toolchain}-bookworm"
+          tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
+          printf 'FROM %s\nRUN apt-get update -qq && apt-get install -y -qq lld sqlite3 && rm -rf /var/lib/apt/lists/*\n' "${image}" |
+            docker build -q -t "lwc-ci-${tag}-lld" -
       - name: Run the workspace and lgwks-bot full suites on Linux
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
