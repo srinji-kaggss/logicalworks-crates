@@ -114,6 +114,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -169,6 +171,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           components: clippy, rustfmt
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -286,6 +290,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -331,6 +337,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           components: clippy
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -480,6 +488,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           components: clippy
+      - name: Install lld, the linker the repository's cargo configuration names
+        run: brew install lld
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
