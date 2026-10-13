@@ -209,7 +209,7 @@ jobs:
         run: cargo run --locked -p lgwks_deps --bin check-requirements && cargo run --locked -p lgwks_deps --bin check-spec-owners
       - name: llms.txt matches the documentation index
         # `llms.txt` is generated from the README's own tables by
-        # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
+        # the `llms-txt` binary. Regenerate and fail if the committed copy
         # differs, so the index cannot drift from the documents it points at: a
         # stale index is worse than none, because an agent trusts it and stops
         # looking. The script also fails when a document in `docs/` is missing

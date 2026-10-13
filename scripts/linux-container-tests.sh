@@ -29,7 +29,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-toolchain="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["toolchain"]["channel"])' "${root}/rust-toolchain.toml")"
+toolchain="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "${root}/rust-toolchain.toml" | sed -n 1p)"
 nextest="$(cargo nextest --version | awk 'NR==1 {print $2}')"
 case "$(uname -m)" in
     arm64 | aarch64) nextest_platform="linux-arm" ;;
@@ -45,12 +45,23 @@ esac
 cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 host_triple="$(rustc -vV | awk '/^host:/ {print $2}')"
 container_triple="$(uname -m | sed 's/^arm64$/aarch64/')-unknown-linux-gnu"
-container_rustflags="$(python3 -c 'import sys,tomllib
-try:
-    config = tomllib.load(open(sys.argv[1], "rb"))
-except FileNotFoundError:
-    config = {}
-print(" ".join(config.get("target", {}).get(sys.argv[2], {}).get("rustflags", [])))' "${cargo_home}/config.toml" "${host_triple}")"
+container_rustflags=""
+if [ -f "${cargo_home}/config.toml" ]; then
+    # The strings of `rustflags = [...]` under `[target.<host>]`, which may wrap.
+    container_rustflags="$(awk -v table="[target.${host_triple}]" '
+        $0 == table { inside = 1; next }
+        /^\[/ { inside = 0 }
+        inside && /^rustflags[[:space:]]*=/ { collecting = 1 }
+        inside && collecting {
+            line = $0
+            while (match(line, /"[^"]*"/)) {
+                printf "%s ", substr(line, RSTART + 1, RLENGTH - 2)
+                line = substr(line, RSTART + RLENGTH)
+            }
+            if ($0 ~ /\]/) collecting = 0
+        }
+    ' "${cargo_home}/config.toml" | sed 's/ *$//')"
+fi
 rustflags_var="CARGO_TARGET_$(echo "${container_triple}" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
 config_mount=()
 if [ -f "${cargo_home}/config.toml" ]; then
