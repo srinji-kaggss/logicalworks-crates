@@ -559,23 +559,22 @@ jobs:
   # of the same feature sets (#276): one job per feature set, still.
   feature-matrix:
     name: lgwks-std feature matrix and per-feature tests
-    # A GitHub-hosted runner, for the capacity reason given on the docs job.
-    runs-on: ubuntu-latest
+    # Local, not hosted: `http_alloc` bounds the client's median latency at 8x a
+    # bare exchange, and on a hosted Linux VM it read 1124 us against 67 us
+    # (run 38372549097), a ratio the local machine does not produce. That
+    # difference is a finding about the client on Linux, kept as a gate here
+    # until it is explained, not loosened to make a hosted job pass.
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: std-matrix
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
+          test-share: "4"
+          build-share: "2"
       # The three lgwks-std boundary checks run in the lgwks-bot/lgwks-ast
       # matrix job below, whose instance was idle after 48 s.
       # Every lgwks-std feature alone, built for every target and executed
