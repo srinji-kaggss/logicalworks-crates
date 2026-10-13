@@ -230,10 +230,31 @@ jobs:
         run: cargo run --locked -p lgwks_deps --bin check-doc-citations
       - name: Root README quickstart matches its compiled example
         run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
-      # The second lgwks-std per-feature shard (see the feature-matrix job). The
-      # file checks above take two minutes and build nothing, so this instance
-      # has the room. The workspace wrapper is restored for it: each run is
-      # that feature's isolated build, and the lints are part of that build.
+
+  # The second lgwks-std per-feature shard (see the feature-matrix job), in a job
+  # of its own. On the gate job it ran behind the file checks and the pair took
+  # 5 m 16 s against a 5-minute limit; apart, the checks take 2 m 20 s and these
+  # five isolated builds fit beside them. The workspace wrapper is restored: each
+  # run is that feature's isolated build, and the lints are part of that build.
+  tests_std_features_b:
+    name: lgwks-std per-feature tests, shard b
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"
+          cache-on-failure: "true"
+          key: std-features-b
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run lgwks-std per-feature tests, shard b (hash pattern json ron sign)
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "0"
@@ -320,6 +341,29 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
+
+  # The lgwks-std full-feature suite, apart from the lgwks-bot suite it shared a
+  # job with: the pair compiled two feature sets and ran past 5 minutes.
+  tests_std_full:
+    name: Tests (lgwks-std full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"
+          cache-on-failure: "true"
+          key: std-full
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run lgwks-std full-feature tests
         run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
@@ -356,11 +400,29 @@ jobs:
       # shards).
       - name: Run lgwks-bot saturation tiers
         run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
-      # One lgwks-std per-feature shard rides here, not on the matrix
-      # instance: twelve serial feature compiles on one instance starved the
-      # drain-grace test on another (run 37678318088), and this instance's own
-      # work is process spawns, not compiles, so a compile-bound shard fits
-      # beside it. Same opt-level-0 reasoning as its siblings below.
+
+  # The third lgwks-std per-feature shard, in a job of its own: beside the
+  # saturation tiers it ran past the 5-minute limit (run 38395269833). Same
+  # opt-level-0 reasoning as shard b.
+  tests_std_features_c:
+    name: lgwks-std per-feature tests, shard c
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"
+          cache-on-failure: "true"
+          key: std-features-c
+      - name: nextest is installed
+        uses: taiki-e/install-action@nextest
       - name: Run lgwks-std per-feature tests, shard c (wire online fs-raw process)
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "0"
@@ -453,8 +515,24 @@ jobs:
     timeout-minutes: 5
     strategy:
       fail-fast: false
+      # The workspace suite is three nextest partitions: whole, it ran 4 m 46 s
+      # on top of its compile and was cancelled at the 5-minute limit (run
+      # 38395269833). Each partition compiles the same workspace and runs a
+      # third of the tests.
       matrix:
-        suite: [workspace, bot-full appcui]
+        include:
+          - suite: workspace
+            shard: "1"
+            partition: "count:1/3"
+          - suite: workspace
+            shard: "2"
+            partition: "count:2/3"
+          - suite: workspace
+            shard: "3"
+            partition: "count:3/3"
+          - suite: bot-full appcui
+            shard: "1"
+            partition: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -467,10 +545,12 @@ jobs:
         with:
           save-if: "true"
           cache-on-failure: "true"
-          key: linux-${{ matrix.suite }}
+          key: linux-${{ matrix.suite }}-${{ matrix.shard }}
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
       - name: Run the workspace and lgwks-bot full suites on Linux
+        env:
+          PARTITION: ${{ matrix.partition }}
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
       # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so

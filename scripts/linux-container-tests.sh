@@ -91,7 +91,7 @@ fi
 commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
-        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
+        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' \${PARTITION:+--partition \$PARTITION}") ;;
         bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
