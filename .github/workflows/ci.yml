@@ -744,7 +744,8 @@ jobs:
   # from the lgwks-std, lgwks-deps and target matrices: together the two halves
   # were the longest job of a warm run (450 s, run 37619560219 attempt 2), and
   # neither half builds what the other does.
-  # Three legs, each step unchanged and run in exactly one: as one job it took
+  # Four legs (the WASI check took 1 m 53 s beside the 3 m 08 s bot matrix on a
+  # contended instance, run 38437338031), each step unchanged and run in exactly one: as one job it took
   # 5 m 24 s on a pinned instance (run 38429086342: docs.rs metadata 2 m 13 s,
   # the bot matrix 2 m 02 s, the AST matrix cut off at 24 s).
   feature-matrix-bot-ast:
@@ -761,6 +762,8 @@ jobs:
             instance: lwc-10
           - part: lgwks-ast
             instance: lwc-9
+          - part: lgwks-bot WASI
+            instance: lwc-13
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -787,7 +790,7 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
       - name: Check lgwks-bot WASI runtime boundary
-        if: matrix.part == 'lgwks-bot'
+        if: matrix.part == 'lgwks-bot WASI'
         run: |
           set -eu
           rustup target add wasm32-wasip1
