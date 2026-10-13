@@ -70,6 +70,14 @@ impl EcsBot {
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
+            // A chain with no step and no condition failure has nothing to run
+            // and nothing to report: `run_chain` over it returns `(0, None)`, so
+            // building and awaiting its future for every quiet chain of every
+            // quiet tick was the whole cost of a tick that selected nothing.
+            if run.is_empty() && condition_failure.is_none() {
+                start = end;
+                continue;
+            }
             let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, retry).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a

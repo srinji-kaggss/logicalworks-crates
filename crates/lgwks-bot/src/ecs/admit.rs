@@ -151,8 +151,10 @@ impl Admit {
 /// one transition's entry states rather than a comparison of values, so the
 /// repeat costs less than the caching saves.
 pub(super) fn plan_admissions(world: &World, moving: &[bool], kinds: &mut [AdmitKind]) {
+    // One lookup of the ledger for the pass: a resource lookup is a hash of its
+    // type, and doing it once per chain was a per-chain cost on every tick.
+    let ledger = world.non_send::<Ledger>();
     for (chain, kind) in kinds.iter_mut().enumerate() {
-        let ledger = world.non_send::<Ledger>();
         let held = ledger.transitions.get(chain).and_then(Option::as_ref);
         *kind = match held {
             Some(transition) if transition.has_open() => AdmitKind::Keep,

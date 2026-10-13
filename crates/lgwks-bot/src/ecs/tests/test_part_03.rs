@@ -106,6 +106,36 @@ fn the_ledger_refuses_an_attempt_inside_its_backoff() -> TestResult {
     Ok(())
 }
 
+/// The decision pass builds its `Changed<Revision>` query on the first tick and
+/// keeps it, and the ticks that run on the kept query still answer.
+///
+/// A query built per tick is the allocations `World::query_filtered` makes, once
+/// per tick: `bench/` `--alloc-report` measured 20 per quiet tick with it and 1
+/// without. Source: bevy_ecs `QueryState` docs, a state is built once and run
+/// many times, taking its change ticks from the world it runs on, so keeping it
+/// changes the cost of a tick and not its answer. That the kept query still
+/// sees a movement is `a_source_value_that_moves_is_polled_again_and_fires`.
+#[test]
+fn the_change_query_is_built_once_and_kept_between_ticks() -> TestResult {
+    let runs = Rc::new(Cell::new(0));
+    let mut bot = counting_bot("kept-query", &runs, test_effects()?)?;
+    let kept = |bot: &EcsBot| {
+        bot.world
+            .non_send::<crate::ecs::resources::AdmitScratch>()
+            .movers
+            .is_some()
+    };
+    assert!(!kept(&bot), "no query is built before the first tick");
+    assert_eq!(bot.tick()?, 1, "the first value fires");
+    assert!(kept(&bot), "the first tick keeps the query it built");
+    for _ in 0..3 {
+        assert_eq!(bot.tick()?, 0, "a held value fires nothing");
+        assert!(kept(&bot), "a later tick still holds the kept query");
+    }
+    assert_eq!(runs.get(), 1, "the one movement ran its effect once");
+    Ok(())
+}
+
 /// The deadline runs from the first attempt and a retry never resets it: a
 /// retry that comes due after the deadline is given up rather than begun, and
 /// the reason names the deadline and the time that ran.

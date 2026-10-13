@@ -359,6 +359,7 @@ pub(super) fn fire_plan(world: &mut World) {
         ref mut moving,
         ref mut kinds,
         ref mut inputs,
+        ref mut movers,
     } = scratch;
 
     // Which chains moved, and whether each newest observation is admitted over
@@ -368,12 +369,16 @@ pub(super) fn fire_plan(world: &mut World) {
     #[cfg(feature = "profile")]
     let compare_charge = Charge::new(TickStage::Compare);
     {
-        let mut query = world.query_filtered::<&SourceId, Changed<Revision>>();
+        let mut query = match movers.take() {
+            Some(query) => query,
+            None => world.query_filtered::<&SourceId, Changed<Revision>>(),
+        };
         for id in query.iter(world) {
             if let Some(flag) = moving.get_mut(id.chain) {
                 *flag = true;
             }
         }
+        *movers = Some(query);
     }
     plan_admissions(world, moving, kinds);
     #[cfg(feature = "profile")]
