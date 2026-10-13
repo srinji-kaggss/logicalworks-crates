@@ -110,8 +110,17 @@ fn shared_subset_matches_the_pinned_vendored_upstream() -> Result<(), Box<dyn Er
         .collect::<Vec<_>>();
 
     let scratch = tempfile::tempdir()?;
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let upstream = manifest_dir.join("../../vendor/glob/src/lib.rs");
+    // The vendored source is pinned at compile time, not opened from the working
+    // tree at run time. A checkout is rewritten in place while sibling jobs run:
+    // on run 38256111073 this test failed on two runners (r3 and r5) with
+    // `couldn't find file .../vendor/glob/src/lib.rs` while that file was present
+    // before and after, because another job on the same instance was replacing
+    // the tree under it. `include_str!` reads the same tracked bytes once, at
+    // compile time, so what is compiled here is exactly what this revision
+    // carries and no other job can move it. The comparison against our matcher
+    // is unchanged.
+    let upstream = scratch.path().join("glob-upstream.rs");
+    fs::write(&upstream, include_str!("../../../../vendor/glob/src/lib.rs"))?;
     let library = scratch.path().join("libglob.rlib");
     let library_build = Command::new("rustc")
         .arg("--crate-name")
