@@ -107,6 +107,47 @@ runs:
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
           cargo clean --target-dir "${target}"
         fi
+    # One compile cache for the machine, shared by every instance and every job.
+    # Each instance keeps its own target directory (see the step above), so the
+    # identical compile of a dependency or of a changed workspace crate used to
+    # happen once per instance: on run 38450101413 the bot suite and the two
+    # saturation legs each compiled lgwks_bot with the same feature set, and the
+    # checks in the matrix job compiled the same crates the suites had already
+    # compiled. sccache keys a compilation by the preprocessed source, the
+    # compiler and the flags, so the second and later jobs of a run are cache
+    # hits rather than compiles. SCCACHE_BASEDIRS is what makes that work across
+    # instances: each runner checks out under its own `rN/`, and without it the
+    # absolute paths inside the invocation would make every instance's key, and
+    # so every instance's compile, distinct. Measured on this machine 2026-10-13
+    # with two identical checkouts at different absolute paths under one
+    # SCCACHE_BASEDIRS: the second build was a cache hit (hits 1, misses 1). The
+    # cache is content-addressed and never stores a failed compilation, so a hit
+    # cannot hide a broken build.
+    - name: One compile cache shared by the machine's instances
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v sccache >/dev/null 2>&1; then
+          echo "::warning::sccache is not installed: this job compiles from nothing, as it did before"
+          exit 0
+        fi
+        dir="${SCCACHE_DIR:-${HOME}/.cache/sccache}"
+        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+        mkdir -p "${dir}"
+        SCCACHE_DIR="${dir}" SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}" \
+          SCCACHE_BASEDIRS="${root}" sccache --start-server >/dev/null 2>&1 || true
+        {
+          echo "RUSTC_WRAPPER=sccache"
+          echo "SCCACHE_DIR=${dir}"
+          echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-30G}"
+          echo "SCCACHE_BASEDIRS=${root}"
+          # sccache cannot cache an incremental compilation, and the next job on
+          # this instance discards the sessions anyway, so the setting only ever
+          # cost this job a directory it could not reuse.
+          echo "CARGO_INCREMENTAL=0"
+        } >> "${GITHUB_ENV}"
+        SCCACHE_DIR="${dir}" sccache --show-stats 2>/dev/null | head -6 || true
+        echo "compile cache: ${dir} (basedirs ${root})"
     # Temporary files on a RAM disk owned by this runner instance. Rust's
     # `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS, which flushes the
     # whole device's cache and serialises against every other flush on it, so
