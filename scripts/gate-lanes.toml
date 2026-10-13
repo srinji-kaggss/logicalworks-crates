@@ -345,7 +345,7 @@ id = "requirements"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo run --locked -p lgwks_deps --bin check-requirements && python3 scripts/check-spec-owners.py --test"
+command = "cargo run --locked -p lgwks_deps --bin check-requirements && cargo run --locked -p lgwks_deps --bin check-spec-owners"
 ci_step = "Requirements sentences unedited without supersession"
 
 [[lane]]

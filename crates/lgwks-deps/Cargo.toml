@@ -144,6 +144,10 @@ path = "src/bin/llms_txt.rs"
 name = "check-requirements"
 path = "src/bin/check_requirements.rs"
 
+[[bin]]
+name = "check-spec-owners"
+path = "src/bin/check_spec_owners.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"
