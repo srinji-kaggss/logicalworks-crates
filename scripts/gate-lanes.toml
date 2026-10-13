@@ -85,7 +85,7 @@ id = "std-first"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py"
+command = "cargo run --locked -p lgwks_deps --bin check-std-first"
 ci_step = "Audit std-first and lgwks_std-first"
 
 [[lane]]
