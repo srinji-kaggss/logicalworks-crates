@@ -64,10 +64,18 @@ mod probe {
     const LATENCY_RATIO: u64 = 8;
 
     /// The manifest of the throwaway probe crate.
+    ///
+    /// Its dependencies build optimised. The probe is its own workspace, so it
+    /// builds under the `dev` profile, and the client's code (ureq, rustls and
+    /// this crate's own) then ran unoptimised against a bare socket exchange that
+    /// is nothing but syscalls: 1829 us against 49 us on a CI runner, a fixed
+    /// cost of the build rather than of the client. The ratio is only a
+    /// measurement of the shipped client when the client is built as shipped.
     fn manifest() -> String {
         format!(
             "[package]\nname = \"http_alloc_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
-             [dependencies]\nlgwks_std = {{ path = {:?}, default-features = false, features = [\"http\"] }}\n",
+             [dependencies]\nlgwks_std = {{ path = {:?}, default-features = false, features = [\"http\"] }}\n\n\
+             [profile.dev.package.\"*\"]\nopt-level = 3\n",
             Path::new(env!("CARGO_MANIFEST_DIR"))
         )
     }
