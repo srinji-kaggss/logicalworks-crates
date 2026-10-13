@@ -38,6 +38,9 @@ Both are invisible to the manifest gate and both are exactly the drift the
                  APPROVED.toml` does not admit *this* crate to it.
   `STD-FIRST`    a line matching a capability `std` or `lgwks_std` already
                  provides, named in the finding.
+  `POLICY-ONLY`  a storefront edge no workspace code consumes whose register
+                 `reason` does not open with `policy-only:`, or one that is
+                 consumed and still says it is not (#418).
 
 # Resolution, and why the obvious reading is wrong
 
@@ -86,6 +89,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from rust_source import USE, CodeOnlyRegression, code_only, use_tree
+
 # The standard library, plus the two relative-path prefixes every module may
 # write without an edge.
 CLEAN_ROOTS = frozenset(
@@ -97,6 +102,14 @@ CLEAN_ROOTS = frozenset(
 # reference implementation is allowed to be.
 SURFACE_OWNER = "lgwks_std"
 
+# The register `reason` prefix of an admitted-not-implemented edge (#418). An
+# approval is a recorded policy decision, and a reader of `APPROVED.toml` or of
+# `--justify` cannot tell one nobody consumes from a shipped capability unless
+# the record says so. The register's schema refuses unknown keys, so the marker
+# lives in the field it already has, and `policy_only_findings` keeps it true
+# in both directions.
+POLICY_ONLY = "policy-only:"
+
 # Where source lives. `src` is the shipped surface; the rest are compiled by
 # `--all-targets` and are held to the same rule, because a test that reaches a
 # crate its manifest does not declare is the same unregistered edge.
@@ -105,15 +118,6 @@ SOURCE_GLOBS = (
     "crates/*/tests/**/*.rs",
     "crates/*/examples/**/*.rs",
     "crates/*/benches/**/*.rs",
-)
-
-# `use path::to::thing;`, `pub use …`, `pub(crate) use …`. The whole statement
-# is captured rather than only its first segment: what a statement binds is what
-# a later statement may resolve through, and reading only the root loses that.
-# `[^;]*` spans newlines, which a wrapped `use` group needs.
-USE = re.compile(
-    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?use[ \t]+(?P<body>[^;]*);",
-    re.MULTILINE,
 )
 
 # A module the crate declares itself, in either form: `mod cap;` and
@@ -184,162 +188,6 @@ EXEMPT: dict[str, tuple[str, str]] = {
         "compiled, so it spawns nothing",
     ),
 }
-
-
-def code_only(text: str) -> str:
-    """The text with every comment and literal blanked, offsets preserved.
-
-    A `use` statement or a bare `name::` path can only be code, so the scan has
-    to tell code from a string or comment that happens to spell one. Two real
-    cases forced this. `crates/lgwks-deps/src/scan.rs` *is* a source scanner,
-    and its pattern table holds `"tracing::"`; reporting that as a reach into
-    `tracing` is the checker reporting a detector as the thing it detects. And
-    `crates/lgwks-ast/src/script/refuse.rs` (then in `lgwks-macros`) writes a diagnostic whose continuation
-    line starts with `use `…`;`, which the `use` pattern read as a statement:
-    the prose became a "crate", bound itself as a name, resolved through that
-    binding, and was printed among the crates the estate reaches (#195).
-
-    This is a lexer for exactly the Rust forms that can hide code-like text:
-    line and nested block comments, string and byte-string literals with
-    escapes, raw strings with any number of `#`, and character literals, which
-    are told apart from lifetimes by their closing quote. Every blanked
-    character becomes a space and every newline is kept, so an offset and a
-    line number mean the same thing in the result as in the file.
-    """
-    out = list(text)
-    length = len(text)
-
-    def blank(start: int, end: int) -> None:
-        for index in range(start, min(end, length)):
-            if out[index] != "\n":
-                out[index] = " "
-
-    index = 0
-    while index < length:
-        char = text[index]
-        after = text[index + 1] if index + 1 < length else ""
-        if char == "/" and after == "/":
-            end = text.find("\n", index)
-            end = length if end == -1 else end
-            blank(index, end)
-            index = end
-        elif char == "/" and after == "*":
-            depth, cursor = 1, index + 2
-            while cursor < length and depth:
-                pair = text[cursor : cursor + 2]
-                if pair == "/*":
-                    depth, cursor = depth + 1, cursor + 2
-                elif pair == "*/":
-                    depth, cursor = depth - 1, cursor + 2
-                else:
-                    cursor += 1
-            blank(index, cursor)
-            index = cursor
-        elif char == "r" and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_") or text[index - 1] == "b"):
-            hashes = 0
-            while index + 1 + hashes < length and text[index + 1 + hashes] == "#":
-                hashes += 1
-            if index + 1 + hashes < length and text[index + 1 + hashes] == '"':
-                closing = '"' + "#" * hashes
-                end = text.find(closing, index + 2 + hashes)
-                end = length if end == -1 else end + len(closing)
-                blank(index, end)
-                index = end
-            else:
-                index += 1
-        elif char == '"':
-            cursor = index + 1
-            while cursor < length and text[cursor] != '"':
-                cursor += 2 if text[cursor] == "\\" else 1
-            blank(index, cursor + 1)
-            index = cursor + 1
-        elif char == "'":
-            if after == "\\":
-                end = text.find("'", index + 3 if text[index + 2 : index + 3] == "'" else index + 2)
-                end = length if end == -1 else end + 1
-                blank(index, end)
-                index = end
-            elif index + 2 < length and text[index + 2] == "'" and after != "\n":
-                blank(index, index + 3)
-                index += 3
-            else:
-                index += 1
-        else:
-            index += 1
-    return "".join(out)
-
-
-def split_top_level(text: str) -> list[str]:
-    """Split a `use` group body on the commas outside nested braces."""
-    parts: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for char in text:
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-        if char == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    parts.append("".join(current))
-    return parts
-
-
-def use_tree(body: str, prefix: str = "") -> tuple[set[str], set[str]]:
-    """The crate roots a `use` specification reaches, and the names it binds.
-
-    `use lgwks_std::json::serde;` reaches `lgwks_std` and binds `serde`.
-    `use std::collections::{BTreeMap, BTreeSet};` reaches `std` and binds both.
-    `use a::b::{self, c};` binds `b` as well as `c`, which is the arm a
-    first-segment-only reading gets wrong.
-    """
-    body = body.strip()
-    if not body:
-        return set(), set()
-
-    brace = body.find("{")
-    if brace != -1 and body.endswith("}"):
-        head = body[:brace].rstrip(":").strip()
-        # The prefix is not decoration: in `use lgwks_deps::bevy_ecs::{
-        # prelude::{…} }` the inner group's head is `prelude` only until the
-        # outer path is put back in front of it, and a group read without its
-        # prefix reports `prelude` and `schedule` as crates.
-        if prefix:
-            head = f"{prefix}::{head}" if head else prefix
-        roots: set[str] = set()
-        names: set[str] = set()
-        for part in split_top_level(body[brace + 1 : -1]):
-            part = part.strip()
-            if not part:
-                continue
-            if part == "self":
-                if head:
-                    roots.add(head.split("::")[0])
-                    names.add(head.split("::")[-1])
-                continue
-            sub_roots, sub_names = use_tree(part, head)
-            roots |= sub_roots
-            names |= sub_names
-        return roots, names
-
-    path = f"{prefix}::{body}" if prefix else body
-    path = path.lstrip(":")
-    if path.endswith("::*") or path == "*":
-        root = path.split("::")[0]
-        return ({root} if root else set()), set()
-
-    if " as " in path:
-        target, _, alias = path.rpartition(" as ")
-        path = target.strip()
-        name = alias.strip()
-    else:
-        name = path.split("::")[-1].strip()
-
-    root = path.split("::")[0].strip()
-    return ({root} if root else set()), ({name} if name else set())
 
 
 def crate_name(manifest: dict) -> str | None:
@@ -498,36 +346,125 @@ def justification(record: dict | None) -> str:
     )
 
 
-class CodeOnlyRegression(unittest.TestCase):
-    """What `code_only` must blank, and what it must leave as code."""
+def storefront_consumers(repo: Path, files: list[Path], owned: set[str]) -> dict[str, set[str]]:
+    """Each `lgwks_deps`-only edge -> the files whose code consumes it.
 
-    def scan_uses(self, source: str) -> list[str]:
-        return [m.group("body") for m in USE.finditer(code_only(source))]
+    Consumption is a `lgwks_deps::<edge>` path in another workspace crate, or
+    a `<edge>::` path in the storefront's own source past `lib.rs`, whose
+    re-export lines are the admission, not a use of it. Tests, examples and
+    fixtures of the storefront itself are not consumers: a fixture that names
+    `gpui` proves the gate sees the edge, not that anything ships with it.
+    """
+    own_src = "crates/lgwks-deps/src/"
+    consumers: dict[str, set[str]] = {name: set() for name in owned}
+    for path in files:
+        relative = path.relative_to(repo).as_posix()
+        code = code_only(cleaned_text(path))
+        if relative.startswith(own_src):
+            if relative == own_src + "lib.rs":
+                continue
+            for name in owned:
+                if re.search(rf"(?<![A-Za-z0-9_:]){re.escape(name)}::", code):
+                    consumers[name].add(relative)
+            continue
+        if relative.startswith("crates/lgwks-deps/"):
+            continue
+        for match in re.finditer(r"\blgwks_deps::(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)", code):
+            for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", match.group(1)):
+                if name in consumers:
+                    consumers[name].add(relative)
+    return consumers
 
-    def test_a_use_line_inside_a_multiline_string_is_not_a_statement(self) -> None:
-        # The refuse.rs shape that put prose into the crate list (#195).
-        source = 'let m = "flows stop here: \\\n    use `?` or `.or_fail()?` (permanent)";\nuse std::fmt;\n'
-        self.assertEqual(self.scan_uses(source), ["std::fmt"])
 
-    def test_raw_strings_comments_and_char_literals_hide_code_like_text(self) -> None:
-        source = (
-            'let a = r#"use serde::Value; "quoted" tokio::spawn"#;\n'
-            "/* use regex::Regex; /* nested */ still comment */\n"
-            "let q = '\"'; let e = '\\''; // tokio::spawn\n"
-            "use lgwks_std::json;\n"
+def policy_only_findings(approved: dict[str, dict], consumers: dict[str, set[str]]) -> list[str]:
+    """The register lines whose `policy-only:` marker disagrees with the source.
+
+    Both directions fail: an unconsumed edge left unmarked reads as a delivered
+    capability, and a consumed edge still marked hides that it shipped.
+    """
+    findings: list[str] = []
+    for name in sorted(consumers):
+        marked = approved[name].get("reason", "").startswith(POLICY_ONLY)
+        used = sorted(consumers[name])
+        if not used and not marked:
+            findings.append(
+                f"contract/APPROVED.toml `{name}` — POLICY-ONLY: no workspace code consumes "
+                f"it, so its reason must open with `{POLICY_ONLY}` (#418)"
+            )
+        elif used and marked:
+            findings.append(
+                f"contract/APPROVED.toml `{name}` — POLICY-ONLY: marked `{POLICY_ONLY}` but "
+                f"consumed by {used[0]}; drop the marker"
+            )
+    return findings
+
+
+def storefront_only(approved: dict[str, dict]) -> set[str]:
+    """The edges the storefront owns and admits no other crate to."""
+    return {
+        name for name, record in approved.items()
+        if record.get("owner") == "lgwks_deps" and admitted_consumers(record) == {"lgwks_deps"}
+    }
+
+
+class PolicyOnlyRegression(unittest.TestCase):
+    """The #418 marker: a storefront edge says whether anything consumes it."""
+
+    def write(self, repo: Path, relative: str, text: str) -> Path:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def consumers_of(self, sources: dict[str, str], owned: set[str]) -> dict[str, set[str]]:
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            files = [self.write(repo, rel, text) for rel, text in sources.items()]
+            return storefront_consumers(repo, files, owned)
+
+    def test_a_facade_path_in_another_crate_consumes_and_a_reexport_does_not(self) -> None:
+        found = self.consumers_of(
+            {
+                "crates/lgwks-deps/src/lib.rs": "pub use gpui::{self, App as GpuiApp};\npub use bevy_ecs;\n",
+                "crates/lgwks-deps/tests/fixtures/app/src/main.rs": "use lgwks_deps::gpui::App;\n",
+                "crates/lgwks-bot/src/ecs.rs": "use lgwks_deps::{bevy_ecs::{self, prelude::World}};\n",
+                "crates/lgwks-bot/src/note.rs": '// lgwks_deps::gpui\nlet s = "lgwks_deps::gpui";\n',
+            },
+            {"gpui", "bevy_ecs"},
         )
-        code = code_only(source)
-        self.assertEqual(self.scan_uses(source), ["lgwks_std::json"])
-        self.assertNotIn("tokio::", code)
-        self.assertNotIn("regex::", code)
+        self.assertEqual(found, {"gpui": set(), "bevy_ecs": {"crates/lgwks-bot/src/ecs.rs"}})
 
-    def test_lifetimes_stay_code_and_offsets_are_preserved(self) -> None:
-        source = "fn f<'a>(x: &'a str) -> &'a str { serde_json::from_str(x) }\n\"\n\""
-        code = code_only(source)
-        self.assertEqual(len(code), len(source))
-        self.assertEqual(code.count("\n"), source.count("\n"))
-        self.assertIn("serde_json::", code)
-        self.assertIn("'a", code)
+    def test_the_storefronts_own_source_past_lib_rs_consumes(self) -> None:
+        found = self.consumers_of(
+            {
+                "crates/lgwks-deps/src/scan.rs": "let f = syn::parse_file(t);\n",
+                "crates/lgwks-deps/src/report.rs": "let g = not_gpui::App::new();\n",
+            },
+            {"syn", "gpui"},
+        )
+        self.assertEqual(found, {"syn": {"crates/lgwks-deps/src/scan.rs"}, "gpui": set()})
+
+    def test_the_marker_must_match_consumption_in_both_directions(self) -> None:
+        approved = {
+            "gpui": {"reason": "A GPU UI."},
+            "candle_core": {"reason": f"{POLICY_ONLY} tensors."},
+            "tokio": {"reason": f"{POLICY_ONLY} runtime."},
+            "syn": {"reason": "Parsing."},
+        }
+        consumers = {"gpui": set(), "candle_core": set(), "tokio": {"crates/lgwks-bot/src/lib.rs"}, "syn": {"x.rs"}}
+        found = policy_only_findings(approved, consumers)
+        self.assertEqual(len(found), 2)
+        self.assertIn("`gpui` — POLICY-ONLY: no workspace code consumes", found[0])
+        self.assertIn("`tokio` — POLICY-ONLY: marked", found[1])
+        self.assertIn("crates/lgwks-bot/src/lib.rs", found[1])
+
+    def test_only_edges_admitting_the_storefront_alone_are_judged(self) -> None:
+        approved = {
+            "gpui": {"owner": "lgwks_deps", "allowed_consumers": "lgwks_deps"},
+            "proptest": {"owner": "lgwks_deps", "allowed_consumers": "lgwks_std, lgwks_deps"},
+            "regex": {"owner": "lgwks_std", "allowed_consumers": "lgwks_std"},
+        }
+        self.assertEqual(storefront_only(approved), {"gpui"})
 
 
 class SourceFilesRegression(unittest.TestCase):
@@ -574,7 +511,10 @@ def main() -> int:
     if args.test:
         loader = unittest.defaultTestLoader
         suite = unittest.TestSuite(
-            [loader.loadTestsFromTestCase(CodeOnlyRegression), loader.loadTestsFromTestCase(SourceFilesRegression)]
+            [
+                loader.loadTestsFromTestCase(case)
+                for case in (CodeOnlyRegression, SourceFilesRegression, PolicyOnlyRegression)
+            ]
         )
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
     repo: Path = args.repo.resolve()
@@ -768,6 +708,10 @@ def main() -> int:
                     f"`{record.get('owner')}` and admits {sorted(admitted)}, not `{crate}`"
                 )
 
+    owned = storefront_only(approved)
+    consumers = storefront_consumers(repo, files, owned)
+    findings += policy_only_findings(approved, consumers)
+
     if args.justify and reached:
         print("Crates reached past std / lgwks_std / lgwks_bot / lgwks_ast / lgwks_deps:")
         for dep in sorted(reached):
@@ -783,6 +727,10 @@ def main() -> int:
                 print(f"    resolved through a surface by {through}")
             print(f"    {justification(approved.get(dep))}")
         print()
+        policy_only = sorted(name for name in owned if not consumers[name])
+        print(f"Admitted, not implemented ({POLICY_ONLY} {len(policy_only)} of {len(owned)} storefront-only edges):")
+        print(f"  {', '.join(policy_only) if policy_only else 'none'}")
+        print()
 
     if findings:
         print(f"{len(findings)} finding(s):", file=sys.stderr)
@@ -793,7 +741,8 @@ def main() -> int:
     print(
         f"std-first holds: {len(files)} source file(s) across {len(members)} crate(s); "
         f"{len(reached)} crate(s) reached past the clean roots "
-        f"({', '.join(sorted(reached)) if reached else 'none'})"
+        f"({', '.join(sorted(reached)) if reached else 'none'}); "
+        f"{sum(1 for name in owned if not consumers[name])} storefront edge(s) marked {POLICY_ONLY}"
     )
     return 0
 
