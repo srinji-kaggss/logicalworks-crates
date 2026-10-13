@@ -453,6 +453,9 @@ pub(super) fn run_lane(
 }
 
 #[cfg(test)]
+mod sim_env;
+
+#[cfg(test)]
 mod tests {
     use super::{child_env_from, flag};
     use crate::toml_subset::{list, read_tables, text};
