@@ -10,6 +10,11 @@
 //! warmed six-token match cost at least six allocations and a warmed
 //! twelve-token match at least twelve. After warm capacity both are zero.
 
+// The probe is its own downstream package with its own feature list, so the
+// run's features cannot change its result: it runs once under `full`, not once
+// per per-feature run.
+#![cfg(feature = "full")]
+
 #[path = "support/consumer_probe.rs"]
 mod consumer_probe;
 
