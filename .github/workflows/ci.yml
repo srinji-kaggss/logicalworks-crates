@@ -119,7 +119,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: workspace
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -176,7 +177,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: gate
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -295,7 +297,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: bot-full
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -342,7 +345,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: saturation
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -422,7 +426,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: nodefault
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -456,7 +461,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: linux-${{ matrix.suite }}
       - name: nextest is installed
         uses: taiki-e/install-action@nextest
@@ -493,7 +499,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: clippy
       - name: Clippy all workspace targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -569,7 +576,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: "true"
+          cache-on-failure: "true"
           key: docs
       - name: Doc build with broken-link denial
         # Every feature on, per crate (gpui excluded: it needs the Xcode Metal
