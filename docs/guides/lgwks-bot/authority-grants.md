@@ -85,7 +85,7 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
 
 So `Auth::check` cannot fail inside a running bot.
 `BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs/admit.rs:342`) is
+that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs/admit.rs:344`) is
 defensive rather than live. A hold was built on top of that arm and then removed,
 because machinery whose only caller is a contrived test is not a feature.
 

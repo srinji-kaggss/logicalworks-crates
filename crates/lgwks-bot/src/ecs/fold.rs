@@ -397,6 +397,13 @@ pub(super) fn fire_plan(world: &mut World) {
     #[cfg(feature = "profile")]
     let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
+        // Idle is "no transition held and the source did not move", which
+        // `plan_admissions` decided a moment ago: taking the slot would take
+        // nothing and `resume` would hand nothing back, so an idle chain cost a
+        // lookup of the ledger it never used.
+        if matches!(kinds.get(index), Some(AdmitKind::Idle)) {
+            continue;
+        }
         let held = world.non_send_mut::<Ledger>().take(index);
         let admit = Admit::bind(
             // A chain the compare pass did not reach is idle, which is the same
