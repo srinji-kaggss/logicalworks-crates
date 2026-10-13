@@ -7,11 +7,12 @@ which moved is worse than no index, because the agent trusts it and stops
 looking. So this file is generated and never hand-edited, and CI re-runs this
 script and fails when the committed copy differs.
 
-The index has exactly one source: `README.md`. Its crates table and its
-Documentation table are already the human-facing index, and a second list would
-be a second thing to drift out of date. This script reads those two tables,
-checks every path they name exists, checks no document in `docs/` is missing
-from the table, and writes `llms.txt`.
+The index has exactly one source per table: the crates table of `README.md`
+and the Documentation table of `docs/README.md` (moved there when the README
+was split under the 120-line .md law). They are already the human-facing
+index, and a second list would be a second thing to drift out of date. This
+script reads those two tables, checks every path they name exists, checks no
+document in `docs/` is missing from the table, and writes `llms.txt`.
 
 Usage:
     python3 scripts/gen-llms-txt.py
@@ -29,6 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
+# The Documentation table; its links are relative to `docs/`.
+INDEX = ROOT / "docs" / "README.md"
 OUTPUT = ROOT / "llms.txt"
 
 # Table rows whose first cell carries a link: `| [`path`](path) | description |`
@@ -40,13 +43,13 @@ def cells(row: str) -> list[str]:
     return [cell.strip() for cell in row.strip().strip("|").split("|")]
 
 
-def section(text: str, heading: str) -> list[str]:
+def section(text: str, heading: str, source: str = "README.md") -> list[str]:
     """Return the lines of the `## <heading>` section, excluding the heading."""
     lines = text.splitlines()
     try:
         start = next(i for i, line in enumerate(lines) if line.strip() == f"## {heading}")
     except StopIteration:
-        raise SystemExit(f"README.md has no '## {heading}' section") from None
+        raise SystemExit(f"{source} has no '## {heading}' section") from None
     body: list[str] = []
     for line in lines[start + 1 :]:
         if line.startswith("## "):
@@ -91,6 +94,29 @@ def repository_url() -> str:
     return url.rstrip("/")
 
 
+MARKDOWN_LINK = re.compile(r"\]\((?P<target>[^)#\s]+)(?:#[^)]*)?\)")
+
+
+def linked_from(documents: set[str]) -> set[str]:
+    """Every repository document a link in one of `documents` resolves to.
+
+    Relative links resolve against the linking page's directory, the way a
+    reader's browser resolves them; a link that leaves the repository or
+    names no file is not counted.
+    """
+    found: set[str] = set()
+    for document in documents:
+        page = ROOT / document
+        for match in MARKDOWN_LINK.finditer(page.read_text(encoding="utf-8")):
+            target = match.group("target")
+            if "://" in target:
+                continue
+            resolved = (page.parent / target).resolve()
+            if resolved.is_file() and resolved.is_relative_to(ROOT):
+                found.add(resolved.relative_to(ROOT).as_posix())
+    return found
+
+
 def main() -> int:
     readme = README.read_text(encoding="utf-8")
     repo = repository_url()
@@ -123,16 +149,17 @@ def main() -> int:
         crates.append((crate, match.group(1), row_cells[-1]))
 
     documents: list[tuple[str, str, str]] = []
-    for row in section(readme, "Documentation"):
+    index = INDEX.read_text(encoding="utf-8")
+    for row in section(index, "Documentation", "docs/README.md"):
         match = LINK_ROW.match(row)
         if match is None:
             continue
-        target, description = match.group("target"), cells(row)[-1]
-        path = ROOT / target
-        if not path.is_file():
-            problems.append(f"the Documentation table names {target}, which does not exist")
+        link, description = match.group("target"), cells(row)[-1]
+        path = (INDEX.parent / link).resolve()
+        if not path.is_file() or not path.is_relative_to(ROOT):
+            problems.append(f"the Documentation table names {link}, which does not exist")
             continue
-        documents.append((title_of(path), target, description))
+        documents.append((title_of(path), path.relative_to(ROOT).as_posix(), description))
 
     # A document nobody indexed is invisible to every reader that arrives
     # through this file, which for an agent is every reader.
@@ -146,13 +173,19 @@ def main() -> int:
     # A document deliberately kept out of the consumer index is named here with
     # its reason, so the way to exempt one is to write down why rather than to
     # move it somewhere the check does not reach.
-    NOT_INDEXED: dict[str, str] = {}
+    # A guide split under the 120-line .md law keeps one entry page in the
+    # README table and links its parts from it. A part is reachable in one hop
+    # from the index, so it is accepted only when an indexed document really
+    # links to it: the link must exist and resolve, which a name list could not
+    # check.
+    NOT_INDEXED: dict[str, str] = {"docs/README.md": "the index itself"}
     indexed = {target for _, target, _ in documents}
+    linked = linked_from(indexed)
     for path in sorted((ROOT / "docs").rglob("*.md")):
         relative = path.relative_to(ROOT).as_posix()
-        if relative in indexed or relative in NOT_INDEXED:
+        if relative in indexed or relative in NOT_INDEXED or relative in linked:
             continue
-        problems.append(f"{relative} exists but the README Documentation table omits it")
+        problems.append(f"{relative} exists but the Documentation table in docs/README.md omits it")
 
     # A crate nobody indexed is invisible to every reader that arrives through
     # this file, which for an agent is every reader.
