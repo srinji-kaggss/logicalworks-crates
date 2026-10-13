@@ -85,7 +85,11 @@ id = "std-first"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py"
+# The audit is the `check-std-first` binary, ported from the Python script it
+# replaces because a repository holds Rust and C++ only. Its own tests moved
+# with it: they are unit tests of the binary, run by the workspace test lanes,
+# so no `--test` flag is needed to keep the audit tested.
+command = "cargo run --locked -p lgwks_deps --bin check-std-first"
 ci_step = "Audit std-first and lgwks_std-first"
 
 [[lane]]
