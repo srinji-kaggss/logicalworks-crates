@@ -160,6 +160,14 @@ path = "src/bin/check_gate_parity/main.rs"
 name = "check-std-first"
 path = "src/bin/check_std_first/main.rs"
 
+[[bin]]
+name = "ci-local"
+path = "src/bin/ci_local/main.rs"
+
+[[bin]]
+name = "acceptance-receipts"
+path = "src/bin/acceptance_receipts/main.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

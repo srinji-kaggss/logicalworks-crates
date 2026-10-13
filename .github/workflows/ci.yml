@@ -137,12 +137,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p gate-evidence
-          python3 scripts/ci_local.py --lane simulation-evidence | tee gate-evidence/simulation-evidence.txt
+          cargo run --locked -p lgwks_deps --bin ci-local -- --lane simulation-evidence | tee gate-evidence/simulation-evidence.txt
       - name: Debug doctor end-to-end journey
         run: |
           set -euo pipefail
           mkdir -p gate-evidence
-          python3 scripts/ci_local.py --lane debug-e2e | tee gate-evidence/debug-e2e.txt
+          cargo run --locked -p lgwks_deps --bin ci-local -- --lane debug-e2e | tee gate-evidence/debug-e2e.txt
       - name: Upload gate evidence
         uses: actions/upload-artifact@v4
         with:
@@ -192,7 +192,7 @@ jobs:
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
       - name: Verify invariant enforcement references resolve
-        run: python3 scripts/ci_local.py --lane invariants
+        run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane invariants
       - name: Audit std-first and lgwks_std-first
         # The manifest gate above sees every authored edge. This reads the
         # source for the two failures a manifest cannot show: a `use` no
@@ -202,9 +202,9 @@ jobs:
       - name: Forbid unwrap outside tests
         # Safety bar: library code fails loud with typed errors or named
         # expects, never bare unwrap. Doc examples count as shipped surface.
-        run: python3 scripts/ci_local.py --lane unwrap-scan
+        run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane unwrap-scan
       - name: Validate the dependency contract alignment
-        run: python3 scripts/ci_local.py --lane contract-drift
+        run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane contract-drift
       - name: Requirements sentences unedited without supersession
         run: cargo run --locked -p lgwks_deps --bin check-requirements && cargo run --locked -p lgwks_deps --bin check-spec-owners
       - name: llms.txt matches the documentation index
@@ -229,7 +229,7 @@ jobs:
         # repository; the script names that exemption rather than guessing.
         run: cargo run --locked -p lgwks_deps --bin check-doc-citations
       - name: Root README quickstart matches its compiled example
-        run: python3 scripts/ci_local.py --lane readme-quickstart
+        run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
       # The second lgwks-std per-feature shard (see the feature-matrix job). The
       # file checks above take two minutes and build nothing, so this instance
       # has the room. The workspace wrapper is restored for it: each run is
@@ -373,10 +373,10 @@ jobs:
           cargo nextest run --locked -p lgwks_std --all-targets --no-default-features --features process
 
   acceptance_receipts:
-    # The receipt, built from the JUnit reports the shards already wrote. No
-    # Rust toolchain and no cargo build: this job runs a Python script over two
-    # XML files, so it costs seconds rather than adding a second execution of
-    # the tests the shards already ran between them.
+    # The receipt, built from the JUnit reports the shards already wrote. The
+    # job builds one small binary (`acceptance-receipts`, std only) and reads two
+    # XML files with it, so it costs seconds rather than adding a second
+    # execution of the tests the shards already ran between them.
     name: Acceptance receipts
     needs: [tests_bot_full, tests_linux]
     runs-on: [self-hosted, macOS, ARM64, lwc]
@@ -385,6 +385,10 @@ jobs:
       REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
       - name: Download lgwks-bot JUnit reports
         uses: actions/download-artifact@v4
         with:
@@ -396,7 +400,7 @@ jobs:
           name: acceptance-junit-linux
           path: acceptance-linux
       - name: Record acceptance receipts
-        run: python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && python3 scripts/acceptance-receipts.py --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64
+        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64
       - name: Upload acceptance receipt
         uses: actions/upload-artifact@v4
         with:
@@ -751,7 +755,7 @@ jobs:
         # what happened to lgwks_deps: `gpui` pulls `objc2`, which refuses to
         # compile off Apple targets. Build with the declared set so an
         # unbuildable declaration fails here instead of on docs.rs.
-        run: python3 scripts/ci_local.py --lane docsrs-metadata
+        run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane docsrs-metadata
       - name: Check lgwks-bot async feature matrix
         run: |
           set -eu

@@ -1,7 +1,7 @@
 # The gate's lane table: the one definition of what the gate runs and where.
 #
-# `scripts/ci_local.py` executes the local lanes from here. `scripts/check-gate-parity.py`
-# asserts every lane that names a `ci_step` matches the step of that name in
+# The `ci-local` binary executes the local lanes from here. The `check-gate-parity`
+# binary asserts every lane that names a `ci_step` matches the step of that name in
 # `.github/workflows/ci.yml`, and that every gate step in ci.yml is claimed by a
 # lane. A second hand-copied command list drifts, and the drift is invisible
 # because each side still looks green on its own terms — which is exactly the
@@ -23,15 +23,16 @@
 #             lane with "ci" in surfaces that runs as a named step.
 #   ci_job    the job `name:` in ci.yml for a lane that runs as unnamed `run:`
 #             steps of a whole job (the AppCUI matrix).
-#   builtin   instead of `command`, the name of a check implemented inside
-#             `ci_local.py`. Used for the scanners that must be unit-tested
+#   builtin   instead of `command`, the name of a check implemented inside the
+#             `ci-local` binary. Used for the scanners that must be unit-tested
 #             against fixture trees rather than shelled out. When such a lane
-#             runs in CI, the step is `python3 scripts/ci_local.py --lane <id>`.
+#             runs in CI, the step is
+#             `cargo run --locked -p lgwks_deps --bin ci-local -- --lane <id>`.
 #   needs     prerequisites checked before the lane runs. A missing one makes a
 #             required lane `blocked` rather than silently absent.
-#             Recognised: `module:<python module>`, `script:<path>` (must exist
-#             and be executable), `bin:<name>` (must be on PATH).
-#   platforms Python `sys.platform` values this lane applies to. A host outside
+#             Recognised: `script:<path>` (must exist and be executable),
+#             `bin:<name>` (must be on PATH), `os:<name>`.
+#   platforms Host names (`darwin`, `linux`, `win32`) this lane applies to. A host outside
 #             the list reports the lane `skip` (out of scope) rather than
 #             failing it. Omitted means every host.
 #   fast      true when the lane belongs to the `--fast` set.
@@ -181,10 +182,10 @@ id = "acceptance-receipts"
 surfaces = "ci"
 required = true
 # The receipt, built from the two JUnit reports the lgwks-bot shards already
-# wrote. It reads XML and records into SQLite, so the job needs no Rust
-# toolchain and no build -- it costs seconds, and it does not run the suite a
-# second time.
-command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && python3 scripts/acceptance-receipts.py --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
+# wrote. The `acceptance-receipts` binary reads the XML and records into SQLite
+# through the sqlite3 program, so the job builds one std-only binary -- it
+# costs seconds, and it does not run the suite a second time.
+command = "cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
 ci_step = "Record acceptance receipts"
 
 [[lane]]
@@ -647,7 +648,7 @@ command = "cargo run --locked -p lgwks_deps --bin check-gate-parity"
 
 # The GPUI Windows renderer builds only on a Windows host. The check runs as the
 # GPUI Windows renderer job; naming it here puts it in the one gate table, so
-# parity sees it and `ci_local.py` runs it on a Windows machine. (#195)
+# parity sees it and `ci-local` runs it on a Windows machine. (#195)
 [[lane]]
 id = "gpui-windows"
 group = "check"

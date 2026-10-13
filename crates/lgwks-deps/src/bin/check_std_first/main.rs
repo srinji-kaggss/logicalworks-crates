@@ -21,6 +21,8 @@ mod files;
 mod lexer;
 mod manifest;
 mod scans;
+#[path = "../shared/toml_subset.rs"]
+mod toml_subset;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -30,7 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lexer::{Kind, code_only, line_of, module_names, path_reaches, statements, use_tree};
-use manifest::{Record, Table};
+use manifest::Record;
+use toml_subset::{Table, read_tables};
 use scans::{POLICY_ONLY, policy_only_findings, std_first_hits, storefront_consumers, storefront_only};
 
 /// The deepest directory nesting the source walk accepts.
@@ -147,12 +150,12 @@ struct Member {
 /// Workspace member crate name -> the member.
 fn workspace(repo: &Path) -> Result<BTreeMap<String, Member>, AuditError> {
     let root_path = repo.join("Cargo.toml");
-    let root = manifest::read_tables(&read(&root_path)?);
+    let root = read_tables(&read(&root_path)?);
     let mut members = BTreeMap::new();
     for entry in manifest::workspace_members(&root) {
         let directory = repo.join(&entry);
         let member_path = directory.join("Cargo.toml");
-        let tables = manifest::read_tables(&read(&member_path)?);
+        let tables = read_tables(&read(&member_path)?);
         let Some(name) = manifest::crate_name(&tables) else {
             return fail(
                 AuditError::Manifest {
@@ -179,7 +182,7 @@ fn workspace(repo: &Path) -> Result<BTreeMap<String, Member>, AuditError> {
 
 /// The register, merged per crate.
 fn register(repo: &Path) -> Result<BTreeMap<String, Record>, AuditError> {
-    let tables: Vec<Table> = manifest::read_tables(&read(&repo.join("contract/APPROVED.toml"))?);
+    let tables: Vec<Table> = read_tables(&read(&repo.join("contract/APPROVED.toml"))?);
     Ok(manifest::approvals(&tables))
 }
 

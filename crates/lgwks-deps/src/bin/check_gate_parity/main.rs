@@ -16,8 +16,8 @@
 //!      segment of the step's run body. A shortened command is a different
 //!      command and fails.
 //!   3. Builtin agreement. A `builtin` lane that runs in CI must be invoked as
-//!      `python3 scripts/ci_local.py --lane <id>`, so the text of the check
-//!      exists once.
+//!      `cargo run --locked -p lgwks_deps --bin ci-local -- --lane <id>`, so the
+//!      text of the check exists once.
 //!   4. Toolchain agreement. The manifest's `toolchain.rust` is the version
 //!      every `toolchain:` pin in the workflow installs.
 //!
@@ -205,7 +205,7 @@ fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
             }
             claimed_steps.insert(ci_step.to_owned(), lane.id.clone());
             if lane.builtin.is_some() {
-                let expected = format!("python3 scripts/ci_local.py --lane {}", lane.id);
+                let expected = format!("cargo run --locked -p lgwks_deps --bin ci-local -- --lane {}", lane.id);
                 if !normalise(&step.run).contains(&expected) {
                     let shown: String = normalise(&step.run).chars().take(80).collect();
                     problems.push(format!(
@@ -417,7 +417,7 @@ mod tests {
     fn a_builtin_must_route_through_the_coordinator() -> TestResult {
         let (manifest, workflow) = files()?;
         let mutated = workflow.replace(
-            "python3 scripts/ci_local.py --lane unwrap-scan",
+            "cargo run --locked -p lgwks_deps --bin ci-local -- --lane unwrap-scan",
             "grep -rn '\\.unwrap()' crates",
         );
         let problems = check_parity(&manifest, &mutated);
