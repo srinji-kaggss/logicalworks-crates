@@ -105,7 +105,11 @@ jobs:
   # lanes that need the workspace built run after the shard that built it.
   build:
     name: Build and workspace tests
-    runs-on: macos-latest
+    # The instance keeps its target directory across runs, so a warm run
+    # recompiles only what changed: 250 s on run 38365526454. A hosted runner
+    # starts from a restored cache that never holds the workspace crates, and
+    # compiled lgwks_bot's `it` test binary alone for 100 s (run 38401426445).
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 5
     env:
       # The Clippy job is where lints run, with `-D warnings`, over the same
@@ -117,25 +121,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Install lld, the linker the repository's cargo configuration names
-        run: brew install lld
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: workspace
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
+          test-share: "6"
+          build-share: "3"
       - name: Build all workspace targets
-        # A cold cache cannot finish this inside the job's 5 minutes, and a job
-        # the runner cancels at its limit saves no cache, so the next run is
-        # cold again. The step stops at 3 minutes instead, the job fails, and
-        # the post step saves what compiled; each run resumes where it stopped.
-        timeout-minutes: 3
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
         run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
@@ -278,7 +270,9 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    runs-on: macos-latest
+    # The instance's own target directory, as on the build job: 245 s on run
+    # 38365526454, against a hosted runner's 100 s compile of the `it` binary.
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
     timeout-minutes: 5
     # One job, so the full feature set is compiled once (see the header).
     env:
@@ -287,22 +281,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Install lld, the linker the repository's cargo configuration names
-        run: brew install lld
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: bot-full
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
+          # Eight is the share this suite was green at: ten threads failed the
+          # drain-grace test (`shutdown_reports_every_draining_cleanup_...`,
+          # INV-BOT-156) under the run's process-table storm — the grace is
+          # calibrated for loaded, not oversubscribed, hosts.
+          test-share: "8"
+          build-share: "3"
       - name: Run lgwks-bot async runner tests
-        # Stops before the job limit so the cache is saved (see the build job).
-        timeout-minutes: 3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
       # the acceptance job can build one receipt from the suite's own output.
@@ -351,38 +340,40 @@ jobs:
   # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a real
   # process boundary) in a job of their own, beside the suite rather than after
   # it: the 10,000 tier alone is 50,000 process starts and about two minutes.
-  # It compiles only lgwks-bot and this one test binary.
+  # It compiles only lgwks-bot and this one test binary. The three tiers took
+  # 254 s in one job (run 38365526454), so the 10,000 tier runs on one instance
+  # and the 100 and 1,000 tiers on another, each under the 5-minute limit.
   tests_bot_saturation:
-    name: Saturation tiers (lgwks-bot full)
-    runs-on: macos-latest
+    name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tiers: "10000"
+            instance: lwc-6
+            filter: "test(=saturation_r32_tier_10000)"
+          - tiers: "100 and 1000"
+            instance: lwc-12
+            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy
-      - name: Install lld, the linker the repository's cargo configuration names
-        run: brew install lld
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: saturation
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
+          test-share: "3"
+          build-share: "2"
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
       - name: Run lgwks-bot saturation tiers
-        # Stops before the job limit so the cache is saved (see the build job).
-        timeout-minutes: 3
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'
+        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E '${{ matrix.filter }}'
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
@@ -427,8 +418,8 @@ jobs:
   # whose threads it sizes for.
   tests_nodefault:
     name: Tests (lgwks-bot no default features)
-    # A GitHub-hosted runner, for the capacity reason given on the docs job.
-    runs-on: ubuntu-latest
+    # The instance's own target directory: 77 s on run 38365526454.
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
     timeout-minutes: 5
     env:
       # As in the workspace job: lints run once, in the Clippy job.
@@ -436,20 +427,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: nodefault
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
+          test-share: "6"
+          build-share: "3"
       - name: Run lgwks-bot no-default-feature tests
-        # Stops before the job limit so the cache is saved (see the build job).
-        timeout-minutes: 3
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
@@ -460,51 +444,25 @@ jobs:
   # target volume.
   tests_linux:
     name: Tests (Linux container)
-    # A GitHub-hosted Linux kernel: the container this job used lived in a VM on
-    # the shared machine and measured 8 to 10 minutes. The script runs the same
-    # suites natively on a Linux host.
-    runs-on: ubuntu-latest
+    # Each suite on its own instance, whose container target volume keeps the
+    # Linux build across runs: 175 s and 195 s on run 38365526454. A hosted
+    # Linux runner restores a cache without the workspace crates and compiled
+    # lgwks_std, lgwks_deps and lgwks_bot for over three minutes before the
+    # first test (run 38401426445).
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
     timeout-minutes: 5
     strategy:
       fail-fast: false
-      # The workspace suite is three nextest partitions: whole, it ran 4 m 46 s
-      # on top of its compile and was cancelled at the 5-minute limit (run
-      # 38395269833). Each partition compiles the same workspace and runs a
-      # third of the tests.
       matrix:
-        include:
-          - suite: workspace
-            shard: "1"
-            partition: "count:1/3"
-          - suite: workspace
-            shard: "2"
-            partition: "count:2/3"
-          - suite: workspace
-            shard: "3"
-            partition: "count:3/3"
-          - suite: bot-full appcui
-            shard: "1"
-            partition: ""
+        suite: [workspace, bot-full appcui]
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
-        uses: dtolnay/rust-toolchain@stable
+        uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
-          components: clippy
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: "true"
-          cache-on-failure: "true"
-          key: linux-${{ matrix.suite }}-${{ matrix.shard }}
-      - name: nextest is installed
-        uses: taiki-e/install-action@nextest
+          nextest: "true"
       - name: Run the workspace and lgwks-bot full suites on Linux
-        # Stops before the job limit so the cache is saved (see the build job).
-        timeout-minutes: 3
-        env:
-          PARTITION: ${{ matrix.partition }}
         run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
       # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so
