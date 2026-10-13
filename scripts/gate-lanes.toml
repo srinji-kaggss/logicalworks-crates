@@ -639,8 +639,7 @@ id = "gate-parity"
 surfaces = "local"
 required = true
 fast = true
-command = "python3 scripts/check-gate-parity.py"
-needs = ["module:yaml"]
+command = "cargo run --locked -p lgwks_deps --bin check-gate-parity"
 
 # ── ci only, platform-bound ─────────────────────────────────────────────────
 # A local run never covers these. The receipt names them. On a host outside
