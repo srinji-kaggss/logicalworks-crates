@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -182,10 +181,24 @@ pub(super) fn platform_applies(lane: &Lane) -> bool {
     lane.platforms.is_empty() || lane.platforms.iter().any(|name| name == platform_name())
 }
 
+/// Whether the file's permissions let anyone execute it.
+#[cfg(unix)]
+fn has_execute_bit(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+/// Whether the file's permissions let anyone execute it; a platform without an
+/// execute bit judges by the file alone.
+#[cfg(not(unix))]
+fn has_execute_bit(_meta: &fs::Metadata) -> bool {
+    true
+}
+
 /// Whether `path` is an executable regular file.
 pub(super) fn is_executable_file(path: &Path) -> bool {
     match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        Ok(meta) => meta.is_file() && has_execute_bit(&meta),
         Err(_) => false,
     }
 }

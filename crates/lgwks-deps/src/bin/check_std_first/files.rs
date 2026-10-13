@@ -209,7 +209,10 @@ impl Scratch {
             match fs::create_dir(&root) {
                 Ok(()) => return Ok(Self { root }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(Box::new(error)),
+                Err(error) => {
+                    lgwks_std::trace::debug!(%error, "a scratch directory could not be claimed");
+                    return Err(Box::new(error));
+                }
             }
         }
         Err("no free scratch directory".into())

@@ -14,7 +14,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,11 +80,35 @@ fn wait_filled<T>(slot: &Mutex<Option<T>>, ready: &Condvar, limit: Duration) -> 
     }
 }
 
+/// The signal that ended a process, where the platform has signals.
+#[cfg(unix)]
+fn signal_of(status: ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+/// The signal that ended a process, where the platform has signals.
+#[cfg(not(unix))]
+fn signal_of(_status: ExitStatus) -> Option<i32> {
+    None
+}
+
+/// Makes `command` lead a process group of its own, where the platform has groups.
+#[cfg(unix)]
+fn lead_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Makes `command` lead a process group of its own, where the platform has groups.
+#[cfg(not(unix))]
+fn lead_group(_command: &mut Command) {}
+
 /// The exit code a status stands for; a signal reads as `128 + signal`.
 fn code_of(status: ExitStatus) -> i32 {
     match status.code() {
         Some(code) => code,
-        None => match status.signal() {
+        None => match signal_of(status) {
             Some(signal) => 128_i32.saturating_add(signal),
             None => UNRUNNABLE,
         },
@@ -218,8 +241,8 @@ impl Children {
             .args(argv.iter().skip(1))
             .current_dir(root)
             .env_clear()
-            .envs(env)
-            .process_group(0);
+            .envs(env);
+        lead_group(&mut command);
         if let Some(file) = out {
             match (file.try_clone(), file.try_clone()) {
                 (Ok(stdout), Ok(stderr)) => {
@@ -269,12 +292,14 @@ impl Children {
         let Some(program) = argv.first() else {
             return refused("no command".to_owned());
         };
-        let spawned = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(argv.iter().skip(1))
             .current_dir(root)
             .env_clear()
-            .envs(env)
-            .process_group(0)
+            .envs(env);
+        lead_group(&mut command);
+        let spawned = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -357,10 +382,10 @@ fn from_output(output: &Output) -> Captured {
 
 /// Starts the watchdog.
 fn start_watchdog() -> Option<Watchdog> {
-    let spawned = Command::new("bash")
-        .arg("-c")
-        .arg(WATCHDOG)
-        .process_group(0)
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(WATCHDOG);
+    lead_group(&mut command);
+    let spawned = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -187,6 +187,12 @@ fn attribute(tag: &Tag, key: &str) -> Option<String> {
         .map(|pair| pair.1.clone())
 }
 
+/// Logs why a document is not well-formed, then hands the reason back as the `Err`.
+fn malformed<T>(reason: String) -> Result<T, String> {
+    lgwks_std::trace::debug!(reason = %reason, "a JUnit document is malformed");
+    Err(reason)
+}
+
 /// Every `<testcase>` of a well-formed XML document, or why it is not one.
 fn read_cases(text: &str) -> Result<Vec<Case>, String> {
     let mut cases: Vec<Case> = Vec::new();
@@ -214,7 +220,7 @@ fn read_cases(text: &str) -> Result<Vec<Case>, String> {
         if let Some(closing) = inside.strip_prefix('/') {
             let (name, _) = stack.pop().ok_or("an end tag has no start tag")?;
             if name != closing.trim() {
-                return Err(format!("</{}> closes <{name}>", closing.trim()));
+                return malformed(format!("</{}> closes <{name}>", closing.trim()));
             }
             continue;
         }
@@ -222,7 +228,7 @@ fn read_cases(text: &str) -> Result<Vec<Case>, String> {
         if stack.is_empty() {
             roots = roots.saturating_add(1);
             if roots > 1 {
-                return Err("junk after the document element".to_owned());
+                return malformed("junk after the document element".to_owned());
             }
         }
         let parent_case = stack.last().and_then(|entry| entry.1);
@@ -249,10 +255,10 @@ fn read_cases(text: &str) -> Result<Vec<Case>, String> {
         }
     }
     if !stack.is_empty() {
-        return Err("an element is not closed".to_owned());
+        return malformed("an element is not closed".to_owned());
     }
     if roots == 0 {
-        return Err("no document element".to_owned());
+        return malformed("no document element".to_owned());
     }
     Ok(cases)
 }

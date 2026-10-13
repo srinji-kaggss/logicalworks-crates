@@ -44,8 +44,10 @@ mod journey_tests;
 
 use std::fmt;
 use std::io::Write;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::slice::Iter;
 
 use junit::{Outcomes, is_asked_for, junit_command, match_outcome, merge_junit, run_nextest};
 use render::{
@@ -155,27 +157,54 @@ fn parse_args(arguments: &[String]) -> Result<Args, Failure> {
             "--write-table" => args.write_table = true,
             "--check" => args.check = true,
             "--dry-run" => args.dry_run = true,
-            "--root" => args.root = PathBuf::from(flag_value(&mut remaining, "--root")?),
-            "--map" => args.map = flag_value(&mut remaining, "--map")?,
-            "--db" => args.db = Some(flag_value(&mut remaining, "--db")?),
-            "--revision" => args.revision = Some(flag_value(&mut remaining, "--revision")?),
-            "--head" => args.head = Some(flag_value(&mut remaining, "--head")?),
-            "--spec" => args.spec = flag_value(&mut remaining, "--spec")?,
-            "--package" => args.package = flag_value(&mut remaining, "--package")?,
-            "--features" => args.features = flag_value(&mut remaining, "--features")?,
-            "--export" => args.export = Some(flag_value(&mut remaining, "--export")?),
-            "--platform" => args.platform = Some(flag_value(&mut remaining, "--platform")?),
-            "--from-junit" => {
-                args.from_junit
-                    .push(PathBuf::from(flag_value(&mut remaining, "--from-junit")?));
-                while let Some(next) = remaining.next_if(|candidate| !candidate.starts_with("--")) {
-                    args.from_junit.push(PathBuf::from(next));
-                }
+            flag if VALUE_FLAGS.contains(&flag) => {
+                let value = flag_value(&mut remaining, flag)?;
+                args.set(flag, value, &mut remaining);
             }
-            other => return Err(Failure(format!("unknown argument {other:?}"))),
+            other => return fail(format!("unknown argument {other:?}"), "parse_args"),
         }
     }
     Ok(args)
+}
+
+/// The flags that take a value.
+const VALUE_FLAGS: [&str; 11] = [
+    "--root",
+    "--map",
+    "--db",
+    "--revision",
+    "--head",
+    "--spec",
+    "--package",
+    "--features",
+    "--export",
+    "--platform",
+    "--from-junit",
+];
+
+impl Args {
+    /// Records the value of a flag that takes one. `--from-junit` takes every
+    /// following argument that is not itself a flag.
+    fn set(&mut self, flag: &str, value: String, remaining: &mut Peekable<Iter<'_, String>>) {
+        match flag {
+            "--root" => self.root = PathBuf::from(value),
+            "--map" => self.map = value,
+            "--db" => self.db = Some(value),
+            "--revision" => self.revision = Some(value),
+            "--head" => self.head = Some(value),
+            "--spec" => self.spec = value,
+            "--package" => self.package = value,
+            "--features" => self.features = value,
+            "--export" => self.export = Some(value),
+            "--platform" => self.platform = Some(value),
+            _ => {
+                self.from_junit.push(PathBuf::from(value));
+                while let Some(next) = remaining.next_if(|candidate| !candidate.starts_with("--")) {
+                    self.from_junit.push(PathBuf::from(next));
+                }
+            }
+        }
+    }
 }
 
 /// What `program` prints for `arguments`, trimmed, if it succeeds.

@@ -20,6 +20,7 @@ impl Fixture {
                 Ok(()) => return Ok(Self { root }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
+                    lgwks_std::trace::debug!(%error, "a scratch directory could not be claimed");
                     return Err(io::Error::new(
                         error.kind(),
                         format!("{}: {error}", root.display()),
@@ -27,6 +28,7 @@ impl Fixture {
                 }
             }
         }
+        lgwks_std::trace::debug!(prefix, "no free scratch directory");
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(

@@ -95,6 +95,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<String, Box<dyn Error>> {
         .stdin(Stdio::null())
         .output()?;
     if !output.status.success() {
+        lgwks_std::trace::debug!(?arguments, "a test git command failed");
         return Err(format!(
             "git {arguments:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)

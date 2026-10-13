@@ -56,7 +56,7 @@ mod toml_subset;
 #[path = "../shared/utc.rs"]
 mod utc;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod cli_tests;
 
 use std::collections::BTreeMap;
@@ -328,20 +328,20 @@ fn parse_options(arguments: &[String]) -> Result<Options, GateError> {
                 match text.parse::<usize>() {
                     Ok(count) => options.jobs = Some(count),
                     Err(_) => {
-                        return Err(GateError::Usage(format!(
-                            "ci-local: --jobs wants a number, got {text:?}"
-                        )));
+                        return usage(format!("ci-local: --jobs wants a number, got {text:?}"));
                     }
                 }
             }
-            other => {
-                return Err(GateError::Usage(format!(
-                    "ci-local: unknown argument {other:?}"
-                )));
-            }
+            other => return usage(format!("ci-local: unknown argument {other:?}")),
         }
     }
     Ok(options)
+}
+
+/// Logs a usage refusal, then returns it.
+fn usage<T>(message: String) -> Result<T, GateError> {
+    lgwks_std::trace::debug!(message = %message, "ci-local refused its arguments");
+    Err(GateError::Usage(message))
 }
 
 /// Whether a lane belongs to the local surface.
@@ -363,10 +363,10 @@ fn select<'table>(
             .collect();
         unknown.sort_unstable();
         if !unknown.is_empty() {
-            return Err(GateError::Usage(format!(
+            return usage(format!(
                 "ci-local: unknown lane id(s): {}",
                 unknown.join(", ")
-            )));
+            ));
         }
         return Ok(manifest
             .lanes
