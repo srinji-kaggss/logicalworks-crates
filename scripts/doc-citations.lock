@@ -20,22 +20,22 @@ crates/lgwks-bot/src/cap.rs:291	pub fn to_grant_set(&self) -> GrantSet {
 crates/lgwks-bot/src/cap.rs:406	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
-crates/lgwks-bot/src/ecs.rs:1428	struct TickError(Option<BotError>);
-crates/lgwks-bot/src/ecs.rs:1970	/// chain's before committing anything.
-crates/lgwks-bot/src/ecs.rs:4111	/// satisfied, so the entries behind it are unresolved through it.
-crates/lgwks-bot/src/ecs.rs:4190	/// explains every successor blocked behind it, so naming it is naming the
-crates/lgwks-bot/src/ecs.rs:4525	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs.rs:4691	*slot = Some(value);
-crates/lgwks-bot/src/ecs.rs:4803	fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs.rs:4966	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
-crates/lgwks-bot/src/ecs.rs:5078	*failure = Some(error);
-crates/lgwks-bot/src/ecs.rs:5478	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:5530	// borrow of the plan would outlive the schedule that wrote it. An empty
-crates/lgwks-bot/src/ecs.rs:5652	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs.rs:6956	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
-crates/lgwks-bot/src/ecs.rs:7155	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs.rs:7175	world.insert_resource(Grants(grants.clone()));
-crates/lgwks-bot/src/error.rs:211	/// the calling thread until its verb futures resolve, and the thread it was
+crates/lgwks-bot/src/ecs/admit.rs:342	RetryClass::Never => EntryState::Abandoned {
+crates/lgwks-bot/src/ecs/bot.rs:390	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/bot.rs:442	// borrow of the plan would outlive the schedule that wrote it. An empty
+crates/lgwks-bot/src/ecs/bot.rs:565	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/builder.rs:440	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
+crates/lgwks-bot/src/ecs/builder.rs:639	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:659	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/fold.rs:212	*slot = Some(value);
+crates/lgwks-bot/src/ecs/fold.rs:324	pub(super) fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs/fold.rs:491	/// bindings. Empty `Vec`s are left in their place, so a tick that dies before
+crates/lgwks-bot/src/ecs/fold.rs:636	*failure = Some(error);
+crates/lgwks-bot/src/ecs/ledger.rs:766	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs/ledger.rs:847	/// explains every successor blocked behind it, so naming it is naming the
+crates/lgwks-bot/src/ecs/resources.rs:78	pub(super) struct TickError(pub(super) Option<BotError>);
+crates/lgwks-bot/src/ecs/resources.rs:647	/// chain's before committing anything.
+crates/lgwks-bot/src/error.rs:206	/// the calling thread until its verb futures resolve, and the thread it was
 crates/lgwks-bot/src/gate.rs:14	pub struct GrantSet {
 crates/lgwks-bot/src/gate.rs:59	pub fn grant(mut self, cap: Cap) -> Self {
 crates/lgwks-bot/src/gate.rs:106	pub fn uncovered(&self, required: &[Cap], demand: &Demand) -> Vec<Shortage> {
@@ -55,9 +55,11 @@ crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
 crates/lgwks-bot/src/rt/mod.rs:86	//! This is not a scheduler with realtime guarantees. Future completion order
 crates/lgwks-bot/src/rt/mod.rs:106	/// engine's `task_local!` needs only the `rt` feature this module already
 crates/lgwks-bot/src/rt/mod.rs:117	#[cfg(feature = "io")]
-crates/lgwks-bot/src/rt/process.rs:64	Capture(NonZeroUsize),
-crates/lgwks-bot/src/rt/process.rs:980	pub struct ProcessRun {
-crates/lgwks-bot/src/rt/process.rs:1625	pub enum ProcessRunError {
+crates/lgwks-bot/src/rt/process.rs:66	Capture(NonZeroUsize),
+crates/lgwks-bot/src/rt/process.rs:603	pub struct ProcessRun {
+crates/lgwks-bot/src/rt/process.rs:723	pub enum ProcessRunError {
+crates/lgwks-bot/src/rt/process/confine.rs:52	pub struct SandboxProfile {
+crates/lgwks-bot/src/rt/process/confine.rs:162	pub struct LandlockRules {
 crates/lgwks-bot/src/rt/runtime.rs:176	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
 crates/lgwks-bot/src/rt/runtime.rs:179	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
@@ -72,7 +74,7 @@ crates/lgwks-bot/src/rt/supervise.rs:2822	pub async fn spawn_process_identified(
 crates/lgwks-bot/src/rt/supervise.rs:3066	let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
 crates/lgwks-bot/src/rt/supervise.rs:5969	token.run_until_cancelled(body(iterations)),
 crates/lgwks-bot/src/rt/supervise.rs:6078	mod tests {
-crates/lgwks-bot/src/rt/task.rs:170	where
+crates/lgwks-bot/src/rt/task.rs:169	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
 crates/lgwks-bot/src/semantic.rs:356	pub const DEFAULT: Self = Self {
