@@ -667,10 +667,29 @@ jobs:
   # from the lgwks-std, lgwks-deps and target matrices: together the two halves
   # were the longest job of a warm run (450 s, run 37619560219 attempt 2), and
   # neither half builds what the other does.
+  #
+  # One leg per feature-set family. As one job the seven steps read 6 m 4 s
+  # against the 5-minute bound and were cut mid-flight with the earlier steps
+  # already green: the sum is what did not fit, so the legs are the families and
+  # each compiles only what it is named for. Every step, command and comment is
+  # unchanged and gated to its leg. The file's rule that each feature set is
+  # compiled by exactly one job still holds, because the families do not overlap.
   feature-matrix-bot-ast:
-    name: Feature matrix (lgwks-bot, lgwks-ast)
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-11]
+    name: Feature matrix (${{ matrix.part }})
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: docs.rs
+            instance: lwc-11
+          - part: lgwks-std
+            instance: lwc-13
+          - part: lgwks-bot
+            instance: lwc-10
+          - part: lgwks-ast
+            instance: lwc-9
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -679,18 +698,21 @@ jobs:
           toolchain: "1.99.0"
           build-share: "2"
       - name: Check lgwks-std feature matrix
+        if: matrix.part == 'lgwks-std'
         run: |
           set -eu
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets
           cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features
       - name: Doc build for each lgwks-std feature alone
+        if: matrix.part == 'lgwks-std'
         # The general case: a link between two optional modules where neither
         # implies the other resolves under both boundary lanes. Each feature is
         # documented alone, so every gated module is documented while every
         # module it does not pull in is genuinely absent.
         run: ./scripts/doc-lanes.sh per-feature
       - name: docs.rs metadata names a buildable feature set
+        if: matrix.part == 'docs.rs'
         # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,
         # and a failure there is invisible from the repository: the crate page
         # just shows a build error. `all-features = true` on a crate whose
@@ -700,6 +722,7 @@ jobs:
         # unbuildable declaration fails here instead of on docs.rs.
         run: python3 scripts/ci_local.py --lane docsrs-metadata
       - name: Check lgwks-bot async feature matrix
+        if: matrix.part == 'lgwks-bot'
         run: |
           set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features
@@ -707,11 +730,13 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
       - name: Check lgwks-bot WASI runtime boundary
+        if: matrix.part == 'lgwks-bot'
         run: |
           set -eu
           rustup target add wasm32-wasip1
            RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt
       - name: Check lgwks-ast feature matrix
+        if: matrix.part == 'lgwks-ast'
         run: |
           set -eu
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features
@@ -719,6 +744,7 @@ jobs:
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets
            cargo check --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features
       - name: Execute the lgwks-ast grammar matrix
+        if: matrix.part == 'lgwks-ast'
         # The check above proves each combination compiles; this executes it. A
         # grammar that compiles but does not read its own language is the
         # failure `cargo check` cannot see, and the grammar features are
