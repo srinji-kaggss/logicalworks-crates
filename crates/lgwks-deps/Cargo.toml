@@ -140,6 +140,10 @@ path = "src/main.rs"
 name = "llms-txt"
 path = "src/bin/llms_txt.rs"
 
+[[bin]]
+name = "check-requirements"
+path = "src/bin/check_requirements.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

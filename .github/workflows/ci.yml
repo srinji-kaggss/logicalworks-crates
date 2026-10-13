@@ -206,7 +206,7 @@ jobs:
       - name: Validate the dependency contract alignment
         run: python3 scripts/ci_local.py --lane contract-drift
       - name: Requirements sentences unedited without supersession
-        run: python3 scripts/check-requirements.py && python3 scripts/check-spec-owners.py --test
+        run: cargo run --locked -p lgwks_deps --bin check-requirements && python3 scripts/check-spec-owners.py --test
       - name: llms.txt matches the documentation index
         # `llms.txt` is generated from the README's own tables by
         # `scripts/gen-llms-txt.py`. Regenerate and fail if the committed copy
