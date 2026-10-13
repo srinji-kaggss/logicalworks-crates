@@ -482,7 +482,10 @@ source = "git+https://example.com/org/git-crate#abc123"
             match std::fs::create_dir(&root) {
                 Ok(()) => return Ok(root),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    lgwks_std::trace::debug!(error = ?error, "claim_root: the fixture root could not be created");
+                    return Err(error.into());
+                }
             }
         }
         Err(format!(
