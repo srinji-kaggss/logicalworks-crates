@@ -109,9 +109,6 @@ done
 if [ \"\$(/opt/tools/cargo-nextest --version 2>/dev/null | awk 'NR==1 {print \$2}')\" != '${nextest}' ]; then
     curl -fsSL 'https://get.nexte.st/${nextest}/${nextest_platform}' | tar -xz -C /opt/tools
 fi
-case ' ${container_rustflags} ' in
-    *fuse-ld=lld*) command -v ld.lld >/dev/null || { apt-get update -qq && apt-get install -y -qq lld >/dev/null; } ;;
-esac
 export PATH=/opt/tools:\$PATH
 rustc --version
 $(printf '%s\n' "${commands[@]}")"
@@ -129,6 +126,24 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # not found`, run 38099333925). One image, one volume.
 image="rust:${toolchain}-bookworm"
 image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
+
+# The linker the machine's cargo configuration names (lld) is not in the image,
+# and a `--rm` container forgets whatever it installs, so installing it inside
+# the run fetched it from the Debian mirror every time: one slow mirror held a
+# job for 6.5 minutes and then failed it with `cannot find 'ld'` (run
+# 38316346444). A derived image carries it instead, built once per machine and
+# toolchain and reused by every later run; the volumes below are unchanged, so
+# the build caches stay warm.
+run_image="${image}"
+case " ${container_rustflags} " in
+    *fuse-ld=lld*)
+        run_image="lwc-ci-${image_tag}-lld"
+        if ! docker image inspect "${run_image}" >/dev/null 2>&1; then
+            printf 'FROM %s\nRUN apt-get update -qq && apt-get install -y -qq lld && rm -rf /var/lib/apt/lists/*\n' "${image}" |
+                docker build -q -t "${run_image}" -
+        fi
+        ;;
+esac
 
 # The toolchain's components live in a volume too. `rust-toolchain.toml` asks
 # for clippy and rustfmt and the image ships neither, so a `--rm` container
@@ -168,5 +183,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "${image}" \
+    "${run_image}" \
     bash -c "${script}"

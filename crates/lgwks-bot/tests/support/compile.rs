@@ -103,9 +103,17 @@ fn probe(
         ),
     )?;
     fs::write(root.join("src/main.rs"), main)?;
-    Ok(Command::new(env!("CARGO"))
-        .args([subcommand, "--offline", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo.args([subcommand, "--offline", "--manifest-path"]);
+    cargo.arg(root.join("Cargo.toml"));
+    if subcommand == "clippy" {
+        // Only the one-file consumer is linted. Cargo's clippy would also run
+        // clippy-driver over `lgwks_bot` and every path dependency, a cold pass
+        // the other probes wait on under one lock; the lints under test fire in
+        // the consumer, and the dependencies are type-checked as `check` does.
+        cargo.arg("--no-deps");
+    }
+    Ok(cargo
         .env("CARGO_TARGET_DIR", workspace_target_dir()?)
         .output()?)
 }
