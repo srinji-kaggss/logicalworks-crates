@@ -36,12 +36,9 @@ impl Stream {
         mixed ^ (mixed >> 31)
     }
 
-    /// A draw below `bound`; a bound of zero draws zero.
+    /// A draw below `bound`, which is at least one.
     fn below(&mut self, bound: u64) -> u64 {
-        match self.draw().checked_rem(bound) {
-            Some(drawn) => drawn,
-            None => 0,
-        }
+        self.draw().wrapping_rem(bound.max(1))
     }
 }
 

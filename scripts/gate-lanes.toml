@@ -413,7 +413,7 @@ id = "target-matrix"
 group = "targets"
 surfaces = "local ci"
 required = true
-command = "./scripts/check-target-matrix.sh"
+command = "./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}"
 ci_step = "Check lgwks-std across the declared target matrix"
 needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
 

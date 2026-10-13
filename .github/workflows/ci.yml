@@ -670,12 +670,6 @@ jobs:
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
-      - name: Check lgwks-std across the declared target matrix
-        # `cargo check --target <t>` for every declared target and crate. The
-        # script installs the target with rustup first, requires the Rust-only
-        # surface everywhere, and records with its exact error any check this
-        # runner has no C toolchain to reach.
-        run: ./scripts/check-target-matrix.sh
       - name: Check normal GPUI renderer feature
         # The fixture is its own workspace, so by default it builds into its
         # own target directory and compiles the GPUI stack a second time.
@@ -692,6 +686,45 @@ jobs:
       # Standalone consumer packages, one cargo build per storefront family.
       - name: Build storefront consumers
         run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
+
+  # The declared target matrix, one leg per group of targets. Run in one job it
+  # took over 7 minutes (run 38412846693: the sixth of seven targets was
+  # reached at 5 m 29 s with the cancel at 5 m 00 s), so each leg holds the
+  # targets it is named for and the host triple the script always adds.
+  target-matrix:
+    name: Target matrix (${{ matrix.targets }})
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - targets: aarch64-unknown-linux-gnu
+            instance: lwc-4
+          - targets: x86_64-unknown-linux-musl wasm32-wasip1
+            instance: lwc-5
+          - targets: x86_64-unknown-freebsd aarch64-linux-android
+            instance: lwc-6
+          - targets: aarch64-apple-ios
+            instance: lwc-7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          build-share: "1"
+      - name: Check lgwks-std across the declared target matrix
+        # `cargo check --target <t>` for every declared target and crate. The
+        # script installs the target with rustup first, requires the Rust-only
+        # surface everywhere, and records with its exact error any check this
+        # runner has no C toolchain to reach. MATRIX_TARGETS names the targets
+        # this leg checks (unset, the script checks them all), as SATURATION_FILTER
+        # does for the saturation tiers: the gate-parity check compares this
+        # text with scripts/gate-lanes.toml.
+        env:
+          MATRIX_TARGETS: ${{ matrix.targets }}
+        run: ./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}
 
   # The two release-build timing gates, apart from the lints: each measures
   # wall time, and a measurement taken beside a clippy pass on the same
