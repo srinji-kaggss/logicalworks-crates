@@ -20,7 +20,12 @@ fn deliver_seed(seed: u64) -> TestResult {
         let byte = u8::try_from(sim.rng().below(251))?;
         let width = sim.faults.tenants.max(1);
         let addressee = sim.rng().between(0, width.saturating_sub(1));
-        sim.send(0, addressee, vec![byte], sim.clock.now().saturating_add(wait));
+        sim.send(
+            0,
+            addressee,
+            vec![byte],
+            sim.clock.now().saturating_add(wait),
+        );
         let delivered = sim.advance_and_drain(wait);
         for envelope in &delivered {
             assert_eq!(
