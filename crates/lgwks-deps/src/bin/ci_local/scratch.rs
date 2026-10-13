@@ -113,7 +113,15 @@ impl Drop for Scratch {
     }
 }
 
+/// WASI has no entropy source and no RAM disk to name, so a scratch name is
+/// never made there and the lanes use the system temporary directory.
+#[cfg(target_family = "wasm")]
+fn fresh_identity() -> Option<String> {
+    None
+}
+
 /// A name no other run holds: 64 random bits, in hex.
+#[cfg(not(target_family = "wasm"))]
 fn fresh_identity() -> Option<String> {
     match lgwks_std::random::bytes::<8>() {
         Ok(bytes) => Some(format!("{:016x}", u64::from_le_bytes(bytes))),
