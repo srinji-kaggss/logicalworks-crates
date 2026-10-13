@@ -195,7 +195,7 @@ required = true
 # CI runs on the self-hosted macOS runner; this lane runs the workspace and
 # lgwks-bot full suites in a Linux container on it, so the Linux-only paths
 # execute on every run. A local macOS run covers the same suites natively.
-command = "./scripts/linux-container-tests.sh"
+command = "cargo run --locked -p lgwks_deps --no-default-features --bin linux-container-tests"
 ci_step = "Run the workspace and lgwks-bot full suites on Linux"
 
 [[lane]]

@@ -168,6 +168,10 @@ path = "src/bin/ci_local/main.rs"
 name = "acceptance-receipts"
 path = "src/bin/acceptance_receipts/main.rs"
 
+[[bin]]
+name = "linux-container-tests"
+path = "src/bin/linux_container_tests/main.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

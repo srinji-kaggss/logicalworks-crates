@@ -462,6 +462,9 @@ jobs:
     # first test (run 38401426445).
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
     timeout-minutes: 5
+    env:
+      # The tool is built on the host: lints run once, in the Clippy job.
+      RUSTC_WORKSPACE_WRAPPER: ""
     strategy:
       fail-fast: false
       matrix:
@@ -473,25 +476,15 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-      - name: Install sqlite3 into the Linux container image
-        # The acceptance-receipt binary holds its receipts through the sqlite3
-        # command-line program. A hosted Linux runner has it and `rust:bookworm`
-        # does not, so two of its journey tests failed in the container with
-        # `the sqlite3 command-line program is required` (run 38404124109).
-        # The suite script reuses the derived image it finds under this name,
-        # so the image is rebuilt here with sqlite3 beside lld; with the layers
-        # cached it costs a second.
-        run: |
-          set -eu
-          export PATH="/Applications/OrbStack.app/Contents/MacOS/xbin:${HOME}/.orbstack/bin:${PATH}"
-          export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
-          toolchain="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' rust-toolchain.toml | sed -n 1p)"
-          image="rust:${toolchain}-bookworm"
-          tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
-          printf 'FROM %s\nRUN apt-get update -qq && apt-get install -y -qq lld sqlite3 && rm -rf /var/lib/apt/lists/*\n' "${image}" |
-            docker build -q -t "lwc-ci-${tag}-lld" -
+      # The container image is Debian trixie, whose util-linux 2.41 `setpriv`
+      # applies the Landlock rules `Confinement::Landlock` wraps (#337);
+      # bookworm's 2.38 cannot, and the Landlock simulations failed there with
+      # `Unsupported` (run 38455031363). The tool builds the derived image with
+      # lld and sqlite3 itself (the acceptance-receipt binary holds its receipts
+      # through the sqlite3 program, run 38404124109). `--no-default-features`
+      # leaves out `syn`, which the tool does not read.
       - name: Run the workspace and lgwks-bot full suites on Linux
-        run: ./scripts/linux-container-tests.sh ${{ matrix.suite }}
+        run: cargo run --locked -p lgwks_deps --no-default-features --bin linux-container-tests -- ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
       # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so
       # the receipt job records it as its own platform.
