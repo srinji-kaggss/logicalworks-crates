@@ -140,8 +140,12 @@ fn read_bytes(
     last_error: fn() -> io::Error,
     name: &mut [c_int],
 ) -> io::Result<Vec<u8>> {
-    let length = c_uint::try_from(name.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "sysctl name is too long"))?;
+    let length = c_uint::try_from(name.len()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a {}-word sysctl name is too long: {error}", name.len()),
+        )
+    })?;
     for _ in 0..MAX_ATTEMPTS {
         let mut needed: usize = 0;
         // SAFETY: `name` is `length` initialised ints; a null `oldp` asks only
@@ -158,18 +162,24 @@ fn read_bytes(
             )
         };
         if sized != 0 {
-            return Err(last_error());
+            let refusal = Err(last_error());
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "sysctl size query: returning an error to the caller");
+            return refusal;
         }
         let capacity = needed
             .saturating_add(needed.saturating_div(8))
             .saturating_add(KINFO_PROC_BYTES.saturating_mul(HEADROOM_RECORDS));
         if capacity > MAX_TABLE_BYTES {
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
                 format!(
                     "the process table needs {capacity} bytes, past the {MAX_TABLE_BYTES}-byte bound"
                 ),
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "sysctl table bound: returning an error to the caller");
+            return refusal;
         }
         let mut buffer = vec![0_u8; capacity];
         let mut filled = capacity;
@@ -191,13 +201,19 @@ fn read_bytes(
             if error.raw_os_error() == Some(ENOMEM) {
                 continue;
             }
-            return Err(error);
+            let refusal = Err(error);
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "sysctl table fill: returning an error to the caller");
+            return refusal;
         }
         if filled > capacity {
-            return Err(io::Error::new(
+            let refusal = Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("sysctl reported {filled} bytes written into a {capacity}-byte buffer"),
             ));
+            #[cfg(feature = "trace")]
+            crate::trace::debug!(error = ?refusal.as_ref().err(), "sysctl overfill: returning an error to the caller");
+            return refusal;
         }
         buffer.truncate(filled);
         return Ok(buffer);
@@ -217,26 +233,35 @@ fn read_bytes(
 fn decode(bytes: &[u8]) -> io::Result<Vec<KinfoRow>> {
     let (records, rest) = bytes.as_chunks::<KINFO_PROC_BYTES>();
     if !rest.is_empty() {
-        return Err(io::Error::new(
+        let refusal = Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "{} bytes is not a whole number of {KINFO_PROC_BYTES}-byte kinfo_proc records",
                 bytes.len()
             ),
         ));
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "kinfo_proc decode: returning an error to the caller");
+        return refusal;
     }
     records.iter().map(row).collect()
 }
 
-/// One record's fields.
+/// One record's fields, one field per statement so a refusal names its line.
 fn row(record: &[u8; KINFO_PROC_BYTES]) -> io::Result<KinfoRow> {
+    let pid = field(record, OFFSET_PID)?;
+    let ppid = field(record, OFFSET_PPID)?;
+    let pgid = field(record, OFFSET_PGID)?;
+    let stat = field(record, OFFSET_STAT)?;
+    let start_sec = field(record, OFFSET_START_SEC)?;
+    let start_usec = field(record, OFFSET_START_USEC)?;
     Ok(KinfoRow {
-        pid: i32::from_ne_bytes(field(record, OFFSET_PID)?),
-        ppid: i32::from_ne_bytes(field(record, OFFSET_PPID)?),
-        pgid: i32::from_ne_bytes(field(record, OFFSET_PGID)?),
-        zombie: u8::from_ne_bytes(field(record, OFFSET_STAT)?) == SZOMB,
-        start_sec: i64::from_ne_bytes(field(record, OFFSET_START_SEC)?),
-        start_usec: i32::from_ne_bytes(field(record, OFFSET_START_USEC)?),
+        pid: i32::from_ne_bytes(pid),
+        ppid: i32::from_ne_bytes(ppid),
+        pgid: i32::from_ne_bytes(pgid),
+        zombie: u8::from_ne_bytes(stat) == SZOMB,
+        start_sec: i64::from_ne_bytes(start_sec),
+        start_usec: i32::from_ne_bytes(start_usec),
     })
 }
 
