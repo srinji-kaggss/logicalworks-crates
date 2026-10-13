@@ -234,6 +234,7 @@ mod sim_tenancy;
 mod sim_tenancy_flood;
 mod sim_tenancy_model;
 mod sim_tenancy_scope;
+mod sim_tenant_delivery;
 mod sim_tenant_journal_kill;
 mod sim_tenant_store;
 mod skew;
