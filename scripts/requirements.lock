@@ -4,7 +4,7 @@
 #
 # One entry per requirement: `R<id>` TAB `<sha256, first 12 hex>` TAB
 # `<the normative sentence, whitespace-collapsed>`.
-# Generated and checked by `scripts/check-requirements.py`. A changed digest
+# Generated and checked by the `check-requirements` binary of `lgwks_deps`. A changed digest
 # with no Supersession log entry naming that id is refused; record the
 # supersession first, then `--update`.
 R1	344f6d8acd78	A developer MUST supply typed work and its logic and receive a result. The contract MUST own reaping, readiness polling, retry ownership, duplicate-effect suppression, cancellation, continuation persistence, and reporting.
