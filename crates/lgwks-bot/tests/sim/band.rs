@@ -46,26 +46,26 @@ pub const BANDS: u64 = 32;
 /// The one band of seeds a declared test sweeps.
 ///
 /// `index` is a registration, not a computation: every call site is a literal
-/// written beside the family that declares it, so an index past the last band is a
-/// registration mistake. It is folded onto a declared band rather than refused,
-/// because `swap_remove` answered it with an out-of-bounds panic whose message
-/// names the length rather than the mistake — and because the alternative,
-/// `expect`, is forbidden here too. Folding means a mistyped band silently reuses
-/// another family's seeds, so the band count is doubled alongside the seed space
-/// and every declared index stays inside it.
+/// written beside the family that declares it. An index inside the table is
+/// that band; an index past it is the next band-width of seeds past
+/// [`SEED_SPACE`], one band per index. Folding indices past the table onto its
+/// last band made families 32 to 44 sweep the same eight seeds (#401), and a
+/// table widened for them would double every sweep that walks the whole table.
 pub fn band_of(index: usize) -> Band {
     let table = bands(SEED_SPACE, BANDS);
-    let mut widened = table.clone();
-    while widened.len() <= index {
-        match table.last().copied() {
-            Some(last) => widened.push(last),
-            None => return Band::new(0, 1),
-        }
+    if let Some(band) = table.get(index) {
+        return *band;
     }
-    match widened.get(index) {
-        Some(band) => *band,
-        None => Band::new(0, 1),
-    }
+    let (Some(last), Ok(beyond)) = (
+        table.last(),
+        u64::try_from(index.saturating_sub(table.len())),
+    ) else {
+        return Band::new(0, 1);
+    };
+    Band::new(
+        SEED_SPACE.saturating_add(beyond.saturating_mul(last.count)),
+        last.count,
+    )
 }
 
 /// The bands that partition `0..total` into `parts` of them.

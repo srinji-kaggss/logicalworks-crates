@@ -38,6 +38,7 @@ use crate::band_family::band_family;
 use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::rc::Rc;
+use std::time::Duration;
 
 use lgwks_bot::journal::{EffectEvent, EffectJournal, MemoryJournal};
 use lgwks_bot::spec::{Bot, EffectScope, RetryPolicy};
@@ -650,9 +651,9 @@ fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
             Predecessor::Failed | Predecessor::Abandoned | Predecessor::Unknown => is_value,
         };
         let policy = match state {
-            Predecessor::Abandoned => RetryPolicy::ONE_ATTEMPT,
+            Predecessor::Abandoned => RetryPolicy::new(1, Duration::ZERO, Duration::MAX),
             Predecessor::Failed | Predecessor::Unknown | Predecessor::Skipped => {
-                RetryPolicy::DEFAULT
+                RetryPolicy::new(3, Duration::ZERO, Duration::MAX)
             }
         };
         let mut bot = Bot::builder("sim-t10-states")
@@ -697,7 +698,7 @@ fn every_predecessor_state_decides_its_dependent(band: Band) -> TestResult {
             }
         }
 
-        let attempts_left = policy.max_attempts();
+        let attempts_left = policy.max_attempts;
         match state {
             Predecessor::Skipped => {
                 assert_eq!(

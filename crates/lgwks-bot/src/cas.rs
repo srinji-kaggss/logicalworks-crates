@@ -310,10 +310,10 @@ impl RecordStore {
     /// the persist fails, in which case nothing was applied.
     pub fn write(&self, record: &str, expected: u64, value: &str) -> Result<u64, CasError> {
         let mut state = lock(&self.state);
-        let found = state
-            .records
-            .get(record)
-            .map_or(NO_VERSION, Record::version);
+        let found = match state.records.get(record) {
+            Some(held) => held.version(),
+            None => NO_VERSION,
+        };
         if found != expected {
             let entry = ConflictEntry {
                 record: record.to_owned(),
