@@ -10,10 +10,10 @@ statement = "Every authored external dependency edge names an admitted semantic 
 scope = "lgwks_deps"
 owner = "lgwks_deps"
 enforcement = "static-check"
-enforced_by = "crates/lgwks-deps/src/lib.rs"
+enforced_by = "crates/lgwks-deps/src/tests.rs"
 approved_by = "maintainer"
 approved_on = "2026-09-20"
-review = "crates/lgwks-deps/src/lib.rs"
+review = "crates/lgwks-deps/src/audit.rs"
 
 [[invariant]]
 id = "INV-BOT-FOUR-VERBS"
