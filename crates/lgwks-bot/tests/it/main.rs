@@ -135,8 +135,6 @@ mod authority;
 mod cas;
 mod credential;
 mod dist_lease;
-#[cfg(feature = "net")]
-mod dist_lease_tcp;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -194,8 +192,6 @@ mod sim_continuation_seal;
 mod sim_credential;
 mod sim_dispatch;
 mod sim_dist_lease;
-#[cfg(feature = "net")]
-mod sim_dist_lease_tcp;
 mod sim_epoch_identity;
 mod sim_group_commit;
 mod sim_inspect;
