@@ -5,8 +5,8 @@
 # Every `tests` entry is a nextest test name as `cargo nextest list` prints it:
 # `<binary>::<test>` for a separate integration binary, and `it::<test>` for the
 # consolidated `tests/it/` binary, where `<test>` is `module::function`.
-# `scripts/acceptance-receipts.py` reads this file, runs exactly these tests, and
-# writes the observed result to `evidence/<revision>.json`.
+# The `acceptance-receipts` binary reads this file, runs exactly these tests, and
+# records the observed result in the receipt database.
 #
 # `state` is the spec's own evidence ladder:
 #   planned                  - no test addresses the row
@@ -20,7 +20,7 @@
 
 schema = 1
 spec = "docs/orchestration-acceptance.spec.md"
-generated_by = "scripts/acceptance-receipts.py"
+generated_by = "acceptance-receipts"
 
 [[row]]
 id = "T01"

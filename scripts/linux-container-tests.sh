@@ -29,7 +29,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-toolchain="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["toolchain"]["channel"])' "${root}/rust-toolchain.toml")"
+toolchain="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "${root}/rust-toolchain.toml" | sed -n 1p)"
 nextest="$(cargo nextest --version | awk 'NR==1 {print $2}')"
 case "$(uname -m)" in
     arm64 | aarch64) nextest_platform="linux-arm" ;;
@@ -45,12 +45,23 @@ esac
 cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 host_triple="$(rustc -vV | awk '/^host:/ {print $2}')"
 container_triple="$(uname -m | sed 's/^arm64$/aarch64/')-unknown-linux-gnu"
-container_rustflags="$(python3 -c 'import sys,tomllib
-try:
-    config = tomllib.load(open(sys.argv[1], "rb"))
-except FileNotFoundError:
-    config = {}
-print(" ".join(config.get("target", {}).get(sys.argv[2], {}).get("rustflags", [])))' "${cargo_home}/config.toml" "${host_triple}")"
+container_rustflags=""
+if [ -f "${cargo_home}/config.toml" ]; then
+    # The strings of `rustflags = [...]` under `[target.<host>]`, which may wrap.
+    container_rustflags="$(awk -v table="[target.${host_triple}]" '
+        $0 == table { inside = 1; next }
+        /^\[/ { inside = 0 }
+        inside && /^rustflags[[:space:]]*=/ { collecting = 1 }
+        inside && collecting {
+            line = $0
+            while (match(line, /"[^"]*"/)) {
+                printf "%s ", substr(line, RSTART + 1, RLENGTH - 2)
+                line = substr(line, RSTART + RLENGTH)
+            }
+            if ($0 ~ /\]/) collecting = 0
+        }
+    ' "${cargo_home}/config.toml" | sed 's/ *$//')"
+fi
 rustflags_var="CARGO_TARGET_$(echo "${container_triple}" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
 config_mount=()
 if [ -f "${cargo_home}/config.toml" ]; then
@@ -80,7 +91,7 @@ fi
 commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
-        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
+        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' \${PARTITION:+--partition \$PARTITION}") ;;
         bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
@@ -90,6 +101,18 @@ for suite in "${suites[@]}"; do
         *) echo "linux-container-tests: unknown suite ${suite} (workspace, bot-full, appcui)" >&2; exit 2 ;;
     esac
 done
+
+# A Linux host is the Linux the container existed to provide, so the suites run
+# on it directly: the same commands, with the host's own init reaping orphans
+# and its own /tmp. The container below is for a macOS machine only, where it
+# cost an image, a VM sharing the machine's cores, and 8 to 10 minutes of
+# contended wall on the critical path.
+if [ "$(uname -s)" = Linux ]; then
+    for command in "${commands[@]}"; do
+        eval "${command}"
+    done
+    exit 0
+fi
 
 script="set -euo pipefail
 # A job killed mid-unpack (a timeout on a transition run) leaves a package
