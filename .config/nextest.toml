@@ -61,6 +61,16 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 filter = 'package(lgwks_std) & binary(it) & test(/^sim_random_error::/)'
 threads-required = 'num-test-threads'
 
+# http_alloc times the shipped client against a bare socket exchange on one
+# loopback server and holds the client's fastest decile to a multiple of the
+# bare one. That ratio compares two cheap things, so a sibling test taking the
+# runner's two vCPUs moves the client by milliseconds and the bare exchange by
+# microseconds (CI run 38398095659: 1829 us against 49 us). The probe runs with
+# every test slot to itself, which makes the ratio a measurement of the client.
+[[profile.default.overrides]]
+filter = 'package(lgwks_std) & binary(http_alloc)'
+threads-required = 'num-test-threads'
+
 # The CI profile: the same runs, each writing a JUnit report of what it actually
 # ran, so the acceptance receipt can be built from the suite's own output instead
 # of running it a second time. `store-success-output = false` keeps a report to
