@@ -460,6 +460,41 @@ source = "git+https://example.com/org/git-crate#abc123"
     /// `VendorError` it is, not as a panic with no variant attached.
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    /// How many roots a claim tries before it refuses: a directory that cannot
+    /// be created at every sequence number is a broken temp root, not a race.
+    const CLAIM_ATTEMPTS: u32 = 64;
+
+    /// Creates and returns a root under `base` that no other caller holds.
+    ///
+    /// The directory is made with the exclusive `create_dir`, so of two callers
+    /// naming the same root exactly one succeeds and the other takes the next
+    /// number from `next`.
+    fn claim_root(
+        base: &Path,
+        clock: u128,
+        next: &std::sync::atomic::AtomicU64,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        for _ in 0..CLAIM_ATTEMPTS {
+            let root = base.join(format!(
+                "lgwks-deps-vendor-test-{clock}-{}",
+                next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&root) {
+                Ok(()) => return Ok(root),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    lgwks_std::trace::debug!(error = ?error, "claim_root: the fixture root could not be created");
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(format!(
+            "no unclaimed fixture root under {} after {CLAIM_ATTEMPTS} tries",
+            base.display()
+        )
+        .into())
+    }
+
     struct Fixture {
         root: PathBuf,
     }
@@ -493,16 +528,17 @@ source = "git+https://example.com/org/git-crate#abc123"
                     format!("the wall clock reads before the Unix epoch: {before_epoch}")
                 })?
                 .as_nanos();
-            // The discriminator is nanos plus the sequence, which is INV-DEP-6's
-            // prescription and what this comment already concluded: the atomic
-            // separates two tests on two threads of one binary (the clock's
-            // granularity is coarser than a nanosecond, so the timestamp alone
-            // does not), and the nanoseconds separate two runs. A process id is
-            // not in the name because the OS reuses it, so it names no run.
-            let root = std::env::temp_dir().join(format!(
-                "lgwks-deps-vendor-test-{clock}-{}",
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            // Nanos and the sequence name the root (INV-DEP-6), and the claim is
+            // the exclusive `create_dir`. The atomic separates two tests on two
+            // threads of one process, but not two tests in two processes:
+            // nextest runs every test in its own process, each starts its counter
+            // at zero, and the clock's granularity is coarser than a nanosecond,
+            // so two processes starting in one tick named one root and one
+            // `Drop` removed the directory the other was filling (run
+            // 38316346444, `EINVAL`). The directory is what arbitrates: the one
+            // process that creates it owns it, and every other sees
+            // `AlreadyExists` and takes the next sequence number.
+            let root = claim_root(&std::env::temp_dir(), clock, &NEXT)?;
             std::fs::create_dir_all(root.join("tree/covered-crate"))?;
             std::fs::write(
                 root.join("tree/covered-crate/.cargo-checksum.json"),
@@ -604,6 +640,26 @@ source = "git+https://example.com/org/git-crate#abc123"
             tree_for(&fixture.root.join("bare")),
             Err(VendorError::NoTree { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_root_another_process_already_holds_is_not_reused() -> TestResult {
+        let fixture = Fixture::create()?;
+        let base = fixture.root.join("claims");
+        std::fs::create_dir_all(&base)?;
+        // Another process's claim at the very name this caller would pick.
+        let held = base.join("lgwks-deps-vendor-test-7-0");
+        std::fs::create_dir(&held)?;
+        std::fs::write(held.join("sentinel"), "theirs")?;
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let claimed = claim_root(&base, 7, &next)?;
+        assert_eq!(
+            claimed,
+            base.join("lgwks-deps-vendor-test-7-1"),
+            "a held root must be skipped, not shared"
+        );
+        assert_eq!(std::fs::read_to_string(held.join("sentinel"))?, "theirs");
         Ok(())
     }
 
