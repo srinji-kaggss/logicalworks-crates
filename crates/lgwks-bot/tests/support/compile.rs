@@ -113,8 +113,12 @@ fn probe(
         // the consumer, and the dependencies are type-checked as `check` does.
         cargo.arg("--no-deps");
     }
+    // Plain text on every host: a GitHub-hosted runner sets
+    // `CARGO_TERM_COLOR=always`, and the assertions here search the compiler's
+    // output for the literal `error: <message>` (run 38377043423).
     Ok(cargo
         .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .env("CARGO_TERM_COLOR", "never")
         .output()?)
 }
 

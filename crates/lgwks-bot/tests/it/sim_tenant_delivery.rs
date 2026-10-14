@@ -145,4 +145,14 @@ tenant_delivery_cases!(
     #[test] tenant_delivery_2077 => 2077;
     #[test] tenant_delivery_2078 => 2078;
     #[test] tenant_delivery_2079 => 2079;
+    #[test] tenant_delivery_2080 => 2080;
+    #[test] tenant_delivery_2081 => 2081;
+    #[test] tenant_delivery_2082 => 2082;
+    #[test] tenant_delivery_2083 => 2083;
+    #[test] tenant_delivery_2084 => 2084;
+    #[test] tenant_delivery_2085 => 2085;
+    #[test] tenant_delivery_2086 => 2086;
+    #[test] tenant_delivery_2087 => 2087;
+    #[test] tenant_delivery_2088 => 2088;
+    #[test] tenant_delivery_2089 => 2089;
 );

@@ -53,8 +53,15 @@ codegen-units = 256
 # it. `debug-assertions` and `overflow-checks` are separate settings and stay
 # on, so every assertion and overflow trap still fires. `build`, `check` and
 # `clippy` use `dev` and are unchanged.
+#
+# CI is held to 5 minutes a run (Director, 2026-10-13), and on a hosted runner the
+# opt-level-3 compile of `lgwks_bot`'s test binaries alone outlasts that (run
+# 38395269833: the saturation job was cancelled at 4 m 14 s inside that
+# compile). So the test profile is opt-level 1: the same assertions and
+# overflow checks, a fraction of the codegen. Dependencies keep opt-level 3 in
+# the cache, so they are paid for once.
 [profile.test]
-opt-level = 3
+opt-level = 1
 # Line tables, not full debuginfo. A backtrace or a debugger still names the
 # function, file and line; what goes is variable and type information. CI's
 # bot shards each spent 152 s of a 233 s job compiling and linking test
@@ -62,6 +69,9 @@ opt-level = 3
 # rustc emits and the linker copies. Nothing in the workspace reads debuginfo.
 # CI repeats it as `CARGO_PROFILE_TEST_DEBUG` so its cache keys on it.
 debug = "line-tables-only"
+
+[profile.test.package."*"]
+opt-level = 3
 
 # Shared lint contract: every member opts in with `[lints] workspace = true`.
 # Mirrors the crate-level attributes the crates already carried, plus
