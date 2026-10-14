@@ -1,6 +1,11 @@
 //! Public-consumer regression checks for codec coordinate contracts.
 #![forbid(unsafe_code)]
 
+// The allocation probe at the foot of this file is its own downstream package
+// with its own feature list, so the run's features cannot change its result:
+// it, its constant and its helper compile once, under `full`, not once per
+// per-feature run.
+#[cfg(feature = "full")]
 #[path = "support/consumer_probe.rs"]
 mod consumer_probe;
 
@@ -78,6 +83,7 @@ fn consumer_preserves_uuid_digest_and_minimal_leb_profiles()
 /// allocation contract of the fixed-size codec paths. The allocator needs
 /// `unsafe`, which this workspace forbids, so it lives in a standalone package.
 #[test]
+#[cfg(feature = "full")]
 fn consumer_counts_no_allocation_on_fixed_size_codec_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let manifest = format!(
@@ -103,6 +109,7 @@ fn consumer_counts_no_allocation_on_fixed_size_codec_paths()
 
 /// Counts every allocation, reallocation and zeroed allocation in the probe
 /// process; each measured region reports the delta across one call.
+#[cfg(feature = "full")]
 const ALLOCATION_PROBE: &str = r#"
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt::Write as _;
