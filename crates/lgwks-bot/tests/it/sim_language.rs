@@ -15,7 +15,7 @@
 //!
 //! Sources: tier precedence and the alias scope are #25's counterexamples
 //! (`"the usual"` resolving to `"Delete account"` in another question); the
-//! migration and revocation rows are the alias table's documented contract in
+//! migration and forgetting rows are the alias table's documented contract in
 //! `language.rs`. Real code throughout: the shipped `LanguageResolver`, no copy.
 
 use crate::sim;
@@ -220,14 +220,11 @@ fn permutation_invariant(band: Band) -> TestResult {
             let verdict = resolver.resolve(&typed, &Question::new("ask", &options));
             let expected = format!("resolved {chosen:?} at Exact");
             let observed = decision(&verdict, &options)?;
-            if observed != expected {
-                return Err(format!(
-                    "seed {}: {typed:?} among {options:?} must resolve exactly to \
-                     {chosen:?}, got {observed}",
-                    sim.seed
-                )
-                .into());
-            }
+            assert_eq!(
+                observed, expected,
+                "seed {}: {typed:?} among {options:?} must resolve exactly to {chosen:?}",
+                sim.seed
+            );
             let probe = phrase(sim.rng(), &WORDS)?;
             let permuted = shuffled(sim.rng(), &options)?;
             for utterance in [typed.as_str(), probe.as_str()] {
@@ -346,9 +343,9 @@ fn learn_then_forget_restores(band: Band) -> TestResult {
             sim.seed
         );
         let learned = resolver.resolve(&utterance, &Question::new(question, &options));
-        let revoked = resolver.forget(question, &utterance);
+        let forgotten = resolver.forget(question, &utterance);
         assert_eq!(
-            revoked.as_ref().map(Alias::option),
+            forgotten.as_ref().map(Alias::option),
             Some(option.as_str()),
             "seed {}: forgetting returns the row that was learned",
             sim.seed
@@ -435,7 +432,7 @@ mod migration {
     every_band!(super::exported_table_reloads);
 }
 
-mod revocation {
+mod forgetting {
     every_band!(super::learn_then_forget_restores);
 }
 
