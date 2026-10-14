@@ -2365,6 +2365,11 @@ mod tests {
                 .arg(&self.root)
                 .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
                 .args(["-c", "commit.gpgsign=false"])
+                // The throwaway repository must not inherit the machine's global
+                // git config: a global core.hooksPath would run an estate hook here and
+                // make a binding test fail for a reason outside this code.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .args(args)
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
