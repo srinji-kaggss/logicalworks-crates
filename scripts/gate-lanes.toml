@@ -1,7 +1,7 @@
 # The gate's lane table: the one definition of what the gate runs and where.
 #
-# `scripts/ci_local.py` executes the local lanes from here. `scripts/check-gate-parity.py`
-# asserts every lane that names a `ci_step` matches the step of that name in
+# The `ci-local` binary executes the local lanes from here. The `check-gate-parity`
+# binary asserts every lane that names a `ci_step` matches the step of that name in
 # `.github/workflows/ci.yml`, and that every gate step in ci.yml is claimed by a
 # lane. A second hand-copied command list drifts, and the drift is invisible
 # because each side still looks green on its own terms — which is exactly the
@@ -23,15 +23,16 @@
 #             lane with "ci" in surfaces that runs as a named step.
 #   ci_job    the job `name:` in ci.yml for a lane that runs as unnamed `run:`
 #             steps of a whole job (the AppCUI matrix).
-#   builtin   instead of `command`, the name of a check implemented inside
-#             `ci_local.py`. Used for the scanners that must be unit-tested
+#   builtin   instead of `command`, the name of a check implemented inside the
+#             `ci-local` binary. Used for the scanners that must be unit-tested
 #             against fixture trees rather than shelled out. When such a lane
-#             runs in CI, the step is `python3 scripts/ci_local.py --lane <id>`.
+#             runs in CI, the step is
+#             `cargo run --locked -p lgwks_deps --bin ci-local -- --lane <id>`.
 #   needs     prerequisites checked before the lane runs. A missing one makes a
 #             required lane `blocked` rather than silently absent.
-#             Recognised: `module:<python module>`, `script:<path>` (must exist
-#             and be executable), `bin:<name>` (must be on PATH).
-#   platforms Python `sys.platform` values this lane applies to. A host outside
+#             Recognised: `script:<path>` (must exist and be executable),
+#             `bin:<name>` (must be on PATH), `os:<name>`.
+#   platforms Host names (`darwin`, `linux`, `win32`) this lane applies to. A host outside
 #             the list reports the lane `skip` (out of scope) rather than
 #             failing it. Omitted means every host.
 #   fast      true when the lane belongs to the `--fast` set.
@@ -85,7 +86,11 @@ id = "std-first"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-std-first.py --test && python3 scripts/check-std-first.py"
+# The audit is the `check-std-first` binary, ported from the Python script it
+# replaces because a repository holds Rust and C++ only. Its own tests moved
+# with it: they are unit tests of the binary, run by the workspace test lanes,
+# so no `--test` flag is needed to keep the audit tested.
+command = "cargo run --locked -p lgwks_deps --bin check-std-first"
 ci_step = "Audit std-first and lgwks_std-first"
 
 [[lane]]
@@ -181,10 +186,10 @@ id = "acceptance-receipts"
 surfaces = "ci"
 required = true
 # The receipt, built from the two JUnit reports the lgwks-bot shards already
-# wrote. It reads XML and records into SQLite, so the job needs no Rust
-# toolchain and no build -- it costs seconds, and it does not run the suite a
-# second time.
-command = "python3 scripts/acceptance-receipts.py --test && python3 scripts/acceptance-receipts.py --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\""
+# wrote. The `acceptance-receipts` binary reads the XML and records into SQLite
+# through the sqlite3 program, so the job builds one std-only binary -- it
+# costs seconds, and it does not run the suite a second time.
+command = "cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
 ci_step = "Record acceptance receipts"
 
 [[lane]]
@@ -194,7 +199,7 @@ required = true
 # CI runs on the self-hosted macOS runner; this lane runs the workspace and
 # lgwks-bot full suites in a Linux container on it, so the Linux-only paths
 # execute on every run. A local macOS run covers the same suites natively.
-command = "./scripts/linux-container-tests.sh"
+command = "cargo run --locked -p lgwks_deps --no-default-features --bin linux-container-tests"
 ci_step = "Run the workspace and lgwks-bot full suites on Linux"
 
 [[lane]]
@@ -205,7 +210,11 @@ required = true
 # The saturation family on its own: it is CPU-bound for about two minutes, so it
 # gets its own runner instead of one shard's tail. Builds only the one test
 # binary it runs.
-command = "cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E 'test(saturation_r32_tier)'"
+#
+# CI runs the legs of this lane on two instances by setting SATURATION_FILTER to
+# the tiers each leg takes (the 10,000 tier alone; the 100 and 1,000 tiers
+# together); unset, it is all three.
+command = "cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E \"${SATURATION_FILTER:-test(saturation_r32_tier)}\""
 ci_step = "Run lgwks-bot saturation tiers"
 
 [[lane]]
@@ -322,14 +331,14 @@ needs = ["script:scripts/doc-lanes.sh"]
 id = "llms-txt"
 surfaces = "local ci"
 required = true
-command = "python3 scripts/gen-llms-txt.py && git diff --exit-code -- llms.txt"
+command = "cargo run --locked -p lgwks_deps --bin llms-txt && git diff --exit-code -- llms.txt"
 ci_step = "llms.txt matches the documentation index"
 
 [[lane]]
 id = "doc-citations"
 surfaces = "local ci"
 required = true
-command = "python3 scripts/check-doc-citations.py"
+command = "cargo run --locked -p lgwks_deps --bin check-doc-citations"
 ci_step = "Documentation citations resolve"
 
 [[lane]]
@@ -345,7 +354,7 @@ id = "requirements"
 surfaces = "local ci"
 required = true
 fast = true
-command = "python3 scripts/check-requirements.py"
+command = "cargo run --locked -p lgwks_deps --bin check-requirements && cargo run --locked -p lgwks_deps --bin check-spec-owners"
 ci_step = "Requirements sentences unedited without supersession"
 
 [[lane]]
@@ -367,7 +376,6 @@ group = "clippy"
 surfaces = "local ci"
 required = true
 command = """\
-cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --all-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio-full -- -D warnings\
@@ -380,7 +388,6 @@ group = "clippy"
 surfaces = "local ci"
 required = true
 command = """\
-cargo clippy --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser -- -D warnings\
@@ -395,85 +402,8 @@ required = true
 command = "cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features --features process -- -D warnings"
 ci_step = "Clippy process-only"
 
-[[lane]]
-id = "feat-std"
-group = "check"
-surfaces = "local ci"
-required = true
-# Every one of the twelve non-`full` features, each alone, plus the two
-# boundary sets. `core`, `trace`, `random`, `ron` and `process` were missing from
-# this list and so were never built by anything except the rustdoc lane: a
-# feature that silently needs another feature is exactly what an isolated build
-# refuses to hide. (#276)
-command = """\
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features core --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features trace --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features random --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features hash --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features pattern --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features json --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features ron --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features wire --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features http --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features online --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features fs-raw --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --features process --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-std/Cargo.toml --all-targets --all-features\
-"""
-ci_step = "Check lgwks-std feature matrix"
-
-# Every feature alone, *executed* rather than compiled. A `cargo check` says a
-# feature builds; only a run says its tests pass with nothing else switched on,
-# and a test that quietly needs a second feature passes in the full suite while
-# being unreachable for a consumer who selected one flag. The per-feature run is
-# one `nextest` invocation per feature, in the same feature sets the check lane
-# above uses. (#276)
-# Three shards of four features, each its own CI job: as one step on the
-# feature-matrix job the twelve runs took 228 s on GitHub and put that job at
-# 303 s, past the five-minute gate budget. (#276)
-[[lane]]
-id = "tests-std-per-feature-a"
-group = "std-per-feature"
-surfaces = "local ci"
-required = true
-command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features core && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features trace && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features random && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features http\
-"""
-ci_step = "Run lgwks-std per-feature tests, shard a (core trace random http)"
-needs = ["bin:cargo-nextest"]
-
-[[lane]]
-id = "tests-std-per-feature-b"
-group = "std-per-feature"
-surfaces = "local ci"
-required = true
-command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features hash && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features pattern && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features json && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features ron\
-"""
-ci_step = "Run lgwks-std per-feature tests, shard b (hash pattern json ron)"
-needs = ["bin:cargo-nextest"]
-
-[[lane]]
-id = "tests-std-per-feature-c"
-group = "std-per-feature"
-surfaces = "local ci"
-required = true
-command = """\
-cargo nextest run --locked -p lgwks_std --no-default-features --features wire && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features online && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features fs-raw && \
-cargo nextest run --locked -p lgwks_std --no-default-features --features process\
-"""
-ci_step = "Run lgwks-std per-feature tests, shard c (wire online fs-raw process)"
-needs = ["bin:cargo-nextest"]
+# lgwks_std has no feature subsets (Director, 2026-10-13): every module is part
+# of it, so the gate builds and runs it whole and keeps no per-feature lane.
 
 # The declared target matrix, executed. Before this lane the only non-native
 # build in the gate was the bot's WASI boundary, so `lgwks_std`, `lgwks_ast` and
@@ -487,7 +417,7 @@ id = "target-matrix"
 group = "targets"
 surfaces = "local ci"
 required = true
-command = "./scripts/check-target-matrix.sh"
+command = "./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}"
 ci_step = "Check lgwks-std across the declared target matrix"
 needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
 
@@ -603,15 +533,6 @@ ci_step = "Doc build at the default feature set"
 needs = ["script:scripts/doc-lanes.sh"]
 
 [[lane]]
-id = "docs-per-feature"
-group = "docs"
-surfaces = "local ci"
-required = true
-command = "./scripts/doc-lanes.sh per-feature"
-ci_step = "Doc build for each lgwks-std feature alone"
-needs = ["script:scripts/doc-lanes.sh"]
-
-[[lane]]
 id = "docsrs-metadata"
 group = "docs"
 surfaces = "local ci"
@@ -651,8 +572,7 @@ id = "gate-parity"
 surfaces = "local"
 required = true
 fast = true
-command = "python3 scripts/check-gate-parity.py"
-needs = ["module:yaml"]
+command = "cargo run --locked -p lgwks_deps --bin check-gate-parity"
 
 # ── ci only, platform-bound ─────────────────────────────────────────────────
 # A local run never covers these. The receipt names them. On a host outside
@@ -660,7 +580,7 @@ needs = ["module:yaml"]
 
 # The GPUI Windows renderer builds only on a Windows host. The check runs as the
 # GPUI Windows renderer job; naming it here puts it in the one gate table, so
-# parity sees it and `ci_local.py` runs it on a Windows machine. (#195)
+# parity sees it and `ci-local` runs it on a Windows machine. (#195)
 [[lane]]
 id = "gpui-windows"
 group = "check"
@@ -709,3 +629,15 @@ ci_step = "Check Candle Metal storefront features"
 platforms = ["darwin"]
 needs = ["bin:xcodebuild"]
 reason = "needs the Xcode Metal toolchain"
+
+# The repository's ruleset requires a check named "Clippy and scan", and the lint
+# job is a matrix whose legs report under their own names. This row carries the
+# required name and passes only when the matrix's aggregate result, which is
+# `success` only if every leg succeeded, says so.
+[[lane]]
+id = "clippy-verdict"
+surfaces = "ci"
+required = true
+command = "test \"${LEGS}\" = success"
+ci_step = "Every clippy leg passed"
+reason = "dedicated PR check row whose job name is the ruleset's required Clippy and scan"
