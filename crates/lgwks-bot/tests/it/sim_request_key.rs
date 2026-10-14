@@ -757,10 +757,12 @@ band_family::band_family! {
     same_seed_replays_band_15 => same_seed_replays, 15;
 }
 
-/// The environment variable that gates the high-volume submission measurement.
+/// The environment variable that extends the submission measurement past its
+/// first tier.
 const SCALE_ENV: &str = "LGWKS_REQUEST_SCALE";
 
-/// The submission tiers the opt-in measurement drives.
+/// The submission tiers the measurement drives: the first on every run, all of
+/// them when [`SCALE_ENV`] is set.
 ///
 /// The list stops at ten thousand because that is the largest tier this file
 /// actually measured; a tier nobody ran is not a tier this file claims.
@@ -775,25 +777,22 @@ const SCALE_TIERS: [usize; 3] = [100, 1_000, 10_000];
 /// store's one owner thread, so the question is whether the derived identities
 /// stay distinct under load, not whether the disk can take it.
 ///
-/// Opt-in, like the run store's own scale measurement, because it is minutes of
-/// real `fsync`s. It is `#[ignore]`d rather than silently skipped, and it prints
-/// what it measured.
+/// Every run drives the first tier with every assertion, so the property is
+/// checked on each suite rather than only when someone asks. The two larger
+/// tiers are minutes of real `fsync`s, so they run when [`SCALE_ENV`] is set.
+/// Each tier prints what it measured, so the output shows which tiers ran.
 ///
 /// ```text
-/// LGWKS_REQUEST_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral \
-///     --test sim_request_key concurrent_submissions_across_tiers -- --ignored --nocapture
+/// LGWKS_REQUEST_SCALE=1 cargo nextest run --locked -p lgwks_bot --features script,ephemeral \
+///     --test it --no-capture -E 'test(concurrent_submissions_across_tiers)'
 /// ```
 #[test]
-#[ignore = "the request-key submission scale measurement; run it with \
-            LGWKS_REQUEST_SCALE=1 and --ignored"]
 fn concurrent_submissions_across_tiers() -> TestResult {
-    if std::env::var_os(SCALE_ENV).is_none() {
-        return Err(format!(
-            "{SCALE_ENV} is not set, so the tier measurement did not run; set it to measure"
-        )
-        .into());
-    }
-    for tier in SCALE_TIERS {
+    let tiers = match std::env::var_os(SCALE_ENV) {
+        Some(_) => &SCALE_TIERS[..],
+        None => &SCALE_TIERS[..1],
+    };
+    for &tier in tiers {
         measure_tier(tier)?;
     }
     Ok(())
