@@ -5,8 +5,8 @@
 # Every `tests` entry is a nextest test name as `cargo nextest list` prints it:
 # `<binary>::<test>` for a separate integration binary, and `it::<test>` for the
 # consolidated `tests/it/` binary, where `<test>` is `module::function`.
-# `scripts/acceptance-receipts.py` reads this file, runs exactly these tests, and
-# writes the observed result to `evidence/<revision>.json`.
+# The `acceptance-receipts` binary reads this file, runs exactly these tests, and
+# records the observed result in the receipt database.
 #
 # `state` is the spec's own evidence ladder:
 #   planned                  - no test addresses the row
@@ -20,7 +20,7 @@
 
 schema = 1
 spec = "docs/orchestration-acceptance.spec.md"
-generated_by = "scripts/acceptance-receipts.py"
+generated_by = "acceptance-receipts"
 
 [[row]]
 id = "T01"
@@ -203,8 +203,8 @@ tests = [
   "it::wrong_identity_evidence::every_wrong_identity_field_is_refused_and_the_correct_one_is_not",
   "it::wrong_identity_evidence::a_settlement_carrying_another_runs_identity_is_refused",
   "it::wrong_identity_evidence::a_refused_settlement_leaves_a_real_file_journal_byte_identical",
-  "it::wrong_identity_evidence::a_checked_counter_exhaustion_never_aliases_an_issued_identity",
-  "it::wrong_identity_evidence::a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable",
+  "it::wrong_identity_evidence::counter::a_checked_counter_exhaustion_never_aliases_an_issued_identity",
+  "it::wrong_identity_evidence::counter::a_journal_position_carries_a_head_so_a_wrapped_sequence_is_detectable",
   "it::sim_dispatch::store_isolation_r00",
   "it::sim_dispatch::store_isolation_r01",
 ]
@@ -340,7 +340,7 @@ id = "T21"
 requires = "LC-10"
 row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
 state = "present"
-gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal; the row is not yet receipted per backend: the Linux container leg runs these tests in CI but records no receipt, and containment is Unix-only."
+gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal, and the row is receipted on macOS and Linux (the Linux container's bot-full JUnit, recorded as linux-aarch64); containment is still Unix-only, so no Windows backend is receipted until #263."
 tests = [
   "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group_t21",
   "it::process_escape::a_session_escape_is_captured_and_stopped_by_pid",
@@ -539,7 +539,7 @@ tests = [
 
 [[row]]
 id = "T33"
-requires = "PR-07/08"
+requires = "PR-07/08/AI-08"
 row = "Provider accepts review but response is lost; reconciliation finds and verifies the exact review, or remains Unknown. No duplicate post. Test partially submitted reviews/comments."
 state = "exercised"
 gap = ""
@@ -557,7 +557,7 @@ tests = [
 
 [[row]]
 id = "T34"
-requires = "PR-09/10"
+requires = "PR-09/10/AI-08"
 row = "Real readback proves exact IDs/state/subject/payload; lost read permission reports unverified/blocking state while retaining applied-effect evidence."
 state = "exercised"
 gap = ""

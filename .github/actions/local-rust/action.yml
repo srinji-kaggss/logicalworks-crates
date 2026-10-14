@@ -47,10 +47,10 @@ inputs:
       cores and 24 GiB of RAM (run 37654108625: 35 GiB of swap used). One
       opt-level-3 rustc holds ~0.9 GiB, so two slots per job is 26 of them
       plus the linkers, and run 37675264254 died six jobs at once with swap at
-      96%. Every job runs at one slot: warm compiles take seconds either way,
-      transitions take longer but survive instead of dying. The six compiler
-      jobs carry 30-minute timeouts for exactly those transitions; warm runs
-      are still held to 5 minutes by measurement, not by the timeout.
+      96%. So the default is one slot, and a job raises it only for the
+      codegen it holds: rustc's codegen threads draw on these slots, so one
+      slot compiled lgwks-bot's opt-level-3 test binaries on one core (6 m 55 s,
+      run 38304128455). ci.yml's header names which jobs take more.
     required: false
     default: "1"
   tmp-gib:
@@ -105,6 +105,13 @@ runs:
         free_kib="$(df -Pk "${target}" | awk 'NR==2 {print $4}')"
         if [ "${free_kib}" -lt "$(( ${{ inputs.min-free-gib }} * 1024 * 1024 ))" ]; then
           echo "::warning::$(( free_kib / 1024 / 1024 )) GiB free, under ${{ inputs.min-free-gib }} GiB: cleaning ${target}"
+          # cargo refuses to clean a directory without its CACHEDIR.TAG (run
+          # 38410708974: `missing or invalid CACHEDIR.TAG` failed every job on
+          # lwc-3 at 36 GiB free). The directory is this action's own, so the
+          # tag is written first and the clean then runs.
+          if [ ! -f "${target}/CACHEDIR.TAG" ]; then
+            printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n' > "${target}/CACHEDIR.TAG"
+          fi
           cargo clean --target-dir "${target}"
         fi
     # Temporary files on a RAM disk owned by this runner instance. Rust's
@@ -227,3 +234,35 @@ runs:
       if: inputs.nextest == 'true'
       shell: bash
       run: cargo nextest --version
+    # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
+    # directory. rustc deletes its own when it finishes, so a cancelled or
+    # timed-out job leaves the rest, and nothing else ever removes them: on
+    # 2026-10-13 lwc-3's `debug/deps` held 445,426 entries, most of them these,
+    # in a 62 GiB target, and the machine was past its 256 GB cap with them.
+    #
+    # The sweep runs beside the build, not before it. Run inline it was still
+    # deleting after 301 s on lwc-3 and the 5-minute job limit cancelled the
+    # job (run 38469573599), so a dirty target would have failed the job that
+    # cleaned it. What it may delete is fixed by a marker made when the step
+    # starts: an object not newer than the marker was written before this job
+    # began, so it is not this job's and no compile of this job can need it,
+    # and anything this job's compiles write is newer and is left alone. It
+    # runs at the lowest priority with every descriptor closed, so neither the
+    # build nor the runner waits on it; the runner's cleanup ends it with the
+    # job, and what it had deleted stays deleted, so a backlog too large for
+    # one job drains across several. The globs are the ones the incremental
+    # sweep above uses: the host profile directories and the per-target ones.
+    - name: Codegen objects left by killed compiles
+      shell: bash
+      run: |
+        set -euo pipefail
+        marker="${RUNNER_TEMP}/codegen-sweep-marker"
+        : > "${marker}"
+        (
+          for deps in "${CARGO_TARGET_DIR}"/*/deps "${CARGO_TARGET_DIR}"/*/*/deps; do
+            if [ -d "${deps}" ]; then
+              nice -n 19 find "${deps}" -maxdepth 1 -name '*.rcgu.o' ! -newer "${marker}" -delete
+            fi
+          done
+        ) < /dev/null > /dev/null 2>&1 &
+        disown

@@ -1,1 +1,0 @@
-module Rand.Distributions.Distribution
