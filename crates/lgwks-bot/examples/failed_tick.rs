@@ -1,6 +1,6 @@
 //! What a failed tick means, as a program rather than as prose.
 //!
-//! This is the example `docs/guides/lgwks-bot/failures.md` shows, kept where the
+//! This is the example `docs/guides/lgwks-bot/failures-example.md` shows, kept where the
 //! workspace gate compiles and runs it: the guide's claims about a partial run,
 //! about an unchanged source, and about what is still owed are assertions here,
 //! so a change in `tick`'s behaviour breaks the build instead of silently
