@@ -3,9 +3,6 @@
 use lgwks_std::glob::{
     GlobDialect, GlobPattern, GlobScratch, PatternError, PatternErrorKind, matches,
 };
-use std::error::Error;
-use std::fs;
-use std::process::Command;
 
 #[test]
 fn public_compile_reuse_and_legacy_call_share_text_semantics() -> Result<(), PatternError> {
@@ -90,106 +87,38 @@ fn public_wildcards_and_classes_count_unicode_scalars() -> Result<(), PatternErr
     Ok(())
 }
 
+/// The syntax this matcher shares with the `glob` crate answers as `glob`
+/// 0.3.4 does. The two lists are that release's `Pattern::matches` verdicts for
+/// ten cases, read by compiling its `src/lib.rs` and running them when the
+/// vendored tree was dropped (#266), so the oracle lives beside the cases and no
+/// checkout has to carry a copy of the crate. Semantics:
+/// <https://docs.rs/glob/0.3.4/glob/struct.Pattern.html>.
 #[test]
-fn shared_subset_matches_the_pinned_vendored_upstream() -> Result<(), Box<dyn Error>> {
-    let cases = [
+fn shared_subset_matches_the_recorded_answers_of_glob_0_3_4() {
+    let upstream_accepts = [
         ("literal", "literal"),
         ("a?c", "abc"),
-        ("a?c", "ac"),
         ("a*b", "ab"),
         ("a*b", "axyb"),
-        ("a*b", "axyc"),
         ("[a-c]", "b"),
-        ("[a-c]", "z"),
         ("[!a-c]", "z"),
-        ("[!a-c]", "b"),
     ];
-    let ours = cases
-        .iter()
-        .map(|&(pattern, path)| matches(pattern, path))
-        .collect::<Vec<_>>();
-
-    let scratch = tempfile::tempdir()?;
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let upstream = manifest_dir.join("../../vendor/glob/src/lib.rs");
-    let library = scratch.path().join("libglob.rlib");
-    let library_build = Command::new("rustc")
-        .arg("--crate-name")
-        .arg("glob")
-        .arg("--crate-type")
-        .arg("lib")
-        .arg("--edition=2021")
-        .arg(&upstream)
-        .arg("--out-dir")
-        .arg(scratch.path())
-        .output()?;
-    assert!(
-        library_build.status.success(),
-        "pinned upstream library compile failed: {}",
-        String::from_utf8_lossy(&library_build.stderr)
-    );
-    assert!(library.exists(), "pinned upstream rlib was produced");
-
-    let consumer_source = scratch.path().join("consumer.rs");
-    fs::write(
-        &consumer_source,
-        r#"
-use std::error::Error;
-use std::io::Write;
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let cases = [
-        ("literal", "literal"),
-        ("a?c", "abc"),
+    let upstream_refuses = [
         ("a?c", "ac"),
-        ("a*b", "ab"),
-        ("a*b", "axyb"),
         ("a*b", "axyc"),
-        ("[a-c]", "b"),
         ("[a-c]", "z"),
-        ("[!a-c]", "z"),
         ("[!a-c]", "b"),
     ];
-    let mut output = std::io::stdout().lock();
-    for (source, path) in cases {
-        writeln!(output, "{}", glob::Pattern::new(source)?.matches(path))?;
+    for (pattern, path) in upstream_accepts {
+        assert!(
+            matches(pattern, path),
+            "`{pattern}` against `{path}`: glob 0.3.4 matches, so must this matcher"
+        );
     }
-    Ok(())
-}
-"#,
-    )?;
-    let executable = scratch.path().join(if cfg!(windows) {
-        "glob-reference.exe"
-    } else {
-        "glob-reference"
-    });
-    let external = format!("glob={}", library.display());
-    let consumer_build = Command::new("rustc")
-        .arg("--edition=2021")
-        .arg(&consumer_source)
-        .arg("--extern")
-        .arg(external)
-        .arg("-o")
-        .arg(&executable)
-        .output()?;
-    assert!(
-        consumer_build.status.success(),
-        "pinned upstream consumer compile failed: {}",
-        String::from_utf8_lossy(&consumer_build.stderr)
-    );
-    let reference = Command::new(executable).output()?;
-    assert!(
-        reference.status.success(),
-        "pinned upstream consumer failed: {}",
-        String::from_utf8_lossy(&reference.stderr)
-    );
-    let reference = String::from_utf8(reference.stdout)?
-        .lines()
-        .map(str::parse::<bool>)
-        .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(
-        ours, reference,
-        "shared syntax subset agrees with vendored glob 0.3.4"
-    );
-    Ok(())
+    for (pattern, path) in upstream_refuses {
+        assert!(
+            !matches(pattern, path),
+            "`{pattern}` against `{path}`: glob 0.3.4 refuses, so must this matcher"
+        );
+    }
 }

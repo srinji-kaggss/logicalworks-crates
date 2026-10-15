@@ -29,7 +29,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-toolchain="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["toolchain"]["channel"])' "${root}/rust-toolchain.toml")"
+toolchain="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "${root}/rust-toolchain.toml" | sed -n 1p)"
 nextest="$(cargo nextest --version | awk 'NR==1 {print $2}')"
 case "$(uname -m)" in
     arm64 | aarch64) nextest_platform="linux-arm" ;;
@@ -45,12 +45,23 @@ esac
 cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 host_triple="$(rustc -vV | awk '/^host:/ {print $2}')"
 container_triple="$(uname -m | sed 's/^arm64$/aarch64/')-unknown-linux-gnu"
-container_rustflags="$(python3 -c 'import sys,tomllib
-try:
-    config = tomllib.load(open(sys.argv[1], "rb"))
-except FileNotFoundError:
-    config = {}
-print(" ".join(config.get("target", {}).get(sys.argv[2], {}).get("rustflags", [])))' "${cargo_home}/config.toml" "${host_triple}")"
+container_rustflags=""
+if [ -f "${cargo_home}/config.toml" ]; then
+    # The strings of `rustflags = [...]` under `[target.<host>]`, which may wrap.
+    container_rustflags="$(awk -v table="[target.${host_triple}]" '
+        $0 == table { inside = 1; next }
+        /^\[/ { inside = 0 }
+        inside && /^rustflags[[:space:]]*=/ { collecting = 1 }
+        inside && collecting {
+            line = $0
+            while (match(line, /"[^"]*"/)) {
+                printf "%s ", substr(line, RSTART + 1, RLENGTH - 2)
+                line = substr(line, RSTART + RLENGTH)
+            }
+            if ($0 ~ /\]/) collecting = 0
+        }
+    ' "${cargo_home}/config.toml" | sed 's/ *$//')"
+fi
 rustflags_var="CARGO_TARGET_$(echo "${container_triple}" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
 config_mount=()
 if [ -f "${cargo_home}/config.toml" ]; then
@@ -80,7 +91,7 @@ fi
 commands=()
 for suite in "${suites[@]}"; do
     case "${suite}" in
-        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)'") ;;
+        workspace) commands+=("cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' \${PARTITION:+--partition \$PARTITION}") ;;
         bot-full) commands+=("cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)'") ;;
         appcui) commands+=(
             "cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib"
@@ -90,6 +101,18 @@ for suite in "${suites[@]}"; do
         *) echo "linux-container-tests: unknown suite ${suite} (workspace, bot-full, appcui)" >&2; exit 2 ;;
     esac
 done
+
+# A Linux host is the Linux the container existed to provide, so the suites run
+# on it directly: the same commands, with the host's own init reaping orphans
+# and its own /tmp. The container below is for a macOS machine only, where it
+# cost an image, a VM sharing the machine's cores, and 8 to 10 minutes of
+# contended wall on the critical path.
+if [ "$(uname -s)" = Linux ]; then
+    for command in "${commands[@]}"; do
+        eval "${command}"
+    done
+    exit 0
+fi
 
 script="set -euo pipefail
 # A job killed mid-unpack (a timeout on a transition run) leaves a package
@@ -109,9 +132,6 @@ done
 if [ \"\$(/opt/tools/cargo-nextest --version 2>/dev/null | awk 'NR==1 {print \$2}')\" != '${nextest}' ]; then
     curl -fsSL 'https://get.nexte.st/${nextest}/${nextest_platform}' | tar -xz -C /opt/tools
 fi
-case ' ${container_rustflags} ' in
-    *fuse-ld=lld*) command -v ld.lld >/dev/null || { apt-get update -qq && apt-get install -y -qq lld >/dev/null; } ;;
-esac
 export PATH=/opt/tools:\$PATH
 rustc --version
 $(printf '%s\n' "${commands[@]}")"
@@ -129,6 +149,36 @@ target_owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
 # not found`, run 38099333925). One image, one volume.
 image="rust:${toolchain}-bookworm"
 image_tag="$(printf '%s' "${image}" | tr -c 'A-Za-z0-9_.-' '-')"
+
+# The linker the machine's cargo configuration names (lld) is not in the image,
+# and a `--rm` container forgets whatever it installs, so installing it inside
+# the run fetched it from the Debian mirror every time: one slow mirror held a
+# job for 6.5 minutes and then failed it with `cannot find 'ld'` (run
+# 38316346444). A derived image carries it instead, built once per machine and
+# toolchain and reused by every later run; the volumes below are unchanged, so
+# the build caches stay warm.
+run_image="${image}"
+case " ${container_rustflags} " in
+    *fuse-ld=lld*)
+        run_image="lwc-ci-${image_tag}-lld"
+        if ! docker image inspect "${run_image}" >/dev/null 2>&1; then
+            printf 'FROM %s\nRUN apt-get update -qq && apt-get install -y -qq lld && rm -rf /var/lib/apt/lists/*\n' "${image}" |
+                docker build -q -t "${run_image}" -
+        fi
+        ;;
+esac
+
+# The toolchain's components live in a volume too. `rust-toolchain.toml` asks
+# for clippy and rustfmt and the image ships neither, so a `--rm` container
+# downloaded both from static.rust-lang.org on every run, and every network
+# blip failed the leg before a test ran (run 38182457101: `error decoding
+# response body` on the channel manifest; run 38180197921: `component download
+# failed for clippy`). An empty named volume is seeded from the image's
+# /usr/local/rustup on first mount, so the components download once and stay.
+# Named by toolchain, so a pin change starts a fresh volume rather than mixing
+# two toolchains, and by runner, for the one-writer reason the target volume
+# has: two first-time installs into one rustup home would race.
+rustup_volume="lwc-ci-linux-rustup-$(printf '%s' "${toolchain}" | tr -c 'A-Za-z0-9_.-' '-')-${target_owner}"
 
 # `--init` puts a reaping init at PID 1, as a Linux host has. Without it the
 # shell is PID 1, never reaps the descendants a supervised process orphans, and
@@ -148,6 +198,7 @@ exec docker run --rm --init \
     --volume "lwc-ci-linux-target-${target_owner}-${image_tag}-$(IFS=-; echo "${suites[*]}"):/target" \
     --volume lwc-ci-linux-registry:/usr/local/cargo/registry \
     --volume lwc-ci-linux-tools:/opt/tools \
+    --volume "${rustup_volume}:/usr/local/rustup" \
     ${config_mount[@]+"${config_mount[@]}"} \
     --env "${rustflags_var}=${container_rustflags}" \
     --env CARGO_TARGET_DIR=/target \
@@ -155,5 +206,5 @@ exec docker run --rm --init \
     --env CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-line-tables-only}" \
     --env RUSTC_WORKSPACE_WRAPPER= \
     --workdir /src \
-    "${image}" \
+    "${run_image}" \
     bash -c "${script}"
