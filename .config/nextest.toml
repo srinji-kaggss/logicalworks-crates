@@ -71,6 +71,26 @@ threads-required = 'num-test-threads'
 filter = 'package(lgwks_std) & binary(http_alloc)'
 threads-required = 'num-test-threads'
 
+# #272: the persist tests spend their time in the kernel (open, rename, write),
+# and macOS serializes that work host-wide, so more concurrent processes buy more
+# kernel time, not more throughput. The 236 lgwks_bot cas and journal tests, one
+# process each as nextest runs them, on one idle host: one at a time 20.6 s wall
+# and 17.4 s sys, three at a time 12.7 s and 29.7 s, six at a time 15.4 s and
+# 72.1 s. Six processes on six separate volumes cost the same (14.5 s, 66.9 s
+# sys), so the limit is the kernel's and not a volume's, and thirteen runners on
+# one host feed it together. Three is the fastest wall; a fourth only adds sys
+# time. The same shape holds for sim_vendor_coverage (2.9 s to 11.6 s sys, one to
+# six) and sim_fs_walk (2.4 s to 6.9 s). The group limits its own members and
+# leaves every other slot to the rest of the run. Linux runs these tests 17 to 89
+# times faster than macOS with no cap, so the override is macOS-only.
+[test-groups]
+file-churn = { max-threads = 3 }
+
+[[profile.default.overrides]]
+filter = '(package(lgwks_bot) & binary(it) & test(/^(sim_cas_disk|sim_cas_corrupt|sim_cas_execute|sim_cas|sim_journal|sim_tenant_store)::/)) | (package(lgwks_deps) & binary(it) & test(/^sim_vendor_coverage::/)) | (package(lgwks_std) & binary(it) & test(/^sim_fs_walk(_prune)?::/))'
+platform = 'cfg(target_os = "macos")'
+test-group = 'file-churn'
+
 # The CI profile: the same runs, each writing a JUnit report of what it actually
 # ran, so the acceptance receipt can be built from the suite's own output instead
 # of running it a second time. `store-success-output = false` keeps a report to
