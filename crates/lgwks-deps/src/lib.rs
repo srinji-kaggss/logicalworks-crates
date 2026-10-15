@@ -88,8 +88,6 @@ pub mod vendor;
 
 /// The audit itself: every direct edge judged against the register.
 mod audit;
-/// `[patch]`, `[replace]` and source replacement: overrides the register cannot see.
-mod overrides;
 /// What the gate refuses and why it could not reach a verdict.
 mod refusal;
 
@@ -370,12 +368,10 @@ pub fn check_verdict(
     // so -- the failure `lock::parse` exists to refuse, reached only by the two
     // commands that happened to call it.
     lock::parse(&read(&lock_path)?).map_err(GateError::Lock)?;
-    let overrides = overrides::refusals(root)?;
     let edges = metadata::read_with_members(root).map_err(GateError::Metadata)?;
     Ok(edges.map(|(edges, members)| {
         let mut refusals = audit_direct(&edges, &register);
         refusals.extend(audit::surface_refusals(&members, &register));
-        refusals.extend(overrides);
         Verdict {
             register,
             refusals,
