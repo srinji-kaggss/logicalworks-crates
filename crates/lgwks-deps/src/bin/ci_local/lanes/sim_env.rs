@@ -6,7 +6,9 @@
 //! The properties are the contract the lanes depend on: the caller's
 //! `CARGO_INCREMENTAL` is kept (run 38407172423 lost 2 m 43 s to a rebuild when
 //! it was not), `PATH` gains the cargo directory in front and keeps what it had,
-//! and no variable the caller set is dropped.
+//! no variable the caller set is dropped except the ones `cargo run` sets for the
+//! crate it launched (a lane that inherited them rebuilt every workspace crate
+//! that reads one, run 38776238519), and every Cargo configuration variable stays.
 
 use super::child_env_from;
 use std::collections::BTreeMap;
@@ -24,6 +26,58 @@ const KNOWN: [&str; 6] = [
     "CARGO_TARGET_DIR",
     "PATH",
 ];
+
+/// Every variable the Cargo Book's "Environment variables Cargo sets for
+/// crates" lists, except `CARGO` (Cargo forwards it so a nested `cargo` finds the
+/// one that is running); the `CARGO_BIN_EXE_*` family is drawn by `world`. This
+/// is the model the lane's rule is held to, spelled from the book rather than
+/// from the rule's own prefixes.
+const CRATE_SCOPED: [&str; 19] = [
+    "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_PATH",
+    "CARGO_PKG_VERSION",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_PKG_AUTHORS",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_DESCRIPTION",
+    "CARGO_PKG_HOMEPAGE",
+    "CARGO_PKG_REPOSITORY",
+    "CARGO_PKG_LICENSE",
+    "CARGO_PKG_LICENSE_FILE",
+    "CARGO_PKG_RUST_VERSION",
+    "CARGO_PKG_README",
+    "CARGO_CRATE_NAME",
+    "CARGO_BIN_NAME",
+    "CARGO_PRIMARY_PACKAGE",
+];
+
+/// Cargo and build-cache configuration a lane must keep, drawn from the book's
+/// "Configuration environment variables" and the variables the runners export.
+/// `CARGO_TARGET_DIR`, `CARGO_INCREMENTAL` and `TMPDIR` have their own
+/// properties above.
+const CONFIGURATION: [&str; 13] = [
+    "CARGO",
+    "CARGO_HOME",
+    "CARGO_BUILD_JOBS",
+    "CARGO_BUILD_TARGET",
+    "CARGO_PROFILE_TEST_DEBUG",
+    "CARGO_PROFILE_TEST_OPT_LEVEL",
+    "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "SCCACHE_DIR",
+    "NEXTEST_TEST_THREADS",
+];
+
+/// Whether the book lists `name` among the variables it sets for a crate.
+fn is_crate_scoped(name: &str) -> bool {
+    CRATE_SCOPED.contains(&name) || name.starts_with("CARGO_BIN_EXE_")
+}
 
 /// SplitMix64: one seed, one stream.
 struct Stream(u64);
@@ -59,7 +113,10 @@ fn world(seed: u64) -> World {
     let mut stream = Stream(seed);
     let mut vars = BTreeMap::new();
     if stream.below(4) != 0 {
-        vars.insert("HOME".to_owned(), format!("/home/u{}", stream.below(1000)));
+        vars.insert(
+            "HOME".to_owned(),
+            format!("/sim/user{}", stream.below(1000)),
+        );
     }
     if stream.below(4) != 0 {
         let path = match stream.below(3) {
@@ -100,6 +157,22 @@ fn world(seed: u64) -> World {
         (stream.below(2) == 0).then(|| PathBuf::from(format!("/scratch/{}", stream.below(100))));
     let target =
         (stream.below(2) == 0).then(|| PathBuf::from(format!("/target/{}", stream.below(100))));
+    for name in CRATE_SCOPED {
+        if stream.below(2) == 0 {
+            vars.insert(name.to_owned(), format!("c{}", stream.below(100)));
+        }
+    }
+    for binary in 0..stream.below(3) {
+        vars.insert(
+            format!("CARGO_BIN_EXE_b{binary}"),
+            format!("target/b{binary}"),
+        );
+    }
+    for name in CONFIGURATION {
+        if stream.below(2) == 0 {
+            vars.insert(name.to_owned(), format!("k{}", stream.below(100)));
+        }
+    }
     World {
         vars,
         scratch,
@@ -257,8 +330,30 @@ fn nothing_the_caller_set_is_dropped(
     drawn: &World,
     received: &BTreeMap<String, String>,
 ) {
-    for name in drawn.vars.keys() {
+    for name in drawn.vars.keys().filter(|name| !is_crate_scoped(name)) {
         assert!(received.contains_key(name), "seed {seed} lost {name}");
+    }
+}
+
+fn crate_variables_never_reach_a_lane(
+    seed: u64,
+    _drawn: &World,
+    received: &BTreeMap<String, String>,
+) {
+    let leaked: Vec<&String> = received
+        .keys()
+        .filter(|name| is_crate_scoped(name))
+        .collect();
+    assert!(leaked.is_empty(), "seed {seed} leaked {leaked:?}");
+}
+
+fn configuration_variables_are_kept(seed: u64, drawn: &World, received: &BTreeMap<String, String>) {
+    for (name, value) in drawn
+        .vars
+        .iter()
+        .filter(|&(name, _)| CONFIGURATION.contains(&name.as_str()))
+    {
+        assert_eq!(received.get(name), Some(value), "seed {seed} {name}");
     }
 }
 
@@ -506,6 +601,36 @@ fn sim_only_known_variables_are_added_band_1() {
 #[test]
 fn sim_only_known_variables_are_added_band_2() {
     over_band(2, only_known_variables_are_added);
+}
+
+#[test]
+fn sim_crate_variables_never_reach_a_lane_band_0() {
+    over_band(0, crate_variables_never_reach_a_lane);
+}
+
+#[test]
+fn sim_crate_variables_never_reach_a_lane_band_1() {
+    over_band(1, crate_variables_never_reach_a_lane);
+}
+
+#[test]
+fn sim_crate_variables_never_reach_a_lane_band_2() {
+    over_band(2, crate_variables_never_reach_a_lane);
+}
+
+#[test]
+fn sim_configuration_variables_are_kept_band_0() {
+    over_band(0, configuration_variables_are_kept);
+}
+
+#[test]
+fn sim_configuration_variables_are_kept_band_1() {
+    over_band(1, configuration_variables_are_kept);
+}
+
+#[test]
+fn sim_configuration_variables_are_kept_band_2() {
+    over_band(2, configuration_variables_are_kept);
 }
 
 mod sim_bands;
