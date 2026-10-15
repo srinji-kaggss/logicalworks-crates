@@ -1,6 +1,6 @@
 # Documentation
 
-The index of every document in this repository. `scripts/gen-llms-txt.py`
+The index of every document in this repository. The `llms-txt` binary of `lgwks_deps`
 builds `llms.txt` from the table below and fails when a document under
 `docs/` is missing from it.
 

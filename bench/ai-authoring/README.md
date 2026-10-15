@@ -21,27 +21,21 @@ member.
 |---|---|
 | [Protocol](protocol.md) | What a trial measures and does not, the five profiles, and the fairness rules every arm is held to. |
 | [Tasks and the harness-owned world](tasks.md) | Each task's contract and hidden oracle clauses, and the instrumented `support/` crate the solutions call. |
-| [The runner](runner.md) | What `run.py` does per trial, the metrics it records, and the lockfile every trial shares. |
+| [The runner](runner.md) | What `run.py` did per trial before the Python ban deleted it, the metrics it recorded, and the lockfile every trial shared. |
 | [Results through 2026-10-04](history.md) | The profile matrix and the four-arm comparison against the ecosystem standard, on aggregate and pipeline. |
 | [Recovery, re-measured](recovery.md) | The three rig defects behind recovery's first 2/20, found one per run, and the regrade. |
 | [The guarantee tasks and their controls](guarantees.md) | The `script!` arm, the three tasks whose oracles fail a solution lacking the guarantee, and the reference and mutant controls. |
 
 ## How to rerun
 
-```sh
-python3 bench/ai-authoring/run.py --dry-run --trials 1      # every reference cell
-python3 bench/ai-authoring/run.py --mutants                 # one negative control per task
-AI_AUTHORING_CMD=<cli> python3 bench/ai-authoring/run.py \
-    --models stealth/space-bunny-alpha,deepseek/deepseek-v4.1-flash \
-    --apis old,new,script --tasks aggregate,pipeline,recovery,capture,tenant-cache,durable-retry \
-    --profiles first-time,expert-hurry,anxious,misuser,agent \
-    --trials 2 --parallel 6
-```
+There is no rerun command. `run.py` and `regrade.py` were Python, and the Python
+ban deleted them in #537 (`22a19af25`; the last copy of each is at `22a19af25^`).
+No Rust runner replaces them, so nothing here reproduces the recorded runs
+under `runs/`; they are the evidence. The tasks, oracles, `support/`,
+`template/` and the reference and mutant solutions are Rust and remain.
 
-`--profiles` defaults to all five and `--tasks` to all six. The default model
-ids are `stealth/space-bunny-alpha` and `deepseek/deepseek-v4.1-flash`. A model
-call must be closed-book and this runner enforces that with macOS
-`sandbox-exec`, so a host without it refuses rather than running the model
-open-book against the hidden oracle. The trial template builds
-`lgwks_bot` with `script` and `process`, alike for every arm, so the arms
-differ only in the API sheet the author is given.
+The deleted runner made each model call closed-book under macOS `sandbox-exec`,
+refusing on a host without it rather than running the model open-book against
+the hidden oracle. Its trial template built `lgwks_bot` with `script` and
+`process`, alike for every arm, so the arms differed only in the API sheet the
+author was given.

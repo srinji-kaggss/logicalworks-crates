@@ -13,8 +13,8 @@ a receipt for every row at every revision (`Acceptance receipts`):
 DX-01/03/04 T01, DX-04/05 T02, DX-05 T03, DX-06 T10, DX-07 T09, DX-08 T23 and
 T24, DX-09 T25, DX-10 T22, DX-11 T36. DX-02 is the vocabulary T01 drives, and
 DX-12 is a release discipline the readme-quickstart lane and the CHANGELOG
-hold. `scripts/check-spec-owners.py` refuses a DX requirement that no row
-requires and no stated reason exempts, so a new one cannot land unowned.
+hold. The `check-spec-owners` binary of `lgwks_deps` refuses a DX requirement
+that no row requires and no stated reason exempts, so a new one cannot land unowned.
 
 Normative words MUST/SHOULD apply to the proposed surface, not to the current
 release. Code-shaped blocks are design examples, deliberately labelled `text`.

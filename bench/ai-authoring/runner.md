@@ -1,10 +1,12 @@
 # The runner
 
-What `run.py` does per trial, the metrics it records, and the lockfile every trial shares. Part of the [authoring benchmark](README.md).
+What `run.py` did per trial, the metrics it recorded, and the lockfile every trial shared. Part of the [authoring benchmark](README.md).
 
-## The runner: `run.py`
+## The runner: `run.py` (deleted)
 
-Python standard library only.
+Python standard library only. The Python ban deleted it in #537 (`22a19af25`;
+the last copy is at `22a19af25^`) and no Rust runner replaces it, so this page
+records what it did when it produced the runs under `runs/`. Its commands:
 
 ```
 python3 bench/ai-authoring/run.py --dry-run --trials 1   # plumbing, no model
