@@ -364,7 +364,11 @@ fn together(branches: &Together) -> Result<TokenStream> {
     let mut patterns = Vec::new();
     let mut futures = Vec::new();
     for branch in branches.branches() {
-        patterns.push(branch.pattern().map_or_else(|| quote!(_), Clone::clone));
+        let pattern = match branch.pattern() {
+            Some(bound) => bound.clone(),
+            None => quote!(_),
+        };
+        patterns.push(pattern);
         let value = match *branch.value() {
             BranchValue::Construct(ref block) => construct(block)?,
             BranchValue::Run(ref run) => call(run)?,
@@ -619,8 +623,13 @@ fn flow_shape(shape: &FlowShape) -> TokenStream {
     let signature = shape.signature();
     let line = line_literal(shape.line());
     let steps = shape.steps().iter().map(step_shape);
+    let passthrough = shape.passthrough().iter().map(|passed| {
+        let line = line_literal(passed.line());
+        let text = passed.text();
+        quote!(#script::Passthrough::new(#line, #text))
+    });
     quote! {
-        #script::FlowShape::new(#name, #signature, #line, &[#(#steps),*])
+        #script::FlowShape::new(#name, #signature, #line, &[#(#steps),*], &[#(#passthrough),*])
     }
 }
 

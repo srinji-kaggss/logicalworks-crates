@@ -678,6 +678,8 @@ pub struct FlowShape {
     pub(crate) line: usize,
     /// The steps inside, in source order.
     pub(crate) steps: Vec<StepShape>,
+    /// The lines passed through as plain Rust, in source order (SL-3).
+    pub(crate) passthrough: Vec<Passthrough>,
 }
 
 impl FlowShape {
@@ -703,6 +705,37 @@ impl FlowShape {
     #[must_use]
     pub const fn steps(&self) -> &[StepShape] {
         self.steps.as_slice()
+    }
+
+    /// The lines this flow passes through as plain Rust, in source order: the
+    /// lines no word reads, which the word-admission census counts (SL-7).
+    #[must_use]
+    pub const fn passthrough(&self) -> &[Passthrough] {
+        self.passthrough.as_slice()
+    }
+}
+
+/// A line a flow passes through as written: no word, and no `run`,
+/// `observe` or `act` inside it (SL-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passthrough {
+    /// The 1-based source line, as the compiler reports it.
+    pub(crate) line: usize,
+    /// The line as written.
+    pub(crate) text: String,
+}
+
+impl Passthrough {
+    /// The 1-based source line, as the compiler reports it.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    /// The line as written.
+    #[must_use]
+    pub const fn text(&self) -> &str {
+        self.text.as_str()
     }
 }
 

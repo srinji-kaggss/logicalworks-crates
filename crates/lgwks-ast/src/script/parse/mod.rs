@@ -154,7 +154,10 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<Flow> {
     };
     let (body, steps) = block(&children, &mut labels, place)?;
     if output.is_some() && body.tail().is_none() && !body.diverges() {
-        let span = children.last().map_or(line.span, |last| last.line.span);
+        let span = match children.last() {
+            Some(last) => last.line.span,
+            None => line.span,
+        };
         let refusal = Err(Refusal::new(
             span,
             "this flow promises an output (`-> ..`) but its last line produces no value; \
@@ -174,6 +177,7 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<Flow> {
         signature,
         line: line.number,
         steps,
+        passthrough: super::passthrough::of(&body),
     };
     Ok(Flow {
         attributes: attributes.into_iter().collect(),

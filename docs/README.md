@@ -41,6 +41,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/orchestration-acceptance.spec.md`](orchestration-acceptance.spec.md) | The 36 public-interface falsifiers, the requirement each one owns, and the per-revision table of the tests that drive them. No row is accepted yet. |
 | [`docs/orchestration-acceptance-evaluation.md`](orchestration-acceptance-evaluation.md) | How falsifier evidence is graded, what candidate tests do not prove, and the developer-experience and multi-axis evaluation that would accept the facade. |
 | [`docs/script-lexicon.md`](script-lexicon.md) | Every `script!` word on one page, generated from the lexicon the parser dispatches on: its forms, refusals, guarantees and an example. Enough context to write a script from alone. |
+| [`docs/script-word-admission.md`](script-word-admission.md) | How a word joins the `script!` language: three cited estate sites, its row, a refusal case per refusal, a test per guarantee, a seeded simulation, and the passthrough census that finds candidates. |
 | [`docs/orchestration-evidence.md`](orchestration-evidence.md) | The pinned source findings, the foundational Rust assessment, and the reference entries the orchestration specs are built on. |
 | [`docs/bot-on-ecs.md`](bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
 | [`docs/effect-kernel.md`](effect-kernel.md) | The durable effect dispatch and recovery kernel: the journal ladder, the recovery fold, settlement unification, durability admission, and what one authority means. |
