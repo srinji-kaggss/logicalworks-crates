@@ -32,6 +32,9 @@
 //!
 //! Usage, from the repository root: `linux-container-tests [workspace|bot-full|appcui]...`
 //! (default: all three). `PARTITION=count:N/M` shards the workspace suite.
+//! `linux-container-tests vps` is the one suite that is not a test run: it
+//! measures the `bench/async` matrix under a cgroup cap (see `vps`), runs
+//! alone, and always in a container, on any host.
 //! Exit status is the first failing command's, or 2 when the leg could not run.
 
 mod plan;
@@ -39,6 +42,7 @@ mod plan;
 mod tests;
 #[path = "../shared/toml_subset.rs"]
 mod toml_subset;
+mod vps;
 
 use std::fmt;
 use std::io::Write;
@@ -46,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 use plan::{
-    Container, SUITES, container_script, container_triple, dockerfile, host_triple, names,
+    Container, Run, SUITES, container_script, container_triple, dockerfile, host_triple, names,
     nextest_platform, nextest_version, owner, rustflags_variable, suite_commands, target_rustflags,
     toolchain_channel,
 };
@@ -247,8 +251,8 @@ fn setting(name: &str) -> Option<String> {
     }
 }
 
-/// Runs the suites in the container.
-fn run_in_container(suites: &[String], commands: &[Vec<String>]) -> Result<u8, Failure> {
+/// Runs each of `runs` in its own container, stopping at the first that fails.
+fn run_in_container(suites: &[String], runs: &[Run]) -> Result<u8, Failure> {
     let root = match std::env::current_dir().and_then(std::fs::canonicalize) {
         Ok(found) => found,
         Err(error) => {
@@ -292,7 +296,6 @@ fn run_in_container(suites: &[String], commands: &[Vec<String>]) -> Result<u8, F
     let runner = setting("RUNNER_NAME");
     let docker_names = names(&toolchain, &owner(runner.as_deref()), suites);
     build_tools_image(&docker_names.image, &docker_names.tools_image)?;
-    let script = container_script(nextest, platform, commands);
     let flags_variable = rustflags_variable(&container_triple(arch));
     let test_debug = match setting("CARGO_PROFILE_TEST_DEBUG") {
         Some(found) => found,
@@ -300,23 +303,47 @@ fn run_in_container(suites: &[String], commands: &[Vec<String>]) -> Result<u8, F
     };
     let root_text = root.display().to_string();
     let config_text = config.as_deref().map(|path| path.display().to_string());
-    let container = Container {
-        names: &docker_names,
-        root: &root_text,
-        cargo_config: config_text.as_deref(),
-        flags_variable: &flags_variable,
-        flags: &flags,
-        test_debug: &test_debug,
-        script: &script,
-    };
-    match docker()?.args(container.arguments()).status() {
-        Ok(status) => Ok(exit_code(status)),
-        Err(error) => fail(format!("docker run: {error}"), "run_in_container"),
+    for run in runs {
+        let script = container_script(nextest, platform, &run.commands);
+        let container = Container {
+            names: &docker_names,
+            root: &root_text,
+            cargo_config: config_text.as_deref(),
+            flags_variable: &flags_variable,
+            flags: &flags,
+            test_debug: &test_debug,
+            cap: run.cap.as_ref(),
+            script: &script,
+        };
+        match docker()?.args(container.arguments()).status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => return Ok(exit_code(status)),
+            Err(error) => return fail(format!("docker run: {error}"), "run_in_container"),
+        }
     }
+    Ok(0)
+}
+
+/// Measures the `bench/async` matrix under the cap the profile names.
+fn execute_vps(arguments: &[String]) -> Result<u8, Failure> {
+    if arguments.len() > 1 {
+        return fail(
+            format!(
+                "{} runs alone; a capped run beside a suite measures the suite",
+                vps::SUITE
+            ),
+            "execute_vps",
+        );
+    }
+    let profile = vps::parse(&read(Path::new(vps::PROFILE))?)?;
+    run_in_container(arguments, &vps::runs(&profile))
 }
 
 /// Runs with `arguments` and returns the exit status.
 fn execute(arguments: &[String]) -> Result<u8, Failure> {
+    if arguments.iter().any(|argument| argument == vps::SUITE) {
+        return execute_vps(arguments);
+    }
     let suites: Vec<String> = if arguments.is_empty() {
         SUITES.iter().map(|suite| (*suite).to_owned()).collect()
     } else {
@@ -328,8 +355,9 @@ fn execute(arguments: &[String]) -> Result<u8, Failure> {
         match suite_commands(suite, partition.as_deref()) {
             Some(found) => commands.extend(found),
             None => {
+                let known: Vec<&str> = SUITES.iter().copied().chain([vps::SUITE]).collect();
                 return fail(
-                    format!("unknown suite {suite} (workspace, bot-full, appcui)"),
+                    format!("unknown suite {suite} ({})", known.join(", ")),
                     "execute",
                 );
             }
@@ -338,7 +366,11 @@ fn execute(arguments: &[String]) -> Result<u8, Failure> {
     if cfg!(target_os = "linux") {
         return run_on_host(&commands);
     }
-    run_in_container(&suites, &commands)
+    let runs = [Run {
+        commands,
+        cap: None,
+    }];
+    run_in_container(&suites, &runs)
 }
 
 /// Writes a line, logging a failure to write.

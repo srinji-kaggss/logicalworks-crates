@@ -1,0 +1,80 @@
+# The 2 vCPU / 2 GB VPS profile (#269): what `linux-container-tests vps` builds,
+# the cap it runs under, and the doors it runs, in order. The binary reads this
+# file and nothing about the matrix is written in its source, so a door added
+# here is a door that runs. The records are committed beside it; vps.md reads
+# them.
+
+[build]
+# The bench is its own workspace root, built uncapped so the cap measures the
+# run and not the compile.
+manifest = "bench/async/Cargo.toml"
+# The binary the build leaves under release/ in the container's target.
+binary = "lgwks-bench-async"
+# Where each door's record is written (a door's `record` is a file name in it).
+records = "bench/async/vps"
+
+[cap]
+# Docker's spelling of the cgroup limits. The memory value is also the swap
+# value, so the container cannot swap.
+cpus = "2"
+memory = "2g"
+# The run's /tmp: tmpfs pages count against the memory cgroup, and the matrix
+# writes nothing there.
+tmpfs = "64m"
+
+# What the container reports about the cap it was given, so a record carries the
+# cap as the container read it and not as this file wrote it.
+[[report]]
+argv = ["nproc"]
+
+[[report]]
+argv = ["cat", "/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/memory.max"]
+
+# Every bench/async door the host tables report, each writing its own record.
+[[door]]
+name = "closed-loop"
+arguments = ["--rounds=15", "--alloc-report"]
+record = "results.json"
+
+[[door]]
+name = "tiers"
+arguments = ["--tiers"]
+
+[[door]]
+name = "matrix"
+arguments = ["--matrix"]
+record = "matrix.json"
+
+[[door]]
+name = "flood-split"
+arguments = ["--flood-split", "--rounds=41"]
+
+[[door]]
+name = "saturation-backpressure"
+arguments = ["--saturation", "--window=1"]
+record = "saturation-backpressure.json"
+
+[[door]]
+name = "saturation-refuse"
+arguments = ["--refusal", "--window=1"]
+record = "saturation-refuse.json"
+
+[[door]]
+name = "overload"
+arguments = [
+    "--overload",
+    "--bound=64",
+    "--knee=10000",
+    "--baseline-seconds=5",
+    "--overload-seconds=30",
+    "--recovery-seconds=90",
+]
+record = "overload.json"
+
+# Last, because its widest tier may exceed the cap: an out-of-memory kill is the
+# cap reached, and it is reported as that rather than raised.
+[[door]]
+name = "inflight"
+arguments = ["--inflight"]
+record = "inflight.json"
+may_exceed_cap = true

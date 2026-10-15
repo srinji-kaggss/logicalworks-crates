@@ -1,16 +1,18 @@
 //! The Linux leg's decisions, checked without a container: the commands it runs,
 //! the names it gives Docker, and what it reads from the machine's configuration.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::path::PathBuf;
 
 use crate::execute;
 use crate::plan::{
-    Container, SUITES, container_script, container_triple, dockerfile, host_triple, names,
-    nextest_platform, nextest_version, owner, rustflags_variable, shell_line, slug, suite_commands,
-    target_rustflags, toolchain_channel,
+    Cap, Container, Names, SUITES, container_script, container_triple, dockerfile, host_triple,
+    names, nextest_platform, nextest_version, owner, rustflags_variable, shell_line, slug,
+    suite_commands, target_rustflags, toolchain_channel,
 };
 use crate::toml_subset::{read_tables, text};
+use crate::vps;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -50,6 +52,20 @@ fn lane_command(lanes: &str, id: &str) -> Option<String> {
 /// Words as owned strings.
 fn suites(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+/// A container on the CI machine's volumes, under `cap` when there is one.
+fn container_of<'run>(layout: &'run Names, cap: Option<&'run Cap>) -> Container<'run> {
+    Container {
+        names: layout,
+        root: "/srv/lwc-ci/r9/work",
+        cargo_config: Some("/srv/cargo/config.toml"),
+        flags_variable: "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+        flags: "-C target-cpu=native",
+        test_debug: "line-tables-only",
+        cap,
+        script: "echo hello world",
+    }
 }
 
 #[test]
@@ -405,15 +421,7 @@ fn the_run_is_an_ephemeral_init_container_on_the_runners_own_volumes() {
         "MacBook-Pro-lwc-9",
         &suites(&["bot-full", "appcui"]),
     );
-    let container = Container {
-        names: &layout,
-        root: "/srv/lwc-ci/r9/work",
-        cargo_config: Some("/srv/cargo/config.toml"),
-        flags_variable: "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
-        flags: "-C target-cpu=native",
-        test_debug: "line-tables-only",
-        script: "echo hello world",
-    };
+    let container = container_of(&layout, None);
     let arguments = container.arguments();
     let joined = arguments.join(" ");
     assert_eq!(
@@ -470,7 +478,251 @@ fn an_unknown_suite_is_refused_before_anything_runs() {
     let refused = execute(&suites(&["workspace", "nonsense"]));
     assert_eq!(
         refused.err().map(|failure| failure.to_string()),
-        Some("unknown suite nonsense (workspace, bot-full, appcui)".to_owned()),
+        Some("unknown suite nonsense (workspace, bot-full, appcui, vps)".to_owned()),
         "the refusal names the suite and the ones that exist"
     );
+}
+
+/// The smallest profile the reader accepts.
+const MINIMAL: &str = "[build]\nmanifest = \"m/Cargo.toml\"\nbinary = \"b\"\nrecords = \"r\"\n\n[cap]\ncpus = \"2\"\nmemory = \"2g\"\ntmpfs = \"64m\"\n\n[[door]]\nname = \"d\"\narguments = [\"--x\"]\n";
+
+/// The profile the repository commits.
+fn committed_profile() -> Result<vps::Profile, Box<dyn Error>> {
+    Ok(vps::parse(&repo_file(vps::PROFILE)?)?)
+}
+
+/// The `--json=` records the capped run of `profile` writes, as file names.
+fn written_records(profile: &vps::Profile) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let runs = vps::runs(profile);
+    let matrix = runs.get(1).ok_or("no matrix run")?;
+    Ok(matrix
+        .commands
+        .iter()
+        .flatten()
+        .filter_map(|word| word.strip_prefix("--json="))
+        .filter_map(|path| path.rsplit('/').next())
+        .map(str::to_owned)
+        .collect())
+}
+
+#[test]
+fn the_committed_profile_builds_uncapped_and_then_measures_capped() -> TestResult {
+    // #269: the cap measures the run and not the compile, so the build is a run of
+    // its own with no limits, and the matrix is the one that carries them.
+    let runs = vps::runs(&committed_profile()?);
+    assert_eq!(runs.len(), 2, "a vps suite is a build and a matrix");
+    let (Some(build), Some(matrix)) = (runs.first(), runs.get(1)) else {
+        return Err("a vps suite is two runs".into());
+    };
+    assert_eq!(build.cap, None, "the build is uncapped");
+    assert_eq!(
+        build
+            .commands
+            .iter()
+            .map(|argv| shell_line(argv))
+            .collect::<Vec<_>>(),
+        ["cargo build --locked --release --manifest-path bench/async/Cargo.toml"],
+        "one locked release build of the bench's own manifest"
+    );
+    let cap = matrix.cap.as_ref().ok_or("the matrix run is not capped")?;
+    assert_eq!(
+        (cap.cpus.as_str(), cap.memory.as_str(), cap.tmpfs.as_str()),
+        ("2", "2g", "64m"),
+        "the profile's 2 vCPU / 2 GB cap"
+    );
+    let lines: Vec<String> = matrix
+        .commands
+        .iter()
+        .map(|argv| shell_line(argv))
+        .collect();
+    assert_eq!(
+        lines.get(..3),
+        Some(
+            &[
+                "mkdir -p bench/async/vps".to_owned(),
+                "nproc".to_owned(),
+                "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max".to_owned(),
+            ][..]
+        ),
+        "the records directory, then what the container says the cap is"
+    );
+    assert_eq!(lines.len(), 11, "three set-up commands and eight doors");
+    assert_eq!(
+        lines.get(3).map(String::as_str),
+        Some(
+            "/target/release/lgwks-bench-async --rounds=15 --alloc-report --json=bench/async/vps/results.json"
+        ),
+        "the first door runs the binary the build left in the container's target"
+    );
+    let guarded = lines
+        .iter()
+        .filter(|line| line.starts_with("sh -c "))
+        .count();
+    assert_eq!(
+        guarded, 1,
+        "only the door that may reach the cap is guarded"
+    );
+    let last = lines.last().ok_or("no commands")?;
+    assert!(
+        last.starts_with("sh -c ")
+            && last.contains(" inflight /target/release/lgwks-bench-async --inflight --json="),
+        "the in-flight tiers are the guarded door, last: {last}"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_record_the_profile_writes_is_committed_and_every_committed_record_is_written() -> TestResult
+{
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bench/async/vps");
+    let mut committed = BTreeSet::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        {
+            committed.insert(name.to_owned());
+        }
+    }
+    assert_eq!(
+        written_records(&committed_profile()?)?,
+        committed,
+        "the doors and the records on disk name the same six files"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_measuring_run_is_capped_by_cgroup_with_no_swap_and_a_small_tmpfs() {
+    let layout = names("1.99.0", "local", &suites(&["vps"]));
+    let cap = Cap {
+        cpus: "2".to_owned(),
+        memory: "2g".to_owned(),
+        tmpfs: "64m".to_owned(),
+    };
+    let capped = container_of(&layout, Some(&cap)).arguments().join(" ");
+    for expected in [
+        "--tmpfs /tmp:rw,exec,nosuid,size=64m",
+        "--cpus 2 --memory 2g --memory-swap 2g",
+    ] {
+        assert!(
+            capped.contains(expected),
+            "{expected} is missing from {capped}"
+        );
+    }
+    assert!(
+        !capped.contains("size=3g"),
+        "the cap names the tmpfs: {capped}"
+    );
+    let open = container_of(&layout, None).arguments().join(" ");
+    assert!(
+        open.contains("size=3g"),
+        "an uncapped run keeps the test tmpfs: {open}"
+    );
+    for absent in ["--cpus", "--memory"] {
+        assert!(
+            !open.contains(absent),
+            "{absent} caps only a measuring run: {open}"
+        );
+    }
+}
+
+#[test]
+fn a_profile_missing_a_part_is_refused_by_name() -> TestResult {
+    let one_of_each = format!("{MINIMAL}\n[[report]]\nargv = [\"nproc\"]\n");
+    assert!(
+        vps::parse(&one_of_each).is_ok(),
+        "the minimal profile reads"
+    );
+    let with_record = MINIMAL.replace("[[door]]", "[[door]]\nrecord = \"ok.json\"");
+    assert!(
+        vps::parse(&with_record).is_ok(),
+        "a bare record name is admitted"
+    );
+    let many = format!(
+        "{MINIMAL}{}",
+        "\n[[door]]\nname = \"d\"\narguments = [\"--x\"]\n".repeat(64)
+    );
+    for key in [
+        "manifest", "binary", "records", "cpus", "memory", "tmpfs", "name",
+    ] {
+        let refused = refusal(&without_line(MINIMAL, key));
+        let reason = format!("non-empty string `{key}`");
+        assert!(
+            refused.contains(&reason),
+            "dropping {key}: expected {reason:?}, got {refused:?}"
+        );
+    }
+    let door = "arguments = [\"--x\"]";
+    let record = "[[door]]\nrecord = ";
+    for (from, to, reason) in [
+        (door, "", "non-empty list `arguments`"),
+        (door, "arguments = []", "non-empty list `arguments`"),
+        ("[cap]\n", "", "no [cap] table"),
+        ("[build]\n", "", "no [build] table"),
+        ("[[door]]", "[[surprise]]", "unknown table [[surprise]]"),
+        (&format!("[[door]]\nname = \"d\"\n{door}\n"), "", "0 doors"),
+        (
+            "[[door]]",
+            "[[door]]\nrecord = \"../out.json\"",
+            "not a bare file name",
+        ),
+        (
+            "[[door]]",
+            "[[door]]\nrecord = \"a/b.json\"",
+            "not a bare file name",
+        ),
+        ("[[door]]", &format!("{record}\"\""), "not a bare file name"),
+        (
+            door,
+            &format!("{door}\nmay_exceed_cap = 1"),
+            "`may_exceed_cap` is 1, not true or false",
+        ),
+    ] {
+        let refused = refusal(&MINIMAL.replace(from, to));
+        assert!(
+            refused.contains(reason),
+            "{from:?} to {to:?}: expected {reason:?}, got {refused:?}"
+        );
+    }
+    let twice = format!("{MINIMAL}[cap]\ncpus = \"1\"\n");
+    assert!(
+        refusal(&twice).contains("[cap] is written twice"),
+        "a repeated table"
+    );
+    assert!(
+        refusal(&many).contains("65 doors"),
+        "one door past the bound"
+    );
+    Ok(())
+}
+
+/// `text` without the line that sets `key`.
+fn without_line(text: &str, key: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with(&format!("{key} = ")))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// Why the profile in `text` is refused, or an empty string when it is not.
+fn refusal(text: &str) -> String {
+    match vps::parse(text) {
+        Err(failure) => failure.to_string(),
+        Ok(_) => String::new(),
+    }
+}
+
+#[test]
+fn vps_runs_alone_wherever_it_is_named_and_before_any_container_work() {
+    for arguments in [["vps", "workspace"], ["workspace", "vps"]] {
+        let refused = execute(&suites(&arguments));
+        assert_eq!(
+            refused.err().map(|failure| failure.to_string()),
+            Some("vps runs alone; a capped run beside a suite measures the suite".to_owned()),
+            "{arguments:?}: a capped run beside a suite measures the suite"
+        );
+    }
 }

@@ -10,6 +10,13 @@ use crate::{Failure, fail};
 /// The suites the leg runs, in the order a bare invocation runs them.
 pub(crate) const SUITES: [&str; 3] = ["workspace", "bot-full", "appcui"];
 
+/// Where the container's build output lives: the target volume's mount, and the
+/// `CARGO_TARGET_DIR` every command inside it builds into.
+pub(crate) const CONTAINER_TARGET: &str = "/target";
+
+/// The ceiling of the container's `/tmp` tmpfs when no cap names another.
+const TMPFS: &str = "3g";
+
 /// The Debian release the image is. Its util-linux 2.41 `setpriv` applies
 /// Landlock rules, which `Confinement::Landlock` wraps (#337); bookworm's 2.38
 /// cannot, and the Landlock simulations fail there with `Unsupported`.
@@ -282,6 +289,27 @@ pub(crate) fn container_script(nextest: &str, platform: &str, commands: &[Vec<St
     lines.join("\n")
 }
 
+/// The cgroup limits a measuring run is held to, as Docker spells them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Cap {
+    /// `--cpus`: the CPU time the container may use, in CPUs.
+    pub(crate) cpus: String,
+    /// `--memory`, and `--memory-swap` to the same value, so the cap has no swap.
+    pub(crate) memory: String,
+    /// The ceiling of `/tmp`: tmpfs pages count against the memory cgroup, so a
+    /// measuring run keeps it small.
+    pub(crate) tmpfs: String,
+}
+
+/// One `docker run`: the commands it runs and the cap it runs under.
+#[derive(Debug)]
+pub(crate) struct Run {
+    /// The commands, each an argument vector.
+    pub(crate) commands: Vec<Vec<String>>,
+    /// The limits the container is held to, or `None` for an uncapped run.
+    pub(crate) cap: Option<Cap>,
+}
+
 /// What a `docker run` of the leg is made of.
 pub(crate) struct Container<'run> {
     /// The Docker object names.
@@ -296,6 +324,8 @@ pub(crate) struct Container<'run> {
     pub(crate) flags: &'run str,
     /// The debuginfo level of the test profile.
     pub(crate) test_debug: &'run str,
+    /// The limits of a measuring run; `None` leaves the container uncapped.
+    pub(crate) cap: Option<&'run Cap>,
     /// The script to run.
     pub(crate) script: &'run str,
 }
@@ -315,17 +345,33 @@ impl Container<'_> {
     /// the bytes land. Docker's tmpfs default is `noexec`; the suites execute
     /// scripts they write there (the fake `gh`), so the mount says `exec`. The
     /// size is a ceiling, not a reservation.
+    ///
+    /// A measuring run is capped by cgroup (`--cpus`, and `--memory` with
+    /// `--memory-swap` equal to it, so the container cannot swap): the build
+    /// that precedes it is not, so the cap measures the run and not the compile.
     pub(crate) fn arguments(&self) -> Vec<String> {
-        let mut arguments = words(&[
-            "run",
-            "--rm",
-            "--init",
-            "--tmpfs",
-            "/tmp:rw,exec,nosuid,size=3g",
+        let tmpfs = match self.cap {
+            Some(cap) => cap.tmpfs.as_str(),
+            None => TMPFS,
+        };
+        let mut arguments = words(&["run", "--rm", "--init"]);
+        arguments.extend([
+            "--tmpfs".to_owned(),
+            format!("/tmp:rw,exec,nosuid,size={tmpfs}"),
         ]);
+        if let Some(cap) = self.cap {
+            arguments.extend(words(&[
+                "--cpus",
+                cap.cpus.as_str(),
+                "--memory",
+                cap.memory.as_str(),
+                "--memory-swap",
+                cap.memory.as_str(),
+            ]));
+        }
         let mut volume = |mount: String| arguments.extend(["--volume".to_owned(), mount]);
         volume(format!("{}:/src", self.root));
-        volume(format!("{}:/target", self.names.target_volume));
+        volume(format!("{}:{CONTAINER_TARGET}", self.names.target_volume));
         volume("lwc-ci-linux-registry:/usr/local/cargo/registry".to_owned());
         volume("lwc-ci-linux-tools:/opt/tools".to_owned());
         volume(format!("{}:/usr/local/rustup", self.names.rustup_volume));
@@ -334,7 +380,7 @@ impl Container<'_> {
         }
         for setting in [
             format!("{}={}", self.flags_variable, self.flags),
-            "CARGO_TARGET_DIR=/target".to_owned(),
+            format!("CARGO_TARGET_DIR={CONTAINER_TARGET}"),
             "NEXTEST_TEST_THREADS".to_owned(),
             format!("CARGO_PROFILE_TEST_DEBUG={}", self.test_debug),
             "RUSTC_WORKSPACE_WRAPPER=".to_owned(),
