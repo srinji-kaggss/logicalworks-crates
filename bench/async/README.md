@@ -61,11 +61,12 @@ saturation body is a timer and its knees matched `--workers=15` exactly.
 **At a service time of 3.2 ms or more, `Supervisor` and raw Tokio admit work at
 the same offered rate at every in-flight bound from 64 to 131,072**, and past the
 knee both refuse at exactly the declared bound with the served p99 unchanged.
-The facade's cost is a **fixed per-task** cost — 3.61 allocations and a fixed
+The facade's cost is a **fixed per-task** cost — 3.46 allocations and a fixed
 amount of bookkeeping per spawn — and it is amortised away as the body lengthens
 and as the ceiling widens. The [closed-loop table](results.md) is the regime where that
 fixed cost is the whole cost (a ~1 µs body), and it is where the facade is
-1.36x–4.49x raw Tokio.
+1.02x–1.17x raw Tokio at p50 and 0.93x–1.41x at p99 (15 paired rounds, load 6.86,
+2026-10-15; the table read 1.36x–4.49x before #320 removed the 1 ms drain tick).
 
 **Memory favours the facade.** 2,039 bytes per in-flight task against the
 baseline's 2,595 at a million concurrent tasks.
