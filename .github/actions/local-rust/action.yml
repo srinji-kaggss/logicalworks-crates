@@ -181,16 +181,43 @@ runs:
     # bounds its memory to one job's temporary files and leaves nothing of the
     # previous job behind. A machine where the disk cannot be made keeps its
     # temporary files on disk, with a warning naming the cost.
+    #
+    # The detach runs beside the job, not before it. Thirteen jobs start at once
+    # and each used to eject the volume its instance's last job left; the ejects
+    # queue behind one another, and thirteen at once took 20-29 s each on this
+    # machine against 2.7 s to create a volume (the step read 9.4 s and 14.2 s in
+    # runs 38814432873 and 38812907766, the longest step of the first minute). A
+    # job's volume therefore carries a label of its own (run, attempt and this
+    # shell's pid): it never shares a name with a volume being detached, so its
+    # mount point is known. The earlier volumes, and the unsuffixed one earlier
+    # versions of this step made, are detached in the background: thirteen jobs
+    # started together waited 3.5-5.6 s for their own volumes while the detaches
+    # took 26-30 s beside them. Until a detach ends an instance holds the old
+    # volume's written pages beside the new volume's, so the bound is two
+    # volumes per instance for that window; a volume a detach could not remove is
+    # named again in the next job's log.
     - name: Temporary files on a RAM disk
       shell: bash
       run: |
         set -euo pipefail
         owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
-        label="lwc-tmp-${owner}"
-        # Ejecting the volume detaches its APFS container and the RAM store
-        # beneath it, which is what returns the memory.
-        if [ -d "/Volumes/${label}" ]; then
-          diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
+        label="lwc-tmp-${owner}@${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+        left=()
+        for old in "/Volumes/lwc-tmp-${owner}" "/Volumes/lwc-tmp-${owner}@"*; do
+          if [ -d "${old}" ]; then
+            left+=("${old}")
+          fi
+        done
+        if [ "${#left[@]}" -gt 0 ]; then
+          echo "detaching ${#left[@]} volume(s) an earlier job left: ${left[*]}"
+          # Ejecting a volume detaches its APFS container and the RAM store
+          # beneath it, which is what returns the memory.
+          (
+            for old in "${left[@]}"; do
+              diskutil eject force "${old}" || true
+            done
+          ) < /dev/null > /dev/null 2>&1 &
+          disown
         fi
         tmp=""
         if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
@@ -225,7 +252,9 @@ runs:
       run: |
         set -euo pipefail
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
-        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        shopt -s nullglob
+        instances=("${root}"/r[0-9]*/)
+        runners="${#instances[@]}"
         cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
         threads=$(( ${{ inputs.test-share }} * cores / (runners > 0 ? runners : 1) ))
         threads=$(( threads > 1 ? threads : 2 ))
@@ -239,7 +268,9 @@ runs:
       run: |
         set -euo pipefail
         root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
-        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+        shopt -s nullglob
+        instances=("${root}"/r[0-9]*/)
+        runners="${#instances[@]}"
         cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
         slots=$(( ${{ inputs.build-share }} * cores / (runners > 0 ? runners : 1) ))
         slots=$(( slots > 0 ? slots : 1 ))
@@ -266,16 +297,20 @@ runs:
         # say) can print the same version while ignoring rust-toolchain.toml and
         # carrying no cross-target std. The rustc on PATH must be the one rustup
         # resolves for this checkout.
-        pinned="$(dirname "$(dirname "$(rustup which rustc)")")"
+        pinned="$(rustup which rustc)"
+        pinned="${pinned%/*/*}"
         sysroot="$(rustc --print sysroot)"
         if [ "${sysroot}" != "${pinned}" ]; then
           echo "::error::rustc on PATH ($(command -v rustc), sysroot ${sysroot}) is not rustup's ${pinned}"
           exit 1
         fi
+    # The binary cargo would run for `cargo nextest`, called directly: through
+    # cargo that is four process starts (cargo, rustup's proxy, the toolchain's
+    # cargo, then nextest), and on a thirteen-job start each of them waits.
     - name: nextest is installed
       if: inputs.nextest == 'true'
       shell: bash
-      run: cargo nextest --version
+      run: cargo-nextest nextest --version
     # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
     # directory. rustc deletes its own when it finishes, so a cancelled or
     # timed-out job leaves the rest, and nothing else ever removes them: on
