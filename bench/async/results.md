@@ -5,31 +5,48 @@ The scenario table, every §3 matrix row with its receipt, and the committed rec
 ## Results — the closed-loop scenario table
 
 Apple M5 Pro, macOS 27.0, rustc 1.99.0, `opt-level=3`, `lto=true`,
-`codegen-units=1`. **15 paired rounds, load average 9.33.** One host, one run.
+`codegen-units=1`, at `origin/main` 22f1d526 (2026-10-15). **15 paired rounds,
+load average 6.86, no CI run live.** One host, one run.
 
-| scenario | tasks | bound | facade p50 | facade p99 | base p50 | base p99 | ratio | 95% CI (paired) |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| quiet-async-bot | 256 | 8 | 1.692 ms | 1.859 ms | 0.377 ms | 0.771 ms | 4.49x | [2.41, 5.03] distinguishes |
-| high-fanout | 2048 | 32 | 4.041 ms | 4.689 ms | 2.646 ms | 2.910 ms | 1.53x | [1.44, 1.58] distinguishes |
-| at-capacity | 512 | 4 | 2.891 ms | 3.886 ms | 1.486 ms | 1.918 ms | 1.95x | [1.86, 2.31] distinguishes |
-| single-permit | 512 | 1 | 6.560 ms | 8.415 ms | 4.820 ms | 6.806 ms | 1.36x | [1.25, 1.40] distinguishes |
+```sh
+cargo build --release --locked --manifest-path bench/async/Cargo.toml
+bench/async/target/release/lgwks-bench-async --rounds=15 --alloc-report --json=bench/async/results.json
+```
+
+| scenario | tasks | bound | facade p50 | facade p99 | base p50 | base p99 | p50 ratio | p99 ratio | 95% CI (paired, p50) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| quiet-async-bot | 256 | 8 | 0.412 ms | 0.565 ms | 0.352 ms | 0.400 ms | 1.17x | 1.41x | [1.09, 1.24] distinguishes |
+| high-fanout | 2048 | 32 | 2.260 ms | 2.452 ms | 2.212 ms | 2.395 ms | 1.02x | 1.02x | [0.97, 1.06] spans parity |
+| at-capacity | 512 | 4 | 1.182 ms | 1.529 ms | 1.116 ms | 1.402 ms | 1.06x | 1.09x | [1.04, 1.13] distinguishes |
+| single-permit | 512 | 1 | 3.848 ms | 4.019 ms | 3.600 ms | 4.339 ms | 1.07x | 0.93x | [1.06, 1.08] distinguishes |
+
+The p99 target of ≤ 2x raw Tokio holds on every row. A second run of the same
+binary a minute later (it wrote no record) read p50 1.26x / 1.00x / 1.15x / 1.06x
+and p99 1.05x / 1.01x / 1.12x / 1.05x, so the run-to-run spread on this host is
+about 0.1x at p50.
 
 Bare synchronous floor (no scheduler): 7 µs for 4,096 counter bumps. It is a
 reference line and is **never** multiplied into the ratio above.
 
-Peak RSS for the whole process: **3,850,240 bytes**.
+Peak RSS for the whole process: **4,308,992 bytes** (`/usr/bin/time -l`, maximum
+resident set size, on that second run; peak memory footprint 2,621,800 bytes).
 
 Allocation model, 1,024 tasks at bound 8, counted in a window separate from every
-timed round: facade **3,798 allocations / 977,528 bytes (3.71 per task)**, baseline
-2,064 / 320,800 (2.02 per task).
+timed round: facade **3,544 allocations / 933,352 bytes (3.46 per task)**, baseline
+2,066 / 320,992 (2.02 per task).
 
-**The spread is itself a result and is not smoothed away.** `quiet-async-bot`
-(4.49x) is the smallest workload, where the facade's fixed per-spawn work
-dominates; `high-fanout` (1.53x) amortizes it over 2,048 tasks. `single-permit`
-is the row to watch: with one permit there is no concurrency for the facade to
-account for, so what remains is per-task bookkeeping competing with scheduler
-jitter of comparable size, and it sits at 1.36x with a 95% interval that
-distinguishes parity on every run here.
+**The closed-loop table used to read 1.36x–4.49x, and the reason it no longer
+does is the finding.** The drain polled `reap()` behind a `tokio::time::sleep`,
+so every drain paid Tokio's 1 ms timer granularity, which #320's commit message
+names as the whole of the 3–5x gap. A fixed cost per drain weighs most on the
+smallest workload: `quiet-async-bot` (a ~0.35 ms baseline) read 4.49x and
+`high-fanout` (a ~2.2 ms baseline) 1.53x. `Supervisor::wait_idle` joins on the
+`JoinSet` wakeup instead (#320, `b1b1a3434`), and the same four scenarios now sit
+at 1.02x–1.17x at p50. What remains on `quiet-async-bot` is the per-task
+bookkeeping, itemised with its guarantee in [allocations.md](allocations.md).
+`single-permit`'s p99 read below its baseline's on the committed run (0.93x) and
+above it on the second (1.05x). The paired interval is on p50 only, so each p99
+figure is a point reading, not an interval.
 
 ## The §3 workload matrix — every row, with its receipt
 

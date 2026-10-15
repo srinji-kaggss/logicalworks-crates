@@ -25,7 +25,8 @@ unchanged harness. **BEFORE** is `origin/main`'s `cancel.rs` and `supervise.rs`;
 | one `run_until_cancelled` race | 13.00 | 3.00 |
 | one `Supervisor::new(4096)` | 15.00 | 5.00 |
 
-**The issue's allocation target (≤ 6 per task) is met: 3.61, from 15.33.**
+**The issue's allocation target (≤ 6 per task) is met: 3.61, from 15.33** (3.46
+on `origin/main` 22f1d526, 2026-10-15, after #320: [results.md](results.md)).
 Four changes, each measured on its own:
 
 1. **`Inner`'s signal channel is built on first use** (`OnceLock`), not in the
@@ -60,13 +61,15 @@ runtime hands tasks out of a per-worker slab and never returns to the allocator.
 That is why the raw wave's 2.02 is the semaphore permit, the baseline's own
 cancellation child and its body — not the spawn.
 
-### The latency target was NOT met, and the reason is the finding
+### The latency target was not met by this change, and the reason is the finding
 
-The issue also asks for **≤ 2x the baseline at p99 on every scenario**. That is
-**not met** — `quiet-async-bot` is 4.49x (see [the scenario table](results.md)). And the finding
-is that the two targets are not the same target: **removing 76% of the
-allocations moved the allocation count exactly as predicted and moved the paired
-latency ratios not at all.** Measured paired, four rounds each, same harness:
+The issue also asks for **≤ 2x the baseline at p99 on every scenario**. This
+change did not meet it — `quiet-async-bot` read 4.49x — and it is met now: #320
+removed the cause, and [the scenario table](results.md) reads 0.93x–1.41x at p99.
+The finding stands as the record of why: the two targets are not the same target:
+**removing 76% of the allocations moved the allocation count exactly as predicted
+and moved the paired latency ratios not at all.** Measured paired, four rounds
+each, same harness:
 
 | scenario | ratio before | ratio after |
 |---|---:|---:|
@@ -77,7 +80,9 @@ latency ratios not at all.** Measured paired, four rounds each, same harness:
 
 (The three rounds that overlapped with a load of 50+ are excluded from the
 `quiet-async-bot` after column's reading as noise; the harness printed the load
-for exactly this reason.) **The remaining gap is work, not allocation**, and the
-work is the per-spawn reap, the identity map, the `TaskOutcome` the wrapper builds
-and the reporting layer. Closing it is a different change from the one this issue
-names, and it is not made here.
+for exactly this reason.) **The remaining gap was work, not allocation.** This
+section first named the per-spawn reap, the identity map, the `TaskOutcome` the
+wrapper builds and the reporting layer; the measurement that followed found it
+elsewhere: the drain polled `reap()` behind a `tokio::time::sleep` and paid
+Tokio's 1 ms timer granularity on every drain. `Supervisor::wait_idle` now joins
+on the `JoinSet` wakeup (#320, `b1b1a3434`), which is the change that closed it.
