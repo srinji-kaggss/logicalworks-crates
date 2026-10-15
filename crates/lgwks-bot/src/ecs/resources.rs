@@ -10,7 +10,8 @@ use std::time::Duration;
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
 use lgwks_deps::bevy_ecs::{
     self,
-    prelude::{Component, Entity, Resource, World},
+    prelude::{Changed, Component, Entity, Resource, World},
+    query::QueryState,
 };
 
 use crate::error::BotError;
@@ -171,6 +172,14 @@ pub(super) struct AdmitScratch {
     pub(super) kinds: Vec<AdmitKind>,
     /// The admitted-input identity each binding takes, `None` where it binds none.
     pub(super) inputs: Vec<Option<AdmittedInput>>,
+    /// The `Changed<Revision>` query, built on the first tick and kept.
+    ///
+    /// `World::query_filtered` builds a `QueryState` each call — its access
+    /// sets, its archetype matches and the allocations behind both — and the
+    /// decision pass asked for one on every tick, quiet or not. The state holds
+    /// no tick of its own: the change ticks a run compares against come from the
+    /// world, so a kept state answers exactly what a fresh one would.
+    pub(super) movers: Option<QueryState<&'static SourceId, Changed<Revision>>>,
 }
 
 /// The decision pass's scratch, taken out whole so the walk can read and write it

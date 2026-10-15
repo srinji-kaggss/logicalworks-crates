@@ -359,6 +359,7 @@ pub(super) fn fire_plan(world: &mut World) {
         ref mut moving,
         ref mut kinds,
         ref mut inputs,
+        ref mut movers,
     } = scratch;
 
     // Which chains moved, and whether each newest observation is admitted over
@@ -368,12 +369,16 @@ pub(super) fn fire_plan(world: &mut World) {
     #[cfg(feature = "profile")]
     let compare_charge = Charge::new(TickStage::Compare);
     {
-        let mut query = world.query_filtered::<&SourceId, Changed<Revision>>();
+        let mut query = match movers.take() {
+            Some(query) => query,
+            None => world.query_filtered::<&SourceId, Changed<Revision>>(),
+        };
         for id in query.iter(world) {
             if let Some(flag) = moving.get_mut(id.chain) {
                 *flag = true;
             }
         }
+        *movers = Some(query);
     }
     plan_admissions(world, moving, kinds);
     #[cfg(feature = "profile")]
@@ -392,6 +397,13 @@ pub(super) fn fire_plan(world: &mut World) {
     #[cfg(feature = "profile")]
     let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
+        // Idle is "no transition held and the source did not move", which
+        // `plan_admissions` decided a moment ago: taking the slot would take
+        // nothing and `resume` would hand nothing back, so an idle chain cost a
+        // lookup of the ledger it never used.
+        if matches!(kinds.get(index), Some(AdmitKind::Idle)) {
+            continue;
+        }
         let held = world.non_send_mut::<Ledger>().take(index);
         let admit = Admit::bind(
             // A chain the compare pass did not reach is idle, which is the same

@@ -57,22 +57,23 @@ impl EcsBot {
         for chain in 0..failures.len() {
             // `steps` is in `(chain, entry)` walk order, so the steps of `chain`
             // are the run at `start` — and a chain that recorded none contributes
-            // the empty run: its first step is a later chain's, `position` finds
-            // it at offset 0, and `end == start`.
+            // the empty run, because its first step is a later chain's.
             let end = match steps[start..].iter().position(|step| step.chain != chain) {
                 Some(offset) => start.saturating_add(offset),
                 None => steps.len(),
             };
-            let run = &steps[start..end];
+            let run = match steps.get(start) {
+                Some(step) if step.chain == chain => &steps[start..end],
+                _ => &[],
+            };
 
             // Taken, so the condition failure belongs to the chain it was recorded
             // for and cannot be reported for a chain that never reached it.
             let condition_failure = failures.get_mut(chain).and_then(Option::take);
-            // A chain with no step and no failure has nothing to apply or
-            // report, and `run_chain` would answer `(0, None)` for it. Skipped
-            // rather than awaited, because building and polling that future —
-            // a state machine sized for every await in the walk — is what a
-            // quiet tick paid per chain in the act stage (#279).
+            // A chain with no step and no condition failure has nothing to run
+            // and nothing to report: `run_chain` over it returns `(0, None)`, so
+            // building and awaiting its future for every quiet chain of every
+            // quiet tick was the whole cost of a tick that selected nothing.
             if run.is_empty() && condition_failure.is_none() {
                 start = end;
                 continue;

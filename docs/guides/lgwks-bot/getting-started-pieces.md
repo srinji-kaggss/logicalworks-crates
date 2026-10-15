@@ -42,7 +42,7 @@ thread the runtime is driving.
 ## Inspecting a bot
 
 Four accessors exist for tests and instrumentation, all read-only
-(`crates/lgwks-bot/src/ecs/fold.rs:491`):
+(`crates/lgwks-bot/src/ecs/bot.rs:275`):
 
 | Method | Returns |
 |---|---|

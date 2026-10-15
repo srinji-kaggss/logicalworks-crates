@@ -48,7 +48,7 @@ chunking.
 
 `lgwks_std::task::spawn_blocking` runs a closure on a process-wide blocking
 pool and returns a future for its result
-(`crates/lgwks-std/src/task.rs:419`). At most 512 pool threads run at once;
+(`crates/lgwks-std/src/task/blocking.rs:155`). At most 512 pool threads run at once;
 a job submitted while all of them are busy waits its turn, and a thread with
 no work for ten seconds exits, so an idle process holds none. Jobs that wait
 on each other must number fewer than the ceiling, or the waiters hold every
@@ -85,7 +85,7 @@ being idle, not a way to cancel a running closure.
 
 The tick still bounds its own fan-out on both adapters, because the wave loop
 lives in the `observe_fold` system rather than in either entry point.
-`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs/resources.rs:647`), and
+`MAX_IN_FLIGHT_POLLS` is 32 (`crates/lgwks-bot/src/ecs/watchdog.rs:39`), and
 `observe_fold` polls sources in waves of that size. Chains beyond 32 are polled
 in additional waves, so the cap holds regardless of how many chains a spec
 declares.

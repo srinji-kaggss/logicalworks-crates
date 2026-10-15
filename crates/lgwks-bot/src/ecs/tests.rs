@@ -619,7 +619,12 @@ mod test_part_03;
 /// unpolled fails here on every run.
 #[test]
 fn an_expired_wave_still_reads_a_source_ready_on_its_next_turn() -> TestResult {
-    let deadline = Duration::from_millis(1);
+    // Long enough that no host schedules the two first turns past it, so the
+    // wave is live for both; a 1 ms deadline let a loaded host fire the reaper
+    // before the first turn finished and stall it (run 38438866216, CI
+    // `Tests (Linux container) (workspace)`). The expiry below is written, not
+    // waited for, so no clock decides the interleaving.
+    let deadline = Duration::from_secs(60);
     let watchdog = PollWatchdog::new(deadline, 2);
     let clock = Clock::wall();
     let armed = AtomicBool::new(false);
@@ -664,6 +669,16 @@ fn an_expired_wave_still_reads_a_source_ready_on_its_next_turn() -> TestResult {
         armed.load(Ordering::Relaxed),
         "a wave with a pending poll starts its reaper"
     );
+    {
+        // What the reaper writes when the deadline passes, then the wake it
+        // would send: the live reaper sees `expired` and returns.
+        let mut state = crate::journal::owner::lock(&watchdog.state);
+        state.expired = true;
+        // Also released, so a reaper that has not yet reached its wait returns
+        // at the top of its loop rather than sleeping out the 60 s budget.
+        state.released = true;
+        watchdog.settled.notify_all();
+    }
     watchdog.join();
     assert!(
         watchdog.expired(),

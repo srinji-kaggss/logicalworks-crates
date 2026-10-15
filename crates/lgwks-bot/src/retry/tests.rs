@@ -179,6 +179,32 @@ fn one_attempt_policy_exhausts_after_the_first() {
     );
 }
 
+/// `max_attempts` is a public field, so a literal `0` reaches this check
+/// without `RetryPolicy::new`'s floor. It is read as one attempt, the floor
+/// std's own `may_retry` applies, never as an unbounded budget or as one that
+/// refuses the first attempt; the refusal names the floored bound (#444
+/// review, carried to the #424 stack that superseded it).
+#[test]
+fn a_zero_attempt_policy_is_read_as_one_attempt() {
+    let mut policy = policy();
+    policy.max_attempts = 0;
+    let at = |attempts_used| {
+        retry_admissible(&RetryFacts {
+            policy,
+            attempts_used,
+            ..permissive(RetryClass::Safe)
+        })
+    };
+    assert_eq!(at(0), RetryDecision::Safe);
+    assert_eq!(
+        at(1),
+        RetryDecision::Refused(vec![RetryRefusal::BudgetExhausted {
+            attempts_used: 1,
+            max_attempts: 1,
+        }])
+    );
+}
+
 #[test]
 fn absent_authority_refuses() {
     let mut facts = permissive(RetryClass::Safe);
