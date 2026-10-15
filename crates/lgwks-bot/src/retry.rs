@@ -559,4 +559,8 @@ pub fn retry_admissible(facts: &RetryFacts) -> RetryDecision {
 }
 
 #[cfg(test)]
+#[path = "sim_retry.rs"]
+mod sim_retry;
+
+#[cfg(test)]
 mod tests;

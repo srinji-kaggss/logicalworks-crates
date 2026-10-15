@@ -27,14 +27,14 @@ pub(crate) const CRATES_IO_INDEX: &str = "registry+https://github.com/rust-lang/
 pub(crate) const CRATES_IO_SPARSE: &str = "sparse+https://index.crates.io/";
 
 /// Whether `detail` names the crates.io registry through either Cargo spelling.
-fn is_crates_io(detail: &str) -> bool {
+pub(crate) fn is_crates_io(detail: &str) -> bool {
     detail == CRATES_IO_INDEX
         || detail == CRATES_IO_SPARSE
         || detail == "sparse+https://index.crates.io"
 }
 
 /// The repository portion of a Cargo Git source, before any revision policy.
-fn git_repository(detail: &str) -> &str {
+pub(crate) fn git_repository(detail: &str) -> &str {
     match detail.find(['?', '#']) {
         Some(index) => &detail[..index],
         None => detail,
@@ -43,7 +43,7 @@ fn git_repository(detail: &str) -> &str {
 
 /// The revision/reference policy of a Cargo Git source: the `?rev=…`/`?branch=…`
 /// query and the `#…` resolved-revision fragment, or empty when none is pinned.
-fn git_policy(detail: &str) -> &str {
+pub(crate) fn git_policy(detail: &str) -> &str {
     match detail.find(['?', '#']) {
         Some(index) => &detail[index..],
         None => "",
@@ -57,7 +57,7 @@ fn git_policy(detail: &str) -> &str {
 /// admitted revision/reference policy, so pinning a different revision inside
 /// the approved repository is still a drift. Path identity is the whole
 /// authority string.
-fn same_origin(approved: &str, observed: &str) -> bool {
+pub(crate) fn same_origin(approved: &str, observed: &str) -> bool {
     if approved == observed {
         return true;
     }
@@ -141,7 +141,7 @@ fn optionality_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
 /// unconditionally, which is a fact about the *text* a reader sees rather than a
 /// value substituted for a missing scope: an authored `target = ""` says the
 /// same thing as no `target` key, and both print `<none>`.
-fn scope_label(scope: Option<&str>) -> &str {
+pub(crate) fn scope_label(scope: Option<&str>) -> &str {
     match scope {
         Some(scope) if !scope.is_empty() => scope,
         _ => "<none>",

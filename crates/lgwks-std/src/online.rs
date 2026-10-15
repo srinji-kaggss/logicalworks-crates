@@ -27,10 +27,37 @@ const MAX_PROBE_ADDRESSES: usize = 64;
 /// one monotonic timeout. DNS failures, refused connections, and timeouts all
 /// report false.
 pub fn probe(addr: impl ToSocketAddrs, timeout: Duration) -> bool {
+    let origin = Instant::now();
+    probe_with_clock(
+        addr,
+        timeout,
+        || origin.elapsed(),
+        |candidate, remaining| TcpStream::connect_timeout(candidate, remaining).is_ok(),
+    )
+}
+
+/// [`probe`] with its clock and its dial injected.
+///
+/// `now` reads time since an arbitrary origin. The budget starts from the
+/// reading taken *after* resolution returns, which is what puts a slow
+/// resolver outside the connection budget; the tests drive `now` from a
+/// simulated clock the resolver itself advances.
+fn probe_with_clock(
+    addr: impl ToSocketAddrs,
+    timeout: Duration,
+    mut now: impl FnMut() -> Duration,
+    connect: impl FnMut(&SocketAddr, Duration) -> bool,
+) -> bool {
     let Ok(addrs) = addr.to_socket_addrs() else {
         return false;
     };
-    probe_candidates(addrs.take(MAX_PROBE_ADDRESSES), timeout)
+    let started = now();
+    probe_candidates_with(
+        addrs.take(MAX_PROBE_ADDRESSES),
+        timeout,
+        || now().saturating_sub(started),
+        connect,
+    )
 }
 
 /// Probe a caller-resolved address slice under one total monotonic budget.
@@ -141,6 +168,11 @@ pub fn is_online(timeout: Duration) -> bool {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+/// The seeded simulation of the shared budget, against a reference model.
+#[cfg(test)]
+#[path = "sim_online_budget.rs"]
+mod sim_online_budget;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,10 +184,9 @@ mod tests {
     // reports its own `Debug` on failure, which is the same report `.unwrap`
     // would have panicked with, without an `unwrap` in the tree.
     //
-    // A dial that has to wait out its share parks rather than sleeps: this
-    // crate forbids `std::thread::sleep`, and `park_timeout` is the sanctioned
-    // synchronous wait. Each test only ever asserts that *at least* the share
-    // elapsed, so an unpark that returns early cannot make one pass.
+    // No test here waits on the wall clock: every budget is driven through a
+    // simulated clock, so the arithmetic is checked exactly rather than
+    // against however long a loaded host takes to wake a thread.
     #[test]
     fn open_port_probes_true() -> Result<(), std::io::Error> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -274,23 +305,49 @@ mod tests {
     }
 
     /// A deliberately slow resolver demonstrates the documented boundary:
-    /// its synchronous work is outside the socket timeout.
+    /// its synchronous work is outside the socket timeout. The resolver spends
+    /// 80 ms of a simulated clock, and the one candidate is still offered the
+    /// whole 10 ms budget rather than none of it.
     #[test]
     fn resolver_delay_is_outside_the_connection_budget() {
-        struct SlowResolver;
+        /// A resolver that advances the simulated clock before it answers.
+        struct SlowResolver<'clock> {
+            /// The simulated clock the probe reads.
+            clock: &'clock std::cell::Cell<Duration>,
+        }
 
-        impl ToSocketAddrs for SlowResolver {
+        impl ToSocketAddrs for SlowResolver<'_> {
             type Iter = std::vec::IntoIter<SocketAddr>;
 
             fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-                std::thread::park_timeout(Duration::from_millis(80));
-                Ok(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 9))].into_iter())
+                self.clock
+                    .set(self.clock.get().saturating_add(Duration::from_millis(80)));
+                Ok(vec![SocketAddr::from((Ipv4Addr::new(192, 0, 2, 9), 9))].into_iter())
             }
         }
 
-        let started = Instant::now();
-        assert!(!probe(SlowResolver, Duration::from_millis(10)));
-        assert!(started.elapsed() >= Duration::from_millis(80));
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut offered = Vec::new();
+        let reachable = probe_with_clock(
+            SlowResolver { clock: &clock },
+            Duration::from_millis(10),
+            || clock.get(),
+            |_, share| {
+                offered.push(share);
+                false
+            },
+        );
+        assert!(!reachable, "the one candidate refused");
+        assert_eq!(
+            offered,
+            [Duration::from_millis(10)],
+            "the resolver's 80 ms is not charged to the 10 ms connection budget"
+        );
+        assert_eq!(
+            clock.get(),
+            Duration::from_millis(80),
+            "the resolver did spend its time"
+        );
     }
 
     /// A whole multi-candidate failure is bounded by one budget: four

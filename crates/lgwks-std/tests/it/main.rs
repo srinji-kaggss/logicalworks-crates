@@ -50,6 +50,8 @@ mod sim_hex;
 mod sim_http;
 mod sim_id;
 mod sim_join_all;
+#[cfg(feature = "json")]
+mod sim_json;
 mod sim_kernel_owners;
 mod sim_leb128;
 mod sim_locale;
@@ -59,6 +61,8 @@ mod sim_pattern;
 mod sim_process_group;
 mod sim_random_error;
 mod sim_retry_arithmetic;
+#[cfg(feature = "ron")]
+mod sim_ron;
 mod sim_seeded;
 mod sim_shared_policy_tiers;
 mod sim_sign;
@@ -66,6 +70,8 @@ mod sim_similarity_sweep;
 mod sim_task_public;
 mod sim_tenant_isolation;
 mod sim_time_profile;
+#[cfg(feature = "trace")]
+mod sim_trace;
 mod sim_wire;
 mod similarity_evidence_contract;
 mod similarity_public_api;

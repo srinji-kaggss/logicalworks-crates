@@ -39,6 +39,7 @@ mod sim_dependency_policy;
 mod sim_invariant_register;
 mod sim_license_policy;
 mod sim_lock_spellings;
+mod sim_lockfile;
 mod sim_metadata_dimensions;
 mod sim_origin;
 mod sim_policy_properties;

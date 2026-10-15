@@ -263,7 +263,7 @@ pub enum Refusal {
 /// This refusal exists only for an authored dimension, so the printed bit is
 /// always one the register carries; the absent arm names that rather than
 /// printing a `true` or `false` the register never wrote.
-fn bit_label(bit: Option<bool>) -> &'static str {
+pub(crate) fn bit_label(bit: Option<bool>) -> &'static str {
     match bit {
         Some(true) => "true",
         Some(false) => "false",

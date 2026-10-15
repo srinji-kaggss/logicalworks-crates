@@ -89,6 +89,9 @@ mod audit;
 mod overrides;
 /// What the gate refuses and why it could not reach a verdict.
 mod refusal;
+/// The origin and label predicates, model-checked against a reference.
+#[cfg(test)]
+mod sim_edge;
 
 pub use audit::{audit_direct, declared_scope};
 pub use refusal::{GateError, Refusal};

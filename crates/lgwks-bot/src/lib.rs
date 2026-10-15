@@ -359,6 +359,20 @@ pub mod script;
 pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
 pub mod session;
+/// The error vocabulary's escaping and retry-class promises, simulated; declared
+/// here because `error.rs` is past the size law.
+#[cfg(test)]
+mod sim_error;
+/// The lexicon resolver's verdicts, simulated; declared here beside the other
+/// in-crate simulations.
+#[cfg(test)]
+mod sim_language;
+/// The semantic tier behind the lexicon, simulated with a scripted embedder.
+#[cfg(test)]
+mod sim_semantic;
+/// The seeded draw stream the in-module simulations share.
+#[cfg(test)]
+mod sim_stream;
 /// Cross-host time: monotonic deadlines, wall timestamps, and the skew bound.
 ///
 /// [`SkewBound`](crate::skew::SkewBound) is how far two honest clocks may disagree;

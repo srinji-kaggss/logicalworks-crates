@@ -94,3 +94,6 @@ mod tests;
 
 #[cfg(test)]
 mod lexicon_docs;
+
+#[cfg(test)]
+mod sim_emit;

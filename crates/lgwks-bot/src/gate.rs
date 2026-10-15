@@ -204,6 +204,10 @@ impl GrantSet {
 }
 
 #[cfg(test)]
+#[path = "sim_gate.rs"]
+mod sim_gate;
+
+#[cfg(test)]
 mod tests {
     use super::GrantSet;
     use crate::cap::{Cap, Demand};
