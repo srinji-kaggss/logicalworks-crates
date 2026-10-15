@@ -44,7 +44,7 @@ script = ["rt", "time", "sync", "macros", "dep:lgwks_macros", "dep:lgwks_ast", "
 # file needs `AsyncRead` without any of the drivers, and it is the module that
 # makes `net`, `process`, and `fs` composable with each other.
 io = ["rt", "lgwks_deps/tokio-io"]
-net = ["io", "lgwks_deps/tokio-net"]
+net = ["io", "lgwks_deps/tokio-net", "lgwks_std/random"]
 # `sync` is implied because the only way this crate runs a command is
 # `Supervisor::spawn_process`: `Command` describes, and the supervisor is what
 # starts it. A `process` build without `sync` would expose the description and
