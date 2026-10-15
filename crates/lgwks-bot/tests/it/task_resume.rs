@@ -622,16 +622,16 @@ fn the_store_is_opened_at_installation_not_at_the_first_step() -> TestResult {
     Ok(())
 }
 
-/// The environment variable that gates the concurrent-run tier measurement.
+/// The environment variable that extends the concurrent-run measurement past its
+/// first tier.
 ///
 /// Ten thousand `sync_all`-ed appends is several minutes: the right cost for a
-/// measurement, the wrong cost for every ordinary test run. The test is therefore
-/// `#[ignore]`d and reports itself as **skipped**, never as a bound nobody
-/// checked. The scale lane runs it explicitly:
+/// measurement, the wrong cost for every ordinary test run. Every run therefore
+/// drives the hundred-run tier, and the scale lane sets this to drive all three:
 ///
 /// ```text
-/// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral --release \
-///     --test it task_resume::concurrent_runs_across_tiers -- --ignored --nocapture
+/// LGWKS_RESUME_SCALE=1 cargo nextest run --locked -p lgwks_bot --features script,ephemeral \
+///     --release --test it --no-capture -E 'test(task_resume::concurrent_runs_across_tiers)'
 /// ```
 ///
 /// Measured on the machine that recorded it, over all three tiers including the
@@ -669,27 +669,17 @@ const SCALE_TIERS: [usize; 3] = [100, 1_000, 10_000];
 /// the question this asks of the store is whether that ordering holds under load,
 /// not whether the file system can take it.
 ///
-/// The measurement is opt-in for the same reason the ten-thousand-run resident set
-/// was: it is minutes of real `fsync`s, which is the right cost for a measurement
-/// and the wrong cost for every ordinary run. It is `#[ignore]`d rather than
-/// silently skipped, and it prints what it measured rather than only asserting a
-/// bound.
-///
-/// ```text
-/// LGWKS_RESUME_SCALE=1 cargo test -p lgwks_bot --features script,ephemeral \
-///     --test it task_resume::concurrent_runs_across_tiers -- --ignored --nocapture
-/// ```
+/// Every run drives the first tier with every assertion; the two larger tiers
+/// are minutes of real `fsync`s and run when [`SCALE_ENV`] is set. Each tier
+/// prints what it measured rather than only asserting a bound, so the output
+/// shows which tiers ran.
 #[test]
-#[ignore = "the concurrent-run scale measurement; run it with \
-            LGWKS_RESUME_SCALE=1 and --ignored"]
 fn concurrent_runs_across_tiers() -> TestResult {
-    if std::env::var_os(SCALE_ENV).is_none() {
-        return Err(format!(
-            "{SCALE_ENV} is not set, so the tier measurement did not run; set it to measure"
-        )
-        .into());
-    }
-    for tier in SCALE_TIERS {
+    let tiers = match std::env::var_os(SCALE_ENV) {
+        Some(_) => &SCALE_TIERS[..],
+        None => &SCALE_TIERS[..1],
+    };
+    for &tier in tiers {
         measure_tier(tier)?;
     }
     Ok(())
