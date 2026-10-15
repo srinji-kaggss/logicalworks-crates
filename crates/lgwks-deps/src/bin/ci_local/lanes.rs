@@ -262,12 +262,39 @@ pub(super) fn child_env(scratch: Option<&Path>, target: Option<&Path>) -> BTreeM
     child_env_from(vars, scratch, target)
 }
 
+/// What Cargo sets, by exact name, for the crate it runs: the Cargo Book's
+/// "Environment variables Cargo sets for crates". `CARGO` is not listed: Cargo
+/// forwards it so that a nested `cargo` finds the one that is running.
+const CRATE_NAMES: [&str; 4] = [
+    "CARGO_CRATE_NAME",
+    "CARGO_BIN_NAME",
+    "CARGO_PRIMARY_PACKAGE",
+    "CARGO_TARGET_TMPDIR",
+];
+
+/// The families of those variables, one per manifest field or binary. A bare
+/// `CARGO_TARGET_` is not here: `CARGO_TARGET_DIR` and the per-triple linker and
+/// runner variables are configuration, and a lane keeps configuration.
+const CRATE_PREFIXES: [&str; 3] = ["CARGO_PKG_", "CARGO_MANIFEST_", "CARGO_BIN_EXE_"];
+
+/// Whether `name` describes the crate Cargo launched `ci-local` for.
+fn describes_the_launched_crate(name: &str) -> bool {
+    CRATE_NAMES.contains(&name) || CRATE_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// The environment lanes run in, given the environment `ci-local` was started in.
 fn child_env_from(
     mut env: BTreeMap<String, String>,
     scratch: Option<&Path>,
     target: Option<&Path>,
 ) -> BTreeMap<String, String> {
+    // `cargo run` exports the launched crate's description (`CARGO_PKG_*`,
+    // `CARGO_MANIFEST_DIR`) to `ci-local`, and a lane's nested `cargo` took it for
+    // its own: Cargo fingerprints those values, so every workspace crate that
+    // reads one was rebuilt. The `simulation-evidence` lane's `nextest list` spent
+    // 35 s on that rebuild locally and 55 to 112 s on the runners, and the Build
+    // job hit its 5-minute limit (run 38776238519).
+    env.retain(|name, _| !describes_the_launched_crate(name));
     let existing = path_of(&env);
     if let Some(home) = env.get("HOME") {
         let cargo = Path::new(home).join(".cargo").join("bin");
@@ -474,6 +501,63 @@ mod tests {
             Some(&"0".to_owned()),
             "unset, a lane builds without incremental state"
         );
+    }
+
+    /// The Cargo Book's "Environment variables Cargo sets for crates" is the
+    /// source of the first list and its "configuration environment variables"
+    /// the second; run 38776238519 and the bisect behind it (a nested `nextest
+    /// list` rebuilt for 35 s when `CARGO_MANIFEST_DIR` or `CARGO_PKG_*` was
+    /// set, and not when `CARGO_CRATE_NAME`, `CARGO_BIN_NAME` or
+    /// `CARGO_PRIMARY_PACKAGE` was) are the incident.
+    #[test]
+    fn a_lane_does_not_inherit_the_crate_cargo_run_launched_it_for() {
+        let launched = [
+            ("CARGO_MANIFEST_DIR", "workspace/crates/lgwks-deps"),
+            (
+                "CARGO_MANIFEST_PATH",
+                "workspace/crates/lgwks-deps/Cargo.toml",
+            ),
+            ("CARGO_PKG_NAME", "lgwks_deps"),
+            ("CARGO_PKG_VERSION", "3.0.1"),
+            ("CARGO_PKG_VERSION_PRE", ""),
+            ("CARGO_CRATE_NAME", "ci_local"),
+            ("CARGO_BIN_NAME", "ci-local"),
+            ("CARGO_PRIMARY_PACKAGE", "1"),
+            ("CARGO_BIN_EXE_ci-local", "target/debug/ci-local"),
+            ("CARGO_TARGET_TMPDIR", "target/tmp"),
+        ];
+        let configuration = [
+            ("CARGO", "toolchain/bin/cargo"),
+            ("CARGO_HOME", "home/.cargo"),
+            ("CARGO_TARGET_DIR", "target"),
+            ("CARGO_BUILD_JOBS", "3"),
+            ("CARGO_PROFILE_TEST_DEBUG", "line-tables-only"),
+            (
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+                "-Cdebuginfo=0",
+            ),
+            ("CARGO_INCREMENTAL", "1"),
+            ("RUSTC_WRAPPER", "sccache"),
+        ];
+        let started = launched
+            .into_iter()
+            .chain(configuration)
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        let received = child_env_from(started, None, None);
+        for (name, _) in launched {
+            assert!(
+                !received.contains_key(name),
+                "{name} describes the crate Cargo launched, not the lane"
+            );
+        }
+        for (name, value) in configuration {
+            assert_eq!(
+                received.get(name).map(String::as_str),
+                Some(value),
+                "{name} is Cargo configuration and a lane keeps it"
+            );
+        }
     }
 
     #[test]
