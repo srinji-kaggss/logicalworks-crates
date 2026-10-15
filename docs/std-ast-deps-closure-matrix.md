@@ -52,7 +52,7 @@ be inferred:
 
 One row per `pub mod` in `crates/lgwks-std/src/lib.rs`, on its own page,
 [Part 1](std-ast-deps-closure-matrix-std.md), checked against `lib.rs` by
-`scripts/check-doc-citations.py`.
+the `check-doc-citations` binary of `lgwks_deps`.
 
 ## Part 2 — `lgwks_ast`: finished, and explicitly not re-opened
 
@@ -72,9 +72,9 @@ propose growing it into a fourth surface.
 | Property | State | Evidence |
 |---|---|---|
 | Every authored external edge has an owner | enforced by a gate | `cargo run -p lgwks_deps -- check .` (gate lane `deps-register`); `contract/APPROVED.toml` |
-| `lgwks_std` and `lgwks_ast` author edges directly under the grandfather clause | enforced | `contract/APPROVED.toml`; `scripts/check-std-first.py` reads the *source*, not the manifest |
+| `lgwks_std` and `lgwks_ast` author edges directly under the grandfather clause | enforced | `contract/APPROVED.toml`; the `check-std-first` binary of `lgwks_deps` reads the *source*, not the manifest |
 | Feature-gated storefront capabilities are default-off | present | `crates/lgwks-deps/Cargo.toml` `[features]` |
-| **`appcui` / `gpui` / `candle-*` / `tokenizers` / `bevy_app` / `bevy_time` / `bevy_state` are admitted dependencies** | **admitted-not-implemented**, marked by a gate | An approved edge is a recorded policy decision, **not a CUA product, a model runtime, or a delivered capability.** Each record's `reason` opens with `policy-only:`; `scripts/check-std-first.py` (lane `std-first`) refuses an unconsumed storefront edge left unmarked and a consumed one still marked (#418). `bevy_ecs` is consumed (`lgwks_bot::ecs`) and is not marked. |
+| **`appcui` / `gpui` / `candle-*` / `tokenizers` / `bevy_app` / `bevy_time` / `bevy_state` are admitted dependencies** | **admitted-not-implemented**, marked by a gate | An approved edge is a recorded policy decision, **not a CUA product, a model runtime, or a delivered capability.** Each record's `reason` opens with `policy-only:`; the `check-std-first` binary of `lgwks_deps` (lane `std-first`) refuses an unconsumed storefront edge left unmarked and a consumed one still marked (#418). `bevy_ecs` is consumed (`lgwks_bot::ecs`) and is not marked. |
 | Authored-edge assurance vs resolved transitive bytes, patches, source replacement, vendor integrity | **assurance-gap** | A no-deps graph is not a supply-chain proof. Transitive bytes: cargo checks each `.crate` against `Cargo.lock`'s sha256 under `--locked`. Patches, `[replace]` and source replacement are refused by `lgwks-deps check` since #517, and the vendored tree is gone (#519, option B), so [#266](https://github.com/srinji-kaggss/logicalworks-crates/issues/266) closed: INV-DEP-17 names the tests, which landed after this page's revision and so are not cited as rows here |
 | Unambiguous register parsing, complete member records, collector error-path cleanup | unexercised-gap | [#157](https://github.com/srinji-kaggss/logicalworks-crates/issues/157), [#159](https://github.com/srinji-kaggss/logicalworks-crates/issues/159) |
 | Every selected capability has a usable public import path downstream | unexercised-gap | Declared-but-unexported `bevy_app`/`bevy_time`/`bevy_state` → [#169](https://github.com/srinji-kaggss/logicalworks-crates/issues/169) |

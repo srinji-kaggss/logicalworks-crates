@@ -96,8 +96,8 @@ HOL4 model theorems remain model evidence, not refinement proof of this Rust.
 
 Every acceptance row needs a test path and exact-head receipt before it becomes
 accepted. Both now exist for all 36 rows: `docs/acceptance/t-rows.toml` is the
-path, and `scripts/acceptance-receipts.py` writes the receipt for whichever
-revision is checked out, so a stale receipt is visible rather than assumed. The
+path, and the `acceptance-receipts` binary of `lgwks_deps` writes the receipt
+for whichever revision is checked out, so a stale receipt is visible rather than assumed. The
 receipt can only lower a row's claim; promoting a row is a review decision, not
 something a green run does.
 

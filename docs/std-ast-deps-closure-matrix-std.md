@@ -5,8 +5,8 @@ which names the revision every row describes and what a row's state means.
 
 The module inventory is read from `crates/lgwks-std/src/lib.rs`, which
 declares exactly twenty-two `pub mod` items. Every one has a row. A module added
-without a row is a coverage failure, and `scripts/check-doc-citations.py`
-refuses it: it reads the `pub mod` names from `lib.rs` and the module column
+without a row is a coverage failure, and the `check-doc-citations` binary of
+`lgwks_deps` refuses it: it reads the `pub mod` names from `lib.rs` and the module column
 below, and fails when either holds a name the other lacks.
 
 | # | Module | Feature | State | Test that exists on the pinned revision | Closed by (date) · still open → owner |

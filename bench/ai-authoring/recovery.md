@@ -23,6 +23,6 @@ and `mutant-recovery` — a fresh store per attempt, so the resume re-runs every
 unit — still fails `a_resume_does_not_rerun_a_completed_unit`, so the relaxed
 count did not stop the clause catching a solution that re-runs.
 
-`regrade.py` grades in place in the run's trial directories under the system
-temp root, so it reproduces only on the host that ran the trials; the verdicts
-it wrote are committed beside the run.
+`regrade.py` (deleted with the Python ban, #537) graded in place in the run's
+trial directories under the system temp root, so it reproduced only on the host
+that ran the trials; the verdicts it wrote are committed beside the run.

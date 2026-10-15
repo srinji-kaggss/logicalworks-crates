@@ -62,7 +62,7 @@ describes symbols present in the 0.4.2 tag as well.
 ## How these pages cite
 
 Each factual claim names the file and line it came from, in the form
-`path/to/file.rs:NNN`, and `scripts/check-doc-citations.py` verifies that every
-one resolves. Line numbers are from the head of this branch.
+`path/to/file.rs:NNN`, and the `check-doc-citations` binary of `lgwks_deps`
+verifies that every one resolves. Line numbers are from the head of this branch.
 Where a claim could not be established from the inspected source,
 the page says so rather than describing the intent.
