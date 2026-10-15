@@ -9,7 +9,7 @@ Pages of this guide: [tasks](background-work.md) ·
 
 `Supervisor::run_process(spec)` is `spawn_process` with the completion handed
 back: it awaits the child and returns a `ProcessRun`
-(`crates/lgwks-bot/src/rt/supervise.rs:3066`). It reuses the same process-group
+(`crates/lgwks-bot/src/rt/supervise/run.rs:244`). It reuses the same process-group
 ownership, deadline and cleanup machinery, so a deadline stops the **group**,
 and the run reports the same `CleanupReceipt` a supervised task would.
 
