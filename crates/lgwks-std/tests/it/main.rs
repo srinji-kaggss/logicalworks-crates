@@ -75,6 +75,7 @@ mod sim_trace;
 mod sim_wire;
 mod similarity_evidence_contract;
 mod similarity_public_api;
+mod unsafe_boundary;
 mod wire_consumer;
 mod wire_feature_unification;
 mod wire_fixture;
