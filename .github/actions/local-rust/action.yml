@@ -187,24 +187,36 @@ runs:
     # queue behind one another, and thirteen at once took 20-29 s each on this
     # machine against 2.7 s to create a volume (the step read 9.4 s and 14.2 s in
     # runs 38814432873 and 38812907766, the longest step of the first minute). A
-    # job's volume therefore carries a label of its own (run, attempt and this
-    # shell's pid): it never shares a name with a volume being detached, so its
-    # mount point is known. The earlier volumes, and the unsuffixed one earlier
-    # versions of this step made, are detached in the background: thirteen jobs
-    # started together waited 3.5-5.6 s for their own volumes while the detaches
-    # took 26-30 s beside them. Until a detach ends an instance holds the old
-    # volume's written pages beside the new volume's, so the bound is two
-    # volumes per instance for that window; a volume a detach could not remove is
-    # named again in the next job's log.
+    # job's volume therefore carries a label of its own (the run id and the
+    # second the step started): it never shares a name with a volume being
+    # detached, so its mount point is known. The earlier volumes, and the
+    # unsuffixed one earlier versions of this step made, are detached in the
+    # background: thirteen jobs started together waited 3.5-5.6 s for their own
+    # volumes while the detaches took 26-30 s beside them. Until a detach ends
+    # an instance holds the old volume's written pages beside the new volume's,
+    # so the bound is two volumes per instance for that window; a volume a
+    # detach could not remove is named again in the next job's log.
+    #
+    # The label uses only the characters the unsuffixed one did (letters,
+    # digits, dot, underscore, hyphen), because the temporary path is written
+    # into scripts: `process_escape` puts it inside a double-quoted perl string,
+    # where an `@` in the label read as an array, changed the path, and two
+    # tests never saw their child's pid (run 38816702507).
     - name: Temporary files on a RAM disk
       shell: bash
       run: |
         set -euo pipefail
         owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
-        label="lwc-tmp-${owner}@${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+        printf -v started '%(%s)T' -1
+        label="lwc-tmp-${owner}-${GITHUB_RUN_ID:-0}-${started}"
+        # This owner's volumes: the unsuffixed label, and the owner's name
+        # followed by exactly two numbers. A longer owner name that begins with
+        # this one never matches, because its remainder is not two numbers.
         left=()
-        for old in "/Volumes/lwc-tmp-${owner}" "/Volumes/lwc-tmp-${owner}@"*; do
-          if [ -d "${old}" ]; then
+        for old in "/Volumes/lwc-tmp-${owner}" "/Volumes/lwc-tmp-${owner}-"[0-9]*; do
+          [ -d "${old}" ] || continue
+          rest="${old#"/Volumes/lwc-tmp-${owner}"}"
+          if [ -z "${rest}" ] || [[ "${rest}" =~ ^-[0-9]+-[0-9]+$ ]]; then
             left+=("${old}")
           fi
         done
