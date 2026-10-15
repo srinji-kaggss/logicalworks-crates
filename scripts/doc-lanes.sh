@@ -73,15 +73,17 @@ lane_default() {
 # while every module it does not pull in is genuinely absent.
 lane_per_feature() {
   local features
-  features="$(python3 - <<'PY'
-import tomllib
-
-with open("crates/lgwks-std/Cargo.toml", "rb") as handle:
-    parsed = tomllib.load(handle)
-names = [name for name in parsed["features"] if name not in ("default", "full")]
-print(" ".join(sorted(names)))
-PY
-)"
+  # The keys of the `[features]` table, less `default` and `full`, sorted. A
+  # key opens a line (`name = [...]`); the lines of a wrapped array do not.
+  features="$(awk '
+    /^\[features\]/ { inside = 1; next }
+    /^\[/ { inside = 0 }
+    inside && /^[A-Za-z0-9_-]+[[:space:]]*=/ {
+      name = $1
+      sub(/[[:space:]]*=.*/, "", name)
+      if (name != "default" && name != "full") print name
+    }
+  ' crates/lgwks-std/Cargo.toml | sort | paste -sd' ' -)"
   printf '\nlgwks-std features: %s\n' "$features"
   local feature
   for feature in $features; do

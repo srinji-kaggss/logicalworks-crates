@@ -136,6 +136,42 @@ lgwks_std = { workspace = true, features = ["random"] }
 name = "lgwks-deps"
 path = "src/main.rs"
 
+[[bin]]
+name = "llms-txt"
+path = "src/bin/llms_txt.rs"
+
+[[bin]]
+name = "check-requirements"
+path = "src/bin/check_requirements.rs"
+
+[[bin]]
+name = "check-spec-owners"
+path = "src/bin/check_spec_owners.rs"
+
+[[bin]]
+name = "check-doc-citations"
+path = "src/bin/check_doc_citations/main.rs"
+
+[[bin]]
+name = "check-gate-parity"
+path = "src/bin/check_gate_parity/main.rs"
+
+[[bin]]
+name = "check-std-first"
+path = "src/bin/check_std_first/main.rs"
+
+[[bin]]
+name = "ci-local"
+path = "src/bin/ci_local/main.rs"
+
+[[bin]]
+name = "acceptance-receipts"
+path = "src/bin/acceptance_receipts/main.rs"
+
+[[bin]]
+name = "linux-container-tests"
+path = "src/bin/linux_container_tests/main.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

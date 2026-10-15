@@ -5,9 +5,11 @@
 //! declared clock — and then *held*, which is what an adapter does when it
 //! obtains a token once and spends it over a ladder of steps. The subject is a
 //! real file read through the shipped `domain::data::JsonStore` verb path, and
-//! the clock is a real wall clock, so the lifetime is spent in real time rather
-//! than by advancing a counter: a test that proved only that `now` had been
-//! moved would prove nothing about a proof that lapses on its own.
+//! the clock is a declared virtual clock the test advances. The lifetime was
+//! first spent in real time, and a 120 ms credential then lapsed before its
+//! first poll when CI load stretched the poll (run 38341722158); the expiry
+//! decision reads only the clock the proof was issued on, so advancing that
+//! clock past the lifetime proves the same refusal with no race against the host.
 //!
 //! The recovery case is in the same file: a fresh grant mints a working proof
 //! again, which is the repair a lapsed credential calls for. A check that
@@ -29,13 +31,11 @@ use lgwks_bot::{GrantSet, RetryClass};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// A lifetime short enough that a test spends it in real time, and long enough
-/// that the first poll is not a race the test has already lost.
+/// The lifetime a lapsing proof is granted, on the test's virtual clock.
 const LIFETIME: Duration = Duration::from_millis(120);
 
-/// How long to park before the second poll. Longer than [`LIFETIME`] by a
-/// margin that dwarfs the resolution of the host's timer, so the second poll is
-/// certainly past the expiry rather than usually past it.
+/// How far the clock is advanced before the second poll: past [`LIFETIME`], so
+/// the second poll is certainly after the expiry.
 const ELAPSED: Duration = Duration::from_millis(220);
 
 /// A store holding one whole document, so a poll has something to report.
@@ -53,31 +53,13 @@ async fn poll_with(store: &JsonStore, auth: &lgwks_bot::Auth) -> Result<String, 
         .map(|state| state.raw().to_owned())
 }
 
-/// Park the calling thread for at least `wait`.
-///
-/// `park_timeout` rather than the banned blocking `sleep`: this thread has no
-/// reactor, so `rt::time::sleep` cannot be awaited on it, and what is being
-/// waited for is the credential's own lifetime passing in real time. Repeated
-/// until the span is spent, because `park_timeout` may return early on a
-/// spurious wake-up, and a lifetime the test only *usually* outwaited would make
-/// the expiry assertions a race.
-fn spend(wait: Duration) {
-    let started = std::time::Instant::now();
-    while let Some(left) = wait.checked_sub(started.elapsed()) {
-        if left.is_zero() {
-            break;
-        }
-        std::thread::park_timeout(left);
-    }
-}
-
 /// The row's own journey: a proof that is minted, spent once, and then found
 /// lapsed — refused as a typed `CredentialExpired` naming the capabilities it
 /// covered, and classified as the permanent refusal a re-grant repairs.
 #[test]
 fn a_proof_that_lapses_mid_run_refuses_the_verb() -> TestResult {
     let (_scratch, store) = real_store("lapsing")?;
-    let clock = Clock::wall();
+    let clock = Clock::virtual_at(Duration::ZERO);
     let grants = GrantSet::empty().grant_expiring(Cap::fs(), LIFETIME);
     let auth = grants.issue_at(&[Cap::fs()], &clock)?;
 
@@ -92,7 +74,7 @@ fn a_proof_that_lapses_mid_run_refuses_the_verb() -> TestResult {
         auth.remaining()
     );
 
-    spend(ELAPSED);
+    clock.advance(ELAPSED)?;
 
     match lgwks_std::task::block_on(poll_with(&store, &auth)) {
         Ok(raw) => Err(Box::new(std::io::Error::other(format!(
@@ -131,11 +113,11 @@ fn a_proof_that_lapses_mid_run_refuses_the_verb() -> TestResult {
 #[test]
 fn a_fresh_grant_mints_a_working_proof_again() -> TestResult {
     let (_scratch, store) = real_store("repair")?;
-    let clock = Clock::wall();
+    let clock = Clock::virtual_at(Duration::ZERO);
     let lapsed = GrantSet::empty()
         .grant_expiring(Cap::fs(), LIFETIME)
         .issue_at(&[Cap::fs()], &clock)?;
-    spend(ELAPSED);
+    clock.advance(ELAPSED)?;
     assert!(
         lgwks_std::task::block_on(poll_with(&store, &lapsed)).is_err(),
         "the control: the credential is lapsed before the repair is attempted"
@@ -161,10 +143,11 @@ fn a_fresh_grant_mints_a_working_proof_again() -> TestResult {
 #[test]
 fn a_grant_without_a_lifetime_never_expires() -> TestResult {
     let (_scratch, store) = real_store("perpetual")?;
+    let clock = Clock::virtual_at(Duration::ZERO);
     let auth = GrantSet::empty()
         .grant(Cap::fs())
-        .issue_at(&[Cap::fs()], &Clock::wall())?;
-    spend(ELAPSED);
+        .issue_at(&[Cap::fs()], &clock)?;
+    clock.advance(ELAPSED)?;
     assert_eq!(
         auth.expires_at(),
         None,
