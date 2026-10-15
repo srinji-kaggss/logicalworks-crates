@@ -4,8 +4,9 @@
 //! bytes, and a `[source.*] replace-with` reroutes every registry fetch. Each
 //! one leaves `cargo metadata` naming the approved package while the build
 //! compiles something else, so the edge audit would pass a tree it never saw.
-//! The only override this repository admits is the one #266 wires: crates.io
-//! replaced by the checked-in `vendored-sources` tree.
+//! No override is admitted: #266 removed the vendored tree (option B), so the
+//! one replacement this reader once allowed, crates.io read from the checked-in
+//! `vendored-sources` directory, names a directory that no longer exists.
 //!
 //! Cargo honours `[patch]` and `[replace]` only in the workspace root manifest
 //! (a member's are ignored with a warning) and in `.cargo/config.toml`, and
@@ -16,12 +17,6 @@
 use std::path::Path;
 
 use crate::{GateError, Refusal};
-
-/// The one source replacement the register admits: crates.io, read from the
-/// vendored tree (#266, option A).
-const ADMITTED_SOURCE: &str = "crates-io";
-/// The replacement source the admitted override must name.
-const ADMITTED_REPLACEMENT: &str = "vendored-sources";
 
 /// Every override in the repository rooted at `root`.
 ///
@@ -49,24 +44,12 @@ pub(crate) fn manifest_refusals(file: &str, text: &str) -> Vec<Refusal> {
         .collect()
 }
 
-/// The overrides a cargo config declares: every `[patch…]`, and every
-/// `replace-with` other than crates.io → `vendored-sources`.
+/// The overrides a cargo config declares: every `[patch…]` and every
+/// `source.*.replace-with`, whatever it names.
 pub(crate) fn config_refusals(file: &str, text: &str) -> Vec<Refusal> {
     keys(text)
         .into_iter()
-        .filter(|key| {
-            if is_patch_or_replace(&key.path) {
-                return true;
-            }
-            match *key.path.as_slice() {
-                [ref first, ref source, ref last]
-                    if first == "source" && last == "replace-with" =>
-                {
-                    source != ADMITTED_SOURCE || key.value.as_deref() != Some(ADMITTED_REPLACEMENT)
-                }
-                _ => false,
-            }
-        })
+        .filter(|key| is_patch_or_replace(&key.path) || is_source_replacement(&key.path))
         .map(|key| refusal(file, &key.render()))
         .collect()
 }
@@ -82,6 +65,12 @@ fn refusal(file: &str, table: &str) -> Refusal {
 /// Whether a key path sits under `patch` or `replace`.
 fn is_patch_or_replace(path: &[String]) -> bool {
     matches!(path.first().map(String::as_str), Some("patch" | "replace"))
+}
+
+/// Whether a key path is `source.<name>.replace-with`, the key that reroutes
+/// every fetch of `<name>`.
+fn is_source_replacement(path: &[String]) -> bool {
+    matches!(path, [first, _, last] if first == "source" && last == "replace-with")
 }
 
 /// One table header or key, as a dotted path with its value when it has one.
@@ -251,16 +240,20 @@ mod tests {
         );
     }
 
-    /// Cargo reference, "Source Replacement": the one admitted replacement is
-    /// crates.io read from `vendored-sources`.
+    /// Cargo reference, "Source Replacement": the replacement #266 once admitted,
+    /// crates.io read from `vendored-sources`, is refused now that the vendored
+    /// tree is gone (#519); the refusal names the key that reroutes the fetch.
     #[test]
-    fn the_vendored_source_replacement_is_admitted() {
+    fn the_vendored_source_replacement_is_refused_now_the_tree_is_gone() {
         let config = "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
                       [source.vendored-sources]\ndirectory = \"vendor\"\n";
-        assert!(config_refusals(".cargo/config.toml", config).is_empty());
+        assert_eq!(
+            tables(&config_refusals(".cargo/config.toml", config)),
+            vec!["source.crates-io.replace-with = \"vendored-sources\""]
+        );
     }
 
-    /// Any other replacement target, or another source replaced, is refused.
+    /// Any replacement target, and any source replaced, is refused.
     #[test]
     fn a_foreign_source_replacement_is_refused() {
         let mirror = "[source.crates-io]\nreplace-with = \"my-mirror\"\n";
