@@ -7,7 +7,7 @@
 //! gate and structural inspection cannot disagree about a file, and the gate
 //! inherits the parser's bounds: a source past the byte ceiling, a tree past the
 //! node or depth bound, and a parse past its deadline are typed refusals
-//! ([`ScanError::Refused`]), never an abort. They replace five `syn::visit`
+//! ([`crate::scan::ScanError::Refused`]), never an abort. They replace five `syn::visit`
 //! detectors (ADR 0001, #408) and answer the same verdicts: the rule names, the
 //! evidence text, the thresholds and the exemptions are the reference
 //! implementation's, held to an independent model by `sim_scan_detectors`.

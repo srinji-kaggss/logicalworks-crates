@@ -34,7 +34,7 @@
 #![cfg(feature = "scan")]
 
 mod model;
-mod rules;
+mod sim_rules;
 
 use std::collections::BTreeSet;
 
