@@ -59,14 +59,14 @@ use lgwks_deps::tokio::task::Id;
 pub use lgwks_deps::tokio::task::{AbortHandle, JoinError, yield_now};
 use std::future::Future;
 
-/// A task owner with a deliberately narrow API.
+/// A task owner with a deliberately narrow API: there is no `detach_all`.
 ///
-/// The engine's raw `JoinSet` also exposes `detach_all`, which removes tasks
-/// without aborting them. This wrapper does not: every task remains owned by
-/// this set until joined, aborted, or the set is dropped (which aborts its
-/// remaining tasks). Blocking and local tasks are likewise absent; blocking
-/// work needs an explicit non-preemptible owner, not a method on this async
-/// owner.
+/// The engine's raw set can detach tasks without aborting them; this one
+/// cannot. Every task stays owned until joined, aborted, or the set is dropped,
+/// which aborts the rest. Blocking and local tasks are absent too: blocking
+/// work needs a non-preemptible owner. Enforced by `tests/it/rt_joinset.rs`
+/// (#415): joins at 100 to 100,000 tasks, a drop aborting a parked task (seen
+/// through its own drop), and a consumer probe refused `E0599` on `detach_all`.
 pub struct JoinSet<T> {
     /// The engine set kept private so callers cannot detach its tasks.
     inner: lgwks_deps::tokio::task::JoinSet<T>,

@@ -33,6 +33,10 @@ mod wire_record;
 mod glob_public;
 mod pattern_external;
 mod prop_codecs;
+// Builds its own downstream packages with its own json and ron features, so
+// the run's features cannot change its result; once under `full`, not once per
+// per-feature run (a nested build of 55-198 s each time).
+#[cfg(feature = "full")]
 mod serde_facade_consumers;
 mod sim_codec;
 mod sim_descendants;
@@ -45,6 +49,7 @@ mod sim_hash;
 mod sim_hex;
 mod sim_http;
 mod sim_id;
+mod sim_join_all;
 mod sim_kernel_owners;
 mod sim_leb128;
 mod sim_locale;

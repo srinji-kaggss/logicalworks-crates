@@ -10,3 +10,9 @@
 # `$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`.
 [build]
 rustc-workspace-wrapper = "clippy-driver"
+
+# The LLVM linker, not Apple's ld: the link step is a large share of a
+# from-scratch build and ld64.lld is several times faster than the default.
+[target.aarch64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld"]
