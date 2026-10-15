@@ -1,19 +1,25 @@
-//! `lgwks-ast script map|check [--json] [PATH...]`: every `script!` in a tree,
-//! read by the one parser (SL-2, #384).
+//! `lgwks-ast script map|check|census [--json] [--top N] [PATH...]`: every
+//! `script!` in a tree, read by the one parser (SL-2, #384).
 //!
 //! `map` prints each invocation's architecture map, written exactly as the
 //! `ARCHITECTURE` the macro emits for it renders. `check` prints only what the
 //! language refuses, with the message `cargo build` reports at the same line
-//! and column. Both read through `lgwks_ast::script::read_source`, which lexes
-//! each file with the tokenizer the macro receives its input from and hands
-//! every invocation to `lgwks_ast::script::parse`, so the tool and the compiler
-//! cannot disagree about a script: there is no second reader to drift.
+//! and column. `census` prints the plain-Rust shapes that recur across flows,
+//! the evidence a new word is admitted on (SL-7, #389). All three read through
+//! `lgwks_ast::script::read_source`, which lexes each file with the tokenizer
+//! the macro receives its input from and hands every invocation to
+//! `lgwks_ast::script::parse`, so the tool and the compiler cannot disagree
+//! about a script: there is no second reader to drift.
 //!
 //! A `PATH` that is a directory is walked for `.rs` files, skipping build
 //! output and vendored trees; a file is read as given; no `PATH` means `.`.
-//! `--json` writes one document to stdout for an agent. The exit status is 0
-//! when nothing is refused, 2 when a script is refused or a file cannot be
-//! read, and 2 with the usage for an unknown command.
+//! `--json` writes one document to stdout for an agent (`map` and `check`);
+//! `--top` bounds the rows a census prints. The exit status is 0 when nothing
+//! is refused, 2 when a script is refused or a file cannot be read, and 2 with
+//! the usage for an unknown command. A census measures and never gates, so it
+//! exits 0 and says how many scripts it could not read.
+
+mod census;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -24,12 +30,14 @@ use lgwks_std::fs::{Descend, FileKind, WalkOptions, walk_dir_entries};
 use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
-const USAGE: &str = "usage: lgwks-ast script map|check [--json] [PATH...]\n\
+const USAGE: &str = "usage: lgwks-ast script map|check|census [--json] [--top N] [PATH...]\n\
 \n\
-  map    print every script!'s architecture map, as its ARCHITECTURE renders\n\
-  check  print only what the script! language refuses; exit 2 if anything is\n\
-  --json one JSON document on stdout instead of text\n\
-  PATH   a directory to walk for .rs files, or one file; default `.`\n";
+  map     print every script!'s architecture map, as its ARCHITECTURE renders\n\
+  check   print only what the script! language refuses; exit 2 if anything is\n\
+  census  print the plain-Rust shapes that recur across flows, most recurrent first\n\
+  --json  one JSON document on stdout instead of text (map and check)\n\
+  --top   how many shapes a census prints\n\
+  PATH    a directory to walk for .rs files, or one file; default `.`\n";
 
 /// Directory names never walked: build output, vendored and foreign trees,
 /// and version-control metadata, the same set `lgwks-deps scan` skips.
@@ -59,6 +67,8 @@ enum Verb {
     Map,
     /// Only the refusals.
     Check,
+    /// The plain-Rust shapes that recur, and where.
+    Census,
 }
 
 impl Verb {
@@ -67,6 +77,70 @@ impl Verb {
         match self {
             Self::Map => "map",
             Self::Check => "check",
+            Self::Census => "census",
+        }
+    }
+}
+
+/// What the arguments after `script <verb>` asked for.
+struct Options {
+    /// `--json`: one document instead of text.
+    json: bool,
+    /// `--top`: the rows a census prints.
+    top: usize,
+    /// The paths to read; `.` when none was named.
+    roots: Vec<PathBuf>,
+}
+
+/// Read the arguments after `script <verb>`.
+///
+/// # Errors
+///
+/// The first argument `verb` does not take, as the message printed above the
+/// usage.
+fn options(verb: Verb, rest: &[String]) -> Result<Options, String> {
+    let mut parsed = Options {
+        json: false,
+        top: census::DEFAULT_TOP,
+        roots: Vec::new(),
+    };
+    let mut arguments = rest.iter();
+    while let Some(argument) = arguments.next() {
+        take(verb, argument, &mut arguments, &mut parsed)?;
+    }
+    if parsed.roots.is_empty() {
+        parsed.roots.push(PathBuf::from("."));
+    }
+    Ok(parsed)
+}
+
+/// Apply one argument to `parsed`, taking its value from `rest` when it has one.
+///
+/// # Errors
+///
+/// The message printed above the usage when `verb` does not take `argument`.
+fn take(
+    verb: Verb,
+    argument: &str,
+    rest: &mut std::slice::Iter<'_, String>,
+    parsed: &mut Options,
+) -> Result<(), String> {
+    match argument {
+        "--json" if verb != Verb::Census => {
+            parsed.json = true;
+            Ok(())
+        }
+        "--top" if verb == Verb::Census => {
+            let value = rest
+                .next()
+                .ok_or_else(|| "--top needs a row count".to_owned())?;
+            parsed.top = census::rows(value)?;
+            Ok(())
+        }
+        unknown if unknown.starts_with("--") => Err(format!("unknown option `{unknown}`")),
+        path => {
+            parsed.roots.push(PathBuf::from(path));
+            Ok(())
         }
     }
 }
@@ -99,7 +173,7 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Parse the arguments and run `script map` or `script check`.
+/// Parse the arguments and run `script map`, `script check` or `script census`.
 fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     let verb = match (
         args.first().map(String::as_str),
@@ -107,6 +181,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     ) {
         (Some("script"), Some("map")) => Verb::Map,
         (Some("script"), Some("check")) => Verb::Check,
+        (Some("script"), Some("census")) => Verb::Census,
         (Some("-h" | "--help" | "help"), _) => {
             write!(out, "{USAGE}")?;
             return Ok(ExitCode::SUCCESS);
@@ -120,25 +195,16 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
         write!(err, "{USAGE}")?;
         return Ok(ExitCode::from(2));
     };
-    let json = rest.iter().any(|arg| arg == "--json");
-    if let Some(unknown) = rest
-        .iter()
-        .find(|arg| arg.starts_with("--") && *arg != "--json")
-    {
-        writeln!(err, "lgwks-ast: unknown option `{unknown}`\n")?;
-        write!(err, "{USAGE}")?;
-        return Ok(ExitCode::from(2));
-    }
-    let mut roots: Vec<PathBuf> = rest
-        .iter()
-        .filter(|arg| !arg.starts_with("--"))
-        .map(PathBuf::from)
-        .collect();
-    if roots.is_empty() {
-        roots.push(PathBuf::from("."));
-    }
+    let parsed = match options(verb, rest) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            writeln!(err, "lgwks-ast: {message}\n")?;
+            write!(err, "{USAGE}")?;
+            return Ok(ExitCode::from(2));
+        }
+    };
     let mut readings = Vec::new();
-    for root in &roots {
+    for root in &parsed.roots {
         match files_under(root) {
             Ok(files) => readings.extend(files.into_iter().map(read_file)),
             Err(error) => readings.push(FileReading {
@@ -147,7 +213,9 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
             }),
         }
     }
-    if json {
+    if verb == Verb::Census {
+        census::write(&readings, parsed.top, out)
+    } else if parsed.json {
         write_json(verb, &readings, out)
     } else {
         write_text(verb, &readings, out, err)

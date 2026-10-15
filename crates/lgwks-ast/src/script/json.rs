@@ -6,12 +6,13 @@
 
 use lgwks_std::json::{Map, Value};
 
-use super::tree::{Script, StepShape};
+use super::tree::{Passthrough, Script, StepShape};
 
 impl Script {
     /// The architecture map as JSON: `{"flows": [{"name", "signature", "line",
-    /// "steps"}]}`, each step `{"kind", "subject", "detail", "line", "steps"}`,
-    /// the document `Architecture::to_json` writes for this script.
+    /// "steps", "passthrough"}]}`, each step `{"kind", "subject", "detail",
+    /// "line", "steps"}` and each passthrough line `{"line", "text"}`, the
+    /// document `Architecture::to_json` writes for this script.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let flows = self
@@ -23,6 +24,7 @@ impl Script {
                     ("signature", Value::from(flow.shape.signature.as_str())),
                     ("line", Value::from(flow.shape.line)),
                     ("steps", step_values(&flow.shape.steps)),
+                    ("passthrough", passthrough_values(&flow.shape.passthrough)),
                 ])
             })
             .collect();
@@ -45,6 +47,22 @@ fn step_values(steps: &[StepShape]) -> Value {
                     ("detail", Value::from(step.detail.as_str())),
                     ("line", Value::from(step.line)),
                     ("steps", step_values(&step.children)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// The lines passed through as plain Rust, as `{"line", "text"}` objects in
+/// source order.
+fn passthrough_values(lines: &[Passthrough]) -> Value {
+    Value::Array(
+        lines
+            .iter()
+            .map(|passed| {
+                object([
+                    ("line", Value::from(passed.line)),
+                    ("text", Value::from(passed.text.as_str())),
                 ])
             })
             .collect(),

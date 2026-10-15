@@ -91,8 +91,8 @@ lang-yaml = ["parser", "ast-grep-language/tree-sitter-yaml"]
 # grammar is selected by it, so the macro's build compiles no tree-sitter.
 script = ["dep:lgwks_deps", "dep:tracing"]
 # The script tool (#384): `script::Script::to_json` and the `lgwks-ast` binary,
-# `lgwks-ast script map|check [--json] [PATH...]`, the second caller of the one
-# parser (SL-2). It walks a tree and writes JSON through `lgwks_std`, a
+# `lgwks-ast script map|check|census [--json] [--top N] [PATH...]`, the second
+# caller of the one parser (SL-2). It walks a tree and writes JSON through `lgwks_std`, a
 # workspace member, so it adds no third-party edge. It lives here rather than
 # in `lgwks-deps` because `script` already depends on `lgwks_deps` for
 # `proc_macro2`, and `lgwks_deps` depending back on this crate is a cycle Cargo
@@ -168,11 +168,11 @@ lgwks_std = { workspace = true, features = ["random"] }
 # added, and the library never sees it.
 lgwks_deps = { workspace = true, features = ["macro"] }
 
-# `lgwks-ast script map|check`: every `script!` in a tree, read by the one
-# parser (#384). Built only with the tool selected.
+# `lgwks-ast script map|check|census`: every `script!` in a tree, read by the
+# one parser (#384, #389). Built only with the tool selected.
 [[bin]]
 name = "lgwks-ast"
-path = "src/bin/lgwks-ast.rs"
+path = "src/bin/lgwks-ast/main.rs"
 required-features = ["tool"]
 
 [[example]]

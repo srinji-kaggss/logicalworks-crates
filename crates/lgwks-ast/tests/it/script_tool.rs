@@ -173,6 +173,11 @@ fn a_missing_path_and_an_unknown_word_refuse_with_the_usage() -> TestResult {
         &["map"][..],
         &[][..],
         &["script", "map", "--yaml"][..],
+        &["script", "map", "--top", "3"][..],
+        &["script", "census", "--json"][..],
+        &["script", "census", "--top"][..],
+        &["script", "census", "--top", "0"][..],
+        &["script", "census", "--top", "many"][..],
     ] {
         let output = tool(tree.path(), args)?;
         let (_, err) = text(&output);
@@ -188,6 +193,64 @@ fn a_missing_path_and_an_unknown_word_refuse_with_the_usage() -> TestResult {
         text(&help)
             .0
             .starts_with("usage: lgwks-ast script map|check")
+    );
+    Ok(())
+}
+
+/// Two flows whose plain Rust shares one shape (`let _ = _.get(0)`, at lines 3
+/// and 7), and one line of another.
+const RECURRING: &str = "lgwks_bot::script! {\n    flow first(site: u32) -> u32:\n        let seen = site.get(1)\n        site.note(seen).await?\n        give back site\n    flow second(site: u32) -> u32:\n        let other = site.get(2)\n        give back site\n}\n";
+
+#[test]
+fn census_prints_the_recurring_shapes_and_never_gates() -> TestResult {
+    let tree = Scratch::new("script-tool-census")?;
+    plant(tree.path(), "src/flows.rs", RECURRING)?;
+    plant(tree.path(), "src/bad.rs", REFUSED)?;
+    plant(tree.path(), "target/debug/build/out.rs", RECURRING)?;
+    let output = tool(tree.path(), &["script", "census"])?;
+    let (out, err) = text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a census measures and never gates:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.starts_with(
+            "2 `script!` in 1 files, 2 flows; 2 word steps and 3 passthrough lines \
+             (passthrough share 60.0%); 1 refused or unreadable and not read; 2 distinct shapes.\n"
+        ),
+        "the refused script is counted and not read, each flow's `give back` is a word step, and target/ is never walked:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "| 1 | 2 | 1 | `let _ = _.get(0)` | `src/flows.rs:3`, `src/flows.rs:7` |\n\
+             | 2 | 1 | 1 | `_.note(_).await?` | `src/flows.rs:4` |\n"
+        ),
+        "the shape that recurs ranks first, named at its lines:\n{out}"
+    );
+    assert!(
+        err.is_empty(),
+        "the census writes its report to stdout and nothing to stderr:\n{err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn census_stops_at_the_rows_asked_for() -> TestResult {
+    let tree = Scratch::new("script-tool-census-top")?;
+    plant(tree.path(), "flows.rs", RECURRING)?;
+    let all = tool(tree.path(), &["script", "census", "flows.rs"])?;
+    let one = tool(tree.path(), &["script", "census", "--top", "1", "flows.rs"])?;
+    let (all_out, _) = text(&all);
+    let (one_out, err) = text(&one);
+    assert_eq!(one.status.code(), Some(0), "{err}");
+    assert!(
+        all_out.contains("`_.note(_).await?`"),
+        "without --top both shapes print:\n{all_out}"
+    );
+    assert!(
+        one_out.contains("`let _ = _.get(0)`") && !one_out.contains("`_.note(_).await?`"),
+        "--top 1 prints the most recurrent shape and not the next:\n{one_out}"
     );
     Ok(())
 }

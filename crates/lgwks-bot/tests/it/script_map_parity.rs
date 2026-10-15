@@ -25,7 +25,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use lgwks_ast::script::{Script, StepShape, read_source};
+use lgwks_ast::script::{Passthrough, Script, StepShape, read_source};
 use lgwks_bot::script::Architecture;
 use lgwks_std::json::Value;
 
@@ -138,6 +138,31 @@ fn assert_steps(out: &mut String, path: &str, at: &str, steps: &[StepShape]) -> 
     Ok(())
 }
 
+/// Write the assertions for the passthrough lines of the flow at `path`,
+/// labelled `at`.
+fn assert_passthrough(
+    out: &mut String,
+    path: &str,
+    at: &str,
+    lines: &[Passthrough],
+) -> std::fmt::Result {
+    let count = format!("{path}.passthrough().len() == {}", lines.len());
+    fact(
+        out,
+        &count,
+        &format!("{at}: the number of passthrough lines"),
+    )?;
+    for (index, passed) in lines.iter().enumerate() {
+        let here = format!("{path}.passthrough()[{index}]");
+        let label = format!("{at} passthrough {index}");
+        let line = format!("{here}.line() == {}", passed.line());
+        fact(out, &line, &format!("{label}: line"))?;
+        let text = format!("same({here}.text(), {:?})", passed.text());
+        fact(out, &text, &format!("{label}: text"))?;
+    }
+    Ok(())
+}
+
 /// The probe's source: each file as a module, the tool's reading of it as
 /// `const` assertions on its `ARCHITECTURE`, and one assertion that fails.
 fn probe_source(files: &[(PathBuf, Script)]) -> Result<String, std::fmt::Error> {
@@ -163,6 +188,7 @@ fn probe_source(files: &[(PathBuf, Script)]) -> Result<String, std::fmt::Error> 
             let line = format!("{path}.line() == {}", shape.line());
             fact(&mut main, &line, &format!("{at}: line"))?;
             assert_steps(&mut main, &format!("{path}.steps()"), &at, shape.steps())?;
+            assert_passthrough(&mut main, &path, &at, shape.passthrough())?;
         }
         main.push_str("};\n");
     }
