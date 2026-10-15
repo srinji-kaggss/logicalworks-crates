@@ -4,6 +4,11 @@ Four APIs in this workspace bound background work. Pick by what you need
 bounded: simultaneous tasks, iterations of a loop, child processes, or threads
 for a blocking call. The units differ, and so do the guarantees.
 
+Pages of this guide: [tasks](background-work.md) ·
+[child processes](background-processes.md) ·
+[process results and confinement](process-results.md) ·
+[loops, fan-out and blocking](bounded-loops.md) · [limits and tests](background-limits.md)
+
 ## `Supervisor`: a ceiling on tasks
 
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
@@ -82,14 +87,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
-## The rest of this guide
-
-- [Child processes](background-work-processes.md): `spawn_process`,
-  `spawn_process_identified` and `run_process`.
-- [A child's output](background-work-output.md): framed records and the typed
-  errors of a run.
-- [Loops, fan-outs and blocking calls](background-work-loops.md): `repeat`,
-  `join_all_bounded` and `spawn_blocking`.
-- [The limits](background-work-limits.md): where the bounds stop applying, and
-  what the tests exercise.
