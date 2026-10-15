@@ -262,38 +262,92 @@ pub fn tree_for(repo: &Path) -> Result<PathBuf, VendorError> {
 
 // ── Tree index ──────────────────────────────────────────────────────────────
 
-/// Extracts the `"package"` hash from a `.cargo-checksum.json` by key search.
-/// The file is machine-written (`cargo vendor` format), so locating one
-/// `"package": "<hex>"` pair needs no general parser. Anything else is a
+/// Extracts the `"package"` hash from a `.cargo-checksum.json`.
+///
+/// Only the top-level object's `"package"` member counts. Cargo writes the
+/// object with sorted keys, so the `"files"` map — which names every file in
+/// the crate — comes first, and a crate that ships a root file called
+/// `package` puts a `"package": "<that file's hash>"` pair inside it. A search
+/// for the first `"package"` string read that file's hash as the crate's, so
+/// the crate read as missing, and a directory whose only `"package"` was a file
+/// entry read as hashed. Anything without a top-level string member is a
 /// broken tree, refused rather than guessed at.
 fn package_hash(checksum_file: &Path) -> Result<String, String> {
     let text =
         std::fs::read_to_string(checksum_file).map_err(|cause| format!("unreadable: {cause}"))?;
-    let key = "\"package\"";
-    // Splitting on the key takes everything after its first occurrence, which
-    // is exactly the tail `find` plus `key.len()` would have addressed, with
-    // no index arithmetic to overflow.
-    let (_, tail) = text
-        .split_once(key)
-        .ok_or_else(|| "no \"package\" hash".to_owned())?;
-    let rest = tail.trim_start();
-    let rest = rest
-        .strip_prefix(':')
-        .ok_or_else(|| "no \"package\" hash".to_owned())?;
-    let rest = rest.trim_start();
-    let rest = rest
-        .strip_prefix('"')
-        .ok_or_else(|| "no \"package\" hash".to_owned())?;
-    let end = rest
-        .find('"')
-        .ok_or_else(|| "no \"package\" hash".to_owned())?;
-    let hash = rest[..end].to_string();
+    let hash =
+        top_level_string(&text, "package").ok_or_else(|| "no \"package\" hash".to_owned())?;
     if hash.is_empty() {
         let refusal = Err("no \"package\" hash".to_owned());
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "package_hash: returning an error to the caller");
         return refusal;
     }
     Ok(hash)
+}
+
+/// The raw text of the string member `key` of the top-level JSON object in
+/// `text`, or `None` when it has none.
+///
+/// A single pass that tracks nesting depth and string boundaries (RFC 8259
+/// §2, §4, §7), so a key, file name or value inside a nested object or array is
+/// never mistaken for a top-level member, and an escaped quote never ends a
+/// string. The value is returned unescaped-as-written: the members read here
+/// are hex digests, which carry no escapes.
+fn top_level_string(text: &str, key: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut depth = 0u32;
+    let mut pos = 0usize;
+    while let Some(&byte) = bytes.get(pos) {
+        match byte {
+            b'{' | b'[' => depth = depth.saturating_add(1),
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'"' => {
+                let start = pos.saturating_add(1);
+                let end = string_end(bytes, start)?;
+                pos = end.saturating_add(1);
+                let colon = skip_whitespace(bytes, pos);
+                if depth == 1
+                    && bytes.get(colon) == Some(&b':')
+                    && text.get(start..end) == Some(key)
+                {
+                    let value = skip_whitespace(bytes, colon.saturating_add(1));
+                    if bytes.get(value) != Some(&b'"') {
+                        return None;
+                    }
+                    let value_start = value.saturating_add(1);
+                    let value_end = string_end(bytes, value_start)?;
+                    return text.get(value_start..value_end).map(str::to_owned);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        pos = pos.saturating_add(1);
+    }
+    None
+}
+
+/// The offset of the quote that closes the string whose content starts at
+/// `start`, skipping every backslash escape, or `None` for an unterminated
+/// string.
+fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut pos = start;
+    loop {
+        match *bytes.get(pos)? {
+            b'"' => return Some(pos),
+            b'\\' => pos = pos.saturating_add(2),
+            _ => pos = pos.saturating_add(1),
+        }
+    }
+}
+
+/// The first offset at or after `pos` that is not JSON whitespace.
+fn skip_whitespace(bytes: &[u8], pos: usize) -> usize {
+    let mut pos = pos;
+    while matches!(bytes.get(pos), Some(&(b' ' | b'\t' | b'\n' | b'\r'))) {
+        pos = pos.saturating_add(1);
+    }
+    pos
 }
 
 /// Reads a vendored `Cargo.toml` `[package]` name and version by line scan.

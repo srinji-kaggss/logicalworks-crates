@@ -43,4 +43,5 @@ mod sim_policy_properties;
 mod sim_register_policy;
 mod sim_scan_detectors;
 mod sim_seed_draws;
+mod sim_vendor_coverage;
 mod workstream_c;
