@@ -202,6 +202,7 @@ mod sim_dist_lease;
 mod sim_dist_lease_tcp;
 mod sim_ecs_backoff;
 mod sim_epoch_identity;
+mod sim_fan_out;
 mod sim_group_commit;
 mod sim_inspect;
 mod sim_inspect_wiring;

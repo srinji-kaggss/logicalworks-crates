@@ -53,3 +53,7 @@ impl fmt::Display for TaskName {
         formatter.write_str(&self.0)
     }
 }
+
+#[cfg(test)]
+#[path = "sim_names.rs"]
+mod sim_names;

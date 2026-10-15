@@ -67,7 +67,12 @@ pub(super) struct Policy {
 impl Policy {
     /// The policy for the machine this runs on.
     pub(super) fn for_this_machine() -> Self {
-        let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        // A machine that cannot report its parallelism runs one body per core
+        // it is known to have, which is one.
+        let cores = match std::thread::available_parallelism() {
+            Ok(cores) => cores.get(),
+            Err(_) => 1,
+        };
         let fan_out = cores.saturating_mul(FAN_OUT_PER_CORE).min(MAX_IN_FLIGHT);
         // The fan-out is non-zero by construction rather than by substitution:
         // `cores` is at least one, `FAN_OUT_PER_CORE` is non-zero and
@@ -120,3 +125,7 @@ impl Policy {
             .is_ok()
     }
 }
+
+#[cfg(test)]
+#[path = "sim_policy.rs"]
+mod sim_policy;
