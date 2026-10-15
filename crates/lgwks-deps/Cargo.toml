@@ -16,23 +16,17 @@ keywords = ["dependencies", "audit", "supply-chain", "cargo", "debug"]
 # Depending on serde_json directly here would make the checker its own first
 # bypass.
 #
-# syn is the one exception to the zero-dependency gate-tool rule, and it is
-# not self-refuting: a Rust parser is the only honest way to police Rust
-# source (the `scan` subcommand carries the same fallible-check detectors, so
-# every repository here runs the same verdicts from one binary). Pinned to the same
-# major already vetted for serde's derive stack. `scan` is a default
-# feature so `cargo install lgwks_deps` keeps working with no flags;
-# embedders who only call `check_dependencies` can disable default features.
+# There is no default feature: the zero-gate source scan (INV-SCAN-ZERO) used to
+# be the one, and held `syn` here. It now lives in `lgwks_ast` (feature `scan`),
+# which reads Rust through its one tree-sitter parser (ADR 0002, #408), so this
+# crate authors no Rust grammar at all.
 [features]
-default = ["scan"]
-scan = ["dep:syn", "dep:proc-macro2"]
-# Proc-macro authoring storefront: the Rust grammar (`syn`), token streams
-# (`proc-macro2`) and quasi-quoting (`quote`) a first-party proc-macro crate
-# needs. `lgwks_macros` is the one consumer; it reaches all three through the
-# re-exports below, so this crate stays the only author of each edge. Default
-# off: selecting `scan` does not pull `quote`, and a runtime consumer pulls
-# none of the three.
-macro = ["dep:syn", "dep:proc-macro2", "dep:quote"]
+# Proc-macro authoring storefront: token streams (`proc-macro2`) and
+# quasi-quoting (`quote`) a first-party proc-macro crate needs. `lgwks_macros` is
+# the one consumer; it reaches both through the re-exports below, so this crate
+# stays the only author of each edge. Default off: a runtime consumer pulls
+# neither.
+macro = ["dep:proc-macro2", "dep:quote"]
 # The token stream the `script!` language is read from (`lgwks_ast`'s `script`
 # feature, #383): `proc-macro2` with span locations and nothing else, so a tool
 # that reads scripts, and the macro that compiles them, share one parser
@@ -89,7 +83,6 @@ bevy-state = ["bevy-ecs", "dep:bevy_state"]
 
 [dependencies]
 lgwks_std = { workspace = true, features = ["json"] }
-syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 quote = { version = "1", optional = true }
 gpui = { version = "0.2", optional = true }

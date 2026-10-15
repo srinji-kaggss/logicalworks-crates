@@ -1,5 +1,7 @@
 //! `lgwks-ast script map|check|census [--json] [--top N] [PATH...]`: every
-//! `script!` in a tree, read by the one parser (SL-2, #384).
+//! `script!` in a tree, read by the one parser (SL-2, #384); and
+//! `lgwks-ast scan [--json] [PATH...]`, the zero-gate source detectors
+//! (INV-SCAN-ZERO, #408).
 //!
 //! `map` prints each invocation's architecture map, written exactly as the
 //! `ARCHITECTURE` the macro emits for it renders. `check` prints only what the
@@ -17,9 +19,12 @@
 //! `--top` bounds the rows a census prints. The exit status is 0 when nothing
 //! is refused, 2 when a script is refused or a file cannot be read, and 2 with
 //! the usage for an unknown command. A census measures and never gates, so it
-//! exits 0 and says how many scripts it could not read.
+//! exits 0 and says how many scripts it could not read. `scan` exits 2 on any
+//! finding and on any file the checked parse refuses; it is in `scan.rs`.
 
 mod census;
+#[cfg(feature = "scan")]
+mod scan;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,16 +36,19 @@ use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
 const USAGE: &str = "usage: lgwks-ast script map|check|census [--json] [--top N] [PATH...]\n\
+       lgwks-ast scan [--json] [PATH...]\n\
 \n\
   map     print every script!'s architecture map, as its ARCHITECTURE renders\n\
   check   print only what the script! language refuses; exit 2 if anything is\n\
   census  print the plain-Rust shapes that recur across flows, most recurrent first\n\
-  --json  one JSON document on stdout instead of text (map and check)\n\
+  scan    run the zero-gate detectors (error swallow, unlogged returns, lint\n\
+          allowances, try chains, docs); exit 2 on any finding or refused file\n\
+  --json  one JSON document on stdout instead of text (map, check and scan)\n\
   --top   how many shapes a census prints\n\
   PATH    a directory to walk for .rs files, or one file; default `.`\n";
 
 /// Directory names never walked: build output, vendored and foreign trees,
-/// and version-control metadata, the same set `lgwks-deps scan` skips.
+/// and version-control metadata.
 const SKIPPED: [&str; 7] = [
     "target",
     "vendor",
@@ -69,6 +77,8 @@ enum Verb {
     Check,
     /// The plain-Rust shapes that recur, and where.
     Census,
+    /// Every finding of the zero-gate detectors.
+    Scan,
 }
 
 impl Verb {
@@ -78,6 +88,15 @@ impl Verb {
             Self::Map => "map",
             Self::Check => "check",
             Self::Census => "census",
+            Self::Scan => "scan",
+        }
+    }
+
+    /// How many leading arguments name the verb: `script map` is two.
+    const fn words(self) -> usize {
+        match self {
+            Self::Map | Self::Check | Self::Census => 2,
+            Self::Scan => 1,
         }
     }
 }
@@ -173,7 +192,8 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Parse the arguments and run `script map`, `script check` or `script census`.
+/// Parse the arguments and run `script map`, `script check`, `script census` or
+/// `scan`.
 fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     let verb = match (
         args.first().map(String::as_str),
@@ -182,6 +202,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
         (Some("script"), Some("map")) => Verb::Map,
         (Some("script"), Some("check")) => Verb::Check,
         (Some("script"), Some("census")) => Verb::Census,
+        (Some("scan"), _) => Verb::Scan,
         (Some("-h" | "--help" | "help"), _) => {
             write!(out, "{USAGE}")?;
             return Ok(ExitCode::SUCCESS);
@@ -191,7 +212,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
             return Ok(ExitCode::from(2));
         }
     };
-    let Some(rest) = args.get(2..) else {
+    let Some(rest) = args.get(verb.words()..) else {
         write!(err, "{USAGE}")?;
         return Ok(ExitCode::from(2));
     };
@@ -203,6 +224,9 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
             return Ok(ExitCode::from(2));
         }
     };
+    if verb == Verb::Scan {
+        return run_scan(&parsed.roots, parsed.json, out, err);
+    }
     let mut readings = Vec::new();
     for root in &parsed.roots {
         match files_under(root) {
@@ -220,6 +244,29 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     } else {
         write_text(verb, &readings, out, err)
     }
+}
+
+/// `lgwks-ast scan` over `roots`.
+#[cfg(feature = "scan")]
+fn run_scan(
+    roots: &[PathBuf],
+    json: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    scan::run(roots, json, out, err)
+}
+
+/// Without the `scan` feature the verb exists and says what it needs.
+#[cfg(not(feature = "scan"))]
+fn run_scan(
+    _roots: &[PathBuf],
+    _json: bool,
+    _out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    writeln!(err, "lgwks-ast: scan needs the `scan` feature")?;
+    Ok(ExitCode::from(2))
 }
 
 /// Every `.rs` file under `root`, in walk order, or `root` itself when it is a

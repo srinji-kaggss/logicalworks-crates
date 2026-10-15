@@ -24,7 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lgwks_deps::vendor::{self, Report, VendorError};
 
-use crate::sim::{Failure, Rng, Trace, refuse, replay_sweep};
+use crate::replay::{Failure, refuse, replay_sweep};
+use crate::sim::{Rng, Trace};
 
 /// Every scenario's result.
 type TestResult = Result<(), Failure>;
