@@ -98,6 +98,12 @@ script = ["dep:lgwks_deps", "dep:tracing"]
 # `proc_macro2`, and `lgwks_deps` depending back on this crate is a cycle Cargo
 # refuses.
 tool = ["script", "dep:lgwks_std"]
+# The zero-gate source detectors (INV-SCAN-ZERO, #408): `lgwks_ast::scan` and
+# the `lgwks-ast scan` subcommand, which read Rust through the one parser and
+# need nothing it does not already hold: the Rust grammar and the checked parse.
+# They live here because `script` makes this crate depend on `lgwks_deps`, so
+# `lgwks_deps` calling back is a cycle Cargo refuses (ADR 0001). Default off.
+scan = ["lang-rust"]
 full = [
     "lang-rust",
     "lang-python",
@@ -147,8 +153,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"], optio
 # a crate: the `Tree` built here is the type `StrDoc` holds.
 tree-sitter = { version = "0.27", optional = true }
 # The token streams `script` reads (feature `script`, #383), through the
-# storefront that owns the edge; `default-features = false` keeps the `scan`
-# detectors out, so the macro's build pulls `proc-macro2` and nothing else here.
+# storefront that owns the edge; the macro's build pulls `proc-macro2` and
+# nothing else here.
 lgwks_deps = { workspace = true, features = ["script"], optional = true }
 # The script tool's tree walk and JSON (feature `tool`, #384).
 lgwks_std = { workspace = true, features = ["json"], optional = true }
@@ -162,14 +168,10 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # `random`, which names the script tool's scratch trees (#384) so two runs on
 # one machine never share one.
 lgwks_std = { workspace = true, features = ["random"] }
-# `syn`, reached through the storefront that owns its edge (`macro` re-exports
-# it), so `examples/rust_readers.rs` can read the same files with both Rust
-# readers (#387). A dev edge on a workspace member: no third-party edge is
-# added, and the library never sees it.
-lgwks_deps = { workspace = true, features = ["macro"] }
 
 # `lgwks-ast script map|check|census`: every `script!` in a tree, read by the
-# one parser (#384, #389). Built only with the tool selected.
+# one parser (#384, #389); and `lgwks-ast scan`, the zero-gate detectors, when
+# `scan` is selected too (#408). Built only with the tool selected.
 [[bin]]
 name = "lgwks-ast"
 path = "src/bin/lgwks-ast/main.rs"
@@ -186,11 +188,12 @@ required-features = ["lang-rust"]
 name = "parse_budget"
 required-features = ["parser"]
 
-# The two Rust readers over one corpus (#387): fidelity, latency and, one
-# reader per process, peak RSS, for `docs/adr/0001-one-rust-reader.md`.
+# The Rust readers over one corpus (#387, #408): the checked parse and the scan
+# built on it, with latency and, one reader per process, peak RSS, for
+# `docs/adr/`.
 [[example]]
 name = "rust_readers"
-required-features = ["lang-rust"]
+required-features = ["scan"]
 
 [lints]
 workspace = true

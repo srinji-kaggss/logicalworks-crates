@@ -60,10 +60,10 @@
 //! exposes Bevy's state API.
 //! `tokio` is the async engine behind `lgwks_bot::rt` (`use
 //! lgwks_deps::tokio::...` only when bypassing the bot facade), and `gpui` is
-//! the GPU desktop UI. Capability features are default-off; `scan`, the
-//! gate-tool feature, is the default-on exception for `cargo install` CLI use.
-//! Library consumers take `default-features = false` plus exactly the engine
-//! they need so the Rust parser never rides along with a runtime edge.
+//! the GPU desktop UI. Every feature is default-off: the zero-gate source scan
+//! that was the one default-on exception now lives in `lgwks_ast` (feature
+//! `scan`, `lgwks-ast scan`; ADR 0002), so a consumer takes exactly the engine
+//! it needs and no Rust grammar rides along with a runtime edge.
 //!
 //! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
 //! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
@@ -80,9 +80,6 @@ pub mod invariants;
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
-/// Rust source scan: the zero-gate detectors behind `lgwks-deps scan` (feature `scan`).
-#[cfg(feature = "scan")]
-pub mod scan;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 pub mod vendor;
 
@@ -100,8 +97,6 @@ pub use refusal::{GateError, Refusal};
 pub use proc_macro2;
 #[cfg(feature = "macro")]
 pub use quote;
-#[cfg(feature = "macro")]
-pub use syn;
 /// The one authored `tokio` edge, re-exported for the storefront.
 ///
 /// `lgwks_deps` owns this edge so no other crate declares `tokio` directly

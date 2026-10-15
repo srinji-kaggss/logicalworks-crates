@@ -10,11 +10,10 @@
 #![cfg(feature = "tool")]
 
 use std::error::Error;
-use std::path::Path;
-use std::process::{Command, Output};
 
 use lgwks_std::json::Value;
 
+use crate::cli::{plant, text, tool};
 use crate::scratch::Scratch;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -25,32 +24,6 @@ const ACCEPTED: &str =
 
 /// A script the language refuses at its file's line 3, column 23: the `exit`.
 const REFUSED: &str = "lgwks_bot::script! {\n    flow stop():\n        std::process::exit(1)\n}\n";
-
-/// Run the binary with `args` in `dir`.
-fn tool(dir: &Path, args: &[&str]) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(env!("CARGO_BIN_EXE_lgwks-ast"))
-        .args(args)
-        .current_dir(dir)
-        .output()?)
-}
-
-/// Stdout and stderr as text.
-fn text(output: &Output) -> (String, String) {
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
-
-/// Write `contents` to `relative` under `root`, creating its directories.
-fn plant(root: &Path, relative: &str, contents: &str) -> TestResult {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, contents)?;
-    Ok(())
-}
 
 #[test]
 fn map_prints_every_script_and_skips_build_output() -> TestResult {

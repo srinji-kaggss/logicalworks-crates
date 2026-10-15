@@ -15,14 +15,14 @@ not pass the gate until a human registers it in `contract/APPROVED.toml`.
 The binary is the gate; the library is the storefront.
 
 ```sh
-cargo install lgwks_deps                        # the `lgwks-deps` binary
-cargo add lgwks_deps --no-default-features      # the storefront library
+cargo install lgwks_deps    # the `lgwks-deps` binary
+cargo add lgwks_deps        # the storefront library
 ```
 
-`default-features = false` matters for library consumers. The default build
-carries the `scan` gate-tool feature, which pulls `syn` and `proc-macro2` for
-the CLI's source detectors. Disabling defaults keeps a parser out of a runtime
-dependency graph.
+No feature is on by default, so `cargo add lgwks_deps` pulls no third-party
+crate. The Rust source detectors the CLI once carried behind a default `scan`
+feature moved to `lgwks_ast` with the one Rust reader: run `lgwks-ast scan`
+([ADR 0002](../../docs/adr/0002-scan-routed-through-lgwks-ast.md)).
 
 ## Storefront
 
@@ -30,45 +30,12 @@ Each feature exposes a reviewed upstream capability through the storefront, so
 a consumer never declares it directly. Do not add `tokio`, `gpui`, or Bevy
 crates directly; select the storefront feature and import its public path. The
 explicit admission gate detects unregistered direct edges when it runs; the
-library does not intercept arbitrary Cargo invocations.
-
-| Feature | Re-exports | Notes |
-|---|---|---|
-| `tokio` | `lgwks_deps::tokio` | The bypass path. Prefer `lgwks_bot::rt` unless you are deliberately working below the bot facade. |
-| `tokio-time` | `lgwks_deps::tokio::time` | Enables Tokio timers. |
-| `tokio-sync` | `lgwks_deps::tokio::sync` | Enables Tokio synchronization primitives. |
-| `tokio-macros` | `lgwks_deps::tokio` | Enables Tokio's macros. Alias `lgwks_deps::tokio` as `tokio` at the consumer root before using `#[tokio::main]` or `#[tokio::test]`. |
-| `tokio-io` | `lgwks_deps::tokio::io` | Enables asynchronous reader/writer traits and their extensions. |
-| `tokio-net` | `lgwks_deps::tokio::net` | Enables Tokio sockets. |
-| `tokio-process` | `lgwks_deps::tokio::process` | Enables Tokio child-process support. |
-| `tokio-fs` | `lgwks_deps::tokio::fs` | Enables Tokio filesystem APIs. |
-| `tokio-signal` | `lgwks_deps::tokio::signal` | Enables Tokio signal handling. |
-| `tokio-full` | `lgwks_deps::tokio` | Combines the listed Tokio capabilities. |
-| `bevy-ecs` | `lgwks_deps::bevy_ecs` | ECS substrate; no renderer, window, audio, or multithreaded scheduler. |
-| `bevy-app` | `lgwks_deps::bevy_app` | Bevy `App` runtime, layered on `bevy-ecs`. |
-| `bevy-time` | `lgwks_deps::bevy_time` | Bevy time resources and plugin, layered on `bevy-ecs`. |
-| `bevy-state` | `lgwks_deps::bevy_state` | Bevy state runtime, layered on `bevy-ecs`. For `States` derives, alias `lgwks_deps::bevy_state` as `bevy_state` at the consumer crate root; the upstream derive resolves that manifest crate name. |
-| `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. External consumer checks run on Linux, macOS, and Windows. |
-| `appcui` | `lgwks_deps::appcui` | Native terminal UI. Downstream code uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros resolve their crate alias without a direct dependency. |
-| `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
-| `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | macOS-only. |
-| `ml-tokenizers` | `lgwks_deps::tokenizers` | The matching tokenizer stack. |
-| `process-group-probe` | `lgwks_deps::process_group::exists` (deprecated) | Forwards to `lgwks_std::process::process_group_exists`, the one process-group backend; kept for 1.x compatibility. |
-| `scan` (default) | — | The gate's Rust source detectors. The one reviewed default-on feature. |
-
-The ML features are default-off, so the default `scan` build compiles none of
-Candle's closure. Selecting `ml-candle` pulls `hf-hub` transitively through
-`candle-transformers`, which makes the compiled tree network-capable even though
-the runtime here loads a local checkpoint and does not call the hub. Authority,
-transitive-surface limits, and verification are recorded in
-[`docs/candle-admission.md`](../../docs/candle-admission.md).
-
-The `gpui` feature is not compiled by the default `scan` build either. Its
-authority and verification are recorded in
-[`docs/bevy-admission.md`](../../docs/bevy-admission.md); AppCUI's in
-[`docs/appcui-admission.md`](../../docs/appcui-admission.md). Native terminal
-support does not imply a full editor, backend execution, or measured platform
-parity.
+library does not intercept arbitrary Cargo invocations. Every feature, what it
+re-exports, and what it pulls in is in
+[`storefront.md`](../../docs/guides/lgwks-deps/storefront.md); the admission
+records are [Candle](../../docs/candle-admission.md),
+[Bevy and GPUI](../../docs/bevy-admission.md) and
+[AppCUI](../../docs/appcui-admission.md).
 
 ## Gate
 
@@ -79,7 +46,6 @@ lgwks-deps request <crate> <v>  # print an approval block to fill in
 lgwks-deps init [PATH]          # fail-closed starting register
 lgwks-deps freshness [PATH]     # resolved versus latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
-lgwks-deps scan [PATH]...       # source detectors, one verdict binary
 lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
 ```
 
@@ -140,22 +106,9 @@ enforced.
 
 ## The other crates
 
-Five crates ship from this repository — the four in the table below plus
-`lgwks_macros`, a proc-macro crate carrying the syntax of `lgwks_bot::script!`
-which exists only because Rust requires a proc macro to live in its own crate.
-It is not a surface of its own; use it through `lgwks_bot`. They share a
-release process, not a dependency graph: `lgwks_bot` and `lgwks_deps` depend on
-`lgwks_std` (unconditionally, plus an optional `lgwks_macros` behind `bot`'s
-`script` feature), and `lgwks_ast` stands alone.
-
-| Crate | What it gives you |
-|---|---|
-| [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, default structured debugging, time, hashing, ids |
-| [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work. Its async engine is one of the stacks this storefront ships |
-| [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
-
-The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
-indexes the design documents.
+Five crates ship from this repository and each is usable on its own. The
+[repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
+lists them and indexes the design documents.
 
 ## License
 

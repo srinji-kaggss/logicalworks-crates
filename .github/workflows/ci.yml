@@ -487,8 +487,9 @@ jobs:
       # bookworm's 2.38 cannot, and the Landlock simulations failed there with
       # `Unsupported` (run 38455031363). The tool builds the derived image with
       # lld and sqlite3 itself (the acceptance-receipt binary holds its receipts
-      # through the sqlite3 program, run 38404124109). `--no-default-features`
-      # leaves out `syn`, which the tool does not read.
+      # through the sqlite3 program, run 38404124109). `lgwks_deps` has no default
+      # feature since the scan moved to `lgwks_ast` (#408); the flag is kept so
+      # the command stays the text `scripts/gate-lanes.toml` holds.
       - name: Run the workspace and lgwks-bot full suites on Linux
         run: cargo run --locked -p lgwks_deps --no-default-features --bin linux-container-tests -- ${{ matrix.suite }}
       # The Linux receipt (#271): the bot-full suite's JUnit, under a name the
@@ -547,7 +548,7 @@ jobs:
         if: matrix.part == 'scan'
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
-        run: cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan
+        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool,scan --bin lgwks-ast -- scan
       # #384: every `script!` in the tree, read by the one parser the macro
       # calls (SL-2), without compiling it. Refuses on any construct the
       # language refuses and on any file that is not Rust tokens, at the
@@ -556,7 +557,7 @@ jobs:
         if: matrix.part == 'scan'
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
-        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check
+        run: cargo run --locked --release -p lgwks_ast --no-default-features --features tool,scan --bin lgwks-ast -- script check
       - name: Clippy feature matrix
         if: matrix.part == 'workspace'
         # Per-crate all-features (gpui excluded: it needs the Xcode Metal

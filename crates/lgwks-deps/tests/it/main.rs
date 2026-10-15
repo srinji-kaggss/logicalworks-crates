@@ -16,6 +16,9 @@ mod deps_sim;
 #[path = "../support/sim.rs"]
 mod sim;
 
+#[path = "../support/replay.rs"]
+mod replay;
+
 /// The estate's one seed substrate: the generator and the replay trace every
 /// workspace simulation draws from, so a seed means one stream in every crate.
 #[path = "../../../lgwks-bot/tests/sim/seed.rs"]
@@ -32,7 +35,6 @@ mod metadata_dimensions;
 mod metadata_public_api;
 mod origin_binding;
 mod prop_parsers;
-mod scan_evidence;
 mod sim_dependency_policy;
 mod sim_invariant_register;
 mod sim_license_policy;
@@ -41,7 +43,6 @@ mod sim_metadata_dimensions;
 mod sim_origin;
 mod sim_policy_properties;
 mod sim_register_policy;
-mod sim_scan_detectors;
 mod sim_seed_draws;
 mod sim_vendor_coverage;
 mod workstream_c;

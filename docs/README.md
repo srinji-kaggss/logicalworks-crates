@@ -28,6 +28,8 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-std/index.md`](guides/lgwks-std/index.md) | `lgwks_std`: install, feature selection, and logging. |
 | [`docs/guides/lgwks-ast/index.md`](guides/lgwks-ast/index.md) | `lgwks_ast`: install, grammar selection, bounds, and diagnostics. |
 | [`docs/guides/lgwks-deps/index.md`](guides/lgwks-deps/index.md) | `lgwks_deps`: library use versus CLI and policy adoption. |
+| [`docs/guides/lgwks-deps/storefront.md`](guides/lgwks-deps/storefront.md) | Every `lgwks_deps` storefront feature, what it re-exports, and what each pulls in. |
+| [`docs/guides/lgwks-deps/embedding.md`](guides/lgwks-deps/embedding.md) | Embedding `check_dependencies` in your own tool, and when adopting the policy is the right call. |
 | [`docs/dependency-doctrine.md`](dependency-doctrine.md) | How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate. |
 | [`docs/async-parity.md`](async-parity.md) | The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences. |
 | [`docs/async-sdk-shape.md`](async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
@@ -35,7 +37,8 @@ the rest of this table is design history and contributor policy.
 | [`docs/declarative-orchestration-composition.spec.md`](declarative-orchestration-composition.spec.md) | Part two of the task-first specification: composition, admission and repair, one registry and execution path, ownership and visibility. |
 | [`docs/orchestration-lifecycle.spec.md`](orchestration-lifecycle.spec.md) | Single-owner state, atomic fingerprint and value commits, attempt-bound evidence, readiness and process-tree ownership, and the honest durability boundary. |
 | [`docs/script-language.spec.md`](script-language.spec.md) | The `script!` language: one lexicon, one parser, one call per line, guarantees carried by words, and where the parser lives. Proposed, not shipped. |
-| [`docs/adr/0001-one-rust-reader.md`](adr/0001-one-rust-reader.md) | ADR 0001: Rust is read by one parser, `lgwks_ast`. The decision is backed by fidelity, latency, peak-RSS and hostile-nesting measurements on this repository's own sources; routing the `scan` gate through it is #408. |
+| [`docs/adr/0001-one-rust-reader.md`](adr/0001-one-rust-reader.md) | ADR 0001: Rust is read by one parser, `lgwks_ast`. The decision is backed by fidelity, latency, peak-RSS and hostile-nesting measurements on this repository's own sources. |
+| [`docs/adr/0002-scan-routed-through-lgwks-ast.md`](adr/0002-scan-routed-through-lgwks-ast.md) | ADR 0002: the `scan` gate reads Rust through `lgwks_ast`, so `lgwks_deps` no longer carries `syn`, and `lgwks-deps scan` points at `lgwks-ast scan` (#408). |
 | [`docs/ai-orchestration.spec.md`](ai-orchestration.spec.md) | AI-authored scripts and AI workloads: constrained proposals, bounded artifact context, subject pinning, no-progress intervention and same-model evaluation. |
 | [`docs/pr-review-orchestration.spec.md`](pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
 | [`docs/orchestration-acceptance.spec.md`](orchestration-acceptance.spec.md) | The 36 public-interface falsifiers, the requirement each one owns, and the per-revision table of the tests that drive them. No row is accepted yet. |

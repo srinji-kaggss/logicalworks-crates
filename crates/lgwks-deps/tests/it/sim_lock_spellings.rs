@@ -19,7 +19,8 @@
 
 use lgwks_deps::lock::{self, LockError};
 
-use crate::sim::{Failure, Rng, Trace, refuse, replay_sweep};
+use crate::replay::{Failure, refuse, replay_sweep};
+use crate::sim::{Rng, Trace};
 
 type TestResult = Result<(), Failure>;
 

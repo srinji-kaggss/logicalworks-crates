@@ -706,8 +706,9 @@ fn deps_are_approved_leaves() -> TestResult {
         .ok_or("crates/ has no parent")?;
 
     // The deps storefront may depend only on the workspace facade it enforces,
-    // plus the reviewed scan exception, plus optional storefront features
-    // that the end user selects. The default build stays zero-dependency:
+    // plus optional storefront features that the end user selects; the Rust
+    // source detectors live in `lgwks_ast` (ADR 0002), so no parser is here.
+    // The default build stays zero-dependency:
     // every third-party edge other than lgwks_std must be `optional = true`,
     // so `cargo build`/`cargo install` with no features pulls nothing.
     {
@@ -718,7 +719,6 @@ fn deps_are_approved_leaves() -> TestResult {
             names,
             [
                 "lgwks_std",
-                "syn",
                 "proc-macro2",
                 "quote",
                 "gpui",

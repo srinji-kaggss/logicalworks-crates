@@ -306,7 +306,10 @@ group = "quality"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo run --locked --release -p lgwks_deps --bin lgwks-deps -- scan"
+# The detectors read Rust through `lgwks_ast`, the workspace's one Rust reader
+# (ADR 0001, #408), so the lane runs `lgwks-ast scan`. `lgwks_deps` cannot host it:
+# `lgwks_ast`'s `script` feature depends on `lgwks_deps`, and the reverse is a cycle.
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool,scan --bin lgwks-ast -- scan"
 ci_step = "Scan reports zero findings"
 
 [[lane]]
@@ -315,7 +318,9 @@ group = "quality"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool --bin lgwks-ast -- script check"
+# The same feature set as the `scan` lane above, so the two lanes of this group
+# build `lgwks-ast` once.
+command = "cargo run --locked --release -p lgwks_ast --no-default-features --features tool,scan --bin lgwks-ast -- script check"
 ci_step = "Every script! in the repository reads"
 
 [[lane]]

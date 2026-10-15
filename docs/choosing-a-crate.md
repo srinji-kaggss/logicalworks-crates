@@ -25,7 +25,7 @@ nothing in this workspace. `lgwks_bot` depends on `lgwks_std`, and optionally on
 | Capability-gated automation (Observe/Evaluate/Execute/Query) | `lgwks_bot` | default (sync) |
 | Async timers, channels, sockets, processes, signals | `lgwks_bot::rt` | `rt`, `time`, `sync`, `net`, `process`, `fs`, `signal` |
 | Parse Rust/Python/TS/JS/Go/Java/Swift in a tool | `lgwks_ast` | default (7 grammars) |
-| Rust source lint scan (zero-gate detectors) | `lgwks_deps` | `scan` (default for CLI) |
+| Rust source lint scan (zero-gate detectors) | `lgwks_ast` | `scan` and `tool` (default off), run as `lgwks-ast scan` |
 | Raw `tokio` engine without the bot facade | `lgwks_deps` | `tokio*` with `default-features = false` |
 | GPU desktop UI (Zed's GPUI) | `lgwks_deps` | `gpui` with `default-features = false` |
 | Native terminal UI (AppCUI) | `lgwks_deps` | `appcui` with `default-features = false`, version =0.5.1 per `contract/APPROVED.toml` |
