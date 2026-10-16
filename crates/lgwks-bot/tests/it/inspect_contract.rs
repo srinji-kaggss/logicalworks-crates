@@ -405,6 +405,17 @@ fn cancellation_closes_admission_and_the_terminal_record_stays_readable()
         );
 
         gate.release(2);
+        // Both bodies finish and are absorbed before the drain starts, as the
+        // test above does. `shutdown` gives a body that has not returned a
+        // 50 ms wall-clock grace and then aborts it, and an aborted body is
+        // counted in neither counter below: with the drain started straight
+        // after the release, a host that did not schedule the two body threads
+        // inside that grace failed the assertion on the host's load and not on
+        // the property (run 38916569842, bot-full on a loaded instance). The
+        // property is that cancellation leaves both terminal records readable,
+        // and it is asserted exactly as before.
+        gate.await_exits(2).await;
+        reap_until_completed(&mut supervisor, 2).await;
         let report = supervisor.shutdown().await;
         // The terminal record survives cancellation and stays attributable.
         assert!(

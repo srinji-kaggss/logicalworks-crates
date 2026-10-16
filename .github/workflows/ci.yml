@@ -380,11 +380,13 @@ jobs:
   # slot-seconds of tests on nine threads, of which the 42 held 206 and
   # `sim_scale` 250 to 477 (runs 38904371387 and 38912085538, each cancelled at
   # the 5 min cap with every test passed). lwc-2 finished its one leg in 80 s of
-  # its 300; lwc-12 runs the lgwks-ast leg first (127 s on run 38912085538) and a
-  # leg queued behind it ends the run, because the receipt waits for every leg,
-  # so it keeps only the two small tiers. The Linux container run still runs all
-  # of them. The legs build the `it` binary too, which each instance keeps warm
-  # like its other test binaries.
+  # its 300 (159 s on run 38916569842, which built the `it` binary cold there);
+  # lwc-12 runs the lgwks-ast leg first (127 s on run 38912085538) and a leg
+  # queued behind it ends the run, because the receipt waits for every leg, so
+  # it keeps only the two small tiers, and builds only their binary: with the
+  # `it` binary too its leg took 186 s on run 38916569842. The Linux container
+  # run still runs all of them. Which binaries a leg builds is the leg's
+  # `binaries`; unset, the lane builds the review-path binary alone.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -395,6 +397,7 @@ jobs:
         include:
           - tiers: "10000"
             instance: lwc-2
+            binaries: "--test sim_review_path --test it"
             filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier)) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
           - tiers: "100 and 1000"
             instance: lwc-12
@@ -418,16 +421,18 @@ jobs:
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
-      # The lane's own command, with the tests this leg runs set in
-      # SATURATION_FILTER (unset, the command selects the whole `sim_review_path`
-      # binary), as the sharded lanes set PARTITION: the gate-parity check
-      # compares this text with scripts/gate-lanes.toml. `--ignore-default-filter`
-      # lifts the `ci` profile's macOS filter, which keeps that binary and the
-      # `sim_scale` module out of the bot-full job.
+      # The lane's own command, with the binaries this leg builds set in
+      # SATURATION_BINARIES and the tests it runs in SATURATION_FILTER (unset, the
+      # command builds and selects the whole `sim_review_path` binary), as the
+      # sharded lanes set PARTITION: the gate-parity check compares this text
+      # with scripts/gate-lanes.toml. `--ignore-default-filter` lifts the `ci`
+      # profile's macOS filter, which keeps that binary and the `sim_scale`
+      # module out of the bot-full job.
       - name: Run lgwks-bot saturation tiers
         env:
+          SATURATION_BINARIES: ${{ matrix.binaries }}
           SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path --test it -E "${SATURATION_FILTER:-binary(sim_review_path)}"
+        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E "${SATURATION_FILTER:-binary(sim_review_path)}"
       # The JUnit report of what this leg ran, under the `lgwks-bot-junit-*` name
       # the acceptance job downloads: the review-path tests (T31-T34) are named
       # in `docs/acceptance/t-rows.toml`, so the macOS receipt reads them here.
