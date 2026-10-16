@@ -28,9 +28,9 @@ crates/lgwks-bot/src/ecs/bot.rs:565	pub fn tick(&mut self) -> Result<usize, BotE
 crates/lgwks-bot/src/ecs/builder.rs:440	pub fn observe<U>(self, source: U) -> EcsObserveBuilder<U>
 crates/lgwks-bot/src/ecs/builder.rs:639	let mut shortages: Vec<Shortage> = Vec::new();
 crates/lgwks-bot/src/ecs/builder.rs:659	world.insert_resource(Grants(grants.clone()));
-crates/lgwks-bot/src/ecs/fold.rs:212	*slot = Some(value);
-crates/lgwks-bot/src/ecs/fold.rs:324	pub(super) fn fire_plan(world: &mut World) {
-crates/lgwks-bot/src/ecs/fold.rs:648	*failure = Some(error);
+crates/lgwks-bot/src/ecs/fold.rs:341	pub(super) fn fire_plan(world: &mut World) {
+crates/lgwks-bot/src/ecs/fold.rs:690	*failure = Some(error);
+crates/lgwks-bot/src/ecs/fold.rs:712	ambiguity_detection: LogLevel::Error,
 crates/lgwks-bot/src/ecs/ledger.rs:766	/// satisfied, so the entries behind it are unresolved through it.
 crates/lgwks-bot/src/ecs/ledger.rs:847	/// explains every successor blocked behind it, so naming it is naming the
 crates/lgwks-bot/src/ecs/resources.rs:79	pub(super) struct TickError(pub(super) Option<BotError>);

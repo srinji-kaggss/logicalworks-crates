@@ -181,6 +181,65 @@ fn a_late_retry_past_the_deadline_is_given_up_not_begun() -> TestResult {
     Ok(())
 }
 
+/// A condition that cannot be evaluated, naming itself in the failure so a test
+/// can tell which chain's report a tick returned.
+struct CannotDecide(&'static str);
+
+impl Evaluate<u16> for CannotDecide {
+    fn check(&self, _observed: &u16) -> Result<bool, BotError> {
+        Err(BotError::EvaluateError {
+            cause: self.0.into(),
+        })
+    }
+
+    fn condition_id(&self) -> &str {
+        "test::cannot_decide"
+    }
+}
+
+/// Failures are recorded only for the chains that met one (#279), so the driver
+/// has to visit a chain that has a failure and no step, between chains that have
+/// steps and no failure, and still report the first failure in declaration order.
+///
+/// Five chains, in this order: runs, cannot decide ("first"), runs, cannot decide
+/// ("second"), runs. The plan holds steps for chains 0, 2 and 4 and failures for
+/// chains 1 and 3, so a merge that dropped a failure-only chain, walked the
+/// chains out of order, or reported the later failure fails one of the three
+/// assertions. Source: the `tick_async` contract — "a condition that fails stops
+/// its own chain where it failed ... the tick reports the first failure in
+/// declaration order" — and the dense `Vec<Option<_>>` this replaced.
+#[test]
+fn failures_between_running_chains_are_reported_in_order_and_the_others_run() -> TestResult {
+    let runs = Rc::new(Cell::new(0));
+    let mut bot = EcsBot::builder("sparse-failures")
+        .observe(Holds::new(200))
+        .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+        .observe(Holds::new(200))
+        .on(CannotDecide("first"), Count(Rc::clone(&runs)))
+        .observe(Holds::new(200))
+        .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+        .observe(Holds::new(200))
+        .on(CannotDecide("second"), Count(Rc::clone(&runs)))
+        .observe(Holds::new(200))
+        .on(|value: &u16| *value >= 200, Count(Rc::clone(&runs)))
+        .with_effects(test_effects()?)
+        .build(&net_grants())?;
+    let error = refused(bot.tick(), |fired| {
+        format!("two failing conditions fired {fired} and reported nothing")
+    })?;
+    assert!(
+        matches!(&error, BotError::EvaluateError { cause } if cause == "first"),
+        "the first failure in declaration order is the tick's report: {error:?}"
+    );
+    assert_eq!(
+        runs.get(),
+        3,
+        "the three chains whose conditions held ran, on either side of each failure"
+    );
+    assert_eq!(bot.fired(), 3, "the tick counted exactly those three");
+    Ok(())
+}
+
 /// The empty chain `run_steps` skips (#279) is the one `run_chain` would have
 /// answered `(0, None)` for, and with a condition failure it reports that
 /// failure: the skip's equivalence rests on `run_chain`'s tail

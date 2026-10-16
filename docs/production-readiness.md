@@ -97,7 +97,7 @@ not an execution receipt. [Read 4.7](production-readiness/4-7-portable.md).
 
 ### 4.9 Performance — fastest correct implementation
 
-**⚠️** — the synchronous tick loses by 118x to 2 665x; the async facade by 2% to
+**⚠️** — the synchronous tick loses by 28x to 2 605x; the async facade by 2% to
 17% at p50. [Read 4.9](production-readiness/4-9-performance.md).
 
 ## 5. Why Rust, without the adjectives

@@ -34,12 +34,13 @@ impl EcsBot {
     ///
     /// Every chain is run on its own, because a failure stops its own chain rather
     /// than every chain after it: the chains behind a failing one still run and
-    /// still record their work. Iterating chains rather than steps is also what
+    /// still record their work. Visiting the chains that have a step *or* a
+    /// recorded failure, rather than only the chains that have steps, is what
     /// keeps a chain that recorded *no* step from being skipped: a condition the
     /// walk could not evaluate stops that chain before it records anything, and
     /// its failure is still the tick's to report. The failure of the first chain
     /// in declaration order that has one is that report, which is the ordering the
-    /// synchronous walk had.
+    /// synchronous walk had. A chain with neither is not visited at all.
     ///
     /// States are written to the ledger as the walk reaches them — an attempt in
     /// flight *before* its effect is awaited, and its outcome after — so a tick
@@ -48,13 +49,28 @@ impl EcsBot {
     pub(super) async fn run_steps(
         &mut self,
         steps: &[Step],
-        failures: &mut [Option<BotError>],
+        failures: &mut Vec<(usize, BotError)>,
         retry: &RetryReading,
     ) -> (usize, Option<BotError>) {
         let mut fired: usize = 0;
         let mut failure: Option<BotError> = None;
         let mut start = 0;
-        for chain in 0..failures.len() {
+        // Drained rather than taken, so the buffer keeps its capacity for the next
+        // tick that fails. Each row is a chain's condition failure, in chain order.
+        let mut recorded = failures.drain(..).peekable();
+        loop {
+            // The next chain with anything to run or report: the nearer of the
+            // next step's chain and the next failure's. A chain with neither is
+            // never visited, so a tick that selected nothing and met no failure
+            // costs two empty reads and not a walk over every chain.
+            let chain = match (
+                steps.get(start).map(|step| step.chain),
+                recorded.peek().map(|&(chain, _)| chain),
+            ) {
+                (Some(step), Some(failed)) => step.min(failed),
+                (Some(only), None) | (None, Some(only)) => only,
+                (None, None) => break,
+            };
             // `steps` is in `(chain, entry)` walk order, so the steps of `chain`
             // are the run at `start` — and a chain that recorded none contributes
             // the empty run, because its first step is a later chain's.
@@ -67,17 +83,12 @@ impl EcsBot {
                 _ => &[],
             };
 
-            // Taken, so the condition failure belongs to the chain it was recorded
-            // for and cannot be reported for a chain that never reached it.
-            let condition_failure = failures.get_mut(chain).and_then(Option::take);
-            // A chain with no step and no condition failure has nothing to run
-            // and nothing to report: `run_chain` over it returns `(0, None)`, so
-            // building and awaiting its future for every quiet chain of every
-            // quiet tick was the whole cost of a tick that selected nothing.
-            if run.is_empty() && condition_failure.is_none() {
-                start = end;
-                continue;
-            }
+            // Taken only when it is this chain's, so the condition failure
+            // belongs to the chain it was recorded for and cannot be reported for
+            // a chain that never reached it.
+            let condition_failure = recorded
+                .next_if(|&(failed, _)| failed == chain)
+                .map(|(_, error)| error);
             let (chain_fired, chain_failure) = self.run_chain(run, condition_failure, retry).await;
             fired = fired.saturating_add(chain_fired);
             // Chain order, so "the first error in declaration order" is the one a

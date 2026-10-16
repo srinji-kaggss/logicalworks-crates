@@ -8,7 +8,7 @@ Two failures come from the wiring rather than from a domain, and both are typed
 so they cannot be mistaken for a condition that simply did not fire.
 
 - A condition whose `Evaluate<T>` implementation returns `Err` stops the chain
-  with that error (`crates/lgwks-bot/src/ecs/fold.rs:648`). A structural failure in a
+  with that error (`crates/lgwks-bot/src/ecs/fold.rs:690`). A structural failure in a
   condition is `BotError::EvaluateError`, not `false`. The stop is ordered rather
   than absolute: the steps `fire_plan` recorded before the failing condition are
   still run, so an effect the walk had already cleared does take effect, while

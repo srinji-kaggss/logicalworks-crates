@@ -729,16 +729,21 @@ pub(super) struct Step {
 /// One failure per chain rather than one for the tick, because a condition that
 /// cannot be evaluated stops its own chain: the chains after it are still
 /// walked, and a failing action earlier in a chain is a more specific report than
-/// a failing condition later in the same one. That is also why the failures are
-/// indexed rather than ordered — the `chain` field of each [`Step`] is the order
-/// they are reported in.
+/// a failing condition later in the same one. That is also why each failure
+/// names its chain — the `chain` field of each [`Step`] and the one beside each
+/// failure are the order they are reported in.
+///
+/// The failures are sparse: only a chain that met one has a row. A slot per chain
+/// held a [`BotError`]-sized `None` for every chain on every tick, and the tick
+/// that failed nowhere paid to write, clear and take all of them.
 #[derive(Default)]
 pub(super) struct Plan {
     /// The decisions to apply, in declaration order: one chain's entries in
     /// walk order, then the next chain's.
     pub(super) steps: Vec<Step>,
-    /// The condition failure each chain's walk met, indexed by chain. A chain
-    /// whose walk met none has `None`, and an action failure recorded by the
-    /// driver displaces the condition failure of the chain it happened in.
-    pub(super) failures: Vec<Option<BotError>>,
+    /// The condition failure a chain's walk met, as `(chain, failure)` in chain
+    /// order, at most one per chain. A chain whose walk met none has no row, and
+    /// an action failure recorded by the driver displaces the condition failure
+    /// of the chain it happened in.
+    pub(super) failures: Vec<(usize, BotError)>,
 }
