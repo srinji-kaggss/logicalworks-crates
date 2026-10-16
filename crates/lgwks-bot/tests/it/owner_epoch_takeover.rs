@@ -515,11 +515,16 @@ fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16() -> 
     // journal holds work that a stale settlement could overwrite.
     owner.compare_and_append(owner.tail(), &EffectEvent::IntentAdmitted { key: current })?;
     let after_owner_write = owner.committed()?;
-    let bytes_after_owner_write = std::fs::read(&journal_path)?;
 
     // The fence is released, which is what the takeover means from the old
     // worker's point of view: it is no longer the owner, and it comes back.
     drop(owner);
+
+    // The owner's bytes, read once its fence is gone. `File::try_lock` is `flock`
+    // on Unix and `LockFileEx` on Windows, and a region `LockFileEx` holds refuses
+    // a read through any other handle, this process's own included, with os error
+    // 33. Nothing writes between the append and here, so these are its bytes.
+    let bytes_after_owner_write = std::fs::read(&journal_path)?;
 
     // Release a *second* process — the returning worker, with its stale warrant
     // and its own open view of the file. It was never killed, so this is a real
@@ -598,7 +603,9 @@ fn an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16() -> 
 
     // The byte-level half of "does not overwrite". A writer that rewrote the
     // current owner's history would leave the owner's bytes as a *shorter*
-    // prefix, not a longer one; an append-only fence can only extend them.
+    // prefix, not a longer one; an append-only fence can only extend them. Read
+    // once the reopened journal's fence is gone, for the reason given above.
+    drop(reopened);
     let observed_bytes = std::fs::read(&journal_path)?;
     assert!(
         observed_bytes.starts_with(&bytes_after_owner_write),

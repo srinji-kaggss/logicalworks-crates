@@ -7,16 +7,14 @@
 # T19-T21 name the `process_job` tests, which drive a real job object. Every
 # other row names the tests of the `it` binary that carry its row id (`_tNN`, the
 # suffix `tests/it/t_rows.rs` documents) and that passed on a hosted Windows
-# runner (probe run 38956193594, 2026-10-16); the job runs exactly the `_tNN`
-# tests, so the receipt tool fails the run when a named test goes missing or
-# fails. A row's `gap` says how many of the tests `t-rows.toml` names for it the
-# Windows job does not run; the tests that need a Unix process model (a fake `gh`
-# on `PATH`, a signal, a process group) are `cfg(unix)`, do not build there and
-# are among them.
-# T16 has no entry: its row test failed on a hosted Windows runner with os error 33
-# (a lock violation), the job excludes that one test by name, and issue #575 owns
-# the fix. Every entry is a nextest name, `<binary>::<test>`, and `state` and
-# `gap` mean what they mean in `t-rows.toml`.
+# runner (probe run 38956193594, 2026-10-16; T16's after #575 moved its journal
+# reads behind the lock); the job runs exactly the `_tNN` tests, so the receipt
+# tool fails the run when a named test goes missing or fails. A row's `gap` says
+# how many of the tests `t-rows.toml` names for it the Windows job does not run;
+# the tests that need a Unix process model (a fake `gh` on `PATH`, a signal, a
+# process group) are `cfg(unix)`, do not build there and are among them.
+# Every entry is a nextest name, `<binary>::<test>`, and `state` and `gap` mean
+# what they mean in `t-rows.toml`.
 
 schema = 1
 spec = "docs/orchestration-acceptance.spec.md"
@@ -178,6 +176,16 @@ state = "present"
 gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
 tests = [
   "it::sim_replay_drift::every_axis_is_distinguishable_band_11_t15",
+]
+
+[[row]]
+id = "T16"
+requires = "LC-13"
+row = "Old worker returns after owner-epoch takeover; its receipt cannot authorize a stale dispatch or overwrite the current owner."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 6 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16",
 ]
 
 [[row]]
