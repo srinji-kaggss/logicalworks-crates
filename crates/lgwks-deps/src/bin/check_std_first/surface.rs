@@ -281,8 +281,29 @@ pub(super) fn baseline(
 
 #[cfg(test)]
 mod tests {
-    use super::{declarations, is_library, judge};
+    use super::{CONTRACT, baseline, declarations, findings, is_library, judge};
+    use crate::files::{Scratch, source_files};
     use std::collections::BTreeMap;
+    use std::error::Error;
+    use std::fs;
+    use std::path::Path;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// Writes `text` at `relative` under `root`, making its directory.
+    fn put(root: &Path, relative: &str, text: &str) -> TestResult {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, text)?;
+        Ok(())
+    }
+
+    /// Every surface finding of the scratch repository as the disk holds it now.
+    fn judged(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+        Ok(findings(root, &source_files(root)?)?)
+    }
 
     /// A ceiling table from rows.
     fn table(rows: &[(&str, usize)]) -> BTreeMap<String, usize> {
@@ -380,5 +401,91 @@ mod tests {
             !is_library("crates/x/build.rs"),
             "a build script is not an interface"
         );
+    }
+
+    /// Requirement #526 ("the new lane fails on a branch that adds a direct-use `pub`
+    /// item"), as a contributor meets it on a repository read from disk the way the
+    /// lane reads the real one: a recorded tree holds, one more item in an old file
+    /// and a new file with one are each refused, recording the table makes both
+    /// legitimate, and a file that stops declaring leaves a stale line to remove.
+    #[test]
+    fn a_contributor_adding_a_pub_item_is_refused_until_the_table_records_it() -> TestResult {
+        let scratch = Scratch::new()?;
+        let root = &scratch.root;
+        put(
+            root,
+            "crates/demo/src/lib.rs",
+            "pub fn one() {}\nfn private() {}\n",
+        )?;
+        put(
+            root,
+            CONTRACT,
+            "[ceilings]\n\"crates/demo/src/lib.rs\" = 1\n",
+        )?;
+        assert!(judged(root)?.is_empty(), "the recorded tree holds");
+
+        put(
+            root,
+            "crates/demo/src/lib.rs",
+            "pub fn one() {}\npub fn two() {}\n",
+        )?;
+        put(root, "crates/demo/src/extra.rs", "pub struct Extra;\n")?;
+        let refused = judged(root)?;
+        assert_eq!(refused.len(), 2, "one rise and one new file: {refused:?}");
+        assert!(
+            says(
+                &refused,
+                "crates/demo/src/lib.rs",
+                "2 public declaration(s), ceiling 1"
+            ),
+            "the added item is over its file's ceiling: {refused:?}"
+        );
+        assert!(
+            says(
+                &refused,
+                "crates/demo/src/extra.rs",
+                "1 public declaration(s), ceiling 0"
+            ),
+            "a new file starts at zero: {refused:?}"
+        );
+
+        let mut recorded = Vec::new();
+        baseline(root, &source_files(root)?, &mut recorded)?;
+        put(root, CONTRACT, &String::from_utf8(recorded)?)?;
+        assert!(
+            judged(root)?.is_empty(),
+            "the table the tree implies is the change made legitimate"
+        );
+
+        put(root, "crates/demo/src/extra.rs", "fn hidden() {}\n")?;
+        let stale = judged(root)?;
+        assert!(
+            says(&stale, "crates/demo/src/extra.rs", "declares no `pub` item"),
+            "a ceiling for a file that stopped declaring is stale: {stale:?}"
+        );
+        Ok(())
+    }
+
+    /// Requirement #526 (a gate that cannot read its contract must not pass): a ceiling
+    /// that is not a whole number and a contract that is absent are refusals, never
+    /// "no ceilings" and never a ceiling of zero.
+    #[test]
+    fn an_unreadable_contract_is_a_refusal_not_an_empty_table() -> TestResult {
+        let scratch = Scratch::new()?;
+        let root = &scratch.root;
+        put(root, "crates/demo/src/lib.rs", "pub fn one() {}\n")?;
+        assert!(judged(root).is_err(), "an absent contract is refused");
+        for spelling in ["\"many\"", "-1", "1.5"] {
+            put(
+                root,
+                CONTRACT,
+                &format!("[ceilings]\n\"crates/demo/src/lib.rs\" = {spelling}\n"),
+            )?;
+            assert!(
+                judged(root).is_err(),
+                "a ceiling written {spelling} is refused"
+            );
+        }
+        Ok(())
     }
 }
