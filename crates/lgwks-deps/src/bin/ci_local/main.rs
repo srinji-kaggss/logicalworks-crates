@@ -42,6 +42,10 @@
 //! usage or manifest error.
 
 mod builtins;
+#[path = "../shared/children.rs"]
+mod children;
+#[path = "../shared/console.rs"]
+mod console;
 #[path = "../shared/fixture.rs"]
 mod fixture;
 mod invariants;
@@ -62,14 +66,15 @@ mod cli_tests;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Mutex;
 use std::time::Instant;
 
+use children::Children;
+use console::Console;
 use lanes::{Lane, Manifest, child_env, load_lanes, run_lane};
-use process::{Children, run_parallel};
+use process::run_parallel;
 use receipt::{build_receipt, capture_line, format_table, host, tree_identity};
 use scratch::Scratch;
 use utc::stamp;
@@ -199,45 +204,6 @@ pub(crate) struct Context<'run> {
     pub(crate) children: &'run Children,
     /// The lane's log, when it has one.
     pub(crate) out: Option<&'run File>,
-}
-
-/// The two output streams, locked per line so lanes in different groups interleave whole lines.
-pub(crate) struct Console {
-    /// Standard output.
-    out: Mutex<Box<dyn Write + Send>>,
-    /// Standard error.
-    err: Mutex<Box<dyn Write + Send>>,
-}
-
-impl Console {
-    /// A console over the given writers.
-    pub(crate) fn new(out: Box<dyn Write + Send>, err: Box<dyn Write + Send>) -> Self {
-        Self {
-            out: Mutex::new(out),
-            err: Mutex::new(err),
-        }
-    }
-
-    /// Writes a line to standard output.
-    pub(crate) fn say(&self, text: &str) {
-        Self::line(&self.out, text);
-    }
-
-    /// Writes a line to standard error.
-    fn warn(&self, text: &str) {
-        Self::line(&self.err, text);
-    }
-
-    /// Writes a line to one stream.
-    fn line(stream: &Mutex<Box<dyn Write + Send>>, text: &str) {
-        let mut held = match stream.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Err(error) = writeln!(held, "{text}").and_then(|()| held.flush()) {
-            lgwks_std::trace::debug!(%error, "a console line could not be written");
-        }
-    }
 }
 
 /// The last lines of a log.

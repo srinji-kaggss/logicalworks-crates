@@ -57,11 +57,33 @@ What this does and does not move. The `script!` arm is measured for the first
 time and holds: 60 of 60 full passes across the three tasks. The `futures`
 lead on the old tasks stands unchallenged — nothing here re-runs models, and
 no interval is claimed over deterministic references. The frontier closed
-model and the human authors have not run (READY-NOT-RUN with the exact
-commands in the README). So the frontier claim now rests on two legs — the
-authority axis above, and a measured authoring comparison on guarantee tasks
-where every `lgwks_bot` arm beats the ecosystem standard — with the model
-half still open.
+model, the other models and the human authors have not run: the matrix calls
+paid models and nobody has ordered that spend, so #270 stays open on it. Its
+runner is back, in Rust (`ai-authoring`, a `lgwks_deps` binary driven by
+`bench/ai-authoring/bench.toml`; the Python runner stays deleted), and the
+README gives its exact command and its planned scale (990 trials). What ran,
+at HEAD, for free: a dry run of all 33 cells (`runs/20261016T225212Z-dry`;
+every `lgwks_bot` and `lexicon` cell passes every clause, `futures` fails
+exactly the guarantee clauses) and the six mutant controls
+(`runs/20261016T225558Z-mutants`; every mutant fails its intended clauses,
+none survives), plus five journeys through the shipped binary under real
+cargo (a mutant the oracle cannot catch exits 1, an oracle past its bound is
+recorded as `timeout`, a `kill -9` and `--resume` leave no process behind).
+The README's per-task table says which arm wins where it is measured. So the
+frontier claim now rests on two legs — the authority axis above, and a
+measured authoring comparison on guarantee tasks where every `lgwks_bot` arm
+beats the ecosystem standard — with the model half still open.
+
+What the runner costs the gate, measured 2026-10-16 on one aarch64-apple-darwin
+host at a load average of 5.7: it adds 89 unit tests and five journeys. A cold test
+build of its binary with every dependency, in an empty target directory with
+`CARGO_INCREMENTAL=0`, took 15.96 s wall, 54 s of CPU and 447 MB peak resident set;
+the 89 unit tests then ran in 5.75 s at 259 MB peak, and those plus the journeys and
+the `ci-local` tests (260 in all) in 13.5 s. The PR's first full CI run had three jobs
+cancelled at the 300 s cap with the host's five-minute load average at 67, against
+262, 267 and 114 s for the same three jobs on main's last run. Sixteen cold seconds
+do not explain that, so the wall is the contention that #272 and #279 own, and it is
+not this binary's cost.
 
 *Not covered:* the survey sample is eight systems and one patent reading, not
 the whole market. A rival that occupies the same axis would falsify the

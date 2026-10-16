@@ -1,0 +1,263 @@
+# The AI authoring benchmark, as it declares itself (#270).
+#
+# `ai-authoring` (crates/lgwks-deps/src/bin/ai_authoring) holds none of this: the
+# arms, tasks, profiles, file layout, limits, defaults, model command line and
+# protocol statements are all read from here. A change to what the benchmark is
+# is a change to this file, reviewed as one.
+
+# The reply contract that closes every prompt. Every profile and every arm
+# answers under the same one.
+framing = """\
+You are authoring one Rust library crate. Read the task and the API sheet \
+below. You may use only the items on the API sheet plus `std` and the \
+harness crate `ai_task_support`. Reply with exactly one fenced ```rust \
+block containing the complete contents of `src/lib.rs`, and nothing else."""
+
+# The text the committed oracles name the crate under test with, and the prefix
+# of every trial crate's package name. The suffix is unique per trial: a constant
+# name makes cargo's `-C metadata` identical across trials, so a shared target
+# directory would let one trial's oracle binary stand in for another's.
+oracle_crate_token = "ai_trial"
+package_prefix = "ai_trial"
+
+# The arm a mutant's record is filed under.
+mutant_arm = "new"
+
+# The author-burden proxy: how often each token occurs in a solution. These are
+# what a hand-written orchestration reaches for: task ownership, bound admission,
+# cancellation, racing, looping, shared state, channels and abort.
+orchestration_tokens = [
+    "JoinSet",
+    "spawn(",
+    "Semaphore",
+    "CancellationToken",
+    "select!",
+    "loop {",
+    "Arc<",
+    "Mutex",
+    "channel(",
+    "abort(",
+]
+
+lockfile_note = "bench/ai-authoring/Cargo.lock copied per trial, root package name rewritten"
+
+[layout]
+template = "template"
+lock = "Cargo.lock"
+prompt = "tasks/{task}/prompt.md"
+oracle = "tasks/{task}/oracle.rs"
+reference = "reference/{surface}-{task}.rs"
+mutant = "reference/mutant-{task}.rs"
+runs = "runs"
+
+[template]
+name_token = "__NAME__"
+
+[[template.path]]
+token = "../../../crates/lgwks-bot"
+target = "../../crates/lgwks-bot"
+
+[[template.path]]
+token = "../support"
+target = "support"
+
+# The model command runs with tools, so it runs under the sandbox: home, the
+# named directories and the work root are unreadable except the command's own
+# settings (less what `withheld` names) and the trial's scratch directory.
+# Read-only plan mode, never a stripped permission check: the whole prompt arrives
+# on stdin and the reply is one fenced block, so an author needs no tool that
+# writes or runs anything.
+[model]
+command = "cmd"
+sandbox = "/usr/bin/sandbox-exec"
+args = [
+    "-p",
+    "--permission-mode",
+    "plan",
+    "-t",
+    "--skip-onboarding",
+    "--no-auto-update",
+    "--no-session",
+    "--no-skills",
+    "-m",
+    "{model}",
+    "--effort",
+    "high",
+    "--max-turns",
+    "6",
+    "--output-format",
+    "json",
+]
+denied = ["/private/tmp"]
+config_dir = ".commandcode"
+withheld = ["projects", "file-history", "history.jsonl", "plans", "scratchpad", "skills"]
+
+# How long each kind of child may run. A hung oracle is a failure of that
+# solution, recorded as one: the clauses that finished keep their verdicts and
+# the rest are `timeout`.
+[limits]
+model_call_s = 900
+build_s = 1800
+oracle_s = 1800
+git_s = 60
+
+# What a run does when the command line does not say. #270's planned run: at
+# least three models, at least one a frontier closed model; two trials under each
+# of the five profiles make ten per (model, arm, task) cell, #270's floor.
+[defaults]
+models = ["deepseek/deepseek-v4.1-flash", "claude-sonnet-5-5", "moonshotai/kimi-k3"]
+trials = 2
+parallel = 4
+max_repairs = 4
+
+# The five required user profiles, as fixed persona preambles. Each is prepended
+# to the SAME prompt skeleton, so the only thing that differs between two cells of
+# one (model, arm, task) is the sentence below. They are fixed text and never
+# generated: a profile that varied per trial would be a second uncontrolled
+# variable and the comparison would measure the draw rather than the profile.
+
+[[profile]]
+name = "first-time"
+text = """\
+You have never used this crate's orchestration API before. Read the API \
+sheet literally and follow it exactly as written. Where it names an item \
+or a signature, use that item with that signature rather than reaching \
+for something you remember from elsewhere. If something is not on the \
+sheet, it is not available to you."""
+
+[[profile]]
+name = "expert-hurry"
+text = """\
+You know this domain well and you are in a hurry. You are looking for \
+the shortest thing that might work, and you will not re-read the API \
+sheet's prose a second time. Skim it, write the minimal correct answer, \
+and stop."""
+
+[[profile]]
+name = "anxious"
+text = """\
+You do not trust this API to clean up after itself. Assume every \
+resource you start stays live unless you explicitly stop it, and assume \
+every fallible call needs your own error handling rather than an \
+implicit one. Be explicit about cleanup and about every error path."""
+
+[[profile]]
+name = "misuser"
+text = """\
+You are confident but mistaken. The most plausible mistake here is to \
+write the obvious first solution, which quietly ignores the deadline or \
+the path that runs when the work is dropped. Write it anyway; when the \
+compiler or the oracle tells you it is wrong, read what it says and fix \
+it from that evidence."""
+
+[[profile]]
+name = "agent"
+text = """\
+You are an AI coding agent working on an automated pipeline. Output only \
+code. Do not explain, do not ask questions, and do not produce anything \
+outside the single required fenced block."""
+
+# The arms. `reference` names the surface whose reference solutions an arm's dry
+# run compiles when it is another arm's: the lexicon arm authors `script!` from
+# the generated lexicon rather than the script sheet, so its reference is the
+# script arm's. The lexicon's sheet is read from where the generator writes it,
+# not from a copy that could drift from the words the parser dispatches on (#385).
+
+[[arm]]
+name = "old"
+sheet = "api/old.md"
+
+[[arm]]
+name = "new"
+sheet = "api/new.md"
+
+[[arm]]
+name = "fan"
+sheet = "api/fan.md"
+
+[[arm]]
+name = "futures"
+sheet = "api/futures.md"
+
+[[arm]]
+name = "script"
+sheet = "api/script.md"
+
+[[arm]]
+name = "lexicon"
+sheet = "../../docs/script-lexicon.md"
+reference = "script"
+
+# The fan sheet is the new sheet plus `FanOut`, and a sequential durable resume
+# has nothing to fan out, so the fan arm's recovery reference is a new-surface
+# solution as written.
+[[borrowed]]
+arm = "fan"
+task = "recovery"
+surface = "new"
+
+# The tasks. `drop_clause` is the oracle test that says a dropped future left
+# nothing live; `cleanup_ok` reads it. `mutant_base` is the surface whose
+# reference a task's mutant is one mutation away from, named so "the mutant is
+# one mutation from a reference that passes" holds for a task with one reference.
+
+[[task]]
+name = "aggregate"
+drop_clause = "dropping_the_future_leaves_no_fetch_live"
+mutant_base = "old"
+
+[[task]]
+name = "pipeline"
+drop_clause = "dropping_the_future_leaves_no_stage_live"
+mutant_base = "old"
+
+[[task]]
+name = "recovery"
+drop_clause = "dropping_the_future_leaves_no_unit_live"
+mutant_base = "new"
+
+[[task]]
+name = "capture"
+drop_clause = "cancelling_leaves_no_descendant"
+mutant_base = "new"
+
+[[task]]
+name = "tenant-cache"
+drop_clause = "dropping_mid_flight_leaves_the_cache_usable"
+mutant_base = "new"
+
+[[task]]
+name = "durable-retry"
+drop_clause = "dropping_mid_wait_applies_nothing_twice"
+mutant_base = "new"
+
+# Cells the benchmark does not run: a cell that asked a model for a capability the
+# sheet does not offer would measure the sheet's silence, not the model.
+
+[[exclusion]]
+task = "recovery"
+arm = "old"
+why = "the old rt surface has no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+
+[[exclusion]]
+task = "capture"
+arm = "old"
+why = "the old rt sheet offers no supervised process spawn, so the task that needs owned processes, bounded capture and group cleanup cannot be written from it"
+
+[[exclusion]]
+task = "recovery"
+arm = "futures"
+why = "the futures sheet offers no durable run store, no remember, no run identity and no resume, so it keeps no record of a completed unit to consult and cannot express 'finish the work without redoing a completed unit'"
+
+# The statements a run's summary.json records beside the profiles it ran, the
+# repair budget it used and the cells it skipped.
+[protocol]
+same_prompt_skeleton = true
+same_oracle = true
+hidden_oracle = true
+same_sheet_budget = "each API sheet <= 250 lines, except the lexicon arm's: its sheet is the generated docs/script-lexicon.md, whose budget is one page (<= 4k tokens, #385) rather than a line count"
+cargo_serialized = "one cargo process at a time under an exclusive file lock"
+closed_book = "each model call runs under sandbox-exec: home, /private/tmp and the work directory are unreadable except the CLI config and the trial scratch; no session, no skills"
+profile_text_is_fixed = "each profile is one fixed persona preamble prepended to the same prompt skeleton; the framing, the API sheet, the oracle, the repair budget and the sandbox are identical across profiles"
+oracle_measured_under_time_l = "oracle_wall_ms is the wall time of the cargo test invocation that runs the oracle, under /usr/bin/time -l; oracle_peak_rss_bytes is that process's maximum resident set size in bytes, or null on a host with no /usr/bin/time"
+cleanup_ok_is_the_drop_clause = "cleanup_ok is true only when the task's 'dropping the future leaves nothing live' oracle test passed; a crate that never compiled reports false rather than a cleanup result"

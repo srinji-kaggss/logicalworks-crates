@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::process::Children;
+use super::children::{Children, Launch, forget_launched_crate, inherited_env};
 use super::toml_subset::{Table, list, raw, read_tables, text};
 use super::utc::stamp;
 use super::{
@@ -20,6 +20,9 @@ use super::{
 
 /// The lane table, relative to the repository root.
 pub(super) const MANIFEST_REL: &str = "scripts/gate-lanes.toml";
+
+/// The longest one child of the gate may run.
+pub(super) const RUN_BOUND: Duration = Duration::from_secs(3600);
 
 /// The boolean under `key` of a table.
 pub(super) fn flag(table: &Table, key: &str) -> Option<bool> {
@@ -251,35 +254,7 @@ fn path_of(env: &BTreeMap<String, String>) -> String {
 
 /// The environment lanes run in.
 pub(super) fn child_env(scratch: Option<&Path>, target: Option<&Path>) -> BTreeMap<String, String> {
-    let vars = std::env::vars_os()
-        .map(|entry| {
-            (
-                entry.0.to_string_lossy().into_owned(),
-                entry.1.to_string_lossy().into_owned(),
-            )
-        })
-        .collect();
-    child_env_from(vars, scratch, target)
-}
-
-/// What Cargo sets, by exact name, for the crate it runs: the Cargo Book's
-/// "Environment variables Cargo sets for crates". `CARGO` is not listed: Cargo
-/// forwards it so that a nested `cargo` finds the one that is running.
-const CRATE_NAMES: [&str; 4] = [
-    "CARGO_CRATE_NAME",
-    "CARGO_BIN_NAME",
-    "CARGO_PRIMARY_PACKAGE",
-    "CARGO_TARGET_TMPDIR",
-];
-
-/// The families of those variables, one per manifest field or binary. A bare
-/// `CARGO_TARGET_` is not here: `CARGO_TARGET_DIR` and the per-triple linker and
-/// runner variables are configuration, and a lane keeps configuration.
-const CRATE_PREFIXES: [&str; 3] = ["CARGO_PKG_", "CARGO_MANIFEST_", "CARGO_BIN_EXE_"];
-
-/// Whether `name` describes the crate Cargo launched `ci-local` for.
-fn describes_the_launched_crate(name: &str) -> bool {
-    CRATE_NAMES.contains(&name) || CRATE_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    child_env_from(inherited_env(), scratch, target)
 }
 
 /// The environment lanes run in, given the environment `ci-local` was started in.
@@ -294,7 +269,7 @@ fn child_env_from(
     // reads one was rebuilt. The `simulation-evidence` lane's `nextest list` spent
     // 35 s on that rebuild locally and 55 to 112 s on the runners, and the Build
     // job hit its 5-minute limit (run 38776238519).
-    env.retain(|name, _| !describes_the_launched_crate(name));
+    forget_launched_crate(&mut env);
     let existing = path_of(&env);
     if let Some(home) = env.get("HOME") {
         let cargo = Path::new(home).join(".cargo").join("bin");
@@ -413,10 +388,15 @@ fn execute_lane(
         Some(command) => command.to_owned(),
         None => String::new(),
     };
+    let argv = ["bash".to_owned(), "-c".to_owned(), command];
     let code = children.run(
-        &["bash".to_owned(), "-c".to_owned(), command],
-        root,
-        env,
+        &Launch {
+            argv: &argv,
+            root,
+            env,
+            stdin: None,
+            bound: RUN_BOUND,
+        },
         file.as_ref(),
     );
     let (status, detail) = if code == 0 {

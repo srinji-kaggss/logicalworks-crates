@@ -8,14 +8,30 @@ use std::path::Path;
 use lgwks_std::json::{self, Value};
 
 use super::builtins::{crate_directories, head, pass, refuse, relative, rust_files_under, tail};
+use super::children::Launch;
 use super::fixture::Fixture;
-use super::lanes::flag;
+use super::lanes::{RUN_BOUND, flag};
 use super::toml_subset::{list, read_tables, text};
 use super::{Context, GateError, Verdict, read};
 
 /// A command line from string slices.
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_owned()).collect()
+}
+
+/// `command` run in `root` with `env`, under the gate's bound.
+fn launch<'run>(
+    command: &'run [String],
+    root: &'run Path,
+    env: &'run BTreeMap<String, String>,
+) -> Launch<'run> {
+    Launch {
+        argv: command,
+        root,
+        env,
+        stdin: None,
+        bound: RUN_BOUND,
+    }
 }
 
 /// Every `[package.metadata.docs.rs]` names a feature set that builds.
@@ -75,7 +91,7 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
         log.push(format!("  {}: {shown}", planned.0));
         let code = context
             .children
-            .run(&planned.1, context.root, &env, context.out);
+            .run(&launch(&planned.1, context.root, &env), context.out);
         if code != 0 {
             log.push(format!("failed (exit {code}): {shown}"));
             return Ok(refuse(log.join("\n")));
@@ -133,7 +149,9 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
         ".",
         "--json",
     ]);
-    let success = context.children.capture(&command, context.root, &env);
+    let success = context
+        .children
+        .capture(&launch(&command, context.root, &env));
     if success.code != 0 {
         return Ok(refuse(format!(
             "debug success journey failed: exit={} stdout={:?} stderr={:?}",
@@ -194,7 +212,9 @@ pub(super) fn debug_e2e(context: &Context<'_>) -> Result<Verdict, GateError> {
     if let Some(slot) = fail_command.get_mut(place) {
         *slot = fixture.path().display().to_string();
     }
-    let refused = context.children.capture(&fail_command, context.root, &env);
+    let refused = context
+        .children
+        .capture(&launch(&fail_command, context.root, &env));
     if refused.code != 2 {
         return Ok(refuse(format!(
             "debug fail-closed journey did not refuse: exit={} stdout={:?} stderr={:?}",
@@ -359,7 +379,7 @@ pub(super) fn simulation_evidence(context: &Context<'_>) -> Result<Verdict, Gate
     ]);
     let listed = context
         .children
-        .capture(&command, context.root, context.env);
+        .capture(&launch(&command, context.root, context.env));
     if listed.code != 0 {
         return Ok(refuse(format!(
             "nextest listing failed: exit={} stdout={:?} stderr={:?}",

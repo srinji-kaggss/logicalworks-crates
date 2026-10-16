@@ -53,8 +53,8 @@ What this supports, stated per task including where `lgwks_bot` does not win:
   drop and across a `SIGKILL`.
 - **No variance, no intervals.** Ten identical verdicts per cell is a
   deterministic reference replayed, not ten model samples: confidence
-  intervals over model behaviour need the model matrix, which is
-  [frontier.md](frontier.md). Nothing here claims one.
+  intervals over model behaviour need the model matrix, whose command is in the
+  [README](README.md#how-to-rerun). Nothing here claims one.
 - **The harness leaves no orphan process.** `ps` after each run shows no
   oracle, solution or sleep process; the capture oracle asserts it per trial
   under per-process markers.

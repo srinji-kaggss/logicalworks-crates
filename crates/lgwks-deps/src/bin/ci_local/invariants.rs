@@ -521,9 +521,9 @@ pub(super) fn invariants(context: &Context<'_>) -> Result<Verdict, GateError> {
 #[cfg(test)]
 mod tests {
     use super::{backticked, bullets, has_commit_id, invariants, lane_ids, resolution_candidates};
+    use crate::children::Children;
     use crate::fixture::Fixture;
     use crate::modules::collect_module_paths;
-    use crate::process::Children;
     use crate::{Context, Verdict};
     use std::collections::BTreeMap;
     use std::error::Error;

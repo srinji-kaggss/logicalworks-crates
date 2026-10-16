@@ -21,21 +21,58 @@ member.
 |---|---|
 | [Protocol](protocol.md) | What a trial measures and does not, the five profiles, and the fairness rules every arm is held to. |
 | [Tasks and the harness-owned world](tasks.md) | Each task's contract and hidden oracle clauses, and the instrumented `support/` crate the solutions call. |
-| [The runner](runner.md) | What `run.py` did per trial before the Python ban deleted it, the metrics it recorded, and the lockfile every trial shared. |
+| [The runner](runner.md) | `ai-authoring` per trial, the metrics it records, what it refuses and the lockfile every trial shares. |
 | [Results through 2026-10-04](history.md) | The profile matrix and the four-arm comparison against the ecosystem standard, on aggregate and pipeline. |
 | [Recovery, re-measured](recovery.md) | The three rig defects behind recovery's first 2/20, found one per run, and the regrade. |
 | [The guarantee tasks and their controls](guarantees.md) | The `script!` arm, the three tasks whose oracles fail a solution lacking the guarantee, and the reference and mutant controls. |
 
+## Which arm wins, per task
+
+Measured so far, and no further. Full passes of 20 per arm and task are model
+samples (two models, ten trials per cell, `runs/20261004T214357Z-models/` and
+`runs/20261004T224716Z-models/`); the last three rows are reference solutions,
+one per cell at HEAD (`runs/20261016T225212Z-dry/`), not model samples
+([guarantees.md](guarantees.md)).
+
+| task | old | new | fan | futures | winner and why |
+|---|---|---|---|---|---|
+| `aggregate` | 19/20 | 17/20 | 19/20 | 20/20 | `futures`: no pass-rate separation, but the fewest lines and tokens and 40/40 on-sheet. |
+| `pipeline` | 19/20 | 20/20 | 18/20 | 19/20 | None on passes. `futures` is again the shortest. |
+| `recovery` | no sheet | 16/20 | — | no sheet | No comparison: `old` and `futures` cannot express a durable resume. |
+| `capture` | no sheet | all clauses | all clauses | 3/6 clauses | `lgwks_bot` arms: `futures` fails the flood, the orphan and the cancel, in fewer lines (36 against 44 for `new`). |
+| `tenant-cache` | all clauses | all clauses | all clauses | 2/6 clauses | `lgwks_bot` arms: `futures` fails isolation, both refusals and the mixed thousand, in 19 lines (`fan` 24). |
+| `durable-retry` | all clauses | all clauses | all clauses | 4/6 clauses | `lgwks_bot` arms: `futures` duplicates an effect across a drop and a `SIGKILL`, in 30 lines (`old` 38). |
+
+The `script` arm passes every clause of the three guarantee tasks as a
+reference too; no model has authored in it. Not measured: any model on `capture`, `tenant-cache` or `durable-retry`, the
+`lexicon` arm (a `script!` author whose whole context is the generated
+`docs/script-lexicon.md`), a frontier closed model on the planned scale, and
+human authors. The oracles of the last three tasks are proven by negative
+controls (`ai-authoring --mutants` and the `futures` references,
+[guarantees.md](guarantees.md)); no interval is claimed over deterministic
+references.
+
 ## How to rerun
 
-There is no rerun command. `run.py` and `regrade.py` were Python, and the Python
-ban deleted them in #537 (`22a19af25`; the last copy of each is at `22a19af25^`).
-No Rust runner replaces them, so nothing here reproduces the recorded runs
-under `runs/`; they are the evidence. The tasks, oracles, `support/`,
-`template/` and the reference and mutant solutions are Rust and remain.
+`ai-authoring` is a binary of `lgwks_deps`; [runner.md](runner.md) has the
+flags, the exit codes and what each run writes. From the repository root:
 
-The deleted runner made each model call closed-book under macOS `sandbox-exec`,
-refusing on a host without it rather than running the model open-book against
-the hidden oracle. Its trial template built `lgwks_bot` with `script` and
-`process`, alike for every arm, so the arms differed only in the API sheet the
-author was given.
+```
+cargo run --locked -p lgwks_deps --bin ai-authoring -- --dry-run --trials 1   # reference solutions, free
+cargo run --locked -p lgwks_deps --bin ai-authoring -- --mutants               # negative controls, free
+cargo run --locked -p lgwks_deps --bin ai-authoring -- --tables RUN_DIR        # tables with 95% intervals
+cargo run --locked -p lgwks_deps --bin ai-authoring -- --matrix                # the model matrix
+```
+
+`--matrix` calls the models and costs money: the manifest's defaults are three
+models, six arms, six tasks less three excluded cells and five profiles at two
+trials each, 990 trials, launched once. It has not been run at that scale, and
+no run under `runs/` was made by this binary's `--matrix`. Every model run there
+was made by `run.py` (one regrade by `regrade.py`), and the Python ban deleted
+both in #537 (`22a19af25`; the last copy of each is at `22a19af25^`); `regrade`
+is not ported.
+
+The model call is closed-book under macOS `sandbox-exec`, refusing on a host
+without it rather than running the model open-book against the hidden oracle.
+The trial template builds `lgwks_bot` with `script` and `process`, alike for
+every arm, so the arms differ only in the API sheet the author is given.
