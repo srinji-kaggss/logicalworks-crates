@@ -118,3 +118,18 @@ test-group = 'file-churn'
 [profile.ci.junit]
 path = "junit.xml"
 store-success-output = false
+
+# #272: on macOS the bot-full job does not run lgwks_bot's `sim_review_path`
+# binary; the saturation job does, beside its tiers, with `--ignore-default-filter`
+# (the lane `tests-bot-saturation`). The suite is bounded by its work and not by
+# its order: on run 38904371387 the 4,870 tests held 1,916 slot-seconds, which
+# nine threads cannot finish in under 213 s, and the job was cancelled at its
+# 5 min cap with every test passed. The binary's 42 tests held 206 of those
+# slot-seconds (list-scheduled without them: 217 s to 195 s) and process-spawn
+# heavy simulations are what a saturation instance, idle for 190 s of its 300,
+# is for. Linux keeps them in the bot-full container run (this filter is
+# macOS-only), and the acceptance receipt reads both jobs' JUnit reports, so no
+# test is dropped from either platform.
+[[profile.ci.overrides]]
+platform = 'cfg(target_os = "macos")'
+default-filter = 'not binary(sim_review_path)'

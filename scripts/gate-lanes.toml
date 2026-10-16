@@ -180,7 +180,9 @@ required = true
 # whole suite less the saturation tiers, which `tests-bot-saturation` runs. Left
 # in, the three tiers (100, 1,000 and 10,000 concurrent runs) land in one shard:
 # on run 37205854158 that shard's test phase took 229 s against 61-63 s for the
-# other three, and set the whole run's wall at 481 s.
+# other three, and set the whole run's wall at 481 s. On macOS the `ci` profile
+# also leaves out the `sim_review_path` binary, which `tests-bot-saturation` runs
+# (`.config/nextest.toml`); on Linux the container run keeps every test.
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot async runner tests"
 
@@ -188,8 +190,9 @@ ci_step = "Run lgwks-bot async runner tests"
 id = "acceptance-receipts"
 surfaces = "ci"
 required = true
-# The receipt, built from the two JUnit reports the lgwks-bot shards already
-# wrote. The `acceptance-receipts` binary reads the XML and records into SQLite
+# The receipt, built from the JUnit reports the lgwks-bot jobs already wrote (the
+# full suite and the saturation legs, one directory each). The
+# `acceptance-receipts` binary reads the XML and records into SQLite
 # through the sqlite3 program, so the job builds one std-only binary -- it
 # costs seconds, and it does not run the suite a second time.
 command = "cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
@@ -212,12 +215,15 @@ surfaces = "local ci"
 required = true
 # The saturation family on its own: it is CPU-bound for about two minutes, so it
 # gets its own runner instead of one shard's tail. Builds only the one test
-# binary it runs.
+# binary it runs. That binary's other 42 tests, the review-path simulations, run
+# here too and not in `tests-bot-full` on macOS (`.config/nextest.toml`'s `ci`
+# profile filters the binary out there), so this lane lifts that filter with
+# `--ignore-default-filter` and writes the JUnit report the receipt reads.
 #
 # CI runs the legs of this lane on two instances by setting SATURATION_FILTER to
-# the tiers each leg takes (the 10,000 tier alone; the 100 and 1,000 tiers
-# together); unset, it is all three.
-command = "cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E \"${SATURATION_FILTER:-test(saturation_r32_tier)}\""
+# the tests each leg takes (the 10,000 tier alone; the 100 and 1,000 tiers with
+# the 42 simulations); unset, it is the whole binary.
+command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path -E \"${SATURATION_FILTER:-all()}\""
 ci_step = "Run lgwks-bot saturation tiers"
 
 [[lane]]
@@ -662,12 +668,13 @@ ci_step = "Every clippy leg passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Clippy and scan"
 
 # The ruleset also requires "Build and workspace tests". The workspace job runs
-# every test but lgwks_bot's, and the two lgwks_bot jobs run those; this row
-# carries the required name and passes only when all three jobs passed.
+# every test but lgwks_bot's, and the lgwks_bot jobs (full, saturation, no default
+# features) run those; this row carries the required name and passes only when
+# all four jobs passed.
 [[lane]]
 id = "build-verdict"
 surfaces = "ci"
 required = true
-command = "test \"${BUILD}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_NODEFAULT}\" = success"
+command = "test \"${BUILD}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success"
 ci_step = "Every workspace test job passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Build and workspace tests"

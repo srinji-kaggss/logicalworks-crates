@@ -372,6 +372,12 @@ jobs:
   # still running 2 m 27 s in when the job limit cancelled it, after a 1 m 11 s
   # build and two minutes of setup (run 38416328077). So the 10,000 tier has an
   # instance of its own, apart from the 100 and 1,000 tiers on lwc-12.
+  # The binary's other 42 tests (the review-path simulations) run on the lwc-12
+  # leg too, in place of the bot-full job, which no longer runs them on macOS
+  # (`.config/nextest.toml`): that suite is bounded by its work, 1,916
+  # slot-seconds of tests on nine threads, and the 42 held 206 of them (run
+  # 38904371387: cancelled at the 5 min cap with every test passed). This leg
+  # finished in 109 s of its 300 and the Linux container run still runs them all.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -385,7 +391,7 @@ jobs:
             filter: "test(=saturation_r32_tier_10000)"
           - tiers: "100 and 1000"
             instance: lwc-12
-            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
+            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | not test(saturation_r32_tier)"
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -401,14 +407,25 @@ jobs:
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
-      # The lane's own command, with the tiers this leg runs set in
-      # SATURATION_FILTER (unset, the command selects all three), as the
+      # The lane's own command, with the tests this leg runs set in
+      # SATURATION_FILTER (unset, the command selects the whole binary), as the
       # sharded lanes set PARTITION: the gate-parity check compares this text
-      # with scripts/gate-lanes.toml.
+      # with scripts/gate-lanes.toml. `--ignore-default-filter` lifts the `ci`
+      # profile's macOS filter, which keeps this binary out of the bot-full job.
       - name: Run lgwks-bot saturation tiers
         env:
           SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --test sim_review_path -E "${SATURATION_FILTER:-test(saturation_r32_tier)}"
+        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path -E "${SATURATION_FILTER:-all()}"
+      # The JUnit report of what this leg ran, under the `lgwks-bot-junit-*` name
+      # the acceptance job downloads: the review-path tests (T31-T34) are named
+      # in `docs/acceptance/t-rows.toml`, so the macOS receipt reads them here.
+      - name: Upload lgwks-bot saturation JUnit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lgwks-bot-junit-saturation-${{ matrix.instance }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 7
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
@@ -416,7 +433,7 @@ jobs:
     # XML files with it, so it costs seconds rather than adding a second
     # execution of the tests the shards already ran between them.
     name: Acceptance receipts
-    needs: [tests_bot_full, tests_linux]
+    needs: [tests_bot_full, tests_bot_saturation, tests_linux]
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     env:
@@ -991,17 +1008,19 @@ jobs:
 
   # The repository's ruleset requires a check named exactly "Build and workspace
   # tests". That name used to be the one job that ran every test; the workspace
-  # job above now runs all but lgwks_bot's, which the two lgwks_bot jobs run
-  # under the feature sets a consumer builds (full, and none). This row carries
-  # the required name and passes only when all three passed, so no test is left
-  # out of the required check: on run 38871028285 each of the 4,138 lgwks_bot
-  # tests the workspace job ran was among the 4,870 the full job ran, and the
+  # job above now runs all but lgwks_bot's, which the lgwks_bot jobs run under
+  # the feature sets a consumer builds (full, and none). This row carries the
+  # required name and passes only when all four passed, so no test is left out
+  # of the required check: on run 38871028285 each of the 4,138 lgwks_bot tests
+  # the workspace job ran was among the 4,870 the full job ran, and the
   # no-default job adds 3,190 under the other feature set, where before the
-  # required check held the default set alone. A cancelled or skipped job is not
-  # `success`, so it fails this row too.
+  # required check held the default set alone. The saturation job runs the 45
+  # tests of `sim_review_path` (42 simulations and the three tiers) that the full
+  # job leaves to it on macOS, so it is part of the row. A cancelled or skipped
+  # job is not `success`, so it fails this row too.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, tests_bot_full, tests_nodefault]
+    needs: [build, tests_bot_full, tests_bot_saturation, tests_nodefault]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1010,7 +1029,8 @@ jobs:
         env:
           BUILD: ${{ needs.build.result }}
           BOT_FULL: ${{ needs.tests_bot_full.result }}
+          BOT_SATURATION: ${{ needs.tests_bot_saturation.result }}
           BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
         run: |
-          echo "workspace ${BUILD}, lgwks_bot full ${BOT_FULL}, lgwks_bot no default ${BOT_NODEFAULT}"
-          test "${BUILD}" = success && test "${BOT_FULL}" = success && test "${BOT_NODEFAULT}" = success
+          echo "workspace ${BUILD}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
+          test "${BUILD}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
