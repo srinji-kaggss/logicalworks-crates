@@ -100,9 +100,9 @@ cross-interpreted for `x86_64-pc-windows-msvc` (`cargo miri nextest run`): 10
 passed in 17.8 s with no undefined behaviour reported, which checks the pointers
 and lengths the leaf hands its call table and not the `kernel32` externs behind
 it. `tests/it/process_job.rs` drives a real job but no Windows host has run it,
-because no CI job runs the `lgwks_std` or `lgwks_bot` suites on `windows-latest`
-(adding one needs the `workflow` token scope). Windows containment is therefore a
-code, type-check and scripted-decision receipt, not yet an executed one.
+because no CI job runs the `lgwks_std` or `lgwks_bot` suites on `windows-latest`.
+Windows containment is therefore a code, type-check, scripted-decision and Miri
+receipt, not yet an executed one.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` off Unix and Windows,
