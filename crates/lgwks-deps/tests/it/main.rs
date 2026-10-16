@@ -29,6 +29,7 @@ mod seed_helpers;
 
 mod check_cli;
 mod contract_schema_compat;
+mod default_run;
 mod feature_policy;
 mod identity_binding;
 mod metadata_dimensions;

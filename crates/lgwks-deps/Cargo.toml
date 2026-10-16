@@ -11,6 +11,11 @@ readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-deps"
 categories = ["development-tools", "config"]
 keywords = ["dependencies", "audit", "supply-chain", "cargo", "debug"]
+# The documentation spells its commands `cargo run -p lgwks_deps -- check .`
+# (AGENTS.md, CONTRIBUTING.md, the dependency doctrine). With several binaries
+# cargo refuses a bare `cargo run`, so the one those pages mean is named here;
+# tests/it/default_run.rs holds the key to that promise.
+default-run = "lgwks-deps"
 
 # This crate consumes JSON only through the facade it enforces.
 # Depending on serde_json directly here would make the checker its own first
