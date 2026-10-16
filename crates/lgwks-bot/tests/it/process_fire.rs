@@ -108,6 +108,21 @@ fn token() -> Result<String, Box<dyn std::error::Error>> {
     Ok(format!("86400.{draw:020}"))
 }
 
+/// The command line of the process whose `/proc` directory is `directory`, or
+/// `None` when the process exited between the listing and this read.
+fn command_line(directory: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(directory.join("cmdline")) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(ESRCH) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// How many running `sleep` leaves carry `token`, read from `/proc`.
 fn running(token: &str) -> std::io::Result<usize> {
     let program: &[u8] = b"sleep";
@@ -118,15 +133,8 @@ fn running(token: &str) -> std::io::Result<usize> {
         if !name.as_encoded_bytes().iter().all(u8::is_ascii_digit) {
             continue;
         }
-        let bytes = match std::fs::read(entry.path().join("cmdline")) {
-            Ok(bytes) => bytes,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    || error.raw_os_error() == Some(ESRCH) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
+        let Some(bytes) = command_line(&entry.path())? else {
+            continue;
         };
         let mut args = bytes.split(|byte| *byte == 0).filter(|arg| !arg.is_empty());
         if args.next() == Some(program)
@@ -290,11 +298,12 @@ async fn round(want: usize, token: &str) -> Result<Round, Box<dyn std::error::Er
             *count = count.saturating_add(1);
         }
         if cancelled.elapsed() >= REPORT {
-            return Err(format!(
+            let refusal = format!(
                 "{} of {started} stopped trees were reported in {REPORT:?}",
                 latencies.len()
-            )
-            .into());
+            );
+            lgwks_std::trace::debug!(error = %refusal, "process_fire: stopped trees unreported");
+            return Err(refusal.into());
         }
         sleep(REPORT_POLL).await;
     }
