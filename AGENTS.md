@@ -18,11 +18,10 @@ duplicate these rules elsewhere; link here. Where this file and `CODEBOOK.md`
 conflict on a dependency question, this file wins.
 
 The gate is defined once in `scripts/gate-lanes.toml`. Run it with
-`./scripts/ci-local.sh`. `scripts/check-gate-parity.py` keeps
+`./scripts/ci-local.sh`. The `check-gate-parity` binary of `lgwks_deps` keeps
 `.github/workflows/ci.yml` in agreement with that table.
 
 ---
-
 
 Read this before adding a dependency to any crate in this repository. The
 workspace compiles against `std` and `lgwks_std` first; every other edge is a
@@ -55,9 +54,9 @@ with no authored edge.
 
 1. The surfaces are `std`, `bot`, and `deps`; `ast` is the one standalone crate.
 2. `lgwks_deps` is the install-and-select storefront: every other dependency is
-   an optional feature there (`--features gpui`). Storefront capability features
-   are default-off; the reviewed `scan` gate-tool feature is the explicit
-   default-on exception.
+   an optional feature there (`--features gpui`). Every storefront feature is
+   default-off; `scan` was the one default-on exception until it moved to
+   `lgwks_ast` (#408).
 3. A new dependency is registered under `lgwks_deps`. Do not introduce a new
    owner crate or a new top-level crate for third-party code.
 4. Grandfathered: `lgwks_std`'s existing core feature stack and `lgwks_ast`'s
@@ -67,23 +66,17 @@ with no authored edge.
 Do **not** add `tokio`, `futures`, `async-trait`, `pollster`, `syn`,
 `proc-macro2`, `regex`, `uuid`, `chrono`, `walkdir`, `glob`, `base64`, `hex`,
 `percent-encoding`, `serde_json`, `ureq`, `reqwest`, or `ast-grep-*` as a *new*
-edge. Read that as a ban on additions, not as a description of the tree: the
-list is not a statement about which crates the workspace currently compiles
-against. `lgwks_std` and `lgwks_ast` already author several of these names
-directly — `regex`, `serde_json`, `ureq` and `ast-grep-*` among them — under
-the grandfather clause above. A name on this list therefore maps to a workspace
-path *when a facade supplies it*; where no facade does, the approved direct edge
-is legal and removing it would be the defect. See `docs/dependency-doctrine.md`
-for which is which. Async and
-runners are exposed by `lgwks_bot`; its tokio engine is selected through the
-`lgwks_deps` storefront, which owns the workspace's one `tokio` edge. The gate
-refuses a second `tokio` consumer.
+edge. Read that as a ban on additions, not as a description of the tree:
+`lgwks_std` and `lgwks_ast` already author several of these names directly
+(`regex`, `serde_json`, `ureq` and `ast-grep-*` among them) under the
+grandfather clause above. A listed name maps to a workspace path *when a facade
+supplies it*; where none does, the approved direct edge is legal and removing it
+would be the defect (`docs/dependency-doctrine.md` says which is which).
 
 ## Before you reach for a crate
 
-1. Read `docs/dependency-doctrine.md`, which covers the decision flow and the
-   full replacement matrix, including the boundaries where no replacement
-   exists.
+1. Read `docs/dependency-doctrine.md`: the decision flow and the full
+   replacement matrix, including where no replacement exists.
 2. Confirm the crate's rung: `cargo run -p lgwks_deps -- tiers`.
 3. If the capability is genuinely missing, follow
    `skills/lgwks-dependency-admission/SKILL.md` exactly.
@@ -92,51 +85,36 @@ refuses a second `tokio` consumer.
 
 ## Checks that must pass
 
+The lane table is the list; this file keeps no second copy of its commands.
+
 ```sh
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo fmt --all -- --check
-cargo run -p lgwks_deps -- check .
-./scripts/lgwks-std-package-smoke.sh
-./scripts/doc-lanes.sh
-python3 scripts/check-std-first.py
-python3 scripts/check-doc-citations.py
-python3 scripts/check-requirements.py
+./scripts/ci-local.sh                  # every lane of scripts/gate-lanes.toml
+./scripts/ci-local.sh --fast           # the lanes marked fast
+./scripts/ci-local.sh --lane std-first # one lane, as CI runs it
 ```
 
-`lgwks-deps check` is the first CI job. A green compile with an unregistered
-edge is a refused build, not a passing one.
+`lgwks-deps check` (lane `deps-register`) is the first CI job. A green compile
+with an unregistered edge is a refused build, not a passing one.
 
-`./scripts/doc-lanes.sh` is the rustdoc gate, and it was the one check reachable
-only from CI. A broken intra-doc link is a warning rather than an error, so the
-build fails only under `RUSTDOCFLAGS='-D warnings'`, and *which* links break
-depends on which features are on. The script runs the four lanes the Docs job
-runs — every feature, no features, the default set, and each `lgwks_std` feature
-alone — and takes about a minute. Each lane has caught a break the other three
-could not see: `trace` linking to `json`, `retry` to `random`, `wire` to `json`.
-Pass `all-features`, `no-default-features`, `default` or `per-feature` to run
-one of them.
+`./scripts/doc-lanes.sh` is the rustdoc gate: a broken intra-doc link is only a
+warning, so it fails under `RUSTDOCFLAGS='-D warnings'`, and *which* links break
+depends on the features on. It runs every feature, no features, the default set
+and each `lgwks_std` feature alone.
 
-`scripts/check-std-first.py` is the other half of the same rule, and it reads
-the source rather than the manifest. `lgwks-deps check` sees every authored
-edge; it cannot see a `use` of a crate nobody declared, which builds only
-because something else in the graph re-exports it, or a capability hand-rolled
-beside the `lgwks_std` module that already provides it. Every crate the source
-reaches past `std` and the four surfaces is printed with the record that
-approves it, so the answer to "why is this edge here" is in the output rather
-than in a reviewer's memory. Run it with `--justify` to see those records
-whether or not there is a finding.
+The `check-std-first` binary (lane `std-first`) is the other half of the same
+rule: it reads the source, not the manifest, so it sees a `use` of an undeclared
+crate that builds only because the graph re-exports it, and a capability
+hand-rolled beside the `lgwks_std` module that provides it. `--justify` prints
+the record that approves every crate the source reaches past the four surfaces.
 
-`python3 scripts/check-doc-citations.py` pins the text of every line a guide
-cites, so a citation that lands on another plausible line after a file grows is
-a failure rather than a green page pointing at unrelated code. `--update`
-records a legitimate move and prints every line whose text changed under a
-citation, which is the review.
+The `check-doc-citations` binary (lane `doc-citations`) pins the text of every
+line a guide cites, so a citation that lands on another line after a file grows
+fails. `--update` records a legitimate move and prints every line whose text
+changed under a citation, which is the review.
 
 ## What the gate enforces
 
 INV-DEP-EDGE-OWNED: every external dependency authored by a workspace package
-names its semantic owner, capability, source, requirement, allowed consumers,
-and allowed dependency kinds. The register is `contract/APPROVED.toml`; the
-gate is `crates/lgwks-deps`. The three dependency surfaces and the standalone
-AST ownership are described in `README.md`.
+names its owner, capability, source, requirement, consumers and kinds in
+`contract/APPROVED.toml`; the gate is `crates/lgwks-deps`. `README.md` describes
+the three surfaces and the standalone AST ownership.
