@@ -110,10 +110,10 @@ jobs:
     # starts from a restored cache that never holds the workspace crates, and
     # compiled lgwks_bot's `it` test binary alone for 100 s (run 38401426445).
     # A push that edits a test source is the cold case of that: the changed
-    # test binaries compiled for 184 s (run 38870029835) and 249 s (run
-    # 38936864320) at a load average of 54-90, against 22 s with nothing
-    # changed, so the first run after the edit is cancelled at the bound with
-    # its tests unfinished; the next run is the measurement of the job.
+    # test binaries compiled for 184 s (run 38870029835), 249 s (run 38936864320)
+    # and 243 s (run 38941034251) at a load average of 45-90, against 31 s at 15
+    # and 22 s with nothing changed, so the first run after the edit is cancelled
+    # at the bound with its tests unfinished; the next is the job's measurement.
     #
     # lgwks_bot's tests (4,138 of the 5,569) run in the lgwks_bot jobs below (full,
     # saturation and no default features), and `build_verdict` reports this
