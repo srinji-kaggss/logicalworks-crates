@@ -89,7 +89,7 @@ lgwks_bot::script! {
     flow stop_from_body(count: u32) -> usize:
         let done = each item in 0..count:
             if item == 3 { scope.cancel(); }
-            sleep(Duration::from_millis(50)).await
+            sleep(Duration::from_secs(30)).await
             item
         give back done.len()
 
@@ -245,6 +245,11 @@ fn a_flow_nesting_every_block_is_send_and_runs_spawned_per_tenant() -> TestResul
 /// An `each` body shares its step's stop, so cancelling from inside one ends
 /// the whole fan-out as a `break` ends a loop: no sibling runs on, and the
 /// stop is reported at the fan-out rather than lost.
+///
+/// The siblings sleep 30 s, so a fan-out that waited for them takes 30 s and
+/// one that dropped them takes milliseconds; the bound is 10 s, so only a wait
+/// fails it and a loaded host cannot (a 40 ms bound failed at 43.7 ms on CI run
+/// 38868946902, with the host's load average past 60).
 #[test]
 fn cancelling_inside_a_body_stops_the_whole_fan_out() -> TestResult {
     let scope = acme()?;
@@ -256,7 +261,7 @@ fn cancelling_inside_a_body_stops_the_whole_fan_out() -> TestResult {
     assert!(error.is_cancelled(), "reported as a stop: {error}");
     assert_eq!(error.at(), "stop_from_body/each:item", "at the fan-out");
     assert!(
-        started.elapsed() < Duration::from_millis(40),
+        started.elapsed() < Duration::from_secs(10),
         "siblings were dropped, not waited for: {:?}",
         started.elapsed()
     );

@@ -1,7 +1,7 @@
 //! The supervisor itself: its state, its constructors and its task doors.
 
-#[cfg(all(unix, feature = "process"))]
-use super::drive::RunBounds;
+#[cfg(all(any(unix, windows), feature = "process"))]
+use super::ended::RunBounds;
 #[cfg(feature = "process")]
 use super::outcome::CleanupReceipt;
 #[cfg(feature = "process")]
@@ -31,6 +31,8 @@ use std::collections::{BTreeMap, VecDeque};
 #[cfg(feature = "process")]
 use std::process::ExitStatus;
 use std::sync::Arc;
+#[cfg(all(windows, feature = "process"))]
+use std::sync::atomic::AtomicUsize;
 
 /// Owns a bounded set of background tasks and stops them when it goes away.
 ///
@@ -50,6 +52,11 @@ pub struct Supervisor {
     /// Process cleanup obligations transferred from terminal or aborted tasks.
     #[cfg(all(unix, feature = "process"))]
     pub(super) cleanup_owners: Arc<CleanupOwners>,
+    /// Process tasks that have not yet settled their job object. Shutdown
+    /// reads it to tell a job still settling from a body that ignores its
+    /// token.
+    #[cfg(all(windows, feature = "process"))]
+    pub(super) live_jobs: Arc<AtomicUsize>,
     /// Maps the engine's task id to this module's, for the one path that cannot
     /// carry a [`TaskId`] in the value: a terminal `JoinError`, which is the
     /// error case and therefore has no value to carry it. Entries are removed
@@ -329,6 +336,8 @@ impl Supervisor {
             permits,
             #[cfg(all(unix, feature = "process"))]
             cleanup_owners: Arc::new(CleanupOwners::default()),
+            #[cfg(all(windows, feature = "process"))]
+            live_jobs: Arc::new(AtomicUsize::new(0)),
             identities: BTreeMap::new(),
             reports: VecDeque::new(),
             report_cap: bound,
@@ -369,7 +378,7 @@ impl Supervisor {
     ///
     /// Both process runners start from these values, and a second copy is a
     /// second place for the ceiling, the deadline or the token to drift.
-    #[cfg(all(unix, feature = "process"))]
+    #[cfg(all(any(unix, windows), feature = "process"))]
     pub(super) fn prepare_process(&self, spec: &ProcessSpec) -> (CancellationToken, RunBounds) {
         (
             self.child_token(),

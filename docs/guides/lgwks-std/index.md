@@ -34,7 +34,7 @@ subscriber bootstrap rather than zero external crates.
 | `http` | `http` | `ureq`, `iri-string` |
 | `online` | `online` | none |
 | `fs-raw` | `fs` | `rustix` |
-| `process` | `process` | `rustix` |
+| `process` | `process` | `rustix` on Unix; none on Windows |
 | `full` | all of the above | all of the above |
 
 Features compose. Pick the ones you use and let the rest stay compiled out.

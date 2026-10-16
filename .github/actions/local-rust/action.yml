@@ -35,7 +35,7 @@ inputs:
       stay near the machine rather than per job. The suite shares sum past
       the cores but the suites are throughput-bound: cutting them ~40% (run
       37680643459) slowed every suite 20-30%, so they are restored
-      (workspace 6, bot-full 8, no-default 6, matrix 3).
+      (workspace 8, bot-full 8, no-default 6, matrix 3).
     required: false
     default: "2"
   build-share:
@@ -156,7 +156,25 @@ runs:
         } >> "${GITHUB_ENV}"
         SCCACHE_DIR="${dir}" sccache --show-stats 2>/dev/null | head -6 || true
         echo "compile cache: ${dir} (basedirs ${root})"
-    # Temporary files on a RAM disk owned by this runner instance. Rust's
+    # Four independent pieces of setup, run together because each one waits on
+    # the machine and not on the others: the RAM disk for temporary files, this
+    # job's share of the cores, the toolchain check and the nextest check. Every
+    # job of a run starts within seconds of the rest, so thirteen instances ask
+    # `diskutil`, `find`, the rustup shim and cargo for the same things at once.
+    # Run one after another the first three took 18.5 s, 9.7 s and 26 s of the
+    # 57 s this action cost the build job on run 38863359393, which then met its
+    # 5-minute bound with 17 s of tail steps unrun, and the nextest check took
+    # 8.2 s more on run 38866246742, whose build job finished its last step at
+    # 5:00 and was cancelled. Started together the step takes as long as the
+    # slowest piece (25.6 s on run 38866246742). Each piece writes its own log
+    # and its own environment file, and the step prints the logs in a fixed
+    # order and appends the environment only after all four succeeded, so a
+    # failure in any one fails the step exactly as it did in sequence. The
+    # nextest check runs the `cargo-nextest` binary itself, as the input says it
+    # must be on PATH, so it neither waits on cargo's package-cache lock nor
+    # reaches the rustup shim while the toolchain piece may be installing.
+    #
+    # Temporary files go on a RAM disk owned by this runner instance. Rust's
     # `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS, which flushes the
     # whole device's cache and serialises against every other flush on it, so
     # six instances' durable-store tests queued behind one another's syncs:
@@ -181,101 +199,120 @@ runs:
     # bounds its memory to one job's temporary files and leaves nothing of the
     # previous job behind. A machine where the disk cannot be made keeps its
     # temporary files on disk, with a warning naming the cost.
-    - name: Temporary files on a RAM disk
-      shell: bash
-      run: |
-        set -euo pipefail
-        owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
-        label="lwc-tmp-${owner}"
-        # Ejecting the volume detaches its APFS container and the RAM store
-        # beneath it, which is what returns the memory.
-        if [ -d "/Volumes/${label}" ]; then
-          diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
-        fi
-        tmp=""
-        if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
-          sectors=$(( ${{ inputs.tmp-gib }} * 1024 * 1024 * 2 ))
-          # `diskutil image` is the current interface; `hdiutil` is the one a
-          # macOS before it has, and prints the device the same way.
-          device="$({ diskutil image attach --noMount "ram://${sectors}" 2>/dev/null || hdiutil attach -nomount "ram://${sectors}" 2>/dev/null; } | awk 'NR==1 {print $1}')"
-          # The volume is a new device inside the container made on the RAM
-          # store, so its mount point is read from the volume, not the store.
-          if [ -n "${device}" ] && diskutil erasevolume APFS "${label}" "${device}" >/dev/null; then
-            tmp="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Mount Point/ {print $2}')"
-          fi
-        fi
-        if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
-          tmp="${RUNNER_TEMP}/lwc-tmp"
-          echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
-          mkdir -p "${tmp}"
-          find "${tmp}" -mindepth 1 -delete
-        fi
-        echo "TMPDIR=${tmp}" >> "${GITHUB_ENV}"
-        echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
+    #
     # The runner instances share this machine's cores and its 24 GiB of RAM.
     # A test job that took every core, beside others doing the same, put the
     # load average at 60-70 on 15 cores, and timing-bounded tests then measured
     # the scheduler. Worse, thirteen jobs each compiling with four slots turned
     # into 52 compiler processes and left 35 GiB of swap used (run 37654108625),
     # where a one-second hashing test took 138 s. Each job gets its share of
-    # both: test threads below, compiler slots in the next step, each budgeted
-    # so the sums across the run stay near the machine.
-    - name: Test threads for this runner's share of the machine
-      shell: bash
-      run: |
-        set -euo pipefail
-        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
-        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
-        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-        threads=$(( ${{ inputs.test-share }} * cores / (runners > 0 ? runners : 1) ))
-        threads=$(( threads > 1 ? threads : 2 ))
-        echo "NEXTEST_TEST_THREADS=${threads}" >> "${GITHUB_ENV}"
-        echo "${cores} cores, ${runners} runner instances: ${threads} test threads"
-    # Compiler and linker slots for the same share. Warm compiles take seconds,
-    # so this caps the thundering herd rather than sizing any one build: every
-    # job compiling at once is what swapped, not any job compiling slowly.
-    - name: Compiler slots for this runner's share of the machine
-      shell: bash
-      run: |
-        set -euo pipefail
-        root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
-        runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
-        cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
-        slots=$(( ${{ inputs.build-share }} * cores / (runners > 0 ? runners : 1) ))
-        slots=$(( slots > 0 ? slots : 1 ))
-        echo "CARGO_BUILD_JOBS=${slots}" >> "${GITHUB_ENV}"
-        echo "${cores} cores, ${runners} runner instances: ${slots} compiler slots"
+    # both: test threads and compiler slots, each budgeted so the sums across
+    # the run stay near the machine. Warm compiles take seconds, so the slots
+    # cap the thundering herd rather than size any one build: every job
+    # compiling at once is what swapped, not any job compiling slowly.
+    #
     # rustup has no lock, and parallel jobs that each ran `rustup toolchain
     # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
     # toolchain is only installed when the pinned one is not already active.
-    - name: Toolchain matches the pin
+    - name: RAM disk, machine share, toolchain pin and nextest, together
       shell: bash
       run: |
         set -euo pipefail
-        active="$(rustc --version 2>/dev/null || true)"
-        case "${active}" in
-          "rustc ${{ inputs.toolchain }} "*) ;;
-          *) rustup toolchain install; active="$(rustc --version)" ;;
-        esac
-        echo "${active}"
-        case "${active}" in
-          "rustc ${{ inputs.toolchain }} "*) ;;
-          *) echo "::error::rust-toolchain.toml resolves to '${active}', the gate pins ${{ inputs.toolchain }}"; exit 1 ;;
-        esac
-        # The version string is not enough: another installation (Homebrew's,
-        # say) can print the same version while ignoring rust-toolchain.toml and
-        # carrying no cross-target std. The rustc on PATH must be the one rustup
-        # resolves for this checkout.
-        pinned="$(dirname "$(dirname "$(rustup which rustc)")")"
-        sysroot="$(rustc --print sysroot)"
-        if [ "${sysroot}" != "${pinned}" ]; then
-          echo "::error::rustc on PATH ($(command -v rustc), sysroot ${sysroot}) is not rustup's ${pinned}"
+        out="${RUNNER_TEMP}/local-rust"
+        mkdir -p "${out}"
+        : > "${out}/ram.env"
+        : > "${out}/share.env"
+        ram_disk() {
+          local owner label sectors device tmp
+          owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
+          label="lwc-tmp-${owner}"
+          # Ejecting the volume detaches its APFS container and the RAM store
+          # beneath it, which is what returns the memory.
+          if [ -d "/Volumes/${label}" ]; then
+            diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
+          fi
+          tmp=""
+          if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
+            sectors=$(( ${{ inputs.tmp-gib }} * 1024 * 1024 * 2 ))
+            # `diskutil image` is the current interface; `hdiutil` is the one a
+            # macOS before it has, and prints the device the same way.
+            device="$({ diskutil image attach --noMount "ram://${sectors}" 2>/dev/null || hdiutil attach -nomount "ram://${sectors}" 2>/dev/null; } | awk 'NR==1 {print $1}')"
+            # The volume is a new device inside the container made on the RAM
+            # store, so its mount point is read from the volume, not the store.
+            if [ -n "${device}" ] && diskutil erasevolume APFS "${label}" "${device}" >/dev/null; then
+              tmp="$(diskutil info "/Volumes/${label}" | awk -F': *' '/Mount Point/ {print $2}')"
+            fi
+          fi
+          if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
+            tmp="${RUNNER_TEMP}/lwc-tmp"
+            echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
+            mkdir -p "${tmp}"
+            find "${tmp}" -mindepth 1 -delete
+          fi
+          echo "TMPDIR=${tmp}" >> "${out}/ram.env"
+          echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
+        }
+        machine_share() {
+          local root runners cores threads slots
+          root="$(cd "${RUNNER_WORKSPACE}/../.." && pwd)"
+          runners="$(find "${root}" -maxdepth 1 -name 'r[0-9]*' -type d | wc -l | tr -d ' ')"
+          cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+          threads=$(( ${{ inputs.test-share }} * cores / (runners > 0 ? runners : 1) ))
+          threads=$(( threads > 1 ? threads : 2 ))
+          slots=$(( ${{ inputs.build-share }} * cores / (runners > 0 ? runners : 1) ))
+          slots=$(( slots > 0 ? slots : 1 ))
+          echo "NEXTEST_TEST_THREADS=${threads}" >> "${out}/share.env"
+          echo "CARGO_BUILD_JOBS=${slots}" >> "${out}/share.env"
+          echo "${cores} cores, ${runners} runner instances: ${threads} test threads, ${slots} compiler slots"
+        }
+        toolchain_pin() {
+          local active pinned sysroot
+          active="$(rustc --version 2>/dev/null || true)"
+          case "${active}" in
+            "rustc ${{ inputs.toolchain }} "*) ;;
+            *) rustup toolchain install; active="$(rustc --version)" ;;
+          esac
+          echo "${active}"
+          case "${active}" in
+            "rustc ${{ inputs.toolchain }} "*) ;;
+            *) echo "::error::rust-toolchain.toml resolves to '${active}', the gate pins ${{ inputs.toolchain }}"; exit 1 ;;
+          esac
+          # The version string is not enough: another installation (Homebrew's,
+          # say) can print the same version while ignoring rust-toolchain.toml and
+          # carrying no cross-target std. The rustc on PATH must be the one rustup
+          # resolves for this checkout.
+          pinned="$(dirname "$(dirname "$(rustup which rustc)")")"
+          sysroot="$(rustc --print sysroot)"
+          if [ "${sysroot}" != "${pinned}" ]; then
+            echo "::error::rustc on PATH ($(command -v rustc), sysroot ${sysroot}) is not rustup's ${pinned}"
+            exit 1
+          fi
+        }
+        nextest_on_path() {
+          if [ "${{ inputs.nextest }}" = true ]; then
+            command -v cargo-nextest
+            cargo-nextest nextest --version
+          fi
+        }
+        ram_disk > "${out}/ram.log" 2>&1 &
+        ram_pid=$!
+        machine_share > "${out}/share.log" 2>&1 &
+        share_pid=$!
+        toolchain_pin > "${out}/toolchain.log" 2>&1 &
+        toolchain_pid=$!
+        nextest_on_path > "${out}/nextest.log" 2>&1 &
+        nextest_pid=$!
+        failed=0
+        wait "${ram_pid}" || failed=1
+        wait "${share_pid}" || failed=1
+        wait "${toolchain_pid}" || failed=1
+        wait "${nextest_pid}" || failed=1
+        cat "${out}/ram.log" "${out}/share.log" "${out}/toolchain.log" "${out}/nextest.log"
+        if [ "${failed}" -ne 0 ]; then
+          echo "::error::the RAM disk, the machine share, the toolchain pin or the nextest check failed; the logs above name which"
           exit 1
         fi
-    - name: nextest is installed
-      if: inputs.nextest == 'true'
-      shell: bash
-      run: cargo nextest --version
+        cat "${out}/ram.env" "${out}/share.env" >> "${GITHUB_ENV}"
     # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
     # directory. rustc deletes its own when it finishes, so a cancelled or
     # timed-out job leaves the rest, and nothing else ever removes them: on

@@ -75,7 +75,13 @@ impl ShutdownReport {
         }) && {
             #[cfg(feature = "process")]
             {
-                self.pending_cleanup_count() == 0
+                // A Windows job outlives no receipt: a cleanup that cannot name an empty job
+                // reports its survivors and closes the job, so only Unix holds pending owners.
+                #[cfg(unix)]
+                let none_pending = self.pending_cleanup_count() == 0;
+                #[cfg(not(unix))]
+                let none_pending = true;
+                none_pending
                     && self
                         .outcomes
                         .iter()

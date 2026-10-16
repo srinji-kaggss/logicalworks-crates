@@ -14,7 +14,7 @@ Pages of this guide: [tasks](background-work.md) ·
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise/supervisor.rs:240`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise/supervisor.rs:247`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to

@@ -1,6 +1,6 @@
 //! Admission, placement and the terminal accounting of every supervised task.
 
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 use super::PROCESS_CLEANUP_GRACE;
 use super::lease::Lease;
 #[cfg(feature = "script")]
@@ -118,7 +118,7 @@ impl Supervisor {
     /// Whether shutdown keeps waiting, `quiet` after the later of its
     /// cooperative grace and the last drain that finished: only while a process
     /// task is live and [`PROCESS_CLEANUP_GRACE`] has not passed without one.
-    #[cfg(all(unix, feature = "process"))]
+    #[cfg(all(any(unix, windows), feature = "process"))]
     pub(super) fn cleanup_holds_grace(&self, quiet: Duration) -> bool {
         quiet < PROCESS_CLEANUP_GRACE && self.live_cleanups() > 0
     }
@@ -131,15 +131,21 @@ impl Supervisor {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Supervised process tasks that have not yet settled their job.
+    #[cfg(all(windows, feature = "process"))]
+    pub(super) fn live_cleanups(&self) -> usize {
+        self.live_jobs.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Without supervised processes no task drains a cleanup.
-    #[cfg(not(all(unix, feature = "process")))]
+    #[cfg(not(all(any(unix, windows), feature = "process")))]
     pub(super) const fn live_cleanups(&self) -> usize {
         0
     }
 
     /// Without supervised processes nothing drains a cleanup, so the cooperative
     /// grace is the whole wait.
-    #[cfg(not(all(unix, feature = "process")))]
+    #[cfg(not(all(any(unix, windows), feature = "process")))]
     pub(super) const fn cleanup_holds_grace(&self, _quiet: Duration) -> bool {
         false
     }

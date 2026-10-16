@@ -136,6 +136,8 @@ fn words(parts: &[&str]) -> Vec<String> {
 pub(crate) fn suite_commands(suite: &str, partition: Option<&str>) -> Option<Vec<Vec<String>>> {
     match suite {
         "workspace" => {
+            // lgwks_bot runs whole in the bot-full suite, so this one leaves it
+            // out, exactly as the `tests` lane does.
             let mut command = words(&[
                 "cargo",
                 "nextest",
@@ -143,7 +145,7 @@ pub(crate) fn suite_commands(suite: &str, partition: Option<&str>) -> Option<Vec
                 "--workspace",
                 "--locked",
                 "-E",
-                "not binary(storefront_consumers)",
+                "not binary(storefront_consumers) and not package(lgwks_bot)",
             ]);
             if let Some(shard) = partition {
                 command.extend(words(&["--partition", shard]));
