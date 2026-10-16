@@ -109,6 +109,11 @@ jobs:
     # recompiles only what changed: 250 s on run 38365526454. A hosted runner
     # starts from a restored cache that never holds the workspace crates, and
     # compiled lgwks_bot's `it` test binary alone for 100 s (run 38401426445).
+    # A push that edits a test source is the cold case of that: the changed `it`
+    # binary compiled for 184 s at a load average of 60-90 (22 s with nothing
+    # changed), so the first run after the edit is cancelled at the bound with
+    # its tests step unfinished (run 38870029835); the next run finds the binary
+    # in the directory and is the measurement of the job.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 5
     env:
