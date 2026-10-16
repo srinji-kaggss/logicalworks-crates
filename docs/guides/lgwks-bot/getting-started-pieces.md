@@ -30,7 +30,7 @@ the `.on` calls.
 `GrantSet::admit` rejects a source or action whose `required_caps` the set does
 not cover (`crates/lgwks-bot/src/gate.rs:116`), and `Schedule::initialize` with
 `ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
-totally ordered (`crates/lgwks-bot/src/ecs/fold.rs:212`).
+totally ordered (`crates/lgwks-bot/src/ecs/fold.rs:712`).
 
 `Bot::tick` returns `Result<usize, BotError>`, where the `usize` is the number of
 actions that fired. The bot is `mut` because a tick advances its world. `tick`

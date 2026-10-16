@@ -2,40 +2,66 @@
 
 Part of [production readiness](../production-readiness.md), §4, nine axes.
 
-**⚠️ — measured honestly on both paths: the synchronous tick loses by 118x to
-2 665x, and the async facade loses by 2% to 17% at p50, with one scenario's
+**⚠️ — measured honestly on both paths: the synchronous tick loses by 28x to
+2 605x, and the async facade loses by 2% to 17% at p50, with one scenario's
 interval spanning parity.**
 
 Full method, raw numbers, fairness gate and exclusions are in
 [`../bench/README.md`](../../bench/README.md). The summary, with the loss stated at
-the same volume as the wins:
+the same volume as the wins (one run of `bench/` on this host with #279's
+changes; the last column is the run on main `940e253cd` just before them):
 
-| scenario | `lgwks_bot` ns/tick | hand-rolled loop ns/tick | ratio | 95% CI |
-|---|---:|---:|---:|---|
-| `poll-only-64x100` | 3 720.9 | 31.4 | 117.99x slower | [117.35, 119.05] |
-| `steady-64x100` | 4 909.2 | 31.9 | 154.37x slower | [151.59, 156.10] |
-| `churn-64x1` | 138 037.7 | 52.1 | 2 664.56x slower | [2 630.82, 2 698.80] |
-| `fanout-1x64` | 116 680.7 | 45.2 | 2 578.12x slower | [2 555.76, 2 601.45] |
-| `wide-256x10` | 66 270.8 | 138.4 | 477.51x slower | [473.00, 481.37] |
+| scenario | `lgwks_bot` ns/tick | hand-rolled loop ns/tick | ratio | 95% CI | before #279 |
+|---|---:|---:|---:|---|---:|
+| `poll-only-64x100` | 896.0 | 32.3 | 27.58x slower | [27.40, 28.05] | 47.22x |
+| `steady-64x100` | 2 055.4 | 32.4 | 63.65x slower | [63.09, 64.20] | 83.09x |
+| `churn-64x1` | 133 986.7 | 51.5 | 2 605.27x slower | [2 547.15, 2 662.27] | 2 698.16x |
+| `fanout-1x64` | 110 259.8 | 42.7 | 2 574.46x slower | [2 527.44, 2 588.59] | 2 553.41x |
+| `wide-256x10` | 54 248.3 | 135.6 | 401.05x slower | [397.17, 410.04] | 429.32x |
 
-A hand-rolled loop doing provably identical work is **118x to 2 665x faster**.
+A hand-rolled loop doing provably identical work is **28x to 2 605x faster**.
 If your workload is a hot path, use the loop. This document says so with a
 number rather than burying it. #279's targets (≤ 10x quiet, ≤ 30x churn) are
-**missed** on every scenario.
+**missed** on every scenario. A second run of the same binary read 29.47x,
+66.61x, 2 691.57x, 2 569.68x and 409.54x, so the run-to-run spread is about two
+to three points on the quiet rows and wider than any bootstrap interval; the
+quiet rows moved by far more than that, and the effect-heavy rows did not move
+(this change does not touch the effect path).
 
-These ratios are larger than the 72x–256x this section used to carry because
+**What changed, and what it bought.** Three things, all on the quiet tick. A
+thread's `block_on` keeps one waker instead of building one per call; the
+condition failures of a tick are recorded only for the chains that met one; and a
+tick on which no source moved, no transition is held and nothing is parked skips
+the observation fold and the decision pass rather than walking every chain to
+confirm that nothing happened. **A quiet tick now makes no heap allocation**
+(`--alloc-report`, per-tick trace of `steady-64x100`: `98:0 99:0 100:558 101:0
+102:0`), down from one — `block_on`'s waker — and from 20 before per-source
+change ticks. The 558 on the tick where 64 sources move is the boxed
+observation, the ledger transition and the journal records, about 8.7 per moved
+chain. Means: 4.2 (`poll-only`), 8.0 (`steady`), 878.0 (`churn`), 345.0
+(`fanout`), 347.4 (`wide`) allocations per tick, against 0.0 for the baseline.
+
+**The gap, itemised by stage** (`--profile`, same run; ns per tick, which
+includes the one tick in a hundred that moves, and the instrument adds about
+209 ns). `poll-only` (plain tick 907.8): poll 412 (47.7%), schedule 282 (32.6%),
+the other four 168 together. `steady` (plain 2 075.3): poll 401 (20.3%),
+schedule 278 (14.1%), fingerprint 79, compare 36, decide 60, act 1 125 (56.8%).
+`churn`, `fanout` and `wide`: act is 83.9%, 98.7% and 79.7%. The ≤ 10x quiet
+target is not reachable by this route: it asks for a tick of about 323 ns
+against a baseline of 32.3 ns, and the poll stage alone is 412 ns, 6.4 ns per
+source for the `revision()` read, the change-tick compare and two declared-state
+reads. The ≤ 30x churn target is not reachable by design: each effect writes a
+ledger transition, a warrant and a journal record, and `act` is where the time
+goes.
+
+These ratios are larger than the 72x–256x this section once carried because
 that run's bots fired effects with no ledger, no warrant and no record, and
 skipped 99 of every 100 polls through a digest seam that has since been
 removed; neither configuration is one the crate builds today
-([`../bench/README.md`](../../bench/README.md) states both). The per-stage profile
-(`--profile`, measured on the tick path itself) itemises the gap: the effect
-path (`act` — ledger, warrant and journal record) is the largest stage in every
-scenario, 41% of a quiet tick and 84–98% of the effect-heavy ones; poll is
-445 ns on a quiet tick, down from 7 064 ns before per-source change ticks. A
-quiet tick still makes 20 heap allocations (`--alloc-report`), flat in the
-number of chains. Admission and cost stay linear in source count with no
-superlinear term. `Auth::check` was quadratic in the capability count and is now
-`n·log2 n`: 12.9 µs → 3.6 µs at 128 capabilities.
+([`../bench/README.md`](../../bench/README.md) states both). Admission and cost
+stay linear in source count with no superlinear term. `Auth::check` was
+quadratic in the capability count and is now `n·log2 n`: 12.9 µs → 3.6 µs at
+128 capabilities.
 
 **Two exclusions that favour this crate and are named so they cannot be
 unnoticed later:**

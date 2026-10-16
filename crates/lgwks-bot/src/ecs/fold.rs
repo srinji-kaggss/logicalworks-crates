@@ -71,6 +71,23 @@ pub(super) fn observe_fold(world: &mut World) {
 
     let mut polled = std::mem::take(&mut world.non_send_mut::<Polled>().0);
 
+    // Nothing was polled: every source reported the revision its committed value
+    // was read at (or there is no source), so there is no result to inspect, no
+    // value to commit and no `Revision` to bump. The staging buffer is empty in
+    // exactly that case — the observation phase gives every chain a slot only when
+    // a wave has a source to poll — so the passes below would walk a slot per
+    // chain to find what this already knows. What is left to say is that nothing
+    // moved, which `fire_plan` reads from `Moved`.
+    if polled.is_empty() {
+        let count = world.non_send::<Chains>().0.len();
+        let mut moved = std::mem::take(&mut world.non_send_mut::<Moved>().0);
+        moved.clear();
+        moved.resize(count, false);
+        world.non_send_mut::<Moved>().0 = moved;
+        put_polled(world, polled);
+        return;
+    }
+
     // Two passes over the results, and neither allocates. The first inspects
     // every result and commits nothing, which is what makes a failed tick leave
     // the world exactly as it was; the second applies the movements the first
@@ -332,7 +349,7 @@ pub(super) fn fire_plan(world: &mut World) {
     steps.clear();
     failures.clear();
 
-    if parked(world) {
+    if parked(world) || quiet_tick(world) {
         put_plan_buffers(world, steps, failures);
         return;
     }
@@ -392,8 +409,6 @@ pub(super) fn fire_plan(world: &mut World) {
     #[cfg(feature = "profile")]
     drop(fingerprint_charge);
 
-    failures.resize_with(count, || None);
-
     #[cfg(feature = "profile")]
     let decide_charge = Charge::new(TickStage::Decide);
     for index in 0..count {
@@ -427,11 +442,8 @@ pub(super) fn fire_plan(world: &mut World) {
             let chains = world.non_send::<Chains>();
             let ledger = world.non_send::<Ledger>();
             let retry = world.resource::<Policy>().reading();
-            if let (Some(chain), Some(value), Some(failure)) = (
-                chains.0.get(index),
-                transition.value.as_ref(),
-                failures.get_mut(index),
-            ) {
+            if let (Some(chain), Some(value)) = (chains.0.get(index), transition.value.as_ref()) {
+                let mut failure = None;
                 plan_chain(
                     chain,
                     &transition,
@@ -442,8 +454,13 @@ pub(super) fn fire_plan(world: &mut World) {
                         retry,
                     },
                     &mut steps,
-                    failure,
+                    &mut failure,
                 );
+                // A row only for the chain that met one, pushed in chain order
+                // because the walk is in chain order.
+                if let Some(error) = failure {
+                    failures.push((index, error));
+                }
             }
             // No chain, or a transition bound to nothing: the work is kept,
             // not discarded. A transition is opened only for a source that was
@@ -496,13 +513,38 @@ pub(super) fn fire_plan(world: &mut World) {
     put_plan_buffers(world, steps, failures);
 }
 
+/// Whether this tick has nothing to decide, so the decision pass can be skipped.
+///
+/// Three facts, all read without touching a chain: the change query has been
+/// built (so this is not the first run, whose spawned components all read as
+/// changed), no chain took a value this tick, and no chain holds a transition.
+/// Every chain is then [`AdmitKind::Idle`] by construction — `Idle` is "no
+/// transition held and the source did not move" — so the pass would build its
+/// scratch, iterate a query that reports nothing, and walk every chain to
+/// confirm it.
+///
+/// `Moved` is the flags `observe_fold` wrote for the chains whose `Revision` it
+/// bumped, which is the whole of what `Changed<Revision>` can report between two
+/// runs of this system. A tick whose commit stopped early leaves the previous
+/// tick's flags in place, which can only make this answer `false` and run the
+/// pass; it can never hide a movement.
+fn quiet_tick(world: &World) -> bool {
+    world.non_send::<AdmitScratch>().movers.is_some()
+        && !world.non_send::<Moved>().0.iter().any(|moved| *moved)
+        && world
+            .non_send::<Ledger>()
+            .transitions
+            .iter()
+            .all(Option::is_none)
+}
+
 /// Take the plan's two buffers, leaving empty ones behind.
 ///
 /// They are taken rather than borrowed so the decision walk can push into them
 /// while the world is borrowed immutably for the chains and the transition
 /// bindings. Empty `Vec`s are left in their place, so a tick that dies before
 /// putting them back stages nothing.
-pub(super) fn take_plan_buffers(world: &mut World) -> (Vec<Step>, Vec<Option<BotError>>) {
+pub(super) fn take_plan_buffers(world: &mut World) -> (Vec<Step>, Vec<(usize, BotError)>) {
     let mut plan = world.non_send_mut::<Plan>();
     (
         std::mem::take(&mut plan.steps),
@@ -519,7 +561,7 @@ pub(super) fn take_plan_buffers(world: &mut World) -> (Vec<Step>, Vec<Option<Bot
 pub(super) fn put_plan_buffers(
     world: &mut World,
     steps: Vec<Step>,
-    failures: Vec<Option<BotError>>,
+    failures: Vec<(usize, BotError)>,
 ) {
     let mut plan = world.non_send_mut::<Plan>();
     plan.steps = steps;

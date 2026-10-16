@@ -124,8 +124,13 @@ impl EcsBot {
         scratch: &mut PollScratch,
     ) -> u32 {
         let count = self.world.non_send::<Chains>().0.len();
+        // Cleared and left empty: a slot per chain is filled the first time a
+        // wave has a source to poll, below. A tick on which every source reports
+        // the revision its value was read at polls nothing, and a `Result` the
+        // size of a `BotError` written for every chain to say "did not move" was
+        // most of what such a tick cost. Empty means nothing was polled, which is
+        // what `observe_fold` reads it as.
         polled.clear();
-        polled.resize_with(count, || Ok(None));
         revisions.clear();
         revisions.resize(count, None);
 
@@ -209,6 +214,12 @@ impl EcsBot {
             if slots.is_empty() {
                 continue;
             }
+            // The first wave with a source to poll gives every chain its slot, as
+            // "did not move", so the results land on the chains that produced
+            // them and every skipped chain reads as the answer it gave.
+            if polled.is_empty() {
+                polled.resize_with(count, || Ok(None));
+            }
 
             // One watchdog for the wave rather than one per poll, and one
             // deadline the whole wave shares: `bounded_wave` owns it and reports
@@ -291,11 +302,14 @@ impl EcsBot {
             let Some(chain) = chains.0.get(index) else {
                 continue;
             };
-            match (
-                chain.source.cache_state(),
-                polled.get(index).map(Result::is_ok),
-            ) {
-                (Some(declared_now), Some(true)) => *reason = Some(declared_now),
+            // A chain with no slot was skipped, which is an answer of "did not
+            // move" and counts as a poll that succeeded.
+            let answered = match polled.get(index) {
+                Some(result) => result.is_ok(),
+                None => true,
+            };
+            match (chain.source.cache_state(), answered) {
+                (Some(declared_now), true) => *reason = Some(declared_now),
                 // A failed poll carries no value at all, so the reason the source
                 // would have named is not the one that matters: nothing was read,
                 // and the baseline this tick did not replace is still standing.
@@ -303,13 +317,13 @@ impl EcsBot {
                 // `Disconnected` for a chain that had declared nothing, because a
                 // source that could not be read is a source whose transport is at
                 // least unavailable.
-                (_, Some(false)) if reason.is_none() => {
+                (_, false) if reason.is_none() => {
                     *reason = Some(RefreshReason::Disconnected);
                 }
                 _ => {}
             }
         }
-        // The `Some(false)` arm above is exactly what a cancelled poll reaches,
+        // The `false` arm above is exactly what a cancelled poll reaches,
         // and that is deliberate: a stalled poll read nothing, so its baseline is
         // as unsound as it was and the mark has to outlive this tick, which is
         // the same rule a failed poll already follows. Clearing the mark on a
