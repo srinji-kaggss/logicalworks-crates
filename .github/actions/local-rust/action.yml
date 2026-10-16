@@ -156,18 +156,23 @@ runs:
         } >> "${GITHUB_ENV}"
         SCCACHE_DIR="${dir}" sccache --show-stats 2>/dev/null | head -6 || true
         echo "compile cache: ${dir} (basedirs ${root})"
-    # Three independent pieces of setup, run together because each one waits on
+    # Four independent pieces of setup, run together because each one waits on
     # the machine and not on the others: the RAM disk for temporary files, this
-    # job's share of the cores, and the toolchain check. Every job of a run
-    # starts within seconds of the rest, so thirteen instances ask `diskutil`,
-    # `find` and the rustup shim for the same things at once. Run one after
-    # another they took 18.5 s, 9.7 s and 26 s of the 57 s this action cost the
-    # build job on run 38863359393, which then met its 5-minute bound with 17 s
-    # of tail steps unrun; started together the step takes as long as the
-    # slowest of them. Each piece writes its own log and its own environment
-    # file, and the step prints the logs in a fixed order and appends the
-    # environment only after all three succeeded, so a failure in any one fails
-    # the step exactly as it did in sequence.
+    # job's share of the cores, the toolchain check and the nextest check. Every
+    # job of a run starts within seconds of the rest, so thirteen instances ask
+    # `diskutil`, `find`, the rustup shim and cargo for the same things at once.
+    # Run one after another the first three took 18.5 s, 9.7 s and 26 s of the
+    # 57 s this action cost the build job on run 38863359393, which then met its
+    # 5-minute bound with 17 s of tail steps unrun, and the nextest check took
+    # 8.2 s more on run 38866246742, whose build job finished its last step at
+    # 5:00 and was cancelled. Started together the step takes as long as the
+    # slowest piece (25.6 s on run 38866246742). Each piece writes its own log
+    # and its own environment file, and the step prints the logs in a fixed
+    # order and appends the environment only after all four succeeded, so a
+    # failure in any one fails the step exactly as it did in sequence. The
+    # nextest check runs the `cargo-nextest` binary itself, as the input says it
+    # must be on PATH, so it neither waits on cargo's package-cache lock nor
+    # reaches the rustup shim while the toolchain piece may be installing.
     #
     # Temporary files go on a RAM disk owned by this runner instance. Rust's
     # `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS, which flushes the
@@ -209,7 +214,7 @@ runs:
     # rustup has no lock, and parallel jobs that each ran `rustup toolchain
     # install` raced: two jobs found wasm32-wasip1 missing mid-transaction. The
     # toolchain is only installed when the pinned one is not already active.
-    - name: RAM disk, machine share and toolchain pin, together
+    - name: RAM disk, machine share, toolchain pin and nextest, together
       shell: bash
       run: |
         set -euo pipefail
@@ -283,26 +288,31 @@ runs:
             exit 1
           fi
         }
+        nextest_on_path() {
+          if [ "${{ inputs.nextest }}" = true ]; then
+            command -v cargo-nextest
+            cargo-nextest nextest --version
+          fi
+        }
         ram_disk > "${out}/ram.log" 2>&1 &
         ram_pid=$!
         machine_share > "${out}/share.log" 2>&1 &
         share_pid=$!
         toolchain_pin > "${out}/toolchain.log" 2>&1 &
         toolchain_pid=$!
+        nextest_on_path > "${out}/nextest.log" 2>&1 &
+        nextest_pid=$!
         failed=0
         wait "${ram_pid}" || failed=1
         wait "${share_pid}" || failed=1
         wait "${toolchain_pid}" || failed=1
-        cat "${out}/ram.log" "${out}/share.log" "${out}/toolchain.log"
+        wait "${nextest_pid}" || failed=1
+        cat "${out}/ram.log" "${out}/share.log" "${out}/toolchain.log" "${out}/nextest.log"
         if [ "${failed}" -ne 0 ]; then
-          echo "::error::the RAM disk, the machine share or the toolchain pin failed; the logs above name which"
+          echo "::error::the RAM disk, the machine share, the toolchain pin or the nextest check failed; the logs above name which"
           exit 1
         fi
         cat "${out}/ram.env" "${out}/share.env" >> "${GITHUB_ENV}"
-    - name: nextest is installed
-      if: inputs.nextest == 'true'
-      shell: bash
-      run: cargo nextest --version
     # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
     # directory. rustc deletes its own when it finishes, so a cancelled or
     # timed-out job leaves the rest, and nothing else ever removes them: on
