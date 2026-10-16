@@ -1,16 +1,207 @@
-# The Windows acceptance map: the rows a Windows job object answers, and the
+# The Windows acceptance map: the rows a hosted Windows runner answers, and the
 # named tests that answer them. The `acceptance-receipts` binary reads it as it
 # reads `t-rows.toml` (`--map docs/acceptance/t-rows-windows.toml`), from the
 # JUnit report of the `Process containment on Windows` CI job, and records the
-# receipt as `windows-x86_64` with the feature set `process`.
+# receipt as `windows-x86_64` with the feature set `process,script,ephemeral`.
 #
-# Only T19-T21 are here. The rest of the suite is not built and run on a hosted
-# Windows runner inside the job bound, so no other row claims a Windows receipt.
-# Every entry is a nextest name, `<binary>::<test>`, and `state` and `gap` mean
-# what they mean in `t-rows.toml`.
+# T19-T21 name the `process_job` tests, which drive a real job object. Every
+# other row names the tests of the `it` binary that carry its row id (`_tNN`, the
+# suffix `tests/it/t_rows.rs` documents) and that passed on a hosted Windows
+# runner (probe run 38956193594, 2026-10-16); the job runs exactly the `_tNN`
+# tests, so the receipt tool fails the run when a named test goes missing or
+# fails. A row's `gap` says how many of the tests `t-rows.toml` names for it the
+# Windows job does not run; the tests that need a Unix process model (a fake `gh`
+# on `PATH`, a signal, a process group) are `cfg(unix)`, do not build there and
+# are among them.
+# T16 has no entry: its row test failed on a hosted Windows runner with os error 33
+# (a lock violation), the job excludes that one test by name, and issue #575 owns
+# the fix. Every entry is a nextest name, `<binary>::<test>`, and `state` and
+# `gap` mean what they mean in `t-rows.toml`.
 
 schema = 1
 spec = "docs/orchestration-acceptance.spec.md"
+
+[[row]]
+id = "T01"
+requires = "DX-01/03/04"
+row = "A one-shot task returns a typed value with one task declaration and call; no fake observer/tick loop or manual reaping."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 4 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::a_one_declaration_one_call_returns_a_typed_value_t01",
+]
+
+[[row]]
+id = "T02"
+requires = "DX-04/05"
+row = "Compile-fail source/condition/action mismatch and cross-schema result binding; equivalent correct local borrowed/non-Send program compiles and runs."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 4 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t02_compile_surface::a_source_condition_action_mismatch_is_refused_t02",
+]
+
+[[row]]
+id = "T03"
+requires = "DX-05/LC-08"
+row = "Drop local composition while suspended; no borrowed child escapes. An independently timed child process detects a non-yielding callback without claiming in-process preemption."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 4 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::a_dropped_suspended_run_releases_its_permit_t03",
+]
+
+[[row]]
+id = "T04"
+requires = "LC-02/03"
+row = "Nested `all`/`map` at concurrency one finishes; parents waiting for children do not hoard execution permits."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 6 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::nested_runs_finish_at_a_ceiling_of_one_t04",
+]
+
+[[row]]
+id = "T05"
+requires = "LC-02/11"
+row = "Large outputs, full stderr and slow stdout consumer stay within declared retained-byte ceilings; malformed/truncated framed output is not parsed as success."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::a_full_journal_refuses_one_more_event_and_keeps_its_history_t05",
+  "it::sim_t_rows_default::journal_counts_are_exact_for_every_seed_t05",
+]
+
+[[row]]
+id = "T06"
+requires = "LC-03"
+row = "Saturated task A cannot starve independent B; one slow source does not block unrelated ready work. Use controlled completions, not sleeps as the oracle."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::a_held_mass_never_starves_an_independent_chain_t06",
+]
+
+[[row]]
+id = "T07"
+requires = "LC-04"
+row = "A succeeds with a new fingerprint, B fails the atomic observation group, then B recovers; A's uncommitted update still executes exactly once. Test initial and subsequent changes."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 5 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::a_failed_group_leaves_its_own_chain_forced_t07",
+]
+
+[[row]]
+id = "T08"
+requires = "LC-04"
+row = "Disconnect, watch overflow, stale remote key and invalidation failure force refresh rather than permanent quiet state."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 9 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::every_declared_reason_forces_a_refresh_t08",
+]
+
+[[row]]
+id = "T09"
+requires = "DX-07"
+row = "Identical event payloads with different event IDs both execute; duplicate delivery of the same event does not. Latest-state mode reports intentional supersession separately."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 6 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::observe_refresh::identical_payloads_with_distinct_event_ids_both_execute_and_a_redelivery_does_not_t09",
+]
+
+[[row]]
+id = "T10"
+requires = "DX-06/LC-01"
+row = "A required predecessor fails, is abandoned, is skipped or becomes Unknown; dependent writes never run merely because it is no longer active."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::a_required_predecessor_holds_its_dependent_t10",
+  "it::sim_t_rows::every_predecessor_state_decides_its_dependent_t10",
+]
+
+[[row]]
+id = "T11"
+requires = "LC-05/06"
+row = "A Unknown -> NotApplied -> B Unknown; delayed A NotApplied and A Applied cannot alter B. Duplicate A evidence stays attributable to A."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 12 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::an_indeterminate_predecessor_is_never_resent_t11",
+  "it::wrong_identity_evidence::late_evidence_for_a_settled_attempt_cannot_alter_its_retry_t11",
+]
+
+[[row]]
+id = "T12"
+requires = "LC-05/06"
+row = "Wrong tenant/run/action/payload/revision/environment/epoch evidence is refused without mutation; checked counter exhaustion never aliases an issued identity."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 8 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_t_rows::identical_digests_never_cross_tenants_t12",
+]
+
+[[row]]
+id = "T13"
+requires = "LC-06/07"
+row = "Permanent policy refusal plus repeated NotApplied does not yield unlimited retries; authorized repair is distinct and root budgets remain charged."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 4 of the 8 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_t29",
+  "it::repair::the_root_budget_stays_charged_across_repair_and_resume_t13",
+  "it::t_rows_default::a_repair_charges_the_root_budget_and_never_resets_it_t13",
+  "it::sim_t_rows_default::repairs_charge_exactly_their_spend_for_every_seed_t13",
+]
+
+[[row]]
+id = "T14"
+requires = "LC-05/12/13"
+row = "Crash before intent ack, after ack before dispatch, after dispatch before response, after response before receipt and during recovery. No unknown effect is blindly replayed."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 4 of the 10 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::durable_crash_observation::a_kill_after_the_intent_ack_and_before_the_dispatch_recovers_as_prepared_t14",
+  "it::t_rows_default::a_recorded_answer_replays_without_a_new_request_t15",
+  "it::t_rows_default::a_compatible_resume_replays_while_a_revised_definition_is_a_typed_drift_t15",
+  "it::sim_t_rows_default::resumes_replay_or_refuse_drift_for_every_seed_t15",
+]
+
+[[row]]
+id = "T15"
+requires = "LC-12"
+row = "Definition/input/order/schema drift during replay returns a typed incompatibility before new effects; replayed model results incur no new model request."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::sim_replay_drift::every_axis_is_distinguishable_band_11_t15",
+]
+
+[[row]]
+id = "T17"
+requires = "LC-08"
+row = "Drop a scoped waiter during an effect, then drain the still-owning host; report uncertainty and cleanup separately. Explicit durable submission outlives its client by contract."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 4 of the 8 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::request_key::a_dropped_client_leaves_the_request_in_flight_for_a_later_client_t17",
+  "it::t_rows_default::a_dropped_waiter_leaves_uncertainty_and_a_later_client_settles_it_t17",
+  "it::sim_t_rows_default::dropped_waiters_settle_under_the_same_run_for_every_seed_t17",
+  "it::t_rows_default::a_drained_host_reports_cleanup_and_uncertainty_as_two_facts_t17",
+]
+
+[[row]]
+id = "T18"
+requires = "LC-09"
+row = "Readiness failure, duplicate readiness, stale generation and failure after ready reach the right caller/dependants; no readiness sleeps in task code."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 8 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::ready::a_failure_before_ready_reaches_the_dependant_and_the_report_t18",
+]
 
 [[row]]
 id = "T19"
@@ -46,4 +237,170 @@ gap = "A stop reaches no process outside the job, and a job never reports a tree
 tests = [
   "process_job::a_stop_leaves_an_unrelated_process_running_t21",
   "process_job::sim_a_stop_never_reaches_an_unrelated_tree_or_process_t21",
+]
+
+[[row]]
+id = "T22"
+requires = "DX-10"
+row = "External consumer cannot execute a public process description via `spawn`, `status`, `output`, mutable engine handle or Deref escape. Exercise the sanctioned path positively."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 10 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::without_the_process_feature_a_process_description_is_unnameable_t22",
+  "it::sim_t_rows_default::subject_names_validate_identically_for_every_seed_t22",
+]
+
+[[row]]
+id = "T23"
+requires = "DX-08"
+row = "Multiple missing permissions/adapters/inputs yield one complete presently knowable NeedSet. Repair only publication authority; prior analysis is not rerun."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 3 of the 9 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::repair::a_run_short_of_authority_is_blocked_naming_every_need_t23",
+  "it::t_rows_default::a_first_step_reach_is_blocked_at_admission_costing_nothing_t23",
+  "it::sim_t_rows_default::shortfalls_name_exactly_the_seeded_subset_for_every_seed_t23",
+]
+
+[[row]]
+id = "T24"
+requires = "DX-08/LC-01"
+row = "Same repair ticket delivered twice, stale repair epoch and denied repair cannot widen authority or repeat an already completed effect."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 3 of the 7 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::repair::a_ticket_from_an_older_epoch_is_refused_as_stale_t24",
+  "it::t_rows_default::a_ticket_applies_once_and_a_denied_or_wide_grant_changes_nothing_t24",
+  "it::sim_t_rows_default::tickets_apply_once_for_every_seed_t24",
+]
+
+[[row]]
+id = "T25"
+requires = "DX-09"
+row = "Native task and supported wire form produce the same normalized operation trace for the same inputs. Unknown operations fail before execution."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 6 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::spec_materialize::one_chain_traces_match_t25",
+]
+
+[[row]]
+id = "T26"
+requires = "AI-02/03"
+row = "Malformed model output and tool-output instruction injection cannot change trusted intent, install tools or obtain credentials. Sandbox escape refusals remain observable."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 9 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::an_unknown_operation_is_refused_by_name_t26",
+  "it::t_rows::a_credential_read_is_refused_and_changes_nothing_t26",
+]
+
+[[row]]
+id = "T27"
+requires = "AI-04"
+row = "Context reset preserves completed work, user corrections, Unknown effects and evidence references; truncated data never becomes a full-coverage claim."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 4 of the 5 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::proposal::a_context_reset_preserves_completed_work_corrections_unknowns_and_evidence_t27",
+  "it::t_rows_default::a_checkpoint_round_trip_preserves_work_corrections_unknowns_and_evidence_t27",
+  "it::sim_t_rows_default::checkpoints_round_trip_for_every_seed_t27",
+  "it::sim_t_rows_default::torn_records_are_refused_at_every_cut_for_every_seed_t27",
+]
+
+[[row]]
+id = "T28"
+requires = "AI-04/05"
+row = "Parallel workers cannot read another tenant's same-digest artifact; conflicting writes are serialized while independent reads progress."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 10 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::a_same_digest_artifact_stays_inside_its_tenant_t28",
+]
+
+[[row]]
+id = "T29"
+requires = "AI-06"
+row = "Repeated unchanged failure reaches finite typed intervention, not infinite tool/model repairs; new evidence is recorded and does not erase root spend."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 4 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::proposal::repeated_unchanged_failure_reaches_a_finite_intervention_t29",
+]
+
+[[row]]
+id = "T30"
+requires = "AI-07"
+row = "Same request key plus different payload is Conflict; a duplicate identical request reattaches; distinct request keys are not silently collapsed."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 3 of the 9 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::one_request_key_serves_one_payload_t30",
+  "it::t_rows_default::one_key_one_payload_conflict_reattach_and_distinct_keys_t30",
+  "it::sim_t_rows_default::keys_reattach_conflict_and_isolate_for_every_seed_t30",
+]
+
+[[row]]
+id = "T31"
+requires = "PR-02/03/04"
+row = "Untrusted PR, pagination, rename, unavailable diff and build-script execution produce correct subject/coverage and sandbox decisions."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 14 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::without_a_runner_nothing_executes_and_subjects_stay_typed_t31",
+  "it::sim_t_rows_default::runnerless_calls_refuse_norunner_for_every_seed_t31",
+]
+
+[[row]]
+id = "T32"
+requires = "PR-05/06"
+row = "Head advances between analysis and publication; report reviewed A/current B or refuse per declared policy, never relabel evidence as B."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 5 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::a_moved_head_is_detectable_as_reviewed_a_current_b_t32",
+  "it::sim_t_rows_default::moves_detect_exactly_when_shas_differ_for_every_seed_t32",
+]
+
+[[row]]
+id = "T33"
+requires = "PR-07/08/AI-08"
+row = "Provider accepts review but response is lost; reconciliation finds and verifies the exact review, or remains Unknown. No duplicate post. Test partially submitted reviews/comments."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 9 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::reconciliation_verifies_the_exact_review_or_stays_unknown_t33",
+  "it::sim_t_rows_default::bodies_verify_exactly_when_they_match_for_every_seed_t33",
+]
+
+[[row]]
+id = "T34"
+requires = "PR-09/10/AI-08"
+row = "Real readback proves exact IDs/state/subject/payload; lost read permission reports unverified/blocking state while retaining applied-effect evidence."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 6 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows_default::a_read_back_review_proves_its_exact_identity_t34",
+  "it::sim_t_rows_default::records_prove_their_exact_identities_for_every_seed_t34",
+]
+
+[[row]]
+id = "T35"
+requires = "LC-01/11"
+row = "Process exit zero with invalid result, model says done without evidence, and successful draft with failed publish all report their distinct true outcomes."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 1 of the 4 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::proposal::the_three_untrue_successes_report_distinct_outcomes_t35",
+]
+
+[[row]]
+id = "T36"
+requires = "DX-11"
+row = "Progress buffer overflow loses only declared detail and increments counters; authoritative terminal/Unknown state is still retrievable. A quiet client never requires a task-owned reporting loop."
+state = "present"
+gap = "The Windows job runs only the row-named `_tNN` tests (its 5-minute bound), so this receipt covers 2 of the 5 tests `t-rows.toml` names for the row; the others are receipted on macOS and Linux."
+tests = [
+  "it::t_rows::an_overflowing_progress_buffer_keeps_the_terminal_state_t36",
+  "it::t_rows::a_failed_overflowing_run_still_reports_its_terminal_failure_t36",
 ]

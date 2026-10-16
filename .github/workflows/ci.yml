@@ -469,7 +469,7 @@ jobs:
           pattern: acceptance-junit-*
           path: acceptance-junit
       - name: Record acceptance receipts
-        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
+        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process,script,ephemeral --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
       - name: Upload acceptance receipt
         uses: actions/upload-artifact@v4
         with:
@@ -972,10 +972,10 @@ jobs:
   # #263 on Windows, executed. The job object a supervised tree lives in is the
   # kernel's own membership list, so the only evidence that containment works is
   # a Windows host running the supervisor's real path and reading that list empty
-  # (`crates/lgwks-bot/tests/process_job.rs`). Every other Windows job of this
-  # file builds or lints. This one's JUnit report is the Windows receipt of rows
-  # T19-T21 (`docs/acceptance/t-rows-windows.toml`). The tests are a binary of
-  # their own, so the compile is lgwks_std, the async engine and lgwks_bot.
+  # (`crates/lgwks-bot/tests/process_job.rs`). #271: the same step runs the `it`
+  # tests named for their row (`_tNN`), the portable half of the row map. Every
+  # other Windows job of this file builds or lints; this one's JUnit report is the
+  # Windows receipt (`docs/acceptance/t-rows-windows.toml`).
   process-windows:
     name: Process containment on Windows
     runs-on: windows-latest
@@ -983,8 +983,6 @@ jobs:
     env:
       # Lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
-      # The tests start processes and read files; the optimizer would only slow the compile.
-      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -996,13 +994,15 @@ jobs:
         with:
           save-if: "true"
           cache-on-failure: "true"
-          key: process-windows
+          key: process-windows-dev
       - uses: taiki-e/install-action@nextest
-      - name: Run the Windows job-object containment tests
-        # Stops before the job limit so the cache is saved (see the build job).
+      - name: Run the Windows containment and row tests
+        # The `dev` profile: the `test` one builds every dependency at opt-level 3. Stops before
+        # the job limit so the cache is saved (see the build job). The one exclusion is #575.
         timeout-minutes: 4
-        run: cargo nextest run --locked -p lgwks_bot --no-default-features --features process --test process_job --profile ci
+        run: cargo nextest run --locked -p lgwks_bot --no-default-features --features 'process,script,ephemeral' --test process_job --test it --cargo-profile dev --profile ci --no-fail-fast -E '(binary(process_job) | test(/_t[0-9]{2}$/)) & !test(=owner_epoch_takeover::an_old_worker_returning_after_a_takeover_cannot_settle_or_authorize_t16)'
       - name: Upload the Windows JUnit report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-junit-windows
