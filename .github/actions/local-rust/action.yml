@@ -35,7 +35,7 @@ inputs:
       stay near the machine rather than per job. The suite shares sum past
       the cores but the suites are throughput-bound: cutting them ~40% (run
       37680643459) slowed every suite 20-30%, so they are restored
-      (workspace 6, bot-full 8, no-default 6, matrix 3).
+      (workspace 8, bot-full 8, no-default 6, matrix 3).
     required: false
     default: "2"
   build-share:
