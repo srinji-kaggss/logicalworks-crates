@@ -17,10 +17,11 @@ The measured record, from 2026-09-30, is in [`RESULTS.md`](RESULTS.md).
 
 The Python runner (`run.py`) and the two Python ways (`asyncio_taskgroup.py`,
 `trio_nursery.py`, with `site_model.py`) were deleted in `22a19af25` (#537),
-when the repository went Rust and C++ only. Nothing now builds every way,
-repeats a cell five times or reads peak RSS, so no command here reproduces the
-tables: they record the run that made them. The ways whose sources remain each
-run one scenario per call:
+when the repository went Rust and C++ only; the Trio pin they read
+(`python/requirements.in` and `requirements.txt`) went with them. Nothing now
+builds every way, repeats a cell five times or reads peak RSS, so no command
+here reproduces the tables: they record the run that made them. The ways whose
+sources remain each run one scenario per call:
 
 ```text
 cargo run --release -p lgwks_bot --example compare_orchestration -- <way> <scenario>
@@ -30,11 +31,10 @@ cargo run --release -p lgwks_bot --example compare_orchestration -- <way> <scena
 
 `<way>` for the Rust example is `script`, `join_all`, `joinset` or `host`
 (`Host::run` per item); `host` has no row in the 2026-09-30 tables.
-Third-party code is pinned by lockfile or hash:
+Third-party code is pinned by checksum file or lockfile:
 
 - `go/go.sum` for errgroup.
 - `node/package-lock.json` for Effect.
-- `python/requirements.txt`, hashed, for Trio; no source reads it now.
 
 ## The ways
 
