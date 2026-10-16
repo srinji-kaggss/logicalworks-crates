@@ -507,14 +507,14 @@ row = "Untrusted PR, pagination, rename, unavailable diff and build-script execu
 state = "exercised"
 gap = ""
 tests = [
-  "sim_review_path::an_untrusted_build_script_is_never_executed",
+  "sim_review_path::subject_arms::an_untrusted_build_script_is_never_executed",
   "it::pr_review_journey::an_untrusted_build_script_in_the_diff_is_never_executed_t31",
-  "sim_review_path::a_renamed_repository_is_refused_naming_both",
+  "sim_review_path::subject_arms::a_renamed_repository_is_refused_naming_both",
   "it::pr_review_journey::a_renamed_repository_is_refused_and_never_silently_re_pointed",
-  "sim_review_path::an_unavailable_diff_publishes_nothing",
+  "sim_review_path::subject_arms::an_unavailable_diff_publishes_nothing",
   "it::pr_review_journey::an_unavailable_diff_is_an_incomplete_coverage_and_publishes_nothing",
-  "sim_review_path::the_two_diff_ceilings_are_refused_separately",
-  "sim_review_path::a_partial_submission_reports_both_counts",
+  "sim_review_path::subject_arms::the_two_diff_ceilings_are_refused_separately",
+  "sim_review_path::subject_arms::a_partial_submission_reports_both_counts",
   "it::gh_binding::an_unavailable_diff_is_a_typed_coverage_refusal",
   "it::gh_binding::a_diff_past_its_file_ceiling_is_a_typed_coverage_refusal",
   "it::gh_binding::a_review_list_past_the_ceiling_is_refused_not_truncated",
@@ -531,8 +531,8 @@ state = "exercised"
 gap = ""
 tests = [
   "it::pr_review_journey::a_moved_head_is_a_typed_refusal_and_publishes_nothing_t32",
-  "sim_review_path::head_moved_between_snapshot_and_publish_r32",
-  "sim_review_path::a_publication_is_pinned_to_the_read_commit",
+  "sim_review_path::families::head_moved_between_snapshot_and_publish_r32",
+  "sim_review_path::subject_arms::a_publication_is_pinned_to_the_read_commit",
   "it::t_rows_default::a_moved_head_is_detectable_as_reviewed_a_current_b_t32",
   "it::sim_t_rows_default::moves_detect_exactly_when_shas_differ_for_every_seed_t32",
 ]
@@ -549,8 +549,8 @@ tests = [
   "it::pr_review_journey::a_pending_draft_is_reconciled_as_a_draft_and_never_reposted",
   "it::pr_review_journey::a_loss_that_cannot_be_reconciled_stays_unknown_and_still_does_not_repost",
   "it::pr_review_journey::a_client_that_never_starts_is_a_definite_non_effect_and_is_not_reconciled",
-  "sim_review_path::duplicate_submission_r16",
-  "sim_review_path::verified_and_not_observed_r32",
+  "sim_review_path::families::duplicate_submission_r16",
+  "sim_review_path::families::verified_and_not_observed_r32",
   "it::t_rows_default::reconciliation_verifies_the_exact_review_or_stays_unknown_t33",
   "it::sim_t_rows_default::bodies_verify_exactly_when_they_match_for_every_seed_t33",
 ]
@@ -563,8 +563,8 @@ state = "exercised"
 gap = ""
 tests = [
   "it::pr_review_journey::a_lost_read_permission_reports_unverified_and_retains_the_review_id_t34",
-  "sim_review_path::an_unverified_effect_retains_its_review_id",
-  "sim_review_path::a_publication_the_ceiling_cannot_verify_stays_unknown",
+  "sim_review_path::subject_arms::an_unverified_effect_retains_its_review_id",
+  "sim_review_path::families::a_publication_the_ceiling_cannot_verify_stays_unknown",
   "it::gh_binding::a_record_still_being_appended_is_not_read_back",
   "it::t_rows_default::a_read_back_review_proves_its_exact_identity_t34",
   "it::sim_t_rows_default::records_prove_their_exact_identities_for_every_seed_t34",
