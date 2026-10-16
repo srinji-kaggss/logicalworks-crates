@@ -170,6 +170,10 @@ path = "src/bin/acceptance_receipts/main.rs"
 name = "linux-container-tests"
 path = "src/bin/linux_container_tests/main.rs"
 
+[[bin]]
+name = "ai-authoring"
+path = "src/bin/ai_authoring/main.rs"
+
 [lib]
 name = "lgwks_deps"
 path = "src/lib.rs"

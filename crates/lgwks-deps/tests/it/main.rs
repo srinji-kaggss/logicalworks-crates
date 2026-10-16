@@ -27,6 +27,10 @@ mod seed;
 #[path = "../../../lgwks-bot/tests/sim/seed_helpers.rs"]
 mod seed_helpers;
 
+// The runner's journeys need `kill`, `ps` and the process groups its watchdog
+// stops, which every Unix host has and Windows does not.
+#[cfg(unix)]
+mod ai_authoring;
 mod check_cli;
 mod contract_schema_compat;
 mod default_run;
