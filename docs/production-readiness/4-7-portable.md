@@ -86,15 +86,25 @@ The sandbox costs one extra fork and exec per spawn, measured on this host at
 p50 10.80 ms against 3.17 ms for a bare `true` (n=200 each); the in-process
 `sandbox_init` that would avoid it needs an FFI leaf the workspace gate
 refuses, and Linux subtree-deny needs Landlock syscall bindings the estate has
-not admitted — both recorded, neither shipped. Windows has no containment at
-all: a job-object backend needs either an admitted Windows API crate or the
-same refused FFI leaf, so the `windows-latest` job stays a build receipt.
+not admitted — both recorded, neither shipped. On Windows (#263) each supervised
+process joins a job object as it starts, and cancel, deadline, exit and drop
+terminate the whole job: the receipt is `CleanupConfirmed` with
+`ContainmentMechanism::JobObject` only when the kernel reads the job's membership
+empty, and a spec that captures a stream is refused before the fork. The calls
+are fourteen `kernel32` externs in `lgwks_std::process::windows`, the one Windows
+`unsafe` leaf (an exception the guard's register names), with no Windows API
+crate. The settle decision table runs on every host against a scripted job (7
+tests) and the Windows target type-checks for both crates, tests included;
+`tests/it/process_job.rs` drives a real job but no Windows host has run it,
+because no CI job runs the `lgwks_std` or `lgwks_bot` suites on `windows-latest`
+(adding one needs the `workflow` token scope). Windows containment is therefore a
+code, type-check and scripted-decision receipt, not yet an executed one.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
-bot's supervised process backend returns `Unsupported` on non-Unix, so a
-green `windows-latest` job is a *build* receipt for the Windows target and
-never a *containment* receipt: no Windows run in CI can have killed a process
-group. A build check and an executed containment test are different facts, and
+bot's supervised process backend returns `Unsupported` off Unix and Windows,
+and a green `windows-latest` job is still a *build* receipt for `lgwks_std` and
+`lgwks_bot`, never a *containment* receipt: no Windows run in CI has stopped a
+job object. A build check and an executed containment test are different facts, and
 only the second one is a portability claim about the runtime. The eight-target
 matrix above is itself a build receipt: every row was executed by `cargo check`
 and none of them ran a test.
