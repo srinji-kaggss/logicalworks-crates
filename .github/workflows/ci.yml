@@ -699,7 +699,11 @@ jobs:
   # reached at 5 m 29 s with the cancel at 5 m 00 s), so each leg holds the
   # targets it is named for and the host triple the script always adds. Only
   # registered, online instances may be named: lwc-6 and lwc-1 are offline
-  # (runner list, 2026-10-13) and a job pinned to one waits for ever.
+  # (runner list, 2026-10-13) and a job pinned to one waits for ever. No leg is
+  # pinned to an instance that holds a critical-path suite: lwc-5 is the lgwks-bot
+  # full suite (3 m 57 s) and lwc-9 the Linux bot-full one (4 m 12 s). The musl
+  # and wasm leg shared lwc-5, so that suite started 2 m 04 s late and the run's
+  # wall was 6 m 42 s (run 38880610389, the suite's start 3 s after the leg's end).
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -711,7 +715,7 @@ jobs:
           - targets: aarch64-unknown-linux-gnu
             instance: lwc-4
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
-            instance: lwc-5
+            instance: lwc-4
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-7
     steps:
@@ -779,7 +783,7 @@ jobs:
           - part: lgwks-bot
             instance: lwc-10
           - part: lgwks-ast
-            instance: lwc-9
+            instance: lwc-12
           - part: lgwks-bot WASI
             instance: lwc-13
     steps:
