@@ -20,6 +20,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Monotone per-process sequence, so two fixtures in one binary never collide.
 static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// How long a call to the fake may run before it is called a hang.
+///
+/// A bound on a hung child, not on the work: a read that asks the fake for a
+/// ceiling's worth of records takes 0.05 s alone and 4.6 s at its worst with 24
+/// copies running beside 45 busy processes, and on CI run 38933831444 the same
+/// reads were stopped by a 20 s bound while `journal::owner::tests` swept for
+/// 69 s on the same host. Two of nextest's 60 s periods keeps a real hang a
+/// typed `Deadline` that names what was being read, well inside the five
+/// periods after which nextest ends the test itself.
+pub const HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// A fake `gh` installed on `PATH` for one scenario.
 ///
 /// The directory is created under the system temp directory, removed on drop,
@@ -125,7 +136,7 @@ impl FakeGh {
                 .capture_limit(
                     std::num::NonZeroUsize::new(capture).ok_or("a non-zero capture ceiling")?,
                 )
-                .deadline(Some(std::time::Duration::from_secs(20)))
+                .deadline(Some(HANG_BOUND))
                 .env("PATH", self.search_path()?),
         )
     }
@@ -886,12 +897,10 @@ impl Scenario {
     #[must_use]
     pub fn to_behaviour(&self) -> String {
         let base = "b".repeat(40);
-        let after = self
-            .head_after_first
-            .as_ref()
-            .map_or_else(String::new, |head| {
-                format!("\"head_after_first\":\"{head}\",")
-            });
+        let after = match self.head_after_first.as_ref() {
+            Some(head) => format!("\"head_after_first\":\"{head}\","),
+            None => String::new(),
+        };
         format!(
             "{{{after}\"head_sha\":\"{head}\",\"base_sha\":\"{base}\",\
              \"create\":\"{create}\",\"next_review_id\":9001,\

@@ -28,7 +28,7 @@ use lgwks_bot::domain::gh::{CommitId, Gh, GhError, Repository};
 
 use crate::fake_gh;
 
-use fake_gh::{FakeGh, Scenario};
+use fake_gh::{FakeGh, HANG_BOUND, Scenario};
 
 /// What a test reports when a precondition did not hold.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -248,7 +248,7 @@ fn a_review_list_past_the_ceiling_is_refused_not_truncated() -> TestResult {
     let gh = Gh::new(Repository::new("acme/widgets")?)
         .program(fake.program())
         .capture_limit(limit(4 * 1024 * 1024)?)
-        .deadline(Some(Duration::from_secs(20)))
+        .deadline(Some(HANG_BOUND))
         .env("PATH", fake.search_path()?);
 
     let refused = lgwks_bot::Runtime::new()?
@@ -309,7 +309,7 @@ fn a_review_list_exactly_at_the_ceiling_is_read() -> TestResult {
     let gh = Gh::new(Repository::new("acme/widgets")?)
         .program(fake.program())
         .capture_limit(limit(4 * 1024 * 1024)?)
-        .deadline(Some(Duration::from_secs(20)))
+        .deadline(Some(HANG_BOUND))
         .env("PATH", fake.search_path()?);
 
     let reviews = lgwks_bot::Runtime::new()?.block_on(async {
@@ -353,7 +353,7 @@ fn a_paginated_review_list_is_read_across_every_page_t31() -> TestResult {
     let gh = Gh::new(Repository::new("acme/widgets")?)
         .program(fake.program())
         .capture_limit(limit(4 * 1024 * 1024)?)
-        .deadline(Some(Duration::from_secs(20)))
+        .deadline(Some(HANG_BOUND))
         .env("PATH", fake.search_path()?);
     let pull = lgwks_bot::domain::gh::PullRequest::new(Repository::new("acme/widgets")?, 7);
     let runtime = lgwks_bot::Runtime::new()?;
