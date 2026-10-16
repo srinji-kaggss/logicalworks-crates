@@ -37,17 +37,26 @@ fn the_gate_excludes_every_other_holder_until_it_is_released() -> Result<(), Fai
         let cargo = Cargo::new(scratch.path(), &children, BOUND, BOUND);
         for round in 0..count(rng, 1, 4)? {
             let held = cargo.gate()?;
-            let rival = OpenOptions::new().append(true).open(scratch.path().join(GATE_FILE))?;
+            let rival = OpenOptions::new()
+                .append(true)
+                .open(scratch.path().join(GATE_FILE))?;
             match rival.try_lock() {
                 Err(TryLockError::WouldBlock) => {}
-                Ok(()) => return Err(format!("round {round}: a rival took the gate while it was held").into()),
+                Ok(()) => {
+                    return Err(
+                        format!("round {round}: a rival took the gate while it was held").into(),
+                    );
+                }
                 Err(TryLockError::Error(error)) => return Err(error.into()),
             }
             drop(held);
             match rival.try_lock() {
                 Ok(()) => {}
                 Err(TryLockError::WouldBlock) => {
-                    return Err(format!("round {round}: the gate stayed held after its holder left").into());
+                    return Err(format!(
+                        "round {round}: the gate stayed held after its holder left"
+                    )
+                    .into());
                 }
                 Err(TryLockError::Error(error)) => return Err(error.into()),
             }
@@ -99,7 +108,9 @@ fn trials_asking_together_pass_the_gate_one_at_a_time() -> Result<(), Failure> {
                 .into_iter()
                 .map(|handle| match handle.join() {
                     Ok(outcome) => outcome,
-                    Err(_) => Err(BenchError::Refused("a thread at the gate panicked".to_owned())),
+                    Err(_) => Err(BenchError::Refused(
+                        "a thread at the gate panicked".to_owned(),
+                    )),
                 })
                 .collect()
         });
@@ -107,9 +118,15 @@ fn trials_asking_together_pass_the_gate_one_at_a_time() -> Result<(), Failure> {
         for outcome in outcomes {
             outcome?;
         }
-        ensure(peak.load(Ordering::SeqCst) == 1 && inside.load(Ordering::SeqCst) == 0, || {
-            format!("{} threads were inside the gate at once", peak.load(Ordering::SeqCst))
-        })?;
+        ensure(
+            peak.load(Ordering::SeqCst) == 1 && inside.load(Ordering::SeqCst) == 0,
+            || {
+                format!(
+                    "{} threads were inside the gate at once",
+                    peak.load(Ordering::SeqCst)
+                )
+            },
+        )?;
         trace.record_number("threads", threads);
         trace.record_number("rounds", rounds);
         Ok(())
@@ -127,9 +144,10 @@ fn a_missing_work_root_is_refused_naming_the_lock_file() -> Result<(), Failure> 
         let cargo = Cargo::new(&absent, &children, BOUND, BOUND);
         match cargo.gate() {
             Err(BenchError::Io { ref path, .. }) => {
-                ensure(path.starts_with(&absent) && path.ends_with(GATE_FILE), || {
-                    format!("the refusal named {}", path.display())
-                })?;
+                ensure(
+                    path.starts_with(&absent) && path.ends_with(GATE_FILE),
+                    || format!("the refusal named {}", path.display()),
+                )?;
             }
             Ok(_) => return Err("a gate was granted in a work root that does not exist".into()),
             Err(other) => return Err(format!("the refusal was {other:?}, not an I/O error").into()),
@@ -204,7 +222,12 @@ fn a_child_forgets_the_launched_crate_and_nothing_else() -> Result<(), Failure> 
             }
         }
         forget_launched_crate(&mut env);
-        ensure(env == kept, || format!("kept {:?}, expected {kept:?}", env.keys().collect::<BTreeSet<_>>()))?;
+        ensure(env == kept, || {
+            format!(
+                "kept {:?}, expected {kept:?}",
+                env.keys().collect::<BTreeSet<_>>()
+            )
+        })?;
         trace.record_number("kept", env.len());
         Ok(())
     })

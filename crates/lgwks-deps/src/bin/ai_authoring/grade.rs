@@ -204,7 +204,11 @@ mod tests {
         let log = "running 4 tests\ntest alpha ... ok\ntest beta ... FAILED\ntest gamma ... ignored\ntest unrelated ... ok\n\ntest result: FAILED. 1 passed; 1 failed; 1 ignored";
         read_verdicts(log, &mut clauses);
         assert_eq!(clauses.get("alpha"), Some(&Verdict::Pass), "ok is a pass");
-        assert_eq!(clauses.get("beta"), Some(&Verdict::Fail), "FAILED is a failure");
+        assert_eq!(
+            clauses.get("beta"),
+            Some(&Verdict::Fail),
+            "FAILED is a failure"
+        );
         assert_eq!(
             clauses.get("gamma"),
             Some(&Verdict::Fail),
@@ -226,7 +230,9 @@ mod tests {
     #[test]
     fn the_peak_resident_set_reads_in_both_spellings_in_bytes() {
         assert_eq!(
-            peak_rss_bytes("        1.85 real         0.31 user         0.12 sys\n  67911680  maximum resident set size\n"),
+            peak_rss_bytes(
+                "        1.85 real         0.31 user         0.12 sys\n  67911680  maximum resident set size\n"
+            ),
             Some(67_911_680),
             "the macOS form is already in bytes"
         );
@@ -235,7 +241,11 @@ mod tests {
             Some(68_037_632),
             "the GNU form is kibibytes and is scaled to bytes"
         );
-        assert_eq!(peak_rss_bytes("no report here"), None, "no label, no measurement");
+        assert_eq!(
+            peak_rss_bytes("no report here"),
+            None,
+            "no label, no measurement"
+        );
         assert_eq!(
             peak_rss_bytes("maximum resident set size (kbytes): many"),
             None,
@@ -254,25 +264,42 @@ mod tests {
 
     #[test]
     fn orchestration_sites_count_each_token_and_total_them() {
-        let tokens = vec!["JoinSet".to_owned(), "spawn(".to_owned(), "abort(".to_owned()];
+        let tokens = vec![
+            "JoinSet".to_owned(),
+            "spawn(".to_owned(),
+            "abort(".to_owned(),
+        ];
         let (total, by_token) = orchestration_sites(
             "let mut set = JoinSet::new(); set.spawn(a); set.spawn(b); JoinSet::new();",
             &tokens,
         );
         assert_eq!(total, 4, "two JoinSet and two spawn( occurrences");
-        assert_eq!(by_token.get("abort("), Some(&0), "an absent token counts zero, not nothing");
+        assert_eq!(
+            by_token.get("abort("),
+            Some(&0),
+            "an absent token counts zero, not nothing"
+        );
         assert_eq!(by_token.get("spawn("), Some(&2), "spawn( occurs twice");
     }
 
     #[test]
     fn verdicts_round_trip_through_their_words() {
-        for verdict in [Verdict::Pass, Verdict::Fail, Verdict::NotRun, Verdict::Timeout] {
+        for verdict in [
+            Verdict::Pass,
+            Verdict::Fail,
+            Verdict::NotRun,
+            Verdict::Timeout,
+        ] {
             assert_eq!(
                 Verdict::from_label(verdict.label()),
                 Some(verdict),
                 "a record's word names its verdict"
             );
         }
-        assert_eq!(Verdict::from_label("passed"), None, "an unknown word names no verdict");
+        assert_eq!(
+            Verdict::from_label("passed"),
+            None,
+            "an unknown word names no verdict"
+        );
     }
 }

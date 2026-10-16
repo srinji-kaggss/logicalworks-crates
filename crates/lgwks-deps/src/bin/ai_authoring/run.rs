@@ -313,12 +313,9 @@ fn work_through(shared: &Shared<'_>) {
         };
         let record = match execute(shared, &job) {
             Ok(found) => found,
-            Err(error) => Record::crashed(
-                &job,
-                shared.commit,
-                &shared.bench.tokens,
-                error.to_string(),
-            ),
+            Err(error) => {
+                Record::crashed(&job, shared.commit, &shared.bench.tokens, error.to_string())
+            }
         };
         if let Err(error) = store::append(shared.dir, &record) {
             guard(&shared.errors).push(error);
@@ -432,23 +429,34 @@ pub(super) fn run(
         Err(poisoned) => poisoned.into_inner(),
     };
     if let Some(first) = stopped.pop() {
-        return Err(first);
+        return fail(first, "run");
     }
     records.extend(match ran.into_inner() {
         Ok(found) => found,
         Err(poisoned) => poisoned.into_inner(),
     });
     records.sort_by(|left, right| {
-        (&left.model, &left.arm, &left.task, &left.profile, left.trial).cmp(&(
-            &right.model,
-            &right.arm,
-            &right.task,
-            &right.profile,
-            right.trial,
-        ))
+        (
+            &left.model,
+            &left.arm,
+            &left.task,
+            &left.profile,
+            left.trial,
+        )
+            .cmp(&(
+                &right.model,
+                &right.arm,
+                &right.task,
+                &right.profile,
+                right.trial,
+            ))
     });
     let profiles: Vec<String> = if options.profiles.is_empty() {
-        bench.profiles.iter().map(|item| item.name.clone()).collect()
+        bench
+            .profiles
+            .iter()
+            .map(|item| item.name.clone())
+            .collect()
     } else {
         options.profiles.clone()
     };
@@ -462,9 +470,18 @@ pub(super) fn run(
         ("groups", Value::Array(summarize(&records))),
     ]);
     store::finish(&places.dir, &records, &summary)?;
-    console.say(&format!("\nwrote {}", places.dir.join("results.jsonl").display()));
-    console.say(&format!("wrote {}", places.dir.join("summary.json").display()));
-    let crashed = records.iter().filter(|record| record.error.is_some()).count();
+    console.say(&format!(
+        "\nwrote {}",
+        places.dir.join("results.jsonl").display()
+    ));
+    console.say(&format!(
+        "wrote {}",
+        places.dir.join("summary.json").display()
+    ));
+    let crashed = records
+        .iter()
+        .filter(|record| record.error.is_some())
+        .count();
     if crashed > 0 {
         console.warn(&format!(
             "ai-authoring: {} trial(s) crashed and are recorded as such",

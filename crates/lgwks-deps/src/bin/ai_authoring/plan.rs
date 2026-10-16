@@ -96,11 +96,7 @@ pub(crate) const DRY_MODEL: &str = "__dry-run__";
 pub(crate) const MUTANT_MODEL: &str = "__mutant__";
 
 /// `names` if it names only known items, else a refusal; every item when empty.
-fn chosen(
-    kind: &str,
-    names: &[String],
-    every: Vec<String>,
-) -> Result<Vec<String>, BenchError> {
+fn chosen(kind: &str, names: &[String], every: Vec<String>) -> Result<Vec<String>, BenchError> {
     if names.is_empty() {
         return Ok(every);
     }
@@ -278,7 +274,13 @@ const PACKAGE_LIMIT: usize = 120;
 pub(crate) fn package_for(prefix: &str, id: &str) -> String {
     let suffix: String = id
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '_' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{prefix}_{suffix}")
         .chars()

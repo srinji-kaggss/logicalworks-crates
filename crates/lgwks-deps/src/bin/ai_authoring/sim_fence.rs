@@ -262,13 +262,17 @@ fn oracle_clauses_are_the_test_functions_in_source_order() -> Result<(), Failure
                 source.push_str(one_of(rng, "non-clauses", &NOT_CLAUSES)?);
             } else {
                 let name = format!("clause_{index}");
-                source.push_str(&one_of(rng, "declarations", &DECLARATIONS)?.replace("{name}", &name));
+                source.push_str(
+                    &one_of(rng, "declarations", &DECLARATIONS)?.replace("{name}", &name),
+                );
                 wanted.push(name);
             }
             source.push_str("\n\n");
         }
         let found = oracle_test_names(&source);
-        ensure(found == wanted, || format!("read {found:?} from {source:?}, expected {wanted:?}"))?;
+        ensure(found == wanted, || {
+            format!("read {found:?} from {source:?}, expected {wanted:?}")
+        })?;
         trace.record(&source);
         Ok(())
     })
@@ -278,7 +282,8 @@ fn oracle_clauses_are_the_test_functions_in_source_order() -> Result<(), Failure
 /// kibibytes after it). Requirement: the peak is in bytes under either spelling,
 /// the first report wins, and a report with no number is no measurement.
 #[test]
-fn the_peak_resident_set_is_read_in_bytes_from_either_spelling_of_the_report() -> Result<(), Failure> {
+fn the_peak_resident_set_is_read_in_bytes_from_either_spelling_of_the_report() -> Result<(), Failure>
+{
     replay_sweep("time reports", 600, |rng, trace| {
         let bytes = u64::from(rng.between(1, u32::MAX));
         let kibibytes = u64::from(rng.between(1, u32::MAX));
@@ -294,12 +299,14 @@ fn the_peak_resident_set_is_read_in_bytes_from_either_spelling_of_the_report() -
         ensure(peak_rss_bytes(&gnu) == kibibytes.checked_mul(1024), || {
             format!("read {:?} from {gnu:?}", peak_rss_bytes(&gnu))
         })?;
-        ensure(peak_rss_bytes(&format!("{apple}{gnu}")) == Some(bytes), || {
-            "the first report must win".to_owned()
-        })?;
-        ensure(peak_rss_bytes("  many  maximum resident set size\n").is_none(), || {
-            "a label with no number is a measurement".to_owned()
-        })?;
+        ensure(
+            peak_rss_bytes(&format!("{apple}{gnu}")) == Some(bytes),
+            || "the first report must win".to_owned(),
+        )?;
+        ensure(
+            peak_rss_bytes("  many  maximum resident set size\n").is_none(),
+            || "a label with no number is a measurement".to_owned(),
+        )?;
         ensure(peak_rss_bytes("1.85 real 0.31 user\n").is_none(), || {
             "a report with no label is a measurement".to_owned()
         })?;
@@ -381,7 +388,10 @@ fn the_reply_is_the_last_result_line_of_whatever_the_command_printed() -> Result
         match (last, read) {
             (None, None) => {}
             (Some(&Output::Bare), Some(found)) => ensure(
-                found.text.is_empty() && found.tokens_in == 0 && found.tokens_out == 0 && found.wall_ms == 0,
+                found.text.is_empty()
+                    && found.tokens_in == 0
+                    && found.tokens_out == 0
+                    && found.wall_ms == 0,
                 || "a bare result is an empty reply".to_owned(),
             )?,
             (Some(&Output::Result(ref words, consumed, written, millis)), Some(found)) => ensure(

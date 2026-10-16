@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
+use super::BenchError;
 use super::author::{Author, extract_rust_block, repair_prompt};
 use super::bench::{Bench, Task};
 use super::cargo::{Built, Tested};
 use super::grade::{Verdict, consumer_lines, orchestration_sites, read_verdicts};
 use super::plan::Job;
 use super::record::{Record, round_millis};
-use super::BenchError;
 
 /// What it takes to compile a candidate and grade it.
 pub(super) trait Judge {
@@ -124,7 +124,11 @@ pub(super) fn run_trial(inputs: Inputs<'_>, judge: &dyn Judge) -> Result<Finishe
             break;
         };
         repairs = repairs.saturating_add(1);
-        let reply = ask(author, &repair_prompt(original, &code, &build_log), &mut spent)?;
+        let reply = ask(
+            author,
+            &repair_prompt(original, &code, &build_log),
+            &mut spent,
+        )?;
         if !reply.is_empty() {
             code = reply;
         }

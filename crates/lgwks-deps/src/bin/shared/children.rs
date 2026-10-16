@@ -586,7 +586,8 @@ mod tests {
     #[test]
     fn a_child_reads_the_input_file_it_was_given() -> TestResult {
         let children = Children::new(false);
-        let path = std::env::temp_dir().join(format!("children-input-{}", std::process::id()));
+        let nonce = lgwks_std::hex::encode(lgwks_std::random::bytes::<8>()?);
+        let path = std::env::temp_dir().join(format!("children-input-{nonce}"));
         std::fs::write(&path, "fed through a file\n")?;
         let file = std::fs::File::open(&path)?;
         let (parts, env) = (argv(&["cat"]), env());

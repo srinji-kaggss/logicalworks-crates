@@ -293,7 +293,14 @@ fn play(
         scenario
             .attempts
             .iter()
-            .map(|attempt| reply(&attempt.text, attempt.tokens_in, attempt.tokens_out, attempt.wall_ms))
+            .map(|attempt| {
+                reply(
+                    &attempt.text,
+                    attempt.tokens_in,
+                    attempt.tokens_out,
+                    attempt.wall_ms,
+                )
+            })
             .collect(),
     );
     let (Some(task), Some(clauses)) = (
@@ -347,7 +354,10 @@ fn repair_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), F
     let record = &finished.record;
     let repairs = u32::try_from(expected.asked.saturating_sub(1))?;
     ensure(record.compiled == expected.compiled, || {
-        format!("compiled {} but the model says {}", record.compiled, expected.compiled)
+        format!(
+            "compiled {} but the model says {}",
+            record.compiled, expected.compiled
+        )
     })?;
     ensure(record.repairs == repairs, || {
         format!("{} repairs but the model says {repairs}", record.repairs)
@@ -358,30 +368,44 @@ fn repair_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), F
             && record.model_wall_ms == expected.wall_ms,
         || "the cost of the calls is not the sum of the calls".to_owned(),
     )?;
-    ensure(record.lib_rs == expected.code && finished.code == expected.code, || {
-        "the solution is not the last code the author wrote".to_owned()
-    })?;
+    ensure(
+        record.lib_rs == expected.code && finished.code == expected.code,
+        || "the solution is not the last code the author wrote".to_owned(),
+    )?;
     ensure(
         record.consumer_lines == expected.lines && record.orchestration_sites == expected.sites,
         || "the solution's size is not the size of that code".to_owned(),
     )?;
     ensure(judge.builds().len() == expected.builds, || {
-        format!("{} builds but the model says {}", judge.builds().len(), expected.builds)
+        format!(
+            "{} builds but the model says {}",
+            judge.builds().len(),
+            expected.builds
+        )
     })?;
-    ensure(judge.grade_calls() == usize::from(expected.compiled), || {
-        "the oracle runs once if something compiled, and never otherwise".to_owned()
-    })?;
+    ensure(
+        judge.grade_calls() == usize::from(expected.compiled),
+        || "the oracle runs once if something compiled, and never otherwise".to_owned(),
+    )?;
     let builds = f64::from(u32::try_from(expected.builds)?);
     ensure(close(record.compile_wall_ms, 1.5 * builds), || {
-        format!("compile time {} is not {builds} builds of 1.5 ms", record.compile_wall_ms)
+        format!(
+            "compile time {} is not {builds} builds of 1.5 ms",
+            record.compile_wall_ms
+        )
     })?;
     let prompts = author.prompts();
     ensure(prompts.len() == expected.asked, || {
-        format!("{} calls but the model says {}", prompts.len(), expected.asked)
+        format!(
+            "{} calls but the model says {}",
+            prompts.len(),
+            expected.asked
+        )
     })?;
-    ensure(prompts.first().map(String::as_str) == Some(ORIGINAL), || {
-        "the first call is the original prompt".to_owned()
-    })?;
+    ensure(
+        prompts.first().map(String::as_str) == Some(ORIGINAL),
+        || "the first call is the original prompt".to_owned(),
+    )?;
     for (prompt, shown) in prompts.iter().skip(1).zip(&expected.shown) {
         let told = match *shown {
             Some(ref code) => prompt.contains(code.as_str()),
@@ -424,7 +448,9 @@ fn repair_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), F
 #[test]
 fn a_trial_repairs_until_a_candidate_compiles_or_the_budget_ends() -> Result<(), Failure> {
     let world = world()?;
-    replay_sweep("repair loop", 400, |rng, trace| repair_under(&world, rng, trace))
+    replay_sweep("repair loop", 400, |rng, trace| {
+        repair_under(&world, rng, trace)
+    })
 }
 
 /// One seed of grading: a clause's verdict is what the oracle log says of it, a
@@ -448,7 +474,10 @@ fn grade_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fa
         .drop_clause;
     if expected.compiled {
         ensure(record.oracle == scenario.graded, || {
-            format!("verdicts {:?} but the log says {:?}", record.oracle, scenario.graded)
+            format!(
+                "verdicts {:?} but the log says {:?}",
+                record.oracle, scenario.graded
+            )
         })?;
         ensure(
             record.cleanup_ok == (scenario.graded.get(drop_clause) == Some(&Verdict::Pass)),
@@ -463,7 +492,10 @@ fn grade_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fa
     } else {
         ensure(
             record.oracle.len() == clauses.len()
-                && record.oracle.values().all(|verdict| *verdict == Verdict::NotRun),
+                && record
+                    .oracle
+                    .values()
+                    .all(|verdict| *verdict == Verdict::NotRun),
             || "a crate that never compiled has every clause not run".to_owned(),
         )?;
         ensure(
@@ -485,7 +517,8 @@ fn grade_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fa
 /// and `cleanup_ok` is only ever the drop clause's pass (the Python runner's
 /// `cleanup_ok`, #270).
 #[test]
-fn a_clause_takes_the_verdict_its_log_line_states_and_a_timeout_marks_the_rest() -> Result<(), Failure> {
+fn a_clause_takes_the_verdict_its_log_line_states_and_a_timeout_marks_the_rest()
+-> Result<(), Failure> {
     let world = world()?;
     replay_sweep("grading", 400, |rng, trace| grade_under(&world, rng, trace))
 }
@@ -504,7 +537,9 @@ fn a_reference_start_asks_no_author_and_gets_no_repair() -> Result<(), Failure> 
         let (run, author) = play(&world, &scenario, &judge, Some(code.clone()));
         let finished = run?;
         let record = &finished.record;
-        ensure(author.prompts().is_empty(), || "a reference was handed an author's question".to_owned())?;
+        ensure(author.prompts().is_empty(), || {
+            "a reference was handed an author's question".to_owned()
+        })?;
         ensure(
             record.repairs == 0
                 && record.tokens_in == 0
@@ -541,9 +576,10 @@ fn fault_under(world: &World, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fa
         ensure(error.to_string().contains("injected build fault"), || {
             format!("the error is {error}, not the build's")
         })?;
-        ensure(judge.builds().len() == at && judge.grade_calls() == 0, || {
-            "nothing was built or graded after the fault".to_owned()
-        })?;
+        ensure(
+            judge.builds().len() == at && judge.grade_calls() == 0,
+            || "nothing was built or graded after the fault".to_owned(),
+        )?;
         ensure(
             expected.build_asks.get(at.saturating_sub(1)) == Some(&author.prompts().len()),
             || "the author was asked past the failing build".to_owned(),
@@ -584,11 +620,14 @@ fn an_author_that_runs_out_of_replies_is_an_error_at_the_unanswered_call() -> Re
         let judge = judge_for(&scenario);
         let (run, author) = play(&world, &scenario, &judge, None);
         match run {
-            Ok(_) => ensure(!needs_more, || "a script ran dry and the trial finished".to_owned())?,
+            Ok(_) => ensure(!needs_more, || {
+                "a script ran dry and the trial finished".to_owned()
+            })?,
             Err(error) => {
-                ensure(needs_more && error.to_string().contains("no reply left"), || {
-                    format!("the trial failed with {error} though the script was enough")
-                })?;
+                ensure(
+                    needs_more && error.to_string().contains("no reply left"),
+                    || format!("the trial failed with {error} though the script was enough"),
+                )?;
                 ensure(author.prompts().len() == kept.saturating_add(1), || {
                     "the unanswered call is the one after the last reply".to_owned()
                 })?;

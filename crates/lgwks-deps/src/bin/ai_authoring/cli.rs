@@ -9,6 +9,23 @@ use super::{BenchError, fail};
 /// repository root the command is run from.
 const DEFAULT_BENCH: &str = "bench/ai-authoring";
 
+/// The flags that take the argument after them; every other flag stands alone.
+const VALUE_FLAGS: [&str; 13] = [
+    "--tables",
+    "--bench",
+    "--resume",
+    "--out",
+    "--work",
+    "--cmd",
+    "--models",
+    "--apis",
+    "--tasks",
+    "--profiles",
+    "--trials",
+    "--max-repairs",
+    "--parallel",
+];
+
 /// The usage text.
 pub(super) const USAGE: &str = "\
 ai-authoring: the AI authoring benchmark's runner. Say what to run:
@@ -131,36 +148,40 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, BenchError> {
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
         let flag = argument.as_str();
-        match flag {
-            "--help" | "-h" => help = true,
-            "--dry-run" => modes.push(Mode::Dry),
-            "--mutants" => modes.push(Mode::Mutants),
-            "--matrix" => modes.push(Mode::Models),
-            "--tables" => tables = Some(PathBuf::from(value_of(&mut remaining, flag)?)),
-            "--bench" => options.bench = PathBuf::from(value_of(&mut remaining, flag)?),
-            "--resume" => options.resume = Some(PathBuf::from(value_of(&mut remaining, flag)?)),
-            "--out" => options.out = Some(PathBuf::from(value_of(&mut remaining, flag)?)),
-            "--work" => options.work = Some(PathBuf::from(value_of(&mut remaining, flag)?)),
-            "--cmd" => options.command = Some(value_of(&mut remaining, flag)?),
-            "--models" => options.models = names(&value_of(&mut remaining, flag)?),
-            "--apis" => options.arms = names(&value_of(&mut remaining, flag)?),
-            "--tasks" => options.tasks = names(&value_of(&mut remaining, flag)?),
-            "--profiles" => options.profiles = names(&value_of(&mut remaining, flag)?),
-            "--trials" => options.trials = Some(count(&value_of(&mut remaining, flag)?, flag)?),
-            "--max-repairs" => {
-                options.max_repairs = Some(count(&value_of(&mut remaining, flag)?, flag)?);
-            }
-            "--parallel" => {
-                let workers = count(&value_of(&mut remaining, flag)?, flag)?;
+        let value = if VALUE_FLAGS.contains(&flag) {
+            Some(value_of(&mut remaining, flag)?)
+        } else {
+            None
+        };
+        match (flag, value) {
+            ("--help" | "-h", None) => help = true,
+            ("--dry-run", None) => modes.push(Mode::Dry),
+            ("--mutants", None) => modes.push(Mode::Mutants),
+            ("--matrix", None) => modes.push(Mode::Models),
+            ("--tables", Some(text)) => tables = Some(PathBuf::from(text)),
+            ("--bench", Some(text)) => options.bench = PathBuf::from(text),
+            ("--resume", Some(text)) => options.resume = Some(PathBuf::from(text)),
+            ("--out", Some(text)) => options.out = Some(PathBuf::from(text)),
+            ("--work", Some(text)) => options.work = Some(PathBuf::from(text)),
+            ("--cmd", Some(text)) => options.command = Some(text),
+            ("--models", Some(text)) => options.models = names(&text),
+            ("--apis", Some(text)) => options.arms = names(&text),
+            ("--tasks", Some(text)) => options.tasks = names(&text),
+            ("--profiles", Some(text)) => options.profiles = names(&text),
+            ("--trials", Some(text)) => options.trials = Some(count(&text, flag)?),
+            ("--max-repairs", Some(text)) => options.max_repairs = Some(count(&text, flag)?),
+            ("--parallel", Some(text)) => {
+                let workers = count(&text, flag)?;
                 options.parallel = match usize::try_from(workers) {
                     Ok(found) => Some(found),
                     Err(_) => return usage(format!("ai-authoring: {flag} {workers} does not fit")),
                 };
             }
-            other => return usage(format!("ai-authoring: unknown argument {other:?}")),
+            _ => return usage(format!("ai-authoring: unknown argument {flag:?}")),
         }
     }
-    let many = "ai-authoring: --dry-run, --mutants, --matrix and --tables are separate runs; pick one";
+    let many =
+        "ai-authoring: --dry-run, --mutants, --matrix and --tables are separate runs; pick one";
     options.action = if help {
         Action::Help
     } else if let Some(run_dir) = tables {

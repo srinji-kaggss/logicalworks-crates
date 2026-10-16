@@ -97,7 +97,10 @@ pub(super) fn resume(dir: &Path, mode: Mode, commit: &str) -> Result<Resumed, Be
     };
     if dir.join(RESULTS).exists() {
         return fail(
-            BenchError::Refused(format!("{} finished; there is nothing to resume", dir.display())),
+            BenchError::Refused(format!(
+                "{} finished; there is nothing to resume",
+                dir.display()
+            )),
             "resume",
         );
     }
@@ -175,17 +178,35 @@ pub(super) fn finish(dir: &Path, records: &[Record], summary: &str) -> Result<()
             file.sync_all()
         });
     if let Err(cause) = wrote {
-        return fail(BenchError::Io { path: staged, cause }, "finish");
+        return fail(
+            BenchError::Io {
+                path: staged,
+                cause,
+            },
+            "finish",
+        );
     }
     let results = dir.join(RESULTS);
     if let Err(cause) = fs::rename(&staged, &results) {
-        return fail(BenchError::Io { path: results, cause }, "finish");
+        return fail(
+            BenchError::Io {
+                path: results,
+                cause,
+            },
+            "finish",
+        );
     }
     let partial = dir.join(PARTIAL);
     if partial.exists()
         && let Err(cause) = fs::remove_file(&partial)
     {
-        return fail(BenchError::Io { path: partial, cause }, "finish");
+        return fail(
+            BenchError::Io {
+                path: partial,
+                cause,
+            },
+            "finish",
+        );
     }
     write(&dir.join(SUMMARY), summary)
 }

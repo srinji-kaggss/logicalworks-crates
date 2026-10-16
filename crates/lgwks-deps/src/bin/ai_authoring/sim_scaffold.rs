@@ -69,35 +69,62 @@ fn a_trial_crate_is_the_template_filled_in_and_is_never_overwritten() -> Result<
             manifest.contains(&format!("name = \"{}\"", dir.package))
                 && !manifest.contains(&bench.template.name_token)
                 && manifest.lines().count() == template.lines().count(),
-            || format!("the manifest of {} was not filled from the template", dir.id),
+            || {
+                format!(
+                    "the manifest of {} was not filled from the template",
+                    dir.id
+                )
+            },
         )?;
         for entry in &bench.template.paths {
             let resolved = fs::canonicalize(Path::new(BENCH_DIR).join(&entry.target))?;
             ensure(
-                manifest.contains(&resolved.display().to_string()) && !manifest.contains(&entry.token),
-                || format!("the path {} was not pointed at {}", entry.token, entry.target),
+                manifest.contains(&resolved.display().to_string())
+                    && !manifest.contains(&entry.token),
+                || {
+                    format!(
+                        "the path {} was not pointed at {}",
+                        entry.token, entry.target
+                    )
+                },
             )?;
         }
         let rewritten = contents(&dir, "Cargo.lock")?;
-        let changed = rewritten.lines().zip(lock.lines()).filter(|pair| pair.0 != pair.1).count();
+        let changed = rewritten
+            .lines()
+            .zip(lock.lines())
+            .filter(|pair| pair.0 != pair.1)
+            .count();
         ensure(
             rewritten.lines().count() == lock.lines().count()
                 && changed == 1
                 && rewritten.contains(&format!("name = \"{}\"", dir.package)),
-            || format!("the lock of {} is not the committed lock with its name line rewritten", dir.id),
+            || {
+                format!(
+                    "the lock of {} is not the committed lock with its name line rewritten",
+                    dir.id
+                )
+            },
         )?;
         match prepare(&bench, scratch.path(), &first) {
-            Err(BenchError::Io { ref cause, .. }) if cause.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(BenchError::Io { ref cause, .. })
+                if cause.kind() == io::ErrorKind::AlreadyExists => {}
             Ok(_) => return Err("a second set-up reused the trial directory".into()),
-            Err(other) => return Err(format!("the refusal was {other:?}, not an existing directory").into()),
+            Err(other) => {
+                return Err(format!("the refusal was {other:?}, not an existing directory").into());
+            }
         }
-        ensure(contents(&dir, "Cargo.toml")? == manifest, || "a refused set-up changed the trial".to_owned())?;
+        ensure(contents(&dir, "Cargo.toml")? == manifest, || {
+            "a refused set-up changed the trial".to_owned()
+        })?;
         let next = Job {
             trial: first.trial.saturating_add(1),
             ..first
         };
         let other = prepare(&bench, scratch.path(), &next)?;
-        ensure(other.path != dir.path, || "two trials share a directory".to_owned())?;
+        ensure(other.path != dir.path, || {
+            "two trials share a directory".to_owned()
+        })?;
         trace.record(&dir.id);
         Ok(())
     })
@@ -108,7 +135,8 @@ fn a_trial_crate_is_the_template_filled_in_and_is_never_overwritten() -> Result<
 /// a finished trial leaves its solution, the model's raw output and both logs
 /// byte for byte.
 #[test]
-fn the_model_sees_only_its_prompt_files_and_a_finished_trial_keeps_its_four_outputs() -> Result<(), Failure> {
+fn the_model_sees_only_its_prompt_files_and_a_finished_trial_keeps_its_four_outputs()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("files", 30, |rng, trace| {
         let scratch = Scratch::new("files")?;
@@ -123,18 +151,27 @@ fn the_model_sees_only_its_prompt_files_and_a_finished_trial_keeps_its_four_outp
         for entry in fs::read_dir(dir.scratch())? {
             found.insert(entry?.file_name().to_string_lossy().into_owned());
         }
-        let mut wanted: BTreeSet<String> = ["prompt.md", "api.md"].iter().map(|name| (*name).to_owned()).collect();
+        let mut wanted: BTreeSet<String> = ["prompt.md", "api.md"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
         if !texts.preamble.is_empty() {
             wanted.insert("role.md".to_owned());
         }
-        ensure(found == wanted, || format!("the model sees {found:?}, expected {wanted:?}"))?;
-        let read = |name: &str| -> Result<String, Failure> { Ok(fs::read_to_string(dir.scratch().join(name))?) };
-        ensure(read("prompt.md")? == texts.task && read("api.md")? == texts.sheet, || {
-            "the prompt files are not the task and the sheet".to_owned()
+        ensure(found == wanted, || {
+            format!("the model sees {found:?}, expected {wanted:?}")
         })?;
-        ensure(texts.preamble.is_empty() || read("role.md")? == texts.preamble, || {
-            "the role file is not the preamble".to_owned()
-        })?;
+        let read = |name: &str| -> Result<String, Failure> {
+            Ok(fs::read_to_string(dir.scratch().join(name))?)
+        };
+        ensure(
+            read("prompt.md")? == texts.task && read("api.md")? == texts.sheet,
+            || "the prompt files are not the task and the sheet".to_owned(),
+        )?;
+        ensure(
+            texts.preamble.is_empty() || read("role.md")? == texts.preamble,
+            || "the role file is not the preamble".to_owned(),
+        )?;
         let code = *one_of(rng, "code", &TEXTS)?;
         let raw = *one_of(rng, "raw", &TEXTS)?;
         let build = *one_of(rng, "build", &TEXTS)?;
@@ -163,19 +200,31 @@ fn a_prompt_is_made_of_the_committed_files_of_its_arm_task_and_profile() -> Resu
         let drawn = job(rng, &bench, Mode::Models)?;
         let texts = prompt_texts(&bench, &drawn)?;
         let arm = bench.arm(&drawn.arm).ok_or("the drawn arm is undeclared")?;
-        let profile = bench.profile(&drawn.profile).ok_or("the drawn profile is undeclared")?;
+        let profile = bench
+            .profile(&drawn.profile)
+            .ok_or("the drawn profile is undeclared")?;
         ensure(
             texts.sheet == fs::read_to_string(bench.path(&arm.sheet))?
                 && texts.preamble == profile.text
                 && texts.task == task_prompt(&bench, &drawn.task)?,
-            || format!("the prompt of {} is not made of the committed files", trial_id(&drawn)),
+            || {
+                format!(
+                    "the prompt of {} is not made of the committed files",
+                    trial_id(&drawn)
+                )
+            },
         )?;
         let prompt = full_prompt(&bench.framing, &texts);
         ensure(
             prompt.starts_with(&bench.framing)
                 && prompt.ends_with(&format!("{}\n", texts.sheet))
                 && prompt.contains(&texts.task),
-            || format!("the prompt of {} is not framed, task, sheet", trial_id(&drawn)),
+            || {
+                format!(
+                    "the prompt of {} is not framed, task, sheet",
+                    trial_id(&drawn)
+                )
+            },
         )?;
         let stray = Job {
             arm: "nonesuch".to_owned(),
@@ -186,7 +235,9 @@ fn a_prompt_is_made_of_the_committed_files_of_its_arm_task_and_profile() -> Resu
                 format!("an undeclared arm was refused as `{said}`")
             })?,
             Ok(_) => return Err("an undeclared arm was given a prompt".into()),
-            Err(other) => return Err(format!("the refusal was {other:?}, not a usage error").into()),
+            Err(other) => {
+                return Err(format!("the refusal was {other:?}, not a usage error").into());
+            }
         }
         let bare = prompt_texts(
             &bench,
@@ -195,7 +246,9 @@ fn a_prompt_is_made_of_the_committed_files_of_its_arm_task_and_profile() -> Resu
                 ..drawn.clone()
             },
         )?;
-        ensure(bare.preamble.is_empty(), || "a trial with no profile got a preamble".to_owned())?;
+        ensure(bare.preamble.is_empty(), || {
+            "a trial with no profile got a preamble".to_owned()
+        })?;
         trace.record(&prompt);
         Ok(())
     })
@@ -208,19 +261,28 @@ fn a_prompt_is_made_of_the_committed_files_of_its_arm_task_and_profile() -> Resu
 #[test]
 fn the_lexicon_arm_is_shown_the_generated_script_lexicon_and_nothing_else() -> Result<(), Failure> {
     let bench = committed()?;
-    let arm = bench.arm("lexicon").ok_or("the benchmark declares no lexicon arm")?;
+    let arm = bench
+        .arm("lexicon")
+        .ok_or("the benchmark declares no lexicon arm")?;
     ensure(arm.sheet.ends_with("docs/script-lexicon.md"), || {
-        format!("the lexicon arm reads {}, not the generated lexicon", arm.sheet)
+        format!(
+            "the lexicon arm reads {}, not the generated lexicon",
+            arm.sheet
+        )
     })?;
     let lexicon = committed_file(&arm.sheet)?;
-    ensure(!lexicon.trim().is_empty(), || "the generated lexicon is empty".to_owned())?;
+    ensure(!lexicon.trim().is_empty(), || {
+        "the generated lexicon is empty".to_owned()
+    })?;
     replay_sweep("lexicon", 100, |rng, trace| {
         let drawn = Job {
             arm: arm.name.clone(),
             ..job(rng, &bench, Mode::Models)?
         };
         let texts = prompt_texts(&bench, &drawn)?;
-        ensure(texts.sheet == lexicon, || "the lexicon arm's sheet is not the lexicon".to_owned())?;
+        ensure(texts.sheet == lexicon, || {
+            "the lexicon arm's sheet is not the lexicon".to_owned()
+        })?;
         let prompt = full_prompt(&bench.framing, &texts);
         ensure(
             prompt.matches("=== API SHEET ===").count() == 1
@@ -250,17 +312,31 @@ fn every_oracle_names_the_crate_under_test_and_holds_its_drop_clause() -> Result
         let (text, clauses) = oracle_for(&bench, &task.name, &package)?;
         let original = oracle_text(&bench, &task.name)?;
         let named = original.matches(bench.oracle_token.as_str()).count();
-        ensure(named > 0 && text.matches(package.as_str()).count() == named, || {
-            format!("the oracle of {} does not name the crate under test once per token", task.name)
-        })?;
+        ensure(
+            named > 0 && text.matches(package.as_str()).count() == named,
+            || {
+                format!(
+                    "the oracle of {} does not name the crate under test once per token",
+                    task.name
+                )
+            },
+        )?;
         let distinct: BTreeSet<&String> = clauses.iter().collect();
         ensure(
             distinct.len() == clauses.len() && clauses.contains(&task.drop_clause),
-            || format!("the oracle of {} lacks its drop clause {} or repeats a clause", task.name, task.drop_clause),
+            || {
+                format!(
+                    "the oracle of {} lacks its drop clause {} or repeats a clause",
+                    task.name, task.drop_clause
+                )
+            },
         )?;
-        ensure(clauses.iter().all(|clause| text.contains(&format!("fn {clause}"))), || {
-            format!("a clause of {} is not a function of its oracle", task.name)
-        })?;
+        ensure(
+            clauses
+                .iter()
+                .all(|clause| text.contains(&format!("fn {clause}"))),
+            || format!("a clause of {} is not a function of its oracle", task.name),
+        )?;
         trace.record_number("clauses", clauses.len());
         Ok(())
     })
@@ -270,28 +346,41 @@ fn every_oracle_names_the_crate_under_test_and_holds_its_drop_clause() -> Result
 /// placed beside it byte for byte as `src/reference.rs`; a task the manifest does
 /// not declare is a usage error and places nothing.
 #[test]
-fn a_mutants_reference_is_placed_byte_for_byte_and_an_undeclared_task_places_nothing() -> Result<(), Failure> {
+fn a_mutants_reference_is_placed_byte_for_byte_and_an_undeclared_task_places_nothing()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("references", 30, |rng, trace| {
         let scratch = Scratch::new("references")?;
         let drawn = job(rng, &bench, Mode::Mutants)?;
         let dir = prepare(&bench, scratch.path(), &drawn)?;
-        let task = bench.task(&drawn.task).ok_or("the drawn task is undeclared")?;
+        let task = bench
+            .task(&drawn.task)
+            .ok_or("the drawn task is undeclared")?;
         place_reference(&bench, &dir, &drawn)?;
         ensure(
-            contents(&dir, "src/reference.rs")? == reference_text(&bench, &task.mutant_base, &drawn.task)?,
-            || format!("the reference of {} was not placed byte for byte", drawn.task),
+            contents(&dir, "src/reference.rs")?
+                == reference_text(&bench, &task.mutant_base, &drawn.task)?,
+            || {
+                format!(
+                    "the reference of {} was not placed byte for byte",
+                    drawn.task
+                )
+            },
         )?;
         let stray = Job {
             task: "nonesuch".to_owned(),
             ..drawn.clone()
         };
         match place_reference(&bench, &dir, &stray) {
-            Err(BenchError::Usage(said)) => ensure(said.contains("is not a declared task"), || {
-                format!("an undeclared task was refused as `{said}`")
-            })?,
+            Err(BenchError::Usage(said)) => {
+                ensure(said.contains("is not a declared task"), || {
+                    format!("an undeclared task was refused as `{said}`")
+                })?
+            }
             Ok(()) => return Err("an undeclared task had a reference placed".into()),
-            Err(other) => return Err(format!("the refusal was {other:?}, not a usage error").into()),
+            Err(other) => {
+                return Err(format!("the refusal was {other:?}, not a usage error").into());
+            }
         }
         trace.record(&drawn.task);
         Ok(())

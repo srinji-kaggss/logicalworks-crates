@@ -329,7 +329,7 @@ pub(super) fn fill(pattern: &str, pairs: &[(&str, &str)]) -> String {
 
 /// The `[layout]` table.
 fn layout_of(table: &Table) -> Result<Layout, BenchError> {
-    Ok(Layout {
+    let layout = Layout {
         template: required(table, "template")?,
         lock: required(table, "lock")?,
         prompt: required(table, "prompt")?,
@@ -337,19 +337,21 @@ fn layout_of(table: &Table) -> Result<Layout, BenchError> {
         reference: required(table, "reference")?,
         mutant: required(table, "mutant")?,
         runs: required(table, "runs")?,
-    })
+    };
+    Ok(layout)
 }
 
 /// The `[model]` table.
 fn model_of(table: &Table) -> Result<ModelCli, BenchError> {
-    Ok(ModelCli {
+    let model = ModelCli {
         command: required(table, "command")?,
         sandbox: required(table, "sandbox")?,
         args: required_list(table, "args")?,
         denied: required_list(table, "denied")?,
         config_dir: required(table, "config_dir")?,
         withheld: required_list(table, "withheld")?,
-    })
+    };
+    Ok(model)
 }
 
 impl Bench {
@@ -577,7 +579,8 @@ mod tests {
     /// required profiles, and the three cells the old and futures sheets cannot
     /// express (#270).
     #[test]
-    fn the_committed_manifest_declares_the_benchmark_the_readme_describes() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_committed_manifest_declares_the_benchmark_the_readme_describes()
+    -> Result<(), Box<dyn std::error::Error>> {
         let bench = committed()?;
         let arms: Vec<&str> = bench.arms.iter().map(|arm| arm.name.as_str()).collect();
         assert_eq!(
@@ -587,7 +590,11 @@ mod tests {
         );
         assert_eq!(bench.tasks.len(), 6, "six held-out tasks");
         assert_eq!(bench.profiles.len(), 5, "the five required user profiles");
-        assert_eq!(bench.exclusions.len(), 3, "three cells no sheet can express");
+        assert_eq!(
+            bench.exclusions.len(),
+            3,
+            "three cells no sheet can express"
+        );
         assert_eq!(
             bench.defaults.trials, 2,
             "two trials under five profiles make ten per cell, #270's floor"
@@ -597,8 +604,11 @@ mod tests {
             "the old sheet has no process spawn and the futures sheet no durable store"
         );
         assert!(
-            bench.protocol.iter().any(|statement| statement.0 == "hidden_oracle"
-                && matches!(statement.1, Setting::Flag(true))),
+            bench
+                .protocol
+                .iter()
+                .any(|statement| statement.0 == "hidden_oracle"
+                    && matches!(statement.1, Setting::Flag(true))),
             "the protocol states the oracle is hidden as a flag"
         );
         Ok(())
@@ -607,7 +617,8 @@ mod tests {
     /// The lexicon arm authors `script!` from the generated lexicon, and the fan
     /// arm's recovery reference is a new-surface solution (trial.py, 2026-10-11).
     #[test]
-    fn a_reference_comes_from_the_arm_then_from_what_it_borrows() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_reference_comes_from_the_arm_then_from_what_it_borrows()
+    -> Result<(), Box<dyn std::error::Error>> {
         let bench = committed()?;
         let lexicon = bench.arm("lexicon").ok_or("no lexicon arm")?;
         let fan = bench.arm("fan").ok_or("no fan arm")?;
@@ -668,14 +679,20 @@ mod tests {
                 missing.push(entry.target.clone());
             }
         }
-        assert!(missing.is_empty(), "the manifest names files that are not there: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "the manifest names files that are not there: {missing:?}"
+        );
         Ok(())
     }
 
     #[test]
     fn a_name_declared_twice_is_refused() {
         assert!(
-            refused(&COMMITTED.replacen("name = \"fan\"", "name = \"old\"", 1), "declared twice"),
+            refused(
+                &COMMITTED.replacen("name = \"fan\"", "name = \"old\"", 1),
+                "declared twice"
+            ),
             "two arms called old"
         );
     }
@@ -685,11 +702,17 @@ mod tests {
     #[test]
     fn a_name_that_could_leave_its_directory_is_refused() {
         assert!(
-            refused(&COMMITTED.replacen("name = \"fan\"", "name = \"../escape\"", 1), "use only"),
+            refused(
+                &COMMITTED.replacen("name = \"fan\"", "name = \"../escape\"", 1),
+                "use only"
+            ),
             "a path separator in an arm name"
         );
         assert!(
-            refused(&COMMITTED.replacen("name = \"fan\"", "name = \"..\"", 1), "use only"),
+            refused(
+                &COMMITTED.replacen("name = \"fan\"", "name = \"..\"", 1),
+                "use only"
+            ),
             "a dot-dot arm name"
         );
     }
@@ -709,13 +732,19 @@ mod tests {
             "task = \"nonesuch\"\narm = \"old\"",
             1,
         );
-        assert!(refused(&edited, "does not declare"), "an exclusion of a task nobody declared");
+        assert!(
+            refused(&edited, "does not declare"),
+            "an exclusion of a task nobody declared"
+        );
     }
 
     #[test]
     fn a_limit_that_is_not_a_positive_whole_number_is_refused() {
         assert!(
-            refused(&COMMITTED.replacen("oracle_s = 1800", "oracle_s = 0", 1), "oracle_s"),
+            refused(
+                &COMMITTED.replacen("oracle_s = 1800", "oracle_s = 0", 1),
+                "oracle_s"
+            ),
             "an oracle bound of zero seconds would time out every trial"
         );
     }

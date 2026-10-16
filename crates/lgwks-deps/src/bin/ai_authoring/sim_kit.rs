@@ -12,7 +12,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::BenchError;
 use super::author::{Author, Reply};
 use super::bench::Bench;
 use super::cargo::{Built, Tested};
@@ -24,6 +23,7 @@ use super::record::Record;
 use super::replay::{Failure, refuse};
 use super::seed::Rng;
 use super::trial::Judge;
+use super::{BenchError, fail};
 
 /// The benchmark's own manifest, as committed.
 pub(super) const COMMITTED: &str = include_str!("../../../../../bench/ai-authoring/bench.toml");
@@ -153,7 +153,9 @@ impl Author for Scripted {
         guard(&self.asked).push(prompt.to_owned());
         match guard(&self.replies).pop_front() {
             Some(next) => Ok(next),
-            None => Err(BenchError::Refused("the script has no reply left".to_owned())),
+            None => Err(BenchError::Refused(
+                "the script has no reply left".to_owned(),
+            )),
         }
     }
 }
@@ -225,7 +227,10 @@ impl Judge for Floor {
         let mut built = guard(&self.built);
         built.push(code.to_owned());
         if self.fault_at_build == Some(built.len()) {
-            return Err(BenchError::Refused("injected build fault".to_owned()));
+            return fail(
+                BenchError::Refused("injected build fault".to_owned()),
+                "sim build",
+            );
         }
         let ok = code.contains(COMPILES);
         Ok(Built {
@@ -243,7 +248,10 @@ impl Judge for Floor {
         let mut grades = guard(&self.grades);
         *grades = grades.saturating_add(1);
         if self.fault_on_grade {
-            return Err(BenchError::Refused("injected grade fault".to_owned()));
+            return fail(
+                BenchError::Refused("injected grade fault".to_owned()),
+                "sim grade",
+            );
         }
         Ok(Tested {
             output: self.graded.output.clone(),
@@ -294,7 +302,12 @@ pub(super) fn shuffle<T>(rng: &mut Rng, items: &mut [T]) -> Result<(), Failure> 
 pub(super) const MODELS: [&str; 3] = ["model-a", "vendor/model-b", "model_c.1"];
 
 /// Every verdict a clause can come to.
-const VERDICTS: [Verdict; 4] = [Verdict::Pass, Verdict::Fail, Verdict::NotRun, Verdict::Timeout];
+const VERDICTS: [Verdict; 4] = [
+    Verdict::Pass,
+    Verdict::Fail,
+    Verdict::NotRun,
+    Verdict::Timeout,
+];
 
 /// A job of `mode` over the committed benchmark, drawn from the sequence.
 pub(super) fn job(rng: &mut Rng, bench: &Bench, mode: Mode) -> Result<Job, Failure> {

@@ -108,13 +108,18 @@ fn a_line_cut_at_any_byte_is_never_read_as_a_record() -> Result<(), Failure> {
             let prefix = String::from_utf8_lossy(bytes.get(..cut).ok_or("a cut past the line")?);
             let (done, torn) = read_log(&prefix);
             ensure(done.is_empty() && torn == usize::from(cut > 0), || {
-                format!("a line cut at byte {cut} of {} was read as {} records, {torn} torn", bytes.len(), done.len())
+                format!(
+                    "a line cut at byte {cut} of {} was read as {} records, {torn} torn",
+                    bytes.len(),
+                    done.len()
+                )
             })?;
         }
         let (done, torn) = read_log(&line);
-        ensure(done.get(&written.trial_id) == Some(&written) && torn == 0, || {
-            "the whole line was not read as its record".to_owned()
-        })?;
+        ensure(
+            done.get(&written.trial_id) == Some(&written) && torn == 0,
+            || "the whole line was not read as its record".to_owned(),
+        )?;
         trace.record_number("length", bytes.len());
         trace.record(&line);
         Ok(())
@@ -125,7 +130,8 @@ fn a_line_cut_at_any_byte_is_never_read_as_a_record() -> Result<(), Failure> {
 /// rerun after a resume supersedes the one it replaces), blank lines are
 /// ignored, and every line that is not a whole record is counted.
 #[test]
-fn a_log_keeps_the_last_record_of_a_repeated_trial_and_counts_what_it_cannot_read() -> Result<(), Failure> {
+fn a_log_keeps_the_last_record_of_a_repeated_trial_and_counts_what_it_cannot_read()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("log reading", 200, |rng, trace| {
         let mut first = drawn(rng, &bench)?;
@@ -140,7 +146,9 @@ fn a_log_keeps_the_last_record_of_a_repeated_trial_and_counts_what_it_cannot_rea
             second.to_line()
         );
         let (done, torn) = read_log(&text);
-        ensure(torn == junk, || format!("{torn} lines counted torn, {junk} were"))?;
+        ensure(torn == junk, || {
+            format!("{torn} lines counted torn, {junk} were")
+        })?;
         ensure(
             done.len() == 2
                 && done.get(&first.trial_id) == Some(&first)
@@ -154,7 +162,9 @@ fn a_log_keeps_the_last_record_of_a_repeated_trial_and_counts_what_it_cannot_rea
         });
         let (kept, _) = read_log(&again);
         ensure(
-            kept.len() == 1 && kept.get(&second.trial_id).map(|found| found.repairs) == Some(second.repairs.saturating_add(1)),
+            kept.len() == 1
+                && kept.get(&second.trial_id).map(|found| found.repairs)
+                    == Some(second.repairs.saturating_add(1)),
             || "a repeated trial id must keep its last record".to_owned(),
         )?;
         trace.record_number("junk", junk);
@@ -176,7 +186,9 @@ fn a_corrupt_results_file_names_the_line_it_cannot_read() -> Result<(), Failure>
             lines.push(drawn(rng, &bench)?.to_line());
         }
         let clean = format!("{}\n", lines.join("\n"));
-        ensure(read_results(&clean)?.len() == made, || "a clean file lost records".to_owned())?;
+        ensure(read_results(&clean)?.len() == made, || {
+            "a clean file lost records".to_owned()
+        })?;
         let at = count(rng, 0, u32::try_from(made)?)?;
         lines.insert(at, "{\"half\": ".to_owned());
         let broken = format!("{}\n", lines.join("\n"));
@@ -185,7 +197,9 @@ fn a_corrupt_results_file_names_the_line_it_cannot_read() -> Result<(), Failure>
             Err(error) => error.to_string(),
         };
         let wanted = format!("results line {} ", at.saturating_add(1));
-        ensure(said.contains(&wanted), || format!("the refusal said `{said}`, not `{wanted}`"))?;
+        ensure(said.contains(&wanted), || {
+            format!("the refusal said `{said}`, not `{wanted}`")
+        })?;
         trace.record_number("at", at);
         Ok(())
     })
@@ -221,12 +235,17 @@ fn a_crashed_record_names_its_job_and_carries_no_measurement() -> Result<(), Fai
                 && crashed.orchestration_token_list == bench.tokens,
             || "a crash names the trial it was".to_owned(),
         )?;
-        ensure(trial_id(&one) != CRASHED, || "a real trial id collides with the crash id".to_owned())?;
-        ensure(read_line(&crashed.to_line()).as_ref() == Some(&crashed), || {
-            "a crash did not survive its line".to_owned()
+        ensure(trial_id(&one) != CRASHED, || {
+            "a real trial id collides with the crash id".to_owned()
         })?;
+        ensure(
+            read_line(&crashed.to_line()).as_ref() == Some(&crashed),
+            || "a crash did not survive its line".to_owned(),
+        )?;
         let (done, torn) = read_log(&crashed.to_line());
-        ensure(done.is_empty() && torn == 0, || "a crash was counted finished".to_owned())?;
+        ensure(done.is_empty() && torn == 0, || {
+            "a crash was counted finished".to_owned()
+        })?;
         trace.record(&crashed.to_line());
         Ok(())
     })
@@ -241,8 +260,12 @@ fn the_generator_draws_records_that_differ() -> Result<(), Failure> {
     for seed in 1..=100_u64 {
         lines.insert(drawn(&mut Rng::new(seed), &bench)?.to_line());
     }
-    ensure(lines.len() > 95, || format!("100 seeds drew only {} different records", lines.len()))?;
+    ensure(lines.len() > 95, || {
+        format!("100 seeds drew only {} different records", lines.len())
+    })?;
     let mut trace = Trace::new();
     trace.record_number("distinct", lines.len());
-    ensure(!trace.is_empty(), || "a trace that recorded something is empty".to_owned())
+    ensure(!trace.is_empty(), || {
+        "a trace that recorded something is empty".to_owned()
+    })
 }

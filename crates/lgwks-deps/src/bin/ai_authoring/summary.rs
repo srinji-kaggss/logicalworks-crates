@@ -39,7 +39,10 @@ fn group(key: &Key, rows: &[&Record]) -> Value {
     let tokens_in: Vec<u64> = rows.iter().map(|row| row.tokens_in).collect();
     let tokens_out: Vec<u64> = rows.iter().map(|row| row.tokens_out).collect();
     let lines: Vec<u64> = rows.iter().map(|row| wide(row.consumer_lines)).collect();
-    let sites: Vec<u64> = rows.iter().map(|row| wide(row.orchestration_sites)).collect();
+    let sites: Vec<u64> = rows
+        .iter()
+        .map(|row| wide(row.orchestration_sites))
+        .collect();
     let rss: Vec<u64> = rows
         .iter()
         .filter_map(|row| row.oracle_peak_rss_bytes)
@@ -60,7 +63,10 @@ fn group(key: &Key, rows: &[&Record]) -> Value {
             trial.insert("trial".to_owned(), Value::from(row.trial));
             trial.insert("compiled".to_owned(), Value::from(row.compiled));
             trial.insert("cleanup_ok".to_owned(), Value::from(row.cleanup_ok));
-            trial.insert("oracle_pass_count".to_owned(), Value::from(wide(row.pass_count())));
+            trial.insert(
+                "oracle_pass_count".to_owned(),
+                Value::from(wide(row.pass_count())),
+            );
             trial.insert("oracle_total".to_owned(), Value::from(wide(row.total())));
             trial.insert(
                 "oracle".to_owned(),
@@ -116,10 +122,7 @@ pub(super) fn summarize(records: &[Record]) -> Vec<Value> {
             .or_default()
             .push(record);
     }
-    cells
-        .iter()
-        .map(|(key, rows)| group(key, rows))
-        .collect()
+    cells.iter().map(|(key, rows)| group(key, rows)).collect()
 }
 
 /// What the run held every trial to: the manifest's statements, and what this
@@ -141,7 +144,12 @@ pub(super) fn protocol(
     table.insert("repair_budget".to_owned(), Value::from(max_repairs));
     table.insert(
         "profiles".to_owned(),
-        Value::Array(profiles.iter().map(|name| Value::from(name.clone())).collect()),
+        Value::Array(
+            profiles
+                .iter()
+                .map(|name| Value::from(name.clone()))
+                .collect(),
+        ),
     );
     table.insert(
         "skipped_cells".to_owned(),

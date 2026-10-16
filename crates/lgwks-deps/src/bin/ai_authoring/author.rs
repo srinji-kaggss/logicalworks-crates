@@ -419,7 +419,11 @@ mod tests {
     use crate::sim_kit::committed;
 
     /// A profile's lines for a closure of three named directories.
-    fn profile_of(home: &str, work: &str, scratch: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn profile_of(
+        home: &str,
+        work: &str,
+        scratch: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         Ok(closed_book_profile(
             &committed()?,
             &Closure {
@@ -434,8 +438,13 @@ mod tests {
     /// quotes an earlier attempt and then corrects it means the later block.
     #[test]
     fn the_last_rust_block_is_the_solution() {
-        let reply = "Here you go:\n```rust\nfn a() {}\n```\nor better:\n```rust\nfn b() {}\n```\nthanks";
-        assert_eq!(extract_rust_block(reply), "fn b() {}\n", "the later rust block wins");
+        let reply =
+            "Here you go:\n```rust\nfn a() {}\n```\nor better:\n```rust\nfn b() {}\n```\nthanks";
+        assert_eq!(
+            extract_rust_block(reply),
+            "fn b() {}\n",
+            "the later rust block wins"
+        );
         assert_eq!(
             extract_rust_block("```rust\nA\n```\n```toml\nB\n```"),
             "A\n",
@@ -471,7 +480,11 @@ mod tests {
 
     #[test]
     fn a_reply_with_no_closed_block_has_no_code() {
-        assert_eq!(extract_rust_block("no fences at all"), "", "prose has no code");
+        assert_eq!(
+            extract_rust_block("no fences at all"),
+            "",
+            "prose has no code"
+        );
         assert_eq!(
             extract_rust_block("```rust\nnever closed"),
             "",
@@ -493,7 +506,10 @@ mod tests {
         };
         let prompt = full_prompt("FRAMING", &texts);
         let at = |needle: &str| prompt.find(needle);
-        assert!(prompt.starts_with("FRAMING\n\n"), "the framing opens the skeleton");
+        assert!(
+            prompt.starts_with("FRAMING\n\n"),
+            "the framing opens the skeleton"
+        );
         assert!(
             at("=== ROLE ===") < at("=== TASK ===") && at("=== TASK ===") < at("=== API SHEET ==="),
             "role, then task, then sheet"
@@ -511,12 +527,26 @@ mod tests {
 
     #[test]
     fn a_repair_prompt_carries_the_code_and_the_first_eighty_lines_of_errors() {
-        let errors: String = (1..=100).map(|line| format!("error line {line}\n")).collect();
+        let errors: String = (1..=100)
+            .map(|line| format!("error line {line}\n"))
+            .collect();
         let prompt = repair_prompt("ORIGINAL", "fn broken() {}\n", &errors);
-        assert!(prompt.starts_with("ORIGINAL"), "the original prompt comes first");
-        assert!(prompt.contains("```rust\nfn broken() {}\n\n```"), "the code under repair is shown");
-        assert!(prompt.contains("error line 80\n"), "the eightieth line is kept");
-        assert!(!prompt.contains("error line 81\n"), "the eighty-first line is cut");
+        assert!(
+            prompt.starts_with("ORIGINAL"),
+            "the original prompt comes first"
+        );
+        assert!(
+            prompt.contains("```rust\nfn broken() {}\n\n```"),
+            "the code under repair is shown"
+        );
+        assert!(
+            prompt.contains("error line 80\n"),
+            "the eightieth line is kept"
+        );
+        assert!(
+            !prompt.contains("error line 81\n"),
+            "the eighty-first line is cut"
+        );
     }
 
     #[test]
@@ -526,7 +556,10 @@ mod tests {
             prompt.contains("contained no fenced ```rust block"),
             "the repair says what was missing"
         );
-        assert!(!prompt.contains("ignored errors"), "there is nothing to quote the compiler on");
+        assert!(
+            !prompt.contains("ignored errors"),
+            "there is nothing to quote the compiler on"
+        );
     }
 
     /// The model command's final NDJSON result line, as `--output-format json`
@@ -536,7 +569,9 @@ mod tests {
         let raw = "{\"type\":\"progress\",\"n\":1}\nnot json at all\n{\"type\":\"result\",\"finalText\":\"```rust\\nfn a() {}\\n```\",\"usage\":{\"inputTokens\":120,\"outputTokens\":30},\"durationMs\":4567}\n";
         let reply = read_reply(raw);
         assert_eq!(
-            reply.as_ref().map(|found| (found.tokens_in, found.tokens_out, found.wall_ms)),
+            reply
+                .as_ref()
+                .map(|found| (found.tokens_in, found.tokens_out, found.wall_ms)),
             Some((120, 30, 4567)),
             "tokens and duration come from the result line"
         );
@@ -554,7 +589,10 @@ mod tests {
             Some("second".to_owned()),
             "the final result is the last one"
         );
-        assert!(read_reply("{\"type\":\"progress\"}\n").is_none(), "progress is not a result");
+        assert!(
+            read_reply("{\"type\":\"progress\"}\n").is_none(),
+            "progress is not a result"
+        );
         assert_eq!(
             read_reply("{\"type\":\"result\"}\n").map(|found| (found.text, found.tokens_in)),
             Some((String::new(), 0)),
@@ -566,17 +604,26 @@ mod tests {
     /// match wins, so the order is the policy: deny, let the settings back in,
     /// deny what the settings hold that must stay hidden, allow the scratch.
     #[test]
-    fn the_closed_book_profile_orders_its_rules_so_the_withheld_stay_withheld() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_closed_book_profile_orders_its_rules_so_the_withheld_stay_withheld()
+    -> Result<(), Box<dyn std::error::Error>> {
         let bench = committed()?;
         let profile = profile_of("home-dir", "work-root", "scratch-dir")?;
         let lines: Vec<&str> = profile.lines().collect();
-        assert_eq!(lines.len(), 7, "version, default, deny, metadata, settings, withheld, scratch");
+        assert_eq!(
+            lines.len(),
+            7,
+            "version, default, deny, metadata, settings, withheld, scratch"
+        );
         let at = |index: usize| match lines.get(index) {
             Some(line) => *line,
             None => "",
         };
         assert_eq!(at(0), "(version 1)", "the profile is version 1");
-        assert_eq!(at(1), "(allow default)", "everything not named stays allowed");
+        assert_eq!(
+            at(1),
+            "(allow default)",
+            "everything not named stays allowed"
+        );
         assert!(
             at(2).starts_with("(deny file-read* file-write* (subpath \"home-dir\")")
                 && at(2).ends_with("(subpath \"work-root\"))"),
@@ -596,13 +643,22 @@ mod tests {
         );
         assert_eq!(
             at(4),
-            format!("(allow file-read* file-write* (subpath \"home-dir/{}\"))", bench.model.config_dir),
+            format!(
+                "(allow file-read* file-write* (subpath \"home-dir/{}\"))",
+                bench.model.config_dir
+            ),
             "the command's own settings are let back in"
         );
-        assert!(at(5).starts_with("(deny file-read* file-write* "), "then the withheld are denied again");
+        assert!(
+            at(5).starts_with("(deny file-read* file-write* "),
+            "then the withheld are denied again"
+        );
         for name in &bench.model.withheld {
             assert!(
-                at(5).contains(&format!("(subpath \"home-dir/{}/{name}\")", bench.model.config_dir)),
+                at(5).contains(&format!(
+                    "(subpath \"home-dir/{}/{name}\")",
+                    bench.model.config_dir
+                )),
                 "{name} stays withheld"
             );
         }
@@ -615,7 +671,8 @@ mod tests {
     }
 
     #[test]
-    fn a_path_with_a_quote_or_backslash_cannot_close_the_profile_string() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_path_with_a_quote_or_backslash_cannot_close_the_profile_string()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             profile_of("h\"ome", "w", "s")?.contains("(subpath \"h\\\"ome\")"),
             "the quote is escaped inside the SBPL string literal"

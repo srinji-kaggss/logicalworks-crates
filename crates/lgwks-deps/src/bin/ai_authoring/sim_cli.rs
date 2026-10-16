@@ -145,7 +145,10 @@ fn draw_line(rng: &mut Rng) -> Result<(Vec<String>, Wanted), Failure> {
         groups.push(vec![chosen.0.to_owned()]);
         wanted.mode = Some(chosen.1);
     }
-    for (index, flag) in ["--models", "--apis", "--tasks", "--profiles"].iter().enumerate() {
+    for (index, flag) in ["--models", "--apis", "--tasks", "--profiles"]
+        .iter()
+        .enumerate()
+    {
         if rng.coin() {
             let (text, names) = list_text(rng)?;
             groups.push(vec![(*flag).to_owned(), text]);
@@ -205,9 +208,13 @@ fn every_flag_is_read_as_written_in_whatever_order_the_line_puts_them() -> Resul
             Action::Tables(ref dir) => {
                 !wanted.help && wanted.tables.as_deref().map(PathBuf::from).as_ref() == Some(dir)
             }
-            Action::Run(mode) => !wanted.help && wanted.tables.is_none() && wanted.mode == Some(mode),
+            Action::Run(mode) => {
+                !wanted.help && wanted.tables.is_none() && wanted.mode == Some(mode)
+            }
         };
-        ensure(action_ok, || format!("{line:?} was read as the wrong action"))?;
+        ensure(action_ok, || {
+            format!("{line:?} was read as the wrong action")
+        })?;
         ensure(
             options.models == wanted.lists[0]
                 && options.arms == wanted.lists[1]
@@ -259,7 +266,9 @@ fn refused(line: &[String]) -> Result<String, Failure> {
     match parse(line) {
         Ok(_) => Err(format!("{line:?} was allowed").into()),
         Err(BenchError::Usage(said)) => Ok(said),
-        Err(other) => Err(format!("{line:?} was refused as {other:?}, not as a usage error").into()),
+        Err(other) => {
+            Err(format!("{line:?} was refused as {other:?}, not as a usage error").into())
+        }
     }
 }
 
@@ -319,7 +328,9 @@ fn a_command_line_that_is_wrong_is_refused_naming_what_was_wrong() -> Result<(),
         for case in wrong_lines(rng)? {
             let said = refused(&case.line)?;
             ensure(
-                case.needles.iter().all(|needle| said.contains(needle.as_str())),
+                case.needles
+                    .iter()
+                    .all(|needle| said.contains(needle.as_str())),
                 || format!("{} was refused as `{said}`", case.what),
             )?;
             trace.record(&said);
@@ -360,28 +371,39 @@ fn reported(run: &Path) -> (u8, String, String) {
 /// refused by its first unreadable line, never read with invented values (a run
 /// from before the `profile` field existed has no profile to report).
 #[test]
-fn the_entry_point_prints_help_refuses_on_stderr_and_reports_or_refuses_each_committed_run() -> Result<(), Failure> {
+fn the_entry_point_prints_help_refuses_on_stderr_and_reports_or_refuses_each_committed_run()
+-> Result<(), Failure> {
     let runs = committed_runs()?;
-    let newest = runs.last().ok_or("the benchmark commits no run to report")?;
-    ensure(reported(newest).0 == 0, || format!("the newest run, {}, is not reported", newest.display()))?;
+    let newest = runs
+        .last()
+        .ok_or("the benchmark commits no run to report")?;
+    ensure(reported(newest).0 == 0, || {
+        format!("the newest run, {}, is not reported", newest.display())
+    })?;
     replay_sweep("execute", 60, |rng, trace| {
         let run = one_of(rng, "committed runs", &runs)?;
         let help = executed(&owned(&["--help"]));
-        ensure(help.0 == 0 && help.1 == format!("{USAGE}\n") && help.2.is_empty(), || {
-            "help is the usage and nothing else".to_owned()
-        })?;
+        ensure(
+            help.0 == 0 && help.1 == format!("{USAGE}\n") && help.2.is_empty(),
+            || "help is the usage and nothing else".to_owned(),
+        )?;
         let wrong = executed(&owned(&["--nonesuch"]));
-        ensure(wrong.0 == 2 && wrong.1.is_empty() && wrong.2.contains("unknown argument"), || {
-            "a refusal must go to standard error with code 2".to_owned()
-        })?;
+        ensure(
+            wrong.0 == 2 && wrong.1.is_empty() && wrong.2.contains("unknown argument"),
+            || "a refusal must go to standard error with code 2".to_owned(),
+        )?;
         let first = reported(run);
-        ensure(first == reported(run), || format!("two reads of {} differ", run.display()))?;
+        ensure(first == reported(run), || {
+            format!("two reads of {} differ", run.display())
+        })?;
         let sound = if first.0 == 0 {
             first.1.starts_with("## Per-(api, profile)") && first.2.is_empty()
         } else {
             first.0 == 2 && first.1.is_empty() && first.2.contains("is not a whole trial record")
         };
-        ensure(sound, || format!("{} was reported as {first:?}", run.display()))?;
+        ensure(sound, || {
+            format!("{} was reported as {first:?}", run.display())
+        })?;
         trace.record_number("code", first.0);
         trace.record(&first.1);
         Ok(())
@@ -397,10 +419,14 @@ fn a_missing_or_corrupt_run_and_a_missing_manifest_are_refused_by_name() -> Resu
         let scratch = Scratch::new("cli")?;
         let dir = scratch.path().display().to_string();
         let empty = executed(&["--tables".to_owned(), dir.clone()]);
-        ensure(empty.0 == 2 && empty.1.is_empty() && empty.2.contains("results.jsonl"), || {
-            format!("an empty run directory was reported: {}", empty.2)
-        })?;
-        fs::write(scratch.path().join("results.jsonl"), format!("{{\"half\": {}\n", rng.below(100)))?;
+        ensure(
+            empty.0 == 2 && empty.1.is_empty() && empty.2.contains("results.jsonl"),
+            || format!("an empty run directory was reported: {}", empty.2),
+        )?;
+        fs::write(
+            scratch.path().join("results.jsonl"),
+            format!("{{\"half\": {}\n", rng.below(100)),
+        )?;
         let corrupt = executed(&["--tables".to_owned(), dir.clone()]);
         ensure(
             corrupt.0 == 2 && corrupt.1.is_empty() && corrupt.2.contains("results line 1"),

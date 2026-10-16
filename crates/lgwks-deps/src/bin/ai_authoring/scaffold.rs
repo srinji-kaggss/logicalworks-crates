@@ -42,7 +42,11 @@ pub(super) fn oracle_text(bench: &Bench, task: &str) -> Result<String, BenchErro
 }
 
 /// The text of a reference solution.
-pub(super) fn reference_text(bench: &Bench, surface: &str, task: &str) -> Result<String, BenchError> {
+pub(super) fn reference_text(
+    bench: &Bench,
+    surface: &str,
+    task: &str,
+) -> Result<String, BenchError> {
     read(&bench.path(&fill(
         &bench.layout.reference,
         &[("surface", surface), ("task", task)],
@@ -100,7 +104,8 @@ pub(super) fn prepare(bench: &Bench, work: &Path, job: &Job) -> Result<TrialDir,
     create_dir(&dir.scratch())?;
     create_dir(&dir.path.join("src"))?;
     let template = bench.path(&bench.layout.template);
-    let mut manifest = read(&template.join("Cargo.toml"))?.replace(&bench.template.name_token, &dir.package);
+    let mut manifest =
+        read(&template.join("Cargo.toml"))?.replace(&bench.template.name_token, &dir.package);
     for entry in &bench.template.paths {
         let target = resolve(&bench.path(&entry.target))?;
         manifest = manifest.replace(&entry.token, &target.display().to_string());

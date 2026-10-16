@@ -186,7 +186,9 @@ fn full_passes(records: &[Record], out: &mut Vec<String>) {
     let arms: BTreeSet<&str> = records.iter().map(|row| row.arm.as_str()).collect();
     let tasks: BTreeSet<&str> = records.iter().map(|row| row.task.as_str()).collect();
     let models: BTreeSet<&str> = records.iter().map(|row| row.model.as_str()).collect();
-    out.push("\n## Full passes per (task, arm), all models, with 95% Wilson intervals\n".to_owned());
+    out.push(
+        "\n## Full passes per (task, arm), all models, with 95% Wilson intervals\n".to_owned(),
+    );
     arm_header(&["task"], &arms, out);
     let by_task_arm = grouped(records, |row| (row.task.clone(), row.arm.clone()));
     for task in &tasks {

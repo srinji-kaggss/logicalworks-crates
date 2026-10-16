@@ -23,11 +23,21 @@ const MODES: [Mode; 3] = [Mode::Dry, Mode::Mutants, Mode::Models];
 
 /// A commit id, drawn from the sequence.
 fn commit_of(rng: &mut Rng) -> String {
-    format!("{:016x}{:016x}{:08x}", rng.next_u64(), rng.next_u64(), rng.below(u32::MAX))
+    format!(
+        "{:016x}{:016x}{:08x}",
+        rng.next_u64(),
+        rng.next_u64(),
+        rng.below(u32::MAX)
+    )
 }
 
 /// `made` trials of `mode`, each with its record, under distinct trial ids.
-fn trials(rng: &mut Rng, bench: &Bench, mode: Mode, made: usize) -> Result<Vec<(Job, Record)>, Failure> {
+fn trials(
+    rng: &mut Rng,
+    bench: &Bench,
+    mode: Mode,
+    made: usize,
+) -> Result<Vec<(Job, Record)>, Failure> {
     let mut found = Vec::new();
     for index in 0..made {
         let mut one = job(rng, bench, mode)?;
@@ -56,13 +66,15 @@ fn begin_under(rng: &mut Rng, trace: &mut Trace) -> Result<(), Failure> {
     let commit = commit_of(rng);
     store::begin(&dir, &work, mode, &commit)?;
     let manifest = fs::read_to_string(dir.join("run.json"))?;
-    ensure(manifest.contains(&commit) && manifest.contains(mode.run_label()), || {
-        "the manifest names the commit and the mode".to_owned()
-    })?;
+    ensure(
+        manifest.contains(&commit) && manifest.contains(mode.run_label()),
+        || "the manifest names the commit and the mode".to_owned(),
+    )?;
     refusal(store::begin(&dir, &work, mode, &commit))?;
-    ensure(fs::read_to_string(dir.join("run.json"))? == manifest, || {
-        "a refused begin rewrote the first run's manifest".to_owned()
-    })?;
+    ensure(
+        fs::read_to_string(dir.join("run.json"))? == manifest,
+        || "a refused begin rewrote the first run's manifest".to_owned(),
+    )?;
     let elsewhere = scratch.path().join("elsewhere");
     refusal(store::begin(&elsewhere, &work, mode, &commit))?;
     ensure(!elsewhere.exists(), || {
@@ -79,7 +91,8 @@ fn begin_under(rng: &mut Rng, trace: &mut Trace) -> Result<(), Failure> {
 /// root are new or the run is refused (the retired runner's "an existing one is
 /// a refusal" rule, and POSIX `mkdir(2)` EEXIST, which is the atomic claim).
 #[test]
-fn a_run_is_refused_the_directories_of_another_and_leaves_them_as_they_were() -> Result<(), Failure> {
+fn a_run_is_refused_the_directories_of_another_and_leaves_them_as_they_were() -> Result<(), Failure>
+{
     replay_sweep("begin", 30, begin_under)
 }
 
@@ -111,7 +124,9 @@ fn torn_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fai
     let resumed = store::resume(&dir, Mode::Models, &commit)?;
     // The last record survives when its JSON is whole, whether or not its
     // newline was written; a cut at the line's first byte leaves nothing torn.
-    let whole = made.saturating_sub(1).saturating_add(usize::from(cut >= body_len));
+    let whole = made
+        .saturating_sub(1)
+        .saturating_add(usize::from(cut >= body_len));
     let torn = usize::from(cut > last_start && cut < body_len);
     ensure(resumed.done.len() == whole && resumed.torn == torn, || {
         format!(
@@ -121,11 +136,14 @@ fn torn_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), Fai
             resumed.torn
         )
     })?;
-    ensure(resumed.work == work, || "the resume lost the work root".to_owned())?;
+    ensure(resumed.work == work, || {
+        "the resume lost the work root".to_owned()
+    })?;
     for pair in kept.iter().take(whole) {
-        ensure(resumed.done.get(&trial_id(&pair.0)) == Some(&pair.1), || {
-            format!("{} was not read back as it was written", trial_id(&pair.0))
-        })?;
+        ensure(
+            resumed.done.get(&trial_id(&pair.0)) == Some(&pair.1),
+            || format!("{} was not read back as it was written", trial_id(&pair.0)),
+        )?;
     }
     let jobs: Vec<Job> = kept.iter().map(|pair| pair.0.clone()).collect();
     let (finished, remaining) = split_done(jobs, &resumed.done);
@@ -157,32 +175,49 @@ fn refusals_under(rng: &mut Rng, trace: &mut Trace) -> Result<(), Failure> {
     let mode = *one_of(rng, "modes", &MODES)?;
     let commit = commit_of(rng);
     store::begin(&dir, &work, mode, &commit)?;
-    let others: Vec<Mode> = MODES.iter().copied().filter(|found| *found != mode).collect();
+    let others: Vec<Mode> = MODES
+        .iter()
+        .copied()
+        .filter(|found| *found != mode)
+        .collect();
     let other = *one_of(rng, "other modes", &others)?;
     let said = refusal(store::resume(&dir, other, &commit))?;
-    ensure(said.contains(&format!("is a {} run, not {}", mode.run_label(), other.run_label())), || {
-        format!("a resume as the wrong mode said: {said}")
-    })?;
+    ensure(
+        said.contains(&format!(
+            "is a {} run, not {}",
+            mode.run_label(),
+            other.run_label()
+        )),
+        || format!("a resume as the wrong mode said: {said}"),
+    )?;
     let elsewhere = commit_of(rng);
     let said = refusal(store::resume(&dir, mode, &elsewhere))?;
     ensure(said.contains(&commit) && said.contains(&elsewhere), || {
         format!("a resume at another commit said: {said}")
     })?;
     let reopened = store::resume(&dir, mode, &commit)?;
-    ensure(reopened.done.is_empty() && reopened.torn == 0 && reopened.work == work, || {
-        "a resume of an untouched run found something".to_owned()
-    })?;
+    ensure(
+        reopened.done.is_empty() && reopened.torn == 0 && reopened.work == work,
+        || "a resume of an untouched run found something".to_owned(),
+    )?;
     store::finish(&dir, &[], "{}\n")?;
     let said = refusal(store::resume(&dir, mode, &commit))?;
-    ensure(said.contains("finished"), || format!("a resume of a finished run said: {said}"))?;
+    ensure(said.contains("finished"), || {
+        format!("a resume of a finished run said: {said}")
+    })?;
     let broken = scratch.path().join("broken");
     fs::create_dir(&broken)?;
     refusal(store::resume(&broken, mode, &commit))?;
     fs::write(broken.join("run.json"), "{\"mode\": \"dry\"")?;
     refusal(store::resume(&broken, Mode::Dry, &commit))?;
-    fs::write(broken.join("run.json"), format!("{{\"mode\": \"{}\"}}", mode.run_label()))?;
+    fs::write(
+        broken.join("run.json"),
+        format!("{{\"mode\": \"{}\"}}", mode.run_label()),
+    )?;
     let said = refusal(store::resume(&broken, mode, &commit))?;
-    ensure(said.contains("lgwks_bot_sha"), || format!("a manifest with no commit said: {said}"))?;
+    ensure(said.contains("lgwks_bot_sha"), || {
+        format!("a manifest with no commit said: {said}")
+    })?;
     trace.record(&commit);
     trace.record(&elsewhere);
     Ok(())
@@ -210,22 +245,35 @@ fn aside_under(rng: &mut Rng, trace: &mut Trace) -> Result<(), Failure> {
         for (id, here) in ids.iter().zip(&present) {
             if *here {
                 fs::create_dir(work.join(id))?;
-                fs::write(work.join(id).join("evidence"), format!("{id} round {round}"))?;
+                fs::write(
+                    work.join(id).join("evidence"),
+                    format!("{id} round {round}"),
+                )?;
             }
         }
         let moved = store::set_aside(&work, &ids)?;
-        ensure(moved == alive, || format!("{moved} directories set aside, {alive} were there"))?;
+        ensure(moved == alive, || {
+            format!("{moved} directories set aside, {alive} were there")
+        })?;
         for (id, here) in ids.iter().zip(&present) {
-            ensure(!work.join(id).exists(), || format!("{id} is still where its rerun would start"))?;
+            ensure(!work.join(id).exists(), || {
+                format!("{id} is still where its rerun would start")
+            })?;
             for earlier in 1..=round {
-                let kept = work.join(format!("{id}.interrupted-{earlier}")).join("evidence");
+                let kept = work
+                    .join(format!("{id}.interrupted-{earlier}"))
+                    .join("evidence");
                 ensure(kept.is_file() == *here, || {
-                    format!("{id} round {earlier}: evidence {} but present is {here}", kept.is_file())
+                    format!(
+                        "{id} round {earlier}: evidence {} but present is {here}",
+                        kept.is_file()
+                    )
                 })?;
                 if *here {
-                    ensure(fs::read_to_string(&kept)? == format!("{id} round {earlier}"), || {
-                        format!("{id}: the evidence of round {earlier} was overwritten")
-                    })?;
+                    ensure(
+                        fs::read_to_string(&kept)? == format!("{id} round {earlier}"),
+                        || format!("{id}: the evidence of round {earlier} was overwritten"),
+                    )?;
                 }
             }
         }
@@ -239,7 +287,8 @@ fn aside_under(rng: &mut Rng, trace: &mut Trace) -> Result<(), Failure> {
 /// It is renamed with a counter so a second interruption of the same trial
 /// cannot overwrite the first's (the retired runner's `.interrupted-N` rule).
 #[test]
-fn an_interrupted_trials_directory_is_set_aside_and_never_deleted_or_overwritten() -> Result<(), Failure> {
+fn an_interrupted_trials_directory_is_set_aside_and_never_deleted_or_overwritten()
+-> Result<(), Failure> {
     replay_sweep("set aside", 40, aside_under)
 }
 
@@ -259,18 +308,20 @@ fn finish_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), F
     }
     store::finish(&dir, &records, "{\"summary\": true}\n")?;
     let text = fs::read_to_string(dir.join("results.jsonl"))?;
-    ensure(read_results(&text)? == records, || "the results are not the records, in order".to_owned())?;
-    ensure(
-        text.lines().eq(records.iter().map(Record::to_line)),
-        || "a results line is not its record's canonical line".to_owned(),
-    )?;
+    ensure(read_results(&text)? == records, || {
+        "the results are not the records, in order".to_owned()
+    })?;
+    ensure(text.lines().eq(records.iter().map(Record::to_line)), || {
+        "a results line is not its record's canonical line".to_owned()
+    })?;
     ensure(
         !dir.join("results.partial.jsonl").exists() && !dir.join("results.jsonl.staged").exists(),
         || "the log or the staging file outlived the run".to_owned(),
     )?;
-    ensure(fs::read_to_string(dir.join("summary.json"))? == "{\"summary\": true}\n", || {
-        "the summary is not what finish was given".to_owned()
-    })?;
+    ensure(
+        fs::read_to_string(dir.join("summary.json"))? == "{\"summary\": true}\n",
+        || "the summary is not what finish was given".to_owned(),
+    )?;
     trace.record_number("made", made);
     trace.record(&text);
     Ok(())
@@ -298,7 +349,12 @@ fn crashed_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), 
     for pair in trials(rng, bench, Mode::Models, made)? {
         let broke = rng.coin();
         let line = if broke {
-            Record::crashed(&pair.0, &commit, &bench.tokens, "the compiler could not start".to_owned())
+            Record::crashed(
+                &pair.0,
+                &commit,
+                &bench.tokens,
+                "the compiler could not start".to_owned(),
+            )
         } else {
             pair.1
         };
@@ -309,7 +365,11 @@ fn crashed_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), 
     let resumed = store::resume(&dir, Mode::Models, &commit)?;
     let alive = crashed.iter().filter(|broke| !**broke).count();
     ensure(resumed.done.len() == alive && resumed.torn == 0, || {
-        format!("{} finished and {} torn, expected {alive} and 0", resumed.done.len(), resumed.torn)
+        format!(
+            "{} finished and {} torn, expected {alive} and 0",
+            resumed.done.len(),
+            resumed.torn
+        )
     })?;
     let (finished, remaining) = split_done(jobs.clone(), &resumed.done);
     let to_run: Vec<Job> = jobs
@@ -331,5 +391,7 @@ fn crashed_under(bench: &Bench, rng: &mut Rng, trace: &mut Trace) -> Result<(), 
 #[test]
 fn a_crashed_trial_is_recorded_and_is_the_one_a_resume_runs_again() -> Result<(), Failure> {
     let bench = committed()?;
-    replay_sweep("crashed", 40, |rng, trace| crashed_under(&bench, rng, trace))
+    replay_sweep("crashed", 40, |rng, trace| {
+        crashed_under(&bench, rng, trace)
+    })
 }

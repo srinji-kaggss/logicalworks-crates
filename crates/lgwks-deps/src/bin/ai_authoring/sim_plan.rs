@@ -40,7 +40,11 @@ fn selection(rng: &mut Rng, bench: &Bench) -> Selection {
     let models: Vec<String> = MODELS.iter().map(|model| (*model).to_owned()).collect();
     let arms: Vec<String> = bench.arms.iter().map(|arm| arm.name.clone()).collect();
     let tasks: Vec<String> = bench.tasks.iter().map(|task| task.name.clone()).collect();
-    let profiles: Vec<String> = bench.profiles.iter().map(|profile| profile.name.clone()).collect();
+    let profiles: Vec<String> = bench
+        .profiles
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect();
     Selection {
         models: subset(rng, &models),
         arms: subset(rng, &arms),
@@ -83,10 +87,17 @@ fn the_grid_is_every_selected_cell_less_the_pairs_the_benchmark_declines() -> Re
         let planned = plan(&bench, mode, &chosen)?;
         let want = expected_jobs(&bench, mode, &chosen)?;
         ensure(planned.jobs.len() == want, || {
-            format!("{} trials planned for {:?}, expected {want}", planned.jobs.len(), mode)
+            format!(
+                "{} trials planned for {:?}, expected {want}",
+                planned.jobs.len(),
+                mode
+            )
         })?;
         ensure(
-            planned.jobs.iter().all(|found| !bench.excludes(&found.arm, &found.task)),
+            planned
+                .jobs
+                .iter()
+                .all(|found| !bench.excludes(&found.arm, &found.task)),
             || "a declined pair was planned".to_owned(),
         )?;
         let declined: Vec<(String, String)> = bench
@@ -103,9 +114,10 @@ fn the_grid_is_every_selected_cell_less_the_pairs_the_benchmark_declines() -> Re
         ensure(skipped == declined, || {
             format!("skipped {skipped:?} but the benchmark declines {declined:?}")
         })?;
-        ensure(planned.skipped.iter().all(|found| !found.why.is_empty()), || {
-            "a declined pair carries no reason".to_owned()
-        })?;
+        ensure(
+            planned.skipped.iter().all(|found| !found.why.is_empty()),
+            || "a declined pair carries no reason".to_owned(),
+        )?;
         trace.record_number("jobs", planned.jobs.len());
         for found in &planned.jobs {
             trace.record(&trial_id(found));
@@ -123,12 +135,15 @@ fn a_dry_run_holds_one_profile_and_a_mutant_run_one_trial_per_task() -> Result<(
     let bench = committed()?;
     replay_sweep("shapes", 150, |rng, trace| {
         let chosen = selection(rng, &bench);
-        let first = chosen.profiles.first().ok_or("a selection with no profile")?;
+        let first = chosen
+            .profiles
+            .first()
+            .ok_or("a selection with no profile")?;
         let dry = plan(&bench, Mode::Dry, &chosen)?;
         ensure(
-            dry.jobs
-                .iter()
-                .all(|found| found.model == DRY_MODEL && &found.profile == first && found.trial < chosen.trials),
+            dry.jobs.iter().all(|found| {
+                found.model == DRY_MODEL && &found.profile == first && found.trial < chosen.trials
+            }),
             || "a dry trial names another model or profile, or a trial past the count".to_owned(),
         )?;
         let mutants = plan(&bench, Mode::Mutants, &chosen)?;
@@ -174,22 +189,27 @@ fn every_trial_has_a_directory_and_a_package_name_of_its_own() -> Result<(), Fai
             let id = trial_id(found);
             let package = package_for(&bench.package_prefix, &id);
             ensure(
-                id.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')),
+                id.chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')),
                 || format!("{id} is not a safe directory name"),
             )?;
             ensure(
                 package.starts_with(&bench.package_prefix)
-                    && package.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    && package
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
                     && package.len() < 121,
                 || format!("{package} is not a cargo package name"),
             )?;
-            ensure(directories.insert(id.clone()) && packages.insert(package.clone()), || {
-                format!("{id} shares a directory or package with another trial")
-            })?;
+            ensure(
+                directories.insert(id.clone()) && packages.insert(package.clone()),
+                || format!("{id} shares a directory or package with another trial"),
+            )?;
         }
-        ensure(directories.len() == planned.jobs.len() && !planned.jobs.is_empty(), || {
-            "the grid is empty or lost a trial".to_owned()
-        })?;
+        ensure(
+            directories.len() == planned.jobs.len() && !planned.jobs.is_empty(),
+            || "the grid is empty or lost a trial".to_owned(),
+        )?;
         trace.record_number("trials", planned.jobs.len());
         Ok(())
     })
@@ -200,7 +220,8 @@ fn every_trial_has_a_directory_and_a_package_name_of_its_own() -> Result<(), Fai
 /// (`a/b` and `a_b`), or a model named twice, would otherwise run one of them
 /// into the other's evidence.
 #[test]
-fn model_ids_that_would_share_a_directory_are_refused_before_anything_runs() -> Result<(), Failure> {
+fn model_ids_that_would_share_a_directory_are_refused_before_anything_runs() -> Result<(), Failure>
+{
     let bench = committed()?;
     replay_sweep("collisions", 40, |rng, trace| {
         let word = format!("m{}", rng.below(1000));
@@ -216,10 +237,14 @@ fn model_ids_that_would_share_a_directory_are_refused_before_anything_runs() -> 
                 trials: 1,
             };
             let said = match plan(&bench, Mode::Models, &chosen) {
-                Ok(_) => return Err("two trials shared a directory and the plan was allowed".into()),
+                Ok(_) => {
+                    return Err("two trials shared a directory and the plan was allowed".into());
+                }
                 Err(error) => error.to_string(),
             };
-            ensure(said.contains("share the directory"), || format!("the refusal said `{said}`"))?;
+            ensure(said.contains("share the directory"), || {
+                format!("the refusal said `{said}`")
+            })?;
         }
         trace.record(&word);
         Ok(())
@@ -229,7 +254,8 @@ fn model_ids_that_would_share_a_directory_are_refused_before_anything_runs() -> 
 /// Requirement: a name the manifest does not declare is a usage error that lists
 /// the names it does, never a quietly empty run.
 #[test]
-fn a_name_the_manifest_does_not_declare_is_refused_listing_the_ones_it_does() -> Result<(), Failure> {
+fn a_name_the_manifest_does_not_declare_is_refused_listing_the_ones_it_does() -> Result<(), Failure>
+{
     let bench = committed()?;
     replay_sweep("unknown names", 40, |rng, trace| {
         let word = format!("nonesuch{}", rng.below(1000));
@@ -249,11 +275,19 @@ fn a_name_the_manifest_does_not_declare_is_refused_listing_the_ones_it_does() ->
                 }
                 "task" => {
                     chosen.tasks = vec![word.clone()];
-                    bench.tasks.iter().map(|found| found.name.as_str()).collect()
+                    bench
+                        .tasks
+                        .iter()
+                        .map(|found| found.name.as_str())
+                        .collect()
                 }
                 _ => {
                     chosen.profiles = vec![word.clone()];
-                    bench.profiles.iter().map(|found| found.name.as_str()).collect()
+                    bench
+                        .profiles
+                        .iter()
+                        .map(|found| found.name.as_str())
+                        .collect()
                 }
             };
             let said = match plan(&bench, Mode::Dry, &chosen) {
@@ -275,7 +309,8 @@ fn a_name_the_manifest_does_not_declare_is_refused_listing_the_ones_it_does() ->
 /// are kept, in plan order, with the records they have; every other trial runs;
 /// none is both and none is lost.
 #[test]
-fn a_resume_splits_the_plan_into_the_trials_it_kept_and_the_trials_left_to_run() -> Result<(), Failure> {
+fn a_resume_splits_the_plan_into_the_trials_it_kept_and_the_trials_left_to_run()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("split", 200, |rng, trace| {
         let chosen = selection(rng, &bench);
@@ -295,11 +330,13 @@ fn a_resume_splits_the_plan_into_the_trials_it_kept_and_the_trials_left_to_run()
         let total = planned.jobs.len();
         let (finished, remaining) = split_done(planned.jobs, &done);
         ensure(finished == kept && remaining == left, || {
-            "the split is not the finished records and the unfinished trials, in plan order".to_owned()
+            "the split is not the finished records and the unfinished trials, in plan order"
+                .to_owned()
         })?;
-        ensure(finished.len().saturating_add(remaining.len()) == total, || {
-            "the split lost or repeated a trial".to_owned()
-        })?;
+        ensure(
+            finished.len().saturating_add(remaining.len()) == total,
+            || "the split lost or repeated a trial".to_owned(),
+        )?;
         trace.record_number("total", total);
         trace.record_number("kept", finished.len());
         Ok(())

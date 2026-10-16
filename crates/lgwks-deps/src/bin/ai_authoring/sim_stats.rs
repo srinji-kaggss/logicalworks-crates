@@ -46,7 +46,9 @@ fn real_of(value: &Value) -> Option<f64> {
             Some(whole) => u32::try_from(whole).ok().map(f64::from),
             None => number.as_f64(),
         },
-        Value::Null | Value::Bool(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Bool(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => {
+            None
+        }
     }
 }
 
@@ -95,7 +97,9 @@ fn medians_are_the_middle_order_statistics_whatever_the_order_or_offset() -> Res
         let mut values = whole_values(rng)?;
         let wanted = modelled_median(&reals(&values));
         let found = median_whole(&wides(&values)).as_ref().and_then(real_of);
-        ensure(same(found, wanted), || format!("whole median of {values:?} was {found:?}, expected {wanted:?}"))?;
+        ensure(same(found, wanted), || {
+            format!("whole median of {values:?} was {found:?}, expected {wanted:?}")
+        })?;
         let eighths: Vec<f64> = reals(&values).iter().map(|item| item / 8.0).collect();
         ensure(
             same(median_real(&eighths), modelled_median(&eighths)),
@@ -103,9 +107,14 @@ fn medians_are_the_middle_order_statistics_whatever_the_order_or_offset() -> Res
         )?;
         shuffle(rng, &mut values)?;
         let shuffled = median_whole(&wides(&values)).as_ref().and_then(real_of);
-        ensure(same(shuffled, found), || format!("the order of {values:?} moved the median"))?;
+        ensure(same(shuffled, found), || {
+            format!("the order of {values:?} moved the median")
+        })?;
         let offset = rng.below(1_000_000);
-        let moved: Vec<u64> = wides(&values).iter().map(|item| item.saturating_add(u64::from(offset))).collect();
+        let moved: Vec<u64> = wides(&values)
+            .iter()
+            .map(|item| item.saturating_add(u64::from(offset)))
+            .collect();
         let moved_found = median_whole(&moved).as_ref().and_then(real_of);
         ensure(
             same(moved_found, found.map(|middle| middle + f64::from(offset))),
@@ -120,7 +129,8 @@ fn medians_are_the_middle_order_statistics_whatever_the_order_or_offset() -> Res
 /// Published 95% Wilson intervals for n = 10: successes, low, high (Brown, Cai and
 /// DasGupta, "Interval Estimation for a Binomial Proportion", *Statistical
 /// Science* 16(2), 2001, Table 1 with z = 1.96).
-const PUBLISHED: [(u64, f64, f64); 3] = [(5, 0.2366, 0.7634), (8, 0.4902, 0.9433), (0, 0.0, 0.2775)];
+const PUBLISHED: [(u64, f64, f64); 3] =
+    [(5, 0.2366, 0.7634), (8, 0.4902, 0.9433), (0, 0.0, 0.2775)];
 
 /// Source: Wilson 1927, "Probable inference, the law of succession, and
 /// statistical inference", JASA 22. Requirement: the interval agrees with the
@@ -128,20 +138,29 @@ const PUBLISHED: [(u64, f64, f64); 3] = [(5, 0.2366, 0.7634), (8, 0.4902, 0.9433
 /// number of successes, mirrors itself when successes and failures swap, and
 /// narrows as the same share is seen over four times the trials.
 #[test]
-fn the_wilson_interval_brackets_the_share_and_is_monotone_symmetric_and_narrowing() -> Result<(), Failure> {
+fn the_wilson_interval_brackets_the_share_and_is_monotone_symmetric_and_narrowing()
+-> Result<(), Failure> {
     replay_sweep("wilson", 500, |rng, trace| {
         for row in PUBLISHED {
             let (low, high) = wilson(row.0, 10);
-            ensure((low - row.1).abs() < 5e-4 && (high - row.2).abs() < 5e-4, || {
-                format!("{}/10 gave [{low}, {high}], published [{}, {}]", row.0, row.1, row.2)
-            })?;
+            ensure(
+                (low - row.1).abs() < 5e-4 && (high - row.2).abs() < 5e-4,
+                || {
+                    format!(
+                        "{}/10 gave [{low}, {high}], published [{}, {}]",
+                        row.0, row.1, row.2
+                    )
+                },
+            )?;
         }
         let total = u64::from(rng.between(1, 300));
         let passed = u64::from(rng.below(u32::try_from(total)?.saturating_add(1)));
         let (low, high) = wilson(passed, total);
         let share = exact(passed) / exact(total);
         ensure(
-            (0.0..=share + 1e-9).contains(&low) && (share - 1e-9..=1.0).contains(&high) && low < high,
+            (0.0..=share + 1e-9).contains(&low)
+                && (share - 1e-9..=1.0).contains(&high)
+                && low < high,
             || format!("{passed}/{total} gave [{low}, {high}] around {share}"),
         )?;
         if passed < total {
@@ -151,9 +170,10 @@ fn the_wilson_interval_brackets_the_share_and_is_monotone_symmetric_and_narrowin
             })?;
         }
         let (mirror_low, mirror_high) = wilson(total.saturating_sub(passed), total);
-        ensure(close(low, 1.0 - mirror_high) && close(high, 1.0 - mirror_low), || {
-            format!("{passed}/{total} is not the mirror of its failures")
-        })?;
+        ensure(
+            close(low, 1.0 - mirror_high) && close(high, 1.0 - mirror_low),
+            || format!("{passed}/{total} is not the mirror of its failures"),
+        )?;
         let (wide_low, wide_high) = wilson(passed.saturating_mul(4), total.saturating_mul(4));
         ensure(wide_high - wide_low < high - low, || {
             format!("four times the trials of {passed}/{total} did not narrow the interval")
@@ -169,7 +189,8 @@ fn the_wilson_interval_brackets_the_share_and_is_monotone_symmetric_and_narrowin
 /// not change when numerator and denominator scale together, and a mean is the sum
 /// over the count.
 #[test]
-fn counts_reach_floats_exactly_and_ratios_and_means_are_what_they_are_defined_as() -> Result<(), Failure> {
+fn counts_reach_floats_exactly_and_ratios_and_means_are_what_they_are_defined_as()
+-> Result<(), Failure> {
     replay_sweep("counts", 600, |rng, trace| {
         let high = rng.below(2_097_152);
         let low = rng.below(u32::MAX);
@@ -177,30 +198,43 @@ fn counts_reach_floats_exactly_and_ratios_and_means_are_what_they_are_defined_as
             .saturating_mul(4_294_967_296)
             .saturating_add(u64::from(low));
         let wanted = f64::from(high) * 4_294_967_296.0 + f64::from(low);
-        ensure(close(exact(value), wanted) && exact(value) < exact(value.saturating_add(1)), || {
-            format!("{value} did not reach a float exactly and in order")
+        ensure(
+            close(exact(value), wanted) && exact(value) < exact(value.saturating_add(1)),
+            || format!("{value} did not reach a float exactly and in order"),
+        )?;
+        ensure(wide(usize::try_from(low)?) == u64::from(low), || {
+            "a count changed value".to_owned()
         })?;
-        ensure(wide(usize::try_from(low)?) == u64::from(low), || "a count changed value".to_owned())?;
         let numerator = u64::from(rng.below(1000));
         let denominator = u64::from(rng.between(1, 1000));
         let factor = u64::from(rng.between(1, 1000));
-        ensure(ratio(numerator, 0).is_none(), || "a ratio had a value over zero".to_owned())?;
+        ensure(ratio(numerator, 0).is_none(), || {
+            "a ratio had a value over zero".to_owned()
+        })?;
         ensure(
             same(
                 ratio(numerator, denominator),
-                ratio(numerator.saturating_mul(factor), denominator.saturating_mul(factor)),
+                ratio(
+                    numerator.saturating_mul(factor),
+                    denominator.saturating_mul(factor),
+                ),
             ),
             || format!("{numerator}/{denominator} changed under a factor of {factor}"),
         )?;
         let values = whole_values(rng)?;
-        let sum: u32 = values.iter().fold(0_u32, |total, found| total.saturating_add(*found));
+        let sum: u32 = values
+            .iter()
+            .fold(0_u32, |total, found| total.saturating_add(*found));
         let wanted_mean = if values.is_empty() {
             None
         } else {
             Some(f64::from(sum) / f64::from(u32::try_from(values.len())?))
         };
         ensure(same(mean_whole(&wides(&values)), wanted_mean), || {
-            format!("the mean of {values:?} was {:?}", mean_whole(&wides(&values)))
+            format!(
+                "the mean of {values:?} was {:?}",
+                mean_whole(&wides(&values))
+            )
         })?;
         trace.record_number("value", value);
         trace.record_number("sum", sum);
@@ -223,24 +257,39 @@ fn records_of(rng: &mut Rng, bench: &Bench) -> Result<Vec<Record>, Failure> {
 /// how many compiled; each (task, arm) cell carries its full passes over its
 /// trials, counted from the records themselves.
 #[test]
-fn the_tables_do_not_depend_on_trial_order_and_count_each_cell_from_the_records() -> Result<(), Failure> {
+fn the_tables_do_not_depend_on_trial_order_and_count_each_cell_from_the_records()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("tables", 300, |rng, trace| {
         let records = records_of(rng, &bench)?;
         let tables = render_tables(&records);
         let mut reordered = records.clone();
         shuffle(rng, &mut reordered)?;
-        ensure(render_tables(&reordered) == tables, || "the order of the trials changed the tables".to_owned())?;
+        ensure(render_tables(&reordered) == tables, || {
+            "the order of the trials changed the tables".to_owned()
+        })?;
         let lines: Vec<&str> = tables.lines().collect();
         let mut profiles: BTreeMap<(String, String), Vec<&Record>> = BTreeMap::new();
         let mut cells: BTreeMap<(String, String), Vec<&Record>> = BTreeMap::new();
         for row in &records {
-            profiles.entry((row.arm.clone(), row.profile.clone())).or_default().push(row);
-            cells.entry((row.task.clone(), row.arm.clone())).or_default().push(row);
+            profiles
+                .entry((row.arm.clone(), row.profile.clone()))
+                .or_default()
+                .push(row);
+            cells
+                .entry((row.task.clone(), row.arm.clone()))
+                .or_default()
+                .push(row);
         }
         for (key, rows) in &profiles {
             let compiled = rows.iter().filter(|row| row.compiled).count();
-            let prefix = format!("| {} | {} | {} | {compiled}/{} | ", key.0, key.1, rows.len(), rows.len());
+            let prefix = format!(
+                "| {} | {} | {} | {compiled}/{} | ",
+                key.0,
+                key.1,
+                rows.len(),
+                rows.len()
+            );
             ensure(lines.iter().any(|line| line.starts_with(&prefix)), || {
                 format!("no row starts `{prefix}`")
             })?;
@@ -250,7 +299,9 @@ fn the_tables_do_not_depend_on_trial_order_and_count_each_cell_from_the_records(
             let wanted = format!("{passes}/{} [", rows.len());
             let lead = format!("| {} | ", key.0);
             ensure(
-                lines.iter().any(|line| line.starts_with(&lead) && line.contains(&wanted)),
+                lines
+                    .iter()
+                    .any(|line| line.starts_with(&lead) && line.contains(&wanted)),
                 || format!("no `{}` row holds `{wanted}`", key.0),
             )?;
         }
@@ -279,7 +330,14 @@ fn the_summary_holds_one_cell_per_key_counting_every_trial_once() -> Result<(), 
         let records = records_of(rng, &bench)?;
         let keys: BTreeSet<(String, String, String, String)> = records
             .iter()
-            .map(|row| (row.model.clone(), row.arm.clone(), row.task.clone(), row.profile.clone()))
+            .map(|row| {
+                (
+                    row.model.clone(),
+                    row.arm.clone(),
+                    row.task.clone(),
+                    row.profile.clone(),
+                )
+            })
             .collect();
         let cells = summarize(&records);
         ensure(cells.len() == keys.len(), || {
@@ -289,7 +347,12 @@ fn the_summary_holds_one_cell_per_key_counting_every_trial_once() -> Result<(), 
         for (cell, key) in cells.iter().zip(&keys) {
             let rows: Vec<&Record> = records
                 .iter()
-                .filter(|row| row.model == key.0 && row.arm == key.1 && row.task == key.2 && row.profile == key.3)
+                .filter(|row| {
+                    row.model == key.0
+                        && row.arm == key.1
+                        && row.task == key.2
+                        && row.profile == key.3
+                })
                 .collect();
             ensure(
                 text_of(cell, "model") == Some(key.0.as_str())
@@ -300,19 +363,28 @@ fn the_summary_holds_one_cell_per_key_counting_every_trial_once() -> Result<(), 
             )?;
             let compiled = rows.iter().filter(|row| row.compiled).count();
             ensure(
-                number_of(cell, "n") == Some(wide(rows.len())) && number_of(cell, "compiled") == Some(wide(compiled)),
+                number_of(cell, "n") == Some(wide(rows.len()))
+                    && number_of(cell, "compiled") == Some(wide(compiled)),
                 || format!("the cell for {key:?} miscounts its trials or compiles"),
             )?;
             let trials: Vec<u64> = match cell.get("oracle_per_trial").and_then(Value::as_array) {
-                Some(listed) => listed.iter().filter_map(|item| number_of(item, "trial")).collect(),
+                Some(listed) => listed
+                    .iter()
+                    .filter_map(|item| number_of(item, "trial"))
+                    .collect(),
                 None => return Err(format!("the cell for {key:?} lists no trials").into()),
             };
             ensure(trials.len() == rows.len() && trials.is_sorted(), || {
-                format!("the cell for {key:?} lists {trials:?} for {} trials", rows.len())
+                format!(
+                    "the cell for {key:?} lists {trials:?} for {} trials",
+                    rows.len()
+                )
             })?;
             seen = seen.saturating_add(wide(rows.len()));
         }
-        ensure(seen == wide(records.len()), || "a trial was counted twice or lost".to_owned())?;
+        ensure(seen == wide(records.len()), || {
+            "a trial was counted twice or lost".to_owned()
+        })?;
         trace.record_number("cells", cells.len());
         trace.record_number("trials", seen);
         Ok(())
@@ -340,17 +412,21 @@ fn the_summary_file_is_valid_json_with_one_group_per_line() -> Result<(), Failur
             Some(items) => items.len(),
             None => return Err("the summary lost its cells".into()),
         };
-        ensure(listed == cells.len(), || format!("{listed} cells survived of {}", cells.len()))?;
-        ensure(parsed.get("empty") == Some(&Value::Array(Vec::new())), || {
-            "an empty list did not survive".to_owned()
+        ensure(listed == cells.len(), || {
+            format!("{listed} cells survived of {}", cells.len())
         })?;
+        ensure(
+            parsed.get("empty") == Some(&Value::Array(Vec::new())),
+            || "an empty list did not survive".to_owned(),
+        )?;
         ensure(
             text.starts_with("{\n") && text.ends_with("\n}\n") && text.contains("\"empty\": []"),
             || format!("the summary is shaped wrongly: {text:?}"),
         )?;
-        ensure(text.lines().count() == cells.len().saturating_add(6), || {
-            format!("{} lines for {} cells", text.lines().count(), cells.len())
-        })?;
+        ensure(
+            text.lines().count() == cells.len().saturating_add(6),
+            || format!("{} lines for {} cells", text.lines().count(), cells.len()),
+        )?;
         trace.record(&text);
         Ok(())
     })
@@ -360,7 +436,8 @@ fn the_summary_file_is_valid_json_with_one_group_per_line() -> Result<(), Failur
 /// makes, the run's repair budget, the profiles it used and every cell it skipped
 /// with the reason, so a reader of `summary.json` alone knows the rules of the run.
 #[test]
-fn the_protocol_carries_the_manifests_statements_the_budget_the_profiles_and_the_skips() -> Result<(), Failure> {
+fn the_protocol_carries_the_manifests_statements_the_budget_the_profiles_and_the_skips()
+-> Result<(), Failure> {
     let bench = committed()?;
     replay_sweep("protocol", 100, |rng, trace| {
         let task = one_of(rng, "tasks", &bench.tasks)?;
@@ -373,7 +450,12 @@ fn the_protocol_carries_the_manifests_statements_the_budget_the_profiles_and_the
         };
         let skipped = plan(&bench, Mode::Dry, &chosen)?.skipped;
         let kept = count(rng, 1, u32::try_from(bench.profiles.len())?)?;
-        let names: Vec<String> = bench.profiles.iter().take(kept).map(|found| found.name.clone()).collect();
+        let names: Vec<String> = bench
+            .profiles
+            .iter()
+            .take(kept)
+            .map(|found| found.name.clone())
+            .collect();
         let budget = rng.between(1, 20);
         let table = protocol(&bench, &names, budget, &skipped);
         for statement in &bench.protocol {
@@ -385,13 +467,20 @@ fn the_protocol_carries_the_manifests_statements_the_budget_the_profiles_and_the
                 format!("the statement {} was lost or changed", statement.0)
             })?;
         }
-        ensure(table.get("repair_budget") == Some(&Value::from(budget)), || "the budget was lost".to_owned())?;
-        ensure(table.get("profiles") == Some(&Value::from(names)), || "the profiles were lost".to_owned())?;
+        ensure(
+            table.get("repair_budget") == Some(&Value::from(budget)),
+            || "the budget was lost".to_owned(),
+        )?;
+        ensure(table.get("profiles") == Some(&Value::from(names)), || {
+            "the profiles were lost".to_owned()
+        })?;
         let listed = match table.get("skipped_cells").and_then(Value::as_array) {
             Some(items) => items.clone(),
             None => return Err("the skipped cells were lost".into()),
         };
-        ensure(listed.len() == skipped.len(), || format!("{} skips of {}", listed.len(), skipped.len()))?;
+        ensure(listed.len() == skipped.len(), || {
+            format!("{} skips of {}", listed.len(), skipped.len())
+        })?;
         for (entry, cell) in listed.iter().zip(&skipped) {
             ensure(
                 text_of(entry, "api") == Some(cell.arm.as_str())

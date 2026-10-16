@@ -260,7 +260,7 @@ impl Record {
     /// The record a JSON value holds, or `None` when it is not a whole record.
     pub(super) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
-        Some(Self {
+        let record = Self {
             model: text_of(object, "model")?,
             arm: text_of(object, "api")?,
             task: text_of(object, "task")?,
@@ -273,9 +273,7 @@ impl Record {
             cleanup_ok: object.get("cleanup_ok")?.as_bool()?,
             oracle: verdicts_of(object)?,
             oracle_wall_ms: object.get("oracle_wall_ms")?.as_f64()?,
-            oracle_peak_rss_bytes: object
-                .get("oracle_peak_rss_bytes")
-                .and_then(Value::as_u64),
+            oracle_peak_rss_bytes: object.get("oracle_peak_rss_bytes").and_then(Value::as_u64),
             tokens_in: whole_of(object, "tokens_in")?,
             tokens_out: whole_of(object, "tokens_out")?,
             model_wall_ms: whole_of(object, "model_wall_ms")?,
@@ -288,7 +286,8 @@ impl Record {
             lgwks_bot_sha: text_of(object, "lgwks_bot_sha")?,
             lib_rs: text_of(object, "lib_rs")?,
             error: text_of(object, "error"),
-        })
+        };
+        Some(record)
     }
 
     /// The record as one line of canonical JSON, without its newline.
@@ -309,7 +308,11 @@ pub(super) fn canonical(value: &Value) -> String {
                 .into_iter()
                 .filter_map(|key| {
                     map.get(key.as_str()).map(|inner| {
-                        format!("{}: {}", canonical(&Value::from(key.clone())), canonical(inner))
+                        format!(
+                            "{}: {}",
+                            canonical(&Value::from(key.clone())),
+                            canonical(inner)
+                        )
                     })
                 })
                 .collect();
