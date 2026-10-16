@@ -6,14 +6,19 @@
 //! primitive a supervisor needs to keep a group leader's id from being
 //! reused under it: a zombie leader still holds its pid, so its group id
 //! cannot be reissued until the supervisor has finished signalling. These
-//! are the `process` feature's primitives. Unix-only; other targets report
-//! [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
+//! are the `process` feature's primitives. Unix and Windows; other targets
+//! report [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
+//! Windows has no process groups, so a "group" there is the tree below a root
+//! process (`kill_process_group` stops the root and everything the process
+//! table names as descended from it), and `ProcessJob` is its kernel-level
+//! owner, the counterpart of a cgroup.
 //!
 //! The module is split by responsibility: this file holds the group and child
 //! primitives, `capture` the descendant capture and the running check,
 //! `identity` process identities and orphaned-group reaping, `cgroup` the
-//! Linux kernel-level containment, and `darwin` the one macOS process-table
-//! read (a `sysctl` syscall, the only `unsafe` in the workspace, #345).
+//! Linux kernel-level containment, `darwin` the one macOS process-table read
+//! (a `sysctl` syscall) and `windows` the `kernel32` calls (the only `unsafe` in
+//! the workspace, #345, #263).
 
 use std::io;
 
@@ -27,6 +32,9 @@ mod cgroup;
 mod darwin;
 /// Process identities and orphaned-group reaping.
 mod identity;
+/// Windows process table, identity, termination and job objects (#263).
+#[cfg(windows)]
+mod windows;
 
 pub use capture::{
     ContainmentMechanism, DescendantSet, MAX_CAPTURED_DESCENDANTS, capture_descendants,
@@ -40,6 +48,8 @@ pub use identity::{
     MAX_START_TOKEN_BYTES, OrphanReap, ProcessIdentity, ProcessIdentityError, identify_process,
     reap_orphaned_group,
 };
+#[cfg(windows)]
+pub use windows::ProcessJob;
 
 /// Send SIGKILL to every process in group `pgid`.
 ///
@@ -62,11 +72,30 @@ pub fn kill_process_group(pgid: i32) -> io::Result<()> {
     rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).map_err(errno_to_io)
 }
 
+/// Stop the process `pgid` and every process descended from it.
+///
+/// Windows has no process groups, so the group is the tree: the descendants the
+/// process table names under `pgid` are terminated, then `pgid` itself. A tree
+/// that left through a parent that had already exited is not reachable from the
+/// root; [`ProcessJob`] is the owner that reaches it. An id no process holds is
+/// an error (`ERROR_INVALID_PARAMETER`, the Windows form of `ESRCH`).
+#[cfg(all(windows, feature = "process"))]
+pub fn kill_process_group(pgid: i32) -> io::Result<()> {
+    let root = windows::pid_u32(pgid)?;
+    for pid in capture_descendants(pgid)?.pids() {
+        match windows::terminate(&windows::NATIVE, windows::pid_u32(*pid)?) {
+            Err(error) if error.raw_os_error() == Some(windows::ERROR_INVALID_PARAMETER) => {}
+            other => other?,
+        }
+    }
+    windows::terminate(&windows::NATIVE, root)
+}
+
 /// Send SIGKILL to every process in group `pgid`.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn kill_process_group(pgid: i32) -> io::Result<()> {
     let _ = pgid;
     Err(unsupported("process kill_process_group is Unix-only"))
@@ -98,11 +127,22 @@ pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
     }
 }
 
+/// Whether the tree under `pgid` still has a process: the root holds its id, or
+/// a process the table names as its descendant is running.
+#[cfg(all(windows, feature = "process"))]
+pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
+    let root = windows::pid_u32(pgid)?;
+    if windows::exists(&windows::NATIVE, root)? {
+        return Ok(true);
+    }
+    Ok(!running_processes(capture_descendants(pgid)?.pids())?.is_empty())
+}
+
 /// Whether `pgid` currently names a process group.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`] rather than a fabricated answer.
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
     let _ = pgid;
     Err(unsupported("process process_group_exists is Unix-only"))
@@ -144,11 +184,20 @@ pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
     Ok(observed.is_some())
 }
 
+/// Whether process `pid` has exited while something still holds its object.
+///
+/// A held process object keeps the id from being reissued, which is the Windows
+/// form of an unreaped child. An id no process holds is an error, never `true`.
+#[cfg(all(windows, feature = "process"))]
+pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
+    windows::exited(&windows::NATIVE, windows::pid_u32(pid)?)
+}
+
 /// Whether child `pid` has exited, leaving it un-reaped.
 ///
-/// The `process` capability is Unix-only; other targets report
+/// The `process` capability is Unix and Windows; other targets report
 /// [`std::io::ErrorKind::Unsupported`] rather than a fabricated success.
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
     let _ = pid;
     Err(unsupported(
@@ -177,7 +226,7 @@ fn invalid_pgid() -> io::Error {
     )
 }
 
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 /// Construct the invalid-process-id error.
 fn invalid_pid() -> io::Error {
     io::Error::new(
@@ -186,7 +235,7 @@ fn invalid_pid() -> io::Error {
     )
 }
 
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 /// Construct the unsupported-operation error for non-Unix targets.
 fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)

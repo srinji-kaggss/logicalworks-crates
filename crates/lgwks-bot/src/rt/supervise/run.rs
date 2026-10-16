@@ -1,16 +1,21 @@
 //! The process doors: spawning and running a supervised child.
 
+use super::LineObserver;
 #[cfg(all(feature = "process", feature = "script"))]
 use super::RunForError;
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 use super::SupervisorCancelled;
 #[cfg(all(unix, feature = "process"))]
-use super::drive::{ProcessObservation, drive_process, drive_process_observed, task_end};
+use super::drive::{drive_process, drive_process_observed};
+#[cfg(all(unix, feature = "process"))]
+use super::ended::task_end;
+#[cfg(all(any(unix, windows), feature = "process"))]
+use super::ended::{ProcessEnd, ProcessObservation};
 #[cfg(all(unix, feature = "process"))]
 use super::group::ProcessGroup;
 #[cfg(all(unix, feature = "process"))]
 use super::identify_leader;
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 use super::lease::Lease;
 #[cfg(all(unix, feature = "process"))]
 use super::owners::LiveProcess;
@@ -19,7 +24,8 @@ use super::start::scope_tree;
 #[cfg(all(unix, feature = "process"))]
 use super::start::start;
 use super::supervisor::Supervisor;
-use super::{IdentifiedSpawn, LineObserver, TaskId};
+#[cfg(not(windows))]
+use super::{IdentifiedSpawn, TaskId};
 use crate::rt::process::{ProcessRun, ProcessRunError, ProcessSpec};
 #[cfg(feature = "script")]
 use crate::script::Tenant;
@@ -143,31 +149,7 @@ impl Supervisor {
         spec: &ProcessSpec,
         read: impl FnOnce(i32) -> io::Result<T>,
     ) -> io::Result<(TaskId, T)> {
-        let Some(permit) = self.claim().await else {
-            // The fence inside `claim` answered for capacity and for
-            // cancellation alike; name which world refused, so a cancelled
-            // supervisor's caller does not read this as a platform failure.
-            if self.token.is_cancelled() {
-                let refusal = Err(io::Error::other(SupervisorCancelled));
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
-                return refusal;
-            }
-            let refusal = Err(io::Error::other(
-                "lgwks_bot: the supervisor's in-flight semaphore was closed",
-            ));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
-            return refusal;
-        };
-        // The recheck at the owned admission point, before the command is
-        // built: a cancelled supervisor never forks, so the first instruction
-        // of a refused command does not run. The permit drops here and the
-        // refusal is counted.
-        if self.token.is_cancelled() {
-            self.refused = self.refused.saturating_add(1);
-            let refusal = Err(io::Error::other(SupervisorCancelled));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
-            return refusal;
-        }
+        let permit = self.admit_process().await?;
         let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
         let (child, group_id) = start(spec)?;
@@ -195,6 +177,38 @@ impl Supervisor {
             task_end(end)
         });
         Ok((placed, read))
+    }
+
+    /// The admission both process spawns share, on every target that has a
+    /// process owner: a slot, and a cancellation recheck before anything forks.
+    ///
+    /// The fence inside `claim` answers for capacity and for cancellation alike,
+    /// so this names which world refused, and a cancelled supervisor's caller
+    /// does not read the refusal as a platform failure. The recheck at the owned
+    /// admission point comes before the command is built: a cancelled supervisor
+    /// never forks, so the first instruction of a refused command does not run.
+    /// The permit drops with the refusal, and the refusal is counted.
+    #[cfg(all(any(unix, windows), feature = "process"))]
+    pub(super) async fn admit_process(&mut self) -> io::Result<Lease> {
+        let Some(permit) = self.claim().await else {
+            if self.token.is_cancelled() {
+                let refusal = Err(io::Error::other(SupervisorCancelled));
+                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+                return refusal;
+            }
+            let refusal = Err(io::Error::other(
+                "lgwks_bot: the supervisor's in-flight semaphore was closed",
+            ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+            return refusal;
+        };
+        if self.token.is_cancelled() {
+            self.refused = self.refused.saturating_add(1);
+            let refusal = Err(io::Error::other(SupervisorCancelled));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "spawn_process: returning an error to the caller");
+            return refusal;
+        }
+        Ok(permit)
     }
 
     /// Run `spec` to completion and return its captured report.
@@ -236,10 +250,12 @@ impl Supervisor {
     /// child started is [`ProcessRunError::AfterStart`], which establishes the
     /// opposite and is why the two are distinguishable.
     ///
-    /// One method on every target: the Unix body is [`Self::run_process_observed`]
-    /// and the non-Unix body is its typed pre-fork refusal, and choosing between
-    /// them behind one signature is what keeps a caller from having to know which
-    /// platform it compiled for before it can run a command.
+    /// One method on every target: the Unix body owns the child's process group,
+    /// the Windows body owns its tree through a job object (and refuses a spec
+    /// that captures a stream, which that path cannot read), and any other target
+    /// answers with a typed pre-fork refusal. Choosing between them behind one
+    /// signature is what keeps a caller from having to know which platform it
+    /// compiled for before it can run a command.
     #[cfg(feature = "process")]
     pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
         self.run_process_observed(spec, None).await
@@ -258,7 +274,7 @@ impl Supervisor {
     ///
     /// As [`Supervisor::run_process`](crate::rt::supervise::Supervisor::run_process): the observer changes what the caller
     /// observes *while* the child runs, never what the run reports after it.
-    #[cfg(all(unix, feature = "process"))]
+    #[cfg(all(any(unix, windows), feature = "process"))]
     pub async fn run_process_observed(
         &mut self,
         spec: &ProcessSpec,
@@ -293,7 +309,7 @@ impl Supervisor {
     /// Two arms rather than one because "this tenant is at its bound" and "the
     /// command could not start" are different facts for the same caller: the
     /// first is the caller's own load to fix, the second is the platform's.
-    #[cfg(all(unix, feature = "process", feature = "script"))]
+    #[cfg(all(any(unix, windows), feature = "process", feature = "script"))]
     pub async fn run_process_for(
         &mut self,
         tenant: &Tenant,
@@ -369,6 +385,16 @@ impl Supervisor {
         let group = ProcessGroup::of(group_id, task, lease, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
         let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+        self.finish_run(end)
+    }
+
+    /// Count a finished run and build its report, on every target that has a
+    /// process owner.
+    ///
+    /// The tail both `drive_run` bodies share, so a run on a process group and a
+    /// run in a job object count, classify and report an ending the same way.
+    #[cfg(all(any(unix, windows), feature = "process"))]
+    pub(super) fn finish_run(&mut self, end: ProcessEnd) -> Result<ProcessRun, ProcessRunError> {
         self.completed = self.completed.saturating_add(1);
         let deadline_fired = matches!(end.observation, ProcessObservation::Deadline);
         let settled = match end.observation {
@@ -422,8 +448,8 @@ impl Supervisor {
         })
     }
 
-    /// Process-group containment is unavailable on non-Unix targets.
-    #[cfg(all(not(unix), feature = "process"))]
+    /// Process containment is unavailable beyond Unix and Windows targets.
+    #[cfg(all(not(any(unix, windows)), feature = "process"))]
     pub async fn run_process_observed(
         &mut self,
         spec: &ProcessSpec,
@@ -435,9 +461,9 @@ impl Supervisor {
         })
     }
 
-    /// Process-group containment is unavailable on non-Unix targets, so no
+    /// Process containment is unavailable beyond Unix and Windows targets, so no
     /// tenant's run ever starts and the admission is never charged.
-    #[cfg(all(not(unix), feature = "process", feature = "script"))]
+    #[cfg(all(not(any(unix, windows)), feature = "process", feature = "script"))]
     pub async fn run_process_for(
         &mut self,
         tenant: &Tenant,
@@ -451,15 +477,15 @@ impl Supervisor {
         refusal
     }
 
-    /// Process-group containment is unavailable on non-Unix targets.
-    #[cfg(all(not(unix), feature = "process"))]
+    /// Process containment is unavailable beyond Unix and Windows targets.
+    #[cfg(all(not(any(unix, windows)), feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
         let _ = spec;
         Err(Self::no_process_group())
     }
 
-    /// Process-group containment is unavailable on non-Unix targets.
-    #[cfg(all(not(unix), feature = "process"))]
+    /// Process containment is unavailable beyond Unix and Windows targets.
+    #[cfg(all(not(any(unix, windows)), feature = "process"))]
     pub async fn spawn_process_identified(
         &mut self,
         spec: &ProcessSpec,
@@ -468,17 +494,18 @@ impl Supervisor {
         Err(Self::no_process_group())
     }
 
-    /// The one refusal every non-Unix process door returns.
+    /// The one refusal every process door returns on a target with neither
+    /// process groups nor job objects.
     ///
     /// Both doors say the same thing for the same reason — there is no process
-    /// group to own, reap or clean up on this target — so the message is written
+    /// owner to own, reap or clean up on this target — so the message is written
     /// once. A second copy is a second statement about the same boundary, and
     /// the two would drift.
-    #[cfg(all(not(unix), feature = "process"))]
+    #[cfg(all(not(any(unix, windows)), feature = "process"))]
     pub(super) fn no_process_group() -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            "lgwks_bot: supervised process-group cleanup is Unix-only",
+            "lgwks_bot: supervised process cleanup needs process groups or job objects",
         )
     }
 }

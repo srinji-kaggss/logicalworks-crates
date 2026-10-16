@@ -404,15 +404,26 @@ fn bolded_names(section: &str) -> Vec<String> {
     names
 }
 
-/// The dependency names the standard-library crate's manifest declares.
-fn declared_in_manifest(context: &Context<'_>) -> Result<BTreeSet<String>, GateError> {
-    let tables = read_tables(&read(&context.root.join("crates/lgwks-std/Cargo.toml"))?);
-    Ok(tables
+/// The dependency names `manifest` declares: its `[dependencies]` table and every
+/// `[target.<cfg>.dependencies]` one, so a dependency moved under a target (as
+/// `rustix` is, for Unix only) is not read as one the crate dropped.
+fn dependency_names(manifest: &str) -> BTreeSet<String> {
+    read_tables(manifest)
         .iter()
-        .filter(|table| table.path == "dependencies")
+        .filter(|table| {
+            table.path == "dependencies"
+                || (table.path.starts_with("target.") && table.path.ends_with(".dependencies"))
+        })
         .flat_map(|table| table.entries.iter())
         .filter_map(|entry| entry.key.split('.').next().map(str::to_owned))
-        .collect())
+        .collect()
+}
+
+/// The dependency names the standard-library crate's manifest declares.
+fn declared_in_manifest(context: &Context<'_>) -> Result<BTreeSet<String>, GateError> {
+    Ok(dependency_names(&read(
+        &context.root.join("crates/lgwks-std/Cargo.toml"),
+    )?))
 }
 
 /// README dependency philosophy and version pins track the manifests.
@@ -535,7 +546,18 @@ pub(super) fn readme_quickstart(context: &Context<'_>) -> Result<Verdict, GateEr
 
 #[cfg(test)]
 mod tests {
-    use super::{bolded_names, is_suppression, rust_blocks, stale_pins};
+    use super::{bolded_names, dependency_names, is_suppression, rust_blocks, stale_pins};
+
+    #[test]
+    fn a_dependency_moved_under_a_target_is_still_declared() {
+        let manifest = "[dependencies]\nserde = \"1\"\n\n[target.'cfg(unix)'.dependencies]\nrustix = { version = \"1\", optional = true }\n\n[target.'cfg(windows)'.dev-dependencies]\nwinapi = \"0\"\n\n[dev-dependencies]\ntempfile = \"3\"\n";
+        let names: Vec<String> = dependency_names(manifest).into_iter().collect();
+        assert_eq!(
+            names,
+            vec!["rustix", "serde"],
+            "the plain and the target-gated tables count, the dev tables do not"
+        );
+    }
 
     #[test]
     fn an_attribute_line_is_a_suppression_only_for_allow_and_expect() {

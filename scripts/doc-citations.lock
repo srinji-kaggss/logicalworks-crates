@@ -69,10 +69,10 @@ crates/lgwks-bot/src/rt/supervise.rs:186	/// otherwise never make, which is why 
 crates/lgwks-bot/src/rt/supervise.rs:202	/// longer than the budget overruns it by one iteration. Cancellation is not
 crates/lgwks-bot/src/rt/supervise.rs:405	/// long enough on one worker and far too short on several, and the failure is
 crates/lgwks-bot/src/rt/supervise/repeat.rs:168	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise/run.rs:97	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-crates/lgwks-bot/src/rt/supervise/run.rs:127	pub async fn spawn_process_identified(
-crates/lgwks-bot/src/rt/supervise/run.rs:244	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-crates/lgwks-bot/src/rt/supervise/supervisor.rs:240	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise/run.rs:103	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise/run.rs:133	pub async fn spawn_process_identified(
+crates/lgwks-bot/src/rt/supervise/run.rs:260	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+crates/lgwks-bot/src/rt/supervise/supervisor.rs:247	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise/tests.rs:1	//! The supervisor's unit tests: the shared seams and helpers, and one module per concern.
 crates/lgwks-bot/src/rt/task.rs:169	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
@@ -107,6 +107,6 @@ crates/lgwks-bot/src/session.rs:4243	/// The one place a session reads a termina
 crates/lgwks-bot/src/spec.rs:456	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:797	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:15	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
-crates/lgwks-std/src/process/identity.rs:364	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
+crates/lgwks-std/src/process/identity.rs:386	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task/blocking.rs:155	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 docs/guidance-runner-spec.md:193	`review`.

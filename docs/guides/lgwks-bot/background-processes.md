@@ -9,7 +9,7 @@ Pages of this guide: [tasks](background-work.md) ·
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise/run.rs:97`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise/run.rs:103`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -28,14 +28,20 @@ async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
 
 Three differences from a raw `Child`:
 
-- **On Unix, the whole process group is killed, not just the child.** A shell started this way
+- **The whole tree is stopped, not just the child.** A shell started this way
   can spawn a pipeline, and `Child::kill` reaches only the shell — its
-  grandchildren keep running with nobody holding their handles. The kill is
-  `killpg` on the child's own group (`lgwks_std::process::kill_process_group`),
+  grandchildren keep running with nobody holding their handles. On Unix the kill
+  is `killpg` on the child's own group (`lgwks_std::process::kill_process_group`),
   while the unreaped leader pins that group id. A later signal-zero probe can
-  verify absence without signalling a potentially reused id. Other targets
-  refuse `spawn_process` with `Unsupported`; direct-child cleanup is not
-  advertised as process-group containment.
+  verify absence without signalling a potentially reused id. On Windows the child
+  is assigned to a job object the moment it starts
+  (`crates/lgwks-bot/src/rt/supervise/job.rs`); cancel, deadline and exit
+  terminate the job, and the receipt is `CleanupConfirmed` only when the kernel
+  reads the job's membership empty (`ContainmentMechanism::JobObject`). Dropping
+  the task closes the job, which kills what is left. A Windows spec cannot capture
+  a stream (`capture_stdout` is refused before the fork); `stdout_to_file` is its
+  door. Targets with neither refuse `spawn_process` with `Unsupported`;
+  direct-child cleanup is not advertised as containment.
 - **Starting can fail, and the caller is told.** An `io::Error` comes back when
   the program does not exist or is not executable; a failed start does not
   consume a slot.
@@ -62,10 +68,10 @@ to them is a record written before the kill.
 
 `Supervisor::spawn_process_identified(spec)` starts the child exactly as
 `spawn_process` does and also returns the identity of its group leader
-(`crates/lgwks-bot/src/rt/supervise/run.rs:127`): the pid **and** the instant the OS
+(`crates/lgwks-bot/src/rt/supervise/run.rs:133`): the pid **and** the instant the OS
 records that pid's process started. Store `leader().to_string()` durably — a
 database row, written before the lane does work — and a successor parses it back
-and calls `reap_orphaned_group` (`crates/lgwks-std/src/process/identity.rs:364`):
+and calls `reap_orphaned_group` (`crates/lgwks-std/src/process/identity.rs:386`):
 
 ```rust
 use lgwks_bot::rt::process::{OrphanReap, ProcessIdentity, reap_orphaned_group};

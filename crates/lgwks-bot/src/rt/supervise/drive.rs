@@ -1,10 +1,11 @@
 //! Driving one supervised child: observing its exit, draining its pipes, reaping it.
 
 use super::LineObserver;
+use super::ended::{ProcessEnd, ProcessObservation, RunBounds};
 use super::group::ProcessGroup;
 use super::outcome::CleanupReceipt;
 use super::start::OwnedChild;
-use super::supervisor::{ProcessCleanup, TaskEnd};
+use super::supervisor::ProcessCleanup;
 use crate::rt::cancel::CancellationToken;
 use crate::rt::clock::Clock;
 use crate::rt::io::{AsyncRead, AsyncReadExt};
@@ -12,23 +13,8 @@ use crate::rt::process::CapturedStream;
 use crate::rt::task::yield_now;
 use std::io;
 use std::num::NonZeroUsize;
-use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
-
-/// What happened while observing a supervised child without releasing its pid.
-#[derive(Clone, Copy)]
-#[cfg(all(unix, feature = "process"))]
-pub(super) enum ProcessObservation {
-    /// The child exited; the status is retrieved after cleanup on Unix.
-    Exited,
-    /// The supervisor's cancellation token was set.
-    Cancelled,
-    /// The process deadline elapsed before an exit was observed.
-    Deadline,
-    /// The platform could not perform non-reaping exit observation.
-    Unobservable,
-}
 
 /// Poll `pid`'s exit state without reaping it, keeping its pid allocated until
 /// the process-group termination phase is complete.
@@ -72,53 +58,6 @@ pub(super) async fn observe_pid_without_reaping(
     }
 }
 
-/// The terminal observation of one supervised child, before it is mapped to a
-/// public report.
-///
-/// One driver produces this shape for both [`Supervisor::spawn_process`] and
-/// [`Supervisor::run_process`], so the two cannot drift into cleaning up a
-/// group differently: the mapping to a `TaskEnd` or a `ProcessRun` happens at
-/// the edge.
-#[cfg(all(unix, feature = "process"))]
-pub(super) struct ProcessEnd {
-    /// What the observation saw.
-    pub(super) observation: ProcessObservation,
-    /// The status the engine reported, when there is one.
-    pub(super) status: Option<ExitStatus>,
-    /// The cleanup receipt and what it was based on.
-    pub(super) cleanup: ProcessCleanup,
-    /// Captured stdout.
-    pub(super) stdout: CapturedStream,
-    /// Captured stderr.
-    pub(super) stderr: CapturedStream,
-}
-
-/// Map a driven child's terminal observation to the supervisor's internal
-/// task-end, so the public `TaskOutcome` is derived from one place.
-#[cfg(all(unix, feature = "process"))]
-pub(super) fn task_end(end: ProcessEnd) -> TaskEnd {
-    // The signal phase ran while the leader was unreaped; signals are over by the
-    // time this is constructed. A `Pending` cleanup stays in this task through the
-    // bounded post-reap, signal-zero probe.
-    let ProcessEnd {
-        observation,
-        status,
-        cleanup,
-        ..
-    } = end;
-    match observation {
-        ProcessObservation::Exited => match status {
-            Some(ref observed) if observed.success() => TaskEnd::CompletedWithCleanup { cleanup },
-            status => TaskEnd::Failed { status, cleanup },
-        },
-        ProcessObservation::Cancelled => TaskEnd::CancelledWithCleanup { cleanup },
-        ProcessObservation::Deadline | ProcessObservation::Unobservable => TaskEnd::Failed {
-            status: None,
-            cleanup,
-        },
-    }
-}
-
 /// Drive one started child to a terminal observation, observing nothing.
 ///
 /// This is the driver behind [`Supervisor::spawn_process`], whose body runs on
@@ -136,22 +75,6 @@ pub(super) async fn drive_process(
     bounds: RunBounds,
 ) -> ProcessEnd {
     drive_process_observed(clock, child, token, group, bounds, None).await
-}
-
-/// The bounds one process run is held to, as its spec declares them.
-///
-/// One value rather than three parameters: [`Supervisor::prepare_process`]
-/// resolves all three from the same spec, so a deadline can never travel with
-/// another run's capture ceilings.
-#[cfg(all(unix, feature = "process"))]
-#[derive(Debug, Clone, Copy)]
-pub(super) struct RunBounds {
-    /// How long the child may run before it is stopped.
-    pub(super) deadline: Option<Duration>,
-    /// The most stdout bytes retained.
-    pub(super) out_limit: Option<NonZeroUsize>,
-    /// The most stderr bytes retained.
-    pub(super) err_limit: Option<NonZeroUsize>,
 }
 
 /// Drive one started child to a terminal observation: drain its captured

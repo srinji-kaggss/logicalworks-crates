@@ -140,7 +140,7 @@ impl IdentifiedSpawn {
 
 /// The identity of the just-started leader `pid`, which the supervisor has not
 /// reaped, so a process holding the pid is the leader itself.
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(any(unix, windows), feature = "process"))]
 fn identify_leader(pid: i32) -> io::Result<lgwks_std::process::ProcessIdentity> {
     if let Some(leader) = lgwks_std::process::identify_process(pid)? {
         return Ok(leader);
@@ -459,8 +459,10 @@ const REAP_PER_ADMISSION: usize = 2;
 /// was given is aborted as stalled. On Linux that wait is the adoption reap,
 /// [`ADOPTION_REAP_PASSES`] × [`ADOPTION_REAP_INTERVAL`] (two seconds), then
 /// the confirming sweep: with the grace equal to the reap's bound alone, an
-/// adoptee that died on the bound's last pass lost its drain to the abort.
-#[cfg(all(unix, feature = "process"))]
+/// adoptee that died on the bound's last pass lost its drain to the abort. A
+/// Windows job settles inside its own two-second bound, so the same grace
+/// covers it with room for a host under load.
+#[cfg(all(any(unix, windows), feature = "process"))]
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(4);
 
 /// Bounded capture-and-signal rounds one cleanup performs.
@@ -565,8 +567,17 @@ mod tenancy_support;
 mod admit;
 #[cfg(all(unix, feature = "process"))]
 mod drive;
+#[cfg(all(any(unix, windows), feature = "process"))]
+mod ended;
 #[cfg(all(unix, feature = "process"))]
 mod group;
+/// The Windows process path: a job object owns the child's tree (#263).
+#[cfg(all(windows, feature = "process"))]
+mod job;
+/// Settling a job's tree to a receipt, held apart from the `kernel32` calls so
+/// every host drives the same decision table against a scripted job.
+#[cfg(all(feature = "process", any(windows, test)))]
+mod job_cleanup;
 mod lease;
 mod outcome;
 #[cfg(all(unix, feature = "process"))]

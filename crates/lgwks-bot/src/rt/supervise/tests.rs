@@ -4,19 +4,19 @@
 use super::group::ProcessGroup;
 #[cfg(all(unix, feature = "process"))]
 use super::lease::Lease;
-#[cfg(feature = "process")]
+#[cfg(all(unix, feature = "process"))]
 use super::outcome::Containment;
 use super::outcome::TaskOutcome;
 #[cfg(all(unix, feature = "process"))]
 use super::owners::{CleanupOwners, DescendantCapture, GroupObserver, GroupSignaller};
 use super::supervisor::Supervisor;
 use super::{Budget, TaskId};
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 use crate::rt::process::ProcessSpec;
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 use crate::rt::runtime::block_on;
 use crate::rt::task::yield_now;
-#[cfg(feature = "process")]
+#[cfg(all(unix, feature = "process"))]
 use lgwks_std::process::ContainmentMechanism;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 #[test]
 fn non_unix_process_group_spawn_is_refused_as_unsupported() {
     let mut supervisor = Supervisor::new(1);
@@ -37,7 +37,7 @@ fn non_unix_process_group_spawn_is_refused_as_unsupported() {
     assert_eq!(supervisor.stats().spawned, 0);
 }
 
-#[cfg(all(not(unix), feature = "process"))]
+#[cfg(all(not(any(unix, windows)), feature = "process"))]
 #[test]
 fn non_unix_process_group_run_is_refused_as_unsupported() {
     let mut supervisor = Supervisor::new(1);
