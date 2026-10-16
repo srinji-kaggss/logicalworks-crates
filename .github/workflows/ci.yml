@@ -380,13 +380,14 @@ jobs:
   # slot-seconds of tests on nine threads, of which the 42 held 206 and
   # `sim_scale` 250 to 477 (runs 38904371387 and 38912085538, each cancelled at
   # the 5 min cap with every test passed). lwc-2 finished its one leg in 80 s of
-  # its 300 (159 s on run 38916569842, which built the `it` binary cold there);
-  # lwc-12 runs the lgwks-ast leg first (127 s on run 38912085538) and a leg
-  # queued behind it ends the run, because the receipt waits for every leg, so
-  # it keeps only the two small tiers, and builds only their binary: with the
-  # `it` binary too its leg took 186 s on run 38916569842. The Linux container
-  # run still runs all of them. Which binaries a leg builds is the leg's
-  # `binaries`; unset, the lane builds the review-path binary alone.
+  # its 300 (159 s on run 38916569842 and 165 s on run 38918492955, each of which
+  # built the `it` binary cold there after a test edit); lwc-12 runs the
+  # lgwks-ast leg first (127 s on run 38912085538) and a leg queued behind it
+  # ends the run, because the receipt waits for every leg, so it keeps only the
+  # two small tiers, and builds only their binary: with the `it` binary too its
+  # leg took 186 s on run 38916569842 and without it 75 s on run 38918492955.
+  # The Linux container run still runs all of them. Which binaries a leg builds
+  # is the leg's `binaries`; unset, the lane builds the review-path binary alone.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
