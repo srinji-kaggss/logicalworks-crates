@@ -445,7 +445,8 @@ impl Children {
     }
 
     /// Waits until `count` groups are live; for tests that must not race a start.
-    #[cfg(test)]
+    /// Only the Unix tests use it, so a Windows test build would see it unused.
+    #[cfg(all(test, unix))]
     pub(crate) fn wait_until_live(&self, count: usize) {
         let held = guard(&self.live);
         if self

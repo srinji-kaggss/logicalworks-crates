@@ -202,7 +202,7 @@ fn every_trial_has_a_directory_and_a_package_name_of_its_own() -> Result<(), Fai
                 || format!("{package} is not a cargo package name"),
             )?;
             ensure(
-                directories.insert(id.clone()) && packages.insert(package.clone()),
+                directories.insert(id.clone()) && packages.insert(package),
                 || format!("{id} shares a directory or package with another trial"),
             )?;
         }
