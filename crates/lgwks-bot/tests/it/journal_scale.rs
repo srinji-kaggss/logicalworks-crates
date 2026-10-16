@@ -27,7 +27,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::journal::{DurabilityPromise, EffectEvent, EffectJournal, FileJournal};
@@ -485,26 +485,148 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
 /// The size of the bare write beside each append, near one framed event.
 const CONTROL_BYTES: usize = 128;
 
+/// A bare durable write that is reached and answered the way an append is.
+///
+/// An append is handed to its storage owner's thread and answered back: the owner
+/// wakes, writes and syncs, and the caller wakes again, so a host with a long run
+/// queue charges it a wait at each wake. A bare write on the caller's own thread
+/// is charged none of those waits, so on a loaded host it read about a quarter of
+/// the path (run 38938628208: append p50 13,488us against 3,251us bare, where an
+/// idle host reads 78us against 68us) and every stall the run queue dealt landed
+/// on the path alone. This control makes the same two hand-offs around the same
+/// write and `sync_all`, so the two differ by what the path adds and not by how
+/// many times each waits to be scheduled.
+struct HoppedWrite {
+    /// What the caller asked for and what the writer answered.
+    slot: Arc<Slot>,
+    /// The writer's thread, joined on drop so it never outlives the test.
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The hand-off state and the one condition variable both sides wait on, as the
+/// storage owner's request slot has them.
+struct Slot {
+    /// One request in flight, one answer waiting.
+    state: Mutex<Handoff>,
+    /// Woken on every change of `state`.
+    signal: Condvar,
+}
+
+/// The control's hand-off state: one request in flight, one answer waiting.
+#[derive(Default)]
+struct Handoff {
+    /// A write was asked for and the writer has not taken it yet.
+    asked: bool,
+    /// The outcome of the last write, until the caller takes it.
+    answered: Option<std::io::Result<()>>,
+    /// The caller is done with the writer.
+    stop: bool,
+}
+
+/// A poisoned hand-off slot, as the error a test reports.
+fn poisoned<T>(error: std::sync::PoisonError<T>) -> String {
+    format!("the control's hand-off slot was poisoned: {error}")
+}
+
+impl HoppedWrite {
+    /// Start the writer thread on `file`.
+    fn start(mut file: std::fs::File) -> std::io::Result<Self> {
+        use std::io::Write as _;
+
+        let slot = Arc::new(Slot {
+            state: Mutex::new(Handoff::default()),
+            signal: Condvar::new(),
+        });
+        let theirs = Arc::clone(&slot);
+        let writer = std::thread::Builder::new()
+            .name(String::from("control-writer"))
+            .spawn(move || {
+                loop {
+                    let Ok(held) = theirs.state.lock() else {
+                        return;
+                    };
+                    let Ok(mut held) = theirs
+                        .signal
+                        .wait_while(held, |state| !state.asked && !state.stop)
+                    else {
+                        return;
+                    };
+                    if held.stop {
+                        return;
+                    }
+                    held.asked = false;
+                    drop(held);
+                    let outcome = file
+                        .write_all(&[0xA5; CONTROL_BYTES])
+                        .and_then(|()| file.sync_all());
+                    let Ok(mut held) = theirs.state.lock() else {
+                        return;
+                    };
+                    held.answered = Some(outcome);
+                    drop(held);
+                    theirs.signal.notify_all();
+                }
+            })?;
+        Ok(Self {
+            slot,
+            writer: Some(writer),
+        })
+    }
+
+    /// One durable write, in microseconds from the request to the answer.
+    fn timed(&self) -> Result<u128, Box<dyn Error>> {
+        let start = Instant::now();
+        let mut held = self.slot.state.lock().map_err(poisoned)?;
+        held.asked = true;
+        self.slot.signal.notify_all();
+        let mut held = self
+            .slot
+            .signal
+            .wait_while(held, |state| state.answered.is_none())
+            .map_err(poisoned)?;
+        let outcome = held
+            .answered
+            .take()
+            .ok_or("the control writer gave no answer")?;
+        drop(held);
+        outcome?;
+        Ok(start.elapsed().as_micros())
+    }
+}
+
+impl Drop for HoppedWrite {
+    fn drop(&mut self) {
+        if let Ok(mut held) = self.slot.state.lock() {
+            held.stop = true;
+        }
+        self.slot.signal.notify_all();
+        if let Some(writer) = self.writer.take() {
+            drop(writer.join());
+        }
+    }
+}
+
 /// A durable write that took this many microseconds or more is a stall: a
 /// quarter of a second blocked on the device, which a healthy host never costs.
 pub(crate) const STALL_US: u128 = 250_000;
 
-/// How many times a bare durable write's median cost the path's median may be.
+/// How many times the control's median cost the path's median may be.
 ///
-/// The path is that write behind a hop to the storage owner, its fence and its
-/// frame: 1.1 to 1.2 times the bare write at the median, and up to 2.3 times at
-/// the p99, in the runs recorded beside this test (idle, and beside a second
-/// process appending to ten thousand journals), so eight is the margin of a
-/// defect (a flush per rung reads as four, ten flushes as ten) and not of a busy
-/// host.
+/// The path is the control's two hand-offs and write behind a fence and a frame:
+/// 1.02 to 1.04 times the control at the median on an idle host (84us against
+/// 81us), and 1.04 to 1.07 times beside sixty loops forking and renaming files
+/// as fast as the kernel lets them, where the path's p99 was 0.1 to 1.7 times the
+/// control's. So eight is the margin of a defect (an extra flush per append reads
+/// as a multiple of the one the control makes) and not of a busy host.
 pub(crate) const TYPICAL_RATIO: u128 = 8;
 
 /// How many times as often as the bare writes beside them (counting one more
 /// than they took) the appends may stall before the stalls are called the path's.
 ///
-/// A stall hits the one write in flight, and the two alternate, so a stall that
-/// belongs to the host lands on each about equally: the odds that the bare writes
-/// take none of eleven stalls the host dealt both are one in 2,048. On a host
+/// A stall hits the one write in flight, and the two alternate and wait to be
+/// scheduled the same number of times ([`HoppedWrite`]), so a stall that belongs
+/// to the host lands on each about equally: the odds that the bare writes take
+/// none of eleven stalls the host dealt both are one in 2,048. On a host
 /// whose bare writes never stall the rule reads exactly as the 250 ms p99 bound
 /// it replaces.
 pub(crate) const STALL_RATIO: usize = 8;
@@ -564,8 +686,9 @@ pub(crate) fn append_verdict(path: &[u128], bare: &[u128]) -> Result<(), String>
 ///
 /// Every sample is a full `compare_and_append`: fence, frame, write and
 /// `sync_all` on the storage owner, then the acknowledgment. Straight after each
-/// one the test times a bare `write` and `sync_all` on a sibling file, so the
-/// host is measured in the same instants as the path.
+/// one the test times a bare `write` and `sync_all` on a sibling file behind the
+/// same two hand-offs ([`HoppedWrite`]), so the host is measured in the same
+/// instants, and with the same waits to be scheduled, as the path.
 ///
 /// The claim is that the path is not pathological on this host, which
 /// [`append_verdict`] decides against the bare writes: a host shared with
@@ -575,17 +698,17 @@ pub(crate) fn append_verdict(path: &[u128], bare: &[u128]) -> Result<(), String>
 /// both are in the report.
 #[test]
 fn append_latency_tails_are_bounded() -> TestResult {
-    use std::io::Write as _;
-
     let dir = scratch("latency");
     std::fs::create_dir_all(&dir)?;
     let _guard = TempGuard(dir.clone());
     let path = dir.join("journal.log");
     let mut journal = FileJournal::open(&path)?;
-    let mut control = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("control.log"))?;
+    let control = HoppedWrite::start(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("control.log"))?,
+    )?;
 
     let mut samples: Vec<u128> = Vec::with_capacity(SAMPLES);
     let mut bare: Vec<u128> = Vec::with_capacity(SAMPLES);
@@ -600,10 +723,7 @@ fn append_latency_tails_are_bounded() -> TestResult {
             DurabilityPromise::ProcessCrash,
             "every sampled append must earn the durable promise"
         );
-        let start = Instant::now();
-        control.write_all(&[0xA5; CONTROL_BYTES])?;
-        control.sync_all()?;
-        bare.push(start.elapsed().as_micros());
+        bare.push(control.timed()?);
     }
     let verdict = append_verdict(&samples, &bare);
     samples.sort_unstable();
