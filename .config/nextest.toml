@@ -17,9 +17,22 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # It is a module of lgwks_bot's one integration binary (#272), so the filter
 # names the module path inside `it`. nextest still runs each test as its own
 # process, so the override applies per test exactly as it did per binary.
+#
+# #272: every override below that takes `num-test-threads` also has `priority =
+# 100`, so those tests run first. A test that needs every slot waits at the head
+# of the queue until the tests already running have finished, and starts nothing
+# behind it meanwhile, so one that comes up mid-run idles the other slots for as
+# long as the longest running test takes. Run 38912085538: the workspace job's
+# `sim_random_error` came up 36 s in with a 15 s test running, then ran alone for
+# 42 s, and its test phase took 131 s for 504 slot-seconds, which nine threads
+# finish in 56 s; bot-full's `journal_scale` waited from 10 s to 25 s for a 23 s
+# test with one slot busy. At priority 100 they run when nothing is running to
+# wait for. The tests, their threads and their exclusivity are unchanged, only
+# their place in the order.
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'
+priority = 100
 
 # #263: the fire test supervises a thousand process trees at 100 and at 1,000 in
 # flight, which is three thousand processes at its peak, so it runs with every
@@ -31,6 +44,7 @@ threads-required = 'num-test-threads'
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^process_fire::/)'
 threads-required = 'num-test-threads'
+priority = 100
 success-output = 'immediate'
 
 # The storefront consumers (INV-DEP-9) are one test per family, and every one is
@@ -40,6 +54,7 @@ success-output = 'immediate'
 [[profile.default.overrides]]
 filter = 'package(lgwks_deps) & binary(storefront_consumers)'
 threads-required = 'num-test-threads'
+priority = 100
 
 # #277: two lgwks_ast modules exist to catch a walk that stops making progress,
 # so they are the last place a missing bound would show up as a run that never
@@ -72,6 +87,7 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = 'package(lgwks_std) & binary(it) & test(/^sim_random_error::/)'
 threads-required = 'num-test-threads'
+priority = 100
 
 # http_alloc times the shipped client against a bare socket exchange on one
 # loopback server and holds the client's fastest decile to a multiple of the
@@ -82,6 +98,16 @@ threads-required = 'num-test-threads'
 [[profile.default.overrides]]
 filter = 'package(lgwks_std) & binary(http_alloc)'
 threads-required = 'num-test-threads'
+priority = 100
+
+# #272: the longest test of the workspace job that is not exclusive, and one that
+# sorts among the last in the order nextest uses. It came up when the rest had
+# finished and ran its 26 s alone at the tail of the job (run 38912085538).
+# Priority 50 starts it right after the exclusive tests above, so it overlaps
+# the rest of the job instead of ending it.
+[[profile.default.overrides]]
+filter = 'package(lgwks_std) & binary(it) & test(/^sim_shared_policy_tiers::/)'
+priority = 50
 
 # #272: the persist tests spend their time in the kernel (open, rename, write),
 # and macOS serializes that work host-wide, so more concurrent processes buy more
@@ -120,16 +146,20 @@ path = "junit.xml"
 store-success-output = false
 
 # #272: on macOS the bot-full job does not run lgwks_bot's `sim_review_path`
-# binary; the saturation job does, beside its tiers, with `--ignore-default-filter`
-# (the lane `tests-bot-saturation`). The suite is bounded by its work and not by
-# its order: on run 38904371387 the 4,870 tests held 1,916 slot-seconds, which
-# nine threads cannot finish in under 213 s, and the job was cancelled at its
-# 5 min cap with every test passed. The binary's 42 tests held 206 of those
-# slot-seconds (list-scheduled without them: 217 s to 195 s) and process-spawn
-# heavy simulations are what a saturation instance, idle for 190 s of its 300,
-# is for. Linux keeps them in the bot-full container run (this filter is
-# macOS-only), and the acceptance receipt reads both jobs' JUnit reports, so no
-# test is dropped from either platform.
+# binary or the `sim_scale` module of its `it` binary; the saturation job does,
+# beside its tiers, with `--ignore-default-filter` (the lane
+# `tests-bot-saturation`). The suite is bounded by its work and not by its order:
+# on run 38904371387 the 4,870 tests held 1,916 slot-seconds, which nine threads
+# cannot finish in under 213 s, and the job was cancelled at its 5 min cap with
+# every test passed; on run 38912085538 it was cancelled again with 1,880. The
+# binary's 42 tests held 206 of those slot-seconds, and the 164 `sim_scale`
+# tests 250 (that run) to 477 (run 38911289882, where the other modules ran
+# faster). They are tenant-scale journal and fsync simulations, which cost 10.3 s
+# of wall at nine threads on an idle host (27.5 s at one), so the rest is kernel
+# contention with the other tests of the job, and they are what a saturation
+# instance, idle for 190 s of its 300, is for. Linux keeps them in the bot-full
+# container run (this filter is macOS-only), and the acceptance receipt reads
+# both jobs' JUnit reports, so no test is dropped from either platform.
 [[profile.ci.overrides]]
 platform = 'cfg(target_os = "macos")'
-default-filter = 'not binary(sim_review_path)'
+default-filter = 'not (binary(sim_review_path) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/)))'

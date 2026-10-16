@@ -58,7 +58,9 @@ inputs:
       Ceiling of the RAM disk that holds this job's temporary files. A RAM disk
       takes memory only for the pages written to it, and it is recreated at
       every job start, so this bounds one job's temporary files rather than
-      reserving memory. Zero keeps temporary files on disk.
+      reserving memory. Zero keeps temporary files on disk, and is for a job
+      that runs no tests: making the disk is four `diskutil` calls, and every
+      job of a run makes them at the same second (#272).
     required: false
     default: "4"
 runs:
@@ -245,7 +247,11 @@ runs:
           fi
           if [ -z "${tmp}" ] || [ ! -d "${tmp}" ]; then
             tmp="${RUNNER_TEMP}/lwc-tmp"
-            echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
+            # A job that asked for no RAM disk (`tmp-gib: 0`) chose this; only a
+            # job that asked for one and did not get it has lost something.
+            if [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
+              echo "::warning::no RAM disk: temporary files are on disk at ${tmp}, where every sync_all is a device-wide F_FULLFSYNC"
+            fi
             mkdir -p "${tmp}"
             find "${tmp}" -mindepth 1 -delete
           fi
