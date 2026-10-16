@@ -340,7 +340,7 @@ id = "T21"
 requires = "LC-10"
 row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
 state = "present"
-gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal, and the row is receipted on macOS and Linux (the Linux container's bot-full JUnit, recorded as linux-aarch64); containment is still Unix-only, so no Windows backend is receipted until #263."
+gap = "PID reuse (a record naming a live pid with another start) and group reuse (a reaped leader's group id) are named and refuse to signal, and the row is receipted on macOS and Linux (the Linux container's bot-full JUnit, recorded as linux-aarch64); on Windows `t-rows-windows.toml` names the tests for a stop that reaches no process outside the job, and no escape from a job is driven there."
 tests = [
   "it::process_escape::cleanup_never_signals_a_process_outside_the_supervisors_group_t21",
   "it::process_escape::a_session_escape_is_captured_and_stopped_by_pid",

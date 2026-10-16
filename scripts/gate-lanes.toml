@@ -191,11 +191,12 @@ id = "acceptance-receipts"
 surfaces = "ci"
 required = true
 # The receipt, built from the JUnit reports the lgwks-bot jobs already wrote (the
-# full suite and the saturation legs, one directory each). The
+# full suite and the saturation legs, one directory each) and the Linux and
+# Windows legs' (`acceptance-junit`, one directory per leg). The
 # `acceptance-receipts` binary reads the XML and records into SQLite
 # through the sqlite3 program, so the job builds one std-only binary -- it
 # costs seconds, and it does not run the suite a second time.
-command = "cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64"
+command = "cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision \"$REVISION\" --platform \"$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)\" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision \"$REVISION\" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision \"$REVISION\" --platform windows-x86_64"
 ci_step = "Record acceptance receipts"
 
 [[lane]]
@@ -609,13 +610,14 @@ platforms = ["win32"]
 reason = "the GPUI Windows renderer builds only on Windows"
 
 # #263 on Windows, executed: the supervisor's job-object path run on a Windows
-# host, with the job read empty after a cancel and after a deadline. The test is a
-# binary of its own, so this builds lgwks_bot's library and that one file.
+# host, with the job read empty after a cancel, a deadline, a zero exit and a stop
+# before the manager runs. Its JUnit report is the Windows receipt of rows T19-T21.
+# The tests are a binary of their own, so this builds lgwks_bot's library and that file.
 [[lane]]
 id = "process-windows"
 surfaces = "local ci"
 required = false
-command = "cargo test --locked -p lgwks_bot --no-default-features --features process --test process_job"
+command = "cargo nextest run --locked -p lgwks_bot --no-default-features --features process --test process_job --profile ci"
 ci_step = "Run the Windows job-object containment tests"
 platforms = ["win32"]
 reason = "the job object is the Windows kernel's; every other host reports the lane skipped by name"

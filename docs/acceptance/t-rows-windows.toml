@@ -1,0 +1,49 @@
+# The Windows acceptance map: the rows a Windows job object answers, and the
+# named tests that answer them. The `acceptance-receipts` binary reads it as it
+# reads `t-rows.toml` (`--map docs/acceptance/t-rows-windows.toml`), from the
+# JUnit report of the `Process containment on Windows` CI job, and records the
+# receipt as `windows-x86_64` with the feature set `process`.
+#
+# Only T19-T21 are here. The rest of the suite is not built and run on a hosted
+# Windows runner inside the job bound, so no other row claims a Windows receipt.
+# Every entry is a nextest name, `<binary>::<test>`, and `state` and `gap` mean
+# what they mean in `t-rows.toml`.
+
+schema = 1
+spec = "docs/orchestration-acceptance.spec.md"
+
+[[row]]
+id = "T19"
+requires = "LC-10"
+row = "`sh -c 'sleep 60 & exit 0'`: parent exit is not reported as complete tree cleanup while descendants remain. Also test nonzero parent exit."
+state = "exercised"
+gap = ""
+tests = [
+  "process_job::a_zero_exit_with_a_live_descendant_still_settles_the_job_t19",
+  "process_job::a_nonzero_exit_is_a_failure_and_still_settles_the_job_t19",
+  "process_job::sim_a_shell_that_exits_alone_leaves_no_descendant_t19",
+]
+
+[[row]]
+id = "T20"
+requires = "LC-10"
+row = "Abort/drop before manager future's first poll; spawned descendants remain owned and are stopped or cleanup is explicitly unresolved."
+state = "exercised"
+gap = ""
+tests = [
+  "process_job::a_stop_before_the_manager_task_runs_still_stops_the_tree_t20",
+  "process_job::sim_a_stop_before_the_manager_task_runs_leaves_no_descendant_t20",
+  "process_job::sim_trees_stopped_together_each_settle_their_own_job_t20",
+  "process_job::a_cancelled_job_holds_a_grandchild_and_settles_empty",
+]
+
+[[row]]
+id = "T21"
+requires = "LC-10"
+row = "Signalling failure, PID/group reuse and child escape attempts cannot kill unrelated processes or produce false cleanup success. Execute per supported platform/backend."
+state = "present"
+gap = "A stop reaches no process outside the job, and a job never reports a tree it did not read empty; no escape from a job is driven, because a child leaves a job only through a breakaway the supervisor's jobs do not grant and attempting one needs unsafe code, which the suite forbids, and a pid is not reissued while the job holds the child's handle, so no reuse case exists to drive."
+tests = [
+  "process_job::a_stop_leaves_an_unrelated_process_running_t21",
+  "process_job::sim_a_stop_never_reaches_an_unrelated_tree_or_process_t21",
+]
