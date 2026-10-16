@@ -10,8 +10,8 @@
 //! ([`Host::run`] per item, bounded by the host's own admission ceiling).
 //! `<scenario>` is one of `throughput`, `failfast`, `cancel`, `storm` and
 //! `deadline`, specified in
-//! `bench/orchestration/README.md` and shared with the Python, Go and Node
-//! versions beside it. Every way runs the same site model below; only the
+//! `bench/orchestration/README.md` and shared with the Go and Node versions
+//! beside it. Every way runs the same site model below; only the
 //! orchestration differs. One JSON line is printed; the runner adds peak RSS.
 //!
 //! The hand-written ways are written as a careful author would write them:
@@ -85,9 +85,14 @@ struct Spec {
 impl Spec {
     /// The specification for `scenario` on this machine.
     fn of(scenario: Scenario) -> Self {
-        let machine = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .saturating_mul(64);
+        let cores = match std::thread::available_parallelism() {
+            Ok(count) => count.get(),
+            Err(error) => {
+                lgwks_std::trace::debug!(%error, "Spec::of: the core count is unknown, so one core is assumed");
+                1
+            }
+        };
+        let machine = cores.saturating_mul(64);
         let (tenants, items, bound, attempts) = match scenario {
             Scenario::Throughput => (2, 10_000, machine, 3),
             Scenario::FailFast | Scenario::Cancel => (1, 2_000, machine, 1),
@@ -483,10 +488,18 @@ fn count_field(value: Option<u128>) -> String {
     }
 }
 
+/// The command-line argument at `index`, or `default` when it was not given.
+fn arg_or<'a>(args: &'a [String], index: usize, default: &'a str) -> &'a str {
+    match args.get(index) {
+        Some(value) => value.as_str(),
+        None => default,
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let way = args.get(1).map_or("script", String::as_str).to_owned();
-    let scenario = match args.get(2).map_or("throughput", String::as_str) {
+    let way = arg_or(&args, 1, "script").to_owned();
+    let scenario = match arg_or(&args, 2, "throughput") {
         "throughput" => Scenario::Throughput,
         "failfast" => Scenario::FailFast,
         "cancel" => Scenario::Cancel,
@@ -595,7 +608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          \"bound\":{},\"peak_in_flight\":{},\"attempts\":{attempts},\"duplicates\":{},\
          \"live_at_return\":{live_at_return},\"live_after_grace\":{live_after_grace},\
          \"finished_after_return\":{finished_after_return},\"error\":{:?}}}",
-        args.get(2).map_or("throughput", String::as_str),
+        arg_or(&args, 2, "throughput"),
         error.is_empty(),
         millis_field(quantile(&[elapsed_micros], 0))?,
         millis_field(quantile(&latencies, 500))?,
