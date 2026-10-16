@@ -972,10 +972,10 @@ jobs:
   # #263 on Windows, executed. The job object a supervised tree lives in is the
   # kernel's own membership list, so the only evidence that containment works is
   # a Windows host running the supervisor's real path and reading that list empty
-  # (`crates/lgwks-bot/tests/process_job.rs`). Every other Windows job of this
-  # file builds or lints. This one's JUnit report is the Windows receipt of rows
-  # T19-T21 (`docs/acceptance/t-rows-windows.toml`). The tests are a binary of
-  # their own, so the compile is lgwks_std, the async engine and lgwks_bot.
+  # (`crates/lgwks-bot/tests/process_job.rs`). #271: the same step runs the `it`
+  # tests named for their row (`_tNN`), the portable half of the row map. Every
+  # other Windows job of this file builds or lints; this one's JUnit report is the
+  # Windows receipt (`docs/acceptance/t-rows-windows.toml`).
   process-windows:
     name: Process containment on Windows
     runs-on: windows-latest
@@ -998,10 +998,10 @@ jobs:
           cache-on-failure: "true"
           key: process-windows
       - uses: taiki-e/install-action@nextest
-      - name: Run the Windows job-object containment tests
+      - name: Run the Windows containment and row tests
         # Stops before the job limit so the cache is saved (see the build job).
         timeout-minutes: 4
-        run: cargo nextest run --locked -p lgwks_bot --no-default-features --features process --test process_job --profile ci
+        run: cargo nextest run --locked -p lgwks_bot --no-default-features --features 'process,script,ephemeral' --test process_job --test it --profile ci --no-fail-fast -E 'binary(process_job) | test(/_t[0-9]{2}$/)'
       - name: Upload the Windows JUnit report
         uses: actions/upload-artifact@v4
         with:

@@ -610,15 +610,15 @@ platforms = ["win32"]
 reason = "the GPUI Windows renderer builds only on Windows"
 
 # #263 on Windows, executed: the supervisor's job-object path run on a Windows
-# host, with the job read empty after a cancel, a deadline, a zero exit and a stop
-# before the manager runs. Its JUnit report is the Windows receipt of rows T19-T21.
-# The tests are a binary of their own, so this builds lgwks_bot's library and that file.
+# host, plus (#271) the `it` tests named for their row (`_tNN`), the portable half
+# of the row map. Its JUnit report is the Windows receipt of every row that
+# `docs/acceptance/t-rows-windows.toml` names.
 [[lane]]
 id = "process-windows"
 surfaces = "local ci"
 required = false
-command = "cargo nextest run --locked -p lgwks_bot --no-default-features --features process --test process_job --profile ci"
-ci_step = "Run the Windows job-object containment tests"
+command = "cargo nextest run --locked -p lgwks_bot --no-default-features --features 'process,script,ephemeral' --test process_job --test it --profile ci --no-fail-fast -E 'binary(process_job) | test(/_t[0-9]{2}$/)'"
+ci_step = "Run the Windows containment and row tests"
 platforms = ["win32"]
 reason = "the job object is the Windows kernel's; every other host reports the lane skipped by name"
 
