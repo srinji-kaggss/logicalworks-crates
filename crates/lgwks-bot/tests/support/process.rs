@@ -30,9 +30,10 @@ pub async fn drop_after_pid<F: std::future::Future>(run: F, pid_file: &Path) -> 
         }
         // The runner wakes itself on its own observation interval while the
         // child lives, so this check reruns on each of those polls.
-        read_pid(pid_file).map_or(std::task::Poll::Pending, |pid| {
-            std::task::Poll::Ready(Some(pid))
-        })
+        match read_pid(pid_file) {
+            Some(pid) => std::task::Poll::Ready(Some(pid)),
+            None => std::task::Poll::Pending,
+        }
     })
     .await
 }
@@ -101,18 +102,32 @@ pub fn group_has_stopped(pgid: i32) -> bool {
     group_members(pgid).is_some_and(|members| members.iter().all(|state| *state == 'Z'))
 }
 
-/// Wait until `done(pgid)` holds, up to `budget`.
-fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
+/// Run `probe` until it holds or `budget` is spent, and answer its last result.
+///
+/// Every wait in this file watches the operating system for a fact about a
+/// process this test did not start: a pid file written by a grandchild, a group
+/// whose last member exited, a pid that stopped answering `kill -0`. The kernel
+/// offers no event for any of them, and a park or a sleep between probes would be
+/// a delay guessed at, so the wait is the probe itself, repeated, and the budget
+/// is what ends it. `yield_now` hands the core to the process being waited on
+/// instead of holding it. The probe runs once more after the budget, so a fact
+/// that arrived during the last yield is not reported as absent.
+fn poll_within(budget: Duration, mut probe: impl FnMut() -> bool) -> bool {
     let started = std::time::Instant::now();
     loop {
-        if done(pgid) {
+        if probe() {
             return true;
         }
         if started.elapsed() >= budget {
-            return done(pgid);
+            return probe();
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+        std::thread::yield_now();
     }
+}
+
+/// Wait until `done(pgid)` holds, up to `budget`.
+fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
+    poll_within(budget, || done(pgid))
 }
 
 /// Wait until `path` holds a pid, up to `budget`.
@@ -121,16 +136,12 @@ fn wait_for(pgid: i32, budget: Duration, done: fn(i32) -> bool) -> bool {
 /// child that records its own pid has provably reached the point under test, and
 /// a loaded host cannot make the test act before that point.
 pub fn wait_for_pid(path: &Path, budget: Duration) -> Option<i32> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(pid) = read_pid(path) {
-            return Some(pid);
-        }
-        if started.elapsed() >= budget {
-            return read_pid(path);
-        }
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
+    let mut recorded = None;
+    poll_within(budget, || {
+        recorded = read_pid(path);
+        recorded.is_some()
+    });
+    recorded
 }
 
 /// Whether a process with `pid` is still running, asked through `kill -0`.
@@ -140,11 +151,19 @@ pub fn wait_for_pid(path: &Path, budget: Duration) -> Option<i32> {
 /// touch. It exits zero while the pid may be signalled and non-zero once it is
 /// gone, so it answers "does this pid still exist" and nothing about *why*.
 pub fn pid_is_alive(pid: i32) -> bool {
-    std::process::Command::new("kill")
+    match std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .status()
-        .is_ok_and(|status| status.success())
+    {
+        Ok(status) => status.success(),
+        // A probe that could not run proves nothing gone, so the pid counts as
+        // alive and a wait on it fails at its budget instead of passing blind.
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, pid, "pid_is_alive: the kill -0 probe did not run");
+            true
+        }
+    }
 }
 
 /// What `ps` reports for `pid` and for every process in the group it leads, one
@@ -197,14 +216,7 @@ pub fn kill_pid(pid: i32) {
 /// `None` for a pid that is still running when the budget expires, so a caller
 /// cannot report a survivor as cleaned up by reading the timeout as success.
 pub fn wait_for_pid_gone(pid: i32, budget: Duration) -> Option<()> {
-    let started = std::time::Instant::now();
-    while pid_is_alive(pid) {
-        if started.elapsed() >= budget {
-            return None;
-        }
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
-    Some(())
+    poll_within(budget, || !pid_is_alive(pid)).then_some(())
 }
 
 /// Assert that one captured stream kept exactly `ceiling` bytes of `total`.
@@ -248,13 +260,13 @@ pub fn assert_capture_within_ceiling(
 /// real process for, because an in-process fake proves nothing about whether the
 /// syscall was actually issued.
 ///
-/// `setsid(1)` is absent on macOS, so the interpreters follow it. `None` means
-/// this host has none of the three, which is a recorded limit rather than a
-/// silent skip — [`escape_unavailable_reason`] names it.
+/// `setsid(1)` is absent on macOS, so perl follows it. `None` means this host
+/// has neither, which is a recorded limit rather than a silent skip —
+/// [`escape_unavailable_reason`] names it.
 ///
-/// A table rather than three branches: the candidates are data, and a branch per
+/// A table rather than two branches: the candidates are data, and a branch per
 /// candidate would put the "which one did we use" fact in control flow instead of
-/// where a reader can see all three at once.
+/// where a reader can see both at once.
 pub fn escape_command() -> Option<EscapeCommand> {
     ESCAPE_COMMANDS
         .iter()
@@ -309,9 +321,9 @@ impl EscapeCommand {
     /// The program is passed as a single **single-quoted** shell word, the only
     /// quoting that leaves the sources intact in both directions:
     ///
-    /// - Double quotes would let this shell expand `$f` and `$$` before perl or
-    ///   python ever saw them, so `open(my $f, …)` arrives as `open(my , …)` and
-    ///   the candidate dies of a syntax error.
+    /// - Double quotes would let this shell expand `$f` and `$$` before perl ever
+    ///   saw them, so `open(my $f, …)` arrives as `open(my , …)` and the candidate
+    ///   dies of a syntax error.
     /// - Single quotes are therefore required, which is why every source below is
     ///   written with double quotes and no apostrophe: a source containing `'`
     ///   would terminate the wrapper early.
@@ -361,15 +373,14 @@ pub fn sources_are_apostrophe_free() -> bool {
 /// Every way this suite knows to leave a process group, in preference order.
 ///
 /// `setsid(1)` first because it is the utility that does exactly this and
-/// nothing else. macOS ships no `setsid(1)`, so the interpreters follow: POSIX
-/// `setsid` is in both, and each takes its program as one argument after a
-/// single flag.
+/// nothing else. macOS ships no `setsid(1)`, so perl follows: it carries POSIX
+/// `setsid` and takes its program as one argument after a single flag.
 ///
 /// Each source records the pid *after* `setsid` returns, so the pid a test reads
 /// back belongs to a process that has already left the group. That ordering is
 /// the difference between measuring an escape and measuring the ordinary group
 /// kill, and it is why the recording lives here rather than in the caller.
-const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
+const ESCAPE_COMMANDS: [EscapeCommand; 2] = [
     EscapeCommand {
         program: "setsid",
         // `setsid(1)` runs a program with its arguments, so the "flag" here is
@@ -390,12 +401,6 @@ const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
         source: "use POSIX; setsid(); open(my $f, \">\", \"{file}\"); print $f $$; $f->flush(); \
                  sleep 30",
     },
-    EscapeCommand {
-        program: "python3",
-        flag: "-c",
-        source: "import os,time; os.setsid(); open(\"{file}\",\"w\").write(str(os.getpid())); \
-                 time.sleep(30)",
-    },
 ];
 
 /// Why [`escape_command`] is unavailable, as a sentence a test may report.
@@ -406,8 +411,8 @@ const ESCAPE_COMMANDS: [EscapeCommand; 3] = [
 /// identical in a green suite.
 pub fn escape_unavailable_reason() -> String {
     String::from(
-        "no setsid(1), perl with POSIX, or python3 on this host, so a real session escape \
-         could not be performed; T21's escape case was NOT exercised",
+        "no setsid(1) or perl with POSIX on this host, so a real session escape could not \
+         be performed; T21's escape case was NOT exercised",
     )
 }
 

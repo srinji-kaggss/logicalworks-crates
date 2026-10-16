@@ -192,53 +192,70 @@ fn hold_source(pid_file: &std::path::Path) -> String {
 /// child is not one.
 fn escape_source(pid_file: &std::path::Path) -> Result<String, Box<dyn Error>> {
     Ok(format!(
-        "python3 -c 'import os,time; os.setsid(); open(\"{}\",\"w\").write(str(os.getpid())); time.sleep(30)' & ",
+        "perl -e 'use POSIX; setsid(); open(my $f, \">\", \"{}\"); print $f $$; $f->flush(); sleep 30' & ",
         pid_file.display()
     ))
 }
 
+/// Run `probe` until it answers `Some` or `budget` is spent, and answer its last
+/// result.
+///
+/// Each wait here watches the operating system for a fact about a process this
+/// test did not start (a pid file a grandchild wrote, a pid that stopped running),
+/// and the kernel offers no event for either. A park or a sleep between probes
+/// would be a delay guessed at, so the wait is the probe itself, repeated, and the
+/// budget is what ends it; `yield_now` hands the core to the process waited on.
+/// The probe runs once more after the budget, so a fact that arrived during the
+/// last yield is not reported as absent.
+fn poll_within<T>(
+    budget: Duration,
+    mut probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
+) -> Result<Option<T>, Box<dyn Error>> {
+    let deadline = Instant::now()
+        .checked_add(budget)
+        .ok_or("the poll deadline overflows the clock")?;
+    loop {
+        if let Some(found) = probe()? {
+            return Ok(Some(found));
+        }
+        if Instant::now() >= deadline {
+            return probe();
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// The pid `file` holds, or `None` while it is absent or not yet a whole number.
+fn read_recorded_pid(file: &std::path::Path) -> Option<i32> {
+    if let Ok(text) = std::fs::read_to_string(file)
+        && let Ok(pid) = text.trim().parse::<i32>()
+    {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
 /// The pid `file` records, within [`RECORD`].
 fn recorded_pid(file: &std::path::Path) -> Result<i32, Box<dyn Error>> {
-    let deadline = Instant::now()
-        .checked_add(RECORD)
-        .ok_or("the record deadline overflows the clock")?;
-    while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(file)
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            return Ok(pid);
-        }
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
-    Err(format!("a fork never recorded its pid in {}", file.display()).into())
+    poll_within(RECORD, || Ok(read_recorded_pid(file)))?
+        .ok_or_else(|| format!("a fork never recorded its pid in {}", file.display()).into())
 }
 
 /// Whether every pid in `pids` has stopped running, within [`SETTLE`].
 fn settle_stopped(pids: &[i32]) -> Result<bool, Box<dyn Error>> {
-    let deadline = Instant::now()
-        .checked_add(SETTLE)
-        .ok_or("the settle deadline overflows the clock")?;
-    while Instant::now() < deadline {
-        if running_processes(pids)?.is_empty() {
-            return Ok(true);
-        }
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
-    Ok(running_processes(pids)?.is_empty())
+    let stopped = poll_within(SETTLE, || {
+        Ok(running_processes(pids)?.is_empty().then_some(()))
+    })?;
+    Ok(stopped.is_some())
 }
 
 /// Whether every pid in `pids` is still running, within [`SETTLE`].
 fn settle_running(pids: &[i32]) -> Result<bool, Box<dyn Error>> {
-    let deadline = Instant::now()
-        .checked_add(SETTLE)
-        .ok_or("the settle deadline overflows the clock")?;
-    while Instant::now() < deadline {
-        if running_processes(pids)?.len() == pids.len() {
-            return Ok(true);
-        }
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
-    Ok(running_processes(pids)?.len() == pids.len())
+    let running = poll_within(SETTLE, || {
+        Ok((running_processes(pids)?.len() == pids.len()).then_some(()))
+    })?;
+    Ok(running.is_some())
 }
 
 /// One seeded sweep of capture, signal and observe over one tree, as its trace.
