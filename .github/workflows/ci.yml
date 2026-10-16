@@ -115,9 +115,10 @@ jobs:
     # its tests step unfinished (run 38870029835); the next run finds the binary
     # in the directory and is the measurement of the job.
     #
-    # lgwks_bot's tests (4,138 of the 5,569) run in the two lgwks_bot jobs below,
-    # and `build_verdict` reports this check's required name only when those two
-    # and this job all passed, so every test is still required. Run on a warm
+    # lgwks_bot's tests (4,138 of the 5,569) run in the lgwks_bot jobs below (full,
+    # saturation and no default features), and `build_verdict` reports this
+    # check's required name only when those three and this job all passed, so
+    # every test is still required. Run on a warm
     # directory beside a load average near 50 (run 38871028285), every one of the
     # 5,569 passed and the step was cancelled in the second the last one did,
     # 252 s in, with 902 of the 1,576 summed test-seconds in the lgwks_bot `it`
@@ -372,12 +373,18 @@ jobs:
   # still running 2 m 27 s in when the job limit cancelled it, after a 1 m 11 s
   # build and two minutes of setup (run 38416328077). So the 10,000 tier has an
   # instance of its own, apart from the 100 and 1,000 tiers on lwc-12.
-  # The binary's other 42 tests (the review-path simulations) run on the lwc-12
-  # leg too, in place of the bot-full job, which no longer runs them on macOS
-  # (`.config/nextest.toml`): that suite is bounded by its work, 1,916
-  # slot-seconds of tests on nine threads, and the 42 held 206 of them (run
-  # 38904371387: cancelled at the 5 min cap with every test passed). This leg
-  # finished in 109 s of its 300 and the Linux container run still runs them all.
+  # The binary's other 42 tests (the review-path simulations) and lgwks-bot's
+  # `sim_scale` module (164 tests of the `it` binary) run on the lwc-2 leg too,
+  # in place of the bot-full job, which no longer runs them on macOS
+  # (`.config/nextest.toml`): that suite is bounded by its work, 1,880 to 1,916
+  # slot-seconds of tests on nine threads, of which the 42 held 206 and
+  # `sim_scale` 250 to 477 (runs 38904371387 and 38912085538, each cancelled at
+  # the 5 min cap with every test passed). lwc-2 finished its one leg in 80 s of
+  # its 300; lwc-12 runs the lgwks-ast leg first (127 s on run 38912085538) and a
+  # leg queued behind it ends the run, because the receipt waits for every leg,
+  # so it keeps only the two small tiers. The Linux container run still runs all
+  # of them. The legs build the `it` binary too, which each instance keeps warm
+  # like its other test binaries.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -388,10 +395,10 @@ jobs:
         include:
           - tiers: "10000"
             instance: lwc-2
-            filter: "test(=saturation_r32_tier_10000)"
+            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier)) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
           - tiers: "100 and 1000"
             instance: lwc-12
-            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | not test(saturation_r32_tier)"
+            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -401,21 +408,26 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "3"
+          # Eight, as the bot-full job: the lwc-2 leg runs 206 tests beside
+          # the 10,000 tier, which asserts counts and isolation and only logs
+          # its latency tails, so sibling load cannot fail it. The 100 and 1,000
+          # leg runs two tests and uses two of the threads.
+          test-share: "8"
           build-share: "2"
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
       # shards).
       # The lane's own command, with the tests this leg runs set in
-      # SATURATION_FILTER (unset, the command selects the whole binary), as the
-      # sharded lanes set PARTITION: the gate-parity check compares this text
-      # with scripts/gate-lanes.toml. `--ignore-default-filter` lifts the `ci`
-      # profile's macOS filter, which keeps this binary out of the bot-full job.
+      # SATURATION_FILTER (unset, the command selects the whole `sim_review_path`
+      # binary), as the sharded lanes set PARTITION: the gate-parity check
+      # compares this text with scripts/gate-lanes.toml. `--ignore-default-filter`
+      # lifts the `ci` profile's macOS filter, which keeps that binary and the
+      # `sim_scale` module out of the bot-full job.
       - name: Run lgwks-bot saturation tiers
         env:
           SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path -E "${SATURATION_FILTER:-all()}"
+        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path --test it -E "${SATURATION_FILTER:-binary(sim_review_path)}"
       # The JUnit report of what this leg ran, under the `lgwks-bot-junit-*` name
       # the acceptance job downloads: the review-path tests (T31-T34) are named
       # in `docs/acceptance/t-rows.toml`, so the macOS receipt reads them here.
@@ -444,6 +456,8 @@ jobs:
         uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
+          # It runs no tests and it is the last link of the run's critical path.
+          tmp-gib: "0"
       - name: Download lgwks-bot JUnit reports
         uses: actions/download-artifact@v4
         with:
@@ -742,6 +756,9 @@ jobs:
         with:
           toolchain: "1.99.0"
           build-share: "1"
+          # No test runs here, so no RAM disk for temporary files (the input's
+          # description says why).
+          tmp-gib: "0"
       - name: Check lgwks-std across the declared target matrix
         # `cargo check --target <t>` for every declared target and crate. The
         # script installs the target with rustup first, requires the Rust-only
@@ -810,6 +827,8 @@ jobs:
         with:
           toolchain: "1.99.0"
           build-share: "2"
+          # Only the lgwks-ast leg runs tests; the others only check.
+          tmp-gib: ${{ matrix.part == 'lgwks-ast' && '4' || '0' }}
       - name: docs.rs metadata names a buildable feature set
         if: matrix.part == 'docs.rs'
         # docs.rs builds with whatever `[package.metadata.docs.rs]` declares,

@@ -214,16 +214,18 @@ group = "bot-full"
 surfaces = "local ci"
 required = true
 # The saturation family on its own: it is CPU-bound for about two minutes, so it
-# gets its own runner instead of one shard's tail. Builds only the one test
-# binary it runs. That binary's other 42 tests, the review-path simulations, run
-# here too and not in `tests-bot-full` on macOS (`.config/nextest.toml`'s `ci`
-# profile filters the binary out there), so this lane lifts that filter with
+# gets its own runner instead of one shard's tail. Builds the `sim_review_path`
+# binary it runs and lgwks_bot's `it` binary, for the `sim_scale` module. That
+# binary's other 42 tests, the review-path simulations, and the 164 `sim_scale`
+# tests run here too and not in `tests-bot-full` on macOS (`.config/nextest.toml`'s
+# `ci` profile filters them out there), so this lane lifts that filter with
 # `--ignore-default-filter` and writes the JUnit report the receipt reads.
 #
 # CI runs the legs of this lane on two instances by setting SATURATION_FILTER to
-# the tests each leg takes (the 10,000 tier alone; the 100 and 1,000 tiers with
-# the 42 simulations); unset, it is the whole binary.
-command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path -E \"${SATURATION_FILTER:-all()}\""
+# the tests each leg takes (the 10,000 tier with the 42 simulations and the
+# `sim_scale` module; the 100 and 1,000 tiers together); unset, it is the whole
+# `sim_review_path` binary.
+command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter --test sim_review_path --test it -E \"${SATURATION_FILTER:-binary(sim_review_path)}\""
 ci_step = "Run lgwks-bot saturation tiers"
 
 [[lane]]
