@@ -94,8 +94,12 @@ empty, and a spec that captures a stream is refused before the fork. The calls
 are fourteen `kernel32` externs in `lgwks_std::process::windows`, the one Windows
 `unsafe` leaf (an exception the guard's register names), with no Windows API
 crate. The settle decision table runs on every host against a scripted job (7
-tests) and the Windows target type-checks for both crates, tests included;
-`tests/it/process_job.rs` drives a real job but no Windows host has run it,
+tests) and the Windows target type-checks for both crates, tests included. The
+leaf's ten scripted-kernel tests (`process::windows::tests`) also run under Miri
+cross-interpreted for `x86_64-pc-windows-msvc` (`cargo miri nextest run`): 10
+passed in 17.8 s with no undefined behaviour reported, which checks the pointers
+and lengths the leaf hands its call table and not the `kernel32` externs behind
+it. `tests/it/process_job.rs` drives a real job but no Windows host has run it,
 because no CI job runs the `lgwks_std` or `lgwks_bot` suites on `windows-latest`
 (adding one needs the `workflow` token scope). Windows containment is therefore a
 code, type-check and scripted-decision receipt, not yet an executed one.
