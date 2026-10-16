@@ -1,7 +1,7 @@
 //! #263 on Windows: the supervisor owns a process tree through a job object.
 //!
-//! The Unix tests of this contract read the operating system's process table
-//! after the stop (`process_fire`). A job object makes a stronger statement than
+//! The Linux fire test (`tests/it/process_fire.rs`) reads the operating system's
+//! process table after the stop. A job object makes a stronger statement than
 //! any table read: the kernel keeps the membership, so the proof is the job
 //! reading empty after its terminate. These tests drive the supervisor's real
 //! Windows path and assert on that proof, which the receipt carries.
@@ -13,8 +13,10 @@
 //! - A deadline stops a tree the same way and the run reports the deadline.
 //! - A spec that captures a stream is refused before anything starts.
 //!
-//! The same suite runs wherever `cargo nextest run --locked -p lgwks_bot
-//! --features process` runs on a Windows host; on any other host the file is
+//! This is a binary of its own, apart from the crate's `it` binary, so the
+//! `windows-latest` job that executes it compiles this file and the library it
+//! drives and not the other four thousand tests (the `Process containment on
+//! Windows` job of `.github/workflows/ci.yml`). On any other host the file is
 //! empty.
 
 #![cfg(all(
@@ -25,7 +27,10 @@
     feature = "process"
 ))]
 
-use crate::scratch::Scratch;
+#[path = "support/scratch.rs"]
+mod scratch;
+
+use scratch::Scratch;
 
 use std::num::NonZeroUsize;
 use std::time::Duration;

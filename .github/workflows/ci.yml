@@ -929,6 +929,41 @@ jobs:
           --target-dir target
           --no-default-features --features gpui --example gpui
 
+  # #263 on Windows, executed. The job object a supervised tree lives in is the
+  # kernel's own membership list, so the only evidence that the containment works
+  # is a Windows host that runs the supervisor's real path and reads that list
+  # empty after a cancel and after a deadline (`crates/lgwks-bot/tests/
+  # process_job.rs`). Every other Windows job of this file builds or lints.
+  # The test is a binary of its own, and the features are the ones it needs, so
+  # the compile is lgwks_std, the async engine and lgwks_bot, not the crate's
+  # four thousand tests.
+  process-windows:
+    name: Process containment on Windows
+    runs-on: windows-latest
+    timeout-minutes: 5
+    env:
+      # Lints run once, in the Clippy job.
+      RUSTC_WORKSPACE_WRAPPER: ""
+      # The test is a handful of syscalls and two child processes, so the
+      # optimizer would only lengthen the compile.
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"
+          cache-on-failure: "true"
+          key: process-windows
+      - name: Run the Windows job-object containment tests
+        # Stops before the job limit so the cache is saved (see the build job).
+        timeout-minutes: 4
+        run: cargo test --locked -p lgwks_bot --no-default-features --features process --test process_job
+
   # The repository's ruleset requires a check named exactly "Clippy and scan".
   # The lint job above is a matrix, whose legs report as "Clippy and scan
   # (workspace)", "(scan)" and "(reduced)", so no check of the required name was
