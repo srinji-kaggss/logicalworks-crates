@@ -128,7 +128,10 @@ required = true
 # Tests job they alone held the step at 441 s of a 513 s job.
 # CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
 # whole suite.
-command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}"
+# lgwks_bot's tests are not in this lane: the `tests-bot-full` and
+# `tests-bot-nodefault` lanes run them under the feature sets a consumer builds,
+# and the `build-verdict` row requires both with this one.
+command = "cargo nextest run --workspace --locked -E 'not binary(storefront_consumers) and not package(lgwks_bot)' ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run all workspace tests"
 
 [[lane]]
@@ -646,3 +649,14 @@ required = true
 command = "test \"${LEGS}\" = success"
 ci_step = "Every clippy leg passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Clippy and scan"
+
+# The ruleset also requires "Build and workspace tests". The workspace job runs
+# every test but lgwks_bot's, and the two lgwks_bot jobs run those; this row
+# carries the required name and passes only when all three jobs passed.
+[[lane]]
+id = "build-verdict"
+surfaces = "ci"
+required = true
+command = "test \"${BUILD}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_NODEFAULT}\" = success"
+ci_step = "Every workspace test job passed"
+reason = "dedicated PR check row whose job name is the ruleset's required Build and workspace tests"

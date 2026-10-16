@@ -104,7 +104,7 @@ jobs:
   # shard instead of holding a runner instance for a job of their own, and the
   # lanes that need the workspace built run after the shard that built it.
   build:
-    name: Build and workspace tests
+    name: Workspace build and tests
     # The instance keeps its target directory across runs, so a warm run
     # recompiles only what changed: 250 s on run 38365526454. A hosted runner
     # starts from a restored cache that never holds the workspace crates, and
@@ -114,6 +114,14 @@ jobs:
     # changed), so the first run after the edit is cancelled at the bound with
     # its tests step unfinished (run 38870029835); the next run finds the binary
     # in the directory and is the measurement of the job.
+    #
+    # lgwks_bot's tests (4,138 of the 5,569) run in the two lgwks_bot jobs below,
+    # and `build_verdict` reports this check's required name only when those two
+    # and this job all passed, so every test is still required. Run on a warm
+    # directory beside a load average near 50 (run 38871028285), every one of the
+    # 5,569 passed and the step was cancelled in the second the last one did,
+    # 252 s in, with 902 of the 1,576 summed test-seconds in the lgwks_bot `it`
+    # binary: the share this job no longer carries.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 5
     env:
@@ -131,15 +139,16 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           # Eight, the share bot-full is green at (its comment names the limit).
-          # Run 38867517459 ran these 5,569 tests in 186 s at six threads for
-          # 1,005 s of summed test time, so 5.4 of the 6 were busy: the cap, not
-          # the machine, set the wall, and the job ended at its 5-minute bound.
+          # Run 38867517459 ran the suite, then 5,569 tests with lgwks_bot's, in
+          # 186 s at six threads for 1,005 s of summed test time, so 5.4 of the 6
+          # were busy: the cap, not the machine, set the wall. The suite is now
+          # the 1,431 tests that are not lgwks_bot's, so this is headroom.
           test-share: "8"
           build-share: "3"
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
-        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers)' ${PARTITION:+--partition $PARTITION}
+        run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers) and not package(lgwks_bot)' ${PARTITION:+--partition $PARTITION}
       # The two evidence lanes print the result their check rows below expose.
       # Each writes its own report, and the check row reads that report rather
       # than building the workspace a second time to produce it again: the
@@ -940,3 +949,29 @@ jobs:
         run: |
           echo "clippy and scan legs: ${LEGS}"
           test "${LEGS}" = success
+
+  # The repository's ruleset requires a check named exactly "Build and workspace
+  # tests". That name used to be the one job that ran every test; the workspace
+  # job above now runs all but lgwks_bot's, which the two lgwks_bot jobs run
+  # under the feature sets a consumer builds (full, and none). This row carries
+  # the required name and passes only when all three passed, so no test is left
+  # out of the required check: on run 38871028285 each of the 4,138 lgwks_bot
+  # tests the workspace job ran was among the 4,870 the full job ran, and the
+  # no-default job adds 3,190 under the other feature set, where before the
+  # required check held the default set alone. A cancelled or skipped job is not
+  # `success`, so it fails this row too.
+  build_verdict:
+    name: Build and workspace tests
+    needs: [build, tests_bot_full, tests_nodefault]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every workspace test job passed
+        env:
+          BUILD: ${{ needs.build.result }}
+          BOT_FULL: ${{ needs.tests_bot_full.result }}
+          BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
+        run: |
+          echo "workspace ${BUILD}, lgwks_bot full ${BOT_FULL}, lgwks_bot no default ${BOT_NODEFAULT}"
+          test "${BUILD}" = success && test "${BOT_FULL}" = success && test "${BOT_NODEFAULT}" = success
