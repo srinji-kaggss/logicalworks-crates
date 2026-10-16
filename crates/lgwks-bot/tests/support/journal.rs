@@ -196,16 +196,17 @@ pub fn key_for(attempt: &str, digest: &str) -> Result<EffectKey, Box<dyn Error>>
 /// a child parked while the parent decides when it dies — is the observation's
 /// subject rather than its scaffolding.
 pub fn pause(millis: u64) {
-    // Parked rather than slept: `park_timeout` may return early, so the loop
-    // waits out what is left of the span, and a span of zero returns at once.
-    let span = std::time::Duration::from_millis(millis);
-    let started = std::time::Instant::now();
-    while let Some(left) = span.checked_sub(started.elapsed()) {
-        if left.is_zero() {
-            break;
-        }
-        std::thread::park_timeout(left);
+    use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+
+    // A timed wait on a channel nobody sends to. The sender lives to the end of
+    // the call, so the receive cannot see a message or a disconnect: the timeout
+    // is the only way out, it comes at the span and never early (a park may
+    // return early), and a span of zero returns at once.
+    let (held, never) = sync_channel::<()>(1);
+    match never.recv_timeout(std::time::Duration::from_millis(millis)) {
+        Ok(()) | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
     }
+    drop(held);
 }
 
 /// Owns a probe child and kills it, reaping it, however the test ends.

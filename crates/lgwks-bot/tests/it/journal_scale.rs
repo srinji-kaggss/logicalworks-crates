@@ -281,6 +281,15 @@ fn read_rss_kb() -> Option<u64> {
     None
 }
 
+/// The larger of the peak so far and a new reading; the reading alone when
+/// nothing was read before it.
+fn larger_reading(peak: Option<u64>, reading: u64) -> u64 {
+    match peak {
+        Some(was) => was.max(reading),
+        None => reading,
+    }
+}
+
 /// A background sampler that tracks the process's peak resident set.
 ///
 /// Sampling rather than a single end-of-run read, because the peak is the
@@ -308,12 +317,12 @@ impl RssPeak {
                 let mut peak: Option<u64> = None;
                 while !flag.load(Ordering::Relaxed) {
                     if let Some(kb) = read_rss_kb() {
-                        peak = Some(peak.map_or(kb, |was: u64| was.max(kb)));
+                        peak = Some(larger_reading(peak, kb));
                     }
                     std::thread::park_timeout(Duration::from_millis(RSS_SAMPLE_MS));
                 }
                 if let Some(kb) = read_rss_kb() {
-                    peak = Some(peak.map_or(kb, |was: u64| was.max(kb)));
+                    peak = Some(larger_reading(peak, kb));
                 }
                 peak
             })
@@ -367,8 +376,7 @@ impl TierReport {
             display_limit(self.p50),
             display_limit(self.p95),
             display_limit(self.p99),
-            self.peak_rss_kb
-                .map_or_else(|| String::from("unmeasured"), |kib| kib.to_string()),
+            display_limit(self.peak_rss_kb),
         ))
     }
 }
@@ -378,7 +386,10 @@ impl TierReport {
 /// One renderer for every optional reading in this file, so "unmeasured" means
 /// the same thing for a percentile and for a resident set.
 fn display_limit<T: std::fmt::Display>(value: Option<T>) -> String {
-    value.map_or_else(|| String::from("unmeasured"), |number| number.to_string())
+    match value {
+        Some(number) => number.to_string(),
+        None => String::from("unmeasured"),
+    }
 }
 
 /// Run one tier at the level the ceiling allows and prove its properties.
@@ -471,21 +482,113 @@ fn run_tier(requested: usize, ceiling: usize) -> Result<TierReport, Box<dyn Erro
     })
 }
 
-/// One acknowledged append's latency tails on the real path.
+/// The size of the bare write beside each append, near one framed event.
+const CONTROL_BYTES: usize = 128;
+
+/// A durable write that took this many microseconds or more is a stall: a
+/// quarter of a second blocked on the device, which a healthy host never costs.
+pub(crate) const STALL_US: u128 = 250_000;
+
+/// How many times a bare durable write's median cost the path's median may be.
+///
+/// The path is that write behind a hop to the storage owner, its fence and its
+/// frame: 1.1 to 1.2 times the bare write at the median, and up to 2.3 times at
+/// the p99, in the runs recorded beside this test (idle, and beside a second
+/// process appending to ten thousand journals), so eight is the margin of a
+/// defect (a flush per rung reads as four, ten flushes as ten) and not of a busy
+/// host.
+pub(crate) const TYPICAL_RATIO: u128 = 8;
+
+/// How many times as often as the bare writes beside them (counting one more
+/// than they took) the appends may stall before the stalls are called the path's.
+///
+/// A stall hits the one write in flight, and the two alternate, so a stall that
+/// belongs to the host lands on each about equally: the odds that the bare writes
+/// take none of eleven stalls the host dealt both are one in 2,048. On a host
+/// whose bare writes never stall the rule reads exactly as the 250 ms p99 bound
+/// it replaces.
+pub(crate) const STALL_RATIO: usize = 8;
+
+/// The median of `sample`, by nearest rank.
+fn median(sample: &[u128]) -> Result<u128, String> {
+    let mut sorted = sample.to_vec();
+    sorted.sort_unstable();
+    percentile(&sorted, 500).ok_or_else(|| String::from("a sweep sampled nothing at all"))
+}
+
+/// How many samples of `sample` are [`STALL_US`] or more.
+pub(crate) fn stalls(sample: &[u128]) -> usize {
+    sample.iter().filter(|us| **us >= STALL_US).count()
+}
+
+/// Whether a sweep of acknowledged appends is pathological, judged against the
+/// bare durable writes timed beside them in the same instants (microseconds).
+///
+/// A latency bound written in absolute microseconds measures the host as much as
+/// the path: main CI run 38929540150 started thirteen jobs in one second and this
+/// path read p50 2.6 ms and p99 453 ms with nothing in it changed. So the path is
+/// judged against the host's own durable write, on two counts:
+///
+/// - **typical cost:** the median append is at most [`TYPICAL_RATIO`] times the
+///   median bare write, which a host slowed throughout slows both of;
+/// - **stalls:** more than 1% of the appends stalling is the old absolute bound
+///   (the nearest-rank p99 is a stall exactly when more than 1% of the samples
+///   are), and it is the path's only when it stalls [`STALL_RATIO`] times as often
+///   as the bare writes did, so a host that stalls on its own is not charged to it.
+///
+/// # Errors
+///
+/// The reason the sweep is pathological, or that a sample was empty.
+pub(crate) fn append_verdict(path: &[u128], bare: &[u128]) -> Result<(), String> {
+    let (path_p50, bare_p50) = (median(path)?, median(bare)?);
+    let (path_stalls, bare_stalls) = (stalls(path), stalls(bare));
+    let slow_throughout = path_p50 > bare_p50.max(1).saturating_mul(TYPICAL_RATIO);
+    let stalls_alone = path_stalls > path.len().div_euclid(100)
+        && path_stalls >= STALL_RATIO.saturating_mul(bare_stalls.saturating_add(1));
+    match (slow_throughout, stalls_alone) {
+        (true, _) => Err(format!(
+            "the median append took {path_p50}us, more than {TYPICAL_RATIO}x the {bare_p50}us of \
+             the bare durable write beside it"
+        )),
+        (false, true) => Err(format!(
+            "{path_stalls} of {} appends took {STALL_US}us or more, so the p99 is a stall, and the \
+             bare durable writes beside them stalled {bare_stalls} times: the stalls are the \
+             path's, not the host's",
+            path.len()
+        )),
+        (false, false) => Ok(()),
+    }
+}
+
+/// One acknowledged append's latency tails on the real path, against the host.
 ///
 /// Every sample is a full `compare_and_append`: fence, frame, write and
-/// `sync_all` on the storage owner, then the acknowledgment. The bounds are
-/// generous — the assertion is that the path is not pathological on this host,
-/// and the exact tails are the measured value the report carries.
+/// `sync_all` on the storage owner, then the acknowledgment. Straight after each
+/// one the test times a bare `write` and `sync_all` on a sibling file, so the
+/// host is measured in the same instants as the path.
+///
+/// The claim is that the path is not pathological on this host, which
+/// [`append_verdict`] decides against the bare writes: a host shared with
+/// thirteen CI jobs that all start in the same second stalls both alike (run
+/// 38929540150 read this path at p99 453 ms with nothing in it changed), and a
+/// bound in absolute microseconds there measures the neighbours. The tails of
+/// both are in the report.
 #[test]
 fn append_latency_tails_are_bounded() -> TestResult {
+    use std::io::Write as _;
+
     let dir = scratch("latency");
     std::fs::create_dir_all(&dir)?;
     let _guard = TempGuard(dir.clone());
     let path = dir.join("journal.log");
     let mut journal = FileJournal::open(&path)?;
+    let mut control = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("control.log"))?;
 
     let mut samples: Vec<u128> = Vec::with_capacity(SAMPLES);
+    let mut bare: Vec<u128> = Vec::with_capacity(SAMPLES);
     for index in 0..SAMPLES {
         let attempt = u64::try_from(index)?.saturating_add(1);
         let event = EffectEvent::IntentAdmitted { key: key(attempt)? };
@@ -497,11 +600,20 @@ fn append_latency_tails_are_bounded() -> TestResult {
             DurabilityPromise::ProcessCrash,
             "every sampled append must earn the durable promise"
         );
+        let start = Instant::now();
+        control.write_all(&[0xA5; CONTROL_BYTES])?;
+        control.sync_all()?;
+        bare.push(start.elapsed().as_micros());
     }
+    let verdict = append_verdict(&samples, &bare);
     samples.sort_unstable();
+    bare.sort_unstable();
     let p50 = percentile(&samples, 500).ok_or("the latency sweep sampled nothing at all")?;
     let p95 = percentile(&samples, 950).ok_or("the latency sweep sampled nothing at all")?;
     let p99 = percentile(&samples, 990).ok_or("the latency sweep sampled nothing at all")?;
+    let bare_p50 = percentile(&bare, 500).ok_or("the control sampled nothing at all")?;
+    let bare_p95 = percentile(&bare, 950).ok_or("the control sampled nothing at all")?;
+    let bare_p99 = percentile(&bare, 990).ok_or("the control sampled nothing at all")?;
     let max = match samples.last() {
         Some(worst) => worst.to_string(),
         // An empty sample has no slowest value, and the percentile fields beside
@@ -510,13 +622,16 @@ fn append_latency_tails_are_bounded() -> TestResult {
         None => String::from("unmeasured"),
     };
     record_measurement(&format!(
-        "append p50_us={p50} p95_us={p95} p99_us={p99} max_us={max} samples={SAMPLES}"
+        "append p50_us={p50} p95_us={p95} p99_us={p99} max_us={max} samples={SAMPLES} \
+         bare_p50_us={bare_p50} bare_p95_us={bare_p95} bare_p99_us={bare_p99}"
     ))?;
     assert_eq!(journal.events().count(), SAMPLES, "every append committed");
-    assert!(
-        p99 < 250_000,
-        "append p99 {p99}us is pathological on this host (p50={p50} p95={p95} max={max})"
-    );
+    verdict.map_err(|reason| {
+        format!(
+            "append latency is pathological on this host: {reason} (append p50={p50} p95={p95} \
+             p99={p99} max={max}; bare p50={bare_p50} p95={bare_p95} p99={bare_p99})"
+        )
+    })?;
     Ok(())
 }
 

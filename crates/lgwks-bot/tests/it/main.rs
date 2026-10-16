@@ -184,6 +184,7 @@ mod script_map_parity;
 mod script_refusals;
 mod script_trail;
 mod session;
+mod sim_append_verdict;
 mod sim_cancel_under_load;
 mod sim_cas;
 mod sim_cas_corrupt;
