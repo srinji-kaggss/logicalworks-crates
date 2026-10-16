@@ -13,6 +13,22 @@
 //! - A deadline stops a tree the same way and the run reports the deadline.
 //! - A spec that captures a stream is refused before anything starts.
 //!
+//! The acceptance rows T19, T20 and T21 (`docs/acceptance/t-rows-windows.toml`)
+//! are answered here for the part a job object answers:
+//!
+//! - T19: a shell that exits by itself, with zero or with seven, while a
+//!   descendant runs, is not reported as a clean tree. The job is settled and
+//!   its receipt says what it read.
+//! - T20: a stop requested before the manager task has run stops the tree.
+//! - T21: a stop reaches no process outside the job. No escape from the job is
+//!   driven, because a child can leave a job only through a breakaway the
+//!   supervisor's jobs do not grant and this suite cannot attempt without
+//!   `unsafe`, so the row stays `present` (`docs/orchestration-acceptance.spec.md`).
+//!
+//! Each of those has a named test and a seeded simulation (`tests/process_job/
+//! sims.rs`) over real jobs. `tests/process_job/tree.rs` holds the trees they
+//! start and the second witness they read, a file a descendant holds open.
+//!
 //! This is a binary of its own, apart from the crate's `it` binary, so the
 //! `windows-latest` job that executes it compiles this file and the library it
 //! drives and not the other four thousand tests (the `Process containment on
@@ -29,6 +45,10 @@
 
 #[path = "support/scratch.rs"]
 mod scratch;
+#[path = "process_job/sims.rs"]
+mod sims;
+#[path = "process_job/tree.rs"]
+mod tree;
 
 use scratch::Scratch;
 
@@ -154,6 +174,93 @@ fn a_spec_that_captures_a_stream_is_refused_before_anything_starts() -> TestResu
             "a captured stream is refused as unsupported, got {refused:?}"
         );
         assert_eq!(supervisor.stats().spawned, 0, "nothing was started");
+        Ok(())
+    })
+}
+
+#[test]
+fn a_zero_exit_with_a_live_descendant_still_settles_the_job_t19() -> TestResult {
+    let dir = Scratch::new("job-zero")?;
+    let script = tree::script(2, &tree::exit_after_a_second(0));
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor.spawn_process(&cmd(&script, dir.path())).await?;
+        let outcome = outcome(&mut supervisor).await?;
+        tree::exited_with(&outcome, 0)?;
+        tree::settled(&outcome, 2)?;
+        assert!(
+            tree::all_released(dir.path(), 2).await,
+            "the descendants still held their files after the job settled"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_nonzero_exit_is_a_failure_and_still_settles_the_job_t19() -> TestResult {
+    let dir = Scratch::new("job-seven")?;
+    let script = tree::script(1, &tree::exit_after_a_second(7));
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor.spawn_process(&cmd(&script, dir.path())).await?;
+        let outcome = outcome(&mut supervisor).await?;
+        tree::exited_with(&outcome, 7)?;
+        tree::settled(&outcome, 1)?;
+        assert!(
+            tree::all_released(dir.path(), 1).await,
+            "the descendant still held its file after the job settled"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_stop_before_the_manager_task_runs_still_stops_the_tree_t20() -> TestResult {
+    let dir = Scratch::new("job-pre-poll")?;
+    let script = tree::script(2, tree::STAY);
+    // A current-thread runtime, and no await between starting the tree and
+    // stopping it: the manager task that owns the job has not run when the stop
+    // is requested, which is the state T20 names.
+    lgwks_bot::block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor.spawn_process(&cmd(&script, dir.path())).await?;
+        tree::up_without_yielding(dir.path())?;
+        assert!(
+            tree::all_held(dir.path(), 2),
+            "the background pings hold their files before the stop"
+        );
+        tree::stopped_tree(&supervisor.shutdown().await, 2)?;
+        assert!(
+            tree::all_released(dir.path(), 2).await,
+            "the descendants still held their files after the stop"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_stop_leaves_an_unrelated_process_running_t21() -> TestResult {
+    let dir = Scratch::new("job-outsider")?;
+    let script = tree::script(1, tree::STAY);
+    let mut outsider = tree::Outsider::start()?;
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::default();
+        supervisor.spawn_process(&cmd(&script, dir.path())).await?;
+        marker(dir.path(), tree::UP).await?;
+        supervisor.cancel();
+        let outcome = outcome(&mut supervisor).await?;
+        tree::settled(&outcome, 2)?;
+        assert!(
+            tree::all_released(dir.path(), 1).await,
+            "the descendant still held its file after the stop"
+        );
+        assert!(
+            outsider.is_running(),
+            "the stop reached a process that was never in the job"
+        );
         Ok(())
     })
 }

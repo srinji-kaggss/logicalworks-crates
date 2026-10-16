@@ -106,23 +106,19 @@ jobs:
   build:
     name: Workspace build and tests
     # The instance keeps its target directory across runs, so a warm run
-    # recompiles only what changed: 250 s on run 38365526454. A hosted runner
-    # starts from a restored cache that never holds the workspace crates, and
-    # compiled lgwks_bot's `it` test binary alone for 100 s (run 38401426445).
-    # A push that edits a test source is the cold case of that: the changed
-    # test binaries compiled for 184 s (run 38870029835), 249 s (run 38936864320)
-    # and 243 s (run 38941034251) at a load average of 45-90, against 31 s at 15
-    # and 22 s with nothing changed, so the first run after the edit is cancelled
-    # at the bound with its tests unfinished; the next is the job's measurement.
+    # recompiles only what changed: 250 s on run 38365526454. A push that edits
+    # a test source is the cold case of that: the changed test binaries compiled
+    # for 184 s (run 38870029835), 249 s (run 38936864320) and 243 s (run
+    # 38941034251) at a load average of 45-90, against 31 s at 15 and 22 s with
+    # nothing changed, so the first run after the edit is cancelled at the bound
+    # with its tests unfinished; the next is the job's measurement.
     #
     # lgwks_bot's tests (4,138 of the 5,569) run in the lgwks_bot jobs below (full,
     # saturation and no default features), and `build_verdict` reports this
     # check's required name only when those three and this job all passed, so
-    # every test is still required. Run on a warm
-    # directory beside a load average near 50 (run 38871028285), every one of the
-    # 5,569 passed and the step was cancelled in the second the last one did,
-    # 252 s in, with 902 of the 1,576 summed test-seconds in the lgwks_bot `it`
-    # binary: the share this job no longer carries.
+    # every test is still required. Run on a warm directory beside a load average
+    # near 50 (run 38871028285), every one of the 5,569 passed and the step was
+    # cancelled in the second the last one did, 252 s in.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 5
     env:
@@ -176,7 +172,6 @@ jobs:
         run: cargo test --workspace --doc --locked
       - name: Run package smoke test
         run: ./scripts/lgwks-std-package-smoke.sh
-
 
   # The checks that read the tree rather than test it, in a job of their own:
   # none builds the workspace's tests, so they need not wait on that compile,
@@ -447,11 +442,10 @@ jobs:
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
-    # job builds one small binary (`acceptance-receipts`, std only) and reads two
-    # XML files with it, so it costs seconds rather than adding a second
-    # execution of the tests the shards already ran between them.
+    # job builds one small binary (`acceptance-receipts`, std only) and reads the
+    # XML files with it, so it costs seconds, not a second run of the tests.
     name: Acceptance receipts
-    needs: [tests_bot_full, tests_bot_saturation, tests_linux]
+    needs: [tests_bot_full, tests_bot_saturation, tests_linux, process-windows]
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     env:
@@ -469,13 +463,13 @@ jobs:
         with:
           pattern: lgwks-bot-junit-*
           path: acceptance-artifact
-      - name: Download the Linux lgwks-bot JUnit report
+      - name: Download the Linux and Windows JUnit reports
         uses: actions/download-artifact@v4
         with:
-          name: acceptance-junit-linux
-          path: acceptance-linux
+          pattern: acceptance-junit-*
+          path: acceptance-junit
       - name: Record acceptance receipts
-        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64
+        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
       - name: Upload acceptance receipt
         uses: actions/upload-artifact@v4
         with:
@@ -976,13 +970,12 @@ jobs:
           --no-default-features --features gpui --example gpui
 
   # #263 on Windows, executed. The job object a supervised tree lives in is the
-  # kernel's own membership list, so the only evidence that the containment works
-  # is a Windows host that runs the supervisor's real path and reads that list
-  # empty after a cancel and after a deadline (`crates/lgwks-bot/tests/
-  # process_job.rs`). Every other Windows job of this file builds or lints.
-  # The test is a binary of its own, and the features are the ones it needs, so
-  # the compile is lgwks_std, the async engine and lgwks_bot, not the crate's
-  # four thousand tests.
+  # kernel's own membership list, so the only evidence that containment works is
+  # a Windows host running the supervisor's real path and reading that list empty
+  # (`crates/lgwks-bot/tests/process_job.rs`). Every other Windows job of this
+  # file builds or lints. This one's JUnit report is the Windows receipt of rows
+  # T19-T21 (`docs/acceptance/t-rows-windows.toml`). The tests are a binary of
+  # their own, so the compile is lgwks_std, the async engine and lgwks_bot.
   process-windows:
     name: Process containment on Windows
     runs-on: windows-latest
@@ -990,8 +983,7 @@ jobs:
     env:
       # Lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
-      # The test is a handful of syscalls and two child processes, so the
-      # optimizer would only lengthen the compile.
+      # The tests start processes and read files; the optimizer would only slow the compile.
       CARGO_PROFILE_TEST_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -1005,10 +997,18 @@ jobs:
           save-if: "true"
           cache-on-failure: "true"
           key: process-windows
+      - uses: taiki-e/install-action@nextest
       - name: Run the Windows job-object containment tests
         # Stops before the job limit so the cache is saved (see the build job).
         timeout-minutes: 4
-        run: cargo test --locked -p lgwks_bot --no-default-features --features process --test process_job
+        run: cargo nextest run --locked -p lgwks_bot --no-default-features --features process --test process_job --profile ci
+      - name: Upload the Windows JUnit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-junit-windows
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 7
 
   # The repository's ruleset requires a check named exactly "Clippy and scan".
   # The lint job above is a matrix, whose legs report as "Clippy and scan

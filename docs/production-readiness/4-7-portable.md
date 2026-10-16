@@ -102,9 +102,9 @@ passed in 17.8 s with no undefined behaviour reported, which checks the pointers
 and lengths the leaf hands its call table and not the `kernel32` externs behind
 it. `tests/process_job.rs` drives a real job on a Windows host: the
 `Process containment on Windows` CI job (`windows-latest`, lane
-`process-windows`) runs its three tests, a cancelled job holding a grandchild
-settling empty, a deadline stopping a job, and a stream-capturing spec refused
-before the fork. The Windows receipt is that run plus the scripted and Miri ones.
+`process-windows`) runs its eleven tests under nextest: a cancelled job holding a
+grandchild settling empty, a deadline, a refused capture, and T19–T21 as four named tests and four seeded simulations.
+The Windows receipt is that run's JUnit report (`docs/acceptance/t-rows-windows.toml`) plus the scripted and Miri ones.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` off Unix and Windows,
