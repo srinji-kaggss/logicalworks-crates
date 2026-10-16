@@ -74,6 +74,17 @@ frontier claim now rests on two legs — the authority axis above, and a
 measured authoring comparison on guarantee tasks where every `lgwks_bot` arm
 beats the ecosystem standard — with the model half still open.
 
+What the runner costs the gate, measured 2026-10-16 on one aarch64-apple-darwin
+host at a load average of 5.7: it adds 89 unit tests and five journeys. A cold test
+build of its binary with every dependency, in an empty target directory with
+`CARGO_INCREMENTAL=0`, took 15.96 s wall, 54 s of CPU and 447 MB peak resident set;
+the 89 unit tests then ran in 5.75 s at 259 MB peak, and those plus the journeys and
+the `ci-local` tests (260 in all) in 13.5 s. The PR's first full CI run had three jobs
+cancelled at the 300 s cap with the host's five-minute load average at 67, against
+262, 267 and 114 s for the same three jobs on main's last run. Sixteen cold seconds
+do not explain that, so the wall is the contention that #272 and #279 own, and it is
+not this binary's cost.
+
 *Not covered:* the survey sample is eight systems and one patent reading, not
 the whole market. A rival that occupies the same axis would falsify the
 position, and no one has looked for one since the survey ran.
