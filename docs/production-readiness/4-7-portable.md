@@ -2,16 +2,17 @@
 
 Part of [production readiness](../production-readiness.md), §4, nine axes.
 
-**⚠️ — one operating system is executed, and eight targets are built. A build
-receipt is not an execution receipt, and this section says which is which.**
+**⚠️ — Linux runs the suites, Windows one containment test, eight targets are
+built. A build receipt is not an execution receipt; this says which is which.**
 
-Twenty-two hosted job definitions in `.github/workflows/ci.yml`, the
-twenty-one at `977c79d4` plus #276's `target-matrix`. Their `runs-on`
-distribution is **18 `ubuntu-latest`, 2 `macos-14` (`gpui-macos`,
-`candle-macos`), 1 `windows-latest` (`gpui-windows`), 1 `matrix.os`**, and that
-single `matrix.os` job is `appcui-native` — so "three operating systems" is
-true of those storefront features and not of the estate. The `lgwks_std` /
-`lgwks_bot` / `lgwks_ast` test and clippy lanes are `ubuntu-latest` only. A
+Twenty-one job definitions in `.github/workflows/ci.yml`, counted at this
+change. Their `runs-on` distribution is **12 self-hosted macOS, 4
+`ubuntu-latest`, 2 `macos-latest`, 2 `windows-latest` (`gpui-windows`,
+`process-windows`), 1 `matrix.os`**, and that single `matrix.os` job is
+`appcui-native`, whose legs are self-hosted macOS and `windows-latest` — so
+"three operating systems" is true of those storefront features and not of the
+estate. The Linux paths execute in a container on the self-hosted macOS runner
+(`tests_linux`) and `lgwks_std`'s full suite on `ubuntu-latest`. A
 `wasm32-wasip1` boundary lane checks that the default feature set compiles for
 WASI — a build check, not an executed containment test. `os.uname` and other
 host-only calls are behind `platform` dispatch.
@@ -66,15 +67,15 @@ an_adopted_orphan_is_named_by_its_adoption` proves the attribution (a pid that
 is both captured and adopted is signalled, then reaped), and the sweep in
 `start` / `confirm_absence` collects the adoptees no guard captured, so a
 killed descendant is never left as a `kill -0`-present zombie. The fire test
-drives 1,000 supervised depth-3 trees under cancellation at in-flight 100 (ten
-rounds of one hundred 7-process trees, 7,000 processes) and at in-flight 1,000
-(one round of one thousand 3-process chains, 3,000 processes — the host's
-`maxprocperuid` of 4,000 forbids ten thousand processes at once, so the second
-level uses chains rather than fan-out): zero surviving descendants in every
-round, verified from the OS process table. Cleanup latency p50/p99 559/574 ms
-at in-flight 100 and 6,582 ms at in-flight 1,000 (one thousand macOS `ps`
-snapshots dominate the second number), peak RSS 13.8 MB and 58.8 MB
-respectively. A descendant orphaned to init before the cleanup ran, where no
+(`tests/it/process_fire.rs`, INV-BOT-164, Linux container leg) cancels 1,000
+supervised depth-3 trees (a root `sh`, a middle `sh`, a `sleep` leaf) at
+in-flight 100 (ten rounds) and at in-flight 1,000 (one round, 3,000 processes)
+and reads the leaves from `/proc` instead of the receipt: zero survivors in
+every round. Measured in the `aarch64` OrbStack container (`Max processes`
+24,093, pid limit `max`): cancel-to-report p50/p95/p99 13.2/20.4/24.8 ms at 100
+and 155/165/165 ms at 1,000, peak RSS 16,096 KiB and 49,076 KiB, receipts
+naming `ProcChildrenTree` for 867 and 997 trees and `SubreaperAdoption` for 133
+and 3, none `CgroupKill`. A descendant orphaned to init before the cleanup ran, where no
 subreaper adopted it, is still not reachable from the leader: a cleanup that
 begins after the leader exited on its own reads no table and reports
 `ResidualRisk::LeaderExited`, so its containment is never `is_complete()`
@@ -99,16 +100,17 @@ leaf's ten scripted-kernel tests (`process::windows::tests`) also run under Miri
 cross-interpreted for `x86_64-pc-windows-msvc` (`cargo miri nextest run`): 10
 passed in 17.8 s with no undefined behaviour reported, which checks the pointers
 and lengths the leaf hands its call table and not the `kernel32` externs behind
-it. `tests/it/process_job.rs` drives a real job but no Windows host has run it,
-because no CI job runs the `lgwks_std` or `lgwks_bot` suites on `windows-latest`.
-Windows containment is therefore a code, type-check, scripted-decision and Miri
-receipt, not yet an executed one.
+it. `tests/process_job.rs` drives a real job on a Windows host: the
+`Process containment on Windows` CI job (`windows-latest`, lane
+`process-windows`) runs its three tests, a cancelled job holding a grandchild
+settling empty, a deadline stopping a job, and a stream-capturing spec refused
+before the fork. The Windows receipt is that run plus the scripted and Miri ones.
 
 **The feature × OS × backend × assurance matrix, and what it does not say.** The
 bot's supervised process backend returns `Unsupported` off Unix and Windows,
-and a green `windows-latest` job is still a *build* receipt for `lgwks_std` and
-`lgwks_bot`, never a *containment* receipt: no Windows run in CI has stopped a
-job object. A build check and an executed containment test are different facts, and
+and a green `windows-latest` job is a *containment* receipt only for
+`process-windows`, which stops a real job object; every other Windows job builds
+or lints. A build check and an executed containment test are different facts, and
 only the second one is a portability claim about the runtime. The eight-target
 matrix above is itself a build receipt: every row was executed by `cargo check`
 and none of them ran a test.

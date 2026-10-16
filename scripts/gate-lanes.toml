@@ -599,6 +599,17 @@ ci_step = "Check GPUI Windows renderer fixture"
 platforms = ["win32"]
 reason = "the GPUI Windows renderer builds only on Windows"
 
+# #263 on Windows, executed: the supervisor's job-object path run on a Windows
+# host, with the job read empty after a cancel and after a deadline. The test is a
+# binary of its own, so this builds lgwks_bot's library and that one file.
+[[lane]]
+id = "process-windows"
+surfaces = "local ci"
+required = false
+command = "cargo test --locked -p lgwks_bot --no-default-features --features process --test process_job"
+ci_step = "Run the Windows job-object containment tests"
+platforms = ["win32"]
+reason = "the job object is the Windows kernel's; every other host reports the lane skipped by name"
 
 [[lane]]
 id = "appcui-native"

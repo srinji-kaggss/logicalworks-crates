@@ -21,6 +21,18 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'package(lgwks_bot) & binary(it) & test(/^journal_scale::/)'
 threads-required = 'num-test-threads'
 
+# #263: the fire test supervises a thousand process trees at 100 and at 1,000 in
+# flight, which is three thousand processes at its peak, so it runs with every
+# test slot to itself and no sibling competes for the process cap it reports.
+# It prints its measured line on success too: the line is the evidence (p50,
+# p95 and p99 cancel-to-report, the mechanisms, the peak resident set), and a
+# passing test's output is otherwise discarded. It is Linux-only, so it runs in
+# the container leg, whose pid namespace is its own.
+[[profile.default.overrides]]
+filter = 'package(lgwks_bot) & binary(it) & test(/^process_fire::/)'
+threads-required = 'num-test-threads'
+success-output = 'immediate'
+
 # The storefront consumers (INV-DEP-9) are one test per family, and every one is
 # a `cargo check` into the same target directory. Run side by side, all but one
 # park on cargo's lock and that wait counts against their own slow-timeout, so
