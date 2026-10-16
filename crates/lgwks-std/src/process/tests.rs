@@ -344,10 +344,12 @@ fn a_descendant_that_left_the_group_is_still_captured() -> Result<(), Box<dyn st
     // session leader, so it is in a different group from its parent and only
     // a pid signal can stop it. The capture is what makes it reachable.
     // The escapee writes its own pid to the shared pipe and the test reads it:
-    // the pid is data to wait for, and a host without python3 ends the pipe
-    // when the leader's sleep does, which reads as `None`.
+    // the pid is data to wait for, and a host without perl ends the pipe
+    // when the leader's sleep does, which reads as `None`. The pid is printed
+    // after `setsid` returns, so the line names a process already out of the
+    // group; `$|` flushes it at once, since a pipe is block-buffered.
     let mut tree = Tree::start(
-        "python3 -c 'import os,time; os.setsid(); print(os.getpid(), flush=True); time.sleep(30)' & exec sleep 30",
+        "perl -e 'use POSIX; setsid(); $| = 1; print $$, chr(10); sleep 30' & exec sleep 30",
     )?;
     let root = tree.root;
     let Some(line) = tree.line()? else {
