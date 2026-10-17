@@ -46,7 +46,11 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   300 s cap with no test failing: in the two job logs read (workspace and
   bot-full) `Compiling lgwks_bot` began at 04:14:23Z and was still running when
   the cancel landed at 04:19:05Z. A doc comment in a Rust file recompiles the
-  crate cold, which #272 owns.
+  crate cold, which #272 owns. Run 2 (39002421637, `3ff90d01`, markdown only)
+  lost two: every step of the workspace job had passed by 04:29:04Z, 296.7 s
+  after it started at 04:24:08Z, and the job still ended `cancelled` at
+  04:29:16Z; bot-full had run 2,294 of 4,721 tests when the cancel landed at
+  04:29:20Z. #272 owns both walls.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
