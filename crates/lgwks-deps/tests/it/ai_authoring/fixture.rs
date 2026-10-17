@@ -40,6 +40,8 @@ model_call_s = 5
 build_s = 120
 oracle_s = ORACLE_SECONDS
 git_s = 30
+token_budget = 1000
+call_tokens = 100
 
 [defaults]
 models = ["fixture-model"]

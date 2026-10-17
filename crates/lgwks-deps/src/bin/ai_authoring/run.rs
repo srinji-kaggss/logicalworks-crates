@@ -14,6 +14,7 @@ use lgwks_std::json::Value;
 
 use super::author::{CliAuthor, ensure_sandbox, full_prompt};
 use super::bench::Bench;
+use super::budget::{Budgeted, Ledger};
 use super::cargo::Cargo;
 use super::children::{Children, Launch, guard, inherited_env};
 use super::cli::Options;
@@ -204,6 +205,8 @@ struct Shared<'run> {
     commit: &'run str,
     /// The model command.
     command: &'run str,
+    /// The token budget and the record of what the run has asked.
+    ledger: &'run Ledger,
     /// Repairs a failing compile gets.
     max_repairs: u32,
     /// The trials still to run.
@@ -226,7 +229,7 @@ fn execute(shared: &Shared<'_>, job: &Job) -> Result<Record, BenchError> {
     let dir = prepare(bench, shared.work, job)?;
     let texts = prompt_texts(bench, job)?;
     write_scratch(&dir, &texts)?;
-    let author = CliAuthor {
+    let cli = CliAuthor {
         bench,
         command: shared.command,
         model: &job.model,
@@ -234,6 +237,11 @@ fn execute(shared: &Shared<'_>, job: &Job) -> Result<Record, BenchError> {
         work: shared.work,
         children: shared.children,
         bound: bench.limits.model_call,
+    };
+    let author = Budgeted {
+        inner: &cli,
+        ledger: shared.ledger,
+        model: &job.model,
     };
     let start = match shared.mode {
         Mode::Models => Start::Model {
@@ -399,6 +407,11 @@ pub(super) fn run(
         bench.limits.oracle,
     );
     let workers = choices.parallel.max(1).min(remaining.len().max(1));
+    let already = places.done.values().fold(0_u64, |sum, record| {
+        sum.saturating_add(record.tokens_in)
+            .saturating_add(record.tokens_out)
+    });
+    let ledger = Ledger::new(bench.limits.token_budget, bench.limits.call_tokens, already);
     let shared = Shared {
         bench,
         mode,
@@ -409,6 +422,7 @@ pub(super) fn run(
         console,
         commit: &commit,
         command: &choices.command,
+        ledger: &ledger,
         max_repairs: choices.max_repairs,
         queue: Mutex::new(remaining.into()),
         records: Mutex::new(Vec::new()),
@@ -424,6 +438,13 @@ pub(super) fn run(
         errors,
         ..
     } = shared;
+    if mode == Mode::Models {
+        let standing = ledger.standing();
+        console.say(&format!(
+            "model tokens billed: {} of the {} budget; {} call(s) refused as repeats in meaning",
+            standing.spent, standing.limit, standing.repeats
+        ));
+    }
     let mut stopped = match errors.into_inner() {
         Ok(found) => found,
         Err(poisoned) => poisoned.into_inner(),

@@ -21,6 +21,7 @@
 
 mod author;
 mod bench;
+mod budget;
 mod cargo;
 #[path = "../shared/children.rs"]
 mod children;
@@ -28,6 +29,7 @@ mod cli;
 #[path = "../shared/console.rs"]
 mod console;
 mod grade;
+mod opencode;
 mod plan;
 mod record;
 mod run;

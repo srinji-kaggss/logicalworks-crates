@@ -64,10 +64,14 @@ cargo run --locked -p lgwks_deps --bin ai-authoring -- --tables RUN_DIR        #
 cargo run --locked -p lgwks_deps --bin ai-authoring -- --matrix                # the model matrix
 ```
 
-`--matrix` calls the models and costs money: the manifest's defaults are three
-models, six arms, six tasks less three excluded cells and five profiles at two
-trials each, 990 trials, launched once. It has not been run at that scale, and
-no run under `runs/` was made by this binary's `--matrix`. Every model run there
+`--matrix` calls the model and costs money: the manifest's defaults are one model
+(OpenCode's Go muse 1.3), six arms, six tasks less three excluded cells and five
+profiles at one trial each, 165 trials. One trial per cell, because a second
+puts the same prompt twice, and the Director's order of 2026-10-17 allows no
+repetition in meaning. The run bills at most `token_budget` tokens, 9M, under
+the Director's 10M: `budget.rs` refuses a call before it is made when its worst
+case would pass the budget or when it repeats an earlier one. No run under
+`runs/` was made by this binary's `--matrix`. Every model run there
 was made by `run.py` (one regrade by `regrade.py`), and the Python ban deleted
 both in #537 (`22a19af25`; the last copy of each is at `22a19af25^`); `regrade`
 is not ported.
