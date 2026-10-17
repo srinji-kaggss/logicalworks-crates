@@ -45,16 +45,25 @@ const RUNNER: &str = env!("CARGO_BIN_EXE_ai-authoring");
 /// listener it announces itself to and then blocks on.
 const GATE: &str = "AI_AUTH_ANNOUNCE";
 
-/// How long the gated oracle may block before it gives up on a runner that never
-/// stopped it, so a runner that fails to stop it fails a test instead of parking one.
+/// How long past the oracle bound the gated oracle may block before it gives up on a
+/// runner that never stopped it, so a runner that fails to stop it fails a test
+/// instead of parking one.
 const VALVE_SECONDS: u32 = 60;
 
 /// The oracle bound of the tests that do not exercise it, in seconds.
 const ORACLE_BOUND: u32 = 120;
 
-/// The oracle bound of the test that does, in seconds: long enough for a cold
-/// compile of one oracle on a loaded host, short enough to wait out.
+/// The least oracle bound of the test that does, in seconds: what `measured_bound`
+/// starts from, long enough for a cold compile of one oracle on an idle host and
+/// short enough to wait out.
 const SHORT_ORACLE_BOUND: u32 = 12;
+
+/// The most that test will wait out, in seconds.
+const LONGEST_SHORT_BOUND: u32 = 90;
+
+/// How many times the cost of one un-gated oracle, measured on this host a moment
+/// before, the test's oracle bound is.
+const BOUND_MARGIN: f64 = 4.0;
 
 /// A directory removed when the test ends.
 struct Dir {
@@ -150,9 +159,10 @@ impl Fixture {
         put(&bench, "tasks/alpha/prompt.md", "Answer.\n")?;
         put(&bench, "tasks/alpha/oracle.rs", ALPHA_ORACLE)?;
         put(&bench, "tasks/beta/prompt.md", "Double.\n")?;
-        let beta_oracle = BETA_ORACLE
-            .replace("__GATE__", GATE)
-            .replace("__VALVE__", &VALVE_SECONDS.to_string());
+        let beta_oracle = BETA_ORACLE.replace("__GATE__", GATE).replace(
+            "__VALVE__",
+            &oracle_seconds.saturating_add(VALVE_SECONDS).to_string(),
+        );
         put(&bench, "tasks/beta/oracle.rs", &beta_oracle)?;
         put(&bench, "reference/solo-alpha.rs", ALPHA_REFERENCE)?;
         put(&bench, "reference/solo-beta.rs", BETA_REFERENCE)?;
@@ -571,14 +581,46 @@ fn gated(fixture: &Fixture, args: &[String], kill: bool) -> Result<Gated, Box<dy
     })
 }
 
+/// The oracle bound, in seconds, that the un-gated task fits inside on this host
+/// now: `BOUND_MARGIN` times the wall time one dry-run oracle of that task takes,
+/// from `SHORT_ORACLE_BOUND` up to `LONGEST_SHORT_BOUND`. An oracle run is a whole
+/// `cargo test`, compile included, so what it costs is the host's load and not a
+/// constant a test can write down.
+fn measured_bound() -> Result<u32, Box<dyn Error>> {
+    let fixture = Fixture::new("measure", ORACLE_BOUND)?;
+    let mut args = fixture.run_args("--dry-run");
+    args.extend(["--tasks".to_owned(), "alpha".to_owned()]);
+    let run = fixture.run(&args)?;
+    assert_eq!(
+        run.code,
+        Some(0),
+        "the measuring dry run must finish clean: {:?} {:?}",
+        run.stdout,
+        run.stderr
+    );
+    let found = records(&fixture.out.join("results.jsonl"))?;
+    let cost = of_task(&found, "alpha")?
+        .get("oracle_wall_ms")
+        .and_then(Value::as_f64)
+        .ok_or("the measuring run recorded no oracle_wall_ms for alpha")?;
+    let mut seconds = SHORT_ORACLE_BOUND;
+    while seconds < LONGEST_SHORT_BOUND && f64::from(seconds) * 1000.0 < cost * BOUND_MARGIN {
+        seconds = seconds.saturating_add(1);
+    }
+    Ok(seconds)
+}
+
 /// Source: #270's "process-group kill ... a 1,800 s oracle timeout recorded as a failure"
-/// and "no orphan process after a run". Requirement: an oracle still running at its
-/// bound is stopped as a group (its process is gone when the runner returns), its
-/// clauses are recorded `timeout` after at least the bound, the other task is graded
-/// as usual, the run is not a crash and exits 0.
+/// and "no orphan process after a run"; CI run 38985141189, where the un-gated task's
+/// own `cargo test` ran past 12 s at a host load of 70 and read `timeout`. Requirement:
+/// an oracle still running at its bound is stopped as a group (its process is gone
+/// when the runner returns), its clauses are recorded `timeout` after at least the
+/// bound, the other task is graded as usual under a bound measured on this host, the
+/// run is not a crash and exits 0.
 #[test]
 fn an_oracle_past_its_bound_is_stopped_with_its_group_and_recorded_as_a_timeout() -> TestResult {
-    let fixture = Fixture::new("timeout", SHORT_ORACLE_BOUND)?;
+    let bound = measured_bound()?;
+    let fixture = Fixture::new("timeout", bound)?;
     let shown = gated(&fixture, &fixture.run_args("--dry-run"), false)?;
     assert!(
         !shown.after_announcement.contains("VALVE"),
@@ -615,7 +657,7 @@ fn an_oracle_past_its_bound_is_stopped_with_its_group_and_recorded_as_a_timeout(
     assert!(
         beta.get("oracle_wall_ms")
             .and_then(Value::as_f64)
-            .is_some_and(|wall| wall >= f64::from(SHORT_ORACLE_BOUND) * 1000.0),
+            .is_some_and(|wall| wall >= f64::from(bound) * 1000.0),
         "the oracle ran its whole bound before it was stopped: {:?}",
         beta.get("oracle_wall_ms")
     );
