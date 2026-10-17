@@ -110,3 +110,10 @@ alone adds about 20 s to the run, against the CI step's 230 s and 280 s. What
 else slows a CI job had not been measured when this was written: with no job
 running, swap read 19.3 GB of 20.5 GB used, the compressor held 15.5 GB, and
 `fseventsd` was 4.9 GB resident at 100% CPU.
+
+*#272, paging, measured later that day:* a sampler beside the PR run (39015466069,
+326 s) and the main run (39016003867, cancelled) read free memory averaging 131 and
+159 MiB (lowest 60 and 76), 1,979 and 1,471 MiB swapped out, and 246 and 285 GB
+through the compressor in 450 s. Idle, `top` shows `fseventsd` at a 28 GB footprint (23 GB
+compressed) pinned at one core; 60 RAM-volume mounts did not grow it. One bot-full
+lane peaks at 860 MiB, so the holder is not its tests; the process is unnamed.
