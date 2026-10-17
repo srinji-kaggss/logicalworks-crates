@@ -120,6 +120,13 @@ priority = 50
 # the end. Priority 50 starts them after the exclusive tests above, so they overlap
 # the rest of the job instead of ending it. The tests are unchanged, only their
 # place in the order.
+#
+# Main run 39035226045 (806f4b0f8): all 4,724 tests passed in a 266.6 s test phase
+# and the job ended 301 s after it started, one second past the cap. The tests
+# that held it were sim_task_resume's tenants_stay_isolated bands 13, 12, 15 and 14
+# (142, 140, 78 and 71 s; 11.7, 11.3, 6.3 and 7.8 s on an idle host) and three
+# t02_compile_surface probes (90 to 95 s; each is a cargo check). The bands now open
+# one store handle per tenant instead of one per offer, 7.9, 7.9, 5.6 and 6.7 s idle.
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
