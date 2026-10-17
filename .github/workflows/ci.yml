@@ -299,8 +299,8 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    # The instance's own target directory: a cold `lgwks_bot` compile took 4m41
-    # on run 39061756210, so a Rust edit needs the checkout built in place first.
+    # The run's critical path: 263 s and 274 s on runs 39060016758 and 39059515989,
+    # and 4,228 of 4,731 tests done at the 5-minute cap on warm run 39062648303.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
     timeout-minutes: 5
     # One job, so the full feature set is compiled once (see the header).
