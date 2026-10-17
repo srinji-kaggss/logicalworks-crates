@@ -88,6 +88,11 @@ env:
   # job has. This restores the declared setting; it changes how much is
   # recompiled, not what is built.
   CARGO_INCREMENTAL: "1"
+  # How many test processes of the whole machine run at once on macOS: the
+  # `churn-slot` wrapper of `.config/nextest.toml` holds one of this many slots
+  # for as long as each test process runs, shared by every job (#272). Set here
+  # so a count is tried without recompiling the wrapper; its default is six.
+  LWC_CHURN_SLOTS: "4"
 
 jobs:
   # The gate lanes and the workspace suite, in two shards of one nextest run.
