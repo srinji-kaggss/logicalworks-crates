@@ -4,109 +4,89 @@ Pages of this guide: [manifest](getting-started.md) · [the program](getting-sta
 
 ## The program
 
+The program is `crates/lgwks-bot/examples/queue_watch.rs`. The part you write is
+below: the registry that names the source and the action, the flow, a host that
+runs it, and a `main` that runs it three times. The source (`QueueDepth`), the
+action (`Page`) and the two counters they read and move are defined above these
+lines in the file; [the pieces](getting-started-pieces.md) says what each is.
+
 ```rust
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use lgwks_bot::{Auth, Bot, BotError, Cap, Execute, GrantSet, Observe};
-
-/// The observed source. A real one reads a socket, a file, or an API; this one
-/// reads a counter the caller owns, so the example is deterministic.
-struct QueueDepth {
-    depth: Arc<AtomicU32>,
-}
-
-impl Observe for QueueDepth {
-    /// `PartialEq` is this executor's one extra bound: the condition here *is*
-    /// change detection, so the observed value has to be comparable.
-    type Output = u32;
-
-    fn required_caps(&self) -> &[Cap] {
-        &[]
-    }
-
-    async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
-        call.0.check(self.required_caps())?;
-        Ok(self.depth.load(Ordering::SeqCst))
-    }
-
-    fn domain_id(&self) -> &str {
-        "queue::depth"
+domains! {
+    /// What the flow below may name: one source and one action.
+    QUEUE_DOMAINS {
+        observe {
+            "queue::depth" => QueueDepth::from_target,
+        }
+        execute {
+            "notify::page" => Page::from_target,
+        }
     }
 }
 
-/// The effect. Delivering a notification is what needs `bot.notify`, so that is
-/// the capability the action declares.
-struct Page {
-    caps: Vec<Cap>,
-    pages: Arc<AtomicU32>,
+lgwks_bot::script! {
+    /// Read the depth of the queue called `name`; page on call when it is over ten.
+    flow watch(name: &str) -> u32:
+        let depth: u32 = observe queue::depth of name
+        if depth > 10:
+            act notify::page on "oncall" with depth
+        give back depth
 }
 
-impl Execute for Page {
-    type Input = u32;
-    type Output = ();
-
-    fn required_caps(&self) -> &[Cap] {
-        &self.caps
-    }
-
-    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
-        // Checked before the effect, not after it.
-        call.0.check(self.required_caps())?;
-        self.pages.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn domain_id(&self) -> &str {
-        "notify::page"
-    }
+/// A host for the `queue-watch` tenant over [`QUEUE_DOMAINS`], holding `grants`.
+fn host(grants: GrantSet) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder("queue-watch")?
+        .domains(&QUEUE_DOMAINS)
+        .grants(grants)
+        .default_deadline(Duration::from_secs(30))
+        .build()?)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let depth = Arc::new(AtomicU32::new(3));
-    let pages = Arc::new(AtomicU32::new(0));
+/// Set the queue to `depth` and run the flow once on `host`: the depth it read,
+/// or the reason the run was refused.
+fn run_at(host: &Host, depth: u32) -> Result<u32, Box<dyn Error>> {
+    DEPTH.store(depth, Ordering::SeqCst);
+    let watching = task("watching", |scope: Scope, name: &'static str| async move {
+        watch(&scope, name).await
+    })?;
+    let report = lgwks_bot::block_on(host.run(&watching, "jobs"));
+    Ok(report.result().copied().map_err(ToString::to_string)?)
+}
 
-    // The grant set is required at build, not only at run: a bot declaring a
-    // capability it was not granted fails here.
-    let grants = GrantSet::empty().grant(Cap::notify());
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut out = std::io::stdout().lock();
+    let granted = host(GrantSet::empty().grant(Cap::notify()))?;
 
-    let mut bot = Bot::builder("queue-watch")
-        .observe(QueueDepth {
-            depth: Arc::clone(&depth),
-        })
-        .on(|seen: &u32| *seen > 10, Page {
-            caps: vec![Cap::notify()],
-            pages: Arc::clone(&pages),
-        })
-        .build(&grants)?;
+    let seen = run_at(&granted, 3)?;
+    let pages = PAGES.load(Ordering::SeqCst);
+    writeln!(out, "depth {seen}, pages delivered: {pages}")?;
+    assert_eq!(pages, 0, "depth 3 is under the threshold");
 
-    // Tick one: depth is 3. A source with no remembered value counts as
-    // changed, so the condition is evaluated; it is false, so nothing fires.
-    let first = bot.tick()?;
-    assert_eq!(first, 0, "depth 3 is under the threshold");
-    assert_eq!(bot.revisions(), vec![1], "the first poll is a change");
+    let seen = run_at(&granted, 11)?;
+    let pages = PAGES.load(Ordering::SeqCst);
+    writeln!(out, "depth {seen}, pages delivered: {pages}")?;
+    assert_eq!(pages, 1, "one page was delivered");
 
-    // Tick two: depth is unchanged. `Revision` does not move, so the condition
-    // is not even re-evaluated.
-    let second = bot.tick()?;
-    assert_eq!(second, 0);
-    assert_eq!(bot.revisions(), vec![1], "a held value is not a change");
-
-    // Tick three: depth moves past the threshold, and the effect runs once.
-    depth.store(11, Ordering::SeqCst);
-    let third = bot.tick()?;
-    assert_eq!(third, 1, "one action fired");
-    assert_eq!(pages.load(Ordering::SeqCst), 1);
-
-    // Tick four: depth is still 11. The condition is still true and the effect
-    // does not run again, because nothing moved.
-    let fourth = bot.tick()?;
-    assert_eq!(fourth, 0, "a held value does not re-fire");
-    assert_eq!(pages.load(Ordering::SeqCst), 1);
-
-    println!("fired: {third}, revisions: {:?}", bot.revisions());
+    let refusal = run_at(&host(GrantSet::empty())?, 11)
+        .err()
+        .ok_or("a host without the grant ran the page")?;
+    let pages = PAGES.load(Ordering::SeqCst);
+    writeln!(out, "no grant: {refusal}")?;
+    assert_eq!(pages, 1, "a refused page is not delivered");
     Ok(())
 }
 ```
 
-It prints `fired: 1, revisions: [2]`.
+## What it prints
+
+```text
+depth 3, pages delivered: 0
+depth 11, pages delivered: 1
+no grant: watching/watch/page: blocked: 1 ungranted: bot.notify
+```
+
+Those three lines are the output of `cargo run -p lgwks_bot --example queue_watch`
+on the commit that added the example, and its three assertions hold the page
+counts (0, then 1, then still 1). Depth 3 is under ten, so the flow reads the
+depth and gives it back. Depth 11 runs the action once. The third run is the same
+flow on a host that was not granted `bot.notify`: it is refused at the page step,
+named by its path, and the action never runs.

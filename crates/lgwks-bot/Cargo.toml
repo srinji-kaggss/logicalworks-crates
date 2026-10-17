@@ -199,6 +199,11 @@ path = "examples/script_tenants.rs"
 required-features = ["script"]
 
 [[example]]
+name = "queue_watch"
+path = "examples/queue_watch.rs"
+required-features = ["script"]
+
+[[example]]
 name = "inspect_scale"
 path = "examples/inspect_scale.rs"
 required-features = ["inspect", "script"]

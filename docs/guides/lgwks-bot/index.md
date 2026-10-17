@@ -13,12 +13,15 @@ cargo add lgwks_bot
 ```
 
 ```rust
-use lgwks_bot::{Bot, Cap, GrantSet};
+lgwks_bot::script! {
+    flow count(items: Vec<u8>) -> usize:
+        give back items.len()
+}
 ```
 
 The package is `lgwks_bot` (underscore) in the directory `crates/lgwks-bot`
-(hyphen), imported as `use lgwks_bot::...`. There is no `lgwks-bot` package to
-add.
+(hyphen), written as `lgwks_bot::script!`. There is no `lgwks-bot` package to
+add. [Getting started](getting-started.md) runs a whole program.
 
 ## What a bot is
 
