@@ -4,7 +4,7 @@
 [ceilings]
 "crates/lgwks-ast/src/diagnostic.rs" = 20
 "crates/lgwks-ast/src/error.rs" = 1
-"crates/lgwks-ast/src/lib.rs" = 6
+"crates/lgwks-ast/src/lib.rs" = 1
 "crates/lgwks-ast/src/parser.rs" = 50
 "crates/lgwks-ast/src/scan/mod.rs" = 7
 "crates/lgwks-ast/src/script/find.rs" = 5
