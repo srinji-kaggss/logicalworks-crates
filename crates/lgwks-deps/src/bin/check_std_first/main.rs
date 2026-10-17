@@ -9,18 +9,24 @@
 //!   * a capability reimplemented by hand that `std` or `lgwks_std` supplies.
 //!
 //! Findings: `UNDECLARED`, `UNAUTHORIZED`, `STD-FIRST`, `POLICY-ONLY`, plus
-//! `UNATTRIBUTED`, `EMPTY` and `STALE EXEMPTION` for an audit that read nothing.
+//! `UNATTRIBUTED`, `EMPTY` and `STALE EXEMPTION` for an audit that read nothing,
+//! and `SURFACE`: a library file declares more `pub` items than
+//! `contract/PUBLIC_SURFACE.toml` allows, or the contract allows more than it
+//! declares (#526, `surface.rs`).
 //!
 //! The whole `use` tree is read, not only its root: `use lgwks_std::json::serde;`
 //! binds `serde`, so a later `use serde::de::X;` resolves through `lgwks_std` and
 //! reaches no edge at all, which is the rule being followed.
 //!
 //! Usage: `check-std-first [--justify] [ROOT]`. Exit 0 when nothing is found.
+//! `check-std-first --surface-baseline [ROOT]` prints the surface contract the
+//! tree implies, to record a legitimate change.
 
 mod files;
 mod lexer;
 mod manifest;
 mod scans;
+mod surface;
 #[path = "../shared/toml_subset.rs"]
 mod toml_subset;
 
@@ -489,6 +495,8 @@ fn audit_repository(repo: &Path) -> Result<Audit, AuditError> {
     audit.consumers = storefront_consumers(repo, &source, &owned)?;
     let marker = policy_only_findings(&approved, &audit.consumers);
     audit.findings.extend(marker);
+    let surface = surface::findings(repo, &source)?;
+    audit.findings.extend(surface);
     Ok(audit)
 }
 
@@ -591,12 +599,22 @@ fn execute(
     Ok(0)
 }
 
+/// Prints the public-surface contract the tree implies (`--surface-baseline`).
+fn record_surface(root: &Path, out: &mut impl Write) -> Result<u8, Box<dyn std::error::Error>> {
+    let source = files::source_files(root)?;
+    surface::baseline(root, &source, out)?;
+    Ok(0)
+}
+
 fn main() -> ExitCode {
     let mut root = PathBuf::from(".");
     let mut with_justify = false;
+    let mut baseline = false;
     for argument in std::env::args_os().skip(1) {
         if argument == "--justify" {
             with_justify = true;
+        } else if argument == "--surface-baseline" {
+            baseline = true;
         } else {
             root = PathBuf::from(argument);
         }
@@ -605,7 +623,12 @@ fn main() -> ExitCode {
     let mut out = stdout.lock();
     let stderr = io::stderr();
     let mut err = stderr.lock();
-    match execute(&root, with_justify, &mut out, &mut err) {
+    let verdict = if baseline {
+        record_surface(&root, &mut out)
+    } else {
+        execute(&root, with_justify, &mut out, &mut err)
+    };
+    match verdict {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             if writeln!(err, "{error}").is_err() {
