@@ -57,9 +57,8 @@ What this does and does not move. The `script!` arm is measured for the first
 time and holds: 60 of 60 full passes across the three tasks. The `futures`
 lead on the old tasks stands unchallenged — nothing here re-runs models, and
 no interval is claimed over deterministic references. The frontier closed
-model, the other models and the human authors have not run: the matrix calls
-paid models and nobody has ordered that spend, so #270 stays open on it. Its
-runner is back, in Rust (`ai-authoring`, a `lgwks_deps` binary driven by
+model, a second model and the human authors have not run, so #270 stays open
+on them. Its runner is back, in Rust (`ai-authoring`, a `lgwks_deps` binary driven by
 `bench/ai-authoring/bench.toml`; the Python runner stays deleted), and the
 README gives its exact command and its planned scale (990 trials). What ran,
 at HEAD, for free: a dry run of all 33 cells (`runs/20261016T225212Z-dry`;
@@ -73,6 +72,16 @@ The README's per-task table says which arm wins where it is measured. So the
 frontier claim now rests on two legs — the authority axis above, and a
 measured authoring comparison on guarantee tasks where every `lgwks_bot` arm
 beats the ecosystem standard — with the model half still open.
+
+The model half ran once, on 2026-10-17: one model (OpenCode's Go muse 1.3), 165
+trials, five per task and arm, 4,569,097 tokens billed
+(`bench/ai-authoring/matrix-2026-10-17.md`, `runs/20261017-matrix-models/`). On
+`capture`, `futures` passed 0 of 5 and `fan` and `new` 4 of 5, but the 95%
+Wilson intervals ([0, 43] and [38, 96]) overlap. On `tenant-cache` and
+`durable-retry` all six arms passed 5 of 5 although the `futures` reference
+fails clauses of both, so those two do not separate the arms. No lower bound
+passes 57 percent, and 14 of the 165 records crashed on a ledger refusal that
+#596 now records as a trial instead.
 
 What the runner costs the gate, measured 2026-10-16 on one aarch64-apple-darwin
 host at a load average of 5.7: it adds 89 unit tests and five journeys. A cold test

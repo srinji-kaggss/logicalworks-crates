@@ -25,6 +25,7 @@ member.
 | [Results through 2026-10-04](history.md) | The profile matrix and the four-arm comparison against the ecosystem standard, on aggregate and pipeline. |
 | [Recovery, re-measured](recovery.md) | The three rig defects behind recovery's first 2/20, found one per run, and the regrade. |
 | [The guarantee tasks and their controls](guarantees.md) | The `script!` arm, the three tasks whose oracles fail a solution lacking the guarantee, and the reference and mutant controls. |
+| [The model matrix of 2026-10-17](matrix-2026-10-17.md) | The first `--matrix` run: one model, 165 records, passes per task and arm, and the 14 crashed records. |
 
 ## Which arm wins, per task
 
@@ -44,9 +45,11 @@ one per cell at HEAD (`runs/20261016T225212Z-dry/`), not model samples
 | `durable-retry` | all clauses | all clauses | all clauses | 4/6 clauses | `lgwks_bot` arms: `futures` duplicates an effect across a drop and a `SIGKILL`, in 30 lines (`old` 38). |
 
 The `script` arm passes every clause of the three guarantee tasks as a
-reference too; no model has authored in it. Not measured: any model on `capture`, `tenant-cache` or `durable-retry`, the
-`lexicon` arm (a `script!` author whose whole context is the generated
-`docs/script-lexicon.md`), a frontier closed model on the planned scale, and
+reference too. One model has authored in it, and in `lexicon` (a `script!`
+author whose whole context is the generated `docs/script-lexicon.md`): the
+matrix of 2026-10-17, five trials per task and arm
+([matrix-2026-10-17.md](matrix-2026-10-17.md), `runs/20261017-matrix-models/`).
+Not measured: a second model, a frontier closed model, ten trials per cell and
 human authors. The oracles of the last three tasks are proven by negative
 controls (`ai-authoring --mutants` and the `futures` references,
 [guarantees.md](guarantees.md)); no interval is claimed over deterministic
@@ -70,9 +73,9 @@ profiles at one trial each, 165 trials. One trial per cell, because a second
 puts the same prompt twice, and the Director's order of 2026-10-17 allows no
 repetition in meaning. The run bills at most `token_budget` tokens, 9M, under
 the Director's 10M: `budget.rs` refuses a call before it is made when its worst
-case would pass the budget or when it repeats an earlier one. No run under
-`runs/` was made by this binary's `--matrix`. Every model run there
-was made by `run.py` (one regrade by `regrade.py`), and the Python ban deleted
+case would pass the budget or when it repeats an earlier one. Its one run is
+`runs/20261017-matrix-models/` (4,569,097 tokens billed). Every other model run
+there was made by `run.py` (one regrade by `regrade.py`), and the Python ban deleted
 both in #537 (`22a19af25`; the last copy of each is at `22a19af25^`); `regrade`
 is not ported.
 
