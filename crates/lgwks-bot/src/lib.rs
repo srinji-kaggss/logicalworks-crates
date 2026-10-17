@@ -1,6 +1,12 @@
 //! Capability-gated automation bots built on four verbs: Observe, Evaluate,
 //! Execute, Query.
 //!
+//! The supported interface is `script!`: this page shows the `script` module its
+//! expansion calls into and the `script!` and `try_join!` macros, and nothing else.
+//! Every other module and root re-export is `#[doc(hidden)]` support, still
+//! reachable by this crate's own tests and by the expansion, and kept out of the
+//! documented surface by #526.
+//!
 //! Bots are assembled from `(condition, action)` chains that bind observed
 //! sources to side effects. Authority is proof-carrying: every `poll`,
 //! `execute_action`, and `query` takes an `(Auth, input)` tuple, and only
@@ -128,6 +134,7 @@ use std::pin::Pin;
 ///
 /// Public because it appears in the public `PipelineStep` signature: an
 /// implementer must be able to name the return type.
+#[doc(hidden)]
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// The environment broker: which environments a run owns, which generation each
@@ -137,8 +144,10 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// dispatch aimed at a replaced environment would be accurate and still wrong.
 /// See [`broker`] for why a stale generation and a generation the broker
 /// never issued are deliberately different errors.
+#[doc(hidden)]
 pub mod broker;
 /// Capability tokens and sealed authority proofs.
+#[doc(hidden)]
 pub mod cap;
 /// Versioned shared records: compare-and-set writes for concurrent editors.
 ///
@@ -146,7 +155,9 @@ pub mod cap;
 /// holds the version the writer saw; a late write is the typed
 /// [`BotError::Conflict`] outcome — recorded in the
 /// store's bounded conflict log, never retried blindly (issue #278, row 5).
+#[doc(hidden)]
 pub mod cas;
+#[doc(hidden)]
 pub mod domain {
     //! Shipped automation domains.
     //!
@@ -184,9 +195,11 @@ pub mod domain {
 /// Re-exported unchanged from `rt::clock` for every build that has `rt`, so
 /// this is one clock reached two ways and never two clocks: `rt::clock` is the
 /// path a caller who has the async surface already writes.
+#[doc(hidden)]
 pub mod clock;
 /// The cross-host lease with fencing epochs, the bounded dispatch queue, and
 /// the coordinator that commits every dispatch row before the lane starts.
+#[doc(hidden)]
 pub mod dist_lease;
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
 /// implementation, not a second way to run a bot.
@@ -198,8 +211,10 @@ mod ecs;
 /// deliveries both arriving as "attempt 3" are indistinguishable, so a repeat
 /// of an old settlement and a statement about a new one look the same at the
 /// moment the ledger accepts one. See [`EffectKey`](effect::EffectKey).
+#[doc(hidden)]
 pub mod effect;
 /// Typed bot errors.
+#[doc(hidden)]
 pub mod error;
 /// Politeness and admission: whether a host may be contacted now, and if not,
 /// what the scheduler does instead.
@@ -208,8 +223,10 @@ pub mod error;
 /// the reasons behind them are typed state machines rather than more arms — see
 /// the module documentation for why that is the difference between a schedule
 /// that replays and an execution token that became an audit log.
+#[doc(hidden)]
 pub mod frontier;
 /// Grant sets: build-time admission and per-tick proof minting.
+#[doc(hidden)]
 pub mod gate;
 /// One effect per key: POST through a retrying proxy without sending twice.
 ///
@@ -219,6 +236,7 @@ pub mod gate;
 /// effect. Wired rather than offered: an upstream credential refusal on this
 /// path is the credential row's typed repair, and the row's tests stand a
 /// real duplicating proxy in front of the adapter (issue #278, row 6).
+#[doc(hidden)]
 pub mod idempotent;
 /// Typed in-process structural code inspection (R8, feature `inspect`).
 ///
@@ -229,8 +247,10 @@ pub mod idempotent;
 /// infrastructure-failure outcomes. The subject is never compiled, imported,
 /// built, shelled or loaded.
 #[cfg(feature = "inspect")]
+#[doc(hidden)]
 pub mod inspect;
 /// The interface model: recognizing the element a step names.
+#[doc(hidden)]
 pub mod interface;
 /// The durable journal an effect is appended to before it leaves the process.
 ///
@@ -239,10 +259,13 @@ pub mod interface;
 /// also where the durability grade lives: a journal that cannot survive its own
 /// writer dying refuses to be the record behind an external handoff, rather
 /// than accepting an append it will lose.
+#[doc(hidden)]
 pub mod journal;
 /// JSON through the shared facade (`lgwks_std::json`).
+#[doc(hidden)]
 pub mod json;
 /// Language understanding: the tiered lexicon behind the resolver seam.
+#[doc(hidden)]
 pub mod language;
 /// Model output admitted as data: bounded decode, provenance, evidence-gated
 /// completion, bounded repair, tenant-scoped artifacts, and a context checkpoint
@@ -284,6 +307,7 @@ pub mod language;
 /// `<step>/refusal` before the error is returned, so a run resumed on a fresh host
 /// reads back what the first run refused. See `INV-BOT-95`.
 #[cfg(feature = "script")]
+#[doc(hidden)]
 pub mod proposal;
 /// The `domain_id -> constructor` registry: what a spec's strings resolve to.
 ///
@@ -298,6 +322,7 @@ mod registry;
 /// what it established. What this module adds is RQ-009's decision rule, which
 /// composes those with the budget, the authority, the intent and any remote
 /// deduplication contract.
+#[doc(hidden)]
 pub mod retry;
 /// The canonical PR-review task: pin a subject, publish at that commit, and
 /// verify the publication independently.
@@ -346,18 +371,22 @@ pub mod retry;
 /// # fn main() {}
 /// ```
 #[cfg(all(feature = "script", feature = "process"))]
+#[doc(hidden)]
 pub mod review;
 /// Async runtime surface (feature `rt`): owned `Runtime`, bounded fan-out,
 /// timers, channels, and opt-in drivers.
 #[cfg(feature = "rt")]
+#[doc(hidden)]
 pub mod rt;
 /// Orchestration blocks for [`script!`]: scoped, bounded, deadline-carrying,
 /// keyed, and mapped (feature `script`).
 #[cfg(feature = "script")]
 pub mod script;
 /// The semantic tier: resolving an utterance a lexicon cannot reach.
+#[doc(hidden)]
 pub mod semantic;
 /// Synchronous validated guidance flows and session runner.
+#[doc(hidden)]
 pub mod session;
 /// The error vocabulary's escaping and retry-class promises, simulated; declared
 /// here because `error.rs` is past the size law.
@@ -381,6 +410,7 @@ mod sim_stream;
 /// rather than offered: [`Auth::check_remote`] judges
 /// a proof minted on one clock against a foreign reading within the bound
 /// (issue #278, row 2).
+#[doc(hidden)]
 pub mod skew;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
@@ -404,6 +434,7 @@ pub mod skew;
 /// expands to plain calls into the `script` module, leaves every verb's
 /// `Auth::check` where it was, and reaches `syn` only on the host through the
 /// `lgwks_deps` storefront.
+#[doc(hidden)]
 pub mod spec;
 /// The stable-read protocol: what an `Observe` adapter must establish before a
 /// reading is allowed to count as a change.
@@ -417,6 +448,7 @@ pub mod spec;
 /// Wired rather than offered: [`domain::data::JsonStore`] reads through
 /// [`stability::read_stable_file`], so every poll of a JSON-backed store is
 /// confirmed before it is reported.
+#[doc(hidden)]
 pub mod stability;
 /// The task front door: a [`Host`](task::Host) runs a
 /// [`Task`](task::Task) and returns a [`Report`](task::Report) (feature
@@ -428,14 +460,19 @@ pub mod stability;
 /// in the author's code. It sits on `script`, so a task body composes with
 /// `each`, `within` and `retry` and inherits their bounds.
 #[cfg(feature = "script")]
+#[doc(hidden)]
 pub mod task;
 /// The estate-owned durable keyed store behind multi-tenant run records:
 /// tenant policies, run rows and lane rows with per-tenant keyed reads.
+#[doc(hidden)]
 pub mod tenant_store;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
+#[doc(hidden)]
 pub mod verb;
 
+#[doc(hidden)]
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
+#[doc(hidden)]
 pub use ecs::{
     DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, StalledSource, SupersededObservation,
     TickReport,
@@ -449,15 +486,24 @@ pub use ecs::{
 /// against a hand-rolled loop is only readable once someone says which stage the
 /// ratio is made of.
 #[cfg(feature = "profile")]
+#[doc(hidden)]
 pub use ecs::{TickProfile, TickStage};
+#[doc(hidden)]
 pub use effect::{EventId, InputIdentity};
+#[doc(hidden)]
 pub use error::{BotError, DispatchCertainty, RetryClass};
+#[doc(hidden)]
 pub use gate::GrantSet;
+#[doc(hidden)]
 pub use language::{Alias, LanguageResolver};
+#[doc(hidden)]
 pub use registry::{Action, ActionCtor, Condition, DomainRegistry, Source, SourceCtor};
 #[cfg(feature = "rt")]
+#[doc(hidden)]
 pub use rt::runtime::{Builder, Handle, Runtime, block_on};
+#[doc(hidden)]
 pub use semantic::{Embedder, EmbedderIdentity, SemanticError, SemanticPolicy, SemanticResolver};
+#[doc(hidden)]
 pub use session::{
     AnswerDomain, AnswerRejection, ChoiceArm, CompiledTemplate, DecisionReceipt, DegradedReason,
     Disposition, EffectLedger, FlowBounds, FlowEdge, FlowNodeKind, FlowSpec, Interpolate, Journal,
@@ -468,6 +514,7 @@ pub use session::{
     TemplateInterpolator, TemplatePart, Terminal, TranscriptEntry, Value, ValueExpr, VarScope,
     VarType, Verdict,
 };
+#[doc(hidden)]
 pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 
 /// Write orchestration as indented blocks that expand to bounded,
@@ -476,6 +523,7 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 /// the [`script`](mod@script) module and in `lgwks_macros`.
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
+#[doc(hidden)]
 pub use verb::EffectLifetime;
 /// Why a source cannot be trusted to answer "has this changed?" this tick, and the
 /// statement it makes through [`Observe::cache_state`].
@@ -484,7 +532,9 @@ pub use verb::EffectLifetime;
 /// because it is not a verb. `verb::tests::the_crate_root_reexports_exactly_those_four_verbs`
 /// reads that list as the four verbs and nothing else, so a fifth name beside them
 /// would make the invariant it guards fail for a type that is not a verb.
+#[doc(hidden)]
 pub use verb::RefreshReason;
+#[doc(hidden)]
 pub use verb::{Evaluate, Execute, Observe, Query};
 
 /// Typed in-process structural inspection (feature `inspect`).
@@ -493,6 +543,7 @@ pub use verb::{Evaluate, Execute, Observe, Query};
 /// surface already exports a `Verdict` at the crate root; the two are unrelated
 /// and one name cannot mean two things.
 #[cfg(feature = "inspect")]
+#[doc(hidden)]
 pub use inspect::{
     Budgets, Finding, InspectRequest, Inspection, RuleCoverage, RuleSet, UnsupportedReason, inspect,
 };
@@ -502,12 +553,14 @@ pub use inspect::{
 /// Re-exported from the `lgwks_deps` engine so callers never name `tokio`. For a
 /// fan-out that must be bounded, prefer `rt::task::join_all_bounded`.
 #[cfg(all(feature = "rt", feature = "macros"))]
+#[doc(hidden)]
 pub use lgwks_deps::tokio::join;
 
 /// Race a set of futures, running the first branch that becomes ready.
 ///
 /// Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
 #[cfg(all(feature = "rt", feature = "macros"))]
+#[doc(hidden)]
 pub use lgwks_deps::tokio::select;
 
 /// Wait for all of a set of fallible futures, short-circuiting on the first

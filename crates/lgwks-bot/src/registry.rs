@@ -751,6 +751,7 @@ fn first_duplicate<T: PartialEq>(entries: &[(&'static str, T)]) -> Option<(usize
 /// so it is usually an inherent function on the adapter that parses the spec's
 /// `target` into the adapter's own fields.
 #[macro_export]
+#[doc(hidden)]
 macro_rules! domains {
     (
         $(#[$meta:meta])*

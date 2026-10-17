@@ -73,12 +73,12 @@ where
     repeat_on(&Clock::wall(), token, budget, body).await
 }
 
-/// [`repeat`](crate::rt::supervise::repeat) with the budget measured on a declared [`Clock`].
+/// `repeat` with the budget measured on a declared [`Clock`].
 ///
 /// The same loop, and the same [`Outcome`](crate::rt::supervise::Outcome), with one difference that matters:
 /// `Budget::For` is compared against the clock's own timeline rather than
 /// against a local monotonic instant. A wall clock is the default through
-/// [`repeat`](crate::rt::supervise::repeat), so a caller that never asks for a clock observes the behaviour it
+/// `repeat`, so a caller that never asks for a clock observes the behaviour it
 /// always did — real elapsed time — and a caller that supplies a
 /// caller-advanceable one gets a budget that is exact and costs no real wait to
 /// exhaust.

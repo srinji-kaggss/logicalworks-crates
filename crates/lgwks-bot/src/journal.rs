@@ -575,13 +575,13 @@ pub trait EffectJournal {
     /// Every committed event, in commit order.
     ///
     /// Required rather than optional, and read rather than streamed, because
-    /// this is what [`recover`] consumes: a controller that comes back after a
+    /// this is what `recover` consumes: a controller that comes back after a
     /// crash learns what was in flight by replaying its own journal, and a
     /// journal that cannot be read back cannot be the record behind an external
     /// handoff. An adapter over a store that can only be appended to is a
     /// *sink*, not a journal, and this trait is not a sink.
     ///
-    /// The whole sequence rather than a page, because [`recover`] folds over it
+    /// The whole sequence rather than a page, because `recover` folds over it
     /// and a partial replay answers "what is uncertain" with a subset — which
     /// reads as "nothing is uncertain" for every attempt in the part that was
     /// not read.

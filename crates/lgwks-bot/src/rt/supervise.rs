@@ -54,7 +54,7 @@
 //!
 //! # Why a loop cannot run away
 //!
-//! [`repeat`] is the only loop this module asks a caller to write, and it
+//! `repeat` is the only loop this module asks a caller to write, and it
 //! cannot be written without a [`Budget`]. Every iteration races the
 //! cancellation token, so a cancel always wins even against a body that is
 //! itself awaiting: the body is dropped, not waited on. [`Budget::Ongoing`] is
@@ -189,7 +189,7 @@ const YIELD_INTERVAL: u64 = 32;
 /// How long a repeated body may keep running.
 ///
 /// There is deliberately no free-running variant. `Ongoing` is the unbounded
-/// case and it is still terminated by cancellation, which [`repeat`] always
+/// case and it is still terminated by cancellation, which `repeat` always
 /// races against the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -210,7 +210,7 @@ pub enum Budget {
     Ongoing,
 }
 
-/// Why a [`repeat`] stopped.
+/// Why a `repeat` stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {

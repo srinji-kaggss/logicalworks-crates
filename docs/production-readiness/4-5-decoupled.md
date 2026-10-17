@@ -29,5 +29,7 @@ others. The newest tags (`git tag --sort=-creatordate`) are `lgwks_std-v1.1.0`,
 `lgwks_bot-v1.1.0`, `lgwks_deps-v1.1.0`, `lgwks_macros-v1.1.0` and
 `lgwks_ast-v1.0.0`, and the manifests at `977c79d4` read the same versions. A
 source tag is not a registry upload. The surface table fixes today's surface and
-does not shrink it: hiding items behind `#[doc(hidden)]`, doctests through
-`script!`, and the changelog entries a narrowing owes are the rest of #526.
+only `lgwks_bot`'s root has shrunk: its modules and re-exports sit behind
+`#[doc(hidden)]`, so its rustdoc lists `script!`, `try_join!` and the `script`
+module. Hiding the other crates' items, doctests through `script!`, and the
+changelog entries a narrowing owes are the rest of #526.
