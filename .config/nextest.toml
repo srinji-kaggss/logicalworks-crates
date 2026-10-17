@@ -173,6 +173,15 @@ priority = 50
 filter = 'package(lgwks_deps) & binary(it) & test(/^ai_authoring::/)'
 priority = 50
 
+# #272: PR 600's first run (39051447353): with ai_authoring first, the workspace
+# job's test phase took 206 s, and the two tests that ended it were lgwks_std's
+# sim_tenant_isolation, 39 s, which came up 39 s before the end and finished last,
+# and wire_feature_unification's probes, 21 s, which ended 16 s before it. Same
+# reasoning and same priority as above.
+[[profile.default.overrides]]
+filter = 'package(lgwks_std) & binary(it) & test(/^(sim_tenant_isolation|wire_feature_unification)::/)'
+priority = 50
+
 # #272: the persist tests spend their time in the kernel (open, rename, write),
 # and macOS serializes that work host-wide, so more concurrent processes buy more
 # kernel time, not more throughput. The 236 lgwks_bot cas and journal tests, one
