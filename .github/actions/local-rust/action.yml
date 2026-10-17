@@ -196,10 +196,16 @@ runs:
     # fixed in `lgwks_bot::stability`. APFS preserves names as written and
     # keeps nanosecond times; on a RAM store 500 `F_FULLFSYNC` calls take 0.1 s.
     #
-    # The disk is detached and recreated at every job start: a RAM disk keeps
-    # each page it ever wrote until it is detached, so recreating it is what
-    # bounds its memory to one job's temporary files and leaves nothing of the
-    # previous job behind. A machine where the disk cannot be made keeps its
+    # A new disk is made at every job start and the previous one is detached
+    # beside it, in the background: a RAM disk keeps each page it ever wrote
+    # until it is detached, so a fresh one is what bounds its memory to one
+    # job's temporary files and leaves nothing of the previous job behind.
+    # Thirteen jobs at the same second made the disk in 4.0 to 4.2 s each with
+    # the detach behind them, against 4.1 to 10.3 s with it in front (a
+    # reproduction on an idle host, thirteen volumes, 4 GiB stores); the
+    # detaches then finished 27.7 s after the burst began. Each piece's own
+    # time is printed after its log, so a run says which one the step waited on.
+    # A machine where the disk cannot be made keeps its
     # temporary files on disk, with a warning naming the cost.
     #
     # The runner instances share this machine's cores and its 24 GiB of RAM.
@@ -224,12 +230,27 @@ runs:
         mkdir -p "${out}"
         : > "${out}/ram.env"
         : > "${out}/share.env"
+        timed() {
+          local started="${SECONDS}"
+          "$@"
+          echo "$1 took $(( SECONDS - started )) s"
+        }
         ram_disk() {
-          local owner label sectors device tmp
+          local owner label other sectors device tmp
           owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
-          label="lwc-tmp-${owner}"
+          # Two labels alternate, and this job takes the one the previous job
+          # did not, so its disk exists before the previous one is detached.
+          if [ -d "/Volumes/lwc-tmp-${owner}" ]; then
+            label="lwc-tmp-${owner}-b"
+            other="lwc-tmp-${owner}"
+          else
+            label="lwc-tmp-${owner}"
+            other="lwc-tmp-${owner}-b"
+          fi
           # Ejecting the volume detaches its APFS container and the RAM store
-          # beneath it, which is what returns the memory.
+          # beneath it, which is what returns the memory. A volume still under
+          # the label this job wants is one a job two back left, when its
+          # detach failed or had not finished; it goes first, as it always did.
           if [ -d "/Volumes/${label}" ]; then
             diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
           fi
@@ -254,6 +275,14 @@ runs:
             fi
             mkdir -p "${tmp}"
             find "${tmp}" -mindepth 1 -delete
+          fi
+          # The previous job's disk is detached behind this job's own work. Its
+          # eject took 0.2 s alone and up to 7.9 s when thirteen jobs made it at
+          # the same second, the slowest call of the four (#272); the disk of
+          # this job needed 4.1 s at the most beside it.
+          if [ -d "/Volumes/${other}" ]; then
+            ( diskutil eject force "/Volumes/${other}" >/dev/null 2>&1 || echo "could not eject /Volumes/${other}" >> "${out}/eject.log" ) < /dev/null > /dev/null 2>&1 &
+            disown
           fi
           echo "TMPDIR=${tmp}" >> "${out}/ram.env"
           echo "temporary files: ${tmp} ($(df -h "${tmp}" | awk 'NR==2 {print $2}'))"
@@ -300,13 +329,13 @@ runs:
             cargo-nextest nextest --version
           fi
         }
-        ram_disk > "${out}/ram.log" 2>&1 &
+        timed ram_disk > "${out}/ram.log" 2>&1 &
         ram_pid=$!
-        machine_share > "${out}/share.log" 2>&1 &
+        timed machine_share > "${out}/share.log" 2>&1 &
         share_pid=$!
-        toolchain_pin > "${out}/toolchain.log" 2>&1 &
+        timed toolchain_pin > "${out}/toolchain.log" 2>&1 &
         toolchain_pid=$!
-        nextest_on_path > "${out}/nextest.log" 2>&1 &
+        timed nextest_on_path > "${out}/nextest.log" 2>&1 &
         nextest_pid=$!
         failed=0
         wait "${ram_pid}" || failed=1
