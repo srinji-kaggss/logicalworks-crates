@@ -63,6 +63,19 @@ inputs:
       job of a run makes them at the same second (#272).
     required: false
     default: "4"
+  defer:
+    description: >
+      Seconds the job waits, after its setup, before its first cargo call, so
+      the jobs on the run's critical path reach cargo's package-cache lock
+      first (#272). Zero for the critical path itself. Every job of a run
+      reaches its first cargo call within seconds of the rest, and cargo
+      serialises them on one lock under `$CARGO_HOME`: on run 39021102172 the
+      workspace job's build step waited 53 of its 63 s on that lock and
+      compiled nothing, and was cancelled 5 s into its last step. The jobs
+      off the critical path ended 80 to 270 s inside their cap, so a wait here
+      costs them nothing they need.
+    required: false
+    default: "30"
 runs:
   using: composite
   steps:
@@ -388,3 +401,18 @@ runs:
           done
         ) < /dev/null > /dev/null 2>&1 &
         disown
+    # The lock is cargo's own and the holder is cargo itself: thirteen
+    # `cargo metadata --locked` started in one instant took 1.0 to 1.2 s each
+    # and printed 38 "Blocking waiting for file lock on package cache" lines on
+    # an idle host, against 0.3 s alone (#272). On the loaded host a cargo
+    # call is far slower (the workspace job's own ran 13 s before its first
+    # wait), and the last of the herd waited 53 s. The jobs that finish with
+    # slack start their first cargo call later; the critical-path jobs do not
+    # wait.
+    - name: Yield the registry lock to the critical path
+      if: inputs.defer != '0'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "first cargo call deferred ${{ inputs.defer }} s for the jobs on the critical path"
+        sleep "${{ inputs.defer }}"
