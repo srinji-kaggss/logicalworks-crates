@@ -620,6 +620,19 @@ pub(crate) const STALL_US: u128 = 250_000;
 /// as a multiple of the one the control makes) and not of a busy host.
 pub(crate) const TYPICAL_RATIO: u128 = 8;
 
+/// What the path's own work may cost on top of [`TYPICAL_RATIO`] times the
+/// control, in microseconds.
+///
+/// The ratio reads the path against a write that costs a device flush, and on a
+/// host whose flush is nearly free it reads the path's fixed work against
+/// nothing. Run 39047466052's Linux container leg timed the bare write at a median
+/// of 9us (p95 61, p99 255) and the path at 90us (p95 375, p99 873): ten times the
+/// control, with no stall and no extra flush in it, and the test failed. The
+/// allowance is half a millisecond, so that host reads 90us against a bound of
+/// 572us, while a flush per rung on a host where a flush costs anything is still
+/// a multiple of it.
+pub(crate) const FIXED_COST_US: u128 = 500;
+
 /// How many times as often as the bare writes beside them (counting one more
 /// than they took) the appends may stall before the stalls are called the path's.
 ///
@@ -652,7 +665,8 @@ pub(crate) fn stalls(sample: &[u128]) -> usize {
 /// judged against the host's own durable write, on two counts:
 ///
 /// - **typical cost:** the median append is at most [`TYPICAL_RATIO`] times the
-///   median bare write, which a host slowed throughout slows both of;
+///   median bare write plus [`FIXED_COST_US`] for the path's own work, which a
+///   host slowed throughout slows both of;
 /// - **stalls:** more than 1% of the appends stalling is the old absolute bound
 ///   (the nearest-rank p99 is a stall exactly when more than 1% of the samples
 ///   are), and it is the path's only when it stalls [`STALL_RATIO`] times as often
@@ -664,13 +678,17 @@ pub(crate) fn stalls(sample: &[u128]) -> usize {
 pub(crate) fn append_verdict(path: &[u128], bare: &[u128]) -> Result<(), String> {
     let (path_p50, bare_p50) = (median(path)?, median(bare)?);
     let (path_stalls, bare_stalls) = (stalls(path), stalls(bare));
-    let slow_throughout = path_p50 > bare_p50.max(1).saturating_mul(TYPICAL_RATIO);
+    let slow_throughout = path_p50
+        > bare_p50
+            .max(1)
+            .saturating_mul(TYPICAL_RATIO)
+            .saturating_add(FIXED_COST_US);
     let stalls_alone = path_stalls > path.len().div_euclid(100)
         && path_stalls >= STALL_RATIO.saturating_mul(bare_stalls.saturating_add(1));
     match (slow_throughout, stalls_alone) {
         (true, _) => Err(format!(
             "the median append took {path_p50}us, more than {TYPICAL_RATIO}x the {bare_p50}us of \
-             the bare durable write beside it"
+             the bare durable write beside it plus {FIXED_COST_US}us of its own work"
         )),
         (false, true) => Err(format!(
             "{path_stalls} of {} appends took {STALL_US}us or more, so the p99 is a stall, and the \
