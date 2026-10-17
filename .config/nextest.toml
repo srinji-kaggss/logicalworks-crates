@@ -202,10 +202,18 @@ priority = 50
 [test-groups]
 file-churn = { max-threads = 3 }
 
+#
+# The local bot-full run on an idle host (4,733 tests, 292 s) put 3,118 slot-seconds
+# in its tests, and the modules below, which store and replay journals, requests and
+# repairs, held 1,500 of them beside the 565 the group above already limited. They
+# are limited the same way, and start first (priority 50) so the longest of them,
+# sim_cas at 184 s and sim_tenant_store at 195 s inside the suite against 3.6 s
+# alone, run while the rest of the job's slots are busy instead of after it.
 [[profile.default.overrides]]
-filter = '(package(lgwks_bot) & binary(it) & test(/^(sim_cas_disk|sim_cas_corrupt|sim_cas_execute|sim_cas|sim_journal|sim_tenant_store)::/)) | (package(lgwks_deps) & binary(it) & test(/^sim_vendor_coverage::/)) | (package(lgwks_std) & binary(it) & test(/^sim_fs_walk(_prune)?::/))'
+filter = '(package(lgwks_bot) & binary(it) & test(/^(sim_cas_disk|sim_cas_corrupt|sim_cas_execute|sim_cas|sim_journal|sim_tenant_store|sim_repair|sim_request_key|sim_replay_drift|sim_journal_liveness|sim_group_commit|sim_journal_tail|sim_store_scale|sim_store_faults|sim_continuation|sim_continuation_seal|sim_tenant_journal_kill|tenant_store|journal)::/)) | (package(lgwks_deps) & binary(it) & test(/^sim_vendor_coverage::/)) | (package(lgwks_std) & binary(it) & test(/^sim_fs_walk(_prune)?::/))'
 platform = 'cfg(target_os = "macos")'
 test-group = 'file-churn'
+priority = 50
 
 # The CI profile: the same runs, each writing a JUnit report of what it actually
 # ran, so the acceptance receipt can be built from the suite's own output instead
