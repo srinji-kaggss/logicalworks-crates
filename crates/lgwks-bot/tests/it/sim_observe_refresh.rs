@@ -22,9 +22,11 @@
 //! The rig below (the schedule, the tenants, the sources, the shared constants
 //! and the scripted source) is this module's. The band families are in
 //! `bands`, the stall families in `stalls`, the scripted-wave families in
-//! `scripted_waves` and `scripted_reports`, and the rule that decides which
-//! chain of a wave may yield in `yield_rule`. The band declarations stay at
-//! the foot of this file so every band test keeps its name.
+//! `sim_scripted_waves` and `sim_scripted_reports`, and the rule that decides
+//! which chain of a wave may yield in `sim_yield_rule`. The three modules that
+//! hold `#[test]` functions carry the `sim_` prefix so a file name says what the
+//! tests in it are. The band declarations stay at the foot of this file so every
+//! band test keeps its name.
 //!
 //! # What the band families fix, and why
 //!
@@ -924,10 +926,10 @@ fn baseline_bot(
 }
 
 mod bands;
-mod scripted_reports;
-mod scripted_waves;
+mod sim_scripted_reports;
+mod sim_scripted_waves;
+mod sim_yield_rule;
 mod stalls;
-mod yield_rule;
 
 band_family::band_family! {
     forced_refresh_band_00 => bands::forced_refresh_matches_the_schedule, 0;

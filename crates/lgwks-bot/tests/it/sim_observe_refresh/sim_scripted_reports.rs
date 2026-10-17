@@ -1,6 +1,6 @@
 //! INV-BOT-120..124: deadline bounds, stall and refresh reports, attribution and the deadline-wave replay.
 
-use super::yield_rule::PendingTurn;
+use super::sim_yield_rule::PendingTurn;
 use super::*;
 
 /// A per-poll deadline is accepted at both boundaries and refused one step past
