@@ -48,6 +48,7 @@ use std::error::Error;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Disposition, Host, task};
@@ -140,7 +141,16 @@ fn cancel_case(sim: &mut sim::Sim, reached: &mut Reached) -> TestResult {
     )?;
 
     let limit = NonZeroUsize::new(ceiling).ok_or("a ceiling is drawn from one")?;
-    let host = Host::builder("acme")?.max_concurrent_tasks(limit).build()?;
+    // The host's default run deadline is 30 s of real time: a body is raced
+    // against an engine timer whatever clock the host declares. A band polling a
+    // thousand flows on a starved machine overran it, and a flow ended
+    // `DeadlineExceeded` for a reason the seed did not draw (CI run 39032462407:
+    // three bands, seeds 119, 342 and 908, after 39 to 58 s). An hour is far past
+    // any band's wall time, so only the seeded cancel ends a flow.
+    let host = Host::builder("acme")?
+        .max_concurrent_tasks(limit)
+        .default_deadline(Duration::from_secs(3600))
+        .build()?;
     let live = Arc::new(AtomicUsize::new(0));
     let stopped = Arc::new(AtomicBool::new(false));
     let late = Arc::new(AtomicUsize::new(0));
