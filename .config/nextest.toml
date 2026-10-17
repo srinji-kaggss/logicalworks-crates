@@ -6,8 +6,34 @@
 # 300 s is the whole budget for a gate, so no single test may take longer; the
 # per-module overrides below are tighter where their tests are known to be
 # shorter, and an override's own slow-timeout takes precedence over this one.
+experimental = ["wrapper-scripts"]
+
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# #272: on macOS the thirteen jobs of a run share one kernel, and the same suite
+# that takes 40 s alone with its temporary files on a RAM disk (bot-full: 4,733
+# tests, p99 2.2 s, longest 17 s) takes about 300 s beside the other jobs (p99
+# 29 s, longest 129 s on run 39072053122). Concurrent file churn on that kernel
+# loses throughput past about four processes: copies of one test, one at a time
+# 4.17 s, four at once 8.63 s each, thirteen 40.7 s each. This holds every test
+# process on macOS to one of six slots shared by every job of the machine, each
+# slot a lock file under /tmp that `lockf -k` holds while the test runs (-k keeps
+# the file: without it lockf unlinks it on exit, and two tests could then hold
+# locks on two different files of one name), so the
+# limit is across jobs, which a test group (per job) cannot be. A test that finds
+# every slot taken waits on one chosen by its process id; the lock is released
+# when the test exits however it exits. `lockf` returns the test's own status;
+# 75 is its own "lock busy", which no test exits with. The command runs the test
+# binary with every argument it was given, as the wrapper protocol requires, for
+# all tests of any package.
+[scripts.wrapper.churn-slot]
+command = ['/bin/sh', '-c', 'd=/tmp/lwc-churn; mkdir -p "$d"; for i in 1 2 3 4 5 6; do /usr/bin/lockf -k -s -t 0 "$d/slot-$i" "$@"; rc=$?; [ "$rc" -ne 75 ] && exit "$rc"; done; exec /usr/bin/lockf -k -s "$d/slot-$(( $$ % 6 + 1 ))" "$@"', 'churn-slot']
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "macos")'
+filter = 'all()'
+run-wrapper = 'churn-slot'
 
 # journal_scale measures how many OS threads the process can create and then
 # holds that many tenant journals open. On Linux the thread limit is per user,
