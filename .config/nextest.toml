@@ -161,6 +161,18 @@ priority = 50
 filter = '(package(lgwks_std) & test(/^task::sim_pool_lifetime::/)) | (package(lgwks_std) & binary(it) & test(/^sim_task_public::/))'
 priority = 50
 
+# #272: PR 599's fourth run (39049011341), on runners primed at the merge commit,
+# workspace job: the build took 1 s and the 1,557 tests 289 s, and the job met the
+# cap 0.05 s after the summary printed with every test passed. The test that ended
+# the phase was lgwks_deps' ai_authoring oracle-bound test, 233 s, which came up 56 s
+# in (the other three ai_authoring tests took 100 to 125 s). Priority 50 starts
+# them right after the exclusive tests, so the longest test overlaps the rest of
+# the job instead of ending it. The tests are unchanged, only their place in the
+# order.
+[[profile.default.overrides]]
+filter = 'package(lgwks_deps) & binary(it) & test(/^ai_authoring::/)'
+priority = 50
+
 # #272: the persist tests spend their time in the kernel (open, rename, write),
 # and macOS serializes that work host-wide, so more concurrent processes buy more
 # kernel time, not more throughput. The 236 lgwks_bot cas and journal tests, one
