@@ -65,6 +65,15 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   job printed `1548 tests run: 1548 passed` at 05:17:14Z and was cancelled in the same
   second, and bot-full finished its compile in 3 min 30 s at 05:17:06Z and had run 30
   of 4,724 tests when the cancel landed at 05:17:18Z. #272 owns both walls.
+  Main run 39008733262 (`c51df6bd1`, 31 of 31 green, 315 s) splits its 291 s
+  workspace job as `Pin Rust 1.99.0` 20 s, of which the RAM-disk, machine-share,
+  toolchain and nextest sub-action took 19.6 s; `cargo test --no-run` 64 s, with
+  four `Blocking waiting for file lock on package cache` lines between 06:08:00Z and
+  06:08:39Z and the compile finishing at 06:08:52Z; the tests 158 s (nextest 138.5
+  s). The RAM-disk recipe alone, run on an idle host, took 2.3 s (attach 0.16 s,
+  APFS erase 1.84 s, eject 0.20 s), so the 19.6 s is that recipe with 13 runners
+  starting together, a cause this page has not shown, and no run named the process
+  that held the package-cache lock. #272 owns both.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
