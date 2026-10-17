@@ -112,6 +112,8 @@ pub(crate) enum BenchError {
     Usage(String),
     /// The host or the run's state refuses the request.
     Refused(String),
+    /// The call asks what an earlier call of the run already asked, so it is not made.
+    Repeated,
 }
 
 impl fmt::Display for BenchError {
@@ -124,6 +126,10 @@ impl fmt::Display for BenchError {
             Self::Manifest(ref what) | Self::Usage(ref what) | Self::Refused(ref what) => {
                 write!(formatter, "{what}")
             }
+            Self::Repeated => write!(
+                formatter,
+                "this call repeats an earlier one in meaning, so it is not made"
+            ),
         }
     }
 }

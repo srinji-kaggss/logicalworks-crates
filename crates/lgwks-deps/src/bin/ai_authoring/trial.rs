@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
-use super::BenchError;
 use super::author::{Author, extract_rust_block, repair_prompt};
 use super::bench::{Bench, Task};
 use super::cargo::{Built, Tested};
 use super::grade::{Verdict, consumer_lines, orchestration_sites, read_verdicts};
 use super::plan::Job;
 use super::record::{Record, round_millis};
+use super::{BenchError, fail};
 
 /// What it takes to compile a candidate and grade it.
 pub(super) trait Judge {
@@ -123,12 +123,19 @@ pub(super) fn run_trial(inputs: Inputs<'_>, judge: &dyn Judge) -> Result<Finishe
         let Some((author, ref original)) = model else {
             break;
         };
-        repairs = repairs.saturating_add(1);
-        let reply = ask(
+        // A repair that would repeat an earlier call (the same code failing the
+        // same way) is not made: the candidate cannot improve by being asked
+        // again, so the trial ends as what it is and keeps what it spent.
+        let reply = match ask(
             author,
             &repair_prompt(original, &code, &build_log),
             &mut spent,
-        )?;
+        ) {
+            Ok(reply) => reply,
+            Err(BenchError::Repeated) => break,
+            Err(other) => return fail(other, "repair"),
+        };
+        repairs = repairs.saturating_add(1);
         if !reply.is_empty() {
             code = reply;
         }

@@ -17,11 +17,11 @@ cargo run --locked -p lgwks_deps --bin ai-authoring -- --matrix                #
 
 ## `bench.toml` holds the benchmark
 
-The binary holds none of it. `bench.toml` declares the arms and their sheets, the tasks and the clause that says a dropped future left nothing live, the five profiles, the file layout, the limits, the defaults, the model command line, the excluded cells and the protocol statements a summary records. A change to what the benchmark is changes that file. The defaults are #270's planned run: three models, six arms, six tasks less three excluded cells, five profiles, two trials per profile, which is 990 trials and ten per `(model, arm, task)` cell.
+The binary holds none of it. `bench.toml` declares the arms and their sheets, the tasks and the clause that says a dropped future left nothing live, the five profiles, the file layout, the limits, the defaults, the model command line, the excluded cells and the protocol statements a summary records. A change to what the benchmark is changes that file. The defaults are the run the Director's order of 2026-10-17 allows: one model (OpenCode's Go muse 1.3), six arms, six tasks less three excluded cells, five profiles, one trial per profile, which is 165 trials and five per `(model, arm, task)` cell. #270's planned 990 (three models, two trials per profile) would put the same prompt twice, which that order forbids.
 
 ## Per trial
 
-A trial makes an empty scratch directory holding only the prompt text files, runs the model command with the prompt on stdin under a 900 s bound, parses the final NDJSON result line, extracts the last ` ```rust ` block, copies `template/` into `<work>/<trial-id>/`, writes `src/lib.rs`, and builds with `cargo build --locked --offline` against one `CARGO_TARGET_DIR` per run. On a failed compile it re-prompts with the original prompt, the current code and the first 80 lines of compiler errors, counting one repair, up to `--max-repairs`. If it compiles it copies the hidden oracle to `tests/oracle.rs` and runs `cargo test --locked --offline -- --test-threads=1`. Every cargo process is serialized by an exclusive lock on `<work>/.cargo-gate.lock`.
+A trial makes an empty scratch directory holding only the prompt text files, runs the model command with the prompt on stdin under a 900 s bound, parses the final NDJSON result line, extracts the last ` ```rust ` block, copies `template/` into `<work>/<trial-id>/`, writes `src/lib.rs`, and builds with `cargo build --locked --offline` against one `CARGO_TARGET_DIR` per run. On a failed compile it re-prompts with the original prompt, the current code and the first 80 lines of compiler errors, counting one repair, up to `--max-repairs`; a repair the call ledger refuses as a repeat (below) ends the trial there, keeping its candidate, the repairs made and the tokens spent. If it compiles it copies the hidden oracle to `tests/oracle.rs` and runs `cargo test --locked --offline -- --test-threads=1`. Every cargo process is serialized by an exclusive lock on `<work>/.cargo-gate.lock`.
 
 The model call is closed-book under macOS `sandbox-exec`; `--matrix` refuses on a host without it rather than run the model open-book against the hidden oracle. A dry run compiles each arm's reference solution in the model's place (the lexicon arm uses the `script` arm's, because it authors `script!` from the generated lexicon), and a mutant run compiles each task's deliberate mistake.
 
@@ -36,6 +36,10 @@ A run creates a fresh work root, `$TMPDIR/lgwks-ai-authoring-<UTC stamp>-<mode>/
 ## Bounds and orphans
 
 Every child leads its own process group under a bound. A child still running at its bound is stopped as a group (`TERM`, ten seconds, `KILL`) and what it had printed comes back: an oracle past `oracle_s` (1,800 s) keeps the verdicts of the clauses that finished, the rest are `timeout`, and the trial is a recorded failure, not a crash. A watchdog process in a group of its own stops every group the runner started if the runner itself is killed, so no oracle, solution or `cargo` outlives a run.
+
+## The call ledger
+
+Every model call goes through `budget.rs` first. It refuses a call before it is made when the call repeats an earlier one in meaning (a 128-bit hash of the model and the prompt folded for case and spacing) or when its worst case, `call_tokens` (20,000), would pass `token_budget` (9,000,000). A call that returns is settled at the tokens it used; one that fails releases its reservation. A repeat inside a repair loop is a refusal the trial survives (`BenchError::Repeated`); a budget refusal still ends the trial as a crashed record.
 
 ## Metrics
 
