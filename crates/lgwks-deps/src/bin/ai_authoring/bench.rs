@@ -769,11 +769,15 @@ mod tests {
 
     #[test]
     fn a_limit_that_is_not_a_positive_whole_number_is_refused() {
+        // The committed value is the one replaced, so a limit changed in the
+        // manifest cannot leave this edit a no-op that the test then misreads.
+        let edited = COMMITTED.replacen("oracle_s = 300", "oracle_s = 0", 1);
+        assert_ne!(
+            edited, COMMITTED,
+            "the committed manifest declares `oracle_s = 300`"
+        );
         assert!(
-            refused(
-                &COMMITTED.replacen("oracle_s = 1800", "oracle_s = 0", 1),
-                "oracle_s"
-            ),
+            refused(&edited, "oracle_s"),
             "an oracle bound of zero seconds would time out every trial"
         );
     }
