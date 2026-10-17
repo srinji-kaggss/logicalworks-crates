@@ -507,6 +507,23 @@ struct Gated {
     after_announcement: String,
 }
 
+/// The runner ended before the gated oracle announced itself: the oracle was stopped
+/// at its bound before it reached its gate, or the runner failed. It is a type of its
+/// own so that a caller can tell it from every other refusal.
+#[derive(Debug)]
+struct Unannounced {
+    /// What the test saw, with the runner's own words.
+    message: String,
+}
+
+impl std::fmt::Display for Unannounced {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.message)
+    }
+}
+
+impl Error for Unannounced {}
+
 /// Kills `pid` with `KILL`.
 fn kill_nine(pid: u32) -> TestResult {
     let status = Command::new("kill")
@@ -528,9 +545,9 @@ fn observe(listener: &TcpListener, runner: u32, kill: bool) -> Result<String, Bo
     reader.read_line(&mut first)?;
     if first.trim().parse::<u32>().is_err() {
         lgwks_std::trace::debug!(announcement = ?first, "no oracle announced itself");
-        return Err(
-            format!("the runner ended before an oracle announced itself; read {first:?}").into(),
-        );
+        return Err(Box::new(Unannounced {
+            message: format!("the runner ended before an oracle announced itself; read {first:?}"),
+        }));
     }
     if kill {
         kill_nine(runner)?;
@@ -572,13 +589,47 @@ fn gated(fixture: &Fixture, args: &[String], kill: bool) -> Result<Gated, Box<dy
                 runner: ended,
                 after_announcement,
             }),
-            Err(error) => Err(format!(
-                "{error}; the runner printed {:?} and {:?}",
-                ended.stdout, ended.stderr
-            )
-            .into()),
+            Err(error) => {
+                let message = format!(
+                    "{error}; the runner printed {:?} and {:?}",
+                    ended.stdout, ended.stderr
+                );
+                if error.downcast_ref::<Unannounced>().is_some() {
+                    Err(Box::new(Unannounced { message }))
+                } else {
+                    Err(message.into())
+                }
+            }
         }
     })
+}
+
+/// Runs the dry run with the second oracle gated under an oracle bound of `first`
+/// seconds, and under twice that while the runner ended before the oracle announced
+/// itself, up to `LONGEST_SHORT_BOUND`. The bound covers the oracle's whole `cargo
+/// test`, compile included, so an oracle cut off before its gate says the host's load
+/// moved after the bound was measured, which the stop under test did not cause; one
+/// that announced itself and then misbehaves is never run again. Returns the fixture,
+/// what the gate showed, and the bound that reached the gate.
+fn gated_within(first: u32) -> Result<(Fixture, Gated, u32), Box<dyn Error>> {
+    let mut seconds = first;
+    loop {
+        let fixture = Fixture::new("timeout", seconds)?;
+        match gated(&fixture, &fixture.run_args("--dry-run"), false) {
+            Ok(shown) => return Ok((fixture, shown, seconds)),
+            Err(error)
+                if error.downcast_ref::<Unannounced>().is_some()
+                    && seconds < LONGEST_SHORT_BOUND =>
+            {
+                lgwks_std::trace::debug!(bound = ?seconds, "the oracle was cut off before its gate");
+                seconds = seconds.saturating_mul(2).min(LONGEST_SHORT_BOUND);
+            }
+            Err(error) => {
+                lgwks_std::trace::debug!(bound = ?seconds, failure = ?error, "the gated run failed");
+                return Err(format!("under a bound of {seconds} s: {error}").into());
+            }
+        }
+    }
 }
 
 /// The oracle bound, in seconds, that the un-gated task fits inside on this host
@@ -612,16 +663,17 @@ fn measured_bound() -> Result<u32, Box<dyn Error>> {
 
 /// Source: #270's "process-group kill ... a 1,800 s oracle timeout recorded as a failure"
 /// and "no orphan process after a run"; CI run 38985141189, where the un-gated task's
-/// own `cargo test` ran past 12 s at a host load of 70 and read `timeout`. Requirement:
+/// own `cargo test` ran past 12 s at a host load of 70 and read `timeout`, and main run
+/// 39006985065, where the gated task's oracle never announced itself (`read ""`) inside
+/// a bound measured moments earlier, on a host whose load had run from 3.5 to 27. A
+/// bound that cut the oracle off before its gate is widened and the run repeated. Requirement:
 /// an oracle still running at its bound is stopped as a group (its process is gone
 /// when the runner returns), its clauses are recorded `timeout` after at least the
 /// bound, the other task is graded as usual under a bound measured on this host, the
 /// run is not a crash and exits 0.
 #[test]
 fn an_oracle_past_its_bound_is_stopped_with_its_group_and_recorded_as_a_timeout() -> TestResult {
-    let bound = measured_bound()?;
-    let fixture = Fixture::new("timeout", bound)?;
-    let shown = gated(&fixture, &fixture.run_args("--dry-run"), false)?;
+    let (fixture, shown, bound) = gated_within(measured_bound()?)?;
     assert!(
         !shown.after_announcement.contains("VALVE"),
         "the oracle outlived its bound and was stopped only by its own valve"
