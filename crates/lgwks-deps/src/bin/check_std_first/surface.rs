@@ -19,14 +19,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::lexer::{code_only, is_word};
-use super::toml_subset::{raw, read_tables};
-use super::{AuditError, fail, posix_relative, read};
+use super::ratchet::{Ratchet, ceilings, judge};
+use super::{AuditError, posix_relative, read};
 
-/// The contract file, relative to the repository root.
-const CONTRACT: &str = "contract/PUBLIC_SURFACE.toml";
-
-/// The table of the contract that holds the ceilings.
-const TABLE: &str = "ceilings";
+/// How the surface ratchet reads its table and words its findings.
+const SURFACE: Ratchet = Ratchet {
+    label: "SURFACE",
+    table: "ceilings",
+    counted: "public declaration(s)",
+    none: "declares no `pub` item",
+    refused: "`script!` is the one supported interface (#526), so a new `pub` item is a refused one",
+};
 
 /// What `pub` may introduce, and the modifiers that may stand between it and `fn`.
 const ITEMS: [&str; 14] = [
@@ -164,7 +167,7 @@ fn declarations(source: &str) -> usize {
 
 /// Whether `relative` is a library source file: under a crate's `src`, not a
 /// binary's. A binary's items are not an interface anyone depends on.
-fn is_library(relative: &str) -> bool {
+pub(super) fn is_library(relative: &str) -> bool {
     let parts: Vec<&str> = relative.split('/').collect();
     parts.first() == Some(&"crates")
         && parts.get(2) == Some(&"src")
@@ -189,75 +192,13 @@ fn counts(repo: &Path, source: &[PathBuf]) -> Result<BTreeMap<String, usize>, Au
     Ok(found)
 }
 
-/// Library file -> its ceiling, as the contract writes it.
-fn ceilings(repo: &Path) -> Result<BTreeMap<String, usize>, AuditError> {
-    let path = repo.join(CONTRACT);
-    let tables = read_tables(&read(&path)?);
-    let mut found = BTreeMap::new();
-    for table in tables.iter().filter(|table| table.path == TABLE) {
-        for entry in &table.entries {
-            let number = raw(table, &entry.key).and_then(|text| text.trim().parse::<usize>().ok());
-            match number {
-                Some(ceiling) => {
-                    found.insert(entry.key.clone(), ceiling);
-                }
-                None => {
-                    return fail(
-                        AuditError::Manifest {
-                            path,
-                            missing: "a ceiling that is not a whole number",
-                        },
-                        "ceilings",
-                    );
-                }
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// The finding for a file that declares `count` items against a `ceiling`.
-fn over(file: &str, count: usize, ceiling: usize) -> String {
-    format!(
-        "{file} — SURFACE: {count} public declaration(s), ceiling {ceiling}; `script!` is the one \
-         supported interface (#526), so a new `pub` item is a refused one"
-    )
-}
-
-/// The finding for a ceiling that is above the `count` its file declares.
-fn stale(file: &str, ceiling: usize, count: usize) -> String {
-    format!(
-        "{file} — SURFACE: ceiling {ceiling} is above the {count} declared; lower it in \
-         {CONTRACT} so the table stays exact"
-    )
-}
-
-/// The findings from holding what the tree declares to what the contract allows.
-fn judge(declared: &BTreeMap<String, usize>, allowed: &BTreeMap<String, usize>) -> Vec<String> {
-    let mut findings = Vec::new();
-    for (file, count) in declared {
-        match allowed.get(file) {
-            Some(&ceiling) if *count > ceiling => findings.push(over(file, *count, ceiling)),
-            Some(_) => {}
-            None => findings.push(over(file, *count, 0)),
-        }
-    }
-    for (file, ceiling) in allowed {
-        match declared.get(file) {
-            Some(&count) if *ceiling > count => findings.push(stale(file, *ceiling, count)),
-            Some(_) => {}
-            None => findings.push(format!(
-                "{file} — SURFACE: ceiling {ceiling} for a file that declares no `pub` item; \
-                 remove the line from {CONTRACT} so the table stays exact"
-            )),
-        }
-    }
-    findings
-}
-
 /// Every surface finding of the tree `source` names, against the contract.
 pub(super) fn findings(repo: &Path, source: &[PathBuf]) -> Result<Vec<String>, AuditError> {
-    Ok(judge(&counts(repo, source)?, &ceilings(repo)?))
+    Ok(judge(
+        &SURFACE,
+        &counts(repo, source)?,
+        &ceilings(repo, &SURFACE)?,
+    ))
 }
 
 /// Writes the contract the tree implies, to record a legitimate change.
@@ -272,7 +213,7 @@ pub(super) fn baseline(
          # declares. Exact, so a ceiling may fall and a rise is a visible change here.\n\
          # `check-std-first --surface-baseline` prints the table the tree implies."
     )?;
-    writeln!(out, "[{TABLE}]")?;
+    writeln!(out, "[{}]", SURFACE.table)?;
     for (file, count) in counts(repo, source)? {
         writeln!(out, "\"{file}\" = {count}")?;
     }
@@ -281,24 +222,14 @@ pub(super) fn baseline(
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTRACT, baseline, declarations, findings, is_library, judge};
-    use crate::files::{Scratch, source_files};
+    use super::{SURFACE, baseline, declarations, findings, is_library};
+    use crate::files::{Scratch, put, says, source_files};
+    use crate::ratchet::{CONTRACT, judge};
     use std::collections::BTreeMap;
     use std::error::Error;
-    use std::fs;
     use std::path::Path;
 
     type TestResult = Result<(), Box<dyn Error>>;
-
-    /// Writes `text` at `relative` under `root`, making its directory.
-    fn put(root: &Path, relative: &str, text: &str) -> TestResult {
-        let path = root.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, text)?;
-        Ok(())
-    }
 
     /// Every surface finding of the scratch repository as the disk holds it now.
     fn judged(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
@@ -310,13 +241,6 @@ mod tests {
         rows.iter()
             .map(|&(name, number)| (name.to_owned(), number))
             .collect()
-    }
-
-    /// Whether a finding about `file` says `text`.
-    fn says(found: &[String], file: &str, text: &str) -> bool {
-        found
-            .iter()
-            .any(|finding| finding.starts_with(file) && finding.contains(text))
     }
 
     /// Requirement #526, from the Rust Reference's visibility rules: `pub` alone
@@ -349,7 +273,7 @@ mod tests {
     fn a_rise_an_unlisted_file_and_a_stale_ceiling_are_each_a_finding() {
         let declared = table(&[("a.rs", 3), ("b.rs", 2), ("c.rs", 1), ("e.rs", 4)]);
         let allowed = table(&[("a.rs", 3), ("b.rs", 5), ("d.rs", 1), ("e.rs", 3)]);
-        let found = judge(&declared, &allowed);
+        let found = judge(&SURFACE, &declared, &allowed);
         assert_eq!(found.len(), 4, "{found:?}");
         assert!(
             says(&found, "c.rs", "ceiling 0"),
@@ -368,7 +292,7 @@ mod tests {
             "a rise past the ceiling is refused: {found:?}"
         );
         assert!(
-            judge(&declared, &declared).is_empty(),
+            judge(&SURFACE, &declared, &declared).is_empty(),
             "an exact table holds"
         );
     }

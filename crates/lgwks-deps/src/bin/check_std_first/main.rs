@@ -12,19 +12,23 @@
 //! `UNATTRIBUTED`, `EMPTY` and `STALE EXEMPTION` for an audit that read nothing,
 //! and `SURFACE`: a library file declares more `pub` items than
 //! `contract/PUBLIC_SURFACE.toml` allows, or the contract allows more than it
-//! declares (#526, `surface.rs`).
+//! declares (#526, `surface.rs`), and `EXAMPLE`: a documentation file holds more
+//! direct-use examples than the contract's `[examples]` table allows (#526,
+//! `examples.rs`; both ratchets are judged by `ratchet.rs`).
 //!
 //! The whole `use` tree is read, not only its root: `use lgwks_std::json::serde;`
 //! binds `serde`, so a later `use serde::de::X;` resolves through `lgwks_std` and
 //! reaches no edge at all, which is the rule being followed.
 //!
 //! Usage: `check-std-first [--justify] [ROOT]`. Exit 0 when nothing is found.
-//! `check-std-first --surface-baseline [ROOT]` prints the surface contract the
-//! tree implies, to record a legitimate change.
+//! `check-std-first --surface-baseline [ROOT]` prints the surface and example
+//! contract tables the tree implies, to record a legitimate change.
 
+mod examples;
 mod files;
 mod lexer;
 mod manifest;
+mod ratchet;
 mod scans;
 mod surface;
 #[path = "../shared/toml_subset.rs"]
@@ -497,6 +501,9 @@ fn audit_repository(repo: &Path) -> Result<Audit, AuditError> {
     audit.findings.extend(marker);
     let surface = surface::findings(repo, &source)?;
     audit.findings.extend(surface);
+    let crates: BTreeSet<String> = members.keys().cloned().collect();
+    let examples = examples::findings(repo, &source, &crates)?;
+    audit.findings.extend(examples);
     Ok(audit)
 }
 
@@ -599,10 +606,13 @@ fn execute(
     Ok(0)
 }
 
-/// Prints the public-surface contract the tree implies (`--surface-baseline`).
+/// Prints the public-surface contract the tree implies (`--surface-baseline`): the
+/// `pub` ceilings, then the doc-example ceilings.
 fn record_surface(root: &Path, out: &mut impl Write) -> Result<u8, Box<dyn std::error::Error>> {
     let source = files::source_files(root)?;
+    let crates: BTreeSet<String> = workspace(root)?.into_keys().collect();
     surface::baseline(root, &source, out)?;
+    examples::baseline(root, &source, &crates, out)?;
     Ok(0)
 }
 
