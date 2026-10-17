@@ -93,3 +93,20 @@ hidden item at its root, which keeps their examples running as doctests. A
 hidden module keep their own ceilings and a new `pub` item inside one is still
 refused; no test asserts the cross-file half, and #526 owns it. Doctests through
 `script!`, and the changelog entries a narrowing owes are the rest of #526.
+
+*#272, measured since 2026-10-17:* #590 (`8571c2622`) moves the RAM-disk detach
+behind the job. Thirteen jobs started in one second were past their disk after
+4.09 s and 4.77 s, against 10.31 s. Its PR run (39011834453) was 31 of 31 green at
+294 s, and the bot-full job's setup step took 2,901 ms where main run 39010245322
+took 15,846 ms. The merge's own main run (39012345363) was cancelled at the job
+cap: bot-full's nextest step took 280 s (230 s on the PR run), the workspace job
+met 300 s, and the one-minute load average read 155.7 at 07:09:44Z. One tree took
+294 s once and was cancelled once, so a setup piece is not margin. The full local
+gate on `8571c2622` passed 47 lanes and skipped two in 871.6 s, of which
+`storefront-consumers` alone took 703.1 s. The bot-full lane alone on a quiet host
+took 119.1 s: 70 s of compile and `Summary [48.122s] 4724 tests run`. Warm, beside
+45 busy loops (three per core), it took 77.7 s with nextest at 68.1 s, so CPU load
+alone adds about 20 s to the run, against the CI step's 230 s and 280 s. What
+else slows a CI job had not been measured when this was written: with no job
+running, swap read 19.3 GB of 20.5 GB used, the compressor held 15.5 GB, and
+`fseventsd` was 4.9 GB resident at 100% CPU.
