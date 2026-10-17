@@ -61,7 +61,10 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   (39004795544, commit `71077831`) lost four jobs at the 300 s cap with no test
   failing: in the two job logs read (workspace and bot-full) `Compiling lgwks_bot`
   began at 05:02:58Z and 05:02:59Z and was still running when the cancel landed at
-  05:07:43Z. #272 owns that wall.
+  05:07:43Z. Run 2 (39005381369, `d1928149`, markdown only) lost two: the workspace
+  job printed `1548 tests run: 1548 passed` at 05:17:14Z and was cancelled in the same
+  second, and bot-full finished its compile in 3 min 30 s at 05:17:06Z and had run 30
+  of 4,724 tests when the cancel landed at 05:17:18Z. #272 owns both walls.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
