@@ -13,6 +13,8 @@
 //! `88ee8c6b5` closed the same race for a yield turned after a wedge; this closes it
 //! for a yield turned after another yield.
 
+use super::*;
+
 /// Whether a chain of the current tick has already gone `Pending` on its first turn.
 #[derive(Debug, Default)]
 pub(super) struct PendingTurn {
@@ -42,6 +44,73 @@ fn armed(wedged: &[bool], drawn: &[u32]) -> Vec<u32> {
         .zip(drawn)
         .map(|(&wedge, &draw)| turn.arm(wedge, draw))
         .collect()
+}
+
+/// One seeded tick: how many chains, which are wedged, and what each draws.
+fn drawn_tick(rng: &mut Rng) -> (Vec<bool>, Vec<u32>) {
+    let width = rng.between(1, 8);
+    let mut wedged = Vec::new();
+    let mut drawn = Vec::new();
+    for _ in 0..width {
+        wedged.push(rng.chance(250));
+        drawn.push(rng.between(0, 2));
+    }
+    (wedged, drawn)
+}
+
+/// Across 2,000 seeded ticks, no chain is armed to yield after one that went `Pending`.
+///
+/// Source: the same race as the module note (main run 39060016758). The unit cases
+/// below pin four hand-picked orders; this sweeps widths 1 to 8, a 25% wedge rate and
+/// draws of 0 to 2, so an order nobody wrote down is checked too. The oracle is the
+/// rule itself, stated independently of `PendingTurn`: scan the chains in order, and
+/// once one is wedged or keeps a yield, every later armed yield must be zero.
+#[test]
+fn no_chain_yields_after_one_that_went_pending_across_seeded_ticks() {
+    const SEED: u64 = 0x1250_0021;
+    let mut rng = Rng::new(SEED);
+    let mut ended_by_wedge = 0_usize;
+    let mut ended_by_yield = 0_usize;
+    for tick in 0..2_000_u32 {
+        let (wedged, drawn) = drawn_tick(&mut rng);
+        let got = armed(&wedged, &drawn);
+        let mut pending = false;
+        for (index, &yields) in got.iter().enumerate() {
+            let expected = if pending { 0 } else { drawn[index] };
+            assert_eq!(
+                yields, expected,
+                "seed {SEED} tick {tick} chain {index}: wedged {wedged:?} drawn {drawn:?}"
+            );
+            if !pending && (wedged[index] || yields > 0) {
+                pending = true;
+                if wedged[index] {
+                    ended_by_wedge = ended_by_wedge.saturating_add(1);
+                } else {
+                    ended_by_yield = ended_by_yield.saturating_add(1);
+                }
+            }
+        }
+    }
+    assert!(
+        ended_by_wedge > 0 && ended_by_yield > 0,
+        "seed {SEED}: the sweep reached both ways a run of yielders ends, so the oracle is not vacuous"
+    );
+}
+
+/// The arming replays: the same seed yields the same armed set, twice over.
+///
+/// The arming is a function of the draws alone, with no clock, so the trace a
+/// family records from it is the run and not the host.
+#[test]
+fn the_arming_of_a_seeded_wave_replays() -> TestResult {
+    sim::assert_replays(sim::band_of(41), |sim| {
+        let ticks = sim.rng().between(2, 6);
+        for tick in 0..ticks {
+            let (wedged, drawn) = drawn_tick(sim.rng());
+            sim.record(&format!("tick {tick} armed {:?}", armed(&wedged, &drawn)));
+        }
+        Ok(())
+    })
 }
 
 /// A yield after another yield is not armed: the first one started the reaper.
