@@ -12,6 +12,9 @@ use super::{AuditError, MAX_DEPTH, fail};
 /// crate its manifest does not declare is the same unregistered edge.
 const SOURCE_DIRECTORIES: [&str; 4] = ["src", "tests", "examples", "benches"];
 
+/// Where documentation pages live: each crate's own, and the repository's guides.
+const DOCUMENT_ROOTS: [&str; 2] = ["crates", "docs"];
+
 /// The files git says the repository holds, or `None` outside a checkout.
 ///
 /// Tracked files plus untracked ones `.gitignore` does not exclude: a new file is
@@ -48,10 +51,11 @@ pub(super) fn repository_files(repo: &Path) -> Option<BTreeSet<PathBuf>> {
     )
 }
 
-/// Every `.rs` file under `directory`, recursively, added to `out`.
-fn rust_files_under(
+/// Every file with `extension` under `directory`, recursively, added to `out`.
+fn files_under(
     directory: &Path,
     depth: usize,
+    extension: &str,
     out: &mut BTreeSet<PathBuf>,
 ) -> Result<(), AuditError> {
     if depth > MAX_DEPTH {
@@ -59,7 +63,7 @@ fn rust_files_under(
             AuditError::TooDeep {
                 path: directory.to_path_buf(),
             },
-            "rust_files_under",
+            "files_under",
         );
     }
     let reader = match fs::read_dir(directory) {
@@ -78,14 +82,14 @@ fn rust_files_under(
                         path: directory.to_path_buf(),
                         cause,
                     },
-                    "rust_files_under",
+                    "files_under",
                 );
             }
         };
         let path = entry.path();
         if path.is_dir() {
-            rust_files_under(&path, depth.saturating_add(1), out)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files_under(&path, depth.saturating_add(1), extension, out)?;
+        } else if path.extension().is_some_and(|found| found == extension) {
             out.insert(path);
         }
     }
@@ -124,8 +128,22 @@ pub(super) fn source_files(repo: &Path) -> Result<Vec<PathBuf>, AuditError> {
             }
         };
         for directory in SOURCE_DIRECTORIES {
-            rust_files_under(&member.path().join(directory), 0, &mut matched)?;
+            files_under(&member.path().join(directory), 0, "rs", &mut matched)?;
         }
+    }
+    Ok(match held {
+        Some(held) => matched.intersection(&held).cloned().collect(),
+        None => matched.into_iter().collect(),
+    })
+}
+
+/// Every Markdown file of the repository under a documentation root, the crates'
+/// own pages and the guides, by the same rule as `source_files`: what git holds.
+pub(super) fn markdown_files(repo: &Path) -> Result<Vec<PathBuf>, AuditError> {
+    let held = repository_files(repo);
+    let mut matched = BTreeSet::new();
+    for root in DOCUMENT_ROOTS {
+        files_under(&repo.join(root), 0, "md", &mut matched)?;
     }
     Ok(match held {
         Some(held) => matched.intersection(&held).cloned().collect(),
@@ -226,6 +244,29 @@ impl Drop for Scratch {
             lgwks_std::trace::debug!(%error, "a scratch directory could not be removed");
         }
     }
+}
+
+/// Writes `text` at `relative` under `root`, making its directory.
+#[cfg(test)]
+pub(super) fn put(
+    root: &Path,
+    relative: &str,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, text)?;
+    Ok(())
+}
+
+/// Whether a finding about `file` says `text`.
+#[cfg(test)]
+pub(super) fn says(found: &[String], file: &str, text: &str) -> bool {
+    found
+        .iter()
+        .any(|finding| finding.starts_with(file) && finding.contains(text))
 }
 
 #[cfg(test)]
