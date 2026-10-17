@@ -136,6 +136,12 @@ priority = 50
 # and 500 ms, bot-full and its container leg were cancelled at the cap, and the
 # docs.rs matrix passed in 4m13. Priming bot-full's runner in place at the merge
 # commit took 34 s and the workspace runner was already warm.
+#
+# PR 599's first run after a Rust edit (run 39045357528, commit 3e223f07): the
+# workspace, bot-full, storefront, both Linux container and docs.rs jobs were
+# cancelled at the cap (314 to 329 s) while lgwks_std's own job passed in 61 s.
+# Priming bot-full's runner (35 s) and the workspace runner (22 s) in place at the
+# merge commit on an idle host came before the next push.
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
