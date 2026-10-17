@@ -272,6 +272,3 @@ store-success-output = false
 [[profile.ci.overrides]]
 platform = 'cfg(target_os = "macos")'
 default-filter = 'not (binary(sim_review_path) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/)))'
-# probe
-# probe2
-# probe3
