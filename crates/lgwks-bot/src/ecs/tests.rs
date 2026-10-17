@@ -603,6 +603,7 @@ mod test_part_00;
 mod test_part_01;
 mod test_part_02;
 mod test_part_03;
+mod test_part_04;
 
 // The cases INVARIANTS.md cites by path (INV-BOT-41, -42, -123) live here,
 // at `ecs::tests::<name>`, so the `invariants` lane resolves them.
@@ -681,7 +682,7 @@ fn an_expired_wave_still_reads_a_source_ready_on_its_next_turn() -> TestResult {
     }
     watchdog.join();
     assert!(
-        watchdog.expired(),
+        crate::journal::owner::lock(&watchdog.state).expired,
         "the reaper returned on the wave's expiry"
     );
     assert!(
