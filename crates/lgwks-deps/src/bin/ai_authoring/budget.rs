@@ -111,12 +111,7 @@ impl Ledger {
         let mut state = guard(&self.state);
         if state.seen.contains(&key) {
             state.repeats = state.repeats.saturating_add(1);
-            return fail(
-                BenchError::Refused(
-                    "this call repeats an earlier one in meaning, so it is not made".to_owned(),
-                ),
-                "admit",
-            );
+            return fail(BenchError::Repeated, "admit");
         }
         let committed = state
             .spent
@@ -251,7 +246,10 @@ mod tests {
             "the first ask is made"
         );
         assert!(
-            refused(&author.ask("write a rust function"), "repeats"),
+            matches!(
+                author.ask("write a rust function"),
+                Err(BenchError::Repeated)
+            ),
             "case and spacing do not make a new question"
         );
         assert!(

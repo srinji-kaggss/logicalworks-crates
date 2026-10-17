@@ -9,8 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::BenchError;
 use super::bench::Bench;
+use super::budget::{Budgeted, Ledger};
 use super::grade::Verdict;
 use super::plan::{Job, Mode};
 use super::replay::{Failure, refuse, replay_sweep};
@@ -21,6 +21,7 @@ use super::sim_kit::{
     COMPILES, Floor, Graded, Scripted, close, committed, count, ensure, job, one_of, reply,
 };
 use super::trial::{Finished, Inputs, Start, run_trial};
+use super::{BenchError, fail};
 
 /// The prompt every simulated author is first asked.
 const ORIGINAL: &str = "ORIGINAL PROMPT";
@@ -303,15 +304,6 @@ fn play(
             })
             .collect(),
     );
-    let (Some(task), Some(clauses)) = (
-        world.bench.task(&scenario.job.task),
-        world.clauses.get(&scenario.job.task),
-    ) else {
-        return (
-            Err(BenchError::Usage("the task is not declared".to_owned())),
-            author,
-        );
-    };
     let start = match reference {
         Some(code) => Start::Reference(code),
         None => Start::Model {
@@ -319,7 +311,27 @@ fn play(
             prompt: ORIGINAL.to_owned(),
         },
     };
-    let run = run_trial(
+    let run = run_from(world, scenario, judge, start);
+    (run, author)
+}
+
+/// Runs `scenario`'s trial from `start`, over `judge`.
+fn run_from(
+    world: &World,
+    scenario: &Scenario,
+    judge: &Floor,
+    start: Start<'_>,
+) -> Result<Finished, BenchError> {
+    let (Some(task), Some(clauses)) = (
+        world.bench.task(&scenario.job.task),
+        world.clauses.get(&scenario.job.task),
+    ) else {
+        return fail(
+            BenchError::Usage("the task is not declared".to_owned()),
+            "sim run",
+        );
+    };
+    run_trial(
         Inputs {
             bench: &world.bench,
             job: &scenario.job,
@@ -331,8 +343,7 @@ fn play(
             start,
         },
         judge,
-    );
-    (run, author)
+    )
 }
 
 /// A judge that reports what `scenario`'s oracle printed.
@@ -635,6 +646,76 @@ fn an_author_that_runs_out_of_replies_is_an_error_at_the_unanswered_call() -> Re
         }
         trace.record_number("kept", kept);
         trace.record_number("needs_more", needs_more);
+        Ok(())
+    })
+}
+
+/// Requirement (the Director, 2026-10-17: no call repeats an earlier one in
+/// meaning): a repair the ledger refuses as a repeat ends its trial as itself,
+/// with the compile verdict it reached, the repairs it made and every token it was
+/// billed, never as a crash that forgets what the run paid for (the 14 trials of
+/// the 2026-10-17 matrix billed 1,196,329 tokens that no record kept).
+///
+/// A reply with no code leaves the candidate and the build log as they were, so
+/// the second repair prompt is the first one again: the loop makes the first call
+/// and the first repair, and the second repair is refused.
+#[test]
+fn a_repair_that_would_repeat_a_call_ends_the_trial_and_keeps_its_spend() -> Result<(), Failure> {
+    let world = world()?;
+    replay_sweep("repeat repair", 200, |rng, trace| {
+        let mut scenario = draw(rng, &world)?;
+        scenario.max_repairs = rng.between(3, 6);
+        let mut replies = Vec::new();
+        let mut billed = (0_u64, 0_u64);
+        for call in 0..8_usize {
+            let (read, written) = (
+                u64::from(rng.between(1, 20_000)),
+                u64::from(rng.between(1, 5_000)),
+            );
+            if call < 2 {
+                billed = (
+                    billed.0.saturating_add(read),
+                    billed.1.saturating_add(written),
+                );
+            }
+            replies.push(reply("Prose only, no code.\n", read, written, 1));
+        }
+        let judge = judge_for(&scenario);
+        let author = Scripted::new(replies);
+        let ledger = Ledger::new(1_000_000_000, 20_000, 0);
+        let held = Budgeted {
+            inner: &author,
+            ledger: &ledger,
+            model: &scenario.job.model,
+        };
+        let start = Start::Model {
+            author: &held,
+            prompt: ORIGINAL.to_owned(),
+        };
+        let finished = run_from(&world, &scenario, &judge, start)?;
+        let record = &finished.record;
+        ensure(author.prompts().len() == 2, || {
+            format!("{} calls reached the model, not 2", author.prompts().len())
+        })?;
+        ensure(ledger.standing().repeats == 1, || {
+            "the refused repair is counted once".to_owned()
+        })?;
+        ensure(!record.compiled && record.repairs == 1, || {
+            format!(
+                "compiled {} after {} repairs, not false after 1",
+                record.compiled, record.repairs
+            )
+        })?;
+        ensure(
+            (record.tokens_in, record.tokens_out) == billed && record.error.is_none(),
+            || "the record keeps the tokens of the two calls made, and is no crash".to_owned(),
+        )?;
+        ensure(
+            judge.builds().is_empty() && judge.grade_calls() == 0,
+            || "an empty candidate is never built or graded".to_owned(),
+        )?;
+        trace.record_number("max_repairs", scenario.max_repairs);
+        trace.record(&record.to_line());
         Ok(())
     })
 }
