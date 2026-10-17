@@ -119,12 +119,14 @@ impl Outcome {
 /// is entered, does no work, and the record never lands — exactly the state a
 /// `SIGKILL` mid-body leaves.
 fn step_body(index: u32, crash_at: usize) -> Result<u32, FlowError> {
-    if u32::try_from(crash_at).is_ok_and(|at| at == index) {
-        let refusal = Err(FlowError::Cancelled { at: Arc::from("") });
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step_body: returning an error to the caller");
-        return refusal;
+    match u32::try_from(crash_at) {
+        Ok(at) if at == index => {
+            let refusal = Err(FlowError::Cancelled { at: Arc::from("") });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "step_body: returning an error to the caller");
+            refusal
+        }
+        _ => Ok(index),
     }
-    Ok(index)
 }
 
 /// One step of the simulated task, entered under its own name and remembered,
@@ -328,19 +330,28 @@ fn finished_steps_run_once(band: Band) -> TestResult {
     Ok(())
 }
 
+/// One tenant's handle on the shared file, opened once the runs are all stored.
+///
+/// What a handle reads does not depend on whose run is offered to it, and no
+/// offer writes a record (a refused resume adds none and the owner's resume of a
+/// finished run replays recorded steps), so one handle per tenant serves every
+/// offer. Opening a fresh one per offer read the whole file again for each of the
+/// T squared pairs, which was most of this family's wall time on a loaded host.
+fn asker_on(shared_path: &Path, name: &str) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder(name)?
+        .store(RunStore::open(shared_path)?)
+        .build()?)
+}
+
 /// Offer one tenant's run id to another tenant's handle on the shared file, and check who may resume it.
 fn offer_run(
     rng: &mut Rng,
-    shared_path: &Path,
     steps: usize,
     owner_name: &str,
     run: RunId,
-    other: &(String, RunId),
+    asker: &(String, Host),
 ) -> TestResult {
-    let (ref asker_name, _) = *other;
-    let asker = Host::builder(asker_name)?
-        .store(RunStore::open(shared_path)?)
-        .build()?;
+    let (ref asker_name, ref asker) = *asker;
     if asker_name == owner_name {
         assert_eq!(
             asker
@@ -444,10 +455,15 @@ fn tenants_share_one_file(rng: &mut Rng) -> TestResult {
     // Every tenant's run id is offered to every tenant's handle on that one
     // file. The owner attributes it to itself; every other tenant is refused
     // the record and refuses to adopt the run.
+    let mut askers = Vec::new();
+    for entry in &runs {
+        let (ref name, _) = *entry;
+        askers.push((name.clone(), asker_on(&shared_path, name)?));
+    }
     for entry in &runs {
         let (ref owner_name, run) = *entry;
-        for other in &runs {
-            offer_run(rng, &shared_path, steps, owner_name, run, other)?;
+        for asker in &askers {
+            offer_run(rng, steps, owner_name, run, asker)?;
         }
     }
     Ok(())
