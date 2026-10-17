@@ -61,36 +61,36 @@ target = "../../crates/lgwks-bot"
 token = "../support"
 target = "support"
 
-# The model command runs with tools, so it runs under the sandbox: home, the
-# named directories and the work root are unreadable except the command's own
-# settings (less what `withheld` names) and the trial's scratch directory.
-# Read-only plan mode, never a stripped permission check: the whole prompt arrives
-# on stdin and the reply is one fenced block, so an author needs no tool that
-# writes or runs anything.
+# The model command is OpenCode on its Go muse models (the Director, 2026-10-17:
+# the router's exec-claude models first, OpenCode's muse models when they fail;
+# exec-claude answers 410 ModelDeprecated and the Executor combo answers empty,
+# measured 2026-10-17). It runs under the sandbox: home, the named directories
+# and the work root are unreadable except the command's own data directory (less
+# what `withheld` names), `.opencode` and the trial's scratch directory. The agent
+# `author` has every tool off and one line of system prompt, and the config,
+# cache and state directories are the scratch directory's, so a call reads about
+# 190 tokens beyond the prompt instead of the 20,800 the global config adds. The
+# whole prompt arrives on stdin and the reply is one fenced block, so an author
+# needs no tool that reads, writes or runs anything.
 [model]
-command = "cmd"
+command = "opencode"
 sandbox = "/usr/bin/sandbox-exec"
-args = [
-    "-p",
-    "--permission-mode",
-    "plan",
-    "-t",
-    "--skip-onboarding",
-    "--no-auto-update",
-    "--no-session",
-    "--no-skills",
-    "-m",
-    "{model}",
-    "--effort",
-    "high",
-    "--max-turns",
-    "6",
-    "--output-format",
-    "json",
-]
+args = ["run", "--pure", "--agent", "author", "--format", "json", "-m", "{model}"]
 denied = ["/private/tmp"]
-config_dir = ".commandcode"
-withheld = ["projects", "file-history", "history.jsonl", "plans", "scratchpad", "skills"]
+config_dir = ".local/share/opencode"
+withheld = ["storage", "snapshot", "tool-output"]
+allowed = [".opencode"]
+env = [
+    "PWD={scratch}",
+    "XDG_CONFIG_HOME={scratch}/xdg-config",
+    "XDG_CACHE_HOME={scratch}/xdg-cache",
+    "XDG_STATE_HOME={scratch}/xdg-state",
+    "OPENCODE_DISABLE_CLAUDE_CODE=1",
+    "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS=1",
+    "OPENCODE_CONFIG_CONTENT={\"agent\":{\"author\":{\"mode\":\"primary\",\"description\":\"closed-book author\",\"prompt\":\"You write one Rust file and reply with it in one fenced block.\",\"tools\":{\"bash\":false,\"read\":false,\"write\":false,\"edit\":false,\"glob\":false,\"grep\":false,\"list\":false,\"patch\":false,\"webfetch\":false,\"todowrite\":false,\"todoread\":false,\"task\":false,\"skill\":false,\"question\":false,\"websearch\":false}}}}",
+]
 
 # How long each kind of child may run. A hung oracle is a failure of that
 # solution, recorded as one: the clauses that finished keep their verdicts and
@@ -100,13 +100,24 @@ model_call_s = 900
 build_s = 1800
 oracle_s = 1800
 git_s = 60
+# The Director's ceiling of 2026-10-17 is the equivalent of 10M tokens for the
+# whole run. The ledger (budget.rs) refuses a call before it is made when its
+# worst case, the prompt at a token a byte plus `call_tokens`, would pass this
+# with what is billed and in flight; it is 1M under the ceiling so a reply that
+# overruns its allowance still lands under it. Reasoning tokens are billed: the
+# one live trial of 2026-10-17 billed 8,208 read and 28,841 written over two calls,
+# so a call's allowance is 20,000 and a 165-trial pass of one model fits.
+token_budget = 9000000
+call_tokens = 20000
 
-# What a run does when the command line does not say. #270's planned run: at
-# least three models, at least one a frontier closed model; two trials under each
-# of the five profiles make ten per (model, arm, task) cell, #270's floor.
+# What a run does when the command line does not say. The Director's order of
+# 2026-10-17: the Go muse models, and zero repetition in meaning among calls. One
+# trial per cell, because a second trial of one (model, arm, task, profile) puts
+# the same prompt twice, and the five profiles are what make the prompts differ.
+# The router lists no Zen muse model (`opencode models opencode`, 2026-10-17).
 [defaults]
-models = ["deepseek/deepseek-v4.1-flash", "claude-sonnet-5-5", "moonshotai/kimi-k3"]
-trials = 2
+models = ["opencode-go/muse-spark-1.3-contributor"]
+trials = 1
 parallel = 4
 max_repairs = 4
 

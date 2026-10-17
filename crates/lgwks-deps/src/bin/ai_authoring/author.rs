@@ -2,6 +2,7 @@
 //! closed-book sandbox the model runs in, and its reply read back as code and
 //! token counts.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,6 +11,7 @@ use lgwks_std::json::{self, Value};
 
 use super::bench::Bench;
 use super::children::{Children, Launch, TIMED_OUT, inherited_env};
+use super::opencode::read_events;
 use super::{BenchError, fail};
 
 /// What one model call returned.
@@ -150,7 +152,7 @@ pub(super) fn extract_rust_block(text: &str) -> String {
 }
 
 /// A whole-number field of `holder`, or zero when it is absent.
-fn count_of(holder: Option<&Value>, key: &str) -> u64 {
+pub(super) fn count_of(holder: Option<&Value>, key: &str) -> u64 {
     holder
         .and_then(|value| value.get(key))
         .and_then(Value::as_u64)
@@ -159,7 +161,8 @@ fn count_of(holder: Option<&Value>, key: &str) -> u64 {
 }
 
 /// The reply a model command's final JSON result line carries, read from its
-/// output: the text, the token counts and the model's own wall time.
+/// output: the text, the token counts and the model's own wall time. A command
+/// that prints an event stream instead is read by `read_events`.
 pub(super) fn read_reply(raw: &str) -> Option<Reply> {
     for line in raw.lines().rev() {
         let trimmed = line.trim();
@@ -190,7 +193,7 @@ pub(super) fn read_reply(raw: &str) -> Option<Reply> {
             raw: String::new(),
         });
     }
-    None
+    read_events(raw)
 }
 
 /// A path as an SBPL string literal.
@@ -238,6 +241,14 @@ pub(super) fn closed_book_profile(bench: &Bench, closure: &Closure) -> String {
             .map(|path| sbpl_string(Path::new(path))),
     );
     denied.push(sbpl_string(&closure.work));
+    let mut settings = vec![sbpl_string(&config)];
+    settings.extend(
+        bench
+            .model
+            .allowed
+            .iter()
+            .map(|name| sbpl_string(&closure.home.join(name))),
+    );
     let withheld: Vec<String> = bench
         .model
         .withheld
@@ -252,10 +263,7 @@ pub(super) fn closed_book_profile(bench: &Bench, closure: &Closure) -> String {
             "(allow file-read-metadata (literal {}))",
             sbpl_string(&closure.home)
         ),
-        format!(
-            "(allow file-read* file-write* (subpath {}))",
-            sbpl_string(&config)
-        ),
+        format!("(allow file-read* file-write* {})", subpaths(&settings)),
         format!("(deny file-read* file-write* {})", subpaths(&withheld)),
         format!(
             "(allow file-read* file-write* (subpath {}))",
@@ -313,6 +321,36 @@ impl CliAuthor<'_> {
         })
     }
 
+    /// The environment of one call: the run's own, then the manifest's entries
+    /// with `{scratch}` filled in. A directory an entry names under the scratch
+    /// directory is made, so a command that keeps its state there finds it.
+    fn call_env(&self, scratch: &Path) -> Result<BTreeMap<String, String>, BenchError> {
+        let mut env = inherited_env();
+        let scratch = scratch.display().to_string();
+        for entry in &self.bench.model.env {
+            let Some((name, value)) = entry.split_once('=') else {
+                return fail(
+                    BenchError::Manifest(format!("[model] env entry {entry:?} is not NAME=value")),
+                    "call_env",
+                );
+            };
+            let value = value.replace("{scratch}", &scratch);
+            if value.starts_with(&scratch)
+                && let Err(cause) = fs::create_dir_all(&value)
+            {
+                return fail(
+                    BenchError::Io {
+                        path: PathBuf::from(&value),
+                        cause,
+                    },
+                    "call_env",
+                );
+            }
+            env.insert(name.to_owned(), value);
+        }
+        Ok(env)
+    }
+
     /// The command line of one call, under the sandbox.
     fn argv(&self, profile: String) -> Vec<String> {
         let mut argv = vec![
@@ -352,7 +390,9 @@ pub(super) fn ensure_sandbox(bench: &Bench) -> Result<(), BenchError> {
 impl Author for CliAuthor<'_> {
     fn ask(&self, prompt: &str) -> Result<Reply, BenchError> {
         ensure_sandbox(self.bench)?;
-        let profile = closed_book_profile(self.bench, &self.closure()?);
+        let closure = self.closure()?;
+        let profile = closed_book_profile(self.bench, &closure);
+        let env = self.call_env(&closure.scratch)?;
         let input_path = self.scratch.join("stdin.txt");
         if let Err(cause) = fs::write(&input_path, prompt) {
             return fail(
@@ -378,7 +418,7 @@ impl Author for CliAuthor<'_> {
         let done = self.children.capture(&Launch {
             argv: &self.argv(profile),
             root: &self.scratch,
-            env: &inherited_env(),
+            env: &env,
             stdin: Some(&input),
             bound: self.bound,
         });
@@ -641,13 +681,15 @@ mod tests {
             "(allow file-read-metadata (literal \"home-dir\"))",
             "the home directory itself can be stat'ed, nothing beneath it"
         );
+        let settings = std::iter::once(bench.model.config_dir.as_str())
+            .chain(bench.model.allowed.iter().map(String::as_str))
+            .map(|name| format!("(subpath \"home-dir/{name}\")"))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(
             at(4),
-            format!(
-                "(allow file-read* file-write* (subpath \"home-dir/{}\"))",
-                bench.model.config_dir
-            ),
-            "the command's own settings are let back in"
+            format!("(allow file-read* file-write* {settings})"),
+            "the command's own settings, and the home directories the manifest allows, are let back in"
         );
         assert!(
             at(5).starts_with("(deny file-read* file-write* "),

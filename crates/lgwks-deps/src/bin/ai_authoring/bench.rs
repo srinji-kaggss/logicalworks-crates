@@ -64,6 +64,12 @@ pub(super) struct ModelCli {
     pub(super) config_dir: String,
     /// What the settings directory holds that the author may not read.
     pub(super) withheld: Vec<String>,
+    /// Further directories under the home directory the command needs, by
+    /// name; none when it keeps everything in its settings directory.
+    pub(super) allowed: Vec<String>,
+    /// The environment the command is given beyond the run's own, as
+    /// `NAME=value`; `{scratch}` stands for the trial's scratch directory.
+    pub(super) env: Vec<String>,
 }
 
 /// How long each kind of child may run.
@@ -76,6 +82,11 @@ pub(super) struct Limits {
     pub(super) oracle: Duration,
     /// One `git` query.
     pub(super) git: Duration,
+    /// The most tokens, read and written, every model call of a run may bill.
+    pub(super) token_budget: u64,
+    /// The most tokens one reply may bill, reasoning included; a call is
+    /// admitted only when this and its prompt still fit the budget.
+    pub(super) call_tokens: u64,
 }
 
 /// What a run does when the command line does not say.
@@ -205,6 +216,15 @@ fn required_list(table: &Table, key: &str) -> Result<Vec<String>, BenchError> {
             BenchError::Manifest(format!("[{}] needs a non-empty list {key}", table.path)),
             "required_list",
         ),
+    }
+}
+
+/// The strings under `key`, none when the key is absent: the manifest says
+/// nothing, and the command needs nothing, so there is nothing to refuse.
+fn optional_list(table: &Table, key: &str) -> Vec<String> {
+    match list(table, key) {
+        Some(found) => found.to_vec(),
+        None => Vec::new(),
     }
 }
 
@@ -350,6 +370,8 @@ fn model_of(table: &Table) -> Result<ModelCli, BenchError> {
         denied: required_list(table, "denied")?,
         config_dir: required(table, "config_dir")?,
         withheld: required_list(table, "withheld")?,
+        allowed: optional_list(table, "allowed"),
+        env: optional_list(table, "env"),
     };
     Ok(model)
 }
@@ -437,6 +459,8 @@ impl Bench {
                 build: Duration::from_secs(number(limits, "build_s")?),
                 oracle: Duration::from_secs(number(limits, "oracle_s")?),
                 git: Duration::from_secs(number(limits, "git_s")?),
+                token_budget: number(limits, "token_budget")?,
+                call_tokens: number(limits, "call_tokens")?,
             },
             defaults: Defaults {
                 models: required_list(defaults, "models")?,
@@ -596,8 +620,13 @@ mod tests {
             "three cells no sheet can express"
         );
         assert_eq!(
-            bench.defaults.trials, 2,
-            "two trials under five profiles make ten per cell, #270's floor"
+            bench.defaults.trials, 1,
+            "one trial per profile: two trials of one cell put the same prompt twice, a repeat in meaning the Director's order of 2026-10-17 forbids"
+        );
+        assert!(
+            bench.limits.token_budget < 10_000_000
+                && bench.limits.token_budget >= bench.limits.call_tokens,
+            "the budget is under the Director's 10M tokens and holds at least one reply"
         );
         assert!(
             bench.excludes("old", "capture") && bench.excludes("futures", "recovery"),
