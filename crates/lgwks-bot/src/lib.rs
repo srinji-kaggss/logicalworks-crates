@@ -1,3 +1,4 @@
+#![doc = include_str!("lexicon.md")]
 //! Capability-gated automation bots built on four verbs: Observe, Evaluate,
 //! Execute, Query.
 //!

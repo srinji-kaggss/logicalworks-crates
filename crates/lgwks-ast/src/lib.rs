@@ -1,3 +1,4 @@
+#![doc = include_str!("lexicon.md")]
 #![cfg_attr(feature = "parser", doc = include_str!("../README.md"))]
 #![cfg_attr(feature = "parser", doc = include_str!("parser.md"))]
 #![cfg_attr(

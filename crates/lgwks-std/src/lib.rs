@@ -1,3 +1,4 @@
+#![doc = include_str!("lexicon.md")]
 //! Zero-config primitives that replace a dozen crates.
 //!
 //! Every module is a single-import, single-call primitive (hex, base64,
