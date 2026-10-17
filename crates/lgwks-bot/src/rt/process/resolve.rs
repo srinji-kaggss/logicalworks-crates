@@ -285,10 +285,8 @@ mod resolution_tests {
         /// a name that exists, so a collision is an error and never shared.
         fn new() -> io::Result<Self> {
             let unique = lgwks_std::random::bytes::<8>().map_err(io::Error::other)?;
-            let dir = std::env::temp_dir().join(format!(
-                "lgwks-resolve-{:016x}",
-                u64::from_be_bytes(unique)
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("lgwks-resolve-{:016x}", u64::from_be_bytes(unique)));
             std::fs::create_dir(&dir)?;
             Ok(Self { dir })
         }
@@ -574,7 +572,10 @@ mod resolution_tests {
                 .strip_prefix("lgwks-resolve-")
                 .ok_or_else(|| io::Error::other("a scratch directory lost its prefix"))?;
             assert_eq!(digits.len(), 16, "{name} is not 16 hex digits");
-            assert!(digits.bytes().all(|byte| byte.is_ascii_hexdigit()), "{name}");
+            assert!(
+                digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{name}"
+            );
             assert!(names.insert(name), "two scratch directories shared a name");
             held.push(scratch);
         }
