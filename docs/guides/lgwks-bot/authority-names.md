@@ -21,18 +21,14 @@ a capability that never matches, not an error at construction.
 
 ## Building a narrower bot
 
-Since there is no way to shrink a live bot, the lever is the grant set you pass:
+A flow carries no authority of its own: the host that runs it holds the
+`GrantSet`, so the lever is the grant set you hand the host.
+`crates/lgwks-bot/examples/queue_watch.rs` runs one flow on two hosts, one built
+with `GrantSet::empty().grant(Cap::notify())` and one with `GrantSet::empty()`.
+The second is refused at the step that needs the grant, and the action never runs:
 
-```rust
-use lgwks_bot::{Bot, Cap, GrantSet};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let read_only = GrantSet::empty().grant(Cap::net());
-
-    let bot = Bot::builder("reporter").build(&read_only)?;
-    assert_eq!(bot.name(), "reporter");
-    Ok(())
-}
+```text
+no grant: watching/watch/page: blocked: 1 ungranted: bot.notify
 ```
 
 `grant` is idempotent (`crates/lgwks-bot/src/gate.rs:59`), so granting a

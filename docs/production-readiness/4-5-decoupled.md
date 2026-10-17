@@ -36,6 +36,21 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   asserted page counts). No test runs it, so #526 owns that too. The example
   ceilings for the guide's `index.md`, `getting-started-pieces.md` and
   `getting-started-program.md` fell to zero (INV-EXAMPLE-1).
+- The registry and front-door examples hold a flow too: the `task` module's
+  front-door doctest, `task::task` and `DomainRegistry` compile one and pass
+  with the other 45 under `cargo test --doc -p lgwks_bot` (48 of 48), and the
+  `domains.md` block was built and run once (`open prs: 0`). The ceilings for
+  `registry.rs`, `task.rs`, `domains.md` and `authority-names.md` fell to zero
+  (INV-EXAMPLE-1). No doctest runs those flows, so #526 owns that. The first CI
+  run of that edit (run 39001774357, commit `8c280ac0`) lost four jobs at the
+  300 s cap with no test failing: in the two job logs read (workspace and
+  bot-full) `Compiling lgwks_bot` began at 04:14:23Z and was still running when
+  the cancel landed at 04:19:05Z. A doc comment in a Rust file recompiles the
+  crate cold, which #272 owns. Run 2 (39002421637, `3ff90d01`, markdown only)
+  lost two: every step of the workspace job had passed by 04:29:04Z, 296.7 s
+  after it started at 04:24:08Z, and the job still ended `cancelled` at
+  04:29:16Z; bot-full had run 2,294 of 4,721 tests when the cancel landed at
+  04:29:20Z. #272 owns both walls.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only

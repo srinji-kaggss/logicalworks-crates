@@ -476,6 +476,13 @@ impl std::fmt::Debug for Condition {
 ///     }
 /// }
 ///
+/// lgwks_bot::script! {
+///     /// The open pull requests of `repo`, read through the registry above.
+///     flow open_prs(repo: &str) -> u16:
+///         let open: u16 = observe github::pr_status of repo
+///         give back open
+/// }
+///
 /// assert!(DOMAINS.source("github::pr_status").is_some());
 /// # Ok::<(), BotError>(())
 /// ```
