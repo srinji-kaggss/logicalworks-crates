@@ -142,6 +142,9 @@ jobs:
           # the 1,431 tests that are not lgwks_bot's, so this is headroom.
           test-share: "8"
           build-share: "3"
+          # The critical path: its first cargo call is the one that must not
+          # queue behind the others' (#272, run 39021102172).
+          defer: "0"
       - name: Build all workspace targets
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
@@ -311,6 +314,8 @@ jobs:
           # calibrated for loaded, not oversubscribed, hosts.
           test-share: "8"
           build-share: "3"
+          # The other half of the critical path (296 s on run 39021102172).
+          defer: "0"
       - name: Run lgwks-bot async runner tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --features full --profile ci -E 'not test(saturation_r32_tier)' ${PARTITION:+--partition $PARTITION}
       # The JUnit report of what this shard actually ran, uploaded per shard so
@@ -458,6 +463,7 @@ jobs:
           toolchain: "1.99.0"
           # It runs no tests and it is the last link of the run's critical path.
           tmp-gib: "0"
+          defer: "0"
       - name: Download lgwks-bot JUnit reports
         uses: actions/download-artifact@v4
         with:
@@ -531,6 +537,9 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
+          # 254 s for the bot-full leg on run 39021102172: 46 s inside the cap,
+          # so it yields 15 s, not the default 30.
+          defer: "15"
       # The container image is Debian trixie, whose util-linux 2.41 `setpriv`
       # applies the Landlock rules `Confinement::Landlock` wraps (#337);
       # bookworm's 2.38 cannot, and the Landlock simulations failed there with
@@ -700,6 +709,9 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           build-share: "1"
+          # 225 to 241 s on runs 39020729790 and 39021102172: it yields 15 s,
+          # not the default 30.
+          defer: "15"
       - name: Check lgwks-deps
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
