@@ -265,14 +265,8 @@ fn is_native_binary(head: &[u8]) -> bool {
 
 #[cfg(all(test, unix))]
 mod resolution_tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
     use crate::rt::process::ProcessSpec;
-
-    /// Distinguishes scratch directories made in the same nanosecond.
-    static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
     /// A shell script whose interpreter exists on every Unix this runs on.
     const SCRIPT: &[u8] = b"#!/bin/sh\nexit 0\n";
@@ -283,16 +277,19 @@ mod resolution_tests {
     }
 
     impl Scratch {
-        /// A fresh directory named by the clock and a counter (INV-DEP-6): a
-        /// process id is reused by the OS and is not an identity.
+        /// A fresh directory named by 64 random bits (INV-BOT-116). A clock and a
+        /// per-process counter are not an identity: nextest runs every test in
+        /// its own process, the counter restarts at zero in each, and macOS
+        /// ticks in microseconds, so two tests starting in one tick shared a
+        /// directory and overwrote each other's `witness`. `create_dir` refuses
+        /// a name that exists, so a collision is an error and never shared.
         fn new() -> io::Result<Self> {
-            let nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(since) => since.as_nanos(),
-                Err(before) => before.duration().as_nanos(),
-            };
-            let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("lgwks-resolve-{nanos}-{seq}"));
-            std::fs::create_dir_all(&dir)?;
+            let unique = lgwks_std::random::bytes::<8>().map_err(io::Error::other)?;
+            let dir = std::env::temp_dir().join(format!(
+                "lgwks-resolve-{:016x}",
+                u64::from_be_bytes(unique)
+            ));
+            std::fs::create_dir(&dir)?;
             Ok(Self { dir })
         }
 
@@ -554,6 +551,35 @@ mod resolution_tests {
         let mut other = ProcessSpec::new("sh");
         other.env("LGWKS_UNRELATED", "1");
         assert_eq!(other.resolved_program(), PathBuf::from("sh"));
+    }
+
+    #[test]
+    fn scratch_names_are_random_not_a_clock_and_a_counter() -> io::Result<()> {
+        // Incident: run 39040434563, job on lwc-5, 2026-10-17. Two tests in two
+        // processes drew `lgwks-resolve-<micros>-0` in one clock tick, shared a
+        // directory, and `a_script_naming_a_missing_interpreter_stays_bare`
+        // resolved the other test's script. A name that cannot repeat across
+        // processes is 64 random bits; this holds 256 live at once.
+        let mut held = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for _ in 0..256 {
+            let scratch = Scratch::new()?;
+            let name = scratch
+                .dir
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| io::Error::other("a scratch directory name is not UTF-8"))?
+                .to_owned();
+            let digits = name
+                .strip_prefix("lgwks-resolve-")
+                .ok_or_else(|| io::Error::other("a scratch directory lost its prefix"))?;
+            assert_eq!(digits.len(), 16, "{name} is not 16 hex digits");
+            assert!(digits.bytes().all(|byte| byte.is_ascii_hexdigit()), "{name}");
+            assert!(names.insert(name), "two scratch directories shared a name");
+            held.push(scratch);
+        }
+        assert_eq!(held.len(), names.len());
+        Ok(())
     }
 
     #[test]
