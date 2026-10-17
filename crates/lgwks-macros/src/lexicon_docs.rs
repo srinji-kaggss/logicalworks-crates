@@ -18,19 +18,37 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The crate documentation's block table, as `//!` lines.
-fn doc_table() -> String {
+/// The block table, one row per written form, every line starting with
+/// `prefix`.
+fn table(prefix: &str) -> String {
     let rows = LEXICON
         .iter()
         .flat_map(Word::forms)
-        .map(|form| format!("//! | {} | {} |\n", form.written(), form.means()));
+        .map(|form| format!("{prefix}| {} | {} |\n", form.written(), form.means()));
     [
-        "//! | Written | Means |\n".to_owned(),
-        "//! |---|---|\n".to_owned(),
+        format!("{prefix}| Written | Means |\n"),
+        format!("{prefix}|---|---|\n"),
     ]
     .into_iter()
     .chain(rows)
     .collect()
+}
+
+/// The crate documentation's block table, as `//!` lines.
+fn doc_table() -> String {
+    table("//! ")
+}
+
+/// The first word's example, indented as the body of a `lgwks_bot::script!`
+/// block.
+fn wrapped_example() -> String {
+    LEXICON
+        .first()
+        .map(Word::example)
+        .into_iter()
+        .flat_map(str::lines)
+        .map(|line| format!("    {line}\n"))
+        .collect()
 }
 
 /// The README's word table: every row, with the columns the crate
@@ -267,13 +285,7 @@ const WRITE_PAGE: &str = "LGWKS_WRITE_LEXICON_PAGE";
 /// Proofs are left to the README's table; the page carries what an author
 /// needs, inside its token budget.
 fn page() -> Result<String, String> {
-    let wrapped: String = LEXICON
-        .first()
-        .map(Word::example)
-        .into_iter()
-        .flat_map(str::lines)
-        .map(|line| format!("    {line}\n"))
-        .collect();
+    let wrapped = wrapped_example();
     let mut page = format!(
         "# The `script!` lexicon\n\n\
          <!-- Generated from `LEXICON` in crates/lgwks-ast/src/script/lexicon.rs by the \
@@ -378,4 +390,114 @@ fn the_lexicon_page_is_rendered_from_the_lexicon() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The crates whose rustdoc front page opens with the lexicon (#526): each
+/// directory under the workspace root holds the `src/lib.rs` and the generated
+/// `src/lexicon.md` this test reads.
+const FRONT_PAGES: [&str; 4] = [
+    "crates/lgwks-std",
+    "crates/lgwks-bot",
+    "crates/lgwks-ast",
+    "crates/lgwks-deps",
+];
+
+/// The first line of each of those `lib.rs` files: the crate documentation
+/// begins with the fragment, ahead of every other line it carries.
+const OPENER: &str = "#![doc = include_str!(\"lexicon.md\")]\n";
+
+/// Where a crate page reaches the full lexicon page.
+const PAGE_URL: &str =
+    "https://github.com/srinji-kaggss/logicalworks-crates/blob/main/docs/script-lexicon.md";
+
+/// What every crate's front page opens with: the way in, one example and the
+/// block table, rendered from [`LEXICON`] so no page says what the parser does
+/// not do.
+fn front() -> String {
+    format!(
+        "The supported way to use this crate is `script!` (`lgwks_bot::script!`): \
+         orchestration written the way it is said.\n\n\
+         ```text\nlgwks_bot::script! {{\n{}}}\n```\n\n\
+         Each line is one step. It starts with one of the words below, or it is a \
+         line of Rust, passed through as written. What each word refuses and \
+         guarantees is on [the one-page lexicon]({PAGE_URL}).\n\n\
+         {}\n\
+         [`Scope`]: https://docs.rs/lgwks_bot/latest/lgwks_bot/script/struct.Scope.html\n",
+        wrapped_example(),
+        table(""),
+    )
+}
+
+/// What is wrong with one crate's front page: a fragment that is not the
+/// rendered one, or a `lib.rs` that does not begin with the opener.
+fn flaws(directory: &str, committed: &str, lib: &str, rendered: &str) -> Vec<String> {
+    let mut found = Vec::with_capacity(2);
+    if committed != rendered {
+        found.push(format!(
+            "{directory}/src/lexicon.md differs from the lexicon"
+        ));
+    }
+    if !lib.starts_with(OPENER) {
+        found.push(format!(
+            "{directory}/src/lib.rs does not begin with {OPENER:?}"
+        ));
+    }
+    found
+}
+
+/// Every crate's rustdoc front page opens with the lexicon (#526): its `lib.rs`
+/// begins with the line that includes the fragment, and the committed fragment
+/// is the one the lexicon renders. Set `LGWKS_WRITE_LEXICON_PAGE` to write the
+/// fragments instead of failing on a stale one.
+#[test]
+fn every_front_page_opens_with_the_lexicon() -> Result<(), String> {
+    let rendered = front();
+    let writing = std::env::var_os(WRITE_PAGE).is_some();
+    let mut found = Vec::new();
+    for directory in FRONT_PAGES {
+        let src = workspace_root().join(directory).join("src");
+        let fragment = src.join("lexicon.md");
+        if writing {
+            std::fs::write(&fragment, &rendered)
+                .map_err(|error| format!("{directory}: {error}"))?;
+        }
+        let committed = std::fs::read_to_string(&fragment)
+            .map_err(|error| format!("{directory}/src/lexicon.md: {error}"))?;
+        let lib = std::fs::read_to_string(src.join("lib.rs"))
+            .map_err(|error| format!("{directory}/src/lib.rs: {error}"))?;
+        found.extend(flaws(directory, &committed, &lib, &rendered));
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}; rerun this test with {WRITE_PAGE}=1 and commit the fragments",
+        found.join("; ")
+    ))
+}
+
+/// The check is not vacuous: a stale fragment and a `lib.rs` that opens with
+/// anything else are each refused, and a page that matches is not.
+#[test]
+fn a_front_page_that_does_not_open_with_the_lexicon_is_refused() {
+    let lib = format!("{OPENER}//! The rest.\n");
+    assert!(
+        flaws("crates/x", "page", &lib, "page").is_empty(),
+        "a matching page is clean"
+    );
+    assert_eq!(
+        flaws("crates/x", "old", &lib, "page").len(),
+        1,
+        "a stale fragment is one flaw"
+    );
+    assert_eq!(
+        flaws("crates/x", "page", "//! The rest.\n", "page").len(),
+        1,
+        "a lib.rs without the opener is one flaw"
+    );
+    assert_eq!(
+        flaws("crates/x", "old", "//! The rest.\n", "page").len(),
+        2,
+        "both flaws are reported together"
+    );
 }

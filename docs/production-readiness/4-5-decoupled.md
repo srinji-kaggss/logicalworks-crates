@@ -21,6 +21,12 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   `std-first` lane (`check-std-first`) refuses a file whose count rises, a file the
   table does not list, and a ceiling the tree has fallen below. A new public item is
   therefore a visible edit to the table: INV-SURFACE-1, #526.
+- The front page says what the parser does: the rustdoc front page of `lgwks_std`,
+  `lgwks_bot`, `lgwks_ast` and `lgwks_deps` opens with one generated `src/lexicon.md`
+  (the way in, the first lexicon example and the block table) rendered from `LEXICON`,
+  and `lgwks_macros` carries the same table in its own crate documentation. A page
+  that drifts from the lexicon, or a `lib.rs` that does not begin with the include,
+  fails `lexicon_docs::every_front_page_opens_with_the_lexicon`: INV-FRONT-1, #526.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only

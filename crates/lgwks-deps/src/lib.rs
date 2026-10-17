@@ -1,3 +1,4 @@
+#![doc = include_str!("lexicon.md")]
 //! `lgwks_deps` owns dependency admission and enforces
 //! INV-DEP-EDGE-OWNED: every external dependency authored by a workspace
 //! package names its semantic owner, capability, source, requirement, allowed
