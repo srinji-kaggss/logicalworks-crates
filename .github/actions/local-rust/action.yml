@@ -235,6 +235,15 @@ runs:
           "$@"
           echo "$1 took $(( SECONDS - started )) s"
         }
+        # Detaching a volume detaches its APFS container and the RAM store
+        # beneath it, which is what returns the memory. `hdiutil detach` does
+        # that for thirteen volumes at once, each holding 256 MiB, in 0.9 to
+        # 6.5 s, where `diskutil eject force` took 12.2 to 21.1 s (#272: an idle
+        # host, APFS, 4 GiB stores, several rounds each); neither left a RAM
+        # store or its daemon behind. `diskutil` stays as the fallback.
+        detach_disk() {
+          hdiutil detach "$1" -force >/dev/null 2>&1 || diskutil eject force "$1" >/dev/null 2>&1
+        }
         ram_disk() {
           local owner label other sectors device tmp
           owner="$(printf '%s' "${RUNNER_NAME:-local}" | tr -c 'A-Za-z0-9_.-' '-')"
@@ -247,12 +256,11 @@ runs:
             label="lwc-tmp-${owner}"
             other="lwc-tmp-${owner}-b"
           fi
-          # Ejecting the volume detaches its APFS container and the RAM store
-          # beneath it, which is what returns the memory. A volume still under
-          # the label this job wants is one a job two back left, when its
-          # detach failed or had not finished; it goes first, as it always did.
+          # A volume still under the label this job wants is one a job two back
+          # left, when its detach failed or had not finished; it goes first, as
+          # it always did.
           if [ -d "/Volumes/${label}" ]; then
-            diskutil eject force "/Volumes/${label}" >/dev/null || echo "::warning::could not eject /Volumes/${label}"
+            detach_disk "/Volumes/${label}" || echo "::warning::could not eject /Volumes/${label}"
           fi
           tmp=""
           if [ "$(uname -s)" = Darwin ] && [ "${{ inputs.tmp-gib }}" -gt 0 ]; then
@@ -281,7 +289,7 @@ runs:
           # the same second, the slowest call of the four (#272); the disk of
           # this job needed 4.1 s at the most beside it.
           if [ -d "/Volumes/${other}" ]; then
-            ( diskutil eject force "/Volumes/${other}" >/dev/null 2>&1 || echo "could not eject /Volumes/${other}" >> "${out}/eject.log" ) < /dev/null > /dev/null 2>&1 &
+            ( detach_disk "/Volumes/${other}" || echo "could not eject /Volumes/${other}" >> "${out}/eject.log" ) < /dev/null > /dev/null 2>&1 &
             disown
           fi
           echo "TMPDIR=${tmp}" >> "${out}/ram.env"
