@@ -675,11 +675,11 @@ reason = "dedicated PR check row whose job name is the ruleset's required Clippy
 # The ruleset also requires "Build and workspace tests". The workspace job runs
 # every test but lgwks_bot's, and the lgwks_bot jobs (full, saturation, no default
 # features) run those; this row carries the required name and passes only when
-# all four jobs passed.
+# all five passed (the fifth is the workspace job's tail: evidence, doc tests, smoke).
 [[lane]]
 id = "build-verdict"
 surfaces = "ci"
 required = true
-command = "test \"${BUILD}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success"
+command = "test \"${BUILD}\" = success && test \"${TAIL}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success"
 ci_step = "Every workspace test job passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Build and workspace tests"

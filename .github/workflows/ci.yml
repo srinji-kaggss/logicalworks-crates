@@ -21,33 +21,24 @@ on:
 # acceptance receipt wait on another job: each of them reads a result instead of
 # building one.
 #
-# Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-11`,
+# Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-13`,
 # runner labels). An instance keeps one target directory and one container
-# target volume; a job free to land on any instance found that instance cold
-# for its feature sets, so each of the six had to build every job's sets before
-# any run was warm, and the first two runs on this layout spent their budgets
-# compiling at a load average of 70-85 (runs 37613720499, 37616318637). Pinned,
-# an instance only ever holds its own jobs' builds, and the second run is warm.
-# The jobs that build nothing run anywhere. Thirteen instances, one per job
-# that builds: with six, a warm run's jobs queued behind one another and the
-# run took 601 s although no job took more than 450 s (run 37619560219
-# attempt 2).
+# target volume; a job free to land on any instance found it cold, and the
+# first two runs on this layout spent their budgets compiling at a load average
+# of 70-85 (runs 37613720499, 37616318637). Pinned, an instance only holds its
+# own jobs' builds, and the second run is warm. Thirteen instances, one per job
+# that builds: with six a warm run's jobs queued behind one another (601 s,
+# run 37619560219 attempt 2). The jobs that build nothing run anywhere.
 #
 # Each feature set is compiled by exactly one job. A suite split into shards
-# across jobs compiled the same set once per shard, at the same time: on run
-# 37630747929, a change to lgwks-bot's source had three bot-full shards and
-# two workspace shards each compiling for 4-9 minutes at a load near 150,
-# while every shard's tests took 66-150 s. A suite now runs in one job, with
-# the test threads of the shards it replaced (`test-share`).
+# compiled the same set once per shard, at the same time (run 37630747929: 4-9
+# minutes each at a load near 150, while every shard's tests took 66-150 s). A
+# suite runs in one job, with the test threads of the shards it replaced
+# (`test-share`).
 #
-# Every self-hosted job's timeout is 20 minutes, 30 for the six jobs that
-# compile the most (build, bot-full, no-default, docs, the two matrices).
-# That is a hang bound, not the budget: the budget is 5 min warm, enforced by
-# measurement (WORKFLOW.md §12).
-# A toolchain or profile change rebuilds every instance at once — the opt-level
-# 2 transition run paid a 638 s full-workspace rebuild on two compiler slots —
-# and a transition run must survive that to leave every instance warm. Hung
-# tests are still bounded inside the suite by nextest's `slow-timeout` with
+# The job timeout is the budget, 5 minutes: a job that passes its tests and
+# ends past it is cancelled (main run 39056822862: every step ended at 297 s).
+# Hung tests are bounded inside the suite by nextest's `slow-timeout` with
 # `terminate-after`.
 #
 # Compiler slots follow what a job compiles, not one rule for all. rustc draws
@@ -107,18 +98,14 @@ jobs:
     name: Workspace build and tests
     # The instance keeps its target directory across runs, so a warm run
     # recompiles only what changed: 250 s on run 38365526454. A push that edits
-    # a test source is the cold case of that: the changed test binaries compiled
-    # for 184 s (run 38870029835), 249 s (run 38936864320) and 243 s (run
-    # 38941034251) at a load average of 45-90, against 31 s at 15 and 22 s with
-    # nothing changed, so the first run after the edit is cancelled at the bound
-    # with its tests unfinished; the next is the job's measurement.
+    # a test source is the cold case: the changed test binaries compiled for
+    # 184 to 249 s at a load average of 45-90 (runs 38870029835, 38936864320,
+    # 38941034251), against 22 s with nothing changed, so the first run after the
+    # edit is cancelled at the bound and the next is the job's measurement.
     #
-    # lgwks_bot's tests (4,138 of the 5,569) run in the lgwks_bot jobs below (full,
-    # saturation and no default features), and `build_verdict` reports this
-    # check's required name only when those three and this job all passed, so
-    # every test is still required. Run on a warm directory beside a load average
-    # near 50 (run 38871028285), every one of the 5,569 passed and the step was
-    # cancelled in the second the last one did, 252 s in.
+    # lgwks_bot's tests run in the lgwks_bot jobs below, and `build_verdict`
+    # reports this check's required name only when those three, this job and its
+    # tail job all passed, so every test is still required.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
     timeout-minutes: 5
     env:
@@ -149,11 +136,30 @@ jobs:
         run: cargo test --workspace --all-targets --locked --no-run
       - name: Run all workspace tests
         run: cargo nextest run --workspace --locked -E 'not binary(storefront_consumers) and not package(lgwks_bot)' ${PARTITION:+--partition $PARTITION}
-      # The two evidence lanes print the result their check rows below expose.
-      # Each writes its own report, and the check row reads that report rather
-      # than building the workspace a second time to produce it again: the
-      # simulation listing alone compiles every test binary, which as a job of
-      # its own cost 364 s on run 37579691890 and 6 s here.
+  # The workspace job's tail, on the instance whose target directory that job
+  # just filled, so it builds nothing. The five steps took 40 s of the job's
+  # 300: on main run 39056822862 every step ended at 297 s with 1,559 of 1,559
+  # tests passed and the cap cancelled the job in its cleanup. The two evidence
+  # lanes print the result their check rows expose; each row reads that report
+  # rather than listing the tests again (as a job of its own the listing cost
+  # 364 s on run 37579691890 and 6 s here). `build_verdict` requires this job.
+  workspace_tail:
+    name: Workspace evidence and doc tests
+    needs: build
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
+    timeout-minutes: 5
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          nextest: "true"
+          test-share: "8"
+          build-share: "3"
+          defer: "0"
       - name: Deterministic simulation evidence
         run: |
           set -euo pipefail
@@ -263,7 +269,7 @@ jobs:
   # pass line, so the row is exactly the lane's verdict on this commit.
   simulation_evidence:
     name: successful simulation result
-    needs: build
+    needs: workspace_tail
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     steps:
@@ -278,7 +284,7 @@ jobs:
 
   debug_e2e:
     name: successful end-to-end journey result
-    needs: build
+    needs: workspace_tail
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     steps:
@@ -365,29 +371,20 @@ jobs:
   # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a real
   # process boundary) in a job of their own, beside the suite rather than after
   # it: the 10,000 tier alone is 50,000 process starts and about two minutes.
-  # It compiles only lgwks-bot and this one test binary. The three tiers took
-  # 254 s in one job (run 38365526454). The 10,000 tier is CPU-bound, 50,000
-  # process starts, and on a self-hosted instance beside twelve other jobs it
-  # ran past the 5-minute limit in its test step alone, with the build cached
-  # (run 38407172423: 5 m 14 s). A hosted runner has 3 cores: the test was
-  # still running 2 m 27 s in when the job limit cancelled it, after a 1 m 11 s
-  # build and two minutes of setup (run 38416328077). So the 10,000 tier has an
-  # instance of its own, apart from the 100 and 1,000 tiers on lwc-12.
-  # The binary's other 42 tests (the review-path simulations) and lgwks-bot's
-  # `sim_scale` module (164 tests of the `it` binary) run on the lwc-2 leg too,
-  # in place of the bot-full job, which no longer runs them on macOS
-  # (`.config/nextest.toml`): that suite is bounded by its work, 1,880 to 1,916
-  # slot-seconds of tests on nine threads, of which the 42 held 206 and
-  # `sim_scale` 250 to 477 (runs 38904371387 and 38912085538, each cancelled at
-  # the 5 min cap with every test passed). lwc-2 finished its one leg in 80 s of
-  # its 300 (159 s on run 38916569842 and 165 s on run 38918492955, each of which
-  # built the `it` binary cold there after a test edit); lwc-12 runs the
-  # lgwks-ast leg first (127 s on run 38912085538) and a leg queued behind it
-  # ends the run, because the receipt waits for every leg, so it keeps only the
-  # two small tiers, and builds only their binary: with the `it` binary too its
-  # leg took 186 s on run 38916569842 and without it 75 s on run 38918492955.
-  # The Linux container run still runs all of them. Which binaries a leg builds
-  # is the leg's `binaries`; unset, the lane builds the review-path binary alone.
+  # It compiles only lgwks-bot and this one test binary. The 10,000 tier is
+  # CPU-bound, 50,000 process starts: beside twelve other jobs it ran past the
+  # limit in its test step alone (run 38407172423: 5 m 14 s), and a hosted
+  # runner's 3 cores did worse (run 38416328077), so it has an instance of its
+  # own (lwc-2), apart from the 100 and 1,000 tiers on lwc-12. The binary's
+  # other 42 tests and lgwks-bot's `sim_scale` module (164 tests) run on the
+  # lwc-2 leg too, in place of the bot-full job (`.config/nextest.toml`): that
+  # suite is bounded by its work, and the 42 held 206 slot-seconds and
+  # `sim_scale` 250 to 477 (runs 38904371387, 38912085538, each cancelled at the
+  # cap with every test passed). lwc-12 keeps the two small tiers and builds only
+  # their binary (186 s with the `it` binary, 75 s without: runs 38916569842,
+  # 38918492955), because a leg queued behind the lgwks-ast leg ends the run.
+  # The Linux container run still runs all of them. A leg's `binaries` names what
+  # it builds; unset, the lane builds the review-path binary alone.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -1051,13 +1048,14 @@ jobs:
   # of the required check: on run 38871028285 each of the 4,138 lgwks_bot tests
   # the workspace job ran was among the 4,870 the full job ran, and the
   # no-default job adds 3,190 under the other feature set, where before the
-  # required check held the default set alone. The saturation job runs the 45
+  # required check held the default set alone. The workspace job's tail (evidence
+  # lanes, doc tests, package smoke) is the fifth job the row requires. The saturation job runs the 45
   # tests of `sim_review_path` (42 simulations and the three tiers) that the full
   # job leaves to it on macOS, so it is part of the row. A cancelled or skipped
   # job is not `success`, so it fails this row too.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, tests_bot_full, tests_bot_saturation, tests_nodefault]
+    needs: [build, workspace_tail, tests_bot_full, tests_bot_saturation, tests_nodefault]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1065,9 +1063,10 @@ jobs:
       - name: Every workspace test job passed
         env:
           BUILD: ${{ needs.build.result }}
+          TAIL: ${{ needs.workspace_tail.result }}
           BOT_FULL: ${{ needs.tests_bot_full.result }}
           BOT_SATURATION: ${{ needs.tests_bot_saturation.result }}
           BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
         run: |
-          echo "workspace ${BUILD}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
-          test "${BUILD}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
+          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
+          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
