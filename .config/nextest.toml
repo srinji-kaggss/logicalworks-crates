@@ -142,6 +142,13 @@ priority = 50
 # cancelled at the cap (314 to 329 s) while lgwks_std's own job passed in 61 s.
 # Priming bot-full's runner (35 s) and the workspace runner (22 s) in place at the
 # merge commit on an idle host came before the next push.
+#
+# Its second run (39046637995) failed one bot-full test, a dependant's 500 ms wait
+# for a child that had not printed yet, and its third (39047466052) lost the
+# workspace and bot-full jobs to the cap on the first run after a test-only edit
+# and failed the Linux container leg on a 9 us control against a 90 us append.
+# Both bounds are fixed in the tests; a test-only edit rebuilds the `it` binary
+# cold too, so the runners were primed at the merge commit (r5 78 s, r3 25 s).
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
