@@ -27,6 +27,9 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   and `lgwks_macros` carries the same table in its own crate documentation. A page
   that drifts from the lexicon, or a `lib.rs` that does not begin with the include,
   fails `lexicon_docs::every_front_page_opens_with_the_lexicon`: INV-FRONT-1, #526.
+  The `lgwks_ast` root was measured once, when it was hidden: its all-features
+  rustdoc fell from 172 pages to three (`cargo doc -p lgwks_ast --all-features`,
+  commit `725a3c88`). No test holds that count, so #526 owns it.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
