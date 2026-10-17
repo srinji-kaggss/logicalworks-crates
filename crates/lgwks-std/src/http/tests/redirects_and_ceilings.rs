@@ -333,12 +333,14 @@ fn request_body_timeout_preserves_send_stage() -> Result<(), Box<dyn std::error:
 /// A body timeout keeps its body phase and timeout class after headers land.
 #[test]
 fn body_timeout_preserves_stage_and_class() -> Result<(), Box<dyn std::error::Error>> {
+    // The head must land before the timeout for the stall to be a body stall (#272).
+    let timeout = host_budget(Duration::from_millis(150), Duration::from_secs(5))?;
     let (port, release, server) = serve_held(Some(
         b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\n\r\nx".to_vec(),
     ))?;
     let result = get_with(
         &format!("http://127.0.0.1:{port}/"),
-        &quiet().timeout(Duration::from_millis(150)),
+        &quiet().timeout(timeout),
     );
     assert!(matches!(
         result,
@@ -367,10 +369,12 @@ fn eof_probe_timeout_preserves_stage_and_class() -> Result<(), Box<dyn std::erro
     )
     .into_bytes();
     response.extend(std::iter::repeat_n(b'x', limit));
+    // The head and the body must land before the timeout for the stall to be the probe's (#272).
+    let timeout = host_budget(Duration::from_millis(150), Duration::from_secs(5))?;
     let (port, release, server) = serve_held(Some(response))?;
     let result = get_with(
         &format!("http://127.0.0.1:{port}/"),
-        &previewing(limit).timeout(Duration::from_millis(150)),
+        &previewing(limit).timeout(timeout),
     );
     assert!(matches!(
         result,

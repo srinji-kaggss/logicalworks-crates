@@ -610,10 +610,13 @@ fn gated(fixture: &Fixture, args: &[String], kill: bool) -> Result<Gated, Box<dy
     })
 }
 
-/// The next rung of the bound ladder: twice `seconds`, never past
-/// `LONGEST_SHORT_BOUND`, and `None` once the ladder is at its top.
+/// The bound after one that cut an oracle off: `LONGEST_SHORT_BOUND`, and `None` once
+/// `seconds` is already there. A cut-off says the host's load moved past what was
+/// measured, and every attempt runs the stopped oracle its whole bound, so climbing
+/// 12, 24, 48 and 90 s cost 174 s of waiting where one step to the top costs 90 (PR
+/// 601's run 39055584424: the test took 205.9 s).
 fn wider(seconds: u32) -> Option<u32> {
-    (seconds < LONGEST_SHORT_BOUND).then(|| seconds.saturating_mul(2).min(LONGEST_SHORT_BOUND))
+    (seconds < LONGEST_SHORT_BOUND).then_some(LONGEST_SHORT_BOUND)
 }
 
 /// Whether the un-gated task's own oracle was cut off by the bound: a run that
@@ -629,9 +632,9 @@ fn ungated_timed_out(fixture: &Fixture, shown: &Gated) -> Result<bool, Box<dyn E
 }
 
 /// Runs the dry run with the second oracle gated under an oracle bound of `first`
-/// seconds, and under twice that while the runner ended before the oracle announced
-/// itself or the un-gated task's oracle was cut off by the bound, up to
-/// `LONGEST_SHORT_BOUND`. The bound covers the oracle's whole `cargo test`, compile
+/// seconds, and once more under `LONGEST_SHORT_BOUND` if the runner ended before the
+/// oracle announced itself or the un-gated task's oracle was cut off by the bound.
+/// The bound covers the oracle's whole `cargo test`, compile
 /// included, so an oracle cut off before its gate, or the un-gated one cut off at all,
 /// says the host's load moved after the bound was measured (main run 39050234041:
 /// both of `alpha`'s clauses read `timeout` 110 s into the job's start burst), which
@@ -751,28 +754,30 @@ fn an_oracle_past_its_bound_is_stopped_with_its_group_and_recorded_as_a_timeout(
 }
 
 /// Source: main run 39050234041, where the un-gated task's oracle read `timeout` under
-/// a bound measured moments before. Requirement: the ladder doubles the bound, never
-/// passes `LONGEST_SHORT_BOUND`, and ends there, so a bound that cut an oracle off is
-/// widened a bounded number of times and a run that never fits still fails.
+/// a bound measured moments before, and PR 601's run 39055584424, where climbing the
+/// rungs one by one made the test 205.9 s. Requirement: a bound that cut an oracle off
+/// is followed by `LONGEST_SHORT_BOUND` at once, never past it, and nothing follows
+/// that, so a cut-off is retried once and a run that never fits still fails.
 #[test]
-fn the_bound_ladder_doubles_and_stops_at_the_longest() {
-    let mut rung = SHORT_ORACLE_BOUND;
-    let mut climbed = 0_u32;
-    while let Some(next) = wider(rung) {
-        assert!(next > rung, "every rung is wider than the one below it");
-        assert!(
-            next <= rung.saturating_mul(2) && next <= LONGEST_SHORT_BOUND,
-            "a rung is at most twice the last and never past the longest bound"
+fn a_cut_off_bound_is_followed_by_the_longest_and_nothing_follows_that() {
+    for cut_off in [0, 1, SHORT_ORACLE_BOUND, LONGEST_SHORT_BOUND - 1] {
+        assert_eq!(
+            wider(cut_off),
+            Some(LONGEST_SHORT_BOUND),
+            "a bound of {cut_off} s that cut an oracle off is followed by the longest"
         );
-        rung = next;
-        climbed = climbed.saturating_add(1);
-        assert!(climbed < 32, "the ladder ends");
     }
+    assert_eq!(wider(LONGEST_SHORT_BOUND), None, "no bound above the top");
     assert_eq!(
-        rung, LONGEST_SHORT_BOUND,
-        "the top rung is the longest bound"
+        wider(LONGEST_SHORT_BOUND.saturating_add(1)),
+        None,
+        "a bound past the top has nothing above it either"
     );
-    assert_eq!(wider(LONGEST_SHORT_BOUND), None, "no rung above the top");
+    assert_eq!(
+        wider(u32::MAX),
+        None,
+        "the widest value has nothing above it"
+    );
 }
 
 /// Source: the Director's contract ("`kill -9` and restart") and #270's "no orphan

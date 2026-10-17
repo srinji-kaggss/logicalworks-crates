@@ -5,6 +5,9 @@ use super::exchange::{
     resolve_location,
 };
 use super::*;
+
+mod deadlines;
+use deadlines::host_budget;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -501,87 +504,6 @@ fn redirect_loop_refuses_at_the_configured_limit() -> Result<(), Box<dyn std::er
             .map_err(|_| "redirect loop server panicked")??,
         3,
         "the receiver observed the initial request plus two followed hops"
-    );
-    Ok(())
-}
-
-/// The whole-call deadline is carried across hops: each hop here answers
-/// well inside the per-phase timeout, yet the chain as a whole overruns
-/// the deadline and is refused at the deadline stage (#191).
-#[test]
-fn a_deadline_bounds_the_whole_redirect_chain() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    // The test drops `done` once the client has given up, which disconnects
-    // the channel; the server's per-hop delay is a wait on that event, so it
-    // ends with the client instead of running out a clock.
-    let (done, client_done) = std::sync::mpsc::sync_channel::<()>(1);
-    // Counts requests the client made, not replies completed: a hop the
-    // deadline cut short still shows the client followed the redirect to it,
-    // and a count of completed replies would make the bound below a race
-    // between the per-hop gap and the deadline on a loaded host.
-    let server = fixture_thread(move || -> std::io::Result<usize> {
-        let mut requested = 0;
-        while requested < 10 {
-            let (mut stream, _) = listener.accept()?;
-            if !matches!(
-                client_done.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Empty)
-            ) {
-                break;
-            }
-            let _ = read_request_head(&mut stream)?;
-            requested += 1;
-            // A slow upstream: 200 ms per hop, well inside the per-phase
-            // timeout, so only the whole-call deadline can stop the chain.
-            let gap = client_done.recv_timeout(Duration::from_millis(200));
-            if !matches!(gap, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
-                break;
-            }
-            let reply = format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/hop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            // The client may already have given up on this hop, which is
-            // the point of the test, so a refused write ends the chain.
-            if stream.write_all(reply.as_bytes()).is_err() {
-                break;
-            }
-        }
-        Ok(requested)
-    })?;
-    let started = std::time::Instant::now();
-    let result = get_with(
-        &format!("http://127.0.0.1:{port}/hop"),
-        &quiet()
-            .timeout(Duration::from_secs(2))
-            .deadline(Duration::from_millis(500))
-            .redirect_policy(RedirectPolicy::FollowAtMost(10)),
-    );
-    let elapsed = started.elapsed();
-    // Tell the server the client is done, and wake an accept it may be
-    // blocked in; whether that connection lands is the server's business.
-    drop(done);
-    drop(TcpStream::connect(("127.0.0.1", port)));
-    assert!(
-        matches!(
-            result,
-            Err(Error::Failure {
-                stage: FailureStage::Deadline,
-                kind: FailureKind::Timeout,
-                ..
-            })
-        ),
-        "the chain is refused at its deadline, got {result:?}"
-    );
-    assert!(
-        elapsed < Duration::from_millis(1_500),
-        "the deadline bounds the chain, not ten hops of 200 ms: {elapsed:?}"
-    );
-    let requested = join_server(server)?;
-    assert!(
-        (2..10).contains(&requested),
-        "the client followed at least one redirect, then stopped at the deadline: \
-         {requested} requests"
     );
     Ok(())
 }
