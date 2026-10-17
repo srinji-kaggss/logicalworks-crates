@@ -109,6 +109,29 @@ priority = 100
 filter = 'package(lgwks_std) & binary(it) & test(/^sim_shared_policy_tiers::/)'
 priority = 50
 
+# #272: run 38990896461 (PR 581), bot-full job. Its test phase took 214.7 s and the
+# job was cancelled at its 5 min cap 0.2 s after the summary printed, with all 4,721
+# tests passed. Equal priorities run in binary then name order, so the modules that
+# sort last in `it` came up together about 158 s in and ran to the end: the
+# sim_task_resume bands 12 to 15 took 57, 57, 44 and 37 s, sim_tenant_store's seeded
+# history 33 s, four t02_compile_surface tests 11 to 20 s, four sim_tenancy_flood
+# tests 15 to 17 s and two sys_process_binding tests 11 and 14 s. nextest's own
+# advice is to run the slowest tests first so a run is not held up by slow tests at
+# the end. Priority 50 starts them after the exclusive tests above, so they overlap
+# the rest of the job instead of ending it. The tests are unchanged, only their
+# place in the order.
+[[profile.default.overrides]]
+filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
+priority = 50
+
+# #272: the same run's workspace job, cancelled at the cap 0.1 s after its package
+# smoke test passed. Its last test, the many-cycle test of task::sim_pool_lifetime,
+# came up when the rest had finished and ran its 19.9 s alone, and sim_task_public's
+# tests took 3.7 to 8.9 s each beside it. Same reasoning and same priority as above.
+[[profile.default.overrides]]
+filter = '(package(lgwks_std) & test(/^task::sim_pool_lifetime::/)) | (package(lgwks_std) & binary(it) & test(/^sim_task_public::/))'
+priority = 50
+
 # #272: the persist tests spend their time in the kernel (open, rename, write),
 # and macOS serializes that work host-wide, so more concurrent processes buy more
 # kernel time, not more throughput. The 236 lgwks_bot cas and journal tests, one

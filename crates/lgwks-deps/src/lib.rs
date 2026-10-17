@@ -9,12 +9,18 @@
 //! make the second half of that sentence mechanically true rather than a
 //! convention people remember.
 //!
+//! The supported interface is `script!` (`lgwks_bot::script!`). The gate, its
+//! register types and the storefront re-exports are the support code under it:
+//! each item is `#[doc(hidden)]`, still reachable by the sibling crates, by the
+//! `lgwks-deps` binaries and by this crate's own tests, and kept out of the
+//! documented surface by #526. This page keeps the prose that explains the gate.
+//!
 //! ## Enforcement boundary
 //!
 //! The same `lgwks-deps check` command is an explicit first job in local and
 //! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 //! closure, because only metadata preserves the package that authored an edge.
-//! Embedders call [`check_dependencies`] for the identical verdict.
+//! Embedders call `check_dependencies` for the identical verdict.
 //!
 //! ## Fail-closed
 //!
@@ -28,7 +34,7 @@
 //! Adoption mode is a posture, not an off switch. It is supported over a tree
 //! this gate admits, and a clean tree still passes under it. It cannot stand a
 //! violating tree down: `enforce = false` over refusals adds a named
-//! [`Refusal::AdoptionModeRefusals`] reporting how many violations the posture
+//! `Refusal::AdoptionModeRefusals` reporting how many violations the posture
 //! stood down, so `check` exits non-zero identically under `enforce = true` and
 //! `enforce = false`. The verdict is a function of the refusals alone, which is
 //! what makes the reviewable one-token diff that adoption mode depends on
@@ -73,14 +79,19 @@
 // links deny) comes from the workspace root.
 
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
+#[doc(hidden)]
 pub mod contract;
 /// The optional authored invariant register and its repository-aware validator.
+#[doc(hidden)]
 pub mod invariants;
 /// The register: parsing and approval lookup for `contract/APPROVED.toml`.
+#[doc(hidden)]
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
+#[doc(hidden)]
 pub mod metadata;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
+#[doc(hidden)]
 pub mod vendor;
 
 /// The audit itself: every direct edge judged against the register.
@@ -93,12 +104,16 @@ mod refusal;
 #[cfg(test)]
 mod sim_edge;
 
+#[doc(hidden)]
 pub use audit::{audit_direct, declared_scope};
+#[doc(hidden)]
 pub use refusal::{GateError, Refusal};
 
 #[cfg(any(feature = "macro", feature = "script"))]
+#[doc(hidden)]
 pub use proc_macro2;
 #[cfg(feature = "macro")]
+#[doc(hidden)]
 pub use quote;
 /// The one authored `tokio` edge, re-exported for the storefront.
 ///
@@ -107,6 +122,7 @@ pub use quote;
 /// and reaches the engine through this re-export; a consumer that wants the
 /// engine without the bot enables the feature here.
 #[cfg(feature = "tokio")]
+#[doc(hidden)]
 pub use tokio;
 
 /// The Bevy ECS substrate, selected through the storefront.
@@ -116,6 +132,7 @@ pub use tokio;
 /// and reaches the crate through this re-export, which is the same rule the
 /// `tokio` edge follows.
 #[cfg(feature = "bevy-ecs")]
+#[doc(hidden)]
 pub use bevy_ecs;
 
 /// The Bevy application layer: the `App` that owns schedules and plugins.
@@ -131,6 +148,7 @@ pub use bevy_ecs;
 /// let _app = App::new();
 /// ```
 #[cfg(feature = "bevy-app")]
+#[doc(hidden)]
 pub use bevy_app;
 
 /// Bevy's time sources, including the virtual clock.
@@ -142,6 +160,7 @@ pub use bevy_app;
 /// let _plugin = TimePlugin;
 /// ```
 #[cfg(feature = "bevy-time")]
+#[doc(hidden)]
 pub use bevy_time;
 
 /// Bevy's state machines and their run conditions.
@@ -159,11 +178,13 @@ pub use bevy_time;
 /// let _initial = Screen::default();
 /// ```
 #[cfg(feature = "bevy-state")]
+#[doc(hidden)]
 pub use bevy_state;
 
 /// The optional GPUI desktop UI framework selected through the storefront.
 /// Re-exported so consumers name the storefront, never the crate.
 #[cfg(feature = "gpui")]
+#[doc(hidden)]
 pub use gpui;
 
 /// Native terminal widgets and input-driven drawing, selected explicitly.
@@ -174,6 +195,7 @@ pub use gpui;
 /// let _layout = layout!("x:0,y:0,w:20,h:5");
 /// ```
 #[cfg(feature = "appcui")]
+#[doc(hidden)]
 pub use appcui;
 
 /// Minimalist tensor compute and safetensors loading, selected explicitly.
@@ -181,10 +203,12 @@ pub use appcui;
 /// The storefront owns this edge so no consumer declares `candle-core`
 /// directly. Weights are loaded from local files; the feature is default-off.
 #[cfg(feature = "ml-candle")]
+#[doc(hidden)]
 pub use candle_core;
 
 /// Neural network layers and parameter containers built on `candle-core`.
 #[cfg(feature = "ml-candle")]
+#[doc(hidden)]
 pub use candle_nn;
 
 /// Reference transformer model implementations built on `candle-core`.
@@ -192,10 +216,12 @@ pub use candle_nn;
 /// Selecting this feature also compiles `hf-hub`, which is network-capable;
 /// the runtime reads a local checkpoint and does not call the hub.
 #[cfg(feature = "ml-candle")]
+#[doc(hidden)]
 pub use candle_transformers;
 
 /// Vocabulary-driven subword tokenisation matching published checkpoints.
 #[cfg(feature = "ml-tokenizers")]
+#[doc(hidden)]
 pub use tokenizers;
 
 use std::path::{Path, PathBuf};
@@ -204,11 +230,13 @@ use contract::Contract;
 use metadata::DirectEdge;
 
 /// Register location relative to the repository root.
+#[doc(hidden)]
 pub const CONTRACT_PATH: &str = "contract/APPROVED.toml";
 
 // ── Filesystem entry points ─────────────────────────────────────────────────
 
 /// Walks up from `start` to the nearest directory holding a `Cargo.lock`.
+#[doc(hidden)]
 pub fn repository_root(start: &Path) -> Result<PathBuf, GateError> {
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
@@ -244,6 +272,7 @@ fn ensure_contract_file(path: &Path) -> Result<(), GateError> {
 /// A receipt that names only the root cannot tell two runs over the same tree
 /// with a changed manifest apart. The subject fingerprint binds the direct-edge
 /// identities Cargo reported, so the receipt names the graph as audited.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subject {
@@ -253,6 +282,7 @@ pub struct Subject {
     edges: usize,
 }
 
+#[doc(hidden)]
 impl Subject {
     /// The stable fingerprint of the audited direct-edge graph.
     #[must_use]
@@ -273,6 +303,7 @@ impl Subject {
 /// This is what a receipt binds: `contract` and `subject` are the two identities
 /// the CLI stamps beside the verdict, and the policy mode is the caller's
 /// (committed enforcement or `--contract` diagnosis).
+#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Verdict {
@@ -284,6 +315,7 @@ pub struct Verdict {
     subject: Subject,
 }
 
+#[doc(hidden)]
 impl Verdict {
     /// The approved-dependency register this verdict was judged against, as parsed from `contract/APPROVED.toml`.
     #[must_use]
@@ -340,6 +372,7 @@ fn subject_fingerprint(edges: &[DirectEdge]) -> String {
 /// The verdict comes back inside a [`metadata::Collected`]: a Cargo capture
 /// file that could not be removed after a complete read is reported beside the
 /// verdict rather than replacing it.
+#[doc(hidden)]
 pub fn check_dependencies(
     root: &Path,
 ) -> Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError> {
@@ -351,6 +384,7 @@ pub fn check_dependencies(
 /// The register is `contract_path` when `Some`, else the committed
 /// `contract/APPROVED.toml` beside `root`. The distinction is the receipt's
 /// policy mode: a committed register is enforcement, an override is diagnosis.
+#[doc(hidden)]
 pub fn check_verdict(
     root: &Path,
     contract_path: Option<&Path>,
@@ -390,6 +424,7 @@ pub fn check_verdict(
 /// register of its own. `enforce` never calls it: a build always reads the
 /// register committed beside the code it is building, so no build can be
 /// pointed at a more permissive contract than the one in its own tree.
+#[doc(hidden)]
 pub fn check_dependencies_against(
     root: &Path,
     contract_path: &Path,
@@ -409,6 +444,7 @@ pub fn check_dependencies_against(
 /// whose references resolved (`Resolved`) from one a recorded run attests
 /// (`Attested`). Neither is proof that the invariant holds — this crate
 /// executes nothing — and [`invariants::SCOPE`] is the sentence that says so.
+#[doc(hidden)]
 pub fn check_invariants(
     root: &Path,
 ) -> Result<Option<metadata::Collected<(invariants::Register, invariants::Audit)>>, GateError> {
