@@ -127,6 +127,9 @@ priority = 50
 # (142, 140, 78 and 71 s; 11.7, 11.3, 6.3 and 7.8 s on an idle host) and three
 # t02_compile_surface probes (90 to 95 s; each is a cargo check). The bands now open
 # one store handle per tenant instead of one per offer, 7.9, 7.9, 5.6 and 6.7 s idle.
+# Not a nextest job, but the same cap: PR 597's run 39037821544 passed every job but
+# the docs.rs feature matrix, whose lane passed at 269.6 s and was cancelled at 300 s
+# because rustdoc of lgwks_deps ran 3m37 after that crate's source changed.
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
