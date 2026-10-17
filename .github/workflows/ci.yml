@@ -409,12 +409,12 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          # Eight, as the bot-full job: the lwc-2 leg runs 206 tests beside
-          # the 10,000 tier, which asserts counts and isolation and only logs
-          # its latency tails, so sibling load cannot fail it. The 100 and 1,000
-          # leg runs two tests and uses two of the threads.
+          # Eight, as the bot-full job: the lwc-2 leg runs 206 tests beside the
+          # 10,000 tier, which only logs its latency tails; the small leg uses two.
           test-share: "8"
           build-share: "2"
+          # On the critical path now: 204 of 207 tests at the cap, run 39069794871.
+          defer: "0"
       # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
       # out of the partitioned suite: in a shard they set the run's wall (481 s
       # on run 37205854158, test phase 229 s against 61-63 s for the other three
@@ -706,9 +706,9 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           build-share: "1"
-          # 225 to 241 s on runs 39020729790 and 39021102172: it yields 15 s,
-          # not the default 30.
-          defer: "15"
+          # Cut in its last step at the cap on run 39069794871 (host idle), so it
+          # yields nothing: 20 of 20 tests passed there, 225 to 241 s earlier.
+          defer: "0"
       - name: Check lgwks-deps
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
