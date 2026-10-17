@@ -35,7 +35,7 @@ A run creates a fresh work root, `$TMPDIR/lgwks-ai-authoring-<UTC stamp>-<mode>/
 
 ## Bounds and orphans
 
-Every child leads its own process group under a bound. A child still running at its bound is stopped as a group (`TERM`, ten seconds, `KILL`) and what it had printed comes back: an oracle past `oracle_s` (300 s, forty times the slowest legitimate oracle run measured; it holds the one cargo lock, so a hung one stalls every trial for that long) keeps the verdicts of the clauses that finished, the rest are `timeout`, and the trial is a recorded failure, not a crash. A watchdog process in a group of its own stops every group the runner started if the runner itself is killed, so no oracle, solution or `cargo` outlives a run.
+Every child leads its own process group under a bound. A child still running at its bound is stopped as a group (`TERM`, ten seconds, `KILL`) and what it had printed comes back: an oracle past `oracle_s` (300 s, 3.2 times the slowest oracle measured, 94.6 s for a reference on a loaded host; it holds the one cargo lock, so a hung one stalls every trial for that long) keeps the verdicts of the clauses that finished, the rest are `timeout`, and the trial is a recorded failure, not a crash. A watchdog process in a group of its own stops every group the runner started if the runner itself is killed, so no oracle, solution or `cargo` outlives a run.
 
 ## The call ledger
 

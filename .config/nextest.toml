@@ -130,6 +130,12 @@ priority = 50
 # Not a nextest job, but the same cap: PR 597's run 39037821544 passed every job but
 # the docs.rs feature matrix, whose lane passed at 269.6 s and was cancelled at 300 s
 # because rustdoc of lgwks_deps ran 3m37 after that crate's source changed.
+#
+# PR 598's first run after a Rust edit (run 39041681878, host load average 38):
+# the workspace job failed two lgwks_std http tests that bound real time at 150 ms
+# and 500 ms, bot-full and its container leg were cancelled at the cap, and the
+# docs.rs matrix passed in 4m13. Priming bot-full's runner in place at the merge
+# commit took 34 s and the workspace runner was already warm.
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
