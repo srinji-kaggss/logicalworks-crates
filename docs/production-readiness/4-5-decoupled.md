@@ -51,6 +51,17 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   after it started at 04:24:08Z, and the job still ended `cancelled` at
   04:29:16Z; bot-full had run 2,294 of 4,721 tests when the cancel landed at
   04:29:20Z. #272 owns both walls.
+- The poll watchdog gives a source the reaper owes a turn that turn: `WavePoll::turn`
+  decides a stall from the expiry it read at the start of the turn, so a deadline that
+  passes while a poll runs no longer cuts off a poll whose waker was installed before it
+  (INV-BOT-123, `ecs::tests::test_part_04`). The push run after PR 586 (39003404318)
+  had failed `the_same_seed_replays_a_deadline_wave` on the old reading. The fix's
+  deterministic test failed on the unfixed tree, and 117 of 117 tests in the `ecs`
+  and `observe_refresh` filters pass on the fixed one. The first CI run of the fix
+  (39004795544, commit `71077831`) lost four jobs at the 300 s cap with no test
+  failing: in the two job logs read (workspace and bot-full) `Compiling lgwks_bot`
+  began at 05:02:58Z and 05:02:59Z and was still running when the cancel landed at
+  05:07:43Z. #272 owns that wall.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
