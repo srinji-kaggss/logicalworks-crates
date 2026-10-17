@@ -97,9 +97,11 @@ env = [
 # the rest are `timeout`. An oracle run holds the one cargo lock, so a hung one
 # stalls every trial for its whole bound. Of 465 oracle runs in the committed
 # model runs the slowest legitimate one took 7.1 s (the 2026-10-17 matrix; the
-# 182 s runs of 2026-10-04 were the rig defect recovery.md fixed), and two
+# 182 s runs of 2026-10-04 were the rig defect recovery.md fixed). A dry run of
+# the 33 references on a loaded host took one `capture` oracle 94.6 s. Two
 # solutions that spun or parked stalled that matrix for 583 s and 386 s before
-# they were stopped by hand; 300 s is forty times the slowest legitimate run.
+# they were stopped by hand; 300 s is 3.2 times the slowest oracle measured and
+# ends a hang at five minutes.
 [limits]
 model_call_s = 900
 build_s = 1800
