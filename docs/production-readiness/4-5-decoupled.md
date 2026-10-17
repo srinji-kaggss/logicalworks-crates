@@ -31,5 +31,8 @@ others. The newest tags (`git tag --sort=-creatordate`) are `lgwks_std-v1.1.0`,
 source tag is not a registry upload. The surface table fixes today's surface and
 only `lgwks_bot`'s root has shrunk: its modules and re-exports sit behind
 `#[doc(hidden)]`, so its rustdoc lists `script!`, `try_join!` and the `script`
-module. Hiding the other crates' items, doctests through `script!`, and the
-changelog entries a narrowing owes are the rest of #526.
+module. A `#[doc(hidden)]` on `mod x;` hides that line only, so the files of a
+hidden module keep their own ceilings and a new `pub` item inside one is still
+refused; no test asserts the cross-file half, and #526 owns it. Hiding the other
+crates' items, doctests through `script!`, and the changelog entries a narrowing
+owes are the rest of #526.
