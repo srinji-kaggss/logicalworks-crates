@@ -17,16 +17,21 @@
 //! host, not to the handle.
 //!
 //! ```no_run
-//! use lgwks_bot::script::{FlowError, Scope};
+//! use lgwks_bot::script::Scope;
 //! use lgwks_bot::task::{Host, Report, task};
+//!
+//! lgwks_bot::script! {
+//!     flow greet(name: &str) -> String:
+//!         give back format!("hello, {name}")
+//! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let host = Host::builder("acme")?.build()?;
-//! let greeting = task("greet", |_scope: Scope, name: &str| {
-//!     // The borrowed input is read before the future is built, so the future
-//!     // owns what it returns.
-//!     let greeting = format!("hello, {name}");
-//!     async move { Ok::<_, FlowError>(greeting) }
+//! let greeting = task("greet", |scope: Scope, name: &str| {
+//!     // The borrowed input is copied before the future is built, so the future
+//!     // owns what it uses.
+//!     let name = name.to_owned();
+//!     async move { greet(&scope, &name).await }
 //! })?;
 //!
 //! let report: Report<String> = host.run(&greeting, "world").await;
@@ -442,9 +447,14 @@ impl<F: fmt::Debug> fmt::Debug for Task<F> {
 /// use lgwks_bot::script::{FlowError, Scope};
 /// use lgwks_bot::task::task;
 ///
+/// lgwks_bot::script! {
+///     flow total(values: Vec<u32>) -> u32:
+///         give back values.iter().copied().sum::<u32>()
+/// }
+///
 /// # fn main() -> Result<(), FlowError> {
-/// let sum = task("sum", |_scope: Scope, values: Vec<u32>| async move {
-///     Ok::<_, FlowError>(values.iter().copied().sum::<u32>())
+/// let sum = task("sum", |scope: Scope, values: Vec<u32>| async move {
+///     total(&scope, values).await
 /// })?;
 /// assert_eq!(sum.name(), "sum");
 ///

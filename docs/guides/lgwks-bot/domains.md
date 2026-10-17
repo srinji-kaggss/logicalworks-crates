@@ -12,7 +12,8 @@ those strings back into a running `Observe` or `Execute`. That is
 
 ## One list, in one place
 
-A registry is declared once with `domains!`, and that is the only entry point:
+A registry is declared once with `domains!`, and that is the only entry point;
+a `script!` flow resolves `observe` and `act` against it:
 
 ```rust
 use lgwks_bot::{Auth, BotError, Cap, Observe, Source, domains};
@@ -41,11 +42,15 @@ impl Observe for GithubPrStatus {
 domains! {
     /// The domains this bot can run.
     pub DOMAINS {
-        observe {
-            "github::pr_status" => GithubPrStatus::from_target,
-        }
+        observe { "github::pr_status" => GithubPrStatus::from_target, }
         execute {}
     }
+}
+
+lgwks_bot::script! {
+    flow open_prs(repo: &str) -> u16:
+        let open: u16 = observe github::pr_status of repo
+        give back open
 }
 ```
 

@@ -36,6 +36,12 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   asserted page counts). No test runs it, so #526 owns that too. The example
   ceilings for the guide's `index.md`, `getting-started-pieces.md` and
   `getting-started-program.md` fell to zero (INV-EXAMPLE-1).
+- The registry and front-door examples hold a flow too: the `task` module's
+  front-door doctest, `task::task` and `DomainRegistry` compile one and pass
+  with the other 45 under `cargo test --doc -p lgwks_bot` (48 of 48), and the
+  `domains.md` block was built and run once (`open prs: 0`). The ceilings for
+  `registry.rs`, `task.rs`, `domains.md` and `authority-names.md` fell to zero
+  (INV-EXAMPLE-1). No doctest runs those flows, so #526 owns that.
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
