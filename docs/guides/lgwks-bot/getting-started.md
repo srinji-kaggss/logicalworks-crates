@@ -2,9 +2,10 @@
 
 Pages of this guide: [manifest](getting-started.md) · [the program](getting-started-program.md) · [the pieces](getting-started-pieces.md)
 
-One source, one condition, one effect. The program below compiles as a
-standalone `main` against `lgwks_bot = "2"` and its default features. Every
-assertion in it was run.
+One source, one condition, one effect, written as a `script!` flow. The program on
+the next page is `crates/lgwks-bot/examples/queue_watch.rs`: it uses only
+`lgwks_bot`, `script` is one of the crate's default features, and CI builds every
+example in the workspace. `cargo run -p lgwks_bot --example queue_watch` runs it.
 
 ## The manifest
 

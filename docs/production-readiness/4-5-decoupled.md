@@ -30,6 +30,12 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
   The `lgwks_ast` root was measured once, when it was hidden: its all-features
   rustdoc fell from 172 pages to three (`cargo doc -p lgwks_ast --all-features`,
   commit `725a3c88`). No test holds that count, so #526 owns it.
+- The `lgwks_bot` getting-started guide runs a `script!` program: its pages follow
+  `crates/lgwks-bot/examples/queue_watch.rs`, which CI builds with every
+  example and which was run once for the pages (three printed lines, three
+  asserted page counts). No test runs it, so #526 owns that too. The example
+  ceilings for the guide's `index.md`, `getting-started-pieces.md` and
+  `getting-started-program.md` fell to zero (INV-EXAMPLE-1).
 
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only

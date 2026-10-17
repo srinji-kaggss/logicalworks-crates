@@ -4,85 +4,58 @@ Pages of this guide: [manifest](getting-started.md) · [the program](getting-sta
 
 ## What each piece is
 
-`Observe` produces the value. `poll` takes an `(Auth, ())` tuple because a read
-can cross a trust boundary too; `call.0.check(self.required_caps())?` is what
-makes the proof load-bearing rather than decorative.
+**The source.** `QueueDepth` implements `Observe`: it produces the value. `poll`
+takes an `(Auth, ())` tuple because a read can cross a trust boundary too;
+`call.0.check(self.required_caps())?` is what makes the proof load-bearing rather
+than decorative. `from_target` builds the source from the name the flow gives
+after `of`. The flow's `observe queue::depth of name` calls that constructor and
+polls the source once, as a step of its own; `let depth: u32 =` is the type the
+value is asked for, and a source whose value is not a `u32` is refused with
+`BotError::TypeMismatch`.
 
-`Observe::Output` must be `PartialEq`. `EcsObserveBuilder::observe` is where the
-requirement lands, on the call that closes a chain
-(`crates/lgwks-bot/src/ecs/builder.rs:440`), because the condition on this executor *is*
-bevy's change detection, and a value that cannot be compared cannot be detected
-as changed. `Observe::poll` is `async fn` returning a future that is
-deliberately not `Send` (`crates/lgwks-bot/src/verb.rs`), so a domain may hold
-thread-local state.
+**The action.** `Page` implements `Execute`. `execute_action` takes
+`(Auth, &Self::Input)`; here `Input` is `u32` and the flow passes `depth`, a `u32`,
+after `with`. `required_caps` is `bot.notify`, and the check runs before
+the effect, not after it. `effect_lifetime` says the page stays in this process
+(`EffectLifetime::Local`). An action that does not say so defaults to
+`EffectLifetime::External`, and `act` refuses it before it runs; the program as
+first written, without that method, stopped at the page with `act runs only an
+action whose effect stays in this process`.
 
-`Bot::builder(name).observe(source).on(condition, action)` is the builder chain.
-A closure that is `Fn(&T) -> bool` implements `Evaluate<T>` automatically. If you
-need to report *which* condition fired, implement `Evaluate<T>` directly and give
-it a `condition_id`.
+**The registry.** `domains!` declares a static table from identifier to
+constructor, one table for sources (`observe`) and one for actions (`execute`).
+A flow can only name what its host's table declares: an identifier the table
+lacks refuses the flow before its first step, naming the registry and the nearest
+declared identifier (`an_unknown_identifier_names_the_registry_and_the_nearest`
+in `crates/lgwks-bot/tests/it/script_domains.rs`).
 
-`Execute::execute_action` takes `(Auth, &Self::Input)`. The tick awaits each one
-before starting the next, in declaration order
-(`crates/lgwks-bot/src/ecs/bot.rs:442`), so the effects fire in the order you wrote
-the `.on` calls.
+**The flow.** `flow watch(name: &str) -> u32:` is one `async fn` that takes the
+tenant's `Scope` first and returns `Result<u32, FlowError>`. Each line is one
+step: `observe` and `act` call the registry, `if` is Rust's `if`, and `give back`
+returns from the flow. The whole vocabulary is on one page,
+[the lexicon](../../script-lexicon.md).
 
-`build(&grants)` returns `Result<Bot, BotError>`. Two things make it fail:
-`GrantSet::admit` rejects a source or action whose `required_caps` the set does
-not cover (`crates/lgwks-bot/src/gate.rs:116`), and `Schedule::initialize` with
-`ambiguity_detection: LogLevel::Error` rejects a schedule whose systems cannot be
-totally ordered (`crates/lgwks-bot/src/ecs/fold.rs:712`).
+**The host.** `Host::builder("queue-watch")` names the tenant. `.domains(..)`
+installs the registry the flow resolves against, `.grants(..)` is what the run is
+allowed (`GrantSet::empty().grant(Cap::notify())` allows paging and nothing
+else), and `.default_deadline(..)` sets the deadline a run gets (30 seconds here).
+`task("watching", ..)` wraps the flow, `host.run(&task, input)` runs it, and the
+`Report` it returns holds the result.
 
-`Bot::tick` returns `Result<usize, BotError>`, where the `usize` is the number of
-actions that fired. The bot is `mut` because a tick advances its world. `tick`
-is the synchronous adapter and must be called from outside an async runtime;
-inside one, `await bot.tick_async()` returns the same `Result` from the same
-work, and `tick` refuses with `BotError::TickInsideRuntime` rather than park the
-thread the runtime is driving.
+## Reading a run
 
-## Inspecting a bot
-
-Four accessors exist for tests and instrumentation, all read-only
-(`crates/lgwks-bot/src/ecs/bot.rs:275`):
-
-| Method | Returns |
-|---|---|
-| `name()` | the name the builder was given |
-| `fired()` | effects fired on the most recent tick |
-| `revisions()` | the `Revision` of every source, in chain order |
-| `source_domains()` | the `domain_id()` of every source, in chain order |
-
-`revisions()` is the one worth knowing about. It is a monotone counter per
-source that advances only when the polled value moved, so it is how you check
-that "the source held still" really was a hold rather than a condition deciding
-not to fire.
-
-A source whose poll has never succeeded has no remembered value. On the next
-tick `observe_fold` treats it as changed (`crates/lgwks-bot/src/ecs/ledger.rs:847`), so
-the condition is evaluated on the first poll even if the value never moves again.
-
-## A bot with no chains
-
-An empty chain list is valid. A bot that only serves direct `Query` and
-`Execute` calls needs no source, and `BotBuilder::build` covers that case:
-
-```rust
-use lgwks_bot::{Bot, GrantSet};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bot = Bot::builder("direct-only").build(&GrantSet::empty())?;
-    assert_eq!(bot.source_domains().len(), 0);
-    Ok(())
-}
-```
-
-This is also the shape the repository root README compiles as its quickstart
-(`crates/lgwks-bot/examples/quickstart.rs`).
+`report.result()` is `Ok` with the flow's value or `Err` with a `FlowError`. A
+refusal names the step that was refused by its path: `watching/watch/page` above
+is the task `watching`, the flow `watch` and the step `page`, the last segment of
+`notify::page`. A run short of a grant says which: `blocked: 1 ungranted:
+bot.notify`. The authority is the host's, so the same flow runs on a host with the
+grant and is refused on a host without it, and nothing in the flow changes.
 
 ## Where to go next
 
 - [Features](features.md) for which cargo features you actually need.
 - [Authority](authority.md) before you design anything around revoking a grant:
-  `GrantSet` has no revoke operation, and a built bot holds a snapshot of it.
+  `GrantSet` has no revoke operation.
 - [Failures](failures.md) before you write a retry.
 - [Background work](background-work.md) if the bot needs work running beside the
-  tick rather than inside it.
+  flow rather than inside it.
