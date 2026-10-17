@@ -62,8 +62,14 @@ const SHORT_ORACLE_BOUND: u32 = 12;
 const LONGEST_SHORT_BOUND: u32 = 90;
 
 /// How many times the cost of one un-gated oracle, measured on this host a moment
-/// before, the test's oracle bound is.
-const BOUND_MARGIN: f64 = 4.0;
+/// before, the test's oracle bound is. The test runs first in its job (see
+/// `nextest.toml`), so it measures inside the start burst, when an oracle costs most,
+/// and the stopped oracle then runs its whole bound: the test took 232.8 s of a
+/// 245 s test phase (PR 600, run 39053271707) against 21 s on a quiet host. A bound
+/// of twice the cost is an estimate to be measured by the next run, not a result;
+/// `gated_within` widens a bound that cut an oracle off, so the first rung need not
+/// be the widest.
+const BOUND_MARGIN: f64 = 2.0;
 
 /// A directory removed when the test ends.
 struct Dir {
