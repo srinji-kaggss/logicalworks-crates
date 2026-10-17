@@ -149,8 +149,25 @@ priority = 50
 # and failed the Linux container leg on a 9 us control against a 90 us append.
 # Both bounds are fixed in the tests; a test-only edit rebuilds the `it` binary
 # cold too, so the runners were primed at the merge commit (r5 78 s, r3 25 s).
+#
+# PR 603, warm runners, all thirteen jobs in their test phase together: bot-full
+# was cancelled at the cap with 4,228 (run 39062648303) and then 4,712 (run
+# 39063408351) of 4,731 tests done. The second run's tail was seven
+# t22_process_surface probes, 72 to 90 s each (each is a cargo check), and two
+# sim_tenancy a_weighted_round_replays bands over 60 s; they sort last in `it`
+# and came up about 200 s in. Same reasoning and same priority as above.
 [[profile.default.overrides]]
-filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
+filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenancy|sim_tenant_store|sys_process_binding|t02_compile_surface|t22_process_surface)::/)'
+priority = 50
+
+# #272: the saturation job, same two runs. Its 207 tests took 140 s of test phase
+# on run 39061756210 and were cancelled at the cap with 204 done (run 39062648303)
+# and with five still running (run 39063408351): saturation_r32_tier_10000 over
+# 120 s and four sim_review_path subject_arms tests over 60 s, which come up after
+# the 164 sim_scale tests. Priority 50 starts them first so they overlap the rest
+# of the job instead of ending it. The tests are unchanged, only their order.
+[[profile.default.overrides]]
+filter = 'package(lgwks_bot) & binary(sim_review_path) & (test(=saturation_r32_tier_10000) | test(/^subject_arms::(a_diff_past_the_file_ceiling_publishes_nothing|subject_saturation_conserves_creates|the_two_diff_ceilings_are_refused_separately|two_tenants_coverage_stays_isolated)$/))'
 priority = 50
 
 # #272: the same run's workspace job, cancelled at the cap 0.1 s after its package
