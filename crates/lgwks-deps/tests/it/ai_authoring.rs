@@ -604,31 +604,55 @@ fn gated(fixture: &Fixture, args: &[String], kill: bool) -> Result<Gated, Box<dy
     })
 }
 
+/// The next rung of the bound ladder: twice `seconds`, never past
+/// `LONGEST_SHORT_BOUND`, and `None` once the ladder is at its top.
+fn wider(seconds: u32) -> Option<u32> {
+    (seconds < LONGEST_SHORT_BOUND).then(|| seconds.saturating_mul(2).min(LONGEST_SHORT_BOUND))
+}
+
+/// Whether the un-gated task's own oracle was cut off by the bound: a run that
+/// finished clean and recorded a `timeout` clause for `alpha`.
+fn ungated_timed_out(fixture: &Fixture, shown: &Gated) -> Result<bool, Box<dyn Error>> {
+    if shown.runner.code != Some(0) {
+        return Ok(false);
+    }
+    let found = records(&fixture.out.join("results.jsonl"))?;
+    Ok(verdicts(of_task(&found, "alpha")?)?
+        .iter()
+        .any(|clause| clause.1 == "timeout"))
+}
+
 /// Runs the dry run with the second oracle gated under an oracle bound of `first`
 /// seconds, and under twice that while the runner ended before the oracle announced
-/// itself, up to `LONGEST_SHORT_BOUND`. The bound covers the oracle's whole `cargo
-/// test`, compile included, so an oracle cut off before its gate says the host's load
-/// moved after the bound was measured, which the stop under test did not cause; one
-/// that announced itself and then misbehaves is never run again. Returns the fixture,
-/// what the gate showed, and the bound that reached the gate.
+/// itself or the un-gated task's oracle was cut off by the bound, up to
+/// `LONGEST_SHORT_BOUND`. The bound covers the oracle's whole `cargo test`, compile
+/// included, so an oracle cut off before its gate, or the un-gated one cut off at all,
+/// says the host's load moved after the bound was measured (main run 39050234041:
+/// both of `alpha`'s clauses read `timeout` 110 s into the job's start burst), which
+/// the stop under test did not cause; one that announced itself and then misbehaves
+/// is never run again. Returns the fixture, what the gate showed, and the bound that
+/// reached the gate.
 fn gated_within(first: u32) -> Result<(Fixture, Gated, u32), Box<dyn Error>> {
     let mut seconds = first;
     loop {
         let fixture = Fixture::new("timeout", seconds)?;
-        match gated(&fixture, &fixture.run_args("--dry-run"), false) {
-            Ok(shown) => return Ok((fixture, shown, seconds)),
-            Err(error)
-                if error.downcast_ref::<Unannounced>().is_some()
-                    && seconds < LONGEST_SHORT_BOUND =>
-            {
-                lgwks_std::trace::debug!(bound = ?seconds, "the oracle was cut off before its gate");
-                seconds = seconds.saturating_mul(2).min(LONGEST_SHORT_BOUND);
-            }
+        let attempt = gated(&fixture, &fixture.run_args("--dry-run"), false);
+        let cut_off = match attempt.as_ref() {
+            Ok(shown) => ungated_timed_out(&fixture, shown)?,
+            Err(error) => error.downcast_ref::<Unannounced>().is_some(),
+        };
+        if let Some(next) = wider(seconds).filter(|_| cut_off) {
+            lgwks_std::trace::debug!(bound = ?seconds, next = ?next, "the bound cut an oracle off before it was measured");
+            seconds = next;
+            continue;
+        }
+        return match attempt {
+            Ok(shown) => Ok((fixture, shown, seconds)),
             Err(error) => {
                 lgwks_std::trace::debug!(bound = ?seconds, failure = ?error, "the gated run failed");
-                return Err(format!("under a bound of {seconds} s: {error}").into());
+                Err(format!("under a bound of {seconds} s: {error}").into())
             }
-        }
+        };
     }
 }
 
@@ -718,6 +742,31 @@ fn an_oracle_past_its_bound_is_stopped_with_its_group_and_recorded_as_a_timeout(
         "a process of the run is still alive"
     );
     Ok(())
+}
+
+/// Source: main run 39050234041, where the un-gated task's oracle read `timeout` under
+/// a bound measured moments before. Requirement: the ladder doubles the bound, never
+/// passes `LONGEST_SHORT_BOUND`, and ends there, so a bound that cut an oracle off is
+/// widened a bounded number of times and a run that never fits still fails.
+#[test]
+fn the_bound_ladder_doubles_and_stops_at_the_longest() {
+    let mut rung = SHORT_ORACLE_BOUND;
+    let mut climbed = 0_u32;
+    while let Some(next) = wider(rung) {
+        assert!(next > rung, "every rung is wider than the one below it");
+        assert!(
+            next <= rung.saturating_mul(2) && next <= LONGEST_SHORT_BOUND,
+            "a rung is at most twice the last and never past the longest bound"
+        );
+        rung = next;
+        climbed = climbed.saturating_add(1);
+        assert!(climbed < 32, "the ladder ends");
+    }
+    assert_eq!(
+        rung, LONGEST_SHORT_BOUND,
+        "the top rung is the longest bound"
+    );
+    assert_eq!(wider(LONGEST_SHORT_BOUND), None, "no rung above the top");
 }
 
 /// Source: the Director's contract ("`kill -9` and restart") and #270's "no orphan
