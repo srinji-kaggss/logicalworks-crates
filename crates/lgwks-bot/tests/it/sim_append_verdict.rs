@@ -17,7 +17,9 @@
 //! trace hash, so a verdict that depended on anything but its inputs fails here
 //! even when each assertion happens to hold.
 
-use crate::journal_scale::{STALL_RATIO, STALL_US, TYPICAL_RATIO, append_verdict, stalls};
+use crate::journal_scale::{
+    FIXED_COST_US, STALL_RATIO, STALL_US, TYPICAL_RATIO, append_verdict, stalls,
+};
 use crate::sim::seed::{Rng, Trace};
 
 use std::error::Error;
@@ -201,8 +203,9 @@ fn host_stalls_are_never_charged_to_the_path_for_any_seed() -> TestResult {
     Ok(())
 }
 
-/// A path that costs more than [`TYPICAL_RATIO`] times the bare write is
-/// refused on every seed: a flush per rung of the four-rung ladder, or more.
+/// A path that costs more than [`TYPICAL_RATIO`] times the bare write, beyond
+/// its [`FIXED_COST_US`] of own work, is refused on every seed: a flush per rung
+/// of the four-rung ladder, or more.
 #[test]
 fn a_path_that_costs_a_flush_per_rung_is_refused_for_every_seed() -> TestResult {
     let refused = check_deterministic(|| {
@@ -214,7 +217,10 @@ fn a_path_that_costs_a_flush_per_rung_is_refused_for_every_seed() -> TestResult 
             let times = TYPICAL_RATIO
                 .saturating_add(1)
                 .saturating_add(u128::from(rng.below(4)));
-            let path: Vec<u128> = bare.iter().map(|us| us.saturating_mul(times)).collect();
+            let path: Vec<u128> = bare
+                .iter()
+                .map(|us| us.saturating_mul(times).saturating_add(FIXED_COST_US))
+                .collect();
             let reason = refusal(seed, append_verdict(&path, &bare))?;
             assert!(
                 reason.contains("median append"),
@@ -307,10 +313,33 @@ fn eleven_stalls_beside_a_stalling_write_are_the_hosts() {
 #[test]
 fn a_bare_write_that_reads_zero_still_bounds_the_path() -> TestResult {
     let bare = flat(0, 0);
-    assert_eq!(append_verdict(&flat(TYPICAL_RATIO, 0), &bare), Ok(()));
-    append_verdict(&flat(TYPICAL_RATIO.saturating_add(1), 0), &bare)
+    let bound = TYPICAL_RATIO.saturating_add(FIXED_COST_US);
+    assert_eq!(append_verdict(&flat(bound, 0), &bare), Ok(()));
+    append_verdict(&flat(bound.saturating_add(1), 0), &bare)
         .err()
-        .ok_or("a path past the ratio was passed beside a zero-cost write")?;
+        .ok_or("a path past the bound was passed beside a zero-cost write")?;
+    Ok(())
+}
+
+/// Run 39047466052's Linux container leg: the bare write took a median of 9us and
+/// the path 90us, ten times the control with no stall and no extra flush in it. A
+/// host whose flush is nearly free is not charged the path's own work, and the
+/// bound still stops at [`TYPICAL_RATIO`] times the control plus the allowance.
+#[test]
+fn a_host_with_a_nearly_free_flush_is_not_charged_the_paths_own_work() -> TestResult {
+    let bare = flat(9, 0);
+    let ratio_alone = 9_u128.saturating_mul(TYPICAL_RATIO);
+    let bound = ratio_alone.saturating_add(FIXED_COST_US);
+    assert!(
+        90 > ratio_alone,
+        "the recorded path was past the ratio alone, which is what failed the run"
+    );
+    assert_eq!(append_verdict(&flat(90, 0), &bare), Ok(()));
+    assert_eq!(append_verdict(&flat(bound, 0), &bare), Ok(()));
+    let reason = append_verdict(&flat(bound.saturating_add(1), 0), &bare)
+        .err()
+        .ok_or("a path past the bound was passed beside a nearly free flush")?;
+    assert!(reason.contains("median append"), "{reason}");
     Ok(())
 }
 

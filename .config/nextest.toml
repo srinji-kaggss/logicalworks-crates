@@ -136,6 +136,19 @@ priority = 50
 # and 500 ms, bot-full and its container leg were cancelled at the cap, and the
 # docs.rs matrix passed in 4m13. Priming bot-full's runner in place at the merge
 # commit took 34 s and the workspace runner was already warm.
+#
+# PR 599's first run after a Rust edit (run 39045357528, commit 3e223f07): the
+# workspace, bot-full, storefront, both Linux container and docs.rs jobs were
+# cancelled at the cap (314 to 329 s) while lgwks_std's own job passed in 61 s.
+# Priming bot-full's runner (35 s) and the workspace runner (22 s) in place at the
+# merge commit on an idle host came before the next push.
+#
+# Its second run (39046637995) failed one bot-full test, a dependant's 500 ms wait
+# for a child that had not printed yet, and its third (39047466052) lost the
+# workspace and bot-full jobs to the cap on the first run after a test-only edit
+# and failed the Linux container leg on a 9 us control against a 90 us append.
+# Both bounds are fixed in the tests; a test-only edit rebuilds the `it` binary
+# cold too, so the runners were primed at the merge commit (r5 78 s, r3 25 s).
 [[profile.default.overrides]]
 filter = 'package(lgwks_bot) & binary(it) & test(/^(sim_task_resume|sim_tenancy_flood|sim_tenant_store|sys_process_binding|t02_compile_surface)::/)'
 priority = 50
@@ -146,6 +159,18 @@ priority = 50
 # tests took 3.7 to 8.9 s each beside it. Same reasoning and same priority as above.
 [[profile.default.overrides]]
 filter = '(package(lgwks_std) & test(/^task::sim_pool_lifetime::/)) | (package(lgwks_std) & binary(it) & test(/^sim_task_public::/))'
+priority = 50
+
+# #272: PR 599's fourth run (39049011341), on runners primed at the merge commit,
+# workspace job: the build took 1 s and the 1,557 tests 289 s, and the job met the
+# cap 0.05 s after the summary printed with every test passed. The test that ended
+# the phase was lgwks_deps' ai_authoring oracle-bound test, 233 s, which came up 56 s
+# in (the other three ai_authoring tests took 100 to 125 s). Priority 50 starts
+# them right after the exclusive tests, so the longest test overlaps the rest of
+# the job instead of ending it. The tests are unchanged, only their place in the
+# order.
+[[profile.default.overrides]]
+filter = 'package(lgwks_deps) & binary(it) & test(/^ai_authoring::/)'
 priority = 50
 
 # #272: the persist tests spend their time in the kernel (open, rename, write),

@@ -3,8 +3,8 @@
 Pages of this guide: [polls and actions](failures.md) · [worked example](failures-example.md) · [uncertain effects](failures-effects.md) · [reporting order](failures-order.md)
 
 Both entry points return `Result<usize, BotError>`: `Bot::tick` is the
-synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:565`) and `Bot::tick_async` is
-the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs/bot.rs:390`).
+synchronous adapter (`crates/lgwks-bot/src/ecs/bot.rs:572`) and `Bot::tick_async` is
+the one to `await` from inside a runtime (`crates/lgwks-bot/src/ecs/bot.rs:393`).
 Four different things can produce an `Err`. Three are failures that mean
 different things for your data — the distinction is the difference between a
 retry and a duplicate — and the fourth is the adapter refusing to run a tick at
@@ -53,9 +53,9 @@ Actions run in declaration order, but deciding and doing are two systems. The
 `fire_plan` system walks the eligible work — a chain whose `Revision` moved opens
 a transition, and a chain with a transition outstanding is walked whether or not
 it moved — and records one ordered `Step` per condition that held
-(`crates/lgwks-bot/src/ecs/fold.rs:341`); the `run_steps` pass then awaits those steps
+(`crates/lgwks-bot/src/ecs/fold.rs:377`); the `run_steps` pass then awaits those steps
 on the caller's executor in exactly that order
-(`crates/lgwks-bot/src/ecs/bot.rs:442`). It breaks on the first failure and records
+(`crates/lgwks-bot/src/ecs/bot.rs:463`). It breaks on the first failure and records
 it, and there is no rollback:
 
 ```rust,ignore
@@ -71,7 +71,7 @@ means "this run did not finish", not "nothing happened".
 
 One consequence is easy to miss, and it is the reason the ledger exists.
 `observe_fold` commits the new values and bumps the revisions *before*
-`fire_plan` decides (`crates/lgwks-bot/src/ecs/fold.rs:341`), so selecting work by
+`fire_plan` decides (`crates/lgwks-bot/src/ecs/fold.rs:377`), so selecting work by
 `Changed<Revision>` alone means the next tick polls an unchanged source, finds
 nothing eligible, and never attempts the actions after the failure again. The
 work is lost, not queued.

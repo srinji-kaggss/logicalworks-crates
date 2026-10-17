@@ -298,10 +298,19 @@ impl EcsBot {
         // after it resolved: a source that reached its failure *inside* the poll
         // has only now recorded it, and asking before the poll would have asked
         // about the previous tick's state.
+        let invalidated = self.world.non_send::<Invalidated>();
+        let nothing_polled = polled.is_empty();
         for (index, reason) in declared.iter_mut().enumerate() {
             let Some(chain) = chains.0.get(index) else {
                 continue;
             };
+            // Nothing was polled, so no source had a poll in which to record a
+            // failure, and the read `declared_refresh` made a moment ago is still
+            // the answer for every chain it reached. The chains it skipped are the
+            // ones already marked, and they read here as they always did.
+            if nothing_polled && !invalidated.is_invalid(index) {
+                continue;
+            }
             // A chain with no slot was skipped, which is an answer of "did not
             // move" and counts as a poll that succeeded.
             let answered = match polled.get(index) {

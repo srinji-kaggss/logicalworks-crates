@@ -14,6 +14,7 @@
 //! | `a_regressing_revision_is_a_change` | a revision that steps *backwards* is a change, and a revision that returns to one already committed is caught by the value comparison rather than trusted |
 //! | `a_forced_refresh_beats_a_quiet_revision` | a source that declares its baseline unsound is polled despite reporting an unchanged revision, and the report names the cause |
 //! | `the_change_tick_never_fires_twice_for_one_movement` | a movement fires once and then stops, with the source polled exactly as often as the run had movements |
+//! | `a_quiet_tick_asks_each_source_for_its_cache_state_once` | a tick that polls nothing reads each source's declared cache state once, not before and after polls that never ran |
 //! | `a_seed_that_changes_the_schedule_changes_the_trace` | two seeds that draw different movement schedules do not hash the same, so the hash is a receipt and not a constant |
 //! | `the_same_seed_replays` | the same seed produces the same trace hash, twice |
 //!
@@ -151,10 +152,10 @@ impl Plan {
     /// What `chain` does on `tick`, or [`Move::Still`] past the drawn cells.
     fn cell(&self, chain: usize, tick: usize) -> Move {
         let index = tick.saturating_mul(CHAINS).saturating_add(chain);
-        self.cells
-            .get(index)
-            .filter(|cell| cell.chain == chain)
-            .map_or(Move::Still, |cell| cell.movement)
+        match self.cells.get(index).filter(|cell| cell.chain == chain) {
+            Some(cell) => cell.movement,
+            None => Move::Still,
+        }
     }
 }
 
@@ -750,6 +751,73 @@ fn the_change_tick_never_fires_twice_for_one_movement() -> TestResult {
         after_movement,
         "five quiet ticks after a movement poll nothing: a skip that re-polls is not a \
          skip"
+    );
+    Ok(())
+}
+
+/// A source that counts how often the substrate asks what it declares about its
+/// own cache, and otherwise sits still at one revision.
+struct Asked {
+    /// How many times `cache_state` was read.
+    reads: Rc<Cell<usize>>,
+}
+
+impl Observe for Asked {
+    type Output = u64;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    fn revision(&self) -> Option<u64> {
+        Some(1)
+    }
+
+    fn cache_state(&self) -> Option<RefreshReason> {
+        self.reads.set(self.reads.get().saturating_add(1));
+        None
+    }
+
+    async fn poll(&self, _call: (Auth, ())) -> Result<u64, BotError> {
+        Ok(1)
+    }
+
+    fn domain_id(&self) -> &str {
+        "sim::asked"
+    }
+}
+
+/// A tick that polls nothing asks a source for its cache state once.
+///
+/// Requirement (#279, the quiet-tick cost): the question is asked before the polls
+/// to decide which sources may be skipped, and asked again after them to catch a
+/// failure a poll recorded. A tick on which every source was skipped has no poll
+/// in which a failure could have been recorded, so the second ask repeats the first
+/// and is not made. The two asks per source per tick were two dynamic calls on the
+/// path every always-on watcher runs every interval. Discriminating: the count over
+/// five quiet ticks is five, where two asks per tick made it ten.
+#[test]
+fn a_quiet_tick_asks_each_source_for_its_cache_state_once() -> TestResult {
+    let reads = Rc::new(Cell::new(0));
+    let (tally, _log) = Tally::new();
+    let mut bot = Bot::builder("sim-change-ticks-asked")
+        .observe(Asked {
+            reads: Rc::clone(&reads),
+        })
+        .on(|_: &u64| true, tally)
+        .with_effects(scope()?)
+        .build(&GrantSet::empty())?;
+    // Two ticks settle the value and the work it opened, so what follows is quiet.
+    let _first = bot.tick();
+    let _second = bot.tick();
+    let warmed = reads.get();
+    for tick in 0..5 {
+        assert_eq!(bot.tick()?, 0, "quiet tick {tick} fired");
+    }
+    assert_eq!(
+        reads.get().saturating_sub(warmed),
+        5,
+        "five quiet ticks must ask once each, not before and after polls that never ran"
     );
     Ok(())
 }

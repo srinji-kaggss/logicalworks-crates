@@ -73,6 +73,18 @@ fn announcing_then_dying() -> ProcessSpec {
 /// be a hang, not a readiness.
 const CHILD_CEILING: Duration = Duration::from_secs(10);
 
+/// How long a dependant that runs beside its child waits for the release.
+///
+/// The child sleeps 0.2 s before it announces, and that sleep starts only after
+/// `sh` is spawned, which on a host running the whole suite beside thirteen
+/// other jobs takes more than the 300 ms [`BUDGET`] leaves over (CI run
+/// 39046637995, bot-full: "timed out after 500ms" with the child still
+/// starting). A release ends the wait the moment the child prints, so a longer
+/// budget costs a passing journey nothing; it stays under [`CHILD_CEILING`] so
+/// a child that never announces ends the wait through the failure raised when
+/// it exits, and never through this budget.
+const RELEASE_BUDGET: Duration = Duration::from_secs(5);
+
 /// Run `spec` on its own supervisor while a dependant waits on the
 /// readiness, and report everything the two halves observed.
 ///
@@ -340,7 +352,7 @@ async fn serve_and_depend(
         let parked = Arc::clone(&parked);
         async move {
             let released = gate
-                .wait(dependant, BUDGET)
+                .wait(dependant, RELEASE_BUDGET)
                 .await
                 .map(|ready| ready.awaited().to_owned())
                 .map_err(|error| error.to_string());
