@@ -33,7 +33,7 @@ pub enum TaskOutcome {
     },
     /// The body returned while cancellation was in force.
     ///
-    /// Two shapes report this. A body built on [`repeat`](crate::rt::supervise::repeat) whose loop stopped at
+    /// Two shapes report this. A body built on `repeat` whose loop stopped at
     /// the token says so itself — that is why [`Supervisor::spawn_repeating`](crate::rt::supervise::Supervisor::spawn_repeating)
     /// routes the loop's [`Outcome`](crate::rt::supervise::Outcome) here instead of dropping it where nobody
     /// can see it. A body placed with [`Supervisor::spawn`](crate::rt::supervise::Supervisor::spawn) has no such

@@ -65,7 +65,7 @@
 "crates/lgwks-bot/src/journal/wire_form.rs" = 2
 "crates/lgwks-bot/src/json.rs" = 1
 "crates/lgwks-bot/src/language.rs" = 19
-"crates/lgwks-bot/src/lib.rs" = 60
+"crates/lgwks-bot/src/lib.rs" = 3
 "crates/lgwks-bot/src/proposal/artifact.rs" = 18
 "crates/lgwks-bot/src/proposal/checkpoint.rs" = 32
 "crates/lgwks-bot/src/proposal/codec.rs" = 26
