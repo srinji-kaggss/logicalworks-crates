@@ -4,17 +4,17 @@ Part of the [measurement rigs](README.md). Method is in [bot-method.md](bot-meth
 the per-stage profile in [bot-profile.md](bot-profile.md).
 
 **`lgwks_bot` is not state of the art on throughput, and this rig does not claim
-it is.** On this machine the bot is between **28x and 2 605x slower** than a
+it is.** On this machine the bot is between **26x and 2 670x slower** than a
 hand-rolled loop doing provably identical work. That is the honest result, and
 the rest of these pages are about what that multiplier buys and where it goes.
 
 | scenario | bot ns/tick | baseline ns/tick | ratio (bot/baseline) | 95% CI | before #279 |
 |---|---:|---:|---:|---|---:|
-| `poll-only-64x100` | 896.0 | 32.3 | 27.58x | [27.40, 28.05] | 47.22x |
-| `steady-64x100` | 2 055.4 | 32.4 | 63.65x | [63.09, 64.20] | 83.09x |
-| `churn-64x1` | 133 986.7 | 51.5 | 2 605.27x | [2 547.15, 2 662.27] | 2 698.16x |
-| `fanout-1x64` | 110 259.8 | 42.7 | 2 574.46x | [2 527.44, 2 588.59] | 2 553.41x |
-| `wide-256x10` | 54 248.3 | 135.6 | 401.05x | [397.17, 410.04] | 429.32x |
+| `poll-only-64x100` | 854.9 | 32.4 | 26.36x | [26.30, 26.47] | 47.22x |
+| `steady-64x100` | 2 044.8 | 32.4 | 63.04x | [62.75, 63.15] | 83.09x |
+| `churn-64x1` | 137 039.0 | 51.2 | 2 669.73x | [2 640.78, 2 682.76] | 2 698.16x |
+| `fanout-1x64` | 113 404.1 | 44.8 | 2 534.11x | [2 525.44, 2 576.10] | 2 553.41x |
+| `wide-256x10` | 55 214.3 | 135.4 | 407.15x | [406.07, 408.09] | 429.32x |
 
 Every interval excludes parity, so each of these is a distinguishable difference
 rather than noise. The `churn-64x1` and `fanout-1x64` intervals are the widest,
@@ -38,6 +38,20 @@ walking every chain to confirm that nothing happened. Its targets, at most 10x
 on a quiet tick and at most 30x on churn, are **missed** on every scenario, and
 [the profile](bot-profile.md) itemises why. Its allocation target is met for a
 quiet tick: **no heap allocation** (`--alloc-report`).
+
+**What the schedule skip bought, paired.** A tick that polled nothing, holds no
+transition and is not parked now settles in place (`settle_quiet_tick`) instead of
+dispatching the schedule's two systems to write "nothing moved" and an empty plan,
+and it reads each source's declared cache state once instead of before and after
+polls that never ran. The table above is the run after it. Because the spread
+between runs is wider than one interval, the change was timed against the code it
+replaced in one binary, three alternating rounds, the old path restored by a
+temporary switch that is not in the tree: `poll-only-64x100` read 971.0, 1 019.7
+and 965.5 ns/tick (30.32x, 29.98x, 29.96x) on the old path and 837.1, 864.3 and
+848.2 (26.53x, 26.65x, 26.34x) on the new, **13.8% faster** on the means (985.4 to
+849.9 ns); `steady-64x100` 2 111.4, 2 133.7 and 2 151.7 against 1 988.8, 2 017.4
+and 2 008.2, 6.0% faster (2 132.3 to 2 004.8 ns). The effect-heavy rows moved by 1% to 2% and are not
+claimed.
 
 **Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.99.0,
 `opt-level = 3`, `lto = true`, `codegen-units = 1`. One machine: these are

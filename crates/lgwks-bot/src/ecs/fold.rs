@@ -79,11 +79,7 @@ pub(super) fn observe_fold(world: &mut World) {
     // chain to find what this already knows. What is left to say is that nothing
     // moved, which `fire_plan` reads from `Moved`.
     if polled.is_empty() {
-        let count = world.non_send::<Chains>().0.len();
-        let mut moved = std::mem::take(&mut world.non_send_mut::<Moved>().0);
-        moved.clear();
-        moved.resize(count, false);
-        world.non_send_mut::<Moved>().0 = moved;
+        clear_moved(world);
         put_polled(world, polled);
         return;
     }
@@ -300,6 +296,46 @@ pub(super) fn observe_fold(world: &mut World) {
     }
     world.resource_mut::<TickReport>().superseded = superseded;
     world.non_send_mut::<Moved>().0 = changed;
+}
+
+/// Record that no chain moved: one `false` per chain, in the buffer `fire_plan`
+/// reads, kept at its capacity.
+fn clear_moved(world: &mut World) {
+    let count = world.non_send::<Chains>().0.len();
+    let mut moved = std::mem::take(&mut world.non_send_mut::<Moved>().0);
+    moved.clear();
+    moved.resize(count, false);
+    world.non_send_mut::<Moved>().0 = moved;
+}
+
+/// Settle a tick on which nothing was polled and nothing is held, without
+/// dispatching the schedule, and say whether it did.
+///
+/// Both of the schedule's systems would do exactly this and no more. `observe_fold`
+/// finds the staging buffer empty and writes "nothing moved" ([`clear_moved`]);
+/// `fire_plan` finds the change query built, no flag set and no transition held
+/// ([`quiet_tick`]) and returns with an empty plan. Dispatching two systems to reach
+/// that answer was 282 ns of a 907 ns tick, the largest cost a quiet tick still had
+/// after the poll itself (`bench/bot-profile.md`).
+///
+/// `false` leaves the world untouched, so the caller runs the schedule as it always
+/// did: a tick that polled something, a parked tick, the first tick (whose query is
+/// not built) and any tick with a transition held all take the full path. The
+/// change query's tick is the system's own, not the world's, so a run the schedule
+/// does not make changes nothing the next run reads: no `Revision` is written on a
+/// tick that polled nothing.
+pub(super) fn settle_quiet_tick(world: &mut World) -> bool {
+    let settled = !parked(world)
+        && world.non_send::<Polled>().0.is_empty()
+        && world.non_send::<AdmitScratch>().movers.is_some()
+        && no_transition_held(world);
+    if settled {
+        clear_moved(world);
+        let mut plan = world.non_send_mut::<Plan>();
+        plan.steps.clear();
+        plan.failures.clear();
+    }
+    settled
 }
 
 /// Put the staging buffer back, capacity and all.
@@ -531,11 +567,16 @@ pub(super) fn fire_plan(world: &mut World) {
 fn quiet_tick(world: &World) -> bool {
     world.non_send::<AdmitScratch>().movers.is_some()
         && !world.non_send::<Moved>().0.iter().any(|moved| *moved)
-        && world
-            .non_send::<Ledger>()
-            .transitions
-            .iter()
-            .all(Option::is_none)
+        && no_transition_held(world)
+}
+
+/// Whether no chain holds a transition, so no chain has work the walk could owe.
+fn no_transition_held(world: &World) -> bool {
+    world
+        .non_send::<Ledger>()
+        .transitions
+        .iter()
+        .all(Option::is_none)
 }
 
 /// Take the plan's two buffers, leaving empty ones behind.

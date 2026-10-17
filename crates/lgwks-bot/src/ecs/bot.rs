@@ -17,6 +17,7 @@ use super::builder::EcsBuilder;
 use super::builder::materialize_chain;
 use super::entry::RetrySchedule;
 use super::fold::put_plan_buffers;
+use super::fold::settle_quiet_tick;
 use super::ledger::Ledger;
 use super::resources::ChangeTicks;
 use super::resources::EcsChain;
@@ -335,7 +336,9 @@ impl EcsBot {
     ///    concurrently, in declaration order;
     /// 2. one `Schedule::run` commits those observations, detects which values
     ///    moved, and records the effect program (`observe_fold`, `fire_plan`),
-    ///    walking the ledger's outstanding work rather than the change set;
+    ///    walking the ledger's outstanding work rather than the change set. A tick
+    ///    that polled nothing, holds no transition and is not parked skips the run
+    ///    and records the same two facts, nothing moved and an empty plan;
     /// 3. the recorded effects run one at a time, in declaration order, and each
     ///    entry is written into the ledger as it goes;
     /// 4. the count, the first failure, and any entry still held are reported.
@@ -434,7 +437,11 @@ impl EcsBot {
 
         #[cfg(feature = "profile")]
         let schedule_charge = Charge::new(TickStage::Schedule);
-        self.schedule.run(&mut self.world);
+        // A tick that polled nothing and holds nothing is settled in place: the
+        // schedule's two systems would write "nothing moved" and an empty plan.
+        if !settle_quiet_tick(&mut self.world) {
+            self.schedule.run(&mut self.world);
+        }
         #[cfg(feature = "profile")]
         drop(schedule_charge);
 

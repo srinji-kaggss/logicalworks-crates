@@ -604,6 +604,7 @@ mod test_part_01;
 mod test_part_02;
 mod test_part_03;
 mod test_part_04;
+mod test_part_05;
 
 // The cases INVARIANTS.md cites by path (INV-BOT-41, -42, -123) live here,
 // at `ecs::tests::<name>`, so the `invariants` lane resolves them.

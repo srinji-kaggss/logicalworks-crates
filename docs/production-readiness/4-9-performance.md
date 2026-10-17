@@ -2,8 +2,8 @@
 
 Part of [production readiness](../production-readiness.md), §4, nine axes.
 
-**⚠️ — measured honestly on both paths: the synchronous tick loses by 28x to
-2 605x, and the async facade loses by 2% to 17% at p50, with one scenario's
+**⚠️ — measured honestly on both paths: the synchronous tick loses by 26x to
+2 670x, and the async facade loses by 2% to 17% at p50, with one scenario's
 interval spanning parity.**
 
 Full method, raw numbers, fairness gate and exclusions are in
@@ -13,13 +13,13 @@ changes; the last column is the run on main `940e253cd` just before them):
 
 | scenario | `lgwks_bot` ns/tick | hand-rolled loop ns/tick | ratio | 95% CI | before #279 |
 |---|---:|---:|---:|---|---:|
-| `poll-only-64x100` | 896.0 | 32.3 | 27.58x slower | [27.40, 28.05] | 47.22x |
-| `steady-64x100` | 2 055.4 | 32.4 | 63.65x slower | [63.09, 64.20] | 83.09x |
-| `churn-64x1` | 133 986.7 | 51.5 | 2 605.27x slower | [2 547.15, 2 662.27] | 2 698.16x |
-| `fanout-1x64` | 110 259.8 | 42.7 | 2 574.46x slower | [2 527.44, 2 588.59] | 2 553.41x |
-| `wide-256x10` | 54 248.3 | 135.6 | 401.05x slower | [397.17, 410.04] | 429.32x |
+| `poll-only-64x100` | 854.9 | 32.4 | 26.36x slower | [26.30, 26.47] | 47.22x |
+| `steady-64x100` | 2 044.8 | 32.4 | 63.04x slower | [62.75, 63.15] | 83.09x |
+| `churn-64x1` | 137 039.0 | 51.2 | 2 669.73x slower | [2 640.78, 2 682.76] | 2 698.16x |
+| `fanout-1x64` | 113 404.1 | 44.8 | 2 534.11x slower | [2 525.44, 2 576.10] | 2 553.41x |
+| `wide-256x10` | 55 214.3 | 135.4 | 407.15x slower | [406.07, 408.09] | 429.32x |
 
-A hand-rolled loop doing provably identical work is **28x to 2 605x faster**.
+A hand-rolled loop doing provably identical work is **26x to 2 670x faster**.
 If your workload is a hot path, use the loop. This document says so with a
 number rather than burying it. #279's targets (≤ 10x quiet, ≤ 30x churn) are
 **missed** on every scenario. A second run of the same binary read 29.47x,
@@ -40,17 +40,26 @@ change ticks. The 558 on the tick where 64 sources move is the boxed
 observation, the ledger transition and the journal records, about 8.7 per moved
 chain. Means: 4.2 (`poll-only`), 8.0 (`steady`), 878.0 (`churn`), 345.0
 (`fanout`), 347.4 (`wide`) allocations per tick, against 0.0 for the baseline.
+A fourth thing, timed against the code it replaced in one binary over three
+alternating rounds: a tick that polled nothing, holds no transition and is not
+parked settles in place instead of dispatching the schedule, and reads each
+source's declared cache state once. `poll-only` read 985.4 ns/tick on the old
+path and 849.9 on the new (13.8% faster, 30.0x to 26.5x), `steady` 2 132.3 and
+2 004.8 (6.0%); the effect-heavy rows moved by 1% to 2% and are not claimed
+([`../bench/bot-headline.md`](../../bench/bot-headline.md)).
 
 **The gap, itemised by stage** (`--profile`, same run; ns per tick, which
 includes the one tick in a hundred that moves, and the instrument adds about
-209 ns). `poll-only` (plain tick 907.8): poll 412 (47.7%), schedule 282 (32.6%),
-the other four 168 together. `steady` (plain 2 075.3): poll 401 (20.3%),
-schedule 278 (14.1%), fingerprint 79, compare 36, decide 60, act 1 125 (56.8%).
-`churn`, `fanout` and `wide`: act is 83.9%, 98.7% and 79.7%. The ≤ 10x quiet
+206 ns). `poll-only` (plain tick 855.7): poll 405 (49.4%), schedule 243 (29.6%),
+the other four 170 together. `steady` (plain 2 032.8): poll 394 (20.4%),
+schedule 240 (12.5%), fingerprint 77, compare 39, decide 63, act 1 113 (57.8%).
+`churn`, `fanout` and `wide`: act is 83.6%, 98.7% and 79.7%. The profile and the
+paired timing above ran at different host loads, so the stage columns are shares,
+not a second measurement of the saving. The ≤ 10x quiet
 target is not reachable by this route: it asks for a tick of about 323 ns
-against a baseline of 32.3 ns, and the poll stage alone is 412 ns, 6.4 ns per
-source for the `revision()` read, the change-tick compare and two declared-state
-reads. The ≤ 30x churn target is not reachable by design: each effect writes a
+against a baseline of 32.4 ns, and the poll stage alone is 405 ns, 6.3 ns per
+source for the `revision()` read, the change-tick compare and one declared-state
+read. The ≤ 30x churn target is not reachable by design: each effect writes a
 ledger transition, a warrant and a journal record, and `act` is where the time
 goes.
 
