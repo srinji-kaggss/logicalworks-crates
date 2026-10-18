@@ -152,6 +152,14 @@ struct ScriptedCapture {
     gone: Vec<i32>,
     /// The pids that keep running whatever is sent to them.
     immortal: Vec<i32>,
+    /// The pids that read as running until `dying_for` observations have been
+    /// taken and as gone after: a SIGKILLed process leaves the table on the
+    /// scheduler's turn, not on the signaller's.
+    dying: Vec<i32>,
+    /// How many observations a `dying` pid outlasts.
+    dying_for: usize,
+    /// How many observations the drain asked for, across both of its phases.
+    observed: AtomicUsize,
     /// Whether every reading fails, the way a target with no process table
     /// reports.
     unreadable: bool,
@@ -218,10 +226,13 @@ impl DescendantCapture for ScriptedCapture {
     }
 
     fn running(&self, pids: &[i32]) -> std::io::Result<Vec<i32>> {
+        let seen = self.observed.fetch_add(1, Ordering::Relaxed);
         Ok(pids
             .iter()
             .copied()
-            .filter(|pid| self.immortal.contains(pid))
+            .filter(|pid| {
+                self.immortal.contains(pid) || (self.dying.contains(pid) && seen < self.dying_for)
+            })
             .collect())
     }
 }
@@ -342,6 +353,9 @@ static NO_CAPTURE: ScriptedCapture = ScriptedCapture {
     tree: Vec::new(),
     gone: Vec::new(),
     immortal: Vec::new(),
+    dying: Vec::new(),
+    dying_for: 0,
+    observed: AtomicUsize::new(0),
     unreadable: false,
     truncated: false,
     reads: AtomicUsize::new(0),

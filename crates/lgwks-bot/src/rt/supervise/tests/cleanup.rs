@@ -1,13 +1,13 @@
 //! The process-group drain: every receipt arm against scripted seams.
 
-#[cfg(all(unix, feature = "process"))]
-use super::super::CONTAINMENT_ROUNDS;
 use super::super::TaskId;
 use super::super::lease::Lease;
 #[cfg(feature = "process")]
 use super::super::outcome::ResidualRisk;
 use super::super::outcome::{CleanupReceipt, TaskOutcome};
 use super::super::supervisor::Supervisor;
+#[cfg(all(unix, feature = "process"))]
+use super::super::{CONTAINMENT_ROUNDS, DEATH_CONFIRM_PASSES};
 #[cfg(all(unix, feature = "process"))]
 use super::{
     EpermGroupSignaller, FailingGroupObserver, ScriptedCapture, UnexpectedGroupSignaller,
@@ -157,6 +157,97 @@ fn a_captured_pid_that_had_ended_is_not_reported_as_a_survivor() {
         "the report must name the mechanism it ran and carry no survivor"
     );
     drop(group);
+}
+
+/// A descendant still running when the rounds end, and gone a few observations
+/// later, is no survivor.
+///
+/// A SIGKILLed process leaves the table on the scheduler's turn, which on a
+/// loaded host is later than the rounds' microseconds:
+/// `process_escape::a_session_escape_is_captured_and_stopped_by_pid` named one
+/// at load 40 (2026-10-18), and the escapee was gone before the test looked.
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn a_descendant_that_dies_after_the_rounds_is_not_named_a_survivor() {
+    let drain = drain_a_dying_descendant(2 * CONTAINMENT_ROUNDS + 4);
+    assert_eq!(
+        drain.pinned,
+        CleanupReceipt::CleanupSurvivors {
+            survivors: vec![70],
+        },
+        "the pinned phase's rounds end while the pid still reads as running"
+    );
+    assert_eq!(
+        drain.settled,
+        CleanupReceipt::CleanupConfirmed,
+        "the confirmation waits out a death that is a few observations away"
+    );
+    assert!(
+        drain.complete,
+        "no survivor is left in the report once the pid has ended"
+    );
+    assert_eq!(
+        drain.signals, CONTAINMENT_ROUNDS,
+        "one signal per round of the pinned phase, and none while the confirmation waits: \
+         the leader is reaped and a pid signalled now could belong to someone else"
+    );
+}
+
+/// What one drain of a group with a single dying descendant reported.
+#[cfg(all(unix, feature = "process"))]
+struct DyingDrain {
+    /// The receipt of the pinned phase, before the leader is reaped.
+    pinned: CleanupReceipt,
+    /// The receipt of the post-reap confirmation.
+    settled: CleanupReceipt,
+    /// Whether the final report names a complete containment.
+    complete: bool,
+    /// How many signals the drain delivered in all.
+    signals: usize,
+}
+
+/// Drain a group whose one captured pid reads as running for `dying_for`
+/// observations and as gone after.
+#[cfg(all(unix, feature = "process"))]
+fn drain_a_dying_descendant(dying_for: usize) -> DyingDrain {
+    let signaller = recording();
+    let observer = sequence(0);
+    let capture = ScriptedCapture {
+        tree: vec![70],
+        dying: vec![70],
+        dying_for,
+        ..ScriptedCapture::default()
+    };
+    let mut group = capture_group(&signaller, &observer, &capture);
+    let pinned = block_on(group.cleanup());
+    group.mark_reaped();
+    let settled = block_on(group.confirm_absence());
+    let complete = group.containment().is_complete();
+    drop(group);
+    DyingDrain {
+        pinned,
+        settled,
+        complete,
+        signals: capture.signals(),
+    }
+}
+
+/// A descendant that outlasts the confirmation's bound is still named.
+#[cfg(all(unix, feature = "process"))]
+#[test]
+fn a_descendant_that_outlasts_the_confirmation_stays_a_survivor() {
+    let drain = drain_a_dying_descendant(2 * CONTAINMENT_ROUNDS + DEATH_CONFIRM_PASSES + 4);
+    assert_eq!(
+        drain.settled,
+        CleanupReceipt::CleanupSurvivors {
+            survivors: vec![70],
+        },
+        "a pid still running past the bound is reported, not waited on for ever"
+    );
+    assert!(
+        !drain.complete,
+        "a named survivor is an incomplete containment"
+    );
 }
 
 /// A leader that exited on its own has had its children re-parented, so the

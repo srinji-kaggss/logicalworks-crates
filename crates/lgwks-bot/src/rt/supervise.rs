@@ -481,6 +481,20 @@ const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(4);
 #[cfg(all(unix, feature = "process"))]
 const CONTAINMENT_ROUNDS: usize = 4;
 
+/// Timed observations the post-reap confirmation adds while a signalled pid is
+/// still running.
+///
+/// A SIGKILL is delivered at once and acted on at the process's next turn on the
+/// scheduler, so on a loaded host a killed `setsid` descendant reads as running
+/// for longer than [`CONTAINMENT_ROUNDS`] yields take: the rounds spend microseconds,
+/// the death lands in milliseconds, and the receipt named a survivor that was
+/// gone before the caller looked (`process_escape::a_session_escape_is_captured_and_stopped_by_pid`
+/// at load 40, 2026-10-18). The passes wait out that window and no longer: 40 ×
+/// [`start::REAP_POLL`] is 200 ms, spent only by a tree that still has a running pid,
+/// so a clean cleanup costs nothing and a pid that does not die is still named.
+#[cfg(all(unix, feature = "process"))]
+const DEATH_CONFIRM_PASSES: usize = 40;
+
 /// Group signals delivered on the drop-time path, while the unreaped leader still
 /// pins the group id.
 ///

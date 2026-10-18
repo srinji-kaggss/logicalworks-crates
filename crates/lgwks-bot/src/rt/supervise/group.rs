@@ -6,11 +6,12 @@ use super::owners::{
     Capture, CleanupOwners, DescendantCapture, GroupObserver, GroupSignaller,
     NATIVE_DESCENDANT_CAPTURE, NATIVE_GROUP_OBSERVER, NATIVE_GROUP_SIGNALLER,
 };
+use super::start::REAP_POLL;
 #[cfg(target_os = "linux")]
 use super::start::{reap_adopted, sweep_adopted, sweep_adopted_confirmed};
 use super::{
-    CONTAINMENT_ROUNDS, GROUP_SIGNAL_ATTEMPTS, GroupSignal, TaskId, is_absence,
-    is_present_but_unsignalable,
+    CONTAINMENT_ROUNDS, DEATH_CONFIRM_PASSES, GROUP_SIGNAL_ATTEMPTS, GroupSignal, TaskId,
+    is_absence, is_present_but_unsignalable,
 };
 use crate::rt::task::yield_now;
 #[cfg(target_os = "linux")]
@@ -411,7 +412,40 @@ impl<'ops> ProcessGroup<'ops> {
                 yield_now().await;
             }
         }
+        self.await_deaths().await;
         self.receipt()
+    }
+
+    /// Wait out the death of a pid the rounds still read as running.
+    ///
+    /// The rounds yield and re-read, which costs microseconds, while a SIGKILLed
+    /// process leaves the table on the scheduler's turn: on a loaded host the
+    /// receipt named a survivor that was gone a few milliseconds later. So while
+    /// a survivor is recorded, this parks on the runtime clock for [`REAP_POLL`]
+    /// and observes the same pids again, at most [`DEATH_CONFIRM_PASSES`] times.
+    /// It sends no signal, because the leader is reaped and a pid signalled now
+    /// could belong to someone else, and it costs nothing when nothing is running.
+    /// A pid that outlasts the bound stays named, so a descendant that never dies
+    /// is still reported; once the survivors clear it also asks whether the group
+    /// has gone, because the rounds that would have asked are spent.
+    async fn await_deaths(&mut self) {
+        if self.no_survivors() {
+            return;
+        }
+        for _ in 0..DEATH_CONFIRM_PASSES {
+            crate::rt::time::sleep(REAP_POLL).await;
+            let survivors = self.containment.survivors.clone();
+            self.observe_running(&survivors);
+            if self.no_survivors() {
+                break;
+            }
+        }
+        if self.no_survivors()
+            && !self.group_absent
+            && matches!(self.observer.exists(self.group), Ok(false))
+        {
+            self.group_absent = true;
+        }
     }
 
     /// Kill and reap the captured descendants this process adopted.
