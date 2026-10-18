@@ -76,6 +76,15 @@ pub(super) struct ProcessGroup<'ops> {
     pub(super) cgroup: Option<CgroupScope>,
     /// The process-group signalling boundary, injectable for regression tests.
     pub(super) signaller: &'ops dyn GroupSignaller,
+    /// How long [`Self::await_deaths`] parks between two observations.
+    ///
+    /// [`REAP_POLL`] in production. A field because the seeded drain tests run
+    /// thousands of worlds whose pid never dies, each of which would otherwise
+    /// spend the whole bound on a real timer; they park for zero, which keeps
+    /// the passes and the bound and drops the wall time: a zero park yields
+    /// instead of arming a timer, because even a zero timer costs the runtime's
+    /// millisecond tick (a 4,096-world sweep took 27 s on it).
+    pub(super) death_poll: std::time::Duration,
     /// Non-mutating group existence boundary, injectable for regression tests.
     pub(super) observer: &'ops dyn GroupObserver,
     /// The per-process containment boundary, injectable for regression tests.
@@ -106,6 +115,7 @@ impl<'ops> ProcessGroup<'ops> {
             signalled_pids: std::collections::BTreeSet::new(),
             #[cfg(all(target_os = "linux", feature = "process"))]
             cgroup: None,
+            death_poll: REAP_POLL,
             signaller: &NATIVE_GROUP_SIGNALLER,
             observer: &NATIVE_GROUP_OBSERVER,
             capture: &NATIVE_DESCENDANT_CAPTURE,
@@ -433,7 +443,11 @@ impl<'ops> ProcessGroup<'ops> {
             return;
         }
         for _ in 0..DEATH_CONFIRM_PASSES {
-            crate::rt::time::sleep(REAP_POLL).await;
+            if self.death_poll.is_zero() {
+                yield_now().await;
+            } else {
+                crate::rt::time::sleep(self.death_poll).await;
+            }
             let survivors = self.containment.survivors.clone();
             self.observe_running(&survivors);
             if self.no_survivors() {

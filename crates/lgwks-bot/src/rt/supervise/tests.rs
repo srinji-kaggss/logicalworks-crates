@@ -291,6 +291,7 @@ fn armed_group<'ops>(
         signalled_pids: std::collections::BTreeSet::new(),
         #[cfg(all(target_os = "linux", feature = "process"))]
         cgroup: None,
+        death_poll: std::time::Duration::ZERO,
         signaller: seams.signaller,
         observer: seams.observer,
         capture: seams.capture,
