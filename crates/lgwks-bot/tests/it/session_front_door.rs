@@ -20,7 +20,9 @@ fn size_options() -> Vec<String> {
 }
 
 /// A two-option ask: `size` routes to `small_end` or `large_end`.
-fn size_flow() -> Result<FlowSpec, BotError> {
+///
+/// Shared with `sim_session_front_door`, which sweeps answer streams over this one flow.
+pub(crate) fn size_flow() -> Result<FlowSpec, BotError> {
     let vars = BTreeMap::from([("size".to_owned(), VarType::Choice(size_options()))]);
     let routes = BTreeMap::from([
         ("small".to_owned(), "small_end".to_owned()),
