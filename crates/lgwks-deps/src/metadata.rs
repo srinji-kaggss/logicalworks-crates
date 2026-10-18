@@ -23,6 +23,12 @@ mod edges_tests;
 /// The single-use faults the collection tests inject, and the checks they share.
 #[cfg(test)]
 mod faults;
+/// Seeded sweeps over `lexical_join` against a component-stack model.
+#[cfg(test)]
+mod sim_edges_join;
+/// Seeded sweeps over `parse` against documents drawn from the seed.
+#[cfg(test)]
+mod sim_edges_parse;
 
 #[doc(hidden)]
 pub use self::capture::CleanupObligation;
