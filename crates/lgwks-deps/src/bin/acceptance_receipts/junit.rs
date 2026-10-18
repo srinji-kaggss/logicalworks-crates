@@ -167,10 +167,15 @@ fn read_tag(inside: &str) -> Option<Tag> {
     })
 }
 
+/// The `classname` nextest gives a setup script's `<testcase>`, followed by the script's name.
+const SETUP_SCRIPT_CLASS: &str = "@setup-script:";
+
 /// A `<testcase>` as the report states it.
 struct Case {
     /// Its `name`, when it has one.
     name: Option<String>,
+    /// Its `classname`, when it has one.
+    classname: Option<String>,
     /// Its `time` in seconds, as written.
     time: Option<String>,
     /// Whether a `<failure>` or `<error>` child is present.
@@ -242,6 +247,7 @@ fn read_cases(text: &str) -> Result<Vec<Case>, String> {
         let own_case = if tag.name == "testcase" {
             cases.push(Case {
                 name: attribute(&tag, "name"),
+                classname: attribute(&tag, "classname"),
                 time: attribute(&tag, "time"),
                 failed: false,
                 skipped: false,
@@ -318,6 +324,15 @@ pub(super) fn parse_junit(path: &Path) -> Result<Outcomes, Failure> {
     }
     let mut outcomes = Outcomes::new();
     for case in cases {
+        // A setup script runs once in every shard and is no test: it answers for no row,
+        // and its name repeats across shards by design.
+        if case
+            .classname
+            .as_deref()
+            .is_some_and(|class| class.starts_with(SETUP_SCRIPT_CLASS))
+        {
+            continue;
+        }
         let Some(name) = case.name.filter(|name| !name.is_empty()) else {
             continue;
         };
@@ -611,6 +626,37 @@ mod tests {
             refused.map(|text| text.contains("may not be reported twice")),
             Some(true),
             "a repeated name"
+        );
+        Ok(())
+    }
+
+    /// Run 39083433157 (2026-10-18): nextest 0.9 writes a setup script as a `<testcase>` of
+    /// classname `@setup-script:<name>` in every shard, and the merge refused the repeat.
+    #[test]
+    fn a_setup_script_repeated_in_every_shard_is_no_test_and_no_duplicate() -> TestResult {
+        let fixture = Fixture::claim(&std::env::temp_dir(), "lgwks-junit-test")?;
+        let shard = |tag: &str, test: &str| -> Result<PathBuf, Box<dyn Error>> {
+            let path = fixture.path().join(format!("setup-{tag}.xml"));
+            fs::write(
+                &path,
+                format!(
+                    "<?xml version=\"1.0\"?><testsuites>\n\
+                     <testsuite name=\"@setup-script:build-churn-slot\" tests=\"1\">\
+                     <testcase name=\"build-churn-slot\" classname=\"@setup-script:build-churn-slot\" time=\"0.261\"/>\
+                     </testsuite>\n\
+                     <testsuite name=\"lgwks_bot\" tests=\"1\">\
+                     <testcase name=\"{test}\" classname=\"lgwks_bot::it\" time=\"0.010\"/>\
+                     </testsuite></testsuites>"
+                ),
+            )?;
+            Ok(path)
+        };
+        let merged = merge_junit(&[shard("a", "a::one")?, shard("b", "b::two")?])?;
+        let names: Vec<&str> = merged.iter().map(|entry| entry.0.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a::one", "b::two"],
+            "only the tests are reported, and the script is in neither shard's list"
         );
         Ok(())
     }
