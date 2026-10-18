@@ -26,7 +26,12 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-bot/resolution.md`](guides/lgwks-bot/resolution.md) | Unreleased: lexical and semantic resolution, and degraded verdicts. |
 | [`docs/guides/lgwks-bot/domains.md`](guides/lgwks-bot/domains.md) | Unreleased: the domain registry, and what a spec's identifiers resolve to. |
 | [`docs/guides/lgwks-std/index.md`](guides/lgwks-std/index.md) | `lgwks_std`: install, feature selection, and logging. |
-| [`docs/guides/lgwks-ast/index.md`](guides/lgwks-ast/index.md) | `lgwks_ast`: install, grammar selection, bounds, and diagnostics. |
+| [`docs/guides/lgwks-ast/index.md`](guides/lgwks-ast/index.md) | `lgwks_ast`: install, identify, parse and inspect, and where to go next. |
+| [`docs/guides/lgwks-ast/bounds-and-refusals.md`](guides/lgwks-ast/bounds-and-refusals.md) | The three constants a checked parse applies and the four refusals each one answers. |
+| [`docs/guides/lgwks-ast/custom-and-diagnostics.md`](guides/lgwks-ast/custom-and-diagnostics.md) | A caller-registered grammar and the shared typed-diagnostic derive. |
+| [`docs/guides/lgwks-ast/grammars.md`](guides/lgwks-ast/grammars.md) | Grammar selection by cargo feature, and the extension table each build compiles. |
+| [`docs/guides/lgwks-ast/script-and-custom.md`](guides/lgwks-ast/script-and-custom.md) | The `script!` reader and the custom-language entry points of `lgwks_ast`. |
+| [`docs/guides/lgwks-ast/bounds.md`](guides/lgwks-ast/bounds.md) | Every bound the checked parse and the inspection walk apply, with the measurements behind them. |
 | [`docs/guides/lgwks-deps/index.md`](guides/lgwks-deps/index.md) | `lgwks_deps`: library use versus CLI and policy adoption. |
 | [`docs/guides/lgwks-deps/storefront.md`](guides/lgwks-deps/storefront.md) | Every `lgwks_deps` storefront feature, what it re-exports, and what each pulls in. |
 | [`docs/guides/lgwks-deps/embedding.md`](guides/lgwks-deps/embedding.md) | Embedding `check_dependencies` in your own tool, and when adopting the policy is the right call. |

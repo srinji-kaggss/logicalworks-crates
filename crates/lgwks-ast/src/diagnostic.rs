@@ -310,17 +310,10 @@ impl<'src> LineIndex<'src> {
 /// The reported order is source order, whatever shape the tree is, because a
 /// reader scanning a list of findings expects to walk down the file.
 ///
-/// ```
-/// use lgwks_ast::{Language, Severity, diagnostic::diagnostics, parse};
-///
-/// let source = "fn main() { let x = 1; }\nfn broken( {\n";
-/// let tree = parse(source, Language::Rust);
-/// let found = diagnostics("src/main.rs", &tree.root(), source, "Rust");
-///
-/// // The recovery is reported, and it points at the line that carries it.
-/// assert!(found.iter().all(|one| one.severity() == Severity::Warning));
-/// assert!(found.iter().all(|d| d.span().start.line == 2));
-/// ```
+/// A source whose second function is malformed reports its recovery as a
+/// warning on the second line, never as an error; the unit tests
+/// `a_recovery_is_reported_on_the_line_that_carries_it` and
+/// `a_recovery_is_never_reported_as_an_error` run that source.
 ///
 /// # Bounds
 ///
@@ -653,9 +646,10 @@ mod tests {
         let tree = parse(source, Language::Rust);
         let found = diagnostics("u.rs", &tree.root(), source, "Rust");
         let first = &found[0];
-        let line_start = source[..first.span().start.byte]
-            .rfind('\n')
-            .map_or(0, |at| at.saturating_add(1));
+        let line_start = match source[..first.span().start.byte].rfind('\n') {
+            Some(at) => at.saturating_add(1),
+            None => 0,
+        };
         let column_chars = source[line_start..first.span().start.byte].chars().count();
         assert_eq!(
             first.span().start.column,

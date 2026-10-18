@@ -9,31 +9,11 @@
 //! The function takes a `proc_macro2` token stream, which is what a macro
 //! receives and what `TokenStream::from_str` makes of source text outside a
 //! macro, with each token's line and column kept (`span-locations`). A tool
-//! therefore gets the macro's tree, refusals and all, from plain text:
-//!
-//! ```
-//! use std::str::FromStr;
-//!
-//! use lgwks_ast::script::{Kind, parse};
-//! use lgwks_deps::proc_macro2::TokenStream;
-//!
-//! let source = "flow sizes(pages: Vec<String>) -> usize:\n    \
-//!               let sizes = each page in pages:\n        page.len()\n    \
-//!               give back sizes.len()\n";
-//! let tokens = TokenStream::from_str(source).map_err(|error| error.to_string())?;
-//! let script = parse(tokens).map_err(|refusal| refusal.to_string())?;
-//! let flow = script.flows().first().ok_or("one flow")?;
-//! assert_eq!(flow.shape().signature(), "sizes(pages: Vec<String>) -> usize");
-//! let kinds: Vec<Kind> = flow.shape().steps().iter().map(|step| step.kind()).collect();
-//! assert_eq!(kinds, [Kind::Each, Kind::GiveBack], "the map, in source order");
-//!
-//! let refused = TokenStream::from_str("flow f():\n    std::process::exit(1)\n")
-//!     .map_err(|error| error.to_string())?;
-//! let refusal = parse(refused).err().ok_or("exit is refused")?;
-//! assert!(refusal.message().contains("ending the process"), "{refusal}");
-//! assert_eq!(refusal.line(), 2, "located at the token, as the compiler reports it");
-//! # Ok::<(), String>(())
-//! ```
+//! therefore gets the macro's tree, refusals and all, from plain text: a flow
+//! with an `each` step and a `give back` maps to those two kinds in source
+//! order, and a flow that ends the process is refused at the token's own line.
+//! The tests `a_tool_reads_the_macros_map_from_plain_text` and
+//! `a_refusal_is_located_at_its_token_as_the_compiler_reports_it` run both.
 //!
 //! Selected by the `script` feature, which reaches `proc_macro2` through the
 //! `lgwks_deps` storefront and builds no tree-sitter, so the macro's build does
