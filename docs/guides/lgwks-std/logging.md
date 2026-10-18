@@ -19,41 +19,12 @@ build against `tracing` works unchanged. It also exposes
 with `LGWKS_LOG`/`RUST_LOG` filtering, compact output by default, and JSON lines
 when `LGWKS_LOG_FORMAT=json`.
 
-```rust
-use lgwks_std::trace::{info, install_default, warn};
-
-/// A typed failure. The error travels as a value; the event travels to whatever
-/// subscriber the application installed once at the process edge.
-#[derive(Debug, PartialEq, Eq)]
-pub enum PortError {
-    /// The text was not a number at all.
-    NotANumber,
-    /// The number was out of range for a port.
-    OutOfRange(u32),
-}
-
-/// Parse a listening port. Emits structured events and returns a typed error.
-///
-/// `info!` and `warn!` are no-ops until the process installs a subscriber.
-pub fn parse_port(raw: &str) -> Result<u16, PortError> {
-    let parsed: u32 = raw.parse().map_err(|_| {
-        warn!(input = raw, "port is not a number");
-        PortError::NotANumber
-    })?;
-    let port = u16::try_from(parsed).map_err(|_| {
-        warn!(parsed, "port is out of range");
-        PortError::OutOfRange(parsed)
-    })?;
-    info!(port, "parsed a listening port");
-    Ok(port)
-}
-
-pub fn main() -> Result<(), lgwks_std::trace::DebugInstallError> {
-    install_default("port-service")?;
-    let _ = parse_port("8080");
-    Ok(())
-}
-```
+The shape is a function that parses a listening port. It returns a typed
+failure (not a number, or out of range for a port) as a value, and it emits a
+`warn!` event with the offending input on each failure and an `info!` event with
+the port on success. The events are no-ops until the process installs a
+subscriber once at its edge with `install_default("port-service")`; the error
+travels to the caller and the events travel to whatever the application chose.
 
 Two facts about that feature that the name does not carry:
 

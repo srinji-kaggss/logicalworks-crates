@@ -62,15 +62,10 @@ put `*` or `?` in a class to match it literally. In strict syntax, `**` must
 occupy a complete slash-delimited component. Legacy syntax keeps embedded
 `**` during migration.
 
-```rust
-use lgwks_std::glob::{GlobPattern, GlobScratch};
-
-let pattern = GlobPattern::compile("src/**/[a-z]?.rs")?;
-let mut scratch = GlobScratch::new();
-assert!(pattern.is_match_with("src/a1.rs", &mut scratch));
-assert!(pattern.is_match_with("src/sub/a1.rs", &mut scratch));
-# Ok::<(), lgwks_std::glob::PatternError>(())
-```
+Compiling `src/**/[a-z]?.rs` once and matching it with one reused
+`GlobScratch` accepts both `src/a1.rs` and `src/sub/a1.rs`; the integration
+test `public_compile_reuse_and_legacy_call_share_text_semantics` in
+`crates/lgwks-std/tests/it/glob_public.rs` runs that flow.
 
 `GlobPattern::compile` rejects unclosed classes, descending ranges, and `**`
 that does not occupy a complete path component. The recognized component forms
