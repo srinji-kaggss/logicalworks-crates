@@ -13,18 +13,10 @@ ceiling as `spawn`, and returns a `TaskId` — not a `Child`
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
-```rust
-use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::Supervisor;
-
-async fn deploy(supervisor: &mut Supervisor) -> std::io::Result<()> {
-    // `ProcessSpec` describes; the supervisor starts, bounds, and owns.
-    let mut spec = ProcessSpec::new("sh");
-    spec.arg("-c").arg("make -j4");
-    supervisor.spawn_process(&spec).await?;
-    Ok(())
-}
-```
+`a_borrowed_process_spec_is_started_and_owned_by_the_supervisor`
+(`crates/lgwks-bot/tests/it/rt_front_door.rs`) runs it: `ProcessSpec` describes
+the command (`sh -c`), and the supervisor starts, bounds and owns it through
+`spawn_process(&spec)`.
 
 Three differences from a raw `Child`:
 
@@ -73,18 +65,11 @@ records that pid's process started. Store `leader().to_string()` durably — a
 database row, written before the lane does work — and a successor parses it back
 and calls `reap_orphaned_group` (`crates/lgwks-std/src/process/identity.rs:386`):
 
-```rust
-use lgwks_bot::rt::process::{OrphanReap, ProcessIdentity, reap_orphaned_group};
-
-fn reap(stored: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let leader: ProcessIdentity = stored.parse()?;
-    match reap_orphaned_group(&leader)? {
-        OrphanReap::Signalled { .. } => {} // the dead supervisor's lane is stopped
-        _ => {} // the pid is gone or now names another process: nothing was sent
-    }
-    Ok(())
-}
-```
+`a_stored_leader_identity_parses_back_and_a_gone_group_is_not_signalled`
+(`crates/lgwks-bot/tests/it/rt_front_door.rs`) runs it: `spawn_process_identified`
+returns the leader, `leader().to_string()` is the text a lane stores, and once the
+group is gone that text parses back to a `ProcessIdentity` and
+`reap_orphaned_group` signals nothing.
 
 The start instant is what makes the reap safe. A pid alone does not say which
 process it names: after the leader exits the OS may hand the number to a

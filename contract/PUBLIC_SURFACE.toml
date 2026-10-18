@@ -199,8 +199,4 @@
 # The doc-example ceiling (#526): per documentation file, how many fenced Rust
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
-"crates/lgwks-bot/README.md" = 6
 "crates/lgwks-deps/src/metadata.rs" = 4
-"docs/guides/lgwks-bot/background-processes.md" = 2
-"docs/guides/lgwks-bot/failures-example.md" = 1
-"docs/guides/lgwks-bot/migrating-to-1-0.md" = 1

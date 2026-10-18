@@ -83,17 +83,22 @@
 // Remaining lint contract (missing_docs deny, unsafe_code forbid,
 // broken_intra_doc_links deny) comes from the workspace.
 
-/// Compiles every Rust block in `README.md` as a doctest.
+/// Compiles every Rust block in the README pages as a doctest.
 ///
 /// The README is the first thing a consumer reads and the last thing anyone
 /// updates: it described a `lgwks_std::task` executor and an `async fn tick`
 /// for two commits after both had been replaced, and nothing failed, because a
 /// prose example is not compiled by anything. This makes it compiled.
 ///
+/// Only `README-script.md` holds a Rust block now: it is the one that goes
+/// through `script!`. The examples that named the crate by path became tests
+/// (`tests/it/readme_front_door.rs`, `tests/it/rt_front_door.rs`), and
+/// `contract/PUBLIC_SURFACE.toml` refuses a README page that gains one.
+///
 /// `#[cfg(doctest)]` so the item exists only under `cargo test --doc`: it is
 /// not part of the library, not built by a normal compile, and not exported.
 #[cfg(doctest)]
-#[doc = include_str!("../README.md")]
+#[doc = include_str!("../README-script.md")]
 struct ReadmeExamples;
 
 use std::future::Future;
