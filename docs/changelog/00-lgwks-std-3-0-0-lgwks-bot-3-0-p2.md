@@ -1,6 +1,6 @@
-# Unreleased
+# lgwks_std 3.0.0 / lgwks_bot 3.0.0 / lgwks_ast 2.0.0 / lgwks_deps 4.0.0 / lgwks_macros 1.1.2 - 2026-10-18 (2/2)
 
-Release: Unreleased. Page 1 of 1. [Changelog index](../../CHANGELOG.md)
+Release: lgwks_std 3.0.0 / lgwks_bot 3.0.0 / lgwks_ast 2.0.0 / lgwks_deps 4.0.0 / lgwks_macros 1.1.2 - 2026-10-18. Page 2 of 2. [Changelog index](../../CHANGELOG.md)
 
 ### lgwks_bot — a run reads back as its script (#386, SL-6)
 
