@@ -387,15 +387,17 @@ jobs:
   # limit in its test step alone (run 38407172423: 5 m 14 s), and a hosted
   # runner's 3 cores did worse (run 38416328077), so it has an instance of its
   # own (lwc-2), apart from the 100 and 1,000 tiers on lwc-12. The binary's
-  # other 42 tests and lgwks-bot's `sim_scale` module (164 tests) run on the
-  # lwc-2 leg too, in place of the bot-full job (`.config/nextest.toml`): that
-  # suite is bounded by its work, and the 42 held 206 slot-seconds and
-  # `sim_scale` 250 to 477 (runs 38904371387, 38912085538, each cancelled at the
-  # cap with every test passed). lwc-12 keeps the two small tiers and builds only
-  # their binary (186 s with the `it` binary, 75 s without: runs 38916569842,
-  # 38918492955), because a leg queued behind the lgwks-ast leg ends the run.
-  # The Linux container run still runs all of them. A leg's `binaries` names what
-  # it builds; unset, the lane builds the review-path binary alone.
+  # other 42 tests run on the lwc-2 leg too, in place of the bot-full job
+  # (`.config/nextest.toml`), and so do lgwks-bot's `sim_scale` module (164
+  # tests) on lwc-12: that suite is bounded by its work, and the 42 held 206
+  # slot-seconds and `sim_scale` 250 to 477 (runs 38904371387, 38912085538, each
+  # cancelled at the cap with every test passed). `sim_scale` was on lwc-2 until
+  # the legs ran in a second wave (#272): the 10,000 leg took 85 to 96 s against
+  # 31 s for the small leg (runs 39088344101, 39089412096), the run's wall is
+  # the longer of the two, and lwc-12 builds the `it` binary warm now that no
+  # leg queues behind the lgwks-ast leg on it (186 s cold, 38 s primed). The
+  # Linux container run still runs all of them. A leg's `binaries` names what it
+  # builds; unset, the lane builds the review-path binary alone.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
     # After the three suites that share this machine's kernel with it, not beside
@@ -418,11 +420,11 @@ jobs:
         include:
           - tiers: "10000"
             instance: lwc-2
-            binaries: "--test sim_review_path --test it"
-            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier)) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
+            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier))"
           - tiers: "100 and 1000"
             instance: lwc-12
-            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000)"
+            binaries: "--test sim_review_path --test it"
+            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
@@ -432,8 +434,9 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          # Eight, as the bot-full job: the lwc-2 leg runs 206 tests beside the
-          # 10,000 tier, which only logs its latency tails; the small leg uses two.
+          # Eight, as the bot-full job: the lwc-2 leg runs 43 tests beside the
+          # 10,000 tier, which only logs its latency tails, and the lwc-12 leg
+          # the 164 `sim_scale` tests and the two small tiers.
           test-share: "8"
           build-share: "2"
           # On the critical path now: 204 of 207 tests at the cap, run 39069794871.
