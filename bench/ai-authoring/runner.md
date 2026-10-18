@@ -39,7 +39,7 @@ Every child leads its own process group under a bound. A child still running at 
 
 ## The call ledger
 
-Every model call goes through `budget.rs` first. It refuses a call before it is made when the call repeats an earlier one in meaning (a 128-bit hash of the model and the prompt folded for case and spacing) or when its worst case, `call_tokens` (20,000), would pass `token_budget` (9,000,000). A call that returns is settled at the tokens it used; one that fails releases its reservation. A repeat inside a repair loop is a refusal the trial survives (`BenchError::Repeated`); a budget refusal still ends the trial as a crashed record.
+Every model call goes through `budget.rs` first. It refuses a call before it is made when the call repeats an earlier one in meaning (a 128-bit hash of the model and the prompt folded for case and spacing) or when its worst case, `call_tokens` (20,000), would pass `token_budget` (9,000,000). A call that returns is settled at the tokens it used; one that fails releases its reservation. A repeat inside a repair loop is a refusal the trial survives (`BenchError::Repeated`); a budget refusal still ends the trial as a crashed record. A call whose output is an `error` event and no reply (an expired key answers 401, 2026-10-18) is a failed call: it is released, not charged, and its trial is a recorded crash that names the provider's status and words, which `--resume` runs again once the key is renewed. Only output with neither a reply nor an error event is charged its whole reservation.
 
 ## Metrics
 
