@@ -11,12 +11,14 @@
 #[cfg(feature = "tool")]
 mod cli;
 mod content_detection;
+mod front_door;
 mod hostile;
 mod parse_deadline;
 mod scan_bounds;
 mod scan_cases;
 mod scan_evidence;
 mod scan_verdicts;
+mod script_read;
 mod script_tool;
 mod sim_diagnostics;
 mod sim_parse_bounds;

@@ -9,9 +9,9 @@
 Cargo.toml:155	print_stderr = "forbid"
 Cargo.toml:156	print_stdout = "forbid"
 crates/lgwks-ast/src/parser.md:77	The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
-crates/lgwks-ast/src/parser.rs:3169	const DECLARED_GRAMMARS: usize = 28;
-crates/lgwks-ast/src/parser.rs:3321	let mut covered: Vec<&str> = Vec::new();
-crates/lgwks-ast/src/parser.rs:3326	assert_eq!(
+crates/lgwks-ast/src/parser/feature_matrix_tests.rs:172	const DECLARED_GRAMMARS: usize = 28;
+crates/lgwks-ast/src/parser/feature_matrix_tests.rs:329	assert_eq!(
+crates/lgwks-ast/src/parser/feature_matrix_tests.rs:332	"the fixture table must cover every grammar the manifest declares"
 crates/lgwks-bot/src/cap.rs:15	//! before acting. This stops confused-deputy calls and accidental ungated
 crates/lgwks-bot/src/cap.rs:56	pub const NET: &str = "bot.net";
 crates/lgwks-bot/src/cap.rs:67	pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
