@@ -22,30 +22,26 @@ trap is named here.
 
 ## Pick by what you wanted
 
-**"Run these concurrently and give me the values."** `JoinSet`.
+**"Run these concurrently and give me the values."** `each`, in a flow. This one
+was run on five inputs and printed `[2, 4, 6, 8, 10]`:
 
 ```rust
-use lgwks_bot::rt::task::JoinSet;
-
-async fn doubled(inputs: Vec<u64>) -> Vec<u64> {
-    let mut set = JoinSet::new();
-    for input in inputs {
-        set.spawn(async move { input * 2 });
-    }
-    let mut out = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        // A task that panicked or was aborted is a `JoinError`, not an unwind.
-        if let Ok(value) = joined {
-            out.push(value);
-        }
-    }
-    out
+lgwks_bot::script! {
+    /// Double every input at once and give the results back in input order.
+    flow doubled(inputs: Vec<u64>) -> Vec<u64>:
+        let out = each input in inputs:
+            input * 2
+        give back out
 }
 ```
 
-For a fixed list with ordered results, `join_all_bounded(limit, futures)` is
-shorter. For ordered, fail-fast fan-out with your own error type, use
-`script::FanOut`.
+`each` runs as many at once as the machine sustains, returns results in input
+order and stops the rest at the first failure. Where you are not in a flow, the
+tool underneath is an owned `JoinSet`: `spawn` each body, then
+`JoinSet::join_next().await` for each value, where a task that panicked or was
+aborted comes back as a `JoinError`, not an unwind. For a fixed list with
+ordered results, `join_all_bounded(limit, futures)` is shorter. For ordered,
+fail-fast fan-out with your own error type, use `script::FanOut`.
 
 **"Run this in the background and tell me how it ended."** `Supervisor`. Its
 tasks return `()`. To get a *value* out, hand the body a `oneshot` sender; a
