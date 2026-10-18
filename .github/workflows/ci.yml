@@ -1092,7 +1092,12 @@ jobs:
     name: Build and workspace tests
     needs: [build, workspace_tail, tests_bot_full, tests_bot_saturation, tests_nodefault]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    # On an instance, not a hosted runner: this row starts when the saturation
+    # job ends and is the run's last link beside the receipts, and a hosted
+    # runner's pick-up took 2 s on main run 39090275332 and 56 s on run
+    # 39091155164 (queued 02:48:38, started 02:49:34, the run's wall 314 s
+    # against the 300 s #272 requires). Its work is two shell commands.
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     steps:
       - name: Every workspace test job passed
