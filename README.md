@@ -12,11 +12,11 @@ exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
 
 | Crate | Version | Docs | What it gives you |
 |---|---|---|---|
-| `lgwks_std` | 2.2.0 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging with default debugger install, time and calendars, hashing, ids, globs, process control |
-| `lgwks_bot` | 2.2.0 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
-| `lgwks_ast` | 1.1.0 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
-| `lgwks_macros` | 1.1.1 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
-| `lgwks_deps` | 3.0.1 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
+| `lgwks_std` | 3.0.0 | [docs.rs](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: JSON/RON/wire codecs, a blocking HTTP client, retry policies, structured logging with default debugger install, time and calendars, hashing, ids, globs, process control |
+| `lgwks_bot` | 3.0.0 | [docs.rs](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs (Observe, Evaluate, Execute, Query), capability-gated authority, change-triggered execution, and supervision that bounds background work |
+| `lgwks_ast` | 2.0.0 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
+| `lgwks_macros` | 1.1.2 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
+| `lgwks_deps` | 4.0.0 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
 Versions move independently from one repository and one tag. The table lists the
 versions in this tree's manifests. A manifest version is not an upload: the
@@ -38,15 +38,24 @@ cargo add lgwks_bot
 ```
 
 ```rust
+use std::error::Error;
 use std::io::Write;
 
-use lgwks_bot::broker::Broker;
-use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-use lgwks_bot::journal::MemoryJournal;
-use lgwks_bot::spec::{EffectIdentity, EffectScope};
-use lgwks_bot::{Bot, GrantSet};
+use lgwks_bot::script::{Scope, Tenant};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+lgwks_bot::script! {
+    /// Square every number, as many at once as the machine sustains; each
+    /// attempt gets a second and a failure worth retrying is retried under
+    /// the same key.
+    flow squares(numbers: Vec<u64>) -> u64:
+        let squared = each number in numbers:
+            retry up to 3 times, waiting 10ms:
+                within 1s:
+                    number.saturating_mul(number)
+        give back squared.iter().sum()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     // Output goes through an explicit locked handle, which turns a broken pipe
     // (`demo | head`) into an ordinary `Err` instead of a panic.
     let mut out = std::io::stdout().lock();
@@ -55,31 +64,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = lgwks_std::time::now_rfc3339()?;
     writeln!(out, "now: {now} hex: {}", lgwks_std::hex::encode(b"hi"))?;
 
-    // bot: capability-gated actors. Grants are required to build, not only to
-    // run, and so is an effect scope: it names the run, the environment that run
-    // acts on, and the journal a dispatch is written to before the effect leaves
-    // the process. `build` returns a typed error; the caller decides what to do
-    // with it.
-    let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    let mut broker = Broker::new();
-    broker.register(environment)?;
-    let effects = EffectScope::new(
-        EffectIdentity::new(
-            RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-            environment,
-            FlowRevision::from_tagged(
-                "blake3_256",
-                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-            )?,
-        ),
-        broker,
-        Box::new(MemoryJournal::new()),
-    );
-
-    let bot = Bot::builder("demo")
-        .with_effects(effects)
-        .build(&GrantSet::empty())?;
-    let _ = bot;
+    // bot: orchestration is a flow. Every flow takes the scope of the tenant it
+    // runs for; the fan-out is bounded, every attempt has a deadline, and a
+    // retry spends from a budget the whole run shares.
+    let scope = Scope::root(Tenant::new("demo")?);
+    let total = lgwks_bot::block_on(squares(&scope, vec![1, 2, 3]))?;
+    writeln!(out, "sum of squares: {total}")?;
+    assert_eq!(total, 14, "1 + 4 + 9");
 
     Ok(())
 }
