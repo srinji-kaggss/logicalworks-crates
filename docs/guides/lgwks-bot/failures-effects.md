@@ -18,13 +18,30 @@ out, or a connection dropped, *after* the request was sent"
 cause, and the words "may have taken effect", so an operator reading a log line
 sees the indeterminacy rather than having to infer it.
 
-Write your retry classifier against the variant, never against the cause string:
+Decide a retry against the variant, never against the cause string. In a flow
+you rarely write that decision at all: a `retry` block reads
+`FlowError::is_retryable`, which is true for a bot error exactly when its class
+is `RetryClass::Safe`, and `EffectIndeterminate` is `RetryClass::RequiresEvidence`,
+so no `retry` block repeats it. This flow, run against an action that fails once
+each way, ran the action once for the lost reply and three times for the refused
+connection:
 
 ```rust
-fn may_have_taken_effect(error: &lgwks_bot::BotError) -> bool {
-    matches!(*error, lgwks_bot::BotError::EffectIndeterminate { .. })
+lgwks_bot::script! {
+    /// Page on call, trying again while the page certainly was not sent.
+    flow page(depth: u32):
+        retry up to 3 times, waiting 1ms:
+            act notify::page on "oncall" with depth
 }
 ```
+
+```text
+indeterminate: ran 1 time(s): paging/page/retry/page: notify::page: may have taken effect — the reply never arrived
+not delivered: ran 3 time(s): paging/page/retry: gave up after 3 attempts; last: paging/page/retry/page: notify::page: connection refused
+```
+
+Outside a flow, a classifier of your own is `matches!(*error,
+BotError::EffectIndeterminate { .. })`, the variant and not the text.
 
 `BotError` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm. That
 is deliberate: a new variant becomes a compile-time prompt at your `match` rather
