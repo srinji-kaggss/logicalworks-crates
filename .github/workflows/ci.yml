@@ -739,6 +739,9 @@ jobs:
     name: Target and storefront matrix
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: taskpolicy -c utility bash -e {0}
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -793,6 +796,9 @@ jobs:
     name: Target matrix (${{ matrix.targets }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: taskpolicy -c utility bash -e {0}
     strategy:
       fail-fast: false
       matrix:
@@ -862,6 +868,9 @@ jobs:
     name: Feature matrix (${{ matrix.part }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: taskpolicy -c utility bash -e {0}
     strategy:
       fail-fast: false
       matrix:
