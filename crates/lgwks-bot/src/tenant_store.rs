@@ -75,25 +75,16 @@
 //! [`TenantStore`]: crate::tenant_store::TenantStore
 //! [`TenantStoreError::Busy`]: crate::tenant_store::TenantStoreError::Busy
 //!
-//! ```rust
-//! use lgwks_bot::tenant_store::TenantStore;
-//!
-//! let dir = std::env::temp_dir().join(format!(
-//!     "lgwks-tenant-store-doc-{}",
-//!     lgwks_bot::tenant_store::doc_nonce()
-//! ));
-//! let store = TenantStore::open(&dir)?;
-//! store.init_policy("acme", "[\"fmt\"]", 1, "2026-10-07T00:00:00Z")?;
-//! assert!(store.policy("acme")?.is_some());
-//! std::fs::remove_dir_all(&dir)?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
+//! `tests/it/tenant_store.rs` runs the store against the real file and lock: a hundred
+//! coordinators each write a policy and take a run from begin through its dispatches, ends and
+//! finish, and a store dropped with a run open reopens to that run, whose abandonment closes the
+//! run and every lane in one frame.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -572,21 +563,6 @@ fn lock_is_stale(path: &Path) -> Result<bool, TenantStoreError> {
         Ok(age) => Ok(age > STALE_LOCK_AFTER),
         Err(_) => Ok(false),
     }
-}
-
-/// A nonce for doc-test directories: unique per call, so parallel doc tests
-/// never share a state directory.
-fn doc_counter() -> u64 {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::SeqCst)
-}
-
-/// A process-unique nonce for doc examples: the wall clock beside a counter,
-/// so parallel doc tests never share a state directory.
-#[doc(hidden)]
-#[must_use]
-pub fn doc_nonce() -> u64 {
-    now_nanos().saturating_add(doc_counter().saturating_mul(1024))
 }
 
 // The refusal vocabulary, the caller's rows, the operations and the record

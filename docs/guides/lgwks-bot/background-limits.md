@@ -9,7 +9,7 @@ Pages of this guide: [tasks](background-work.md) ·
 
 These are the places the bounds stop applying.
 
-**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:86`
+**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:73`
 states it: this is not a scheduler with realtime guarantees, and future
 completion order across worker threads is not deterministic. Only the result
 order of `join_all_bounded` is. The same applies to a child process: the
@@ -26,7 +26,7 @@ thread ceiling, not a deadline. If your body blocks a thread, treat the
 supervisor's cancel as a request, not as an interruption.
 
 **`spawn` can deadlock with itself.** The module documents this one
-(`crates/lgwks-bot/src/rt/supervise.rs:93`): `spawn` awaits a permit, so a caller
+(`crates/lgwks-bot/src/rt/supervise.rs:80`): `spawn` awaits a permit, so a caller
 that holds the last permits inside a task this supervisor owns waits for a slot
 that task will never release. The bound is a backpressure contract, not a queue.
 If you need to keep producing past the ceiling, use `try_spawn` and decide what
@@ -41,7 +41,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:405`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:392`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 

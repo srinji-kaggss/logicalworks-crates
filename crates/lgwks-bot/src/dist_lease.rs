@@ -83,17 +83,9 @@
 //! [`GrantChannel`]: crate::dist_lease::GrantChannel
 //! [`LoopbackChannel`]: crate::dist_lease::LoopbackChannel
 //!
-//! ```rust
-//! use lgwks_bot::dist_lease::AuthorityHandle;
-//!
-//! let authority = AuthorityHandle::new();
-//! let first = authority.acquire("host-a");
-//! let second = authority.acquire("host-b");
-//! assert!(authority.check(&first).is_err(), "the first lease must go stale");
-//! assert!(authority.check(&second).is_ok(), "the second lease must be current");
-//! assert_eq!(authority.epoch(), second.epoch(), "the epoch must be the second mint");
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
+//! The test `the_second_acquire_stales_the_first_lease` (`tests/it/bot_front_door.rs`) holds it:
+//! the second acquire makes the first lease stale at `check`, the second is current, and the
+//! authority's epoch is the second mint.
 
 use std::collections::VecDeque;
 use std::fmt;

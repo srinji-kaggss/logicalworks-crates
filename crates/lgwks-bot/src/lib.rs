@@ -56,43 +56,15 @@
 //!
 //! # Quick start
 //!
-//! ```rust,no_run
-//! use lgwks_bot::broker::Broker;
-//! use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-//! use lgwks_bot::journal::MemoryJournal;
-//! use lgwks_bot::spec::{EffectIdentity, EffectScope};
-//! use lgwks_bot::{Bot, Cap, GrantSet};
+//! The host is the one authority. It names the run, the environment that run acts on and the flow
+//! revision it came from, and it holds the broker that owns the environment's generation. A bot
+//! cannot be built without one: an identity the caller did not choose is one it cannot recover
+//! against, and recovery is what stops a restart from resending a merge.
 //!
-//! // The host is the one authority. It names the run, the environment that run
-//! // acts on, and the flow revision it came from, and it holds the broker that
-//! // owns the environment's generation. A bot cannot be built without one: an
-//! // identity the caller did not choose is one it cannot recover against, and
-//! // recovery is what stops a restart from resending a merge.
-//! let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-//! let mut broker = Broker::new();
-//! broker.register(environment)?;
-//! let effects = EffectScope::new(
-//!     EffectIdentity::new(
-//!         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-//!         environment,
-//!         FlowRevision::from_tagged(
-//!             "blake3_256",
-//!             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-//!         )?,
-//!     ),
-//!     broker,
-//!     Box::new(MemoryJournal::new()),
-//! );
-//!
-//! let mut bot = Bot::builder("my-bot")
-//!     // .observe(source).on(condition, action)
-//!     .with_effects(effects)
-//!     .build(&GrantSet::all_shipped())
-//!     .expect("shipped domains are covered by all_shipped");
-//!
-//! let fired = bot.tick().expect("tick propagates domain errors");
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
+//! `a_bot_built_with_an_effect_scope_ticks_with_no_chains` (`tests/it/bot_front_door.rs`) builds
+//! it as written: the environment is registered with a broker, the scope carries an in-memory
+//! journal, the bot is built against `GrantSet::all_shipped()` and ticks once.
+//! `examples/quickstart.rs` is the same program as a binary.
 //!
 //! `tick` is the synchronous adapter and belongs outside an async runtime:
 //! inside one it returns `BotError::TickInsideRuntime` rather than park the
@@ -345,32 +317,9 @@ pub mod retry;
 ///
 /// # Example
 ///
-/// ```
-/// # #[cfg(all(feature = "script", feature = "process"))]
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use lgwks_bot::domain::gh::{CommitId, Gh, PullRequest, Repository};
-/// use lgwks_bot::review::ReviewRequest;
-/// use lgwks_bot::script::{Scope, Tenant};
-/// use lgwks_bot::task::{Host, task};
-///
-/// let host = Host::builder(Tenant::new("reviewer")?.as_str())?.build()?;
-/// let pull = PullRequest::new(Repository::new("acme/widgets")?, 7);
-/// let review = task("review-pr", |scope: Scope, gh: Gh| async move {
-///     let request = ReviewRequest::new(pull, "COMMENT", "two findings")
-///         .with_marker("example");
-///     lgwks_bot::review::review_pr(scope, gh, request, |_snapshot, _step| {
-///         Ok(String::from("two findings"))
-///     })
-///     .await
-/// })?;
-/// // The run needs a `gh` on PATH and a repository to read; this example
-/// // stops before that rather than reaching the network.
-/// let _ = (CommitId::new("0".repeat(40))?, host, review);
-/// # Ok(())
-/// # }
-/// # #[cfg(not(all(feature = "script", feature = "process")))]
-/// # fn main() {}
-/// ```
+/// The task is built and driven against a fake `gh` in `tests/it/pr_review_journey.rs` and
+/// `tests/it/sim_review_pr.rs`. A real run needs a `gh` on `PATH` and a repository to read, so no
+/// documentation example reaches the network.
 #[cfg(all(feature = "script", feature = "process"))]
 #[doc(hidden)]
 pub mod review;

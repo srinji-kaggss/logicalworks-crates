@@ -694,15 +694,8 @@ pub(crate) fn step_definition(scope: &Scope, step: &str) -> Arc<DefinitionIdenti
 ///
 /// # Example
 ///
-/// ```
-/// use lgwks_bot::script::{FlowError, Scope, remember};
-///
-/// # async fn run(scope: &Scope) -> Result<(), FlowError> {
-/// let fetched = remember(scope, "fetch", || async { Ok::<_, FlowError>(41u32) }).await?;
-/// assert_eq!(fetched, 41);
-/// # Ok(())
-/// # }
-/// ```
+/// `a_remembered_step_returns_its_value_with_no_store_installed` (`tests/it/script_front_door.rs`)
+/// runs it: with no host store installed `remember` is exactly its body, and the value comes back.
 pub async fn remember<T, Fut>(
     scope: &Scope,
     step: &str,

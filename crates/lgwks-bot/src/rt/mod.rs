@@ -53,13 +53,8 @@
 //! There is no attribute macro: a re-exported proc-macro expands to `::tokio`
 //! paths a consumer without a `tokio` edge cannot resolve. Entry is explicit:
 //!
-//! ```
-//! use lgwks_bot::Runtime;
-//!
-//! let runtime = Runtime::new().expect("runtime");
-//! let answer = runtime.block_on(async { 2 + 2 });
-//! assert_eq!(answer, 4);
-//! ```
+//! `the_runtime_is_entered_through_block_on` (`tests/it/rt_front_door.rs`) runs it:
+//! `Runtime::new()` builds the owned runtime and `block_on` drives one future to completion on it.
 //!
 //! # Starting work
 //!
@@ -69,17 +64,9 @@
 //! [`Supervisor`](crate::rt::supervise::Supervisor), which owns it, applies the
 //! in-flight ceiling, and reports how each task or process ended:
 //!
-//! ```
-//! use lgwks_bot::Runtime;
-//! use lgwks_bot::rt::supervise::Supervisor;
-//!
-//! let runtime = Runtime::new().expect("runtime");
-//! runtime.block_on(async {
-//!     let mut supervisor = Supervisor::default();
-//!     supervisor.spawn(|_token| async { /* one unit of work */ }).await;
-//!     // Dropping it stops what it started; `shutdown().await` waits instead.
-//! });
-//! ```
+//! `work_placed_on_a_default_supervisor_is_owned_and_reported` (`tests/it/rt_front_door.rs`) runs
+//! it: a `Supervisor::default()` takes one unit of work from `spawn`, and its shutdown report
+//! accounts for exactly that one task, with no panic.
 //!
 //! # Limits
 //!

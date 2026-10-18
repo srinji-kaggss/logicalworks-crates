@@ -253,20 +253,10 @@ impl std::error::Error for FrameReadError {
 /// most `ceiling` bytes, and the retained records together at most `ceiling`
 /// bytes.
 ///
-/// ```rust
-/// # use lgwks_bot::rt::process::{FrameRead, read_frames};
-/// // One whole record, then a prefix whose payload never arrived.
-/// let mut stream: &[u8] = &[0, 0, 0, 2, 7, 9, 0, 0, 0, 5];
-/// let frames = read_frames(&mut stream, 64).expect("a byte slice does not fail");
-/// assert_eq!(frames.records().len(), 1, "the whole record before the cut");
-/// assert_eq!(frames.records()[0].payload(), Some(&[7, 9][..]));
-/// assert_eq!(
-///     frames.ended(),
-///     &FrameRead::TruncatedPayload { declared: 5, partial: Vec::new() },
-///     "a prefix naming five bytes that delivered none is a truncation, never a frame"
-/// );
-/// assert!(!frames.is_complete(), "a cut record is not a complete reading");
-/// ```
+/// `a_frame_stream_cut_mid_record_is_a_truncation_never_a_frame` (`tests/it/rt_front_door.rs`)
+/// reads one whole record and then a prefix whose payload never arrived: one record is retained,
+/// the stream ended as `FrameRead::TruncatedPayload { declared: 5, .. }`, and the reading is not
+/// complete.
 ///
 /// # Errors
 ///

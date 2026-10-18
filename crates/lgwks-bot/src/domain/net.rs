@@ -60,14 +60,8 @@ pub struct Endpoint {
 /// unreachable would be editing the observation rather than reading it, and
 /// `status_code: 0` is a fact about the endpoint rather than a value to choose.
 ///
-/// ```
-/// use lgwks_bot::domain::net::NetState;
-///
-/// let answered = NetState::new(200, true, "ok");
-/// assert!(answered.reachable());
-/// assert_eq!(answered.status_code(), 200);
-/// assert_eq!(answered.body(), "ok");
-/// ```
+/// `a_network_reading_is_one_probes_status_reachability_and_preview` (`tests/it/domain_values.rs`)
+/// reads `reachable`, `status_code` and `body` of one.
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct NetState {

@@ -75,24 +75,9 @@ impl Default for Builder {
 impl Builder {
     /// A builder using native defaults; WASM uses a current-thread scheduler.
     ///
-    /// ```
-    /// use lgwks_bot::rt::runtime::Builder;
-    ///
-    /// // Workers this crate starts are named `lgwks-bot` until a caller says
-    /// // otherwise, so a thread in a stack trace is attributable with no
-    /// // configuration; a caller that wants its own name replaces it, and both
-    /// // builders build through the same `build`.
-    /// let ours = Builder::new().thread_name("ingest");
-    /// let theirs = Builder::new();
-    /// assert!(
-    ///     format!("{ours:?}").contains("ingest"),
-    ///     "the name a caller set is the name the builder holds"
-    /// );
-    /// assert!(
-    ///     format!("{theirs:?}").contains("lgwks-bot"),
-    ///     "and the default is this crate's own name, not an absent one"
-    /// );
-    /// ```
+    /// `a_builder_names_its_workers_and_defaults_to_this_crates_name` (`tests/it/rt_front_door.rs`)
+    /// holds it: workers are named `lgwks-bot` until a caller says otherwise, so a thread in a stack
+    /// trace is attributable with no configuration, and a caller that wants its own name replaces it.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

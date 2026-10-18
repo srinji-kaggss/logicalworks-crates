@@ -84,90 +84,16 @@
 //!
 //! # Example
 //!
-//! ```
-//! use lgwks_bot::cap::Cap;
-//! use lgwks_bot::proposal::{
-//!     Completion, Decoder, Intervention, LedgerLimits, Outcome, PlanBudget, PlanLimits,
-//!     Provenance, RepairLedger, Refusal, Source, Surface,
-//! };
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // The host declares what a proposal is allowed to say, and what the run holds.
-//! let surface = Surface::builder("acme")?
-//!     .operation("read-report", &[Cap::fs()])?
-//!     .holding(&[Cap::fs()])
-//!     .build();
-//! let decoder = Decoder::new(PlanLimits::default());
-//!
-//! // Untrusted bytes naming an operation nobody registered.
-//! let refused = decoder.decode(&surface, b"op=install-dependency", Source::Model);
-//! assert!(
-//!     matches!(refused.refusal(), Some(Refusal::UnknownOperation { .. })),
-//!     "an unregistered operation is refused, whatever asked for it"
-//! );
-//!
-//! // A proposal naming only registered operations is admitted, and the
-//! // capability it needs is one the run already holds.
-//! let admitted = decoder.decode(&surface, b"op=read-report\nnote=ok", Source::Model);
-//! assert!(admitted.is_admitted(), "a registered operation is admitted");
-//!
-//! // The same operation for a run that does not hold `bot.fs` is refused by
-//! // naming the capability, so the repair is a deliberate grant.
-//! let poor = Surface::builder("acme")?
-//!     .operation("read-report", &[Cap::fs()])?
-//!     .build();
-//! let denied = decoder.decode(&poor, b"op=read-report", Source::Model);
-//! assert!(
-//!     matches!(denied.refusal(), Some(Refusal::CapabilityNotHeld { .. })),
-//!     "a capability the run does not hold is refused by name"
-//! );
-//!
-//! // A completion claim is admitted only with the evidence it names present.
-//! let claim = Completion::claim("done", &["report-1"]);
-//! assert!(claim.admit(&[String::from("report-1")]).is_ok(), "its evidence is present");
-//! assert!(
-//!     matches!(claim.admit(&[]), Err(Refusal::NotEvidenced { .. })),
-//!     "a claim naming absent evidence is NotEvidenced"
-//! );
-//!
-//! // Repeated unchanged failure reaches a finite typed intervention. Three
-//! // identical failures are tolerated; the fourth is the intervention.
-//! let provenance = Provenance::for_model("acme", b"op=read-report");
-//! let mut ledger = RepairLedger::new(LedgerLimits::new(3, 8), provenance);
-//! for attempt in 1..=3 {
-//!     assert!(
-//!         ledger.record_failure("fingerprint-a").is_admitted(),
-//!         "failure {attempt} of 3 is still within the repair ceiling"
-//!     );
-//! }
-//! assert!(
-//!     matches!(
-//!         ledger.record_failure("fingerprint-a"),
-//!         Outcome::Intervention(Intervention::NoProgress { repetitions: 4, .. })
-//!     ),
-//!     "the fourth identical failure is a typed intervention, not another repair"
-//! );
-//!
-//! // New evidence is recorded beside the root spend and does not erase it.
-//! assert!(ledger.record_evidence("fingerprint-a"), "evidence is recorded");
-//! assert_eq!(ledger.spent(), 4, "the root spend is still four failures");
-//! assert_eq!(
-//!     ledger.repetitions("fingerprint-a"),
-//!     4,
-//!     "and the count the ceiling is measured against has not moved"
-//! );
-//!
-//! // Bounded repair is a declared ceiling, not a property of the loop.
-//! let mut budget = PlanBudget::new(2);
-//! assert!(budget.charge().is_ok(), "the first admission is within budget");
-//! assert!(budget.charge().is_ok(), "so is the second");
-//! assert!(
-//!     matches!(budget.charge(), Err(Refusal::Limit { .. })),
-//!     "the third admission is refused with its ceiling named"
-//! );
-//! # Ok(())
-//! # }
-//! ```
+//! Four tests in `tests/it/bot_front_door.rs` hold the claims, one each:
+//! `the_boundary_admits_what_is_registered_and_held_and_refuses_the_rest` (an unregistered
+//! operation is `Refusal::UnknownOperation`, a registered one is admitted, and an operation whose
+//! capability the run does not hold is `Refusal::CapabilityNotHeld`),
+//! `a_completion_claim_is_admitted_only_with_its_evidence_present` (absent evidence is
+//! `Refusal::NotEvidenced`),
+//! `repeated_unchanged_failure_reaches_a_finite_typed_intervention` (three identical failures are
+//! tolerated and the fourth is `Intervention::NoProgress`, with evidence recorded beside the root
+//! spend rather than over it) and `bounded_repair_is_a_declared_ceiling` (the third charge on a
+//! budget of two is `Refusal::Limit`).
 
 mod artifact;
 mod checkpoint;

@@ -111,92 +111,10 @@ impl EcsBot {
     ///
     /// # Example
     ///
-    /// ```rust
-    /// use lgwks_bot::broker::Broker;
-    /// use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-    /// use lgwks_bot::journal::MemoryJournal;
-    /// use lgwks_bot::spec::{Bot, BotSpec, EffectIdentity, EffectScope};
-    /// use lgwks_bot::{
-    ///     Action, Auth, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe, Source, domains,
-    /// };
-    ///
-    /// /// A source that reports the count its target parsed to.
-    /// struct Counter(u16);
-    /// impl Counter {
-    ///     fn from_target(target: &str) -> Result<Source, BotError> {
-    ///         match target.parse::<u16>() {
-    ///             Ok(count) => Ok(Source::new(Self(count))),
-    ///             Err(error) => Err(BotError::IncompleteSpec {
-    ///                 field: "target",
-    ///                 cause: error.to_string(),
-    ///             }),
-    ///         }
-    ///     }
-    /// }
-    /// impl Observe for Counter {
-    ///     type Output = u16;
-    ///     fn required_caps(&self) -> &[Cap] { &[] }
-    ///     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
-    ///         call.0.check(&[])?;
-    ///         Ok(self.0)
-    ///     }
-    ///     fn domain_id(&self) -> &str { "doc::counter" }
-    /// }
-    ///
-    /// /// An action that accepts a count.
-    /// struct Page;
-    /// impl Page {
-    ///     fn from_target(target: &str) -> Result<Action, BotError> {
-    ///         let _ = target;
-    ///         Ok(Action::new(Self))
-    ///     }
-    /// }
-    /// impl Execute for Page {
-    ///     type Input = u16;
-    ///     type Output = ();
-    ///     fn required_caps(&self) -> &[Cap] { &[] }
-    ///     fn effect_lifetime(&self) -> EffectLifetime { EffectLifetime::Local }
-    ///     async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
-    ///         call.0.check(&[])?;
-    ///         Ok(())
-    ///     }
-    ///     fn domain_id(&self) -> &str { "doc::page" }
-    /// }
-    ///
-    /// domains! {
-    ///     /// The domains this example runs.
-    ///     pub DOMAINS {
-    ///         observe { "doc::counter" => Counter::from_target, }
-    ///         execute { "doc::page" => Page::from_target, }
-    ///     }
-    /// }
-    ///
-    /// let spec = BotSpec::from_json(
-    ///     r#"{"version":1,"name":"doc",
-    ///         "chains":[{"source":"doc::counter","target":"3",
-    ///                    "on":[["always",{"domain":"doc::page","target":""}]]}]}"#,
-    /// )?;
-    ///
-    /// let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    /// let mut broker = Broker::new();
-    /// broker.register(environment)?;
-    /// let effects = EffectScope::new(
-    ///     EffectIdentity::new(
-    ///         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-    ///         environment,
-    ///         FlowRevision::from_tagged(
-    ///             "blake3_256",
-    ///             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    ///         )?,
-    ///     ),
-    ///     broker,
-    ///     Box::new(MemoryJournal::new()),
-    /// );
-    ///
-    /// let mut bot = Bot::from_spec(&spec, &DOMAINS, &GrantSet::empty(), effects)?;
-    /// assert_eq!(bot.tick()?, 1);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// `one_chain_traces_match_t25` (`tests/it/spec_materialize.rs`) runs it: a source and an
+    /// action domain are declared with `domains!`, a JSON spec naming both is parsed with
+    /// `BotSpec::from_json`, `Bot::from_spec` admits it against an empty grant set with an in-memory
+    /// effect scope, the one chain fires once on the first tick, and its trace equals a native bot's.
     pub fn from_spec(
         spec: &BotSpec,
         registry: &DomainRegistry,

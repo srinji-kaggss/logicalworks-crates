@@ -9,7 +9,7 @@ Pages of this guide: [tasks](background-work.md) ·
 
 `Supervisor::spawn_process(spec)` starts a child under the same in-flight
 ceiling as `spawn`, and returns a `TaskId` — not a `Child`
-(`crates/lgwks-bot/src/rt/supervise/run.rs:103`). `rt::process::ProcessSpec` lets
+(`crates/lgwks-bot/src/rt/supervise/run.rs:95`). `rt::process::ProcessSpec` lets
 you say what to run without exposing an executable engine handle.
 The task this places is the only owner the process has:
 
@@ -68,7 +68,7 @@ to them is a record written before the kill.
 
 `Supervisor::spawn_process_identified(spec)` starts the child exactly as
 `spawn_process` does and also returns the identity of its group leader
-(`crates/lgwks-bot/src/rt/supervise/run.rs:133`): the pid **and** the instant the OS
+(`crates/lgwks-bot/src/rt/supervise/run.rs:125`): the pid **and** the instant the OS
 records that pid's process started. Store `leader().to_string()` durably — a
 database row, written before the lane does work — and a successor parses it back
 and calls `reap_orphaned_group` (`crates/lgwks-std/src/process/identity.rs:386`):

@@ -212,38 +212,9 @@ impl EcsBuilder {
     /// silently clamped values, because a clamp is indistinguishable from the
     /// budget the caller asked for.
     ///
-    /// ```
-    /// # use std::time::Duration;
-    /// # use lgwks_bot::broker::Broker;
-    /// # use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
-    /// # use lgwks_bot::journal::MemoryJournal;
-    /// # use lgwks_bot::spec::{EffectIdentity, EffectScope};
-    /// # use lgwks_bot::{Bot, BotError, GrantSet};
-    /// # fn effects() -> Result<EffectScope, Box<dyn std::error::Error>> {
-    /// #     let environment = EnvironmentId::from_hex("2122232425262728292a2b2c2d2e2f30")?;
-    /// #     let mut broker = Broker::new();
-    /// #     broker.register(environment)?;
-    /// #     let identity = EffectIdentity::new(
-    /// #         RunId::from_hex("0102030405060708090a0b0c0d0e0f10")?,
-    /// #         environment,
-    /// #         FlowRevision::from_tagged(
-    /// #             "blake3_256",
-    /// #             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    /// #         )?,
-    /// #     );
-    /// #     Ok(EffectScope::new(identity, broker, Box::new(MemoryJournal::new())))
-    /// # }
-    /// let scope = effects()?;
-    /// let refused = Bot::builder("zero")
-    ///     .with_poll_deadline(Duration::ZERO)
-    ///     .with_effects(scope)
-    ///     .build(&GrantSet::empty());
-    /// assert!(matches!(
-    ///     refused,
-    ///     Err(BotError::PollDeadlineUnbounded { .. })
-    /// ));
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// `a_poll_deadline_of_zero_is_refused_at_build` (`tests/it/bot_front_door.rs`) runs the zero
+    /// case: a bot built with `Duration::ZERO` is refused at `build` as
+    /// `BotError::PollDeadlineUnbounded`.
     ///
     /// Defaults to [`DEFAULT_POLL_DEADLINE`] for a caller that never calls this,
     /// which is what makes it a declared policy rather than a hidden constant.

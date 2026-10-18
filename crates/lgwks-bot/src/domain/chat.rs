@@ -22,16 +22,8 @@ use crate::verb::{self, Observe};
 /// would hold a message no provider ever sent, and the condition that reads it
 /// (`eval::contains`) would answer on a body nobody received.
 ///
-/// ```
-/// use lgwks_bot::domain::chat::ChatMessage;
-///
-/// let observed = ChatMessage::new("#deploys", "ci-bot", "rollout finished", "42");
-/// assert!(observed.contains("finished"));
-/// assert_eq!(observed.channel(), "#deploys");
-/// assert_eq!(observed.sender(), "ci-bot");
-/// assert_eq!(observed.text(), "rollout finished");
-/// assert_eq!(observed.ts(), "42");
-/// ```
+/// `a_chat_message_is_read_through_its_accessors` (`tests/it/domain_values.rs`) reads one through
+/// `channel`, `sender`, `text` and `ts` and asks `contains` of its body.
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct ChatMessage {

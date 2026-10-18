@@ -40,35 +40,9 @@ use super::{
 ///
 /// # Example
 ///
-/// ```
-/// use lgwks_bot::task::Host;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let host = Host::builder("acme")?
-///     .max_concurrent_tasks(std::num::NonZeroUsize::new(8).ok_or("a non-zero ceiling")?)
-///     .default_deadline(std::time::Duration::from_secs(5))
-///     .build()?;
-///
-/// assert_eq!(host.tenant().as_str(), "acme");
-/// assert_eq!(host.limits().max_concurrent_tasks(), 8);
-/// assert_eq!(
-///     host.limits().default_deadline(),
-///     std::time::Duration::from_secs(5)
-/// );
-/// assert_eq!(host.admission().available_permits(), 8);
-///
-/// let same_budget = host.clone();
-/// assert_eq!(
-///     same_budget.admission().available_permits(),
-///     8,
-///     "a clone shares the budget rather than minting one"
-/// );
-///
-/// host.cancel();
-/// assert!(host.is_cancelled());
-/// # Ok(())
-/// # }
-/// ```
+/// `a_host_reads_back_its_limits_and_a_clone_shares_the_budget` (`tests/it/bot_front_door.rs`)
+/// runs it: a host for `acme` with eight concurrent tasks and a five-second default deadline reads
+/// both back, a clone sees the same eight permits, and `cancel` is observed by `is_cancelled`.
 #[derive(Clone)]
 pub struct Host {
     /// Everything the handles of one host share: the budget, the counters, the
@@ -341,21 +315,9 @@ impl Host {
     ///
     /// # Example
     ///
-    /// ```
-    /// use lgwks_bot::effect::InputIdentity;
-    /// use lgwks_bot::task::Host;
-    /// use lgwks_std::hash::Hasher;
-    ///
-    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let host = Host::builder("acme")?.build()?;
-    /// let mut hasher = Hasher::new();
-    /// 7u32.write_identity(&mut hasher);
-    /// let identity = host.definition("nightly", 3, Some(hasher.finalize()), 5);
-    /// assert_eq!(identity.revision(), 3);
-    /// assert_eq!(identity.steps(), 5);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `a_host_names_the_definition_every_run_records_against` (`tests/it/bot_front_door.rs`) runs it:
+    /// a definition for task `nightly` at revision 3 with a declared input digest and five steps reads
+    /// its revision and step count back.
     #[must_use]
     pub fn definition(
         &self,
