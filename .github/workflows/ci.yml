@@ -387,6 +387,18 @@ jobs:
   # it builds; unset, the lane builds the review-path binary alone.
   tests_bot_saturation:
     name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
+    # After the three suites that share this machine's kernel with it, not beside
+    # them (#272). On one host, with the test files on RAM disks, each job's test
+    # command run alone took: bot-full 58.6 s, no-default 28.7 s, workspace 21.0 s,
+    # the 10,000-tier leg 55.2 s, the 100 and 1,000 tiers 7.5 s: 171 s in all. Run
+    # together they took 293 s (run 39078914276), because the kernel serialises
+    # the process starts and file work of all of them, so the same work done at
+    # once costs more than done in turn, and the longest job was the one that met
+    # the cap. Run in two waves, the work is 171 s of kernel time plus each wave's
+    # checkout, and the 5 minutes of a job start when its `needs` are met, not
+    # when the run does. The other jobs do not wait: the matrices, the Linux legs
+    # and the lints run as before.
+    needs: [build, tests_bot_full, tests_nodefault]
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
