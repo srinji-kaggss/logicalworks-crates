@@ -73,17 +73,9 @@ impl Supervisor {
     /// supervisor build the private engine command while the caller retains the
     /// auditable specification:
     ///
-    /// ```no_run
-    /// # use lgwks_bot::rt::process::ProcessSpec;
-    /// # use lgwks_bot::rt::supervise::Supervisor;
-    /// # async fn run() -> std::io::Result<()> {
-    /// # let mut supervisor = Supervisor::default();
-    /// let mut spec = ProcessSpec::new("sh");
-    /// spec.arg("-c").arg("exit 0");
-    /// supervisor.spawn_process(&spec).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `a_borrowed_process_spec_is_started_and_owned_by_the_supervisor` (`tests/it/rt_front_door.rs`)
+    /// runs it: `spawn_process` borrows a `ProcessSpec` for `sh -c 'exit 0'`, so the caller keeps the
+    /// auditable description while the supervisor owns the child.
     ///
     /// The caller may retain and clone the description, but cannot start a child
     /// or obtain a child handle from it.

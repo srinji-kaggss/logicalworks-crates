@@ -75,30 +75,10 @@ impl<E: std::error::Error + 'static> std::error::Error for FanOutError<E> {
 /// A bounded, fail-fast, drop-safe fan-out over `items`, with typed errors and
 /// an optional deadline.
 ///
-/// ```
-/// use std::time::Duration;
-///
-/// use lgwks_bot::script::{FanOut, FanOutError};
-///
-/// #[derive(Debug, PartialEq)]
-/// struct Refused(u32);
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let outcome = lgwks_bot::block_on(
-///     FanOut::new(1_u32..=8)
-///         .at_most(4)
-///         .within(Duration::from_secs(5))
-///         .run(|id| async move { if id == 6 { Err(Refused(id)) } else { Ok(id * 2) } }),
-/// );
-/// match outcome {
-///     Err(FanOutError::Item { index, error }) => {
-///         assert_eq!((index, error), (5, Refused(6)), "the sixth item, with its own error");
-///     }
-///     other => return Err(format!("expected the sixth item to fail, got {other:?}").into()),
-/// }
-/// # Ok(())
-/// # }
-/// ```
+/// `the_first_failing_item_stops_the_fan_out_with_its_index_and_its_own_error`
+/// (`tests/it/script_front_door.rs`) runs it: eight items at most four at a time inside a
+/// five-second deadline, with the sixth refusing; the result is `FanOutError::Item` at index five
+/// carrying the item's own error.
 ///
 /// With no [`at_most`](Self::at_most) the bound is the runtime's: 64 bodies per
 /// available core, the same as [`each`] with no limit.
@@ -171,27 +151,8 @@ impl<I: IntoIterator> FanOut<I> {
     /// Cancelling `scope` stops the fan-out, and the first `Err` any body
     /// returns still stops it as [`FanOutError::Item`].
     ///
-    /// ```
-    /// use lgwks_bot::script::{FanOut, Scope, Tenant};
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let scope = Scope::root(Tenant::new("acme")?);
-    /// let doubled = match lgwks_bot::block_on(
-    ///     FanOut::new(1_u32..=8).at_most(4).run_in(&scope, "doubled", |id| async move {
-    ///         Ok::<u32, String>(id.saturating_mul(2))
-    ///     }),
-    /// ) {
-    ///     Ok(values) => values,
-    ///     Err(error) => return Err(format!("the scoped fan-out failed: {error}").into()),
-    /// };
-    /// assert_eq!(
-    ///     doubled,
-    ///     vec![2, 4, 6, 8, 10, 12, 14, 16],
-    ///     "every item ran under the caller's scope"
-    /// );
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `a_scoped_fan_out_returns_every_value_in_input_order` (`tests/it/script_front_door.rs`) runs
+    /// it: eight items under an `acme` scope return their doubles in input order.
     ///
     /// # Errors
     ///
@@ -253,13 +214,16 @@ impl<I: IntoIterator> FanOut<I> {
         };
         match outcome {
             Ok(values) => Ok(values),
-            Err(flow) => Err(lock(&first).take().map_or_else(
-                || match flow {
-                    FlowError::TimedOut { after, .. } => FanOutError::TimedOut { after },
-                    other => FanOutError::Flow(other),
-                },
-                |(index, error)| FanOutError::Item { index, error },
-            )),
+            Err(flow) => {
+                let kept = lock(&first).take();
+                Err(match kept {
+                    Some((index, error)) => FanOutError::Item { index, error },
+                    None => match flow {
+                        FlowError::TimedOut { after, .. } => FanOutError::TimedOut { after },
+                        other => FanOutError::Flow(other),
+                    },
+                })
+            }
         }
     }
 }

@@ -17,12 +17,8 @@ use crate::verb;
 /// would be editing the body the transport is about to put on the wire, which is
 /// a different act from composing it.
 ///
-/// ```
-/// use lgwks_bot::domain::notify::Message;
-///
-/// let outgoing = Message::new("rollout 42 finished");
-/// assert_eq!(outgoing.text(), "rollout 42 finished");
-/// ```
+/// `a_notification_message_carries_the_text_it_will_send` (`tests/it/domain_values.rs`) builds one
+/// and reads its `text` back.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Message {

@@ -132,11 +132,14 @@ fn probe_test(module: &str, test: &str) -> String {
 
 mod ambiguous_commit;
 mod authority;
+mod bot_front_door;
 mod cas;
+mod clock_restart;
 mod credential;
 mod dist_lease;
 #[cfg(feature = "net")]
 mod dist_lease_tcp;
+mod domain_values;
 mod durable_crash_group_commit;
 mod durable_crash_observation;
 mod durable_dispatch;
@@ -174,12 +177,16 @@ mod request_key;
 mod resume_liveness;
 mod retry_proxy;
 mod rt_async_tier;
+#[cfg(all(feature = "rt", feature = "time", feature = "sync"))]
+mod rt_front_door;
 mod rt_joinset;
 mod rt_process;
 mod rt_process_files;
 mod rt_runtime_stack;
 mod script_domains;
 mod script_flow;
+#[cfg(feature = "script")]
+mod script_front_door;
 mod script_map_parity;
 mod script_refusals;
 mod script_trail;

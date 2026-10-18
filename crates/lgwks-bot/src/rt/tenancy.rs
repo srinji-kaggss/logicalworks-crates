@@ -142,24 +142,9 @@ impl std::error::Error for TenancyError {}
 /// ceilings a literal could silently exceed, and a policy is the one object
 /// that must describe the deal every tenant actually gets.
 ///
-/// ```
-/// use std::num::NonZeroU32;
-///
-/// use lgwks_bot::rt::tenancy::TenancyPolicy;
-/// use lgwks_bot::script::Tenant;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let heavy = Tenant::new("acme")?;
-/// let two: NonZeroU32 = 2_u32.try_into()?;
-/// let policy = TenancyPolicy::new(8, 64).with_weight(&heavy, two)?;
-/// // An unweighted tenant defaults to 1; the bounds are readable back.
-/// assert_eq!(policy.per_tenant_limit(), 8);
-/// assert_eq!(policy.queue_per_tenant(), 64);
-/// assert_eq!(u32::from(policy.weight_of(&heavy)), 2);
-/// assert_eq!(u32::from(policy.weight_of(&Tenant::new("quiet")?)), 1);
-/// # Ok(())
-/// # }
-/// ```
+/// `a_policy_reads_back_its_bounds_and_defaults_an_unweighted_tenant_to_one`
+/// (`tests/it/rt_front_door.rs`) holds it: a policy of 8 per tenant and 64 queued reads both back,
+/// a tenant given weight 2 reads 2, and a tenant never weighted reads 1.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TenancyPolicy {

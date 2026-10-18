@@ -62,19 +62,9 @@ pub async fn timeout_at<F: Future>(deadline: Instant, future: F) -> Result<F::Ou
 ///   deadline's construction. This is what catches work that stopped making
 ///   progress entirely, and it keeps running while logical time is frozen.
 ///
-/// ```
-/// # use std::time::Duration;
-/// # use lgwks_bot::rt::clock::Clock;
-/// # use lgwks_bot::rt::time::Deadline;
-/// let clock = Clock::virtual_at(Duration::ZERO);
-/// let deadline = Deadline::after(&clock, Duration::from_secs(30));
-/// // A day of logical time exhausts a 30-second budget exactly.
-/// assert!(clock.advance(Duration::from_secs(86_400)).is_ok());
-/// assert!(deadline.is_exhausted());
-/// assert_eq!(deadline.remaining(), Duration::ZERO);
-/// // The watchdog is a separate fact: a paused clock does not pause it.
-/// assert!(deadline.watchdog().elapsed() < Duration::from_secs(5));
-/// ```
+/// `a_day_of_logical_time_exhausts_a_deadline_the_watchdog_does_not_notice`
+/// (`tests/it/rt_front_door.rs`) holds it: a day of logical time exhausts a 30-second budget
+/// exactly, `remaining` is zero, and the watchdog, a separate fact, has not moved with it.
 #[derive(Debug, Clone, Copy)]
 pub struct Deadline<'a> {
     /// The clock that governs the logical bound.

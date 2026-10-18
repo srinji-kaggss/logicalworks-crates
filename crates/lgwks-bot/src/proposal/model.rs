@@ -19,32 +19,10 @@
 //!
 //! # Example
 //!
-//! ```
-//! use lgwks_bot::proposal::{Decoder, PlanLimits, Source, StubModel, Surface};
-//! use lgwks_bot::cap::Cap;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let surface = Surface::builder("acme")?.operation("read-report", &[])?
-//!     .holding(&[Cap::fs()]).build();
-//! let decoder = Decoder::new(PlanLimits::default());
-//!
-//! // The same seed is the same bytes, every time.
-//! let model = StubModel::from_seed(7);
-//! assert_eq!(
-//!     model.output(),
-//!     StubModel::from_seed(7).output(),
-//!     "a seeded model is a pure function of its seed"
-//! );
-//!
-//! // And what it emits is admitted or refused by the same rule as anything else.
-//! let outcome = decoder.decode(&surface, model.output(), Source::Model);
-//! assert!(
-//!     outcome.provenance().is_some_and(|p| p.source() == Source::Model),
-//!     "every outcome names the model as the payload's source"
-//! );
-//! # Ok(())
-//! # }
-//! ```
+//! `a_seeded_model_is_a_pure_function_of_its_seed_and_its_output_names_its_source`
+//! (`tests/it/bot_front_door.rs`) holds it: the same seed is the same bytes every time, and what
+//! the double emits is admitted or refused by the same rule as anything else, with `Source::Model`
+//! named as the payload's source.
 
 use crate::journal::frame::SaturatingFrom;
 

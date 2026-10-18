@@ -58,22 +58,10 @@
 //! host's clock source changes. What survives a restart is the **remaining
 //! duration**, never the instant:
 //!
-//! ```
-//! # use std::time::Duration;
-//! # use lgwks_bot::rt::clock::Clock;
-//! let clock = Clock::virtual_at(Duration::ZERO);
-//! let budget = Duration::from_secs(5);
-//!
-//! // A run records how much of its budget it has spent, not a wall instant.
-//! clock.advance(Duration::from_secs(2))?;
-//! let recorded = clock.snapshot();
-//!
-//! // A restart re-establishes the origin from the recorded elapsed time, and
-//! // the remaining budget is the same fact on either host.
-//! let resumed = Clock::virtual_at(recorded.elapsed());
-//! assert_eq!(resumed.snapshot().remaining_from(budget), Duration::from_secs(3));
-//! # Ok::<(), lgwks_bot::rt::clock::ClockError>(())
-//! ```
+//! The test `a_restart_restores_the_spent_duration_and_the_budget_that_remains`
+//! (`tests/it/clock_restart.rs`) runs it: a run records how much of a five-second budget it has
+//! spent as a snapshot of elapsed time, a restart rebuilds the origin with `Clock::virtual_at`
+//! from that duration, and the remaining budget is the same three seconds on either host.
 //!
 //! [`ClockSnapshot::remaining_from`] gives the remaining duration of a budget at
 //! the recorded point, and a restarted clock restored to that point has the same
@@ -245,15 +233,9 @@ impl Clock {
     /// why a restart restores a **duration** and never a stored `Instant` — an
     /// `Instant` is process-local and means nothing here.
     ///
-    /// ```
-    /// # use std::time::Duration;
-    /// # use lgwks_bot::rt::clock::Clock;
-    /// // A run that had spent four of its ten seconds restarts here.
-    /// let clock = Clock::wall_at(Duration::from_secs(4));
-    /// assert!(clock.now() >= Duration::from_secs(4));
-    /// // At most six seconds remain, and real time keeps spending them.
-    /// assert!(clock.snapshot().remaining_from(Duration::from_secs(10)) <= Duration::from_secs(6));
-    /// ```
+    /// `a_wall_clock_restored_after_a_restart_keeps_the_time_already_spent`
+    /// (`tests/it/clock_restart.rs`) runs the case: a wall clock restored four seconds in reads at
+    /// least four, and at most six of a ten-second budget remain while real time keeps spending them.
     #[must_use]
     pub fn wall_at(elapsed: Duration) -> Self {
         Self {
@@ -274,12 +256,8 @@ impl Clock {
     /// from a stored `Instant`: an `Instant` is process-local, has no epoch, and
     /// means nothing on another host.
     ///
-    /// ```
-    /// # use std::time::Duration;
-    /// # use lgwks_bot::rt::clock::Clock;
-    /// let clock = Clock::virtual_at(Duration::from_secs(3));
-    /// assert_eq!(clock.now(), Duration::from_secs(3));
-    /// ```
+    /// `a_virtual_clock_starts_where_it_was_placed` (`tests/it/clock_restart.rs`) holds it: a virtual
+    /// clock placed three seconds in reads three seconds.
     #[must_use]
     pub fn virtual_at(elapsed: Duration) -> Self {
         Self {
@@ -432,16 +410,9 @@ impl Clock {
     /// waiting for time; they have stopped making progress, and only real
     /// elapsed time says so.
     ///
-    /// ```
-    /// # use std::time::Duration;
-    /// # use lgwks_bot::rt::clock::Clock;
-    /// let clock = Clock::virtual_at(Duration::ZERO);
-    /// let watchdog = clock.wall_watchdog();
-    /// clock.advance(Duration::from_secs(86_400))?;
-    /// // Three logical days have passed and the watchdog has barely moved.
-    /// assert!(watchdog.elapsed() < Duration::from_secs(1));
-    /// # Ok::<(), lgwks_bot::rt::clock::ClockError>(())
-    /// ```
+    /// `the_wall_watchdog_keeps_running_while_logical_time_moves_a_day`
+    /// (`tests/it/clock_restart.rs`) holds it: a logical day passes in one `advance` call and the
+    /// watchdog, which reads real time, has not moved with it.
     #[must_use]
     pub fn wall_watchdog(&self) -> WallClock {
         self.watchdog()

@@ -21,11 +21,11 @@ crates/lgwks-bot/src/cap.rs:406	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs/admit.rs:344	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs/bot.rs:393	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/bot.rs:463	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
-crates/lgwks-bot/src/ecs/bot.rs:572	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/builder.rs:639	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs/builder.rs:659	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/bot.rs:311	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/bot.rs:381	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
+crates/lgwks-bot/src/ecs/bot.rs:490	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/builder.rs:610	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:630	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/fold.rs:377	pub(super) fn fire_plan(world: &mut World) {
 crates/lgwks-bot/src/ecs/fold.rs:731	*failure = Some(error);
 crates/lgwks-bot/src/ecs/ledger.rs:766	/// satisfied, so the entries behind it are unresolved through it.
@@ -48,26 +48,26 @@ crates/lgwks-bot/src/language.rs:580	/// Creates a resolver pre-loaded with lear
 crates/lgwks-bot/src/language.rs:611	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	.insert(alias.utterance.clone(), alias)
 crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:86	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:106	/// engine's `task_local!` needs only the `rt` feature this module already
-crates/lgwks-bot/src/rt/mod.rs:117	#[cfg(feature = "io")]
+crates/lgwks-bot/src/rt/mod.rs:73	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:93	/// engine's `task_local!` needs only the `rt` feature this module already
+crates/lgwks-bot/src/rt/mod.rs:104	#[cfg(feature = "io")]
 crates/lgwks-bot/src/rt/process.rs:66	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:603	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:723	pub enum ProcessRunError {
 crates/lgwks-bot/src/rt/process/confine.rs:52	pub struct SandboxProfile {
 crates/lgwks-bot/src/rt/process/confine.rs:162	pub struct LandlockRules {
-crates/lgwks-bot/src/rt/runtime.rs:176	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
-crates/lgwks-bot/src/rt/runtime.rs:179	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
+crates/lgwks-bot/src/rt/runtime.rs:161	let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
+crates/lgwks-bot/src/rt/runtime.rs:164	if self.worker_threads.is_some() && workers.get() > MAX_WORKER_THREADS {
 crates/lgwks-bot/src/rt/supervise.rs:9	//! # Why a task cannot leak
 crates/lgwks-bot/src/rt/supervise.rs:58	//! cannot be written without a [`Budget`]. Every iteration races the
-crates/lgwks-bot/src/rt/supervise.rs:93	//! permits inside a task this supervisor owns can deadlock with itself. The
-crates/lgwks-bot/src/rt/supervise.rs:186	/// otherwise never make, which is why it is not larger.
-crates/lgwks-bot/src/rt/supervise.rs:202	/// longer than the budget overruns it by one iteration. Cancellation is not
-crates/lgwks-bot/src/rt/supervise.rs:405	/// long enough on one worker and far too short on several, and the failure is
+crates/lgwks-bot/src/rt/supervise.rs:80	//! permits inside a task this supervisor owns can deadlock with itself. The
+crates/lgwks-bot/src/rt/supervise.rs:173	/// otherwise never make, which is why it is not larger.
+crates/lgwks-bot/src/rt/supervise.rs:189	/// longer than the budget overruns it by one iteration. Cancellation is not
+crates/lgwks-bot/src/rt/supervise.rs:392	/// long enough on one worker and far too short on several, and the failure is
 crates/lgwks-bot/src/rt/supervise/repeat.rs:168	token.run_until_cancelled(body(iterations)),
-crates/lgwks-bot/src/rt/supervise/run.rs:103	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-crates/lgwks-bot/src/rt/supervise/run.rs:133	pub async fn spawn_process_identified(
-crates/lgwks-bot/src/rt/supervise/run.rs:260	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
+crates/lgwks-bot/src/rt/supervise/run.rs:95	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
+crates/lgwks-bot/src/rt/supervise/run.rs:125	pub async fn spawn_process_identified(
+crates/lgwks-bot/src/rt/supervise/run.rs:252	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
 crates/lgwks-bot/src/rt/supervise/supervisor.rs:247	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise/tests.rs:1	//! The supervisor's unit tests: the shared seams and helpers, and one module per concern.
 crates/lgwks-bot/src/rt/task.rs:169	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>

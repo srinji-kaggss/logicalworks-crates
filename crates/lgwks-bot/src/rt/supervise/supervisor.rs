@@ -293,24 +293,10 @@ impl Supervisor {
     /// same semaphore, the same waits, the same refusals. That is what makes this
     /// additive rather than a behaviour change for existing callers.
     ///
-    /// ```
-    /// use lgwks_bot::rt::supervise::Supervisor;
-    /// use lgwks_bot::rt::tenancy::TenancyPolicy;
-    /// use lgwks_bot::script::Tenant;
-    ///
-    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let quiet = Tenant::new("quiet")?;
-    /// // 64 permits in total, 32 per tenant: one tenant can strand at most 32
-    /// // of them, so 32 stay reachable for everyone else however loud it is.
-    /// let mut supervisor = Supervisor::with_tenancy(64, TenancyPolicy::new(32, 1_024));
-    /// supervisor
-    ///     .spawn_for(&quiet, |_token| async { /* one unit of work */ })
-    ///     .await?;
-    /// let report = supervisor.shutdown().await;
-    /// assert!(report.is_clean(), "the quiet tenant's task ran to completion");
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `a_tenant_scoped_spawn_runs_under_a_per_tenant_ceiling` (`tests/it/rt_front_door.rs`) runs it:
+    /// 64 permits in total and 32 per tenant, so one tenant strands at most 32 of them and 32 stay
+    /// reachable for everyone else however loud it is; the quiet tenant's task runs and the shutdown
+    /// report accounts for exactly that one task, with no panic.
     #[cfg(feature = "script")]
     #[must_use]
     pub fn with_tenancy(max_in_flight: usize, policy: TenancyPolicy) -> Self {
@@ -442,17 +428,8 @@ impl Supervisor {
     /// where the retention cap already governs them. A snapshot with its own copy
     /// of them would be a second ledger, and two ledgers disagree.
     ///
-    /// ```
-    /// # use lgwks_bot::rt::supervise::Supervisor;
-    /// # async fn example() {
-    /// let mut supervisor = Supervisor::new(2);
-    /// let snapshot = supervisor.snapshot();
-    /// assert_eq!(snapshot.max_in_flight(), 2);
-    /// assert_eq!(snapshot.free(), 2, "a fresh supervisor holds both permits");
-    /// assert_eq!(snapshot.next_action(), supervisor::NextAction::Admit);
-    /// # }
-    /// # mod supervisor { pub use lgwks_bot::rt::supervise::NextAction; }
-    /// ```
+    /// `a_fresh_supervisor_snapshot_holds_every_permit` (`tests/it/rt_front_door.rs`) holds it: a
+    /// supervisor of two reports a ceiling of two, two free permits and `NextAction::Admit`.
     #[must_use]
     pub fn snapshot(&self) -> SupervisorSnapshot {
         let live_limit = self.max_in_flight;
@@ -699,22 +676,8 @@ impl Supervisor {
     /// supervisor built without a [`TenancyPolicy`], which takes no round
     /// decisions at all.
     ///
-    /// ```
-    /// use lgwks_bot::rt::supervise::Supervisor;
-    /// use lgwks_bot::rt::tenancy::TenancyPolicy;
-    /// use lgwks_bot::script::Tenant;
-    ///
-    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let quiet = Tenant::new("quiet")?;
-    /// let mut supervisor = Supervisor::with_tenancy(4, TenancyPolicy::new(2, 8));
-    /// supervisor
-    ///     .spawn_for(&quiet, |_token| async { /* one unit of work */ })
-    ///     .await?;
-    /// let (arrivals, _, _, _) = supervisor.admission_cost();
-    /// assert!(arrivals >= 1, "one admission took at least one arrival decision");
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `one_tenanted_admission_takes_at_least_one_arrival_decision` (`tests/it/rt_front_door.rs`)
+    /// holds it: one `spawn_for` on a supervisor of four takes at least one arrival decision.
     #[cfg(feature = "script")]
     #[must_use]
     pub fn admission_cost(&self) -> (u64, u64, u64, u64) {

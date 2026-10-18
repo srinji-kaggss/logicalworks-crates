@@ -45,13 +45,8 @@ pub struct JsonStore {
 /// reading that claims to be new and is not, and the `changed` condition would
 /// fire on a body nobody read from the store.
 ///
-/// ```
-/// use lgwks_bot::domain::data::DataState;
-///
-/// let reading = DataState::new(false, "{\"ok\":true}");
-/// assert!(!reading.changed());
-/// assert_eq!(reading.raw(), "{\"ok\":true}");
-/// ```
+/// `a_data_reading_pairs_the_flag_with_the_bytes_it_describes` (`tests/it/domain_values.rs`) reads
+/// the `changed` flag and the `raw` bytes of one.
 #[derive(PartialEq, Debug, Clone)]
 #[non_exhaustive]
 pub struct DataState {

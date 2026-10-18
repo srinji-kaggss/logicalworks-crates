@@ -70,22 +70,9 @@
 //! The bound is documented on `repeat` itself; the interval is private, and no
 //! caller has to know it.
 //!
-//! ```no_run
-//! use lgwks_bot::rt::supervise::{Budget, Supervisor};
-//!
-//! # async fn run() {
-//! let mut supervisor = Supervisor::new(4);
-//! // `Ongoing` is the unbounded budget, and it still ends: the supervisor owns
-//! // the token this loop is raced against, and `shutdown` cancels it.
-//! supervisor
-//!     .spawn_repeating(Budget::Ongoing, |tick| async move {
-//!         let _tick = tick;
-//!     })
-//!     .await;
-//! // The drained evidence, not just an empty set.
-//! let report = supervisor.shutdown().await;
-//! # }
-//! ```
+//! `an_ongoing_repeat_still_ends_when_the_supervisor_shuts_down` (`tests/it/rt_front_door.rs`)
+//! runs it: `Budget::Ongoing` is the unbounded budget, and it still ends because the supervisor
+//! owns the token the loop is raced against and `shutdown` cancels it.
 //!
 //! # Limits
 //!

@@ -187,34 +187,10 @@
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
 "crates/lgwks-bot/README.md" = 6
-"crates/lgwks-bot/src/clock.rs" = 4
-"crates/lgwks-bot/src/dist_lease.rs" = 1
-"crates/lgwks-bot/src/domain/chat.rs" = 1
-"crates/lgwks-bot/src/domain/data.rs" = 1
-"crates/lgwks-bot/src/domain/net.rs" = 1
-"crates/lgwks-bot/src/domain/notify.rs" = 1
-"crates/lgwks-bot/src/ecs/bot.rs" = 1
-"crates/lgwks-bot/src/ecs/builder.rs" = 1
 "crates/lgwks-bot/src/inspect.rs" = 1
-"crates/lgwks-bot/src/lib.rs" = 2
-"crates/lgwks-bot/src/proposal/mod.rs" = 1
-"crates/lgwks-bot/src/proposal/model.rs" = 1
-"crates/lgwks-bot/src/rt/cancel.rs" = 1
-"crates/lgwks-bot/src/rt/mod.rs" = 2
-"crates/lgwks-bot/src/rt/process/frames.rs" = 1
-"crates/lgwks-bot/src/rt/runtime.rs" = 1
-"crates/lgwks-bot/src/rt/supervise.rs" = 1
-"crates/lgwks-bot/src/rt/supervise/run.rs" = 1
-"crates/lgwks-bot/src/rt/supervise/supervisor.rs" = 3
-"crates/lgwks-bot/src/rt/tenancy.rs" = 1
-"crates/lgwks-bot/src/rt/time.rs" = 1
-"crates/lgwks-bot/src/script/fan_out.rs" = 2
 "crates/lgwks-bot/src/script/ready.rs" = 1
-"crates/lgwks-bot/src/script/run_store.rs" = 1
 "crates/lgwks-bot/src/session.rs" = 2
 "crates/lgwks-bot/src/spec.rs" = 5
-"crates/lgwks-bot/src/task/host.rs" = 2
-"crates/lgwks-bot/src/tenant_store.rs" = 1
 "crates/lgwks-deps/src/metadata.rs" = 4
 "docs/guides/lgwks-bot/background-processes.md" = 2
 "docs/guides/lgwks-bot/failures-example.md" = 1

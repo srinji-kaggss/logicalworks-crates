@@ -321,17 +321,8 @@ impl fmt::Debug for Inner {
 ///
 /// # Example
 ///
-/// ```
-/// use lgwks_bot::rt::sync::CancellationToken;
-///
-/// let token = CancellationToken::new();
-/// let worker = token.clone();
-///
-/// // The worker observes the cancel; the supervisor decides when.
-/// assert!(!worker.is_cancelled());
-/// token.cancel();
-/// assert!(worker.is_cancelled());
-/// ```
+/// `a_cancelled_token_is_cancelled_in_every_clone` (`tests/it/rt_front_door.rs`) holds it: a
+/// worker holding a clone sees `is_cancelled` flip when the original is cancelled.
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     /// Shared with every clone and child; the token's entire state.
