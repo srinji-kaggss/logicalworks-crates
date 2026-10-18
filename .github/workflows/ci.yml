@@ -1059,9 +1059,9 @@ jobs:
       # 326 s, 47 s after the saturation legs. On a hosted Windows runner the
       # default CARGO_HOME is on the C: drive, and `cargo metadata --locked` took
       # 23 s and 25 s there against 10 s with CARGO_HOME on D:, where the
-      # workspace already is (run 39108008198). The same runs timed TLS revocation
-      # checks off at 22 s and Defender exclusions at 32 s, so neither is the
-      # cause. A restored cache keeps no index entries, so `CARGO_NET_OFFLINE`
+      # workspace already is (run 39108008198). The same runs timed cargo's TLS
+      # certificate-status checks off at 22 s and Defender exclusions at 32 s, so
+      # neither is the cause. A restored cache keeps no index entries, so `CARGO_NET_OFFLINE`
       # after a full match failed here (`no matching package named blake3`, PR
       # #620's first run).
       CARGO_HOME: D:\cargo-home
