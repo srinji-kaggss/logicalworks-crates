@@ -169,12 +169,9 @@ fn target_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
 /// *third* fact — an unconstrained dimension — which this function is not for
 /// and which callers inside this crate read from an entry's `target` field directly.
 ///
-/// ```
-/// use lgwks_deps::declared_scope;
-///
-/// assert_eq!(declared_scope(None), "");
-/// assert_eq!(declared_scope(Some("cfg(unix)")), "cfg(unix)");
-/// ```
+/// An absent scope is spelled `""` and a scope is kept as Cargo wrote it
+/// (`cfg(unix)`); the integration test `an_absent_target_is_spelled_empty_and_a_scope_is_kept`
+/// asserts both.
 #[must_use]
 pub fn declared_scope(scope: Option<&str>) -> &str {
     let Some(scope) = scope else {

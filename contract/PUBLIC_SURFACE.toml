@@ -215,11 +215,8 @@
 "crates/lgwks-bot/src/spec.rs" = 5
 "crates/lgwks-bot/src/task/host.rs" = 2
 "crates/lgwks-bot/src/tenant_store.rs" = 1
-"crates/lgwks-deps/src/audit.rs" = 1
-"crates/lgwks-deps/src/lib.rs" = 4
 "crates/lgwks-deps/src/metadata.rs" = 4
 "docs/guides/lgwks-bot/background-processes.md" = 2
 "docs/guides/lgwks-bot/failures-example.md" = 1
 "docs/guides/lgwks-bot/migrating-to-1-0.md" = 1
 "docs/guides/lgwks-bot/sessions.md" = 1
-"docs/guides/lgwks-deps/embedding.md" = 1

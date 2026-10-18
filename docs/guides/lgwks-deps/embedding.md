@@ -2,23 +2,11 @@
 
 ## Embedding the gate
 
-```rust
-use std::path::Path;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ((contract, refusals), unresolved) =
-        lgwks_deps::check_dependencies(Path::new("."))?.into_parts();
-    if let Some(cleanup) = unresolved {
-        eprintln!("warning: {cleanup}");
-    }
-    println!(
-        "{} approved edges, {} refusals",
-        contract.entry_count(),
-        refusals.len()
-    );
-    Ok(())
-}
-```
+Call `lgwks_deps::check_dependencies(root)?.into_parts()`: it yields the
+register and its refusals together with any cleanup warning, and a caller prints
+`contract.entry_count()` and `refusals.len()` from them. The integration test
+`the_embedding_flow_reads_the_register_and_reports_refusals` runs that flow over
+this repository and holds the refusal list empty.
 
 `check_dependencies(root)` returns
 `Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError>`. An empty
