@@ -241,11 +241,20 @@ fn an_entry_the_walk_cannot_lstat_is_an_entry_type_omission() -> std::io::Result
     Ok(())
 }
 
+/// The tree the documented walks run over: the crate's own sources. The crate
+/// directory itself is the working directory of every test in this binary and
+/// is shared with whatever else runs on the host, and a walk of it reported an
+/// omission on main run 39147084797 that no later run reproduced. Sources are
+/// what the tree owns and no test writes, so a walk of them has one answer.
+fn documented_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
 /// Requirement #526 (doc examples that named the crate moved into a test): the three
-/// walks `walk_dir` documents, over the crate's own directory.
+/// walks `walk_dir` documents, over the crate's own sources.
 #[test]
 fn the_documented_walks_hold() -> std::io::Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = documented_root();
     let generous = WalkLimits::new(10_000, 2_000, 8 * 1024 * 1024, 100);
     let bounded = walk_dir_bounded(&root, &WalkOptions::default(), &generous)?;
     assert!(
@@ -254,8 +263,11 @@ fn the_documented_walks_hold() -> std::io::Result<()> {
     );
 
     let (entries, omissions) = walk_dir_tolerant(&root, &WalkOptions::default())?.into_parts();
-    assert!(!entries.is_empty(), "the crate directory holds entries");
-    assert!(omissions.is_empty(), "a readable tree has no omission");
+    assert!(!entries.is_empty(), "the crate's sources hold entries");
+    assert!(
+        omissions.is_empty(),
+        "a readable tree has no omission: {omissions:?}"
+    );
 
     let ceilings = WalkLimits::new(100, 20, 64 * 1024, 10);
     let report = walk_dir_tolerant_bounded(&root, &WalkOptions::default(), &ceilings)?;
@@ -276,7 +288,7 @@ fn the_documented_walks_hold() -> std::io::Result<()> {
 /// and checking each entry's path, relative path and kind against its `lstat`.
 #[test]
 fn the_documented_predicate_walk_holds() -> std::io::Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = documented_root();
     let entries = walk_dir_entries(&root, &WalkOptions::default(), None, |path, kind| {
         if kind == FileKind::Directory && path.file_name() == Some(".git".as_ref()) {
             Descend::Skip
@@ -284,7 +296,7 @@ fn the_documented_predicate_walk_holds() -> std::io::Result<()> {
             Descend::Enter
         }
     })?;
-    assert!(!entries.is_empty(), "the crate directory holds entries");
+    assert!(!entries.is_empty(), "the crate's sources hold entries");
     for entry in &entries {
         assert!(
             entry.path().ends_with(entry.relative_path()),
