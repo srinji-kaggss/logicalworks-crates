@@ -38,22 +38,10 @@
 //!
 //! [below]: crate::seeded::Seeded::below
 //!
-//! ```rust
-//! use lgwks_std::seeded::{DrawError, Seeded};
-//!
-//! let mut stream = Seeded::from_seed(7);
-//! let mut replay = Seeded::from_seed(7);
-//! assert_eq!(stream.next_u64(), replay.next_u64());
-//!
-//! let roll = stream.below(6)?;
-//! assert!(roll < 6);
-//! let lanes = ["fmt", "clippy", "tests"];
-//! assert!(lanes.get(stream.index(lanes.len())?).is_some());
-//!
-//! // A range with no value in it is refused, never answered with a substitute.
-//! assert_eq!(stream.below(0), Err(DrawError::EmptyRange));
-//! # Ok::<(), DrawError>(())
-//! ```
+//! Two streams from seed 7 draw the same first word; `below(6)` answers under 6,
+//! `index(3)` answers an index of a three-item list, and a range with no value in
+//! it (`below(0)`) is refused with `DrawError::EmptyRange`, never answered with a
+//! substitute (the unit test `the_documented_flow_holds` runs it).
 
 use std::error::Error;
 use std::fmt;
@@ -248,6 +236,20 @@ mod tests {
             ];
             assert_eq!(drawn, expected, "seed {seed:#x} left the published stream");
         }
+    }
+
+    /// Requirement #526 (a doc example that named the crate moved into a test):
+    /// the replay, the bounded draw, the index and the refusal the header names.
+    #[test]
+    fn the_documented_flow_holds() -> TestResult {
+        let mut stream = Seeded::from_seed(7);
+        let mut replay = Seeded::from_seed(7);
+        assert_eq!(stream.next_u64(), replay.next_u64());
+        assert!(stream.below(6)? < 6);
+        let lanes = ["fmt", "clippy", "tests"];
+        assert!(lanes.get(stream.index(lanes.len())?).is_some());
+        assert_eq!(stream.below(0), Err(DrawError::EmptyRange));
+        Ok(())
     }
 
     #[test]

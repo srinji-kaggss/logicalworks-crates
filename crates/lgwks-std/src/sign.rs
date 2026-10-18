@@ -174,15 +174,9 @@ impl Error for VerifyError {}
 /// # Errors
 ///
 /// [`EntropyError`] when the OS refused entropy; there is no fallback source,
-/// so the caller fails rather than signing under a weak key.
-///
-/// ```rust
-/// let secret = lgwks_std::sign::generate()?;
-/// let public = secret.public_key();
-/// let seal = lgwks_std::sign::sign(&secret, b"example/v1", b"{\"run\": 1}");
-/// lgwks_std::sign::verify_strict(&public, b"example/v1", b"{\"run\": 1}", &seal)?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
+/// so the caller fails rather than signing under a weak key. The unit test
+/// `a_generated_key_seals_and_opens` generates a key, seals a record and
+/// verifies the seal under the public half.
 pub fn generate() -> Result<SecretKey, EntropyError> {
     let seed = crate::random::bytes::<32>()?;
     Ok(SecretKey::from_seed(seed))

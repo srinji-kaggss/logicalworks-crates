@@ -416,18 +416,9 @@ impl Response {
     }
 
     /// Iterate header names and exact legal value bytes, preserving repeated
-    /// values. Order is upstream `HeaderMap` iteration order.
-    ///
-    /// ```rust
-    /// use lgwks_std::http::{get_with, Options};
-    ///
-    /// let response = get_with("http://127.0.0.1:1/", &Options::default());
-    /// if let Ok(response) = response {
-    ///     for (name, value) in response.header_values() {
-    ///         let _ = (name, value);
-    ///     }
-    /// }
-    /// ```
+    /// values. Order is upstream `HeaderMap` iteration order. Each item is a
+    /// header name and its exact legal value bytes, so a repeated header yields
+    /// one item per value.
     pub fn header_values(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
         self.header_bytes
             .iter()

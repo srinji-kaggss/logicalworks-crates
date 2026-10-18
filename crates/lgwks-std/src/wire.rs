@@ -91,15 +91,9 @@ pub struct FormatDescriptor {
 /// identify the effective format. This probe reports byte order, archived
 /// pointer width, and primitive alignment. It deliberately does not invent a
 /// schema id or promise that archives of different application types are
-/// compatible.
-///
-/// ```rust
-/// use lgwks_std::wire::{Endianness, WireError, format_descriptor};
-///
-/// let format = format_descriptor()?;
-/// assert!(matches!(format.endianness, Endianness::Little | Endianness::Big));
-/// # Ok::<(), WireError>(())
-/// ```
+/// compatible. In this build the probe reports `Endianness::Little` or
+/// `Endianness::Big`, never `Unknown` (the unit test
+/// `the_effective_format_names_a_byte_order` asserts it).
 pub fn format_descriptor() -> Result<FormatDescriptor, WireError> {
     let sentinel = to_bytes::<WireError>(&0x0102_0304_u32)?;
     let endianness = if sentinel
@@ -144,3 +138,20 @@ pub fn format_descriptor() -> Result<FormatDescriptor, WireError> {
 /// the derive: naming the items individually is how this module came to be
 /// usable only by its own tests.
 pub use rkyv;
+
+#[cfg(test)]
+mod tests {
+    use super::{Endianness, WireError, format_descriptor};
+
+    /// Requirement #526 (a doc example that named the crate moved into a test):
+    /// the probe observes a known byte order in this build.
+    #[test]
+    fn the_effective_format_names_a_byte_order() -> Result<(), WireError> {
+        let format = format_descriptor()?;
+        assert!(matches!(
+            format.endianness,
+            Endianness::Little | Endianness::Big
+        ));
+        Ok(())
+    }
+}
