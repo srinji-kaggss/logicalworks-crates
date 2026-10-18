@@ -105,13 +105,17 @@ env:
   # job has. This restores the declared setting; it changes how much is
   # recompiled, not what is built.
   CARGO_INCREMENTAL: "1"
-  # The machine-wide count of test processes the nextest wrapper `churn-slot`
-  # lets run at once (`.config/nextest.toml`); unset it is 6. The lgwks-bot full
-  # suite alone on an idle host, 4,735 tests, test files on a RAM disk, nine
-  # threads: 78.96 s at 3 slots, 54.08 s at 6, 46.01 s at 12 and 45.89 s at 64
-  # (#272), so 12 is as fast as no cap, and the three suites of the first wave (9,
-  # 9 and 6 threads) can each use their threads instead of queueing on six slots.
-  LWC_CHURN_SLOTS: "12"
+
+# `LWC_CHURN_SLOTS` is the machine-wide count of test processes the nextest
+# wrapper `churn-slot` lets run at once (`.config/nextest.toml`); unset it is 6.
+# The three suites of the first wave set 12 and the saturation legs of the second
+# leave it at 6 (#272). The lgwks-bot full suite alone on an idle host, 4,735
+# tests, test files on a RAM disk, nine threads: 78.96 s at 3 slots, 54.08 s at 6,
+# 46.01 s at 12 and 45.89 s at 64. In run 39105571862 (12 for every job) the first
+# wave ended at 150 s against 166 to 179 s, bot-full at 145 s against 163, and the
+# second wave's legs took 77.7 s and 73.5 s against 67.4 s and 17.9 s: the small
+# leg's 164 `sim_scale` journal tests and the tier, 16 processes at once, met the
+# kernel's serialised file work.
 
 jobs:
   # The gate lanes and the workspace suite, in two shards of one nextest run.
@@ -139,6 +143,7 @@ jobs:
       # the lint pass here only adds to the compile that gates the run. Empty
       # is "no wrapper" to cargo, and the compiled code is identical.
       RUSTC_WORKSPACE_WRAPPER: ""
+      LWC_CHURN_SLOTS: "12"
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -335,6 +340,7 @@ jobs:
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
+      LWC_CHURN_SLOTS: "12"
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -536,6 +542,7 @@ jobs:
     env:
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
+      LWC_CHURN_SLOTS: "12"
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
