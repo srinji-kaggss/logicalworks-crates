@@ -139,12 +139,11 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          # Eight, the share bot-full is green at (its comment names the limit).
-          # Run 38867517459 ran the suite, then 5,569 tests with lgwks_bot's, in
-          # 186 s at six threads for 1,005 s of summed test time, so 5.4 of the 6
-          # were busy: the cap, not the machine, set the wall. The suite is now
-          # the 1,431 tests that are not lgwks_bot's, so this is headroom.
-          test-share: "8"
+          # Four: the suites' wall is the kernel's serialised file and process
+          # work, which grows no faster with more threads (#272; the share was
+          # eight, the one bot-full was green at, run 38867517459 at six
+          # threads for the 5,569 tests then in the suite).
+          test-share: "4"
           build-share: "3"
           # The critical path: its first cargo call is the one that must not
           # queue behind the others' (#272, run 39021102172).
@@ -335,11 +334,11 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          # Eight is the share this suite was green at: ten threads failed the
-          # drain-grace test (`shutdown_reports_every_draining_cleanup_...`,
-          # INV-BOT-156) under the run's process-table storm — the grace is
-          # calibrated for loaded, not oversubscribed, hosts.
-          test-share: "8"
+          # Four (it was eight, the share this suite was green at: ten threads
+          # failed the drain-grace test, INV-BOT-156, under the run's
+          # process-table storm, so fewer threads is the safe direction). The
+          # wall is the kernel's serialised file and process work (#272).
+          test-share: "4"
           build-share: "3"
           # The other half of the critical path (296 s on run 39021102172).
           defer: "0"
@@ -444,10 +443,10 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          # Eight, as the bot-full job: the lwc-2 leg runs 43 tests beside the
+          # Four, as the bot-full job: the lwc-2 leg runs 43 tests beside the
           # 10,000 tier, which only logs its latency tails, and the lwc-12 leg
           # the 164 `sim_scale` tests and the two small tiers.
-          test-share: "8"
+          test-share: "4"
           build-share: "2"
           # On the critical path now: 204 of 207 tests at the cap, run 39069794871.
           defer: "0"
@@ -536,7 +535,7 @@ jobs:
         with:
           toolchain: "1.99.0"
           nextest: "true"
-          test-share: "6"
+          test-share: "3"
           build-share: "3"
           # On the critical path since the saturation job needs this suite: its
           # 30 s default wait made "Pin Rust" 36 s against bot-full's 6 s, and the
