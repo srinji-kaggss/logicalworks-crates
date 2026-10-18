@@ -55,7 +55,8 @@
 "crates/lgwks-bot/src/frontier/vocab.rs" = 13
 "crates/lgwks-bot/src/gate.rs" = 12
 "crates/lgwks-bot/src/idempotent.rs" = 13
-"crates/lgwks-bot/src/inspect.rs" = 56
+"crates/lgwks-bot/src/inspect.rs" = 6
+"crates/lgwks-bot/src/inspect/types.rs" = 50
 "crates/lgwks-bot/src/interface.rs" = 38
 "crates/lgwks-bot/src/journal.rs" = 42
 "crates/lgwks-bot/src/journal/continuation.rs" = 50
@@ -111,14 +112,26 @@
 "crates/lgwks-bot/src/script/fan_out.rs" = 7
 "crates/lgwks-bot/src/script/map.rs" = 21
 "crates/lgwks-bot/src/script/mod.rs" = 18
-"crates/lgwks-bot/src/script/ready.rs" = 39
+"crates/lgwks-bot/src/script/ready.rs" = 10
+"crates/lgwks-bot/src/script/ready/error.rs" = 5
+"crates/lgwks-bot/src/script/ready/outcome.rs" = 10
+"crates/lgwks-bot/src/script/ready/readiness.rs" = 16
+"crates/lgwks-bot/src/script/ready/state.rs" = 1
 "crates/lgwks-bot/src/script/run_store.rs" = 12
 "crates/lgwks-bot/src/script/scope.rs" = 23
 "crates/lgwks-bot/src/script/trail.rs" = 11
 "crates/lgwks-bot/src/semantic.rs" = 21
-"crates/lgwks-bot/src/session.rs" = 168
+"crates/lgwks-bot/src/session.rs" = 9
+"crates/lgwks-bot/src/session/graph.rs" = 43
+"crates/lgwks-bot/src/session/limits.rs" = 14
+"crates/lgwks-bot/src/session/receipt.rs" = 33
+"crates/lgwks-bot/src/session/resolve.rs" = 18
+"crates/lgwks-bot/src/session/runner.rs" = 19
+"crates/lgwks-bot/src/session/scope.rs" = 26
+"crates/lgwks-bot/src/session/value.rs" = 13
 "crates/lgwks-bot/src/skew.rs" = 15
-"crates/lgwks-bot/src/spec.rs" = 34
+"crates/lgwks-bot/src/spec.rs" = 23
+"crates/lgwks-bot/src/spec/admission.rs" = 12
 "crates/lgwks-bot/src/stability.rs" = 21
 "crates/lgwks-bot/src/task.rs" = 48
 "crates/lgwks-bot/src/task/admit.rs" = 1
@@ -187,12 +200,7 @@
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
 "crates/lgwks-bot/README.md" = 6
-"crates/lgwks-bot/src/inspect.rs" = 1
-"crates/lgwks-bot/src/script/ready.rs" = 1
-"crates/lgwks-bot/src/session.rs" = 2
-"crates/lgwks-bot/src/spec.rs" = 5
 "crates/lgwks-deps/src/metadata.rs" = 4
 "docs/guides/lgwks-bot/background-processes.md" = 2
 "docs/guides/lgwks-bot/failures-example.md" = 1
 "docs/guides/lgwks-bot/migrating-to-1-0.md" = 1
-"docs/guides/lgwks-bot/sessions.md" = 1
