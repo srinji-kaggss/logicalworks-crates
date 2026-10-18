@@ -761,12 +761,16 @@ jobs:
   # took over 7 minutes (run 38412846693: the sixth of seven targets was
   # reached at 5 m 29 s with the cancel at 5 m 00 s), so each leg holds the
   # targets it is named for and the host triple the script always adds. Only
-  # registered, online instances may be named: lwc-6 and lwc-1 are offline
-  # (runner list, 2026-10-13) and a job pinned to one waits for ever. No leg is
-  # pinned to an instance that holds a critical-path suite: lwc-5 is the lgwks-bot
-  # full suite (3 m 57 s) and lwc-9 the Linux bot-full one (4 m 12 s). The musl
-  # and wasm leg shared lwc-5, so that suite started 2 m 04 s late and the run's
-  # wall was 6 m 42 s (run 38880610389, the suite's start 3 s after the leg's end).
+  # registered, online instances may be named: lwc-6 and lwc-1 were offline
+  # (runner list, 2026-10-13) and a job pinned to one waited for ever; all
+  # thirteen were online on 2026-10-18. No leg is pinned to an instance that
+  # holds a critical-path suite: lwc-5 is the lgwks-bot full suite and lwc-9 the
+  # Linux bot-full one, lwc-7 the no-default suite. The musl and wasm leg shared
+  # lwc-5, so that suite started 2 m 04 s late and the run's wall was 6 m 42 s
+  # (run 38880610389, the suite's start 3 s after the leg's end). The freebsd,
+  # android and ios leg shared lwc-7, and the no-default suite started 63 s late
+  # on main runs 39087783845 and the pull request run 39087447996 before it, so it
+  # is on lwc-6, which holds no job.
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -780,7 +784,7 @@ jobs:
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
             instance: lwc-4
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
-            instance: lwc-7
+            instance: lwc-6
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
