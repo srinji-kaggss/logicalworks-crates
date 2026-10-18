@@ -54,36 +54,25 @@ report buffer is capped at the in-flight ceiling; a caller that spawns without
 ever reading its reports loses detail, never memory, and
 `Stats::reports_dropped` says how much.
 
+A flow that only needs bounded fan-out and a deadline never builds a
+`Supervisor`; it writes the two bounds as words (run once, it prints
+`sizes [1, 3, 0]` for the pages `"a"`, `"bcd"` and `""`):
+
 ```rust
-use lgwks_bot::Runtime;
-use lgwks_bot::rt::supervise::{Budget, Supervisor};
-use lgwks_bot::rt::time::Duration;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::new()?;
-    runtime.block_on(async {
-        // `new(4)` when you have an opinion about the ceiling, `default()` when
-        // you do not; both are bounded.
-        let mut supervisor = Supervisor::new(4);
-
-        // A bounded loop. `Budget` is a required argument, so there is no call
-        // here that reads as "loop forever".
-        supervisor
-            .spawn_repeating(Budget::For(Duration::from_secs(30)), |_tick| async move {
-                // one iteration of your work
-            })
-            .await;
-
-        // Cancel and drain. Tasks built on `spawn_repeating` or `repeat`
-        // observe the token and return; one that never does is aborted.
-        // The report is the drained evidence: one terminal outcome per task,
-        // each naming the task and saying how it ended.
-        let report = supervisor.shutdown().await;
-        for outcome in report.outcomes() {
-            // `outcome.is_success()`, `outcome.is_panic()`,
-            // `outcome.panic_message()`
-        }
-    });
-    Ok(())
+lgwks_bot::script! {
+    /// Measure every page at once and give up after thirty seconds.
+    flow sweep(pages: Vec<String>) -> Vec<usize>:
+        let sizes = within 30s:
+            let lens = each page in pages:
+                page.len()
+            lens
+        give back sizes
 }
 ```
+
+`each` runs every page at once, as many as the machine sustains, returns the
+results in input order and cancels the rest at the first failure. `within 30s`
+ends the block with `TimedOut` when the deadline passes. Reach for `Supervisor`
+directly when the work must outlive one flow: a loop bounded by a `Budget`,
+cancelled and drained by `shutdown`, whose report holds one terminal outcome per
+task.
