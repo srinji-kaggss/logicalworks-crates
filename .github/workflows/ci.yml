@@ -525,6 +525,11 @@ jobs:
           nextest: "true"
           test-share: "6"
           build-share: "3"
+          # On the critical path since the saturation job needs this suite: its
+          # 30 s default wait made "Pin Rust" 36 s against bot-full's 6 s, and the
+          # job ended 18 s after bot-full on run 39088344101, which the saturation
+          # job then waited for.
+          defer: "0"
       - name: Run lgwks-bot no-default-feature tests
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
