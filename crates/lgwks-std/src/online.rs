@@ -64,15 +64,9 @@ fn probe_with_clock(
 ///
 /// At most the first 64 addresses are attempted. DNS is outside this function,
 /// so callers that need a strict connection budget can resolve first and pass
-/// the resulting addresses here.
-///
-/// ```rust
-/// use std::net::SocketAddr;
-/// use std::time::Duration;
-///
-/// let local = SocketAddr::from(([127, 0, 0, 1], 1));
-/// let _reachable = lgwks_std::online::probe_resolved(&[local], Duration::from_millis(20));
-/// ```
+/// the resulting addresses here. The unit test
+/// `resolved_probe_reaches_a_loopback_listener` runs the call against a live
+/// loopback listener.
 #[must_use]
 pub fn probe_resolved(addrs: &[SocketAddr], timeout: Duration) -> bool {
     probe_candidates(addrs.iter().copied().take(MAX_PROBE_ADDRESSES), timeout)

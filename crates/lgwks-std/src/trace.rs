@@ -28,17 +28,12 @@
 //! `ERROR` for a broken contract, `WARN` for degraded but serving, `INFO` for
 //! lifecycle, `DEBUG` for developer diagnostics, `TRACE` for wire-level.
 //!
-//! # Example
+//! # Emitting
 //!
-//! ```
-//! use lgwks_std::trace::{info, warn};
-//!
-//! // A library emits. With no subscriber installed these are near-free no-ops;
-//! // the binary that links this installs the subscriber that decides where
-//! // records go.
-//! info!(bytes = 512, "read a record");
-//! warn!(remaining = 3, "retry budget is nearly spent");
-//! ```
+//! A library emits through `info!` and `warn!` with fields, as in
+//! `info!(bytes = 512, "read a record")`. With no subscriber installed those
+//! are near-free no-ops; the binary that links this installs the subscriber that
+//! decides where records go.
 //!
 //! Structured fields, not interpolated strings: a subscriber can filter on
 //! `bytes` without parsing the message, which is the property `println!` cannot

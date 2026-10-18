@@ -42,23 +42,10 @@ const BACKEND: &str = "getrandom";
 /// retry acts on the kind rather than on the message, which is why the raw OS
 /// code is data here and not a rendered string.
 ///
-/// ```rust
-/// use lgwks_std::random::{EntropyError, EntropyErrorKind};
-///
-/// // A caller matches the kind and the code, never the message. The wildcard
-/// // arm is required: the enum is `#[non_exhaustive]`, so a new kind is an
-/// // additive change rather than a breaking one.
-/// fn decision(error: &EntropyError) -> &'static str {
-///     match error.kind() {
-///         EntropyErrorKind::OsCode { code } if code == 4 => "interrupted: retry",
-///         EntropyErrorKind::OsCode { .. } => "an OS refusal: read the code",
-///         EntropyErrorKind::UnsupportedTarget => "this host has no entropy source",
-///         _ => "the backend failed without a code",
-///     }
-/// }
-/// # let _ = decision;
-/// # Ok::<(), EntropyError>(())
-/// ```
+/// A caller matches the kind and the code, never the message. The enum is
+/// `#[non_exhaustive]`, so a caller's match needs a wildcard arm and a new kind
+/// is an additive change rather than a breaking one (the unit test
+/// `a_caller_matches_the_kind_and_the_code` is that match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EntropyErrorKind {
@@ -173,13 +160,8 @@ impl Error for EntropyError {}
 /// `buf` are unspecified**: the backend may have written a prefix, the whole
 /// buffer, or none of it, and this module neither reads nor clears it. A caller
 /// must not read `buf` after an `Err`; [`bytes`] has no such window because a
-/// failed draw returns no array.
-///
-/// ```rust
-/// let mut buf = [0u8; 32];
-/// lgwks_std::random::fill_bytes(&mut buf)?;
-/// # Ok::<(), lgwks_std::random::EntropyError>(())
-/// ```
+/// failed draw returns no array. The unit test `fills_the_whole_buffer` draws a
+/// buffer through this call.
 pub fn fill_bytes(buf: &mut [u8]) -> Result<(), EntropyError> {
     fill_from(buf, getrandom::fill)
 }
@@ -285,6 +267,36 @@ mod tests {
             "buffer looks unwritten"
         );
         Ok(())
+    }
+
+    /// Requirement #526 (a doc example that named the crate moved into a test):
+    /// the match a caller writes over `EntropyErrorKind`, with its wildcard arm.
+    #[test]
+    fn a_caller_matches_the_kind_and_the_code() {
+        fn decision(error: &EntropyError) -> &'static str {
+            match error.kind() {
+                EntropyErrorKind::OsCode { code } if code == EINTR => "interrupted: retry",
+                EntropyErrorKind::OsCode { .. } => "an OS refusal: read the code",
+                EntropyErrorKind::UnsupportedTarget => "this host has no entropy source",
+                _ => "the backend failed without a code",
+            }
+        }
+        assert_eq!(
+            decision(&from_backend(Some(EINTR), false)),
+            "interrupted: retry"
+        );
+        assert_eq!(
+            decision(&from_backend(Some(ENODEV), false)),
+            "an OS refusal: read the code"
+        );
+        assert_eq!(
+            decision(&from_backend(None, true)),
+            "this host has no entropy source"
+        );
+        assert_eq!(
+            decision(&from_backend(None, false)),
+            "the backend failed without a code"
+        );
     }
 
     #[test]

@@ -280,17 +280,9 @@ pub enum PoolShutdown {
 /// [`PoolConfigError::AlreadyConfigured`] when an earlier call configured a
 /// different ceiling. A refusal leaves the pool exactly as it was.
 ///
-/// # Examples
-///
-/// ```
-/// use lgwks_std::task::configure_blocking_pool;
-///
-/// # fn main() -> Result<(), lgwks_std::task::PoolConfigError> {
-/// configure_blocking_pool(8)?;
-/// // The pool this process runs is bounded at eight threads from here on.
-/// # Ok(())
-/// # }
-/// ```
+/// Configuring a ceiling of eight before first use bounds the pool this process
+/// runs at eight threads from then on; the `sim_task_pool_public` test binary
+/// owns its process and runs that journey against the real pool.
 pub fn configure_blocking_pool(threads: usize) -> Result<(), PoolConfigError> {
     if threads < MIN_BLOCKING_THREADS {
         let refusal = Err(PoolConfigError::InvalidCeiling {
@@ -354,24 +346,10 @@ fn configure_decision(pool: &Pool, threads: usize) -> Result<(), PoolConfigError
 /// fails its awaiter with that refusal as the payload. The closure is never
 /// run.
 ///
-/// # Examples
-///
-/// ```
-/// use std::time::Duration;
-///
-/// use lgwks_std::task::{
-///     PoolShutdown, SpawnError, block_on, shutdown_blocking_pool, spawn_blocking,
-///     try_spawn_blocking,
-/// };
-///
-/// let job = spawn_blocking(|| 40 + 2);
-/// let report = shutdown_blocking_pool(Duration::from_secs(30));
-/// // The job was still in the pool: shutdown let it finish before returning.
-/// assert_eq!(block_on(job), 42);
-/// assert_eq!(report, PoolShutdown::Drained { threads: 1 });
-/// // Admission is closed from here on.
-/// assert!(matches!(try_spawn_blocking(|| 0u32), Err(SpawnError::Shutdown)));
-/// ```
+/// A job spawned just before the call still finishes (its awaiter reads the
+/// job's value), the report is [`PoolShutdown::Drained`], and a later
+/// [`try_spawn_blocking`] is refused as [`SpawnError::Shutdown`]; the
+/// `sim_task_pool_public` test binary owns its process and runs that journey.
 pub fn shutdown_blocking_pool(within: Duration) -> PoolShutdown {
     pool().shutdown(within)
 }

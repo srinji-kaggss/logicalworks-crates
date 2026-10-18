@@ -150,18 +150,10 @@ const fn assert_shared_across_threads() {
 impl GlobPattern {
     /// Compiles the strict dialect and returns malformed syntax as a typed error.
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lgwks_std::glob::{GlobPattern, GlobScratch};
-    ///
-    /// let pattern = GlobPattern::compile("src/**/[a-z]?.rs")?;
-    /// let mut scratch = GlobScratch::new();
-    /// assert!(pattern.is_match_with("src/l1.rs", &mut scratch));
-    /// assert!(pattern.is_match_with("src/sub/l1.rs", &mut scratch));
-    /// assert!(!pattern.is_match_with("src/sub/lib1.rs", &mut scratch));
-    /// # Ok::<(), lgwks_std::glob::PatternError>(())
-    /// ```
+    /// `src/**/[a-z]?.rs` matches `src/a1.rs` and `src/nested/a1.rs` and not
+    /// `src/nested/ab1.rs` (the integration test
+    /// `public_compile_reuse_and_legacy_call_share_text_semantics` runs those
+    /// paths through a reused [`GlobScratch`]).
     pub fn compile(pattern: &str) -> Result<Self, PatternError> {
         Self::compile_with_dialect(pattern, GlobDialect::Strict)
     }
@@ -171,15 +163,8 @@ impl GlobPattern {
     /// Use [`GlobDialect::Legacy`] when migrating callers that rely on the old
     /// permissive forms. New consumers should prefer [`Self::compile`].
     ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use lgwks_std::glob::{GlobDialect, GlobPattern};
-    ///
-    /// let old_pattern = GlobPattern::compile_with_dialect("a**b", GlobDialect::Legacy)?;
-    /// assert!(old_pattern.is_match("a/x/b"));
-    /// # Ok::<(), lgwks_std::glob::PatternError>(())
-    /// ```
+    /// Under [`GlobDialect::Legacy`] the embedded `**` of `a**b` matches
+    /// `a/x/b`, the same test as above.
     pub fn compile_with_dialect(pattern: &str, dialect: GlobDialect) -> Result<Self, PatternError> {
         let mut work = Work::default();
         compile_pattern(pattern, dialect, &mut work)

@@ -145,14 +145,9 @@ pub fn decode(input: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
 /// The input length is checked first, then the destination length, then every
 /// digit. The destination is written only after all validation succeeds, so any
 /// error leaves every destination byte unchanged. Uppercase and lowercase
-/// hexadecimal digits are accepted.
-///
-/// ```rust
-/// let mut bytes = [0; 2];
-/// lgwks_std::hex::decode_into("Af09", &mut bytes)?;
-/// assert_eq!(bytes, [0xaf, 0x09]);
-/// # Ok::<(), lgwks_std::hex::DecodeError>(())
-/// ```
+/// hexadecimal digits are accepted: `"Af09"` fills a two-byte destination with
+/// `[0xaf, 0x09]` (the unit test `decode_into_validates_exact_length_and_preserves_output_on_failure`
+/// runs that case).
 pub fn decode_into(input: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), DecodeError> {
     let input = input.as_ref();
     check_even_length(input.len())?;

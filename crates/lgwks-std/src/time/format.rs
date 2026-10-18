@@ -163,15 +163,9 @@ pub fn unix_parts_lossy(at: SystemTime) -> (i64, u32) {
 ///
 /// Nanosecond values at or above one billion are normalized into seconds. If
 /// that carry overflows or the platform clock rejects the resulting instant,
-/// the error preserves the failed input or normalized pair.
-///
-/// ```rust
-/// use lgwks_std::time::format::{from_unix_parts, to_rfc3339};
-///
-/// let instant = from_unix_parts(0, 0)?;
-/// assert_eq!(to_rfc3339(instant)?, "1970-01-01T00:00:00Z");
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
+/// the error preserves the failed input or normalized pair. Seconds `0` and
+/// nanoseconds `0` are the epoch, which [`to_rfc3339`] renders as
+/// `1970-01-01T00:00:00Z` (the unit test `the_epoch_renders_as_rfc3339`).
 pub fn from_unix_parts(secs: i64, nanos: u32) -> Result<SystemTime, UnixTimeError> {
     // `nanos` is unsigned and the divisor is a non-zero constant, so the euclid
     // forms are total and carry the nanosecond overflow into whole seconds.
@@ -346,4 +340,18 @@ pub fn to_rfc3339(at: SystemTime) -> Result<String, FormatError> {
     write_time_parts(&mut out, hour, min, sec);
     write_optional_fraction(&mut out, i64::from(nanos));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{from_unix_parts, to_rfc3339};
+
+    /// Requirement #526 (a doc example that named the crate moved into a test),
+    /// against RFC 3339 section 5.6: the Unix epoch is `1970-01-01T00:00:00Z`.
+    #[test]
+    fn the_epoch_renders_as_rfc3339() -> Result<(), Box<dyn std::error::Error>> {
+        let instant = from_unix_parts(0, 0)?;
+        assert_eq!(to_rfc3339(instant)?, "1970-01-01T00:00:00Z");
+        Ok(())
+    }
 }

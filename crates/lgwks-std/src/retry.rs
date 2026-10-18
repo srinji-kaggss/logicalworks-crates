@@ -13,20 +13,11 @@
 //! [`task`]: crate::task
 //!
 //! Jitter is caller-supplied (`u64` entropy the caller already holds, e.g.
-//! from `lgwks_std::random`) so `core` stays free of entropy sources:
-//!
-//! ```rust
-//! use std::time::Duration;
-//! use lgwks_std::retry::RetryPolicy;
-//!
-//! let policy = RetryPolicy::new(3, Duration::from_millis(100), Duration::from_secs(5));
-//! assert_eq!(policy.delay(0, 0), Duration::from_millis(100));
-//! assert_eq!(policy.delay(1, 0), Duration::from_millis(200));
-//! // Full jitter only ever shortens the backoff, never lengthens it.
-//! assert!(policy.delay(1, u64::MAX) <= Duration::from_millis(200));
-//! assert!(!policy.deadline_exceeded(Duration::from_secs(4)));
-//! assert!(policy.deadline_exceeded(Duration::from_secs(6)));
-//! ```
+//! from `lgwks_std::random`) so `core` stays free of entropy sources. A policy of
+//! three tries, a 100 ms base and a 5 s deadline waits 100 ms after the first
+//! failure and 200 ms after the second; full jitter only ever shortens a
+//! backoff, and the deadline is exceeded at 6 s and not at 4 s (the unit test
+//! `the_documented_budget_holds` runs those values).
 //!
 //! INV-STD-RETRY: [`RetryPolicy`](crate::retry::RetryPolicy) never sleeps, never reads a clock,
 //! never allocates, and computes the exact capped delay for every `u32` retry
@@ -207,6 +198,18 @@ fn duration_from_nanos(nanos: u128) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Requirement #526 (a doc example that named the crate moved into a test):
+    /// the three-try policy the module header describes.
+    #[test]
+    fn the_documented_budget_holds() {
+        let policy = RetryPolicy::new(3, Duration::from_millis(100), Duration::from_secs(5));
+        assert_eq!(policy.delay(0, 0), Duration::from_millis(100));
+        assert_eq!(policy.delay(1, 0), Duration::from_millis(200));
+        assert!(policy.delay(1, u64::MAX) <= Duration::from_millis(200));
+        assert!(!policy.deadline_exceeded(Duration::from_secs(4)));
+        assert!(policy.deadline_exceeded(Duration::from_secs(6)));
+    }
 
     #[test]
     fn backoff_doubles_and_caps() {
