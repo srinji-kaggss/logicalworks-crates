@@ -34,6 +34,7 @@ mod ai_authoring;
 mod check_cli;
 mod contract_schema_compat;
 mod default_run;
+mod embedding;
 mod feature_policy;
 mod identity_binding;
 mod metadata_dimensions;

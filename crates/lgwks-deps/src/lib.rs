@@ -143,23 +143,18 @@ pub use bevy_ecs;
 /// systems inside its own loop needs the substrate and not the application
 /// layer, and the two carry different transitive cost.
 ///
-/// ```
-/// use lgwks_deps::bevy_app::App;
-///
-/// let _app = App::new();
-/// ```
+/// The consumer in `tests/fixtures/bevy-app` builds an `App` through this path, and the
+/// integration test `bevy_app_facade_is_selected_only` compiles it with the feature on and
+/// refuses it with the feature off.
 #[cfg(feature = "bevy-app")]
 #[doc(hidden)]
 pub use bevy_app;
 
 /// Bevy's time sources, including the virtual clock.
 ///
-/// ```
-/// use lgwks_deps::bevy_time::{Time, TimePlugin};
-///
-/// let _time = Time::<lgwks_deps::bevy_time::Real>::default();
-/// let _plugin = TimePlugin;
-/// ```
+/// The consumer in `tests/fixtures/bevy-time` names `Time::<Real>` and `TimePlugin` through this
+/// path, and the integration test `bevy_time_facade_is_selected_only` compiles it with the
+/// feature on and refuses it with the feature off.
 #[cfg(feature = "bevy-time")]
 #[doc(hidden)]
 pub use bevy_time;
@@ -167,17 +162,11 @@ pub use bevy_time;
 /// Bevy's state machines and their run conditions.
 ///
 /// Derive macros resolve the upstream crate name from the consumer manifest.
-/// Alias this facade module at the consumer crate root before deriving:
-///
-/// ```
-/// use lgwks_deps::bevy_state as bevy_state;
-/// use lgwks_deps::bevy_state::prelude::States;
-///
-/// #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, States)]
-/// enum Screen { #[default] Loading, Ready }
-///
-/// let _initial = Screen::default();
-/// ```
+/// Alias this facade module at the consumer crate root before deriving. The consumer in
+/// `tests/fixtures/bevy-state` does exactly that (`use lgwks_deps::bevy_state as bevy_state;`,
+/// then a `States` derive on a `Screen` enum), and the integration test
+/// `bevy_state_facade_is_selected_only` compiles it with the feature on and refuses it with the
+/// feature off.
 #[cfg(feature = "bevy-state")]
 #[doc(hidden)]
 pub use bevy_state;
@@ -190,11 +179,8 @@ pub use gpui;
 
 /// Native terminal widgets and input-driven drawing, selected explicitly.
 ///
-/// ```
-/// use lgwks_deps::appcui;
-/// use appcui::prelude::*;
-/// let _layout = layout!("x:0,y:0,w:20,h:5");
-/// ```
+/// The `appcui` example of `tests/fixtures/storefront-matrix` builds a `layout!` through this path,
+/// and the integration test `storefront_appcui_compiles_alone` compiles it with only that feature on.
 #[cfg(feature = "appcui")]
 #[doc(hidden)]
 pub use appcui;
