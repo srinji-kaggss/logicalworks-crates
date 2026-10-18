@@ -49,6 +49,17 @@ on:
 # rest one. Every job at two slots once filled swap to 96% and killed six jobs
 # (run 37675264254); this spends the slots where the codegen is, and the
 # per-feature checks and second LTO links it removed are compiles no job runs.
+#
+# The runners start under launchd with `ProcessType` Interactive
+# (`~/Library/LaunchAgents/logicalworks-crates.runner.watch.plist`), and a
+# listener started under the default type must be restarted after the change:
+# every job process inherits its listener's scheduling class. The saturation
+# 10,000-tier command (207 tests, nothing else running) took 50.5 s and 52.1 s
+# under a one-shot agent with Interactive, 70.4 s to 74.1 s with the default
+# type, 128.4 s from a terminal clamped to `taskpolicy -c utility`, and 105 s as
+# a job on the default-type listeners, against 51.9 s from a terminal; the
+# same job ran 77 s on the restarted ones. Every test was about twice as slow
+# (p50 0.82 s against 0.42 s) without any other process competing.
 
 # Supersede rather than duplicate. Two `pull_request` events in one group are
 # the same branch pushed twice, so the older run is cancelled. A run on `main`
