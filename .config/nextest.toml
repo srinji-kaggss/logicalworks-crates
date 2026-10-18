@@ -218,18 +218,6 @@ priority = 50
 filter = 'package(lgwks_std) & binary(it) & test(/^(sim_tenant_isolation|wire_feature_unification)::/)'
 priority = 50
 
-# #272: the 10,000-tier leg, run 39104226748 (the lwc-2 saturation job): the tier
-# sorts 14th of the 43 tests, so nextest launched it 19.9 s in, behind 13 `families`
-# tests that held its eight threads, and it ran 40.2 s to 60 s. The leg took 67.4 s
-# for a longest test of 40.2 s, and 19 tests finished in the 7 s after it ended.
-# Longest first bounds a leg by its longest test: priority 100
-# launches the tier first and the other 42, which hold 206 slot-seconds, run beside
-# it. The tier holds one slot and needs no exclusivity; tests, filters and slots are
-# unchanged, only the order.
-[[profile.default.overrides]]
-filter = 'package(lgwks_bot) & binary(sim_review_path) & test(=saturation_r32_tier_10000)'
-priority = 100
-
 # #272: the persist tests spend their time in the kernel (open, rename, write),
 # and macOS serializes that work host-wide, so more concurrent processes buy more
 # kernel time, not more throughput. The 236 lgwks_bot cas and journal tests, one

@@ -111,11 +111,13 @@ env:
 # The three suites of the first wave set 12 and the saturation legs of the second
 # leave it at 6 (#272). The lgwks-bot full suite alone on an idle host, 4,735
 # tests, test files on a RAM disk, nine threads: 78.96 s at 3 slots, 54.08 s at 6,
-# 46.01 s at 12 and 45.89 s at 64. In run 39105571862 (12 for every job) the first
-# wave ended at 150 s against 166 to 179 s, bot-full at 145 s against 163, and the
-# second wave's legs took 77.7 s and 73.5 s against 67.4 s and 17.9 s: the small
-# leg's 164 `sim_scale` journal tests and the tier, 16 processes at once, met the
-# kernel's serialised file work.
+# 46.01 s at 12 and 45.89 s at 64. The first wave ended at 150 s (bot-full 145 s)
+# with 12 for every job and at 160 s with 12 for the first wave only (runs
+# 39105571862 and 39105969151), against 166 to 179 s at 6. The second wave is
+# bound by the kernel's file and process work whatever the slots or the order:
+# the two legs took 77.7 s and 73.5 s at 12 slots and 68.5 s and 61.5 s at 6 with
+# the 10,000 tier ordered first, against 67.4 s and 17.9 s with it last, so the
+# order is the one it was and the legs keep 6.
 
 jobs:
   # The gate lanes and the workspace suite, in two shards of one nextest run.
