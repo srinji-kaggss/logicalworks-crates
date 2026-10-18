@@ -70,7 +70,7 @@ impl FakeGh {
         std::fs::write(&behaviour, Scenario::new(head_sha).to_behaviour())?;
 
         let script = dir.join("gh");
-        std::fs::write(&script, FAKE_GH_SOURCE)?;
+        std::fs::write(&script, format!("#!{}\n{FAKE_GH_BODY}", interpreter()))?;
         make_executable(&script)?;
         Ok(Self { dir, log })
     }
@@ -213,7 +213,27 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The fake client itself.
+/// The interpreter the fake's `#!` line names: `bash` where the platform ships
+/// it, else `sh`.
+///
+/// The script is POSIX, so either runs it, and what differs is what one costs. A
+/// saturation family starts the fake fifty thousand times at its 10,000 tier, and
+/// on the macOS runners that is kernel time the thirteen jobs of a CI run share
+/// (#272). Measured on that host, a fake-`gh` style script ran 268 times a second
+/// under `/bin/sh` and 406 under `/bin/bash` from one loop, and 1,566 and 2,702 a
+/// second from twenty-four loops at once; a 100-record read-back took 7.6 ms under
+/// `sh` and 6.1 ms under `bash` from eight loops. `dash` starts faster still but
+/// reads a file one byte per `read(2)`, so the same read-back took 110 ms from
+/// eight loops: it is not a choice. Debian's `bash` is present beside its `sh`.
+fn interpreter() -> &'static str {
+    if Path::new("/bin/bash").is_file() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    }
+}
+
+/// The fake client itself, without its `#!` line (see [`interpreter`]).
 ///
 /// POSIX `sh`, no `jq`, no `python`: the estate's portability rules apply to a
 /// fixture too, and a fake that needs a JSON processor to fake a JSON client is
@@ -225,8 +245,7 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
 /// that dies mid-way is still recorded. That is the point: the question the
 /// tests ask is how many times the code under test *issued* a create, which is
 /// what this log counts.
-const FAKE_GH_SOURCE: &str = r#"#!/bin/sh
-# A fake `gh api` for the adapter's tests. Records argv, then answers from a
+const FAKE_GH_BODY: &str = r#"# A fake `gh api` for the adapter's tests. Records argv, then answers from a
 # behaviour file. Never touches the network.
 set -u
 
