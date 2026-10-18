@@ -105,6 +105,13 @@ env:
   # job has. This restores the declared setting; it changes how much is
   # recompiled, not what is built.
   CARGO_INCREMENTAL: "1"
+  # The machine-wide count of test processes the nextest wrapper `churn-slot`
+  # lets run at once (`.config/nextest.toml`); unset it is 6. The lgwks-bot full
+  # suite alone on an idle host, 4,735 tests, test files on a RAM disk, nine
+  # threads: 78.96 s at 3 slots, 54.08 s at 6, 46.01 s at 12 and 45.89 s at 64
+  # (#272), so 12 is as fast as no cap, and the three suites of the first wave (9,
+  # 9 and 6 threads) can each use their threads instead of queueing on six slots.
+  LWC_CHURN_SLOTS: "12"
 
 jobs:
   # The gate lanes and the workspace suite, in two shards of one nextest run.
