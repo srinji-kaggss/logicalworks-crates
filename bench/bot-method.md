@@ -37,7 +37,7 @@ consequences, both of them visible in the output:
 #279 asks for change ticks where the source reports its own revision, with the
 digest path kept for sources that cannot, and for the record of which uses
 which. The seam is `Observe::revision() -> Option<u64>`
-(`crates/lgwks-bot/src/spec.rs:618`):
+(`crates/lgwks-bot/src/spec.rs:499`):
 
 - A source that reports `Some(revision)` takes the **change-tick path**: the
   substrate compares the reported revision against the one it committed with

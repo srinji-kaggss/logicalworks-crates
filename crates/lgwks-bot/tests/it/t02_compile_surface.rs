@@ -6,6 +6,7 @@
 //! |---|---|
 //! | `a_correct_local_borrowed_non_send_consumer_compiles` | the probe harness can compile a valid consumer, so a negative probe cannot be a missing-dependency failure in disguise |
 //! | `a_source_condition_action_mismatch_is_refused_t02` | the typed chain builder refuses a condition/action that do not read the source's output |
+//! | `an_action_that_takes_another_type_is_refused_with_e0271` | an action whose `Input` is not the source's output is refused with `E0271` |
 //! | `a_cross_schema_result_binding_is_refused` | binding a `Report<T>` from one schema into a `Report<U>` is a type error |
 //! | `a_local_borrowed_non_send_body_runs_on_the_host` | an `Rc<RefCell<_>>`-holding body over a borrowed `&[u8]`, with an await in the middle, compiles and runs |
 //!
@@ -96,6 +97,39 @@ fn main() {
 }
 "#;
 
+/// An action whose `Input` is `u32` after a source that yields `u16`: the `.on` bound
+/// `A: Execute<Input = S::Output>` cannot hold.
+const MISMATCHED_ACTION: &str = r#"
+use lgwks_bot::{Auth, Bot, BotError, Cap, Execute, GrantSet, Observe};
+
+struct Source;
+impl Observe for Source {
+    type Output = u16;
+    fn required_caps(&self) -> &[Cap] { &[] }
+    async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> { call.0.check(&[])?; Ok(3) }
+    fn domain_id(&self) -> &str { "probe::source" }
+}
+
+struct Courier;
+impl Execute for Courier {
+    type Input = u32;
+    type Output = ();
+    fn required_caps(&self) -> &[Cap] { &[] }
+    async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+        call.0.check(&[])?;
+        Ok(())
+    }
+    fn domain_id(&self) -> &str { "probe::courier" }
+}
+
+fn main() {
+    let _built = Bot::builder("probe")
+        .observe(Source)
+        .on(|ticks: &u16| *ticks >= 3, Courier)
+        .build(&GrantSet::empty());
+}
+"#;
+
 /// A task that yields a `String` bound into a `Report<u32>`: the two schemas do
 /// not line up.
 const CROSS_SCHEMA_BINDING: &str = r#"
@@ -137,6 +171,17 @@ fn a_source_condition_action_mismatch_is_refused_t02() -> TestResult {
     // The condition reads `String` while the source yields `u32`, so the
     // `Evaluate<S::Output>` bound is unsatisfied: E0277 naming the trait.
     assert_refused_for(&output, "E0277", "Evaluate");
+    Ok(())
+}
+
+/// An action that takes another type than its source produces is a compile error, `E0271`, not a
+/// downcast miss discovered on a tick.
+#[test]
+fn an_action_that_takes_another_type_is_refused_with_e0271() -> TestResult {
+    let output = compile_probe("t02-action-mismatch", "", MISMATCHED_ACTION)?;
+    // `Courier::Input` is `u32` where the source's output is `u16`: a type mismatch resolving
+    // the associated type, which rustc reports as E0271 naming `Input`.
+    assert_refused_for(&output, "E0271", "Input");
     Ok(())
 }
 

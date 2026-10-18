@@ -13,7 +13,8 @@ use lgwks_bot::clock::Clock;
 use lgwks_bot::rt::runtime::Builder;
 use lgwks_bot::rt::supervise::{Budget, NextAction, Supervisor};
 use lgwks_bot::rt::sync::{CancellationToken, oneshot};
-use lgwks_bot::rt::time::Deadline;
+use lgwks_bot::rt::task::{JoinError, JoinSet, join_all_bounded};
+use lgwks_bot::rt::time::{Deadline, sleep};
 
 /// What every fallible test here returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -35,6 +36,15 @@ async fn expect_one_drained(supervisor: Supervisor, ran: oneshot::Receiver<()>) 
     assert_eq!(report.stats().completed, 1, "the one task was drained");
     assert_eq!(report.outcomes().len(), 1, "the report holds its outcome");
     assert_eq!(report.panicked().count(), 0, "and it did not panic");
+}
+
+/// Start a repeating task that never ends on its own, so only a shutdown can end it.
+async fn start_ongoing_repeat(supervisor: &mut Supervisor) {
+    supervisor
+        .spawn_repeating(Budget::Ongoing, |tick| async move {
+            let _tick = tick;
+        })
+        .await;
 }
 
 #[test]
@@ -78,15 +88,71 @@ fn an_ongoing_repeat_still_ends_when_the_supervisor_shuts_down() -> TestResult {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         let mut supervisor = Supervisor::new(4);
-        supervisor
-            .spawn_repeating(Budget::Ongoing, |tick| async move {
-                let _tick = tick;
-            })
-            .await;
+        start_ongoing_repeat(&mut supervisor).await;
         // `Ongoing` is unbounded, and it still ends: shutdown cancels the token it races. The
         // drained evidence is the report, not just an empty set.
         let _report = supervisor.shutdown().await;
     });
+    Ok(())
+}
+
+#[test]
+fn a_supervisor_refuses_past_its_ceiling_and_reports_an_outcome_for_every_task() -> TestResult {
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        // At most 4 in flight, ever.
+        let mut supervisor = Supervisor::new(4);
+        start_ongoing_repeat(&mut supervisor).await;
+        assert!(
+            supervisor.try_spawn(|_token| async {}).is_ok(),
+            "a spawn under the ceiling is admitted"
+        );
+        // Cancel, drain, join, and hand back the evidence.
+        let report = supervisor.shutdown().await;
+        assert_eq!(report.stats().spawned, 2, "both tasks were started");
+        assert_eq!(report.stats().completed, 2, "both were drained");
+        assert_eq!(
+            report.outcomes().len(),
+            2,
+            "each names one terminal outcome"
+        );
+    });
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_token_stops_the_task_a_join_set_owns() -> TestResult {
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let token = CancellationToken::new();
+        let mut tasks = JoinSet::new();
+        let worker = token.clone();
+        tasks.spawn(async move {
+            worker.cancelled_owned().await;
+        });
+        token.cancel();
+        while let Some(joined) = tasks.join_next().await {
+            joined?;
+        }
+        Ok::<(), JoinError>(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn a_bounded_fan_out_runs_every_input() -> TestResult {
+    let runtime = Runtime::new()?;
+    let results = runtime.block_on(async {
+        join_all_bounded(
+            4,
+            (0..16).map(|index| async move {
+                sleep(Duration::from_millis(1)).await;
+                index * index
+            }),
+        )
+        .await
+    });
+    assert_eq!(results.len(), 16, "every input produced a result");
     Ok(())
 }
 
@@ -180,19 +246,67 @@ mod tenancy {
 
 #[cfg(all(unix, feature = "process"))]
 mod process {
-    use lgwks_bot::rt::process::{FrameRead, ProcessSpec, read_frames};
+    use std::num::NonZeroUsize;
 
-    use super::{Error, Runtime, Supervisor, TestResult};
+    use lgwks_bot::rt::process::{
+        FrameRead, OrphanReap, ProcessIdentity, ProcessSpec, read_frames, reap_orphaned_group,
+    };
+
+    use super::{Duration, Error, Runtime, Supervisor, TestResult};
+
+    /// A description of `sh -c <script>`; nothing starts until a supervisor takes it.
+    fn shell(script: &str) -> ProcessSpec {
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg(script);
+        spec
+    }
 
     #[test]
     fn a_borrowed_process_spec_is_started_and_owned_by_the_supervisor() -> TestResult {
         let runtime = Runtime::new()?;
         runtime.block_on(async {
             let mut supervisor = Supervisor::default();
-            let mut spec = ProcessSpec::new("sh");
-            spec.arg("-c").arg("exit 0");
-            supervisor.spawn_process(&spec).await?;
+            supervisor.spawn_process(&shell("exit 0")).await?;
             let _report = supervisor.shutdown().await;
+            Ok::<(), Box<dyn Error>>(())
+        })
+    }
+
+    #[test]
+    fn a_stored_leader_identity_parses_back_and_a_gone_group_is_not_signalled() -> TestResult {
+        let runtime = Runtime::new()?;
+        runtime.block_on(async {
+            let mut supervisor = Supervisor::default();
+            let started = supervisor
+                .spawn_process_identified(&shell("exit 0"))
+                .await?;
+            // The text a lane stores durably before it does work.
+            let stored = started.leader().to_string();
+            let _report = supervisor.shutdown().await;
+            let leader: ProcessIdentity = stored.parse()?;
+            let reaped = reap_orphaned_group(&leader)?;
+            assert!(
+                !matches!(reaped, OrphanReap::Signalled { .. }),
+                "a group that has exited is not signalled: {reaped:?}"
+            );
+            Ok::<(), Box<dyn Error>>(())
+        })
+    }
+
+    #[test]
+    fn a_command_runs_with_its_stdout_captured_to_a_ceiling_and_a_deadline() -> TestResult {
+        let runtime = Runtime::new()?;
+        runtime.block_on(async {
+            let mut spec = shell("printf ready");
+            spec.capture_stdout(NonZeroUsize::new(64 * 1024).ok_or("a non-zero ceiling")?)
+                .deadline(Duration::from_secs(10));
+            let mut supervisor = Supervisor::new(1);
+            let run = supervisor.run_process(&spec).await?;
+            assert_eq!(
+                run.stdout().bytes(),
+                b"ready",
+                "the captured stdout is what the child printed"
+            );
             Ok::<(), Box<dyn Error>>(())
         })
     }

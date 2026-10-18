@@ -758,7 +758,7 @@ fn dependants_are_capped_at_the_declared_bound() -> TestResult {
 /// the defects they rule out and are allowed to name them.
 #[test]
 fn no_readiness_path_sleeps_or_polls() -> TestResult {
-    let code = read_source("src/script/ready.rs")?;
+    let code = read_module("src/script/ready")?;
     // `sleep(` and `while ` are the shapes a guessed readiness takes: a fixed
     // wait, and a re-read on a condition. A `loop` is *not* banned outright,
     // because the wait legitimately re-reads the channel after every wake from
@@ -826,6 +826,26 @@ fn read_source(relative: &str) -> Result<String, Box<dyn Error>> {
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+/// A module's source without comment lines: its root file, then each file in the
+/// directory beside it in name order.
+///
+/// The readiness module is a root and four leaves, and the claim is about all of
+/// it, so the leaves are read in a fixed order and joined.
+fn read_module(stem: &str) -> Result<String, Box<dyn Error>> {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut leaves = std::fs::read_dir(base.join(stem))?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    leaves.sort();
+    let mut code = read_source(&format!("{stem}.rs"))?;
+    for leaf in leaves {
+        let name = leaf.to_string_lossy();
+        code.push('\n');
+        code.push_str(&read_source(&format!("{stem}/{name}"))?);
+    }
+    Ok(code)
 }
 
 /// The lines of `source` between two markers, as one string.

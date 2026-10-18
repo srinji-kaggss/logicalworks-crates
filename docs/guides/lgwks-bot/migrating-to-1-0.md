@@ -49,22 +49,10 @@ supervisor reports how a task ended, never what it computed.
 
 **"Run a command."** `ProcessSpec` and `run_process`:
 
-```rust
-use std::num::NonZeroUsize;
-use std::time::Duration;
-use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::Supervisor;
-
-async fn version() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut spec = ProcessSpec::new("rustc");
-    spec.arg("--version")
-        .capture_stdout(NonZeroUsize::new(64 * 1024).ok_or("non-zero")?)
-        .deadline(Duration::from_secs(10));
-    let mut supervisor = Supervisor::new(1);
-    let run = supervisor.run_process(&spec).await?;
-    Ok(run.stdout().bytes().to_vec())
-}
-```
+`a_command_runs_with_its_stdout_captured_to_a_ceiling_and_a_deadline`
+(`crates/lgwks-bot/tests/it/rt_front_door.rs`) runs it: a `ProcessSpec` with
+`capture_stdout(64 KiB)` and a ten-second deadline goes to
+`Supervisor::run_process`, and `run.stdout().bytes()` is what the child printed.
 
 ## Traps the compiler cannot show
 
