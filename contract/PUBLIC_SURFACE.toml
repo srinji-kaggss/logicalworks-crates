@@ -155,7 +155,10 @@
 "crates/lgwks-deps/src/invariants/resolve.rs" = 2
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
 "crates/lgwks-deps/src/lock.rs" = 7
-"crates/lgwks-deps/src/metadata.rs" = 28
+"crates/lgwks-deps/src/metadata/capture.rs" = 2
+"crates/lgwks-deps/src/metadata/collect.rs" = 9
+"crates/lgwks-deps/src/metadata/edges.rs" = 1
+"crates/lgwks-deps/src/metadata/types.rs" = 16
 "crates/lgwks-deps/src/refusal.rs" = 4
 "crates/lgwks-deps/src/vendor.rs" = 11
 "crates/lgwks-macros/src/emit.rs" = 1
@@ -199,4 +202,3 @@
 # The doc-example ceiling (#526): per documentation file, how many fenced Rust
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
-"crates/lgwks-deps/src/metadata.rs" = 4
