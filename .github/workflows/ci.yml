@@ -7,6 +7,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The same matrix on a branch's head with no commit to carry it. #272's
+  # acceptance counts consecutive `main` runs under 300 s, and the only way to
+  # take one was a merge, so a run of the landed code had to wait for a change
+  # to land. `gh workflow run ci.yml --ref main` starts it; a run on `main`
+  # takes the `main` paths of the file (the cache saves, the receipts upload).
+  workflow_dispatch:
 
 # WORKFLOW.md §12 is this workflow's specification: the nine axes it is held
 # to, the budget, and the measurements behind the layout below.
