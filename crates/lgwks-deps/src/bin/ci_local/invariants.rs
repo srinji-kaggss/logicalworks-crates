@@ -591,8 +591,8 @@ mod tests {
     fn a_real_function_in_the_wrong_module_is_refused() -> TestResult {
         let modules = collect_module_paths(&repo())?;
         assert_eq!(
-            resolution_candidates(&modules, "lgwks_deps::metadata::lexical_join"),
-            vec!["lgwks-deps::metadata".to_owned()],
+            resolution_candidates(&modules, "lgwks_deps::metadata::edges::lexical_join"),
+            vec!["lgwks-deps::metadata::edges".to_owned()],
             "a correct reference resolves"
         );
         assert!(
