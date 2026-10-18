@@ -40,6 +40,9 @@ mod metadata_dimensions;
 mod metadata_public_api;
 mod origin_binding;
 mod prop_parsers;
+// The wrapper's journeys run `/bin/sh` and a program that reads a pipe.
+#[cfg(unix)]
+mod sim_churn_slot;
 mod sim_dependency_policy;
 mod sim_invariant_register;
 mod sim_license_policy;

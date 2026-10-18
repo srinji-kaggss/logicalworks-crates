@@ -119,7 +119,7 @@ tests = [
   "it::observe_refresh::a_chain_held_at_capacity_does_not_starve_an_independent_chain",
   "it::observe_refresh::a_slow_source_does_not_block_an_independent_chain",
   "it::observe_refresh::a_saturated_mass_does_not_starve_an_independent_chain_at_every_tier",
-  "it::sim_observe_refresh::a_seeded_mass_of_held_chains_never_starves_an_independent_chain",
+  "it::sim_observe_refresh::sim_scripted_reports::a_seeded_mass_of_held_chains_never_starves_an_independent_chain",
   "it::sim_observe_refresh::saturation_band_30",
   "it::sim_observe_refresh::saturation_band_31",
 ]
@@ -133,9 +133,9 @@ gap = ""
 tests = [
   "it::sim_t_rows::a_failed_group_leaves_its_own_chain_forced_t07",
   "it::observe_refresh::a_failed_refresh_keeps_the_baseline_marked",
-  "it::sim_observe_refresh::a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it",
+  "it::sim_observe_refresh::sim_scripted_reports::a_failed_forced_refresh_keeps_the_mark_until_a_committed_read_spends_it",
   "it::observe_refresh::two_tenants_sources_forced_refreshes_stay_attributed_to_their_own_chain",
-  "it::sim_observe_refresh::two_tenants_interleaved_ticks_never_cross_attribution",
+  "it::sim_observe_refresh::sim_scripted_reports::two_tenants_interleaved_ticks_never_cross_attribution",
 ]
 
 [[row]]
@@ -150,7 +150,7 @@ tests = [
   "it::observe_refresh::a_forced_refresh_commits_the_newer_value_and_then_returns_to_quiet",
   "it::observe_refresh::a_wave_spends_one_watchdog_and_a_mass_of_waves_spends_one_each",
   "it::observe_refresh::a_stalled_chain_is_re_polled_and_commits_when_it_answers",
-  "it::sim_observe_refresh::a_seeded_reason_per_chain_is_reported_against_its_own_chain",
+  "it::sim_observe_refresh::sim_scripted_reports::a_seeded_reason_per_chain_is_reported_against_its_own_chain",
   "it::sim_observe_refresh::forced_refresh_band_00",
   "it::sim_observe_refresh::forced_refresh_band_01",
   "it::sim_observe_refresh::forced_refresh_band_02",
@@ -168,7 +168,7 @@ tests = [
   "it::durable_dispatch::two_equal_payloads_with_distinct_event_ids_are_two_events",
   "it::sim_observe_refresh::event_identities_band_14",
   "it::sim_observe_refresh::event_identities_band_15",
-  "it::sim_observe_refresh::a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once",
+  "it::sim_observe_refresh::sim_scripted_reports::a_seeded_value_sequence_under_a_held_action_reports_each_replaced_revision_once",
 ]
 
 [[row]]

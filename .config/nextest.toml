@@ -6,8 +6,39 @@
 # 300 s is the whole budget for a gate, so no single test may take longer; the
 # per-module overrides below are tighter where their tests are known to be
 # shorter, and an override's own slow-timeout takes precedence over this one.
+experimental = ["setup-scripts", "wrapper-scripts"]
+
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# #272: on macOS the thirteen jobs of a run share one kernel, and the same suite
+# that takes 40 s alone with its temporary files on a RAM disk (bot-full: 4,733
+# tests, p99 2.2 s, longest 17 s) takes about 300 s beside the other jobs (p99
+# 29 s, longest 129 s on run 39072053122). Concurrent file churn on that kernel
+# loses throughput past about four processes: copies of one test, one at a time
+# 4.17 s, four at once 8.63 s each, thirteen 40.7 s each. This holds every test
+# process on macOS to one of a few slots shared by every job of the machine, so the
+# limit is across jobs, which a test group (per job) cannot be. The wrapper is the
+# `churn-slot` binary of lgwks_deps (its header says how a slot is taken and why it
+# is a binary: a first version through /bin/sh and lockf lost the DYLD_* variables
+# macOS removes at a protected binary, and a proc-macro crate's tests failed to
+# load libstd). The setup script builds it once per run, in the target directory
+# the run already uses, so a job that builds only lgwks_bot still has it.
+[scripts.setup.build-churn-slot]
+command = ['cargo', 'build', '--locked', '-p', 'lgwks_deps', '--bin', 'churn-slot']
+
+[scripts.wrapper.churn-slot]
+command = { command-line = "debug/churn-slot", relative-to = "target" }
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "macos")'
+filter = 'all()'
+setup = 'build-churn-slot'
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "macos")'
+filter = 'all()'
+run-wrapper = 'churn-slot'
 
 # journal_scale measures how many OS threads the process can create and then
 # holds that many tenant journals open. On Linux the thread limit is per user,
