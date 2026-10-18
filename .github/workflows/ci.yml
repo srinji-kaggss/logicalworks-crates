@@ -281,7 +281,10 @@ jobs:
   simulation_evidence:
     name: successful simulation result
     needs: workspace_tail
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    # On an instance that holds no suite (this row and `debug_e2e` took 12 s each
+    # on lwc-2 and lwc-13 on main run 39097949541, and the 10,000-tier saturation
+    # leg, queued 04:44:03 for lwc-2, started 04:44:13 behind the first of them).
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-1]
     timeout-minutes: 5
     steps:
       - name: Download gate evidence
@@ -296,7 +299,8 @@ jobs:
   debug_e2e:
     name: successful end-to-end journey result
     needs: workspace_tail
-    runs-on: [self-hosted, macOS, ARM64, lwc]
+    # On lwc-6, which holds only a target leg that has ended: see the row above.
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
     timeout-minutes: 5
     steps:
       - name: Download gate evidence
