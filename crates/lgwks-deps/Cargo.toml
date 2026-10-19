@@ -170,6 +170,12 @@ path = "src/bin/acceptance_receipts/main.rs"
 name = "linux-container-tests"
 path = "src/bin/linux_container_tests/main.rs"
 
+# The downstream proof of a release (#155, #526): every published crate built
+# from crates.io at its newest tag, with the README's own quickstart.
+[[bin]]
+name = "published-consumer"
+path = "src/bin/published_consumer/main.rs"
+
 [[bin]]
 name = "ai-authoring"
 path = "src/bin/ai_authoring/main.rs"
