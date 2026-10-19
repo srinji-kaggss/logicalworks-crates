@@ -53,10 +53,10 @@ trials per task and arm: muse 1.3 in the matrix of 2026-10-17
 and two local models at zero charge, Qwen3.5-0.8B and Qwen2.5-coder 7B, 5 full
 passes of 330 between them ([matrix-local-2026-10-19.md](matrix-local-2026-10-19.md)).
 Not measured: a frontier closed model, ten trials per cell and human authors
-(removed from #270's acceptance by the Director on 2026-10-18). The oracles of the last three tasks are proven by negative
-controls (`ai-authoring --mutants` and the `futures` references,
-[guarantees.md](guarantees.md)); no interval is claimed over deterministic
-references.
+(removed from #270's acceptance by the Director on 2026-10-18). The oracles of
+the last three tasks are proven by negative controls (`ai-authoring --mutants`
+and the `futures` references, [guarantees.md](guarantees.md)); no interval is
+claimed over deterministic references.
 
 ## How to rerun
 
