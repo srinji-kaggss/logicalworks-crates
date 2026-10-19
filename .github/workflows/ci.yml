@@ -598,6 +598,18 @@ jobs:
           # 39245570492). The job timer runs from job start, so the delay counts
           # against the cap; it yields nothing now.
           defer: "0"
+          # The tests run in the container, whose /tmp is its own tmpfs and
+          # whose only host mount of files is the checkout (`plan.rs`), so the
+          # host RAM disk this input makes held nothing the leg read: 13 s of
+          # the 288 s on run 39252665926, and the same four `diskutil` calls
+          # every job makes at one second (#272).
+          tmp-gib: "0"
+          # `NEXTEST_TEST_THREADS` reaches the container, and the leg ran at
+          # two: 185 s for 5,015 tests on run 39252665926, and the leg was
+          # cancelled at the cap on runs 39250803813, 39251780293 and
+          # 39253542698 with its suite still running. Four, against the nine
+          # the macOS bot-full suite is green at.
+          test-share: "4"
       # The container image is Debian trixie, whose util-linux 2.41 `setpriv`
       # applies the Landlock rules `Confinement::Landlock` wraps (#337);
       # bookworm's 2.38 cannot, and the Landlock simulations failed there with
