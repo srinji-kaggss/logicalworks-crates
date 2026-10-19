@@ -86,6 +86,12 @@ impl Failure {
         })
     }
 
+    /// A call with arguments, logged where it was refused.
+    fn usage<T>() -> Result<T, Self> {
+        lgwks_std::trace::debug!("the check takes no arguments");
+        Err(Self::Usage)
+    }
+
     /// A missing input, logged where it was found missing.
     fn missing<T>(what: String) -> Result<T, Self> {
         lgwks_std::trace::debug!(what = %what, "an input the check needs is missing");
@@ -277,7 +283,7 @@ fn manifest_version(manifest: &str) -> Option<String> {
 /// Runs every consumer; how many failed.
 fn execute(console: &Console, children: &Children) -> Result<u32, Failure> {
     if std::env::args().nth(1).is_some() {
-        return Err(Failure::Usage);
+        return Failure::usage();
     }
     let work = Work::make()?;
     let mut env = children::inherited_env();
