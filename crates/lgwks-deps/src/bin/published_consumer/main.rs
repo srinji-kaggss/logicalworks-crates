@@ -100,25 +100,31 @@ impl Failure {
 }
 
 /// The per-run directory every consumer is built in, removed when the run ends.
-/// Its name is 64 random bits, so two runs on one machine never share one.
+/// It is claimed with an exclusive `create_dir`, which refuses a name that exists
+/// (a stale directory, or one another user planted), so two runs never share one.
+/// `lgwks_std::random` is not used: the WASI target checks this package too, and
+/// that module refuses wasm.
 struct Work {
     /// The directory.
     path: PathBuf,
 }
 
+/// How many names a run tries before it gives up on the temporary directory.
+const NAMES: u32 = 64;
+
 impl Work {
     /// Makes a directory no other run holds.
     fn make() -> Result<Self, Failure> {
-        let bytes = match lgwks_std::random::bytes::<8>() {
-            Ok(found) => found,
-            Err(error) => return Failure::missing(format!("no entropy for a work name: {error}")),
-        };
-        let name = format!("published-consumer-{:016x}", u64::from_le_bytes(bytes));
-        let path = std::env::temp_dir().join(name);
-        match fs::create_dir(&path) {
-            Ok(()) => Ok(Self { path }),
-            Err(error) => Failure::io(&path, error),
+        for attempt in 0..NAMES {
+            let name = format!("published-consumer-{}-{attempt}", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Failure::io(&path, error),
+            }
         }
+        Failure::missing(format!("no free work directory name in {NAMES} attempts"))
     }
 }
 
