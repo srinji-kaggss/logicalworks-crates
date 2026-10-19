@@ -34,7 +34,11 @@ fn launch<'run>(
     }
 }
 
-/// Every `[package.metadata.docs.rs]` names a feature set that builds.
+/// Every `[package.metadata.docs.rs]` names a feature set that builds, on the
+/// nightly toolchain docs.rs uses. A runner's first nightly run compiles the
+/// whole dependency graph once (the step is cancelled at the job cap when the
+/// host is loaded); its target directory keeps the result, so later runs only
+/// document the workspace crates.
 pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateError> {
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
     for directory in crate_directories(context.root) {
