@@ -28,6 +28,8 @@ mod console;
 mod consumer;
 mod program;
 #[cfg(test)]
+mod sim_program;
+#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
