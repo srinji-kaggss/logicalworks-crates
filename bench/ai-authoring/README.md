@@ -26,6 +26,7 @@ member.
 | [Recovery, re-measured](recovery.md) | The three rig defects behind recovery's first 2/20, found one per run, and the regrade. |
 | [The guarantee tasks and their controls](guarantees.md) | The `script!` arm, the three tasks whose oracles fail a solution lacking the guarantee, and the reference and mutant controls. |
 | [The model matrix of 2026-10-17](matrix-2026-10-17.md) | The first `--matrix` run: one model, 165 records, passes per task and arm, and the 14 crashed records. |
+| [The local-model matrices of 2026-10-18 and 2026-10-19](matrix-local-2026-10-19.md) | Qwen3.5-0.8B and Qwen2.5-coder 7B on Ollama at zero charge: 330 records, passes per task and arm, and what they do not show. |
 
 ## Which arm wins, per task
 
@@ -45,12 +46,14 @@ one per cell at HEAD (`runs/20261016T225212Z-dry/`), not model samples
 | `durable-retry` | all clauses | all clauses | all clauses | 4/6 clauses | `lgwks_bot` arms: `futures` duplicates an effect across a drop and a `SIGKILL`, in 30 lines (`old` 38). |
 
 The `script` arm passes every clause of the three guarantee tasks as a
-reference too. One model has authored in it, and in `lexicon` (a `script!`
-author whose whole context is the generated `docs/script-lexicon.md`): the
-matrix of 2026-10-17, five trials per task and arm
-([matrix-2026-10-17.md](matrix-2026-10-17.md), `runs/20261017-matrix-models/`).
-Not measured: a second model, a frontier closed model, ten trials per cell and
-human authors. The oracles of the last three tasks are proven by negative
+reference too. Three models have authored in it, and in `lexicon` (a `script!`
+author whose whole context is the generated `docs/script-lexicon.md`), five
+trials per task and arm: muse 1.3 in the matrix of 2026-10-17
+([matrix-2026-10-17.md](matrix-2026-10-17.md), `runs/20261017-matrix-models/`)
+and two local models at zero charge, Qwen3.5-0.8B and Qwen2.5-coder 7B, 5 full
+passes of 330 between them ([matrix-local-2026-10-19.md](matrix-local-2026-10-19.md)).
+Not measured: a frontier closed model, ten trials per cell and human authors
+(removed from #270's acceptance by the Director on 2026-10-18). The oracles of the last three tasks are proven by negative
 controls (`ai-authoring --mutants` and the `futures` references,
 [guarantees.md](guarantees.md)); no interval is claimed over deterministic
 references.
