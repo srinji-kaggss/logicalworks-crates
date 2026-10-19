@@ -515,12 +515,12 @@ fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     let grown = doubled.min(MAX_BACKOFF);
     // The jitter byte comes from the step key, so two siblings that failed
     // together spread out rather than retrying in lockstep, and the same step
-    // always waits the same time. A key with no byte at this index contributes no
-    // jitter: the key is a step path, and the index is inside its low five bits.
-    let jitter_byte = match key.as_bytes().get(usize::saturating_from(attempt) & 31) {
-        Some(byte) => u32::from(*byte),
-        None => 0,
-    };
+    // always waits the same time. The key is 32 bytes and the index is masked to
+    // its low five bits, so the byte always exists: there is no missing case to
+    // give a default. The annotation pins the width the mask relies on, so a key
+    // of another width stops compiling here instead of reading out of range.
+    let bytes: &[u8; 32] = key.as_bytes();
+    let jitter_byte = u32::from(bytes[usize::saturating_from(attempt) & 31]);
     // The halving is done in nanoseconds, which is a width wide enough that the
     // product cannot overflow and a divide by a constant is total — where
     // `Duration` has no total divide and its checked one returns an `Option` whose
