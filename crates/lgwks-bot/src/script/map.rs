@@ -294,12 +294,15 @@ pub enum StepKind {
     Observe,
     /// `act domain::id on target with value`; the subject is the identifier.
     Act,
-    /// `if cond:`.
+    /// `if cond:`. It names none of a bound, deadline, attempt count, step,
+    /// callee or branch count, so read the condition from [`StepShape::detail`].
     If,
-    /// `else:` or `else if cond:`.
+    /// `else:` or `else if cond:`. As [`StepKind::If`], the header is in
+    /// [`StepShape::detail`].
     Else,
-    /// `fail with ..` or `fail transiently with ..`.
+    /// `fail with ..` or `fail transiently with ..`. The header is in
+    /// [`StepShape::detail`].
     Fail,
-    /// `give back ..`.
+    /// `give back ..`. The header is in [`StepShape::detail`].
     GiveBack,
 }

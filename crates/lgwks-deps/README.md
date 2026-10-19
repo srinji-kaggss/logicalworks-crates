@@ -65,13 +65,12 @@ cannot change a build. See issue #204.
 
 `vendor check` is the physical counterpart of the register: the register states
 which edges are owned, a vendored tree states which bytes an offline build
-resolves, and the subcommand binds the two by hash. **Status in this repository,
-unresolved:** `vendor/` is present (294 directories, 12,240 tracked files) but
+resolves, and the subcommand binds the two by hash. **Status in this repository:**
+no `vendor/` tree is tracked (`git ls-files vendor` lists nothing) and
 `.cargo/config.toml` names no `[source.vendored-sources]`, so no build resolves
-from it and `lgwks-deps vendor check .` refuses with "names no
-[source.vendored-sources] directory". Nothing here makes repositories share one
-physical copy. The tree is outside all package directories, so `cargo package`
-never ships it.
+from one and `lgwks-deps vendor check .` refuses with "names no
+[source.vendored-sources] directory". The subcommand is for a repository that
+vendors; nothing here makes repositories share one physical copy.
 
 `tier` is read in exactly one place: an approval at the `vendor` tier whose
 authored edge still resolves from a registry or git source is refused by name as

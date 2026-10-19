@@ -42,7 +42,7 @@
 //! ## The rule a future verb has to keep
 //!
 //! One type across the chain is sound because every verb so far consumes its
-//! input and produces a caller-visible one — [`Evaluate::check`] returns a
+//! input and produces a caller-visible one — [`Evaluate::check`](crate::verb::Evaluate::check) returns a
 //! `bool`, a pure predicate with no derived output. **No stage may introduce a
 //! caller-selected type parameter disconnected from its input.** A stage that
 //! transforms the value must carry the transformation as an associated type

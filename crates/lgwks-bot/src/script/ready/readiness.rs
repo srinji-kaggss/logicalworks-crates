@@ -146,6 +146,9 @@ impl<T: Clone> Readiness<T> {
     /// is older than the generation this readiness has settled at. A readiness
     /// that has already released refuses any further signal with
     /// [`ReadinessError::AlreadyReady`](super::ReadinessError::AlreadyReady).
+    /// A readiness that has already failed refuses a signal at any generation
+    /// with [`ReadinessError::AlreadyFailed`](super::ReadinessError::AlreadyFailed),
+    /// and one that was shut down refuses it as a generation mismatch.
     pub fn ready(&self, generation: Generation, value: T) -> Result<(), ReadinessError> {
         let mut status = self.lock();
         let current = status.generation();
@@ -367,10 +370,19 @@ impl<T: Clone> Readiness<T> {
     /// # Errors
     ///
     /// [`ReadinessError::DependantsFull`](super::ReadinessError::DependantsFull) at the declared cap; the readiness's
-    /// own failure or shutdown through [`ReadinessError`](super::ReadinessError); [`FlowError::Cancelled`]
-    /// when `scope` is stopped; [`FlowError::TimedOut`] when `limit` passes. The
-    /// last two are the scope's, not the readiness's, so an enclosing
-    /// [`retry`](crate::script::retry) does not retry a cancelled dependant.
+    /// own failure through [`ReadinessError::NotReady`](super::ReadinessError::NotReady);
+    /// [`FlowError::Cancelled`] when `scope` is stopped or when the readiness
+    /// was shut down, since a deliberate teardown is a stop and not a failure;
+    /// [`FlowError::TimedOut`] when `limit` passes. The last two are the scope's,
+    /// not the readiness's, so an enclosing [`retry`](crate::script::retry) does
+    /// not retry a cancelled dependant.
+    ///
+    /// A `limit` under one millisecond is raised to one millisecond.
+    ///
+    /// # Panics
+    ///
+    /// The returned future panics when it has to wait outside a runtime with the
+    /// `time` driver, as [`within`] does.
     pub async fn wait(&self, scope: &Scope, limit: Duration) -> Result<Ready<T>, FlowError> {
         self.admit(scope)?;
         let settled = self.settled_value();

@@ -1,6 +1,6 @@
 # Consumer guides
 
-Four Rust crates ship from this repository. Each is usable on its own, and each
+Five Rust crates ship from this repository. Each is usable on its own, and each
 has its own version. Pick the one whose problem you have, then read its guide
 for the version you are installing.
 
@@ -8,56 +8,50 @@ for the version you are installing.
 
 | You need | Crate | Guide |
 |---|---|---|
+| Orchestration with bounded fan-out, deadlines, retries under a shared budget and tenant-keyed steps, written as `script!` | `lgwks_bot` | [lgwks-bot](lgwks-bot/index.md) |
+| The proc-macro behind `script!`, used through `lgwks_bot` | `lgwks_macros` | [docs.rs](https://docs.rs/lgwks_macros) |
 | Hex, base64, timestamps, UUIDs, hashing, globs, LEB128, retry budgets, a single-threaded executor, and default structured debugging | `lgwks_std` | [lgwks-std](lgwks-std/index.md) |
-| An effect that runs when an observed value changes, behind a capability check | `lgwks_bot` | [lgwks-bot](lgwks-bot/index.md) |
-| One AST type across several languages, with bounded traversal | `lgwks_ast` | [lgwks-ast](lgwks-ast/index.md) |
+| One AST type across several languages, with bounded traversal, and the reader of the `script!` language | `lgwks_ast` | [lgwks-ast](lgwks-ast/index.md) |
 | A place to opt into a third-party stack, plus commands that prove no unowned dependency or missing debugger wiring entered a build | `lgwks_deps` | [lgwks-deps](lgwks-deps/index.md) |
 
-The crates share a release process, not a dependency graph. `lgwks_bot` depends
-on `lgwks_std`, `lgwks_deps` depends on `lgwks_std`, and `lgwks_ast` depends on
-neither. Adding one does not require adopting the others. In particular, adding
-`lgwks_ast` to a project that already uses tokio and serde_json does not ask you
-to replace them; the dependency policy in
+`lgwks_bot` depends on `lgwks_macros`, `lgwks_std`, `lgwks_ast` and
+`lgwks_deps`; `lgwks_macros` depends on `lgwks_ast`, `lgwks_deps` and
+`lgwks_std`; `lgwks_ast` depends on `lgwks_deps` through its `script` feature;
+and `lgwks_deps` depends on `lgwks_std`. Adding one does not require adopting
+the others. In particular, adding `lgwks_ast` to a project that already uses
+tokio and serde_json does not ask you to replace them; the dependency policy in
 [`../../AGENTS.md`](../../AGENTS.md) governs contributions to this repository,
 not your application's manifest.
 
-## Stable and development status
+## Versions and the supported interface
 
-A crate's version in its manifest and the symbols actually present at a git tag
-are two different observations. The table below records what was checked, not
-what is implied.
+The versions in each crate's manifest are the source of truth for this tree;
+the registry is the source of truth for what you install. The release process in
+[`../releasing.md`](../releasing.md) keeps the two apart: a tag is created only
+after the upload it names.
 
-| Crate | `Cargo.toml` version | Newest tag | Checked |
-|---|---|---|---|
-| `lgwks_std` | 1.0.0 | `lgwks_std-v0.10.0` | Manifest raised to 1.0.0; 0.10.0 is on crates.io; no 1.0.0 tag until upload |
-| `lgwks_bot` | 1.0.0 | `lgwks_bot-v0.8.0` | Manifest raised to 1.0.0; 0.8.0 is on crates.io and exports `script` |
-| `lgwks_ast` | 1.0.0 | `lgwks_ast-v0.4.0` | Manifest raised to 1.0.0; 0.4.0 is on crates.io |
-| `lgwks_deps` | 1.0.0 | `lgwks_deps-v0.4.0` | Manifest raised to 1.0.0; 0.4.0 is on crates.io |
-| `lgwks_macros` | 1.0.0 | `lgwks_macros-v0.1.2` | Manifest raised to 1.0.0; 0.1.2 is on crates.io |
+| Crate | `Cargo.toml` version | Read it at |
+|---|---|---|
+| `lgwks_std` | 3.0.0 | [docs.rs/lgwks_std](https://docs.rs/lgwks_std) |
+| `lgwks_bot` | 3.0.0 | [docs.rs/lgwks_bot](https://docs.rs/lgwks_bot) |
+| `lgwks_ast` | 2.0.0 | [docs.rs/lgwks_ast](https://docs.rs/lgwks_ast) |
+| `lgwks_deps` | 4.0.0 | [docs.rs/lgwks_deps](https://docs.rs/lgwks_deps) |
+| `lgwks_macros` | 1.1.2 | [docs.rs/lgwks_macros](https://docs.rs/lgwks_macros) |
 
-Those are source tags, and a source tag is not a registry upload.
-`docs/releasing.md` keeps the two apart and warns that a release created before
-the upload is a claim the registry does not support. Confirm the version you are
-installing against docs.rs or `cargo tree` in your own project before relying on
-a symbol.
+From those versions on, the supported interface is `script!`, `try_join!` and
+the `script` module of `lgwks_bot`, `lgwks_ast::script`, and a small page each
+for `lgwks_std` and `lgwks_deps`. Every other item is `#[doc(hidden)]` support
+code with no compatibility promise (#526). The migration notes are under
+[`../changelog/`](../changelog).
 
-### `lgwks_bot` modules and their first release
-
-`lgwks_bot-v0.5.0` was the first tag to export `broker`, `cap`, `domain`,
-`effect`, `error`, `frontier`, `gate`, `interface`, `journal`, `json`,
-`language`, `retry`, `rt`, `semantic`, `session`, `spec` and `verb`
-(`git show lgwks_bot-v0.5.0:crates/lgwks-bot/src/lib.rs`). `lgwks_bot-v0.6.0`
-added `script` (the `script!` macro, feature `script`), which needs
-`lgwks_macros`.
-
-The pages in this tree that document the newer surface are marked at the top:
+Many guide pages below describe that support code in depth. They remain
+accurate about the tree they cite, and they are reference for contributors and
+for readers who accept that those paths can change in any release. Pages that
+cover only part of the history say so at the top:
 
 - [Guidance sessions](lgwks-bot/sessions.md)
 - [Resolution and degraded verdicts](lgwks-bot/resolution.md)
 - [The registry](lgwks-bot/domains.md)
-
-Those pages need `lgwks_bot` 0.5.0 or later. Everything else under `lgwks-bot/`
-describes symbols present in the 0.4.2 tag as well.
 
 ## How these pages cite
 

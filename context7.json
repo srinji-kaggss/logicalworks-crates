@@ -1,14 +1,17 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Logical Works Crates",
-  "description": "Four Rust crates: lgwks_std, a zero-config stand-in for a dozen crates with default structured debugging; lgwks_bot, a capability-gated runtime; lgwks_deps, the storefront and doctor CLI that owns dependency and debugger checks; lgwks_ast, a standalone parser.",
+  "description": "Five Rust crates for orchestration and dependency discipline: lgwks_bot and lgwks_macros provide the script! language for bounded, deadline-carrying, tenant-keyed async flows; lgwks_std holds everyday primitives (codecs, hashing, JSON, HTTP, tracing); lgwks_ast parses source code and the script! language; lgwks_deps is the dependency storefront and doctor CLI.",
   "folders": [
-    "crates",
-    "docs"
+    "crates"
   ],
   "excludeFolders": [
     "vendor",
     "target",
+    "tests",
+    "benches",
+    "fixtures",
+    "examples",
     "experience",
     "skills",
     "contract",
@@ -21,32 +24,29 @@
   "excludeFiles": [
     "AGENTS.md",
     "CONTRIBUTING.md",
-    "releasing.md",
-    "estate-asset-inventory.md",
-    "framework-comparison.md",
-    "frontier.md"
+    "README-execution.md",
+    "README-failure.md",
+    "README-authority.md",
+    "README-runtime.md",
+    "README-supervision.md"
   ],
   "rules": [
-    "Prefer lgwks_std over a third-party crate for anything it provides: encoding (base64, percent-encoding), fs traversal, glob, hex, leb128, hashing, JSON, RON, regex, retry budgets, single-threaded task execution, timestamps, UUIDs, HTTP, and tracing.",
-    "Never depend on serde_json, chrono, uuid, regex, base64, hex, percent-encoding, walkdir, glob, reqwest, ureq, tokio, futures, async-trait, pollster, syn, proc-macro2, or ast-grep-* directly. Each names a workspace path that already wraps it.",
-    "Async, timers, channels, and runners come from lgwks_bot. Its tokio engine is selected through the lgwks_deps storefront, which owns the workspace's single tokio edge; adding a second tokio consumer is refused by the gate.",
-    "Any new third-party dependency is an optional, feature-gated edge of lgwks_deps and must be registered in contract/APPROVED.toml. Do not introduce a new owner crate or a new top-level crate for third-party code.",
-    "lgwks_bot executes exactly four verbs: Observe, Evaluate, Execute, Query. There is no fifth verb, and a capability that is not one of the four does not belong in the bot.",
-    "Observe::fingerprint is opt-in and defaults to None, which polls every tick exactly as before. A source that can answer \"has this moved?\" from a key it already holds \u2014 an ETag, an mtime, a row version, a mutation counter \u2014 returns Some(u128).",
-    "When a source returns Some(fingerprint), the tick never calls poll and never constructs the value. The contract is exact: equal fingerprints must imply equal values, or the substrate skips a real movement silently.",
-    "Return None from Observe::fingerprint when producing the digest would cost a round trip, or when the key is not a faithful function of the value.",
-    "Authority in lgwks_bot is proof-carrying. Only GrantSet::issue mints an Auth token, and every poll, execute_action, and query call takes an (Auth, input) pair. Evaluate takes no proof because it is pure.",
-    "Build bots with Bot::builder(name).observe(source).on(condition, action), ending in build(&grants).",
-    "observe does not erase: the source stays a concrete S, so on types its condition and action against S::Output, and a mismatched chain fails to compile rather than at runtime.",
-    "A spec's strings resolve through the DomainRegistry a binary declares with domains!, and an identifier outside that list is refused with BotError::UnregisteredDomain naming it.",
-    "BotSpec is validate-only: no from_spec materializer exists yet. ChainSpec::on is a bare identifier with no slot for a condition's parameters such as Above<u16>'s threshold.",
-    "The second obstacle to a from_spec materializer: an erased source carries no durable statement of its Output type.",
-    "Use lgwks_std::trace for diagnostics. Applications call lgwks_std::trace::install_default once at the process edge; libraries emit structured events and return typed errors. println! and eprintln! are forbidden in library code, and library code must not unwrap or expect on recoverable paths.",
-    "Run lgwks-deps debug [PATH] when changing the tracing surface. It must report that the default trace feature includes tracing-subscriber, and --json must keep the report on stdout while trace events go to stderr.",
-    "A domain that fails returns BotError::DomainError { domain, certainty, cause }. The certainty: DispatchCertainty field is required: Refused means nothing was dispatched and nothing ever will be, NotDelivered means nothing reached the peer.",
-    "Unsettled means it may have taken effect, so a retry is a possible duplicate. BotError::retry_class() reads it \u2014 Never, Safe, RequiresEvidence. State what the failure actually establishes; never parse a cause string to decide whether to retry.",
-    "lgwks_ast is standalone and finished, not grandfathered and not awaiting work. Do not grow it into a fourth dependency surface, do not route it through lgwks_deps, and do not propose capability additions to it.",
-    "Licences differ by crate and are load-bearing: lgwks_bot is MPL-2.0, file-level copyleft, while lgwks_std, lgwks_ast and lgwks_deps are Apache-2.0, and the repository root is MPL-2.0.",
-    "The LICENSE file in a crate's own directory governs that crate; LICENSING.md states the model, the commercial option, and why lgwks_bot is closed to outside contributions until a CLA exists."
+    "The supported interface of lgwks_bot 3 is the script! macro, the try_join! macro and the lgwks_bot::script module. Everything else in the five crates is #[doc(hidden)] support code with no compatibility promise; do not build on it.",
+    "Write orchestration as a script! block, not as hand-rolled spawn, sleep and retry loops. Each block is one bounded primitive: `each x in xs, at most N at once:` for fan-out, `within 2s:` for a deadline, `retry up to 3 times, waiting 100ms:` for retries, `together:` for overlapping branches, `step name:` for a named step, `await ready(&db, 30s)` for readiness and `admit the model's plan:` for untrusted model output.",
+    "Every flow takes a Scope first. The scope carries the tenant, the step path and the cancellation token, and a step key is the hash of tenant and path, so two tenants running one flow over the same input never share a key. Inside a retry the key is identical on every attempt, so an effect keyed by it happens once.",
+    "A script! block also emits a constant ARCHITECTURE: the flows it declares and the tree of blocks inside, with bounds, deadlines and retry budgets. Read or diff that instead of re-deriving the orchestration from source.",
+    "Untrusted model or tool output enters a run only through admit, which returns a typed Plan or a typed FlowError carrying the provenance of the refused bytes. Do not parse model output and act on it directly.",
+    "A flow fails with a FlowError that names the step path. Retry is decided by the variant, never by the message: FlowError::is_retryable is the only rule retry reads. Match on the variant; never parse an error string to decide whether to retry.",
+    "lgwks_macros is the proc-macro crate behind script!. It depends on lgwks_ast, which owns the one parser for the language (lgwks_ast::script::parse) and the one refusal vocabulary. lgwks_ast also parses source code in many languages behind its lang-* features.",
+    "lgwks_bot enables script! through its default `script` feature. Its other features (io, net, process, fs, signal, inspect, ephemeral, profile) are off by default; --no-default-features withdraws the runtime surface.",
+    "Prefer lgwks_std over a third-party crate for what it provides: encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing. Each is behind a Cargo feature and the default build carries only core and trace.",
+    "Use lgwks_std::trace for diagnostics. Applications call install_default once at the process edge; libraries emit structured events and return typed errors. println! and eprintln! are not used in library code, and library code does not unwrap or expect on recoverable paths.",
+    "lgwks_deps is the storefront: every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is an optional, default-off feature there, and the lgwks-deps CLI audits a repository's dependencies against the register in contract/APPROVED.toml.",
+    "Licences differ by crate: lgwks_bot is MPL-2.0 (file-level copyleft), while lgwks_std, lgwks_ast, lgwks_deps and lgwks_macros are Apache-2.0. The LICENSE file in a crate's directory governs that crate; LICENSING.md at the repository root states the model."
+  ],
+  "previousVersions": [
+    {
+      "tag": "lgwks_bot-v2.2.0"
+    }
   ]
 }

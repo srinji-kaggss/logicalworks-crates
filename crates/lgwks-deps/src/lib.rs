@@ -1,4 +1,5 @@
 #![doc = include_str!("lexicon.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! `lgwks_deps` owns dependency admission and enforces
 //! INV-DEP-EDGE-OWNED: every external dependency authored by a workspace
 //! package names its semantic owner, capability, source, requirement, allowed
@@ -62,7 +63,8 @@
 //!
 //! `lgwks_deps` is also the install-and-select surface for third-party
 //! engines: enable a storefront feature and import its engine through this
-//! crate. For example, `bevy-app` exposes `lgwks_deps::bevy_app::App`,
+//! crate. The re-exports are `#[doc(hidden)]`: reachable and audited, but
+//! outside the supported interface (#526). For example, `bevy-app` exposes `lgwks_deps::bevy_app::App`,
 //! `bevy-time` exposes `lgwks_deps::bevy_time::Time`, and `bevy-state`
 //! exposes Bevy's state API.
 //! `tokio` is the async engine behind `lgwks_bot::rt` (`use
@@ -75,6 +77,30 @@
 //! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
 //! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
 //! single entry this workspace audits.
+//!
+//! ## Feature table
+//!
+//! No feature is on by default. docs.rs builds this page with `tokio-full`,
+//! `appcui`, `bevy-app`, `bevy-time` and `bevy-state`; `gpui` and
+//! `ml-candle-metal` bind to Apple targets and are checked by their own jobs.
+//!
+//! | Feature | Enables |
+//! |---|---|
+//! | `macro` | `proc-macro2` and `quote`, for a first-party proc-macro crate |
+//! | `script` | `proc-macro2` with span locations, for the `script!` parser |
+//! | `tokio` | the async engine behind `lgwks_bot`, runtime only |
+//! | `tokio-time`, `tokio-sync`, `tokio-macros` | one tokio driver each, on top of `tokio` |
+//! | `tokio-io` | the reader and writer traits and their extensions, and stdio |
+//! | `tokio-net` | sockets; implies `tokio-io` |
+//! | `tokio-process`, `tokio-fs`, `tokio-signal` | child processes, files, OS signals |
+//! | `tokio-full` | every `tokio-*` driver above |
+//! | `bevy-ecs` | Bevy's ECS, the state substrate |
+//! | `bevy-app`, `bevy-time`, `bevy-state` | one Bevy runtime crate each, on top of `bevy-ecs` |
+//! | `gpui` | Zed's GPU desktop UI framework (Apple targets only) |
+//! | `appcui` | the AppCUI terminal UI framework |
+//! | `ml-candle` | Candle tensors, layers and the transformer registry |
+//! | `ml-candle-metal` | `ml-candle` plus Candle's Metal backend (macOS) |
+//! | `ml-tokenizers` | the Hugging Face subword tokenizer |
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.

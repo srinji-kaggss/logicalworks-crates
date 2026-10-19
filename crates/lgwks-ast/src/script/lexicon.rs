@@ -176,7 +176,8 @@ pub struct Guarantee {
 }
 
 impl Guarantee {
-    /// Which of the nine axes this guarantee is evidence for.
+    /// Which axis this guarantee is evidence for: one of the six [`Axis`]
+    /// variants, the axes some word serves today.
     #[must_use]
     pub const fn axis(&self) -> Axis {
         self.axis

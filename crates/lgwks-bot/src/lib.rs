@@ -1,9 +1,13 @@
 #![doc = include_str!("lexicon.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Capability-gated automation bots built on four verbs: Observe, Evaluate,
 //! Execute, Query.
 //!
 //! The supported interface is `script!`: this page shows the `script` module its
-//! expansion calls into and the `script!` and `try_join!` macros, and nothing else.
+//! expansion calls into and the `script!` and `try_join!` macros, and nothing
+//! else. They are plain code, not links, because each exists only under its
+//! feature (see the table below) and a link to an absent item breaks the
+//! no-default-features documentation build.
 //! Every other module and root re-export is `#[doc(hidden)]` support, still
 //! reachable by this crate's own tests and by the expansion, and kept out of the
 //! documented surface by #526.
@@ -43,34 +47,68 @@
 //! no-default bot still runs on the ECS schedule. The two axes — the async
 //! surface and the ECS substrate — are independent.
 //!
+//! # Features
+//!
+//! | Feature | Default | Enables |
+//! |---|---|---|
+//! | `rt` | on | the async runtime surface, on the `lgwks_deps` tokio engine |
+//! | `time`, `sync`, `macros` | on | the matching tokio drivers; each implies `rt` |
+//! | `script` | on | `script!` and the `script` module; implies `rt`, `time`, `sync` and `macros` |
+//! | `io` | off | reader and writer traits; implies `rt` |
+//! | `net`, `fs` | off | sockets, files; each implies `io` (`net` also `lgwks_std/random`) |
+//! | `process` | off | supervised child processes; implies `io`, `sync` and `time` |
+//! | `signal` | off | OS signals; implies `rt` |
+//! | `inspect` | off | structural code inspection through `lgwks_ast` (host only) |
+//! | `ephemeral` | off | run identities minted from `lgwks_std::random` |
+//! | `profile` | off | the per-stage tick profiler |
+//! | `full` | off | every feature above |
+//!
 //! # Release boundary
 //!
-//! The `broker`, `effect`, `frontier`, `interface`, `journal`, `language`,
-//! `retry`, `semantic`, and `session` modules are **development APIs**: they
-//! exist on `main` and are in no published tag. The newest `lgwks_bot` tag is
-//! `lgwks_bot-v0.4.2`, and the manifest reads `0.5.0` for the release cut that
-//! carries them, which has no tag yet either. Documentation on this page
-//! describes the `main` tree and must not be read as a statement about a version
-//! installed from a registry. Check the changelog for the release that carries a
-//! given symbol before relying on it.
+//! This page describes the tree the crate was published from. Which release
+//! carries a given symbol is in the changelog (`CHANGELOG.md` in the repository,
+//! with the 3.0.0 migration notes under `docs/changelog/`); check it before
+//! relying on a symbol. Everything outside `script!`, `try_join!` and the
+//! `script` module is `#[doc(hidden)]` support code with no compatibility
+//! promise (#526).
 //!
 //! # Quick start
 //!
-//! The host is the one authority. It names the run, the environment that run acts on and the flow
-//! revision it came from, and it holds the broker that owns the environment's generation. A bot
-//! cannot be built without one: an identity the caller did not choose is one it cannot recover
-//! against, and recovery is what stops a restart from resending a merge.
+//! A flow is written as indented blocks. Each block is one bounded primitive: a
+//! fan-out with a ceiling, a deadline, a retry under a shared budget. The flow
+//! below squares every number, retries a failed attempt under the same step key
+//! and gives each attempt a second.
 //!
-//! `a_bot_built_with_an_effect_scope_ticks_with_no_chains` (`tests/it/bot_front_door.rs`) builds
-//! it as written: the environment is registered with a broker, the scope carries an in-memory
-//! journal, the bot is built against `GrantSet::all_shipped()` and ticks once.
-//! `examples/quickstart.rs` is the same program as a binary.
+//! ```
+//! # use lgwks_bot::script::{FlowError, Scope, Tenant};
+//! lgwks_bot::script! {
+//!     /// Square every number, as many at once as the machine sustains.
+//!     pub flow squares(numbers: Vec<u64>) -> u64:
+//!         let squared = each number in numbers:
+//!             retry up to 3 times, waiting 10ms:
+//!                 within 1s:
+//!                     number.saturating_mul(number)
+//!         give back squared.iter().sum()
+//! }
 //!
-//! `tick` is the synchronous adapter and belongs outside an async runtime:
-//! inside one it returns `BotError::TickInsideRuntime` rather than park the
-//! thread whose reactor the bot's own verbs need. Await `bot.tick_async()`
-//! there instead — the same four phases, the same `Result`, driven on the
-//! caller's executor.
+//! # fn main() -> Result<(), FlowError> {
+//! // Every flow takes a scope first; it carries the tenant, the step path and
+//! // the cancellation token.
+//! let scope = Scope::root(Tenant::new("acme")?);
+//! let total = lgwks_bot::block_on(squares(&scope, vec![1, 2, 3]))?;
+//! assert_eq!(total, 14);
+//!
+//! // The block also emitted a map of what it declared.
+//! assert!(ARCHITECTURE.to_string().contains("each number in numbers"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The same flow is available as ordinary functions: `script::within`,
+//! `script::retry` and `script::each` take a `script::Scope` and a body and
+//! return a `script::FlowError` that names the step where it failed. Use the
+//! macro for the shape and the functions when the body already exists. The
+//! blocks need the default `script` feature (see the table above).
 
 // Verbs are async by design (single-threaded `lgwks_std::task` driver, futures
 // deliberately not `Send`). The verb traits declare their async methods as
@@ -476,6 +514,30 @@ pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
 /// deadline-carrying, tenant-keyed flows over [`script`](mod@script), plus an
 /// `ARCHITECTURE` map of what was declared. The language is documented on
 /// the [`script`](mod@script) module and in `lgwks_macros`.
+///
+/// # Examples
+///
+/// A flow that sizes every page with a second per step. A limit that comes from
+/// outside, such as an upstream's quota, is written `at most (quota) at once`;
+/// a literal there is refused at compile time, because it is right on one host
+/// and wrong on the next.
+///
+/// ```
+/// # use lgwks_bot::script::{FlowError, Scope, Tenant};
+/// lgwks_bot::script! {
+///     pub flow total(pages: Vec<u64>) -> u64:
+///         let sizes = each page in pages:
+///             within 1s:
+///                 page.saturating_add(1)
+///         give back sizes.iter().sum()
+/// }
+///
+/// # fn main() -> Result<(), FlowError> {
+/// let scope = Scope::root(Tenant::new("acme")?);
+/// assert_eq!(lgwks_bot::block_on(total(&scope, vec![1, 2, 3]))?, 9);
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
 #[doc(hidden)]
@@ -520,5 +582,30 @@ pub use lgwks_deps::tokio::select;
 
 /// Wait for all of a set of fallible futures, short-circuiting on the first
 /// error. Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
+///
+/// Every branch is polled on the task that awaits the macro, so the branches may
+/// borrow the caller's locals. The result is `Ok` with a tuple of the branches'
+/// values in the order written when every branch succeeds, or the first `Err`
+/// any branch returns, which drops the branches still running. In `script!` it
+/// is the `together:` block.
+///
+/// # Examples
+///
+/// ```
+/// # use lgwks_bot::script::{FlowError, Scope, Tenant};
+/// lgwks_bot::script! {
+///     pub flow pair(n: u64) -> u64:
+///         together:
+///             let doubled = n.saturating_mul(2)
+///             let tripled = n.saturating_mul(3)
+///         give back doubled.saturating_add(tripled)
+/// }
+///
+/// # fn main() -> Result<(), FlowError> {
+/// let scope = Scope::root(Tenant::new("acme")?);
+/// assert_eq!(lgwks_bot::block_on(pair(&scope, 10))?, 50);
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(all(feature = "rt", feature = "macros"))]
 pub use lgwks_deps::tokio::try_join;

@@ -111,6 +111,11 @@ type Result<T> = std::result::Result<T, Refusal>;
 ///
 /// The first construct the language refuses, in source order, located at its
 /// token and naming its replacement.
+///
+/// # Complexity
+///
+/// Linear in the number of tokens. The tree is owned, so the call allocates in
+/// proportion to the script.
 pub fn parse(tokens: TokenStream) -> std::result::Result<Script, Refusal> {
     lines::tree(lines::split(tokens)).and_then(parse::script)
 }

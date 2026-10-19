@@ -1,4 +1,5 @@
 #![doc = include_str!("lexicon.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(
     not(feature = "parser"),
     doc = "Built without the `parser` feature, `lgwks_ast` is the typed-error derive \
@@ -7,6 +8,18 @@
            multi-language AST parser is the `parser` feature, which every `lang-*` \
            feature and the default set enable."
 )]
+//!
+//! ## Features
+//!
+//! | Feature | Default | Enables |
+//! |---|---|---|
+//! | `lang-rust`, `lang-python`, `lang-typescript`, `lang-javascript`, `lang-go`, `lang-java`, `lang-swift` | on | one tree-sitter grammar each, and `parser` |
+//! | `lang-*` (the other 21, `lang-tsx` and `lang-c` among them) | off | one more grammar each, and `parser` |
+//! | `parser` | on, through any `lang-*` | the multi-language parser and its grammar stack |
+//! | `script` | off | `script::parse`, the reader of the `script!` language |
+//! | `tool` | off | `Script::to_json` and the `lgwks-ast script` binary; implies `script` |
+//! | `scan` | off | the zero-gate Rust source detectors and `lgwks-ast scan`; implies `lang-rust` |
+//! | `full` | off | all 28 grammars |
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.

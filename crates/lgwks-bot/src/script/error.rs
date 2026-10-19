@@ -28,16 +28,16 @@ pub enum FlowError {
         /// Where the stop was observed.
         at: Arc<str>,
     },
-    /// A `within` deadline passed.
+    /// A [`within`](crate::script::within) deadline passed.
     TimedOut {
-        /// The `within` block that expired.
+        /// The [`within`](crate::script::within) block that expired.
         at: Arc<str>,
         /// The deadline it declared.
         after: Duration,
     },
-    /// A `retry` spent every attempt on retryable failures.
+    /// A [`retry`](crate::script::retry) spent every attempt on retryable failures.
     Exhausted {
-        /// The `retry` block.
+        /// The [`retry`](crate::script::retry) block.
         at: Arc<str>,
         /// Attempts made.
         attempts: u32,
@@ -47,7 +47,7 @@ pub enum FlowError {
     /// The run's retry budget was spent: failures are systemic, and another
     /// retry would add load rather than recover. Not retryable.
     Throttled {
-        /// The `retry` block that was refused a retry.
+        /// The [`retry`](crate::script::retry) block that was refused a retry.
         at: Arc<str>,
         /// Attempts made before the refusal.
         attempts: u32,
@@ -111,7 +111,7 @@ pub enum FlowError {
         /// The limit.
         limit: u16,
     },
-    /// A tenant name did not validate.
+    /// A tenant name did not validate, in [`Tenant::new`](crate::script::Tenant::new).
     InvalidTenant {
         /// What is wrong with it.
         reason: &'static str,

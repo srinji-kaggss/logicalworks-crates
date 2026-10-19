@@ -4,12 +4,12 @@
 //! never a lost update. Every write names the version it saw
 //! ([`CasInput::expected`](crate::cas::CasInput::expected)); the store applies the write only when that
 //! version is still current, and a write that arrives late is refused as
-//! [`CasError::Conflict`](crate::cas::CasError::Conflict) — through the [`Execute`]
+//! [`CasError::Conflict`](crate::cas::CasError::Conflict) — through the [`Execute`](crate::verb::Execute)
 //! adapter as [`BotError::Conflict`] —
 //! carrying both versions so the loser can re-read and retry against the new
 //! truth rather than against a guess.
 //!
-//! The refusal is [`RetryClass::Never`]: the
+//! The refusal is [`RetryClass::Never`](crate::error::RetryClass::Never): the
 //! same expected version against the same record gives the same refusal, so a
 //! blind retry spends attempts to learn a fact the error already states. A
 //! retry that re-reads the record and names the version it found is a new

@@ -34,7 +34,11 @@ fn launch<'run>(
     }
 }
 
-/// Every `[package.metadata.docs.rs]` names a feature set that builds.
+/// Every `[package.metadata.docs.rs]` names a feature set that builds, on the
+/// nightly toolchain docs.rs uses. A runner's first nightly run compiles the
+/// whole dependency graph once (the step is cancelled at the job cap when the
+/// host is loaded); its target directory keeps the result, so later runs only
+/// document the workspace crates (70 s on a warm runner, run 39225993584).
 pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateError> {
     let mut commands: Vec<(String, Vec<String>)> = Vec::new();
     for directory in crate_directories(context.root) {
@@ -56,7 +60,17 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
         else {
             continue;
         };
-        let mut command = argv(&["cargo", "doc", "--no-deps", "--locked", "-p", name]);
+        // docs.rs builds on nightly with the `--cfg docsrs` this lane sets, and the
+        // crate roots turn on `doc_cfg` under that cfg, which stable refuses.
+        let mut command = argv(&[
+            "cargo",
+            "+nightly",
+            "doc",
+            "--no-deps",
+            "--locked",
+            "-p",
+            name,
+        ]);
         if flag(docs, "all-features") == Some(true) {
             command.push("--all-features".to_owned());
             commands.push((format!("{name}: all-features"), command));

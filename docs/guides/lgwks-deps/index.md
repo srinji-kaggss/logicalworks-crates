@@ -35,7 +35,7 @@ lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
 
 `check` reads `cargo metadata --no-deps` rather than the transitive lockfile
 closure, because only metadata preserves which package authored an edge
-(`crates/lgwks-deps/src/lib.rs:22`). It refuses in both directions: an approval
+(`crates/lgwks-deps/src/lib.rs:23`). It refuses in both directions: an approval
 with no authored Cargo edge is stale authority, and an authored edge with no
 approval is unregistered.
 

@@ -36,6 +36,28 @@ use super::{FlowError, MAX_IN_FLIGHT, POLL_BUDGET, Scope};
 /// # Errors
 ///
 /// The first body error, or [`FlowError::Cancelled`] when `scope` is stopped.
+///
+/// # Examples
+///
+/// The `each x in xs:` block of `script!` calls this. Values come back in input
+/// order, however the bodies finish:
+///
+/// ```
+/// # use lgwks_bot::script::{FlowError, Scope, Tenant};
+/// lgwks_bot::script! {
+///     pub flow double_all(numbers: Vec<u64>) -> Vec<u64>:
+///         let doubled = each number in numbers:
+///             number.saturating_mul(2)
+///         give back doubled
+/// }
+///
+/// # fn main() -> Result<(), FlowError> {
+/// let scope = Scope::root(Tenant::new("acme")?);
+/// let doubled = lgwks_bot::block_on(double_all(&scope, vec![3, 1, 2]))?;
+/// assert_eq!(doubled, vec![6, 2, 4]);
+/// # Ok(())
+/// # }
+/// ```
 pub async fn each<I, T, F, Fut>(
     scope: &Scope,
     step: &str,

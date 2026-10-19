@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the four crates are recorded here. Versions move
+All notable changes to the five crates are recorded here. Versions move
 independently; each release lists per-crate deltas. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 semantic from 1.0.0: a major bump breaks, a minor adds, a patch fixes

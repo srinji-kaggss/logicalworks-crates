@@ -58,14 +58,14 @@ One manifest key, three alternative lines. Use exactly one of them:
 ```toml
 [dependencies]
 # Zero external deps: defaults off, core selected. The default build is core
-# plus trace, so a bare `lgwks_std = "2"` is NOT zero-dependency.
-lgwks_std = { version = "2", default-features = false, features = ["core"] }
+# plus trace, so a bare `lgwks_std = "3"` is NOT zero-dependency.
+lgwks_std = { version = "3", default-features = false, features = ["core"] }
 
 # Pick what you need, on top of the default core + trace.
-# lgwks_std = { version = "2", features = ["hash", "json"] }
+# lgwks_std = { version = "3", features = ["hash", "json"] }
 
 # Everything.
-# lgwks_std = { version = "2", features = ["full"] }
+# lgwks_std = { version = "3", features = ["full"] }
 ```
 
 The feature table, module reference, JSON and RON decoder notes, entropy target
@@ -101,8 +101,8 @@ plus `trace`. Every other feature flag is one capability and one stack.
 
 ## Minimum supported Rust version
 
-Rust **1.99.0**. The MSRV moves forward only when code or dependency
-requirements demand it.
+Rust **1.98**, the `rust-version` in the manifest. The MSRV moves forward only
+when code or dependency requirements demand it.
 
 ## The other crates
 
@@ -111,7 +111,7 @@ requirements demand it.
 
 | Crate | What it gives you |
 |---|---|
-| [`lgwks_bot`](https://docs.rs/lgwks_bot) | A runtime for bots that run for weeks: four verbs, capability-gated authority, change-triggered execution, supervised background work |
+| [`lgwks_bot`](https://docs.rs/lgwks_bot) | `script!`: orchestration with bounded fan-out, deadlines, retries under a shared budget and tenant-keyed steps |
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
 | [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
