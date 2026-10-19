@@ -11,7 +11,7 @@ use lgwks_std::json::{self, Value};
 
 use super::bench::Bench;
 use super::children::{Children, Launch, TIMED_OUT, inherited_env};
-use super::opencode::read_events;
+use super::opencode::{read_events, read_failure};
 use super::{BenchError, fail};
 
 /// What one model call returned.
@@ -431,20 +431,41 @@ impl Author for CliAuthor<'_> {
             (done.stdout, done.stderr)
         };
         let raw = format!("{stdout}\n{stderr}");
-        let read = match read_reply(&stdout) {
-            Some(reply) if !reply.text.trim().is_empty() => Some(reply),
-            Some(_) | None => read_reply(&stderr),
-        };
-        Ok(match read {
-            Some(reply) => Reply { raw, ..reply },
-            None => Reply {
-                text: String::new(),
-                tokens_in: 0,
-                tokens_out: 0,
-                wall_ms: 0,
-                raw,
-            },
-        })
+        reply_from(&stdout, &stderr, raw)
+    }
+}
+
+/// What a finished model command's output comes to.
+///
+/// A reply when either stream carries one. No reply and an `error` event is a
+/// failed call, refused with the provider's words so the ledger releases it
+/// rather than charging a reservation for an answer that never came, and the
+/// trial is a recorded crash that names the cause. No reply and no error event
+/// is an empty reply, which the ledger charges whole because its usage is unknown.
+fn reply_from(stdout: &str, stderr: &str, raw: String) -> Result<Reply, BenchError> {
+    let read = match read_reply(stdout) {
+        Some(reply) if !reply.text.trim().is_empty() => Some(reply),
+        Some(_) | None => read_reply(stderr),
+    };
+    if let Some(reply) = read {
+        return Ok(Reply { raw, ..reply });
+    }
+    let failure = match read_failure(stdout) {
+        Some(found) => Some(found),
+        None => read_failure(stderr),
+    };
+    match failure {
+        Some(why) => fail(
+            BenchError::Refused(format!("the model command reported an error: {why}")),
+            "reply_from",
+        ),
+        None => Ok(Reply {
+            text: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            wall_ms: 0,
+            raw,
+        }),
     }
 }
 
@@ -454,9 +475,48 @@ mod tests {
 
     use super::{
         Closure, Texts, closed_book_profile, extract_rust_block, full_prompt, read_reply,
-        repair_prompt,
+        repair_prompt, reply_from,
     };
+    use crate::BenchError;
     use crate::sim_kit::committed;
+
+    /// A real call of 2026-10-18 (opencode 1.18.34): the Go key had expired and the
+    /// provider answered 401 before any step ran, so no text and no usage came back.
+    const EXPIRED: &str = "{\"type\":\"error\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"This API key has expired.\",\"statusCode\":401}}}\n";
+
+    /// What a call's output comes to, as text: the refusal's words, or `reply:` and
+    /// the reply's text and billed tokens.
+    fn outcome(stdout: &str, stderr: &str) -> String {
+        match reply_from(stdout, stderr, String::new()) {
+            Err(BenchError::Refused(why)) => why,
+            Err(other) => other.to_string(),
+            Ok(reply) => format!("reply:{}:{}", reply.text, reply.tokens_in),
+        }
+    }
+
+    #[test]
+    fn a_call_the_provider_refused_is_a_failed_call_and_never_an_empty_reply() {
+        assert_eq!(
+            outcome(EXPIRED, ""),
+            "the model command reported an error: HTTP 401: This API key has expired.",
+            "the refusal carries the provider's status and words, so the ledger releases the call"
+        );
+        assert_eq!(
+            outcome("", EXPIRED),
+            outcome(EXPIRED, ""),
+            "an error printed on stderr is read the same way"
+        );
+        assert_eq!(
+            outcome("", ""),
+            "reply::0",
+            "output with no reply and no error is an empty reply, charged whole by the ledger"
+        );
+        assert_eq!(
+            outcome(&format!("{{\"finalText\":\"done\"}}\n{EXPIRED}"), ""),
+            "reply:done:0",
+            "a call that answered keeps its answer even if an error event follows"
+        );
+    }
 
     /// A profile's lines for a closure of three named directories.
     fn profile_of(

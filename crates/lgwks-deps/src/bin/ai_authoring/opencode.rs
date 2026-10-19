@@ -67,9 +67,42 @@ pub(super) fn read_events(raw: &str) -> Option<Reply> {
     })
 }
 
+/// What the last `error` event in `raw` says, with its HTTP status when it has one.
+///
+/// A call the provider refuses before any model step runs prints only this event:
+/// no text, no step, no usage. It is a failed call, never a billed one.
+pub(super) fn read_failure(raw: &str) -> Option<String> {
+    let mut found = None;
+    for line in raw.lines() {
+        let Ok(event) = json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("error") {
+            continue;
+        }
+        let error = event.get("error");
+        let data = error.and_then(|held| held.get("data"));
+        let said = data
+            .and_then(|held| held.get("message"))
+            .and_then(Value::as_str);
+        let named = error
+            .and_then(|held| held.get("name"))
+            .and_then(Value::as_str);
+        let message = match (said, named) {
+            (Some(words), _) | (None, Some(words)) => words,
+            (None, None) => "an error event with no message",
+        };
+        found = Some(match count_of(data, "statusCode") {
+            0 => message.to_owned(),
+            status => format!("HTTP {status}: {message}"),
+        });
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
-    use super::read_events;
+    use super::{read_events, read_failure};
 
     /// A real `opencode run --format json` call, opencode 1.18.34 on the Go
     /// muse model with every tool off, 2026-10-17: one step, one text part,
@@ -77,6 +110,38 @@ mod tests {
     const REAL: &str = "{\"type\":\"step_start\",\"timestamp\":1792231437906,\"sessionID\":\"ses_x\",\"part\":{\"type\":\"step-start\"}}\n\
 {\"type\":\"text\",\"timestamp\":1792231440891,\"sessionID\":\"ses_x\",\"part\":{\"type\":\"text\",\"text\":\"```rust\\nfn main() {}\\n```\"}}\n\
 {\"type\":\"step_finish\",\"timestamp\":1792231440908,\"sessionID\":\"ses_x\",\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\",\"tokens\":{\"total\":786,\"input\":190,\"output\":23,\"reasoning\":573,\"cache\":{\"write\":0,\"read\":0}}}}\n";
+
+    /// A real `opencode run --format json` call, opencode 1.18.34, 2026-10-18: the
+    /// Go key had expired, so the provider answered 401 before any step ran.
+    const EXPIRED_KEY: &str = "{\"type\":\"error\",\"timestamp\":1792345049508,\"sessionID\":\"ses_x\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store.\",\"statusCode\":401,\"isRetryable\":false}}}\n\n";
+
+    #[test]
+    fn an_expired_key_is_a_failure_with_its_status_and_no_reply() {
+        assert_eq!(
+            read_failure(EXPIRED_KEY).as_deref(),
+            Some(
+                "HTTP 401: This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store."
+            ),
+            "the provider's own words and status are kept"
+        );
+        assert!(
+            read_events(EXPIRED_KEY).is_none(),
+            "an error event is no reply, so nothing was billed"
+        );
+        assert!(
+            read_failure(REAL).is_none(),
+            "a stream that answered carries no failure"
+        );
+        assert!(
+            read_failure("").is_none(),
+            "silence is not a failure report"
+        );
+        assert_eq!(
+            read_failure("{\"type\":\"error\"}\n").as_deref(),
+            Some("an error event with no message"),
+            "an error event with nothing in it is still named"
+        );
+    }
 
     #[test]
     fn a_real_event_stream_gives_text_billed_tokens_and_wall_time() {
