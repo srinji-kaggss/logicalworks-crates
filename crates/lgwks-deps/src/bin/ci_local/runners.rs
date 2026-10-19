@@ -56,7 +56,17 @@ pub(super) fn docsrs_metadata(context: &Context<'_>) -> Result<Verdict, GateErro
         else {
             continue;
         };
-        let mut command = argv(&["cargo", "doc", "--no-deps", "--locked", "-p", name]);
+        // docs.rs builds on nightly with the `--cfg docsrs` this lane sets, and the
+        // crate roots turn on `doc_cfg` under that cfg, which stable refuses.
+        let mut command = argv(&[
+            "cargo",
+            "+nightly",
+            "doc",
+            "--no-deps",
+            "--locked",
+            "-p",
+            name,
+        ]);
         if flag(docs, "all-features") == Some(true) {
             command.push("--all-features".to_owned());
             commands.push((format!("{name}: all-features"), command));
