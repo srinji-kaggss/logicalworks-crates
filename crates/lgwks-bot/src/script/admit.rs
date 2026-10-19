@@ -159,6 +159,10 @@ impl Gate {
     /// Moves no repetition count and does not clear what the fingerprint has
     /// already cost, so a run that gathers evidence cannot buy itself another pass
     /// at the failure it has already paid for.
+    ///
+    /// Returns `true` when the gate had tracked `fingerprint` and the evidence
+    /// was counted against it, and `false` when this run never failed under that
+    /// fingerprint, in which case nothing is recorded.
     #[must_use]
     pub fn record_evidence(&self, fingerprint: &str) -> bool {
         self.lock().ledger.record_evidence(fingerprint)
@@ -218,8 +222,9 @@ enum Decision {
 /// [`FlowError::Cancelled`] or [`FlowError::TooDeep`] when the step cannot be
 /// entered; [`FlowError::Refused`] with the payload's [`Refusal`] and
 /// [`Provenance`]; [`FlowError::Intervention`] when the run reached a finite typed
-/// intervention; and [`FlowError`] when the refusal could not be recorded through
-/// the run store.
+/// intervention; and the run store's own error (`FlowError::Store`,
+/// `FlowError::Failed` or `FlowError::Incompatible`) when the refusal could not be
+/// recorded through it.
 pub async fn admit(
     scope: &Scope,
     step: &str,

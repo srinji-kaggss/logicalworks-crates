@@ -247,8 +247,7 @@ impl Clock {
         }
     }
 
-    /// A caller-advanceable clock whose origin is `elapsed` nanoseconds after
-    /// tick zero.
+    /// A caller-advanceable clock whose origin is `elapsed` after tick zero.
     ///
     /// The origin argument exists for **restart**, and is a duration since the
     /// origin rather than a wall-clock timestamp. A process that replays a
@@ -282,7 +281,7 @@ impl Clock {
     /// arithmetic operations.
     ///
     /// A [`TimeSource::Wall`] clock reports where it was placed plus the
-    /// **real** time elapsed since, sampled from `std::time::Instant` on every
+    /// **real** time elapsed since, sampled from [`std::time::Instant`] on every
     /// call. A fresh wall clock is placed at zero; one restored with
     /// [`Clock::wall_at`] keeps the time its previous process had already spent,
     /// so a restart does not hand a run its whole budget back. See

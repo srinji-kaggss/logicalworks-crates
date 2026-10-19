@@ -5,7 +5,7 @@
 //! two launches. This module is the discipline Temporal and Restate apply to
 //! the same hazard — at-least-once delivery with an idempotency key the
 //! receiver deduplicates on — expressed as one
-//! [`Execute`] adapter.
+//! [`Execute`](crate::verb::Execute) adapter.
 //!
 //! [`IdempotentPost`](crate::idempotent::IdempotentPost) POSTs with the caller-generated `Idempotency-Key` the
 //! receiver dedups on ([`lgwks_std::http::Options::idempotency_key`]). Every
@@ -18,7 +18,7 @@
 //! The failure vocabulary is the credential row's, reused rather than
 //! redeclared: an upstream 401/403/404 is
 //! [`BotError::CredentialRejected`]
-//! carrying its [`NeedSet`] repair (never a generic
+//! carrying its [`NeedSet`](crate::spec::NeedSet) repair (never a generic
 //! failure, never a silent retry — retrying the same credential gives the
 //! same refusal), and any other failure is a [`BotError::DomainError`] that
 //! says what the exchange established. A transport failure or a 5xx is
@@ -31,7 +31,7 @@
 //! The body the adapter will send is capped at [`MAX_POST_BYTES`](crate::idempotent::MAX_POST_BYTES), the preview
 //! it keeps at [`BODY_PREVIEW`](crate::domain::net::BODY_PREVIEW) characters, and the exchange at
 //! [`POST_TIMEOUT_SECS`](crate::idempotent::POST_TIMEOUT_SECS) seconds — the same preview ceiling the
-//! [`domain::net`] probe reads under, referenced rather
+//! [`domain::net`](crate::domain::net) probe reads under, referenced rather
 //! than restated so the two cannot drift.
 
 use std::time::Duration;

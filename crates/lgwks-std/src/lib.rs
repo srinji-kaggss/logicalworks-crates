@@ -1,4 +1,5 @@
 #![doc = include_str!("lexicon.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Zero-config primitives that replace a dozen crates.
 //!
 //! Every module is a single-import, single-call primitive (hex, base64,

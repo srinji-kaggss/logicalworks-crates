@@ -92,7 +92,8 @@ impl Acted {
     ///
     /// # Errors
     ///
-    /// [`BotError::TypeMismatch`] when the action's output is not a `T`.
+    /// [`FlowError::Bot`] wrapping [`BotError::TypeMismatch`] when the action's
+    /// output is not a `T`.
     pub fn into_output<T: 'static>(self) -> Result<T, FlowError> {
         let Self { domain, output } = self;
         match output.downcast::<T>() {

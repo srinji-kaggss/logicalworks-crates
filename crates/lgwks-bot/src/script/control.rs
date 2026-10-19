@@ -99,7 +99,41 @@ fn refuse_step<T>(site: &str, error: FlowError) -> Result<T, FlowError> {
 ///
 /// # Errors
 ///
-/// The body's own error, `TimedOut`, or `Cancelled`.
+/// The body's own error, [`FlowError::TimedOut`], or [`FlowError::Cancelled`].
+///
+/// # Panics
+///
+/// The returned future panics when polled outside a runtime with the `time`
+/// driver, because the wall watchdog is an engine timer
+/// ([`time::sleep`](crate::rt::time::sleep)).
+///
+/// # Complexity
+///
+/// Each call boxes three futures (the logical bound, the watchdog and the stop
+/// signal). A scope on a caller-advanceable clock also re-reads that clock every
+/// millisecond while the body runs.
+///
+/// # Examples
+///
+/// The `within 1s:` block of `script!` calls this. A body that finishes inside
+/// its limit returns its own value; one that does not is dropped and refused as
+/// [`FlowError::TimedOut`]:
+///
+/// ```
+/// # use lgwks_bot::script::{FlowError, Scope, Tenant};
+/// lgwks_bot::script! {
+///     pub flow lookup(id: u64) -> u64:
+///         let found = within 1s:
+///             id.saturating_add(1)
+///         give back found
+/// }
+///
+/// # fn main() -> Result<(), FlowError> {
+/// let scope = Scope::root(Tenant::new("acme")?);
+/// assert_eq!(lgwks_bot::block_on(lookup(&scope, 41))?, 42);
+/// # Ok(())
+/// # }
+/// ```
 pub fn within<'s, T, Fut>(
     scope: &'s Scope,
     step: &str,
@@ -143,6 +177,20 @@ where
 /// caller whose step is bounded by a *shorter* clock than the flow's — an
 /// admission budget that is tighter than the run's, say — and for tests that
 /// want to say which clock governs rather than imply it.
+///
+/// # Errors
+///
+/// As [`within`]: the body's own error, [`FlowError::TimedOut`] or
+/// [`FlowError::Cancelled`].
+///
+/// # Panics
+///
+/// As [`within`]: the returned future panics when polled outside a runtime with
+/// the `time` driver.
+///
+/// # Complexity
+///
+/// As [`within`]: three boxed futures per call.
 pub fn within_on<'s, T, Fut>(
     clock: &'s Clock,
     scope: &'s Scope,
@@ -321,6 +369,33 @@ where
 /// the run's retry budget is spent: 10 retries, plus one per five first
 /// attempts, shared by every `retry` under the root scope;
 /// [`FlowError::Cancelled`] on a stop.
+///
+/// # Panics
+///
+/// Panics when polled outside a runtime with the `time` driver and an attempt
+/// fails, because the wait between attempts is an engine timer
+/// ([`time::sleep`](crate::rt::time::sleep)).
+///
+/// # Examples
+///
+/// The `retry up to 3 times, waiting 10ms:` block of `script!` calls this. A body
+/// that succeeds ends the loop at once:
+///
+/// ```
+/// # use lgwks_bot::script::{FlowError, Scope, Tenant};
+/// lgwks_bot::script! {
+///     pub flow fetch(id: u64) -> u64:
+///         let got = retry up to 3 times, waiting 10ms:
+///             id.saturating_mul(2)
+///         give back got
+/// }
+///
+/// # fn main() -> Result<(), FlowError> {
+/// let scope = Scope::root(Tenant::new("acme")?);
+/// assert_eq!(lgwks_bot::block_on(fetch(&scope, 21))?, 42);
+/// # Ok(())
+/// # }
+/// ```
 pub async fn retry<T, F, Fut>(
     scope: &Scope,
     step: &str,
@@ -442,11 +517,10 @@ fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     // together spread out rather than retrying in lockstep, and the same step
     // always waits the same time. A key with no byte at this index contributes no
     // jitter: the key is a step path, and the index is inside its low five bits.
-    let jitter_byte = key
-        .as_bytes()
-        .get(usize::saturating_from(attempt) & 31)
-        .copied()
-        .map_or(0, u32::from);
+    let jitter_byte = match key.as_bytes().get(usize::saturating_from(attempt) & 31) {
+        Some(byte) => u32::from(*byte),
+        None => 0,
+    };
     // The halving is done in nanoseconds, which is a width wide enough that the
     // product cannot overflow and a divide by a constant is total — where
     // `Duration` has no total divide and its checked one returns an `Option` whose

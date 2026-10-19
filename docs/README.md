@@ -14,7 +14,7 @@ the rest of this table is design history and contributor policy.
 |---|---|
 | [`docs/use-cases.md`](use-cases.md) | What each crate is for, what none of them is, how they differ from the crates a search finds first, agent security and in-process background work. |
 | [`docs/choosing-a-crate.md`](choosing-a-crate.md) | Which crate and feature for a need, the exact dependency graph, and the default-feature caveat on the zero-dependency core. |
-| [`docs/guides/index.md`](guides/index.md) | Choose a crate, and which symbols are stable versus main-only. |
+| [`docs/guides/index.md`](guides/index.md) | Choose a crate, the versions in this tree, and the supported interface. |
 | [`docs/guides/lgwks-bot/index.md`](guides/lgwks-bot/index.md) | `lgwks_bot`: purpose, non-goals, and the supported versions. |
 | [`docs/guides/lgwks-bot/getting-started.md`](guides/lgwks-bot/getting-started.md) | One source, one condition, one effect, compiled and run. |
 | [`docs/guides/lgwks-bot/features.md`](guides/lgwks-bot/features.md) | Every `lgwks_bot` feature, and what `--no-default-features` does not remove. |
@@ -22,9 +22,9 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-bot/failures.md`](guides/lgwks-bot/failures.md) | Poll failure, partial action failure, and unknown effect. |
 | [`docs/guides/lgwks-bot/background-work.md`](guides/lgwks-bot/background-work.md) | Bounded fan-out, supervision, and the cancellation limits. |
 | [`docs/guides/lgwks-bot/migrating-to-1-0.md`](guides/lgwks-bot/migrating-to-1-0.md) | What 1.0.0 removed, what replaces it, and the traps the compiler cannot show. |
-| [`docs/guides/lgwks-bot/sessions.md`](guides/lgwks-bot/sessions.md) | Unreleased: validated guidance flows and the session runner. |
-| [`docs/guides/lgwks-bot/resolution.md`](guides/lgwks-bot/resolution.md) | Unreleased: lexical and semantic resolution, and degraded verdicts. |
-| [`docs/guides/lgwks-bot/domains.md`](guides/lgwks-bot/domains.md) | Unreleased: the domain registry, and what a spec's identifiers resolve to. |
+| [`docs/guides/lgwks-bot/sessions.md`](guides/lgwks-bot/sessions.md) | Support code (`#[doc(hidden)]`): validated guidance flows and the session runner. |
+| [`docs/guides/lgwks-bot/resolution.md`](guides/lgwks-bot/resolution.md) | Support code (`#[doc(hidden)]`): lexical and semantic resolution, and degraded verdicts. |
+| [`docs/guides/lgwks-bot/domains.md`](guides/lgwks-bot/domains.md) | Support code (`#[doc(hidden)]`): the domain registry, and what a spec's identifiers resolve to. |
 | [`docs/guides/lgwks-std/index.md`](guides/lgwks-std/index.md) | `lgwks_std`: install, feature selection, and logging. |
 | [`docs/guides/lgwks-ast/index.md`](guides/lgwks-ast/index.md) | `lgwks_ast`: install, identify, parse and inspect, and where to go next. |
 | [`docs/guides/lgwks-ast/bounds-and-refusals.md`](guides/lgwks-ast/bounds-and-refusals.md) | The three constants a checked parse applies and the four refusals each one answers. |

@@ -102,7 +102,7 @@ crates/lgwks-bot/src/session/value.rs:207	pub(crate) fn decode_integer(raw: &str
 crates/lgwks-bot/src/session/value.rs:287	Literal(Value),
 crates/lgwks-bot/src/spec.rs:337	pub use crate::ecs::{
 crates/lgwks-bot/src/spec.rs:678	let auth: Auth = grants.issue(self.0.required_caps())?;
-crates/lgwks-deps/src/lib.rs:22	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
+crates/lgwks-deps/src/lib.rs:23	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-std/src/process/identity.rs:386	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task/blocking.rs:155	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>
 docs/guidance-runner-spec.md:193	`review`.
