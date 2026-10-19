@@ -100,31 +100,41 @@ impl Failure {
 }
 
 /// The per-run directory every consumer is built in, removed when the run ends.
-/// It is claimed with an exclusive `create_dir`, which refuses a name that exists
-/// (a stale directory, or one another user planted), so two runs never share one.
-/// `lgwks_std::random` is not used: the WASI target checks this package too, and
-/// that module refuses wasm.
+/// Its name is 64 random bits and it is claimed with an exclusive `create_dir`,
+/// so two runs on one machine never share one.
 struct Work {
     /// The directory.
     path: PathBuf,
 }
 
-/// How many names a run tries before it gives up on the temporary directory.
-const NAMES: u32 = 64;
+/// WASI has no entropy source and no processes to supervise, so the check names
+/// no directory there. The target matrix compiles this package for it all the
+/// same, which is why the call is split by target, as `ci_local`'s scratch is.
+#[cfg(target_family = "wasm")]
+fn fresh_name() -> Result<String, Failure> {
+    Failure::missing("the check needs a host with processes and entropy, not WASI".to_owned())
+}
+
+/// A name no other run holds: 64 random bits, in hex.
+#[cfg(not(target_family = "wasm"))]
+fn fresh_name() -> Result<String, Failure> {
+    match lgwks_std::random::bytes::<8>() {
+        Ok(bytes) => Ok(format!(
+            "published-consumer-{:016x}",
+            u64::from_le_bytes(bytes)
+        )),
+        Err(error) => Failure::missing(format!("no entropy for a work name: {error}")),
+    }
+}
 
 impl Work {
     /// Makes a directory no other run holds.
     fn make() -> Result<Self, Failure> {
-        for attempt in 0..NAMES {
-            let name = format!("published-consumer-{}-{attempt}", std::process::id());
-            let path = std::env::temp_dir().join(name);
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Failure::io(&path, error),
-            }
+        let path = std::env::temp_dir().join(fresh_name()?);
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Self { path }),
+            Err(error) => Failure::io(&path, error),
         }
-        Failure::missing(format!("no free work directory name in {NAMES} attempts"))
     }
 }
 
