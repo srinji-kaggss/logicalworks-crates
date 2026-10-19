@@ -592,8 +592,12 @@ jobs:
           toolchain: "1.99.0"
           nextest: "true"
           # 254 s for the bot-full leg on run 39021102172: 46 s inside the cap,
-          # so it yields 15 s, not the default 30.
-          defer: "15"
+          # so it yielded 15 s. On a loaded host that margin is gone: the
+          # bot-full leg's suite ended inside the cap and the job still lost it
+          # in teardown, by 5 s, 14 s and 7 s (runs 39241327366, 39242679913,
+          # 39245570492). The job timer runs from job start, so the delay counts
+          # against the cap; it yields nothing now.
+          defer: "0"
       # The container image is Debian trixie, whose util-linux 2.41 `setpriv`
       # applies the Landlock rules `Confinement::Landlock` wraps (#337);
       # bookworm's 2.38 cannot, and the Landlock simulations failed there with
