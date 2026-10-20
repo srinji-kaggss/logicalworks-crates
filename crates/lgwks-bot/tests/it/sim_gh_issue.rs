@@ -352,3 +352,63 @@ fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_2() -> SimRe
 fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_3() -> SimResult {
     receiver_band("kill", 23)
 }
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_4() -> SimResult {
+    receiver_band("accept", 24)
+}
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_5() -> SimResult {
+    receiver_band("accept", 25)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_4() -> SimResult {
+    receiver_band("drop", 26)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_5() -> SimResult {
+    receiver_band("drop", 27)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_4() -> SimResult {
+    receiver_band("refuse", 28)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_5() -> SimResult {
+    receiver_band("refuse", 29)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_4() -> SimResult {
+    receiver_band("lag", 30)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_5() -> SimResult {
+    receiver_band("lag", 31)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_4() -> SimResult {
+    receiver_band("droplag", 32)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_5() -> SimResult {
+    receiver_band("droplag", 33)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_4() -> SimResult {
+    receiver_band("kill", 34)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_5() -> SimResult {
+    receiver_band("kill", 35)
+}
