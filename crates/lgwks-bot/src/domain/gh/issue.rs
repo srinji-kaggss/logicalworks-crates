@@ -7,17 +7,30 @@
 //! [`MAX_ISSUES_READ_BACK`] issues first, so a second run with the same key —
 //! a rerun, a resume after a kill, a retry after a lost answer — finds the
 //! first run's issue instead of opening another. A create whose answer was
-//! lost is reconciled by one more read; one that still cannot be found is
-//! [`BotError::EffectIndeterminate`], never a second create.
+//! lost is reconciled by reading the key back over the same settle; one that
+//! still cannot be found is [`BotError::EffectIndeterminate`], never a second
+//! create.
 //!
 //! GitHub's listing lags a create by seconds, so a create is confirmed at the
 //! number GitHub answered and then reported only once the listing shows it;
 //! until it does, a rerun could not find it.
 //!
+//! A key scan that finds nothing therefore **settles before it creates**. A
+//! rerun whose earlier run lost the create's answer — a crash or `kill -9`
+//! between the POST and its reply — has no number to ask for, so its only
+//! evidence is the listing, and the listing a create lags. Spending the same
+//! bounded settle schedule a create's confirmation spends, before the create,
+//! lets that rerun see the earlier issue once the listing catches up instead of
+//! opening a second one (#658). The same settle answers a create whose answer
+//! this run lost, so one run never creates twice either.
+//!
 //! The bounds are stated rather than hidden: an issue older than the newest
 //! [`MAX_ISSUES_READ_BACK`] in its repository is not found, a key reused after
-//! that many newer issues opens a new one, and a create whose answer was lost
-//! inside the listing's lag can be missed by an immediate rerun (#658).
+//! that many newer issues opens a new one, and the settle covers the listing's
+//! lag, not a repository's whole history. A genuinely new key pays the settle's
+//! schedule too — about 16 s on the wall clock — because no local record of an
+//! earlier run's answered number exists for the scan to ask instead; the run
+//! store that could hold one is not part of this action's seam.
 
 use std::time::Duration;
 
@@ -153,8 +166,10 @@ pub enum Settlement {
     /// This run's create lost its answer, and the read-back found the issue.
     Reconciled,
     /// This run created it and read it back at its number, but the listing a
-    /// rerun's key scan reads had not shown it when the settle bound ran out:
-    /// a rerun before it is listed may open a second issue.
+    /// rerun's key scan reads had not shown it when the settle bound ran out.
+    /// A rerun still spends the scan's own settle before it creates, so it
+    /// finds the issue once the listing catches up rather than opening a
+    /// second one.
     Unlisted,
 }
 
@@ -171,7 +186,11 @@ impl Settlement {
     }
 }
 
-/// How many listing reads a create waits through for its issue to be listed.
+/// How many listing reads one settle makes.
+///
+/// Shared by a create waiting for its issue to be listed and a key scan
+/// waiting for an earlier create to surface, so neither can wait on a bound
+/// the other does not know.
 const SETTLE_POLLS: u8 = 8;
 
 /// The wait before the second listing read; each later wait doubles.
@@ -179,6 +198,43 @@ const FIRST_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
 /// The longest single wait between listing reads; eight reads span about 20 s.
 const MAX_SETTLE_DELAY: Duration = Duration::from_secs(4);
+
+/// The bounded read schedule a settle follows.
+///
+/// One definition for both settles in this module — a create waiting for its
+/// issue to be listed, and a key scan waiting for an earlier create to appear —
+/// so a change to the bound cannot leave one of them waiting on a schedule the
+/// other does not know. [`SETTLE_POLLS`] reads: the first immediately, the
+/// wait before each later one starting at [`FIRST_SETTLE_DELAY`] and doubling
+/// up to [`MAX_SETTLE_DELAY`].
+struct Settle {
+    /// The wait to make before the next read.
+    next: Duration,
+    /// How many reads this settle has made.
+    made: u8,
+}
+
+impl Settle {
+    /// A settle with every read still to make.
+    const fn new() -> Self {
+        Self {
+            next: FIRST_SETTLE_DELAY,
+            made: 0,
+        }
+    }
+
+    /// Record one read, and return the wait before the next, or `None` when
+    /// the bound has been spent.
+    fn spent(&mut self) -> Option<Duration> {
+        self.made = self.made.saturating_add(1);
+        if self.made >= SETTLE_POLLS {
+            return None;
+        }
+        let wait = self.next;
+        self.next = self.next.saturating_mul(2).min(MAX_SETTLE_DELAY);
+        Some(wait)
+    }
+}
 
 /// The issue an open settled on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,6 +383,44 @@ impl Gh {
         }
     }
 
+    /// The key's issue, waited for over the settle bound when the first read
+    /// finds nothing.
+    ///
+    /// This is the pre-create scan and the lost-answer read-back. A rerun whose
+    /// earlier run lost the create's answer has no number to ask for; the
+    /// listing is its only evidence, and the listing lags. Reading it once and
+    /// creating is what opened a second issue beside #658; reading it over the
+    /// same bounded schedule a create's confirmation spends is what lets the
+    /// earlier issue surface before this run writes.
+    ///
+    /// A read that fails is returned rather than retried past: a create issued
+    /// over a listing nobody could read is the one risk this settle exists to
+    /// remove, so a failed scan fails the run and creates nothing.
+    ///
+    /// The waits are spent on `clock`, the flow's own, exactly as
+    /// [`OpenIssue::listed`] spends them: a wall clock waits the real schedule
+    /// a live lag needs, and a caller-advanceable clock spends the same
+    /// schedule without waiting for it.
+    ///
+    /// After the bound the key is still only visible within the newest
+    /// [`MAX_ISSUES_READ_BACK`] issues, which is the scan's own declared window.
+    async fn settled_keyed(
+        &self,
+        draft: &IssueDraft,
+        clock: &Clock,
+    ) -> Result<Option<IssueRecord>, GhError> {
+        let mut settle = Settle::new();
+        loop {
+            if let Some(found) = self.issue_keyed(draft).await? {
+                return Ok(Some(found));
+            }
+            match settle.spent() {
+                Some(wait) => clock.sleep(wait).await,
+                None => return Ok(None),
+            }
+        }
+    }
+
     /// Issue `number`, when it carries `draft`'s key and title.
     ///
     /// The read that confirms a create. GitHub's listing lags a create by
@@ -448,8 +542,9 @@ impl OpenIssue {
     /// a create: an immediate live rerun opened #659 beside #658. So a create
     /// is not reported until the listing shows it, which is what makes the
     /// next run's scan find it; [`Settlement::Unlisted`] says the bound ran
-    /// out first. A listing read that fails is waited past, not reported: the
-    /// issue is already confirmed at its number.
+    /// out first, and the next run's own pre-create settle (`settled_keyed`)
+    /// is what closes that window. A listing read that fails is waited past,
+    /// not reported: the issue is already confirmed at its number.
     ///
     /// The waits are spent on `clock`, the flow's own: a wall clock waits the
     /// real schedule a live GitHub lag needs, while a caller-advanceable clock
@@ -457,29 +552,35 @@ impl OpenIssue {
     /// process's timer here would put the schedule on a timeline no scope
     /// names.
     async fn listed(&self, created: IssueRecord, draft: &IssueDraft, clock: &Clock) -> OpenedIssue {
-        let mut delay = FIRST_SETTLE_DELAY;
-        for poll in 1..=SETTLE_POLLS {
+        let mut settle = Settle::new();
+        loop {
             match self.gh.newest_keyed(draft.key()).await {
                 Ok(listed) if listed.iter().any(|read| read.number == created.number) => {
                     return created.settled(Settlement::Created);
                 }
                 Ok(_) => {}
                 Err(unread) => {
-                    lgwks_std::trace::debug!(error = %unread, poll, "gh::issue: a settle read failed");
+                    lgwks_std::trace::debug!(error = %unread, "gh::issue: a settle read failed");
                 }
             }
-            if poll < SETTLE_POLLS {
-                clock.sleep(delay).await;
-                delay = delay.saturating_mul(2).min(MAX_SETTLE_DELAY);
+            match settle.spent() {
+                Some(wait) => clock.sleep(wait).await,
+                None => return created.settled(Settlement::Unlisted),
             }
         }
-        created.settled(Settlement::Unlisted)
     }
 
     /// Find the key's issue, or create it and read it back.
+    ///
+    /// Both key scans settle: the one before the create, because a rerun after
+    /// a lost answer has only the listing to go on, and the one after a lost
+    /// create answer, because the issue it may have created lags the listing
+    /// too. A scan that finds the key returns it and no create is issued; a
+    /// create whose answer arrives is read back at its number and never
+    /// repeated.
     async fn open(&self, draft: &IssueDraft, clock: &Clock) -> Result<OpenedIssue, BotError> {
         let fail = |failure: GhError| failure.into_bot_error(DOMAIN);
-        if let Some(found) = self.gh.issue_keyed(draft).await.map_err(fail)? {
+        if let Some(found) = self.gh.settled_keyed(draft, clock).await.map_err(fail)? {
             return Ok(found.settled(Settlement::Found));
         }
         let lost = match self.gh.create_issue(draft).await {
@@ -512,8 +613,12 @@ impl OpenIssue {
             }
             Err(failure) => failure,
         };
-        // The create ran and its answer is not one: the issue may exist.
-        match self.gh.issue_keyed(draft).await {
+        // The create ran and its answer is not one: the issue may exist. The
+        // read-back settles for the same reason the pre-create scan does — the
+        // issue this run may have opened lags the listing, and a single read
+        // that misses it would report an indeterminate create a rerun could
+        // then duplicate.
+        match self.gh.settled_keyed(draft, clock).await {
             Ok(Some(found)) => Ok(found.settled(Settlement::Reconciled)),
             Ok(None) => Err(BotError::EffectIndeterminate {
                 domain: DOMAIN.to_owned(),

@@ -154,7 +154,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         if settlement == Settlement::Unlisted.as_str() {
             writeln!(
                 out,
-                "  GitHub has not listed it yet; a rerun with this key before it is listed may open a second issue"
+                "  GitHub has not listed it within the settle bound; a rerun with this key \
+                 settles the listing before it creates, so it finds this issue rather than \
+                 opening a second"
             )?;
         }
     } else if let Some(ref error) = answer.error {

@@ -2,15 +2,17 @@
 //! tenants.
 //!
 //! Each seed draws a receiver (one that answers, one that loses the answer
-//! after holding the issue, one that refuses the create), how many times each
-//! of two tenants reruns its open, and the order the tenants take turns. Both
-//! tenants open on one repository under their own keys. The model is the rule
-//! the action promises: one key, at most one held issue, whatever the reruns;
-//! a refused create holds nothing, so a rerun may try again.
+//! after holding the issue, one that is killed between the POST and its reply,
+//! one that refuses the create, and the same-but-lagging forms), a listing lag
+//! of 0 to 10 reads, how many times each of two tenants reruns its open, and
+//! the order the tenants take turns. Both tenants open on one repository under
+//! their own keys. The model is the rule the action promises: one key, at most
+//! one held issue, whatever the reruns and however long the listing lags; a
+//! refused create holds nothing, so a rerun may try again.
 //!
 //! | Family | Property it pins |
 //! |---|---|
-//! | `one_key_holds_at_most_one_issue_under_reruns` | reruns, lost answers and two tenants never hold two issues for one key, and each run settles as the model says |
+//! | `one_key_holds_at_most_one_issue_under_reruns` | reruns, lost answers, kills and two tenants never hold two issues for one key, and each run settles as the model says |
 //!
 //! The band is swept twice through `sim::assert_replays`; each pass opens on
 //! fresh owners, so the second pass replays the first rather than finding its
@@ -18,19 +20,20 @@
 //!
 //! # A lagging listing, drawn per seed
 //!
-//! A lag seed draws 0 to 10 listing reads from the run's own stream and opens
-//! on a flow clock the scenario advances; the receiver hides the created issue
-//! from that many reads. Every read past the action's eight-read settle bound
-//! is unreachable by the bound, so the fake applies `min(drawn, 8)`: a lag of 9
-//! or 10 would report `unlisted` on the first run and still hide the issue
-//! from the rerun's scan, which is a second create for one key — the exact
-//! defect this family exists to catch. The drawn value is in the trace, so the
-//! sweep records that 9 and 10 were drawn even when the bound is what ran.
+//! Every seed draws its listing lag from 0 to 10 reads from the run's own
+//! stream, and every open runs on a flow clock the scenario advances, so the
+//! action's settle schedule costs no real time. The receiver hides the created
+//! issue from that many listing reads (`lag-N`, `droplag-N`, `kill-N`). The lag
+//! is applied as drawn, never clamped: the action settles both before a create
+//! and after a lost answer, so a lag of 9 or 10 is covered by the bound rather
+//! than hidden by it, and the drawn value is recorded in the trace so a sweep
+//! says which lags it reached.
 //!
-//! The fake receiver forks a shell per call — a lagged open reads the listing
-//! eleven times — so the lag bands are two seeds each, eight in all: the host
-//! caps this family at process starts, not at the tiers the action itself
-//! would serve. The other receivers keep their six-seed bands.
+//! The fake receiver forks a shell per call, and a settled open reads the
+//! listing up to sixteen times, so the family pays in process starts rather
+//! than in seconds. Each tenant opens at most twice, which is the fewest that
+//! still holds a duplicate to its own key, and the host caps this family by
+//! process starts rather than by the tiers the action itself would serve.
 
 #![cfg(all(unix, feature = "script", feature = "process", feature = "ephemeral"))]
 
@@ -42,10 +45,8 @@ use lgwks_bot::BotError;
 use lgwks_bot::domain::gh::{IssueDraft, Settlement};
 use lgwks_bot::rt::clock::Clock;
 
-use crate::fake_gh_issues::creates_on;
-use crate::gh_issue::{
-    failed, fake_host, fake_host_with_clock, full_grant, open, open_on_clock, opened,
-};
+use crate::fake_gh_issues::{creates_on, held_on};
+use crate::gh_issue::{failed, fake_host_with_clock, full_grant, open_on_clock, opened};
 use crate::sim::{self, Band, Sim};
 
 /// A family's result: an error fails it with the seed's text.
@@ -58,13 +59,21 @@ const SEEDS: u64 = 48;
 static PASS: AtomicU64 = AtomicU64::new(0);
 
 /// The receivers a seed draws from, by the repository name the fake reads.
-const RECEIVERS: [&str; 3] = ["accept", "drop", "refuse"];
+///
+/// The first three keep their answer; `lag` holds it and hides the issue from
+/// the listing; `droplag` and `kill` lose the answer and hide it too, which is
+/// the pair #658 is about — a rerun with no number, looking at a lagging
+/// listing.
+const RECEIVERS: [&str; 6] = ["accept", "drop", "refuse", "lag", "droplag", "kill"];
 
 /// The action's settle bound, in listing reads.
 ///
 /// The action keeps its bound private; this is the same eight, and a change to
 /// one without the other is what the model below would stop agreeing with.
 const SETTLE_READS: u32 = 8;
+
+/// The highest listing lag a seed draws, in reads.
+const MAX_DRAWN_LAG: u32 = 10;
 
 /// What the model says the `run`th open (from zero) of one key settles as,
 /// when its listing lags `lag` reads.
@@ -75,6 +84,11 @@ fn expected(receiver: &str, lag: u32, run: u32) -> &'static str {
         ("refuse", _) => "indeterminate",
         ("lag", 0) if lag >= SETTLE_READS => "unlisted",
         ("lag", 0) => "created",
+        // A lost answer spends the read-back's settle on the same lag, so a
+        // lag past the bound is still indeterminate on the first run — and the
+        // rerun's own settle then finds it, which is what keeps one create.
+        ("droplag" | "kill", 0) if lag >= SETTLE_READS => "indeterminate",
+        ("droplag" | "kill", 0) => "reconciled",
         _ => "found",
     }
 }
@@ -106,51 +120,48 @@ fn settled(
 /// One seed on a drawn receiver.
 fn seed(sim: &mut Sim) -> SimResult {
     let receiver = *RECEIVERS
-        .get(usize::try_from(sim.rng().below(3))?)
-        .ok_or("three receivers")?;
+        .get(usize::try_from(sim.rng().below(6))?)
+        .ok_or("six receivers")?;
     seed_on(sim, receiver)
+}
+
+/// The repository name a seed opens on: the drawn lag is part of it for the
+/// receivers whose listing lags, so the fake reads the lag from the name.
+fn target(receiver: &str, drawn: u32) -> String {
+    match receiver {
+        "lag" => format!("lag-{drawn}"),
+        "droplag" => format!("droplag-{drawn}"),
+        "kill" => format!("kill-{drawn}"),
+        other => other.to_owned(),
+    }
 }
 
 /// One seed on `receiver`: two tenants, one repository, each rerunning its
 /// own key in a seeded order.
 ///
-/// A `lag` seed draws its listing lag here, from the run's own stream, and
-/// opens on a clock this scenario advances: the settle schedule costs no real
-/// time, and the trace records the drawn lag beside the settlements.
+/// The lag is drawn here, from the run's own stream, for every receiver, and
+/// recorded even when the receiver keeps its answer: a sweep that drew 9 and
+/// 10 must say so, whatever the bound then did.
 fn seed_on(sim: &mut Sim, receiver: &str) -> SimResult {
     let pass = PASS.fetch_add(1, Ordering::Relaxed);
     let owner = format!("sim{pass}");
-    let drawn = if receiver == "lag" {
-        sim.rng().below(11)
-    } else {
-        0
-    };
-    let lag = drawn.min(SETTLE_READS);
-    let target = if receiver == "lag" {
-        format!("lag-{lag}")
-    } else {
-        receiver.to_owned()
-    };
-    let repo = format!("{owner}/{target}");
+    let drawn = sim.rng().below(MAX_DRAWN_LAG.saturating_add(1));
+    let repo_part = target(receiver, drawn);
+    let repo = format!("{owner}/{repo_part}");
+    // One clock for every receiver: the settle has no real schedule to wait
+    // for, and the scenario owns every wait on it.
     let clock = Clock::virtual_at(Duration::ZERO);
-    let tenants = if receiver == "lag" {
-        [
-            fake_host_with_clock("acme", full_grant(), clock.clone())?,
-            fake_host_with_clock("zenith", full_grant(), clock.clone())?,
-        ]
-    } else {
-        [
-            fake_host("acme", full_grant())?,
-            fake_host("zenith", full_grant())?,
-        ]
-    };
+    let tenants = [
+        fake_host_with_clock("acme", full_grant(), clock.clone())?,
+        fake_host_with_clock("zenith", full_grant(), clock.clone())?,
+    ];
     let drafts = [
         IssueDraft::new("acme-key", "Opened by acme", "")?,
         IssueDraft::new("zenith-key", "Opened by zenith", "")?,
     ];
     let mut left = [
-        sim.rng().below(4).saturating_add(1),
-        sim.rng().below(4).saturating_add(1),
+        sim.rng().below(2).saturating_add(1),
+        sim.rng().below(2).saturating_add(1),
     ];
     let mut done = [0_u32; 2];
     let runs = left
@@ -164,16 +175,12 @@ fn seed_on(sim: &mut Sim, receiver: &str) -> SimResult {
         }
         let host = tenants.get(turn).ok_or("two tenants")?;
         let draft = drafts.get(turn).ok_or("two drafts")?;
-        let report = if receiver == "lag" {
-            open_on_clock(host, &clock, &repo, draft)?
-        } else {
-            open(host, &repo, draft)?
-        };
+        let report = open_on_clock(host, &clock, &repo, draft)?;
         let run = done.get(turn).copied().ok_or("two counts")?;
         let got = settled(&report)?;
         assert_eq!(
             got,
-            expected(receiver, lag, run),
+            expected(receiver, drawn, run),
             "seed {}: tenant {turn}'s run {run} on {receiver} lagging {drawn}",
             sim.seed
         );
@@ -184,6 +191,8 @@ fn seed_on(sim: &mut Sim, receiver: &str) -> SimResult {
         }
     }
     let creates = creates_on(&owner)?;
+    // One create per key, whatever the reruns. A refused create holds nothing,
+    // so the refusals are the one family where the count is the run count.
     let model = if receiver == "refuse" {
         usize::try_from(runs)?
     } else {
@@ -194,8 +203,17 @@ fn seed_on(sim: &mut Sim, receiver: &str) -> SimResult {
         "seed {}: one create per key on {receiver} lagging {drawn}",
         sim.seed
     );
+    // The count says how many POSTs were issued; the store says how many
+    // issues exist, which is the fact a rerun lives with.
+    let held = held_on(&owner, &repo_part)?;
+    let held_model = if receiver == "refuse" { 0 } else { 2 };
+    assert_eq!(
+        held, held_model,
+        "seed {}: one held issue per key on {receiver} lagging {drawn}",
+        sim.seed
+    );
     sim.record(&format!(
-        "{receiver}:{drawn}:{lag}:{}:{creates}",
+        "{receiver}:{drawn}:{creates}:{held}:{}",
         trace.join(",")
     ));
     Ok(())
@@ -209,21 +227,10 @@ fn one_key_holds_at_most_one_issue_under_reruns() -> SimResult {
 /// Seeds per receiver band.
 const BAND_SEEDS: u64 = 6;
 
-/// Seeds per lagging band: a lagged open reads the listing up to eleven times,
-/// so the fake's process budget buys fewer of them than the other receivers.
-const LAG_BAND_SEEDS: u64 = 2;
-
 /// Band `index` of `receiver`, on seeds disjoint from every other band.
 fn receiver_band(receiver: &str, index: u64) -> SimResult {
     let first = SEEDS.saturating_add(index.saturating_mul(BAND_SEEDS));
     sim::assert_replays(Band::new(first, BAND_SEEDS), |sim| seed_on(sim, receiver))
-}
-
-/// Band `index` of the lagging receiver, on the shorter seed budget its
-/// process starts allow.
-fn lag_band(index: u64) -> SimResult {
-    let first = SEEDS.saturating_add(index.saturating_mul(BAND_SEEDS));
-    sim::assert_replays(Band::new(first, LAG_BAND_SEEDS), |sim| seed_on(sim, "lag"))
 }
 
 #[test]
@@ -288,20 +295,60 @@ fn a_refused_create_holds_nothing_and_may_be_retried_band_3() -> SimResult {
 
 #[test]
 fn a_lagging_listing_never_doubles_a_key_band_0() -> SimResult {
-    lag_band(12)
+    receiver_band("lag", 12)
 }
 
 #[test]
 fn a_lagging_listing_never_doubles_a_key_band_1() -> SimResult {
-    lag_band(13)
+    receiver_band("lag", 13)
 }
 
 #[test]
 fn a_lagging_listing_never_doubles_a_key_band_2() -> SimResult {
-    lag_band(14)
+    receiver_band("lag", 14)
 }
 
 #[test]
 fn a_lagging_listing_never_doubles_a_key_band_3() -> SimResult {
-    lag_band(15)
+    receiver_band("lag", 15)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_0() -> SimResult {
+    receiver_band("droplag", 16)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_1() -> SimResult {
+    receiver_band("droplag", 17)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_2() -> SimResult {
+    receiver_band("droplag", 18)
+}
+
+#[test]
+fn a_lost_answer_under_a_lagging_listing_never_doubles_a_key_band_3() -> SimResult {
+    receiver_band("droplag", 19)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_0() -> SimResult {
+    receiver_band("kill", 20)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_1() -> SimResult {
+    receiver_band("kill", 21)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_2() -> SimResult {
+    receiver_band("kill", 22)
+}
+
+#[test]
+fn a_killed_create_under_a_lagging_listing_never_doubles_a_key_band_3() -> SimResult {
+    receiver_band("kill", 23)
 }

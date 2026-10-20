@@ -10,7 +10,7 @@
 //! |---|---|
 //! | J1: the harness opens an issue and prints its page | `a_flow_opens_an_issue_and_reads_it_back` |
 //! | J2: a run without `github.issue.create` is refused naming it | `a_run_without_the_issue_grant_is_blocked_before_gh_starts` |
-//! | J3: a rerun after a lost answer or a kill opens nothing new | `a_second_run_with_the_same_key_finds_the_first_issue`, `a_lost_answer_is_reconciled_by_reading_back_and_never_reposted` |
+//! | J3: a rerun after a lost answer or a kill opens nothing new | `a_second_run_with_the_same_key_finds_the_first_issue`, `a_lost_answer_is_reconciled_by_reading_back_and_never_reposted`, `a_real_kill_between_the_post_and_its_reply_leaves_one_issue` |
 
 #![cfg(all(unix, feature = "script", feature = "process", feature = "ephemeral"))]
 
@@ -25,7 +25,7 @@ use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Host, MAX_TASK_DEADLINE, Report, task};
 use lgwks_bot::{BotError, Cap, GrantSet, domains};
 
-use crate::fake_gh_issues::{calls_on, creates_on, hold, issue_on_fake};
+use crate::fake_gh_issues::{calls_on, creates_on, held_on, hold, issue_on_fake};
 
 /// A test's result: an error fails it with the error's text.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -214,9 +214,9 @@ fn a_flow_opens_an_issue_and_reads_it_back() -> TestResult {
     assert_eq!(issue.number(), 1);
     assert_eq!(issue.url(), "https://github.com/j1-owner/accept/issues/1");
     assert_eq!(creates_on("j1-owner")?, 1, "one create");
-    // Scan, create, read #1 back, see it listed: the create's own answer is
-    // not the evidence, and a rerun's scan is shown to find it.
-    assert_eq!(calls_on("j1-owner")?.len(), 4);
+    // The scan settles before it creates (eight reads), then the create, the
+    // read at the answered number and the listing read that shows it.
+    assert_eq!(calls_on("j1-owner")?.len(), 11);
     Ok(())
 }
 
@@ -268,9 +268,9 @@ fn a_create_waits_for_the_listing_so_an_immediate_rerun_finds_it() -> TestResult
             .any(|argv| argv.iter().any(|arg| arg.ends_with("/issues/1"))),
         "the create is confirmed at the number GitHub answered: {calls:?}"
     );
-    // Scan, create, read #1, two lagging listings, the one that shows it,
-    // and the rerun's scan.
-    assert_eq!(calls.len(), 7);
+    // Scan's settle, create, read #1, the two lagging listings and the one
+    // that shows it, and the rerun's scan.
+    assert_eq!(calls.len(), 14);
     Ok(())
 }
 
@@ -310,8 +310,8 @@ fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
     let issue = opened(&report)?.clone();
     assert_eq!(issue.settlement(), Settlement::Unlisted);
     assert_eq!(issue.number(), 1);
-    // Scan, create, read #1, then the eight settle reads.
-    assert_eq!(calls_on("stale-owner")?.len(), 11);
+    // The scan's settle, create, read #1, then the eight settle reads.
+    assert_eq!(calls_on("stale-owner")?.len(), 18);
     assert!(
         clock.now() >= Duration::from_secs(15),
         "the settle must spend its schedule on the flow's clock, which read {:?}",
@@ -400,11 +400,53 @@ fn a_lost_answer_is_reconciled_by_reading_back_and_never_reposted() -> TestResul
     Ok(())
 }
 
+/// A real `SIGKILL` between the POST and its reply, then a rerun with the same
+/// key, leaves exactly one issue.
+///
+/// The child is the fake client, and it kills itself with `SIGKILL` after it
+/// has held the issue and before it prints the answer — the same instant a
+/// `kill -9` of `gh` catches. What the supervisor reports is a signal death,
+/// not an exit code, so the action cannot know whether the create landed; it
+/// reads back over the settle and reports `Reconciled`. The rerun then finds
+/// the key by its own pre-create settle, and issues no second POST.
+///
+/// The settles run on a clock this test owns: the kill is real, the waits are
+/// not.
+#[test]
+fn a_real_kill_between_the_post_and_its_reply_leaves_one_issue() -> TestResult {
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
+    let draft = IssueDraft::new("killed", "Killed mid-create", "")?;
+    let first = open_on_clock(&host, &clock, "kill-owner/kill", &draft)?;
+    assert_eq!(
+        opened(&first)?.settlement(),
+        Settlement::Reconciled,
+        "a signal death is an unknown outcome, settled by the read-back"
+    );
+    let again = open_on_clock(&host, &clock, "kill-owner/kill", &draft)?;
+    assert_eq!(opened(&again)?.settlement(), Settlement::Found);
+    assert_eq!(
+        opened(&again)?.number(),
+        opened(&first)?.number(),
+        "the rerun answers the issue the killed run created"
+    );
+    assert_eq!(creates_on("kill-owner")?, 1, "one POST across both runs");
+    assert_eq!(
+        held_on("kill-owner", "kill")?,
+        1,
+        "the killed create left one issue, and the rerun left none"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
-    let host = fake_host("acme", full_grant())?;
+    // Both settles are real waits, so this run owns a clock rather than the
+    // process timer: the journey is the typed indeterminate, not the delay.
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
     let draft = IssueDraft::new("refused", "Refused by the receiver", "")?;
-    let report = open(&host, "refused-owner/refuse", &draft)?;
+    let report = open_on_clock(&host, &clock, "refused-owner/refuse", &draft)?;
     assert!(
         matches!(
             *failed(&report)?,
@@ -413,9 +455,10 @@ fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
         "{:?}",
         report.result()
     );
-    // Read, create, read back: the one create, then the read that settles it.
+    // The pre-create scan's settle, the one create, then the lost-answer
+    // settle that reads before it concludes nothing landed.
     assert_eq!(creates_on("refused-owner")?, 1);
-    assert_eq!(calls_on("refused-owner")?.len(), 3);
+    assert_eq!(calls_on("refused-owner")?.len(), 17);
     Ok(())
 }
 
@@ -445,8 +488,9 @@ fn a_create_refused_for_its_credential_is_not_read_back() -> TestResult {
         "{:?}",
         report.result()
     );
-    // GitHub refused the write, so nothing landed and nothing is reconciled.
-    assert_eq!(calls_on("dc-owner")?.len(), 2);
+    // GitHub refused the write, so nothing landed and nothing is reconciled
+    // past the scan's own settle.
+    assert_eq!(calls_on("dc-owner")?.len(), 9);
     Ok(())
 }
 
