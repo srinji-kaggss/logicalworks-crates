@@ -2,12 +2,11 @@
 //! Tokio baseline, the bare floor, and the paired-round harness that gates them
 //! on identical work before any ratio is printed.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
+
+use lgwks_std::trace::info;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -83,17 +82,14 @@ pub(crate) async fn facade_side_draining(total: usize, bound: usize, drain: Drai
     // ended. Deliberately not the retained report *list*: `Supervisor` bounds that
     // at the in-flight ceiling and counts the loss in `reports_dropped`, while the
     // baseline has no reporting layer and so bounds it at nothing. Comparing
-    // retained-list lengths would compare reporting granularity, not execution;
-    // the retention asymmetry is reported separately below, as the asymmetry it
-    // is.
+    // retained-list lengths would compare reporting granularity, not execution, so
+    // neither figure is carried in the tally the gate compares.
     let tally = Tally {
         completed: stats.succeeded,
         cancelled: stats.cancelled,
         aborted: stats.aborted,
         refused: stats.refused,
         placed: stats.spawned,
-        retained: 0,
-        dropped_detail: stats.reports_dropped,
         work_units: counter.load(Ordering::SeqCst),
     };
     if let Some(held) = held {
@@ -172,7 +168,6 @@ pub(crate) async fn baseline_side(total: usize, bound: usize) -> (f64, Tally) {
     let elapsed = started.elapsed().as_secs_f64();
     tally.placed = widen(total);
     tally.work_units = counter.load(Ordering::SeqCst);
-    tally.retained = 0;
     (elapsed, tally)
 }
 

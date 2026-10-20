@@ -2,16 +2,14 @@
 //! body both sides run, the drain helpers, the tally the fairness gate compares,
 //! and the print/refusal helpers every table shares.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_bot::rt::supervise::Supervisor;
+use lgwks_std::trace::info;
 // Every count this rig converts between `usize` and `u64` is lossless on the 64-bit
 // hosts it is built for, and this assertion makes any other width a compile error
 // rather than a silent clamp hidden at a conversion site.
@@ -81,15 +79,6 @@ pub(crate) struct Tally {
     pub(crate) aborted: u64,
     /// Spawn attempts refused because every permit was taken.
     pub(crate) refused: u64,
-    /// Terminal outcomes still *retained* for the caller to read.
-    ///
-    /// Deliberately outside the fairness gate. The facade bounds this at the
-    /// in-flight ceiling and counts the loss in `dropped_detail`; the baseline
-    /// has no reporting layer and so bounds it at nothing. Comparing the two
-    /// would be comparing reporting granularity, not execution.
-    pub(crate) retained: u64,
-    /// Terminal outcomes the facade counted but did not retain.
-    pub(crate) dropped_detail: u64,
     /// The sum of every task's own completion count, so "the body did its work N
     /// times" is compared and not just "a task ended".
     pub(crate) work_units: u64,
@@ -105,8 +94,6 @@ pub(crate) async fn body_unit(counter: Arc<AtomicU64>) {
     tokio::task::yield_now().await;
 }
 
-/// Run `total` bodies through the facade at a ceiling of `bound`.
-///
 /// How a facade run ends: drain everything, or stop early and report anyway.
 ///
 /// The drain policy is the only thing that separates an honest facade run from
@@ -292,9 +279,10 @@ pub(crate) fn host_load_average() -> (Option<String>, &'static str) {
 
 /// Print one row of a table.
 ///
-/// One printer for every table in this file: a column width chosen once, so the tables
-/// cannot drift apart, and a cell's padding decided in one place rather than by each
-/// table's own format string.
+/// One printer for every table in the rig: the two-space indent and the cell
+/// separator are decided here, so a row assembled anywhere cannot drift them.
+/// The column widths themselves belong to each caller's format string, because
+/// only the caller knows what its cells contain.
 pub(crate) fn print_row(cells: &[String]) {
     info!("  {}", cells.join("  "));
 }
@@ -311,7 +299,7 @@ pub(crate) fn print_columns(columns: &[&str]) {
 
 /// A latency in nanoseconds, rendered in microseconds to one decimal.
 ///
-/// One renderer for every latency this file prints, so no table reports the same
+/// One renderer for every latency the rig prints, so no table reports the same
 /// measurement in two scales and lets a reader compare them by eye.
 pub(crate) fn micros(nanos: u64) -> String {
     format!("{:.1}", nanos as f64 / 1_000.0)

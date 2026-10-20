@@ -1,12 +1,11 @@
 //! Overload and recovery: a baseline phase, twice-the-knee overload, then back
 //! down, measuring the drain and the return to the baseline p99.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
+
+use lgwks_std::trace::info;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -16,12 +15,12 @@ use crate::gate::work_units_match;
 use crate::openloop::{Recorder, RecorderSet, period_nanos};
 use crate::support::print_row;
 
+// ── Overload and recovery ────────────────────────────────────────────────────
+
 /// The length of an overload run's recovery phase: what the caller asked for, clamped.
 fn recovery_window_of(shape: OverloadShape) -> Duration {
     shape.recovery_seconds.min(RECOVERY_LIMIT)
 }
-
-// ── Overload and recovery ────────────────────────────────────────────────────
 
 /// Which phase of the overload run is offering load.
 ///

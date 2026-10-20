@@ -1,12 +1,11 @@
 //! The §3 workload matrix: one receipt per scenario the crate can actually drive
 //! today, gated by the counts each row produced rather than by a summary line.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
+
+use lgwks_std::trace::info;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_bot::rt::runtime::Runtime;
@@ -66,9 +65,10 @@ impl Receipt {
 /// Drain `supervisor` until `total` of its tasks have ended, then return the
 /// aggregate it settled on.
 ///
-/// A short sleep rather than a spin: a spin would burn a core and change the
-/// timings the same process reports, and a row that measures while it waits is a
-/// row measuring its own harness.
+/// `drain_supervisor` waits on the supervisor's own task set rather than
+/// sleeping between counts: a sleep would burn wall time the row does not own,
+/// and a spin would burn a core and change the timings the same process
+/// reports.
 async fn drain_to(supervisor: &mut Supervisor, total: usize) -> lgwks_bot::rt::supervise::Stats {
     drain_supervisor(supervisor, completed_target(total)).await;
     supervisor.stats()

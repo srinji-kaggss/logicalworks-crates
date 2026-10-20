@@ -1,12 +1,11 @@
 //! The concurrency ladder: both sides at every tier the contract names, under a
 //! fixed in-flight ceiling, with the process high-water mark reported once.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use lgwks_bot::rt::runtime::Runtime;
+
+use lgwks_std::trace::info;
 
 use crate::async_stats;
 use crate::gate::fair;
@@ -31,11 +30,13 @@ const TIER_ROUNDS: usize = 5;
 /// The process's peak resident set size in bytes, or `None` where the host does
 /// not expose it.
 ///
-/// Linux reads its own `/proc/self/status`, which is a syscall the process
-/// already has. macOS exposes no in-process equivalent without a `getrusage`
-/// edge, and adding one to a measurement instrument is not worth a single
-/// column — so macOS is reported as **absent** here and measured by the
-/// documented `/usr/bin/time -l` wrapper in the README instead.
+/// Linux reads its own `/proc/self/status`, whose `VmHWM` is the kernel's
+/// high-water mark. macOS exposes no in-process high-water mark without a
+/// `getrusage` edge, so it reads the same documented `/bin/ps` sample the
+/// open-loop paths use ([`resident_bytes`]): one reader per host, and the field
+/// means a sample taken when the call runs rather than a high-water mark. The
+/// distinction is in the record's `rss_source`, so a reader is never told the
+/// two platforms measured the same thing.
 ///
 /// It is *optional* rather than required, and the reason is stated rather than
 /// hidden: a peak-RSS column a host cannot fill is worse than none, because an
@@ -56,7 +57,7 @@ fn peak_rss_bytes() -> Option<u64> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        None
+        crate::driver::resident_bytes().0
     }
 }
 

@@ -1,12 +1,11 @@
 //! Allocation attribution: each operation counted in its own process-wide window,
 //! never mixed with a timed round, with the unit named on every row.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::future::Future;
+
+use lgwks_std::trace::info;
 
 use lgwks_bot::rt::supervise::Supervisor;
 use tokio::task::JoinSet;

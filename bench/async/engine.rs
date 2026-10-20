@@ -1,12 +1,11 @@
 //! The engine surfaces both sides implement, and the box that lets a multi-phase
 //! run drive either one through a single loop.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::future::Future;
+
+use crate::widen;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;

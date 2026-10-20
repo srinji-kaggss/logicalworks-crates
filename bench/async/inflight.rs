@@ -1,12 +1,11 @@
 //! The in-flight tiers: that many tasks concurrently admitted, so the bound is
 //! the tier and the observed peak in flight is the tier.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
+
+use lgwks_std::trace::info;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -161,7 +160,12 @@ pub(crate) struct TierRun {
     pub(crate) requested: usize,
     /// How many were concurrently admitted, as the bodies themselves observed.
     pub(crate) reached: u64,
-    /// The engine's own maximum permit count.
+    /// The ceiling this tier admitted under, which is the tier itself.
+    ///
+    /// The tier is the ceiling: `Supervisor::new(tier)` and `Semaphore::new(tier)`
+    /// both bound the run at exactly this many tasks. The engine's own maximum
+    /// (`Semaphore::MAX_PERMITS`) is not this row's ceiling and reporting it put a
+    /// number no run used beside the level the bodies actually reached.
     pub(crate) ceiling: usize,
     pub(crate) placed: u64,
     pub(crate) completed: u64,
@@ -227,7 +231,7 @@ async fn inflight_tier_facade(tier: usize) -> Result<TierRun, String> {
         side: Side::Facade,
         requested: tier,
         reached,
-        ceiling: Semaphore::MAX_PERMITS,
+        ceiling: tier,
         placed: widen(tier),
         completed: stats.succeeded,
         aborted: stats.aborted,
@@ -275,7 +279,7 @@ async fn inflight_tier_baseline(tier: usize) -> Result<TierRun, String> {
         side: Side::Baseline,
         requested: tier,
         reached,
-        ceiling: Semaphore::MAX_PERMITS,
+        ceiling: tier,
         placed: completed.saturating_add(aborted),
         completed,
         aborted,
@@ -325,7 +329,7 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
     if run.reached != requested {
         let refusal = Err(format!(
             "{label}: only {} of {tier} tasks were concurrently admitted within {} s — \
-             requested {tier}, reached {}, engine ceiling {}",
+             requested {tier}, reached {}, run ceiling {}",
             run.reached,
             TIER_ADMIT_LIMIT.as_secs(),
             run.reached,

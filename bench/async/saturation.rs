@@ -1,17 +1,17 @@
 //! The saturation sweep: offered rate past the knee at every declared bound, on
 //! one admission door, with the knee read from the measured rows.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::time::Duration;
+
+use crate::widen;
+use lgwks_std::trace::info;
 
 use crate::driver::{OpenLoopSpec, open_loop_side};
 use crate::engine::{Admission, Side};
 use crate::gate::{
-    BUDGET_EXTRA_BODIES, SLO_P99_MILLIS, SLO_P99_NANOS, SideRun, open_loop_conserved,
+    BUDGET_EXTRA_BODIES, SLO_P99_NANOS, SideRun, floor_label, open_loop_conserved,
     open_loop_pair_fair,
 };
 use crate::support::{micros, print_columns, print_row, worker_and_core_cells};
@@ -327,24 +327,8 @@ pub(crate) async fn saturation_sweep(
             open_loop_side(side, admission, &warm).await?;
         }
 
-        let budget = SLO_P99_NANOS.max(
-            body_micros
-                .saturating_mul(1_000)
-                .saturating_mul(1 + BUDGET_EXTRA_BODIES),
-        );
-        info!(
-            "bound {bound}  (declared capacity {} arrivals/s at a {} us body; knee budget \
-             {:.1} ms = the {SLO_P99_MILLIS} ms floor or {BUDGET_EXTRA_BODIES} further service \
-             time{}, whichever is larger)",
-            capacity_per_second(bound, body_micros),
-            body_micros,
-            budget as f64 / 1_000_000.0,
-            if ladder_clamped(bound, body_micros) {
-                "; ladder top clamped by the generator's own rate"
-            } else {
-                ""
-            }
-        );
+        let header = sweep_header(bound, body_micros);
+        info!("{header}");
         print_columns(&SWEEP_COLUMNS);
         for rate in sweep_ladder(bound, body_micros) {
             let spec = OpenLoopSpec {
@@ -405,6 +389,34 @@ pub(crate) async fn saturation_sweep(
     Ok(())
 }
 
+/// One bound's header: its capacity, its body, and the budget its knee is read
+/// against.
+///
+/// A function rather than an inline `info!` because the line states the SLO
+/// every row below is judged by, and a test must be able to call the exact
+/// string that is printed: the defect this replaced printed the nanosecond
+/// constant beside a `ms` label.
+fn sweep_header(bound: usize, body_micros: u64) -> String {
+    let budget = SLO_P99_NANOS.max(
+        body_micros
+            .saturating_mul(1_000)
+            .saturating_mul(1 + BUDGET_EXTRA_BODIES),
+    );
+    format!(
+        "bound {bound}  (declared capacity {} arrivals/s at a {body_micros} us body; knee budget \
+         {:.1} ms = the {} floor or {BUDGET_EXTRA_BODIES} further service time{}, whichever is \
+         larger)",
+        capacity_per_second(bound, body_micros),
+        budget as f64 / 1_000_000.0,
+        floor_label(),
+        if ladder_clamped(bound, body_micros) {
+            "; ladder top clamped by the generator's own rate"
+        } else {
+            ""
+        }
+    )
+}
+
 /// The knee per bound and per side, declared against [`SLO_P99_NANOS`].
 ///
 /// The knee is the highest ladder rate that refused nothing and stayed inside the
@@ -414,8 +426,8 @@ pub(crate) async fn saturation_sweep(
 fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64) {
     info!(
         "knee — the highest offered rate with no refusal and p99 inside the bound's budget \
-         ({SLO_P99_MILLIS} ms or {BUDGET_EXTRA_BODIES} further service time, whichever is \
-         larger)"
+         ({} or {BUDGET_EXTRA_BODIES} further service time, whichever is larger)",
+        floor_label()
     );
     print_columns(&KNEE_COLUMNS);
     for bound in SWEEP_BOUNDS {
@@ -573,4 +585,24 @@ fn sweep_json(run: &SideRun) -> String {
         run.histogram.clamped(),
         run.rss_source
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sweep_header;
+
+    /// The header a bound prints names the floor in the unit its label says: the
+    /// defect this guards printed `50000000 ms` for a 50 ms floor.
+    #[test]
+    fn the_sweep_header_names_the_floor_in_milliseconds() {
+        let header = sweep_header(64, 3_200);
+        assert!(
+            header.contains("the 50 ms floor"),
+            "the printed header must name the 50 ms floor: {header}"
+        );
+        assert!(
+            !header.contains("50000000"),
+            "the nanosecond constant beside a ms label was the defect: {header}"
+        );
+    }
 }

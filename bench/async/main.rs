@@ -116,7 +116,7 @@ use crate::support::{
     OVERLOAD_DEFAULT_BOUND, RecoveryLength, host_load_average, micros, print_columns, print_row,
     refuse_failed,
 };
-pub(crate) use crate::support::{Tally, widen};
+pub(crate) use crate::support::widen;
 
 // The seeded simulation family names these at the crate root, exactly as it did
 // before the split; the re-export keeps those paths resolving to the one item.

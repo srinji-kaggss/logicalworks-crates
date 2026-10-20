@@ -928,7 +928,7 @@ jobs:
         # batching, the cropping and the control are untouched.
         run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000
       - name: Async fairness gate and concurrency ladder
-        run: cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix
+        run: cargo test --locked --manifest-path bench/async/Cargo.toml --bin lgwks-bench-async && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --matrix
 
   # The lgwks-bot and lgwks-ast compile matrices and the grammar execution, apart
   # from the lgwks-std, lgwks-deps and target matrices: together the two halves

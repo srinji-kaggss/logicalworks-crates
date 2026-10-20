@@ -1,12 +1,11 @@
 //! The open-loop generator: one arrival schedule, a bounded queue-depth trace,
 //! the arrival both engines consume, and the run that offers one side's load.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::sync::Arc;
+
+use crate::widen;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 

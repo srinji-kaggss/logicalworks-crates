@@ -2,16 +2,14 @@
 //! both sides must pass, and the checks that stand in for it once the two sides
 //! legitimately diverge past the knee.
 //!
-//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
-//! bounds are unchanged.
-
-use super::*;
+//! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
 use std::time::Duration;
 
 use crate::driver::DepthTrace;
 use crate::engine::{Admission, Side};
 use crate::openloop::Histogram;
+use crate::support::Tally;
 // ── The fairness gate ────────────────────────────────────────────────────────
 
 /// Whether two tallies describe the same work, with a reason when they do not.
@@ -91,6 +89,17 @@ pub(crate) const SLO_P99_NANOS: u64 = 50_000_000;
 /// constant beside a `ms` label, and a second literal would be the same defect
 /// waiting for the next edit.
 pub(crate) const SLO_P99_MILLIS: u64 = SLO_P99_NANOS / 1_000_000;
+
+/// The floor as every table prints it: the declared budget, in the unit its
+/// label names.
+///
+/// A function rather than a bare const in the format string, so the printed
+/// spelling is something a test can call: the defect this replaces printed the
+/// nanosecond constant beside a `ms` label, and a test that only compared two
+/// constants passed while the table still read `50000000 ms`.
+pub(crate) fn floor_label() -> String {
+    format!("{SLO_P99_MILLIS} ms")
+}
 
 /// Extra service times of queueing the p99 budget allows on top of the floor.
 ///
@@ -288,8 +297,6 @@ pub(crate) fn open_loop_pair_fair(
         cancelled: run.cancelled,
         aborted: run.aborted,
         refused: run.refused,
-        retained: 0,
-        dropped_detail: 0,
         work_units: run.work_units,
     };
     fair(&tally(facade), &tally(baseline)).map_err(|reason| format!("{label}: {reason}"))?;
@@ -298,11 +305,12 @@ pub(crate) fn open_loop_pair_fair(
 
 #[cfg(test)]
 mod tests {
-    use super::{SLO_P99_MILLIS, SLO_P99_NANOS};
+    use super::{SLO_P99_MILLIS, SLO_P99_NANOS, floor_label};
 
-    /// The millisecond spelling of the floor is the nanosecond spelling, not a
-    /// second number: a table printing the nanoseconds beside a `ms` label read
-    /// `50000000 ms` for a 50 ms budget.
+    /// The millisecond spelling of the floor is the nanosecond spelling, and the
+    /// string the tables print is the millisecond one: the defect this guards
+    /// printed `50000000 ms` for a 50 ms budget, and a test that compared only
+    /// the constants still passed while the table was wrong.
     #[test]
     fn the_printed_floor_is_the_floor() {
         assert_eq!(SLO_P99_MILLIS, 50, "50 ms is the estate's budget");
@@ -310,6 +318,12 @@ mod tests {
             SLO_P99_MILLIS.saturating_mul(1_000_000),
             SLO_P99_NANOS,
             "the millisecond spelling must be the same budget"
+        );
+        let printed = floor_label();
+        assert_eq!(printed, "50 ms", "the tables print the floor in ms");
+        assert!(
+            !printed.contains("50000000"),
+            "the nanosecond constant printed beside a ms label was the defect"
         );
     }
 }

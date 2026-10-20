@@ -238,17 +238,19 @@ id = "bench-async-fairness"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# The async rig's three gates, not its timings. `--mutant-check` is the negative
-# control: the fairness gate must REFUSE a side that stops draining, and the
-# lane fails if it ever accepts one. `--tiers` is the same gate applied at every
-# concurrency tier the contract names (100, 1k, 10k, 100k), so a tier that
-# drifts mid-run is caught at the round it drifted. `--matrix` drives every
-# workload row lgwks_bot can drive today and aborts on the first row that fails,
-# so a matrix with a skipped row cannot read as coverage. All three are seconds,
-# and all three run against the release build in a target directory of their own:
-# the rig is a separate workspace root precisely so its raw-`tokio` edge is
-# invisible to `lgwks-deps check`.
-command = "cargo run --release --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --manifest-path bench/async/Cargo.toml -- --matrix"
+# The async rig's three gates and its unit tests, not its timings. `--mutant-check`
+# is the negative control: the fairness gate must REFUSE a side that stops
+# draining, and the lane fails if it ever accepts one. `--tiers` is the same gate
+# applied at every concurrency tier the contract names (100, 1k, 10k, 100k), so a
+# tier that drifts mid-run is caught at the round it drifted. `--matrix` drives
+# every workload row lgwks_bot can drive today and aborts on the first row that
+# fails, so a matrix with a skipped row cannot read as coverage. The unit tests
+# run first because the rig is its own workspace root: `cargo test --workspace`
+# never reaches them, and a regression test no lane runs cannot fail CI. All of
+# it is seconds, and all of it runs against the release build in a target
+# directory of its own: the rig is a separate workspace root precisely so its
+# raw-`tokio` edge is invisible to `lgwks-deps check`.
+command = "cargo test --locked --manifest-path bench/async/Cargo.toml --bin lgwks-bench-async && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --matrix"
 ci_step = "Async fairness gate and concurrency ladder"
 
 [[lane]]
