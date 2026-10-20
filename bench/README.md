@@ -62,7 +62,14 @@ cargo run --release --locked --manifest-path bench/Cargo.toml -- --profile
 
 # heap allocations per steady-state tick, both engines, over the same window
 cargo run --release --locked --manifest-path bench/Cargo.toml -- --alloc-report
+
+# one row, both doors, the width #640 added
+cargo run --release --locked --manifest-path bench/Cargo.toml -- \
+  --scenario wide-4096x10 --alloc-report --profile
 ```
+
+`--scenario NAME` (or `--scenario=NAME`) restricts the timing run and both
+doors to that row; both doors run when both are asked for, in that order.
 
 Both are separate from the timing run and neither number is taken from a
 counting or an instrumented window: the counters and the clock reads are real
@@ -82,6 +89,18 @@ spread, the earlier run it is compared with and what each row is made of are in
 | `churn-64x1` | 133 986.7 | 51.5 | 2 605.27x | [2 547.15, 2 662.27] |
 | `fanout-1x64` | 110 259.8 | 42.7 | 2 574.46x | [2 527.44, 2 588.59] |
 | `wide-256x10` | 54 248.3 | 135.6 | 401.05x | [397.17, 410.04] |
+
+**The wide family, measured again for #640** (2026-10-20, load 2.02 to 2.27
+across the three doors). The four rows hold the change-tick fraction at one in
+ten and vary only the source count; the run fits them at **slope 1.206** (2.31x
+per doubling) and prints that line itself, and `--profile` puts the superlinear
+term in `act` ([§4.9](../../docs/production-readiness/4-9-performance.md)):
+
+| scenario | bot ns/tick | baseline ns/tick | ratio | 95% CI |
+|---|---:|---:|---:|---|
+| `wide-1024x10` | 238 705.6 | 530.6 | 451.45x | [440.97, 458.55] |
+| `wide-4096x10` | 1 167 018.7 | 2 053.1 | 568.06x | [550.42, 575.49] |
+| `wide-16384x10` | 8 471 299.9 | 8 490.6 | 996.37x | [988.15, 1 004.88] |
 
 **Machine and toolchain.** Apple M5 Pro, 15 cores, macOS 27.0, rustc 1.99.0,
 `opt-level = 3`, `lto = true`, `codegen-units = 1`. One machine: these are

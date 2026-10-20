@@ -8,6 +8,7 @@
 
 use super::cap::{Auth, Cap};
 use super::error::BotError;
+use crate::clock::Clock;
 use std::future::Future;
 
 // ── Observe ────────────────────────────────────────────────────────────────
@@ -327,6 +328,26 @@ pub trait Execute {
         &self,
         call: (Auth, &Self::Input),
     ) -> impl Future<Output = Result<Self::Output, BotError>>;
+
+    #[doc(hidden)]
+    /// [`Execute::execute_action`] on the clock of the flow that runs it.
+    ///
+    /// The seam `script!`'s `act` uses: a flow's scope names a clock, and an
+    /// action that waits — `OpenIssue` in the `gh::issue` domain settles a
+    /// create by polling the listing — must wait on that clock, not on the
+    /// process's wall timer. The default is the plain call, so every action
+    /// that does not wait costs nothing and needs no change.
+    ///
+    /// Hidden because it is the expansion that names it, like
+    /// `Scope::enter_at`; a consumer writes `act` and never this.
+    fn execute_action_on(
+        &self,
+        clock: &Clock,
+        call: (Auth, &Self::Input),
+    ) -> impl Future<Output = Result<Self::Output, BotError>> {
+        let _ = clock;
+        self.execute_action(call)
+    }
 
     /// The domain identifier (e.g. `"notify::slack"`).
     fn domain_id(&self) -> &str;

@@ -633,6 +633,27 @@ pub(crate) trait ExecuteAny {
         grants: &'a GrantSet,
         input: &'a Erased,
     ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>>;
+
+    /// [`ExecuteAny::run_any`] on the clock of the flow that runs the action.
+    ///
+    /// The default is the plain call: an action that does not wait has nothing
+    /// to measure. `TypedExec` overrides it to reach
+    /// [`Execute::execute_action_on`](super::verb::Execute::execute_action_on),
+    /// so a flow's `act` reaches a waiting action with the flow's own clock.
+    ///
+    /// Gated with its only caller, `script::act`: an ECS tick carries no scope
+    /// and therefore no clock, and a method nothing there can call is not part
+    /// of that build's surface.
+    #[cfg(feature = "script")]
+    fn run_any_on<'a>(
+        &'a self,
+        clock: &'a crate::clock::Clock,
+        grants: &'a GrantSet,
+        input: &'a Erased,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
+        let _ = clock;
+        self.run_any(grants, input)
+    }
 }
 
 /// Erases one [`Execute`] to [`ExecuteAny`].
@@ -647,6 +668,45 @@ impl<A> TypedExec<A> {
     /// Wrap one concrete action for erasure.
     pub(crate) const fn new(action: A) -> Self {
         Self(action)
+    }
+}
+
+impl<A: super::verb::Execute> TypedExec<A>
+where
+    A::Input: 'static,
+    A::Output: 'static,
+{
+    /// The one erased call: downcast, prove authority, run on `clock` when the
+    /// caller named one, and box the output.
+    ///
+    /// `None` is the call that carried no flow scope — the ECS tick and a
+    /// pipeline built by hand — and it runs exactly as it always has. `Some` is
+    /// the flow's `act`, whose scope names the clock its wait must spend.
+    fn execute_erased<'a>(
+        &'a self,
+        clock: Option<&'a crate::clock::Clock>,
+        grants: &'a GrantSet,
+        input: &'a Erased,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
+        Box::pin(async move {
+            match input.as_any().downcast_ref::<A::Input>() {
+                Some(typed) => {
+                    let auth: Auth = grants.issue(self.0.required_caps())?;
+                    let value = match clock {
+                        Some(clock) => self.0.execute_action_on(clock, (auth, typed)).await?,
+                        None => self.0.execute_action((auth, typed)).await?,
+                    };
+                    let boxed: Box<dyn Any> = Box::new(value);
+                    Ok(boxed)
+                }
+                None => Err(BotError::TypeMismatch {
+                    site: "spec::typed_entry",
+                    chain: None,
+                    expected: type_name::<A::Input>(),
+                    observed: input.witness.name(),
+                }),
+            }
+        })
     }
 }
 
@@ -672,22 +732,17 @@ where
         grants: &'a GrantSet,
         input: &'a Erased,
     ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
-        Box::pin(async move {
-            match input.as_any().downcast_ref::<A::Input>() {
-                Some(typed) => {
-                    let auth: Auth = grants.issue(self.0.required_caps())?;
-                    let value = self.0.execute_action((auth, typed)).await?;
-                    let boxed: Box<dyn Any> = Box::new(value);
-                    Ok(boxed)
-                }
-                None => Err(BotError::TypeMismatch {
-                    site: "spec::typed_entry",
-                    chain: None,
-                    expected: type_name::<A::Input>(),
-                    observed: input.witness.name(),
-                }),
-            }
-        })
+        self.execute_erased(None, grants, input)
+    }
+
+    #[cfg(feature = "script")]
+    fn run_any_on<'a>(
+        &'a self,
+        clock: &'a crate::clock::Clock,
+        grants: &'a GrantSet,
+        input: &'a Erased,
+    ) -> crate::BoxFuture<'a, Result<Box<dyn Any>, BotError>> {
+        self.execute_erased(Some(clock), grants, input)
     }
 }
 

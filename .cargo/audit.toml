@@ -7,10 +7,8 @@
 # only silences the tool.
 #
 # A vulnerability this list does not name still fails the lane: cargo-audit exits
-# non-zero for one whatever `--deny` says. `--deny warnings` is deliberately not
-# set yet: the unmaintained crates issue (#637) owns recording the 13 unmaintained
-# warnings and feeding their ids into this list, and only then can the lane deny
-# warnings as well.
+# non-zero for one whatever `--deny` says. The 13 unmaintained warnings of #637
+# are covered by the ten ids below, so the lane can now deny warnings as well.
 
 [advisories]
 ignore = [
@@ -21,4 +19,26 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # SECURITY.md, "Unmaintained transitive crates": the ten ids behind `gpui` or
+  # the Candle features, all default-off, none with a patched version.
+  # rustybuzz/ttf-parser: gpui -> cosmic-text, usvg; reopen if gpui moves to a
+  # maintained text stack or a shipped binary enables gpui.
+  "RUSTSEC-2026-0206",
+  "RUSTSEC-2026-0192",
+  # async-std/rustls-pemfile: gpui -> gpui_http_client -> the Zed forks; reopen
+  # if gpui ships or its HTTP client leaves those forks.
+  "RUSTSEC-2025-0052",
+  "RUSTSEC-2025-0134",
+  # instant/proc-macro-error2: gpui -> gpui_util (fastrand), stacksafe; reopen if
+  # gpui ships or those parents drop them.
+  "RUSTSEC-2024-0384",
+  "RUSTSEC-2026-0173",
+  # zbus_names/zvariant/zvariant_derive: gpui -> ashpd, oo7 -> zbus 5.19.0;
+  # reopen if gpui moves to zbus 6 (where these are modules) or ships.
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0372",
+  # paste: gpui -> image, metal; ml-candle -> candle-core, tokenizers 0.22;
+  # ml-tokenizers -> tokenizers 0.23; reopen if any of the three features ships.
+  "RUSTSEC-2024-0436",
 ]

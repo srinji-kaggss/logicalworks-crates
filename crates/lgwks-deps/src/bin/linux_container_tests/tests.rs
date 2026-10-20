@@ -140,26 +140,30 @@ fn no_two_runners_or_suite_sets_share_a_writable_volume() -> TestResult {
     // One writer per target volume: two runners on one volume relinked a test binary
     // while another executed it (`No such file or directory`, bot-full).
     let sets: Vec<Vec<String>> = {
-        let mut found = Vec::new();
-        for first in SUITES {
-            found.push(suites(&[first]));
-            for second in SUITES.iter().copied().filter(|other| *other != first) {
-                found.push(suites(&[first, second]));
-                for third in SUITES
-                    .iter()
-                    .copied()
-                    .filter(|other| *other != first && *other != second)
-                {
-                    found.push(suites(&[first, second, third]));
+        // The volume name carries the suite order (`suites.join("-")`), so every
+        // non-empty ordered selection is a different name: four singles, twelve
+        // pairs, twenty-four triples and twenty-four orderings of all four.
+        fn orderings(found: &mut Vec<Vec<String>>, prefix: &mut Vec<String>) {
+            if !prefix.is_empty() {
+                found.push(prefix.clone());
+            }
+            for suite in SUITES.iter().copied() {
+                if prefix.iter().any(|held| held.as_str() == suite) {
+                    continue;
                 }
+                prefix.push(suite.to_owned());
+                orderings(found, prefix);
+                prefix.pop();
             }
         }
+        let mut found = Vec::new();
+        orderings(&mut found, &mut Vec::new());
         found
     };
     assert_eq!(
         sets.len(),
-        15,
-        "three singles, six pairs, six orderings of all three"
+        64,
+        "four singles, twelve pairs, twenty-four triples, twenty-four orderings of all four"
     );
     let mut targets = Vec::new();
     for runner in OWNERS {
@@ -218,7 +222,7 @@ fn a_partition_shards_only_the_workspace_suite() -> TestResult {
         !shell_line(whole.first().ok_or("no command")?).contains("--partition"),
         "unset, it is the whole suite"
     );
-    for suite in ["bot-full", "appcui"] {
+    for suite in ["targets", "bot-full", "appcui"] {
         let commands = suite_commands(suite, Some("count:1/2")).ok_or("a suite is missing")?;
         assert!(
             commands
@@ -248,6 +252,23 @@ fn every_suite_the_default_runs_has_commands() -> TestResult {
     }
     let appcui = suite_commands("appcui", None).ok_or("no appcui suite")?;
     assert_eq!(appcui.len(), 3, "the lib tests, the doc tests and the lint");
+    Ok(())
+}
+
+#[test]
+fn the_targets_suite_builds_the_two_cells_the_portable_doc_names() -> TestResult {
+    // §4.7: `lgwks_std --features full` and `lgwks_ast` build for
+    // aarch64-unknown-linux-gnu in this container, natively.
+    let commands = suite_commands("targets", None).ok_or("no targets suite")?;
+    let lines: Vec<String> = commands.iter().map(|argv| shell_line(argv)).collect();
+    assert_eq!(
+        lines,
+        [
+            "cargo check --locked -p lgwks_std --features full --target aarch64-unknown-linux-gnu",
+            "cargo check --locked -p lgwks_ast --target aarch64-unknown-linux-gnu",
+        ],
+        "the two cells the Linux container closes"
+    );
     Ok(())
 }
 
@@ -478,7 +499,7 @@ fn an_unknown_suite_is_refused_before_anything_runs() {
     let refused = execute(&suites(&["workspace", "nonsense"]));
     assert_eq!(
         refused.err().map(|failure| failure.to_string()),
-        Some("unknown suite nonsense (workspace, bot-full, appcui, vps)".to_owned()),
+        Some("unknown suite nonsense (targets, workspace, bot-full, appcui, vps)".to_owned()),
         "the refusal names the suite and the ones that exist"
     );
 }

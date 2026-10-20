@@ -1,5 +1,7 @@
 //! `lgwks-ast script map|check|census [--json] [--top N] [PATH...]`: every
-//! `script!` in a tree, read by the one parser (SL-2, #384); and
+//! `script!` in a tree, read by the one parser (SL-2, #384);
+//! `lgwks-ast script diff <base> <head> [--json]`, the architecture change
+//! between two checked-out source roots (#655); and
 //! `lgwks-ast scan [--json] [PATH...]`, the zero-gate source detectors
 //! (INV-SCAN-ZERO, #408).
 //!
@@ -15,14 +17,21 @@
 //!
 //! A `PATH` that is a directory is walked for `.rs` files, skipping build
 //! output and vendored trees; a file is read as given; no `PATH` means `.`.
-//! `--json` writes one document to stdout for an agent (`map` and `check`);
-//! `--top` bounds the rows a census prints. The exit status is 0 when nothing
-//! is refused, 2 when a script is refused or a file cannot be read, and 2 with
+//! `--json` writes one document to stdout for an agent (`map`, `check` and
+//! `diff`); `--top` bounds the rows a census prints. The exit status is 0 when
+//! nothing is refused, 2 when a script is refused or a file cannot be read, and 2 with
 //! the usage for an unknown command. A census measures and never gates, so it
 //! exits 0 and says how many scripts it could not read. `scan` exits 2 on any
 //! finding and on any file the checked parse refuses; it is in `scan.rs`.
+//!
+//! `diff` takes two source roots — two directories, or two files — that a
+//! caller checked out, and reads both from disk: there is no git call in the
+//! command. It exits 0 when nothing widens or every widening is approved, 1
+//! when a widening has no `// lgwks-architecture-approved: <reason>` line in
+//! the head source, and 2 for a usage or parse error.
 
 mod census;
+mod diff;
 #[cfg(feature = "scan")]
 mod scan;
 
@@ -35,15 +44,19 @@ use lgwks_std::fs::{Descend, FileKind, WalkOptions, walk_dir_entries};
 use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
-const USAGE: &str = "usage: lgwks-ast script map|check|census [--json] [--top N] [PATH...]\n\
+const USAGE: &str = "usage: lgwks-ast script map|check|census|diff [--json] [--top N] [PATH...]\n\
+       lgwks-ast script diff <base> <head> [--json]\n\
        lgwks-ast scan [--json] [PATH...]\n\
 \n\
   map     print every script!'s architecture map, as its ARCHITECTURE renders\n\
   check   print only what the script! language refuses; exit 2 if anything is\n\
   census  print the plain-Rust shapes that recur across flows, most recurrent first\n\
+  diff    classify the architecture change between two checked-out source roots;\n\
+          exit 1 on a widening with no `// lgwks-architecture-approved: <reason>`\n\
+          line in the head source\n\
   scan    run the zero-gate detectors (error swallow, unlogged returns, lint\n\
           allowances, try chains, docs); exit 2 on any finding or refused file\n\
-  --json  one JSON document on stdout instead of text (map, check and scan)\n\
+  --json  one JSON document on stdout instead of text (map, check, diff and scan)\n\
   --top   how many shapes a census prints\n\
   PATH    a directory to walk for .rs files, or one file; default `.`\n";
 
@@ -77,6 +90,8 @@ enum Verb {
     Check,
     /// The plain-Rust shapes that recur, and where.
     Census,
+    /// The architecture change between two source roots.
+    Diff,
     /// Every finding of the zero-gate detectors.
     Scan,
 }
@@ -88,6 +103,7 @@ impl Verb {
             Self::Map => "map",
             Self::Check => "check",
             Self::Census => "census",
+            Self::Diff => "diff",
             Self::Scan => "scan",
         }
     }
@@ -95,7 +111,7 @@ impl Verb {
     /// How many leading arguments name the verb: `script map` is two.
     const fn words(self) -> usize {
         match self {
-            Self::Map | Self::Check | Self::Census => 2,
+            Self::Map | Self::Check | Self::Census | Self::Diff => 2,
             Self::Scan => 1,
         }
     }
@@ -192,8 +208,8 @@ fn settle(result: io::Result<ExitCode>) -> ExitCode {
     }
 }
 
-/// Parse the arguments and run `script map`, `script check`, `script census` or
-/// `scan`.
+/// Parse the arguments and run `script map`, `script check`, `script census`,
+/// `script diff` or `scan`.
 fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     let verb = match (
         args.first().map(String::as_str),
@@ -202,6 +218,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
         (Some("script"), Some("map")) => Verb::Map,
         (Some("script"), Some("check")) => Verb::Check,
         (Some("script"), Some("census")) => Verb::Census,
+        (Some("script"), Some("diff")) => Verb::Diff,
         (Some("scan"), _) => Verb::Scan,
         (Some("-h" | "--help" | "help"), _) => {
             write!(out, "{USAGE}")?;
@@ -227,6 +244,9 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     if verb == Verb::Scan {
         return run_scan(&parsed.roots, parsed.json, out, err);
     }
+    if verb == Verb::Diff {
+        return run_diff(&parsed, out, err);
+    }
     let mut readings = Vec::new();
     for root in &parsed.roots {
         match files_under(root) {
@@ -244,6 +264,27 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     } else {
         write_text(verb, &readings, out, err)
     }
+}
+
+/// `lgwks-ast script diff <base> <head>`, which needs exactly two roots.
+fn run_diff(parsed: &Options, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
+    let (Some(base), Some(head)) = (parsed.roots.first(), parsed.roots.get(1)) else {
+        writeln!(
+            err,
+            "lgwks-ast: `script diff` takes two source roots, <base> and <head>\n"
+        )?;
+        write!(err, "{USAGE}")?;
+        return Ok(ExitCode::from(2));
+    };
+    if parsed.roots.len() != 2 {
+        writeln!(
+            err,
+            "lgwks-ast: `script diff` takes exactly two source roots, <base> and <head>\n"
+        )?;
+        write!(err, "{USAGE}")?;
+        return Ok(ExitCode::from(2));
+    }
+    diff::run(base, head, parsed.json, out, err)
 }
 
 /// `lgwks-ast scan` over `roots`.

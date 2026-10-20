@@ -13,14 +13,22 @@
 //! |---|---|
 //! | `accept` | holds the issue and answers with it |
 //! | `drop` | holds the issue, then loses the answer (exit 7) |
+//! | `droplag-N` | as `drop`, and its listings hide the issue for N reads |
+//! | `kill` | holds the issue, then `SIGKILL`s itself before answering |
+//! | `kill-N` | as `kill`, and its listings hide the issue for N reads |
 //! | `refuse` | refuses the create without holding it (HTTP 422) |
 //! | `deny` | refuses every call's credential (HTTP 403) |
 //! | `denycreate` | answers reads, refuses the create's credential (HTTP 403) |
 //! | `lag` | as `accept`, but the two listings after a create omit that issue |
+//! | `lag-N` | as `lag`, with N listings omitting the created issue |
 //! | `stale` | as `accept`, but its listing never shows its newest issue |
 //!
-//! Each `owner/repo` has its own store, so tests that use distinct owners
-//! never see each other's issues however they are scheduled.
+//! A lost answer and a lagging listing are two independent faults, so they are
+//! two axes of the same name: `drop` and `kill` differ in *how* the answer is
+//! lost (a normal failure exit against a real signal death between the POST and
+//! its reply), and `-N` names how many listing reads still hide the issue. Each
+//! `owner/repo` has its own store, so tests that use distinct owners never see
+//! each other's issues however they are scheduled.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -126,6 +134,20 @@ pub fn creates_on(owner: &str) -> Result<usize, Box<dyn std::error::Error>> {
         .count())
 }
 
+/// How many issues the fake holds for `owner/repo`, one store line each.
+///
+/// A create's POST count is what a duplicate raises; the store is what a
+/// duplicate *leaves behind*, and the two can differ if a create landed and
+/// was never acknowledged.
+pub fn held_on(owner: &str, repo: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let path = dir()?.join(format!("issues-{owner}-{repo}.jsonl"));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text.lines().filter(|line| !line.is_empty()).count()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// The fake client. Bash where the host has it, as the review fake chooses.
 const FAKE_GH_ISSUES: &str = r#"#!/bin/bash
 # A fake `gh api` holding issues. Records argv, then answers from its store.
@@ -193,12 +215,34 @@ if [ "$method" = "POST" ]; then
   number=${#raw}
   record="{\"number\":$number,\"html_url\":\"https://github.com/$owner/$repo/issues/$number\",${payload#\{}"
   printf '%s\n' "$record" >> "$store"
-  # `lag` hides this issue from the next two listings.
-  if [ "$repo" = "lag" ]; then printf 'xx' > "$dir/lag-$owner-$repo"; fi
-  if [ "$repo" = "drop" ]; then
-    printf 'connection reset by peer\n' >&2
-    exit 7
+  # `lag` hides this issue from the next two listings; `lag-N` from the next N.
+  # A lost answer carries a lag the same way: `droplag-N` and `kill-N`.
+  lag=0
+  case "$repo" in
+    lag) lag=2 ;;
+    lag-*) lag=${repo#lag-} ;;
+    droplag-*) lag=${repo#droplag-} ;;
+    kill-*) lag=${repo#kill-} ;;
+  esac
+  case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
+  if [ "$lag" -gt 0 ]; then
+    key=${payload##*<!-- lgwks-issue:}
+    key=${key%% -->*}
+    printf '%s' "$lag" > "$dir/lag-$owner-$repo-$key"
   fi
+  # The answer is lost after the issue is held. `drop` exits non-zero with a
+  # transport error; `kill` dies by SIGKILL, as a `kill -9` of the child
+  # between the POST and its reply does, so the parent reads a signal death and
+  # no exit code at all.
+  case "$repo" in
+    drop|droplag-*)
+      printf 'connection reset by peer\n' >&2
+      exit 7
+      ;;
+    kill|kill-*)
+      kill -9 $$
+      ;;
+  esac
   project "$record"
   printf '\n'
   exit 0
@@ -224,33 +268,41 @@ case "$rest" in
 esac
 
 # A listing, filtered to the trailer the `--jq` names: newest first, as the
-# endpoint sorts `created desc`. GitHub's listing lags a create: `lag` omits
-# its newest issue from the two listings after a create, `stale` from all.
-held=0
+# endpoint sorts `created desc`. GitHub's listing lags a create: a key's lag
+# file names how many of the newest matching records this key cannot see yet,
+# and each listing read spends one. `stale` omits its newest match on every
+# read.
+lagging="$dir/lag-$owner-$repo-${tail%% -->*}"
+lag=0
+if [ -s "$lagging" ]; then IFS= read -r lag < "$lagging"; fi
+case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
+matches=0
 if [ -s "$store" ]; then
-  while IFS= read -r record; do held=$((held + 1)); done < "$store"
+  while IFS= read -r record; do
+    case "$record" in *"$wanted"*) matches=$((matches + 1)) ;; esac
+  done < "$store"
 fi
-lagging="$dir/lag-$owner-$repo"
-if [ "$repo" = "lag" ] && [ -s "$lagging" ]; then
-  held=$((held - 1))
-  pending=""
-  IFS= read -r pending < "$lagging"
-  printf '%s' "${pending#x}" > "$lagging"
-fi
-if [ "$repo" = "stale" ]; then held=$((held - 1)); fi
+keep=$((matches - lag))
+if [ "$keep" -lt 0 ]; then keep=0; fi
+if [ "$repo" = "stale" ] && [ "$keep" -gt 0 ]; then keep=$((keep - 1)); fi
 out=""
 seen=0
 if [ -s "$store" ]; then
   while IFS= read -r record; do
-    seen=$((seen + 1))
-    if [ "$seen" -gt "$held" ]; then break; fi
     case "$record" in
       *"$wanted"*)
-        kept=$(project "$record")
-        if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
+        seen=$((seen + 1))
+        if [ "$seen" -le "$keep" ]; then
+          kept=$(project "$record")
+          if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
+        fi
         ;;
     esac
   done < "$store"
+fi
+if [ "$lag" -gt 0 ]; then
+  lag=$((lag - 1))
+  if [ "$lag" -eq 0 ]; then : > "$lagging"; else printf '%s' "$lag" > "$lagging"; fi
 fi
 printf '[%s]\n' "$out"
 exit 0

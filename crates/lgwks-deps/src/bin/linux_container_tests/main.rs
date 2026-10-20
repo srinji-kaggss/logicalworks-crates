@@ -1,5 +1,6 @@
-//! The Linux leg of the gate: the workspace suite, the `lgwks_bot` full-feature
-//! suite and the AppCUI storefront, run on Linux.
+//! The Linux leg of the gate: the two target cells for `aarch64-unknown-linux-gnu`
+//! (`lgwks_std --features full` and `lgwks_ast`), the workspace suite, the
+//! `lgwks_bot` full-feature suite and the AppCUI storefront, run on Linux.
 //!
 //! CI runs on the self-hosted macOS runners (Director, 2026-10-04). The
 //! supervisor and `lgwks_std::process` have Linux-only paths (`/proc` child
@@ -30,8 +31,9 @@
 //! applied to the container's target, so its own target table takes precedence
 //! over `[build] rustflags` exactly as the host's does.
 //!
-//! Usage, from the repository root: `linux-container-tests [workspace|bot-full|appcui]...`
-//! (default: all three). `PARTITION=count:N/M` shards the workspace suite.
+//! Usage, from the repository root:
+//! `linux-container-tests [targets|workspace|bot-full|appcui]...`
+//! (default: all four). `PARTITION=count:N/M` shards the workspace suite.
 //! `linux-container-tests vps` is the one suite that is not a test run: it
 //! measures the `bench/async` matrix under a cgroup cap (see `vps`), runs
 //! alone, and always in a container, on any host.

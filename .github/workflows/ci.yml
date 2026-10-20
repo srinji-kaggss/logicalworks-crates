@@ -603,9 +603,9 @@ jobs:
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
   # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
   # backend execute here, in a container on the same machine, with the same
-  # cargo configuration. The workspace suite is one job; the lgwks-bot full
-  # suite and the AppCUI storefront share the other, each pair with its own
-  # target volume.
+  # cargo configuration. The workspace suite and the two §4.7 target cells are
+  # one job; the lgwks-bot full suite and the AppCUI storefront share the other,
+  # each pair with its own target volume.
   tests_linux:
     name: Tests (Linux container)
     # Each suite on its own instance, whose container target volume keeps the
@@ -613,7 +613,13 @@ jobs:
     # Linux runner restores a cache without the workspace crates and compiled
     # lgwks_std, lgwks_deps and lgwks_bot for over three minutes before the
     # first test (run 38401426445).
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'workspace' && 'lwc-8' || 'lwc-9' }}"]
+    #
+    # `targets workspace` adds the two cells #642 closes: `lgwks_std --features
+    # full` and `lgwks_ast` for `aarch64-unknown-linux-gnu`. The container is
+    # arm64, so its own C compiler targets that triple, which the macOS host's
+    # `target-matrix` lane cannot reach. They run first, in the workspace leg's
+    # container, sharing its `/target` with the suite that follows.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.suite == 'targets workspace' && 'lwc-8' || 'lwc-9' }}"]
     timeout-minutes: 5
     env:
       # The tool is built on the host: lints run once, in the Clippy job.
@@ -621,7 +627,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [workspace, bot-full appcui]
+        suite: [targets workspace, bot-full appcui]
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -662,7 +668,7 @@ jobs:
       # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so
       # the receipt job records it as its own platform.
       - name: Upload Linux lgwks-bot JUnit report
-        if: matrix.suite != 'workspace'
+        if: matrix.suite == 'bot-full appcui'
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-junit-linux
@@ -743,7 +749,11 @@ jobs:
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
           --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
-          --all-targets --no-default-features --features parser -- -D warnings
+          --all-targets --no-default-features --features parser -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml
+          --all-targets --no-default-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-macros/Cargo.toml
+          --all-targets --no-default-features -- -D warnings
       - name: Clippy process-only
         if: matrix.part == 'reduced'
         # `process` alone is a supported consumer shape: a bot that starts

@@ -149,7 +149,46 @@ struct Inner {
     /// caller never asked for, and a clock that touches the wall clock when it
     /// is supposed not to is precisely the coupling this module forbids.
     placed: Option<Instant>,
+    /// Futures waiting for a caller to advance this clock to their deadline.
+    ///
+    /// Only a virtual clock keeps any: a wall clock's waits are the engine's
+    /// timer and never reach here. This is the machinery that lets a test own
+    /// the settle schedule: the action registers, the test advances, and the
+    /// advance wakes it — no real time passes and no poll loop runs.
+    #[cfg(feature = "time")]
+    sleepers: std::sync::Mutex<Vec<Sleeper>>,
+    /// Futures waiting for the *first* sleeper to appear, so a test driver can
+    /// park while the run is busy and move the clock only when work is waiting.
+    #[cfg(feature = "time")]
+    watchers: std::sync::Mutex<Vec<std::task::Waker>>,
+    /// Hands each waiter an identity, so a completion that raced an advance can
+    /// remove exactly its own entry and nothing else.
+    #[cfg(feature = "time")]
+    next_sleeper: AtomicU64,
 }
+
+/// One future waiting for a virtual clock to reach `deadline`.
+#[cfg(feature = "time")]
+#[derive(Debug)]
+struct Sleeper {
+    /// The waiting future's own identity, used to withdraw it on a raced
+    /// completion.
+    id: u64,
+    /// The instant, on this clock, the waiter is waiting for.
+    deadline: Duration,
+    /// What to wake when the clock reaches `deadline`.
+    waker: std::task::Waker,
+}
+
+/// The most waiters one clock retains before it wakes them all and starts over.
+///
+/// The registry is a cache of parked futures, not a queue of work: a waiter
+/// that is dropped without completing leaves its entry until the clock is
+/// advanced past it. Bounding the list means a flow that abandons sleeps
+/// cannot grow it across a run, and waking everyone costs one re-registration
+/// each rather than a lost wake.
+#[cfg(feature = "time")]
+const MAX_CLOCK_SLEEPERS: usize = 4_096;
 
 impl Inner {
     /// The real monotonic instant real-time readings count from.
@@ -221,6 +260,12 @@ impl Clock {
                 elapsed: AtomicU64::new(0),
                 source: TimeSource::Wall,
                 placed: Some(Instant::now()),
+                #[cfg(feature = "time")]
+                sleepers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                watchers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                next_sleeper: AtomicU64::new(0),
             }),
         }
     }
@@ -243,6 +288,12 @@ impl Clock {
                 elapsed: AtomicU64::new(duration_to_nanos(elapsed)),
                 source: TimeSource::Wall,
                 placed: Some(Instant::now()),
+                #[cfg(feature = "time")]
+                sleepers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                watchers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                next_sleeper: AtomicU64::new(0),
             }),
         }
     }
@@ -264,6 +315,12 @@ impl Clock {
                 elapsed: AtomicU64::new(duration_to_nanos(elapsed)),
                 source: TimeSource::Virtual,
                 placed: None,
+                #[cfg(feature = "time")]
+                sleepers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                watchers: std::sync::Mutex::new(Vec::new()),
+                #[cfg(feature = "time")]
+                next_sleeper: AtomicU64::new(0),
             }),
         }
     }
@@ -354,7 +411,12 @@ impl Clock {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(nanos_to_duration(next)),
+                Ok(_) => {
+                    let landed = nanos_to_duration(next);
+                    #[cfg(feature = "time")]
+                    self.wake_due(landed);
+                    return Ok(landed);
+                }
                 Err(observed) => {
                     // Another task advanced past the ceiling between the check
                     // above and this attempt. Refuse rather than move: the
@@ -370,6 +432,192 @@ impl Clock {
                     current = observed;
                 }
             }
+        }
+    }
+
+    /// Wait `duration` on this clock.
+    ///
+    /// A wall clock waits real time through the engine's timer, which is the
+    /// production path and needs the runtime's `time` driver. A virtual clock
+    /// instead parks the future until a caller advances the counter to its
+    /// deadline, so the wait costs no real time and the move is the caller's:
+    /// this is the timer a test owns, and the one a settle schedule runs on.
+    ///
+    /// Hidden because a consumer waits through the action it runs: the `Scope`
+    /// it is handed already names the clock, and `act` is the word that spends
+    /// it. The method stays callable so a test can model a wait directly.
+    ///
+    /// # Panics
+    ///
+    /// A wall clock's wait panics when polled outside a runtime with the `time`
+    /// driver, exactly as any engine timer does. A virtual clock's wait needs
+    /// no runtime.
+    #[doc(hidden)]
+    #[cfg(feature = "time")]
+    pub async fn sleep(&self, duration: Duration) {
+        match self.inner.source {
+            TimeSource::Wall => crate::rt::time::sleep(duration).await,
+            TimeSource::Virtual => self.sleep_virtual(duration).await,
+        }
+    }
+
+    #[doc(hidden)]
+    /// Whether any future is parked on this clock's virtual sleep.
+    ///
+    /// The signal a test driver advances on: a virtual clock moves because
+    /// work is waiting, never because a driver guessed it might be. Hidden for
+    /// the same reason the flow's expansion seam is — a consumer waits through
+    /// the action it runs and never asks this.
+    #[cfg(feature = "time")]
+    #[must_use]
+    pub fn has_waiters(&self) -> bool {
+        !self.lock_sleepers().is_empty()
+    }
+
+    #[doc(hidden)]
+    /// Wait until a future is parked on this clock's virtual sleep.
+    ///
+    /// Completes at once when one already is. The other half of
+    /// [`Clock::has_waiters`]: a driver parks here while the run is busy, so it
+    /// spends no CPU and polls no child process, and is woken exactly when the
+    /// run reaches a wait the clock must settle.
+    #[cfg(feature = "time")]
+    pub async fn wait_for_waiter(&self) {
+        std::future::poll_fn(|context| {
+            if self.has_waiters() {
+                return std::task::Poll::Ready(());
+            }
+            let waker = context.waker().clone();
+            let overflow = {
+                let mut watchers = self.lock_watchers();
+                if watchers.len() >= MAX_CLOCK_SLEEPERS {
+                    Some(std::mem::take(&mut *watchers))
+                } else {
+                    None
+                }
+            };
+            if let Some(woken) = overflow {
+                for watcher in woken {
+                    watcher.wake();
+                }
+            }
+            self.lock_watchers().push(waker);
+            // Re-read after registering, for the same reason the sleeper does.
+            if self.has_waiters() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// [`Clock::sleep`] on a caller-advanceable clock.
+    #[cfg(feature = "time")]
+    async fn sleep_virtual(&self, duration: Duration) {
+        let deadline = self.now().saturating_add(duration);
+        std::future::poll_fn(|context| self.poll_virtual_sleep(deadline, context)).await;
+    }
+
+    /// One poll of a virtual sleep: ready once the counter has reached
+    /// `deadline`, registered with the clock until it has.
+    #[cfg(feature = "time")]
+    fn poll_virtual_sleep(
+        &self,
+        deadline: Duration,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.now() >= deadline {
+            return std::task::Poll::Ready(());
+        }
+        let id = self.inner.next_sleeper.fetch_add(1, Ordering::Relaxed);
+        let waker = context.waker().clone();
+        // Bound the registry: wake everyone, who will re-register, rather than
+        // letting an abandoned sleep grow the list without limit.
+        let overflow = {
+            let mut sleepers = self.lock_sleepers();
+            if sleepers.len() >= MAX_CLOCK_SLEEPERS {
+                Some(
+                    sleepers
+                        .drain(..)
+                        .map(|sleeper: Sleeper| sleeper.waker)
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        };
+        if let Some(woken) = overflow {
+            for sleeper in woken {
+                sleeper.wake();
+            }
+        }
+        self.lock_sleepers().push(Sleeper {
+            id,
+            deadline,
+            waker,
+        });
+        self.wake_watchers();
+        // Re-read after registering: an advance between the first read and the
+        // push would otherwise leave this waiter parked for a wake that already
+        // happened.
+        if self.now() >= deadline {
+            self.lock_sleepers().retain(|sleeper| sleeper.id != id);
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// The waiter list, recovered from a poisoned lock.
+    ///
+    /// A panic while the list was held leaves no half-written entry — every
+    /// mutation is one `push`, one `retain` or one `swap_remove` — so the
+    /// recovered list is a list of waiters, not a corrupt one.
+    #[cfg(feature = "time")]
+    fn lock_sleepers(&self) -> std::sync::MutexGuard<'_, Vec<Sleeper>> {
+        match self.inner.sleepers.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The watcher list, recovered from a poisoned lock.
+    #[cfg(feature = "time")]
+    fn lock_watchers(&self) -> std::sync::MutexGuard<'_, Vec<std::task::Waker>> {
+        match self.inner.watchers.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Wake everyone waiting for a sleeper to appear.
+    #[cfg(feature = "time")]
+    fn wake_watchers(&self) {
+        let watching: Vec<std::task::Waker> = self.lock_watchers().drain(..).collect();
+        for watcher in watching {
+            watcher.wake();
+        }
+    }
+
+    /// Wake every waiter whose deadline `now` has reached.
+    #[cfg(feature = "time")]
+    fn wake_due(&self, now: Duration) {
+        let due = {
+            let mut sleepers = self.lock_sleepers();
+            let mut due = Vec::new();
+            let mut index = 0;
+            while index < sleepers.len() {
+                if sleepers[index].deadline <= now {
+                    due.push(sleepers.swap_remove(index).waker);
+                } else {
+                    index = index.saturating_add(1);
+                }
+            }
+            due
+        };
+        for sleeper in due {
+            sleeper.wake();
         }
     }
 
@@ -520,4 +768,60 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 /// there is no quotient to truncate and no remainder to narrow.
 fn nanos_to_duration(nanos: u64) -> Duration {
     Duration::from_nanos(nanos)
+}
+
+#[cfg(all(test, feature = "time"))]
+mod tests {
+    use super::Clock;
+    use std::future::Future as _;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
+
+    /// A waker that counts its wakes, so the test can prove the advance
+    /// reached the parked future rather than only that its condition held.
+    struct Countdown(AtomicUsize);
+
+    impl Wake for Countdown {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A virtual sleep is pending until an advance reaches its deadline, and
+    /// then ready — with no runtime, no timer and no real time spent.
+    #[test]
+    fn a_virtual_sleep_waits_for_the_advance_that_reaches_its_deadline() {
+        let clock = Clock::virtual_at(Duration::ZERO);
+        let woken = Arc::new(Countdown(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut context = Context::from_waker(&waker);
+        let mut sleep = pin!(clock.sleep(Duration::from_millis(10)));
+        assert!(
+            matches!(sleep.as_mut().poll(&mut context), Poll::Pending),
+            "a virtual clock nobody advanced must not complete its sleep"
+        );
+        assert!(
+            clock.advance(Duration::from_millis(5)).is_ok(),
+            "half the deadline is inside the representable range"
+        );
+        assert!(
+            matches!(sleep.as_mut().poll(&mut context), Poll::Pending),
+            "half the deadline is not the deadline"
+        );
+        assert!(
+            clock.advance(Duration::from_millis(5)).is_ok(),
+            "the second half is inside the representable range"
+        );
+        assert!(
+            woken.0.load(Ordering::Relaxed) >= 1,
+            "the advance must wake the parked sleep, not only satisfy its condition"
+        );
+        assert!(
+            matches!(sleep.as_mut().poll(&mut context), Poll::Ready(())),
+            "an advance that reaches the deadline must complete the sleep"
+        );
+    }
 }

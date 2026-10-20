@@ -2,6 +2,7 @@
 //! Execute impls that chain other Execute actions. No new verb needed.
 
 use crate::cap::{Auth, Cap};
+use crate::clock::Clock;
 use crate::error::{BotError, DispatchCertainty};
 use crate::verb;
 
@@ -29,6 +30,21 @@ pub trait PipelineStep {
         &'a self,
         call: (Auth, &'a dyn std::any::Any),
     ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>;
+
+    #[doc(hidden)]
+    /// [`PipelineStep::run_any`] on the clock of the flow that runs the step.
+    ///
+    /// The default is the plain call, so a step that does not wait is
+    /// unchanged; the blanket impl overrides it to pass the clock to
+    /// [`Execute::execute_action_on`](crate::verb::Execute::execute_action_on).
+    fn run_any_on<'a>(
+        &'a self,
+        clock: &'a Clock,
+        call: (Auth, &'a dyn std::any::Any),
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+        let _ = clock;
+        self.run_any(call)
+    }
 }
 
 impl<A> PipelineStep for A
@@ -45,22 +61,51 @@ where
         &'a self,
         call: (Auth, &'a dyn std::any::Any),
     ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
-        Box::pin(async move {
-            let (auth, input) = call;
-            match input.downcast_ref::<A::Input>() {
-                Some(typed) => {
-                    let value = self.execute_action((auth, typed)).await?;
-                    let boxed: Box<dyn std::any::Any> = Box::new(value);
-                    Ok(boxed)
-                }
-                None => Err(BotError::DomainError {
-                    domain: verb::Execute::domain_id(self).into(),
-                    certainty: DispatchCertainty::Refused,
-                    cause: "type mismatch in pipeline step input".into(),
-                }),
-            }
-        })
+        pipeline_run(self, None, call)
     }
+
+    fn run_any_on<'a>(
+        &'a self,
+        clock: &'a Clock,
+        call: (Auth, &'a dyn std::any::Any),
+    ) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>> {
+        pipeline_run(self, Some(clock), call)
+    }
+}
+
+/// One pipeline step's erased call, on `clock` when the caller named one.
+///
+/// The single body behind the blanket `PipelineStep`'s two entry points, so a
+/// correction to the downcast or the boxing cannot reach one and miss the
+/// other.
+fn pipeline_run<'a, A>(
+    step: &'a A,
+    clock: Option<&'a Clock>,
+    call: (Auth, &'a dyn std::any::Any),
+) -> crate::BoxFuture<'a, Result<Box<dyn std::any::Any>, BotError>>
+where
+    A: verb::Execute + 'static,
+    A::Input: 'static,
+    A::Output: 'static,
+{
+    Box::pin(async move {
+        let (auth, input) = call;
+        match input.downcast_ref::<A::Input>() {
+            Some(typed) => {
+                let value = match clock {
+                    Some(clock) => step.execute_action_on(clock, (auth, typed)).await?,
+                    None => step.execute_action((auth, typed)).await?,
+                };
+                let boxed: Box<dyn std::any::Any> = Box::new(value);
+                Ok(boxed)
+            }
+            None => Err(BotError::DomainError {
+                domain: verb::Execute::domain_id(step).into(),
+                certainty: DispatchCertainty::Refused,
+                cause: "type mismatch in pipeline step input".into(),
+            }),
+        }
+    })
 }
 
 impl Pipeline {
@@ -149,6 +194,23 @@ impl verb::Execute for Pipeline {
         let mut current: Box<dyn std::any::Any> = Box::new(());
         for step in &self.steps {
             let next = step.run_any((auth.clone(), current.as_ref())).await?;
+            current = next;
+        }
+        Ok(PipelineOutput(current))
+    }
+
+    async fn execute_action_on(
+        &self,
+        clock: &Clock,
+        call: (Auth, &()),
+    ) -> Result<PipelineOutput, BotError> {
+        let (auth, _) = call;
+        auth.check(verb::Execute::required_caps(self))?;
+        let mut current: Box<dyn std::any::Any> = Box::new(());
+        for step in &self.steps {
+            let next = step
+                .run_any_on(clock, (auth.clone(), current.as_ref()))
+                .await?;
             current = next;
         }
         Ok(PipelineOutput(current))

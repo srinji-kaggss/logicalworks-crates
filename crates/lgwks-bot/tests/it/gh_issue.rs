@@ -10,21 +10,22 @@
 //! |---|---|
 //! | J1: the harness opens an issue and prints its page | `a_flow_opens_an_issue_and_reads_it_back` |
 //! | J2: a run without `github.issue.create` is refused naming it | `a_run_without_the_issue_grant_is_blocked_before_gh_starts` |
-//! | J3: a rerun after a lost answer or a kill opens nothing new | `a_second_run_with_the_same_key_finds_the_first_issue`, `a_lost_answer_is_reconciled_by_reading_back_and_never_reposted` |
+//! | J3: a rerun after a lost answer or a kill opens nothing new | `a_second_run_with_the_same_key_finds_the_first_issue`, `a_lost_answer_is_reconciled_by_reading_back_and_never_reposted`, `a_real_kill_between_the_post_and_its_reply_leaves_one_issue` |
 
 #![cfg(all(unix, feature = "script", feature = "process", feature = "ephemeral"))]
 
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lgwks_bot::domain::gh::{
     GhError, ISSUE_CREATE, IssueDraft, OpenIssue, OpenedIssue, Settlement,
 };
+use lgwks_bot::rt::clock::Clock;
 use lgwks_bot::script::{FlowError, Scope};
-use lgwks_bot::task::{Host, Report, task};
+use lgwks_bot::task::{Host, MAX_TASK_DEADLINE, Report, task};
 use lgwks_bot::{BotError, Cap, GrantSet, domains};
 
-use crate::fake_gh_issues::{calls_on, creates_on, hold, issue_on_fake};
+use crate::fake_gh_issues::{calls_on, creates_on, held_on, hold, issue_on_fake};
 
 /// A test's result: an error fails it with the error's text.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -64,12 +65,30 @@ pub(crate) fn full_grant() -> GrantSet {
         .grant(Cap::new(ISSUE_CREATE))
 }
 
-/// A host for `tenant` over the fake receiver.
+/// A host for `tenant` over the fake receiver, on the production wall clock.
 pub(crate) fn fake_host(tenant: &str, grants: GrantSet) -> Result<Host, Box<dyn Error>> {
     Ok(Host::builder(tenant)?
         .domains(&FAKE_ISSUES)
         .grants(grants)
         .default_deadline(Duration::from_secs(120))
+        .build()?)
+}
+
+/// A host for `tenant` whose runs measure every wait on `clock`.
+///
+/// The deadline is the host's own day-long ceiling: a test moves the clock a
+/// second at a time while a fork is outstanding, and a 120-second deadline
+/// would turn that move into a timeout the action never asked for.
+pub(crate) fn fake_host_with_clock(
+    tenant: &str,
+    grants: GrantSet,
+    clock: Clock,
+) -> Result<Host, Box<dyn Error>> {
+    Ok(Host::builder(tenant)?
+        .domains(&FAKE_ISSUES)
+        .grants(grants)
+        .clock(clock)
+        .default_deadline(MAX_TASK_DEADLINE)
         .build()?)
 }
 
@@ -88,6 +107,71 @@ pub(crate) fn open(
     Ok(lgwks_bot::block_on(
         host.run(&opening, (repo.to_owned(), draft.clone())),
     ))
+}
+
+/// How far one driver step moves a test's flow clock.
+///
+/// A second is the smallest step that always advances a settle wait: the
+/// schedule's longest single wait is four seconds, so at most four steps are
+/// spent on one. Nothing here reads the wall clock.
+const DRIVE_STEP: Duration = Duration::from_secs(1);
+
+/// Run the flow once on `host`, advancing `clock` until the run settles.
+///
+/// Every wait the action makes is on this clock, so a run parked on one makes
+/// no progress until the driver moves it. The driver advances only while a
+/// wait is actually parked (`Clock::has_waiters`), so a run waiting on a child
+/// process does not burn logical time, and it stops on the run's own return.
+pub(crate) fn open_on_clock(
+    host: &Host,
+    clock: &Clock,
+    repo: &str,
+    draft: &IssueDraft,
+) -> Result<Report<OpenedIssue>, Box<dyn Error>> {
+    let opening = task(
+        "opening",
+        |scope: Scope, (repo, draft): (String, IssueDraft)| async move {
+            open_issue(&scope, &repo, draft).await
+        },
+    )?;
+    let finished = lgwks_bot::rt::sync::CancellationToken::new();
+    let run_finished = finished.clone();
+    let driver_clock = clock.clone();
+    let report = lgwks_bot::block_on(async {
+        let run = async {
+            let report = host.run(&opening, (repo.to_owned(), draft.clone())).await;
+            // A driver parked on `wait_for_waiter` is woken by the stop, so a
+            // run that ends between two waits cannot leave the join open.
+            run_finished.cancel();
+            report
+        };
+        let drive = async move {
+            loop {
+                if finished.is_cancelled() {
+                    return;
+                }
+                if driver_clock.has_waiters() {
+                    if driver_clock.advance(DRIVE_STEP).is_err() {
+                        return;
+                    }
+                    // Let the woken wait be polled before the next step; a
+                    // four-second wait needs four of them.
+                    lgwks_bot::rt::task::yield_now().await;
+                } else {
+                    // Nothing is waiting on the clock, so the run is busy with
+                    // a child or the next step: park here rather than spin,
+                    // and wake when a wait registers.
+                    lgwks_bot::select! {
+                        () = driver_clock.wait_for_waiter() => {}
+                        () = finished.cancelled() => return,
+                    }
+                }
+            }
+        };
+        let (report, ()) = lgwks_bot::join!(run, drive);
+        report
+    });
+    Ok(report)
 }
 
 /// The issue a run settled on, or why it did not settle.
@@ -130,9 +214,9 @@ fn a_flow_opens_an_issue_and_reads_it_back() -> TestResult {
     assert_eq!(issue.number(), 1);
     assert_eq!(issue.url(), "https://github.com/j1-owner/accept/issues/1");
     assert_eq!(creates_on("j1-owner")?, 1, "one create");
-    // Scan, create, read #1 back, see it listed: the create's own answer is
-    // not the evidence, and a rerun's scan is shown to find it.
-    assert_eq!(calls_on("j1-owner")?.len(), 4);
+    // The scan settles before it creates (eight reads), then the create, the
+    // read at the answered number and the listing read that shows it.
+    assert_eq!(calls_on("j1-owner")?.len(), 11);
     Ok(())
 }
 
@@ -184,9 +268,9 @@ fn a_create_waits_for_the_listing_so_an_immediate_rerun_finds_it() -> TestResult
             .any(|argv| argv.iter().any(|arg| arg.ends_with("/issues/1"))),
         "the create is confirmed at the number GitHub answered: {calls:?}"
     );
-    // Scan, create, read #1, two lagging listings, the one that shows it,
-    // and the rerun's scan.
-    assert_eq!(calls.len(), 7);
+    // Scan's settle, create, read #1, the two lagging listings and the one
+    // that shows it, and the rerun's scan.
+    assert_eq!(calls.len(), 14);
     Ok(())
 }
 
@@ -209,15 +293,34 @@ fn a_key_that_names_two_issues_answers_the_first() -> TestResult {
 
 /// A listing that never shows the issue within the settle bound is reported
 /// as `Unlisted`, not as a create a rerun is safe after.
+///
+/// The settle schedule — 250 ms doubling to four seconds, about 16 s across
+/// eight reads — is spent on the flow's clock, not on the process's timer: the
+/// host is built on an advancing clock and this test moves it. The assertion
+/// on real elapsed time is the point: a wait that still read
+/// `rt::time::sleep` would spend the schedule for real.
 #[test]
 fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
-    let host = fake_host("acme", full_grant())?;
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
     let draft = IssueDraft::new("stale", "Never listed", "")?;
-    let issue = opened(&open(&host, "stale-owner/stale", &draft)?)?.clone();
+    let started = Instant::now();
+    let report = open_on_clock(&host, &clock, "stale-owner/stale", &draft)?;
+    let elapsed = started.elapsed();
+    let issue = opened(&report)?.clone();
     assert_eq!(issue.settlement(), Settlement::Unlisted);
     assert_eq!(issue.number(), 1);
-    // Scan, create, read #1, then the eight settle reads.
-    assert_eq!(calls_on("stale-owner")?.len(), 11);
+    // The scan's settle, create, read #1, then the eight settle reads.
+    assert_eq!(calls_on("stale-owner")?.len(), 18);
+    assert!(
+        clock.now() >= Duration::from_secs(15),
+        "the settle must spend its schedule on the flow's clock, which read {:?}",
+        clock.now()
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the settle must not wait the schedule in real time: {elapsed:?}"
+    );
     Ok(())
 }
 
@@ -297,11 +400,53 @@ fn a_lost_answer_is_reconciled_by_reading_back_and_never_reposted() -> TestResul
     Ok(())
 }
 
+/// A real `SIGKILL` between the POST and its reply, then a rerun with the same
+/// key, leaves exactly one issue.
+///
+/// The child is the fake client, and it kills itself with `SIGKILL` after it
+/// has held the issue and before it prints the answer — the same instant a
+/// `kill -9` of `gh` catches. What the supervisor reports is a signal death,
+/// not an exit code, so the action cannot know whether the create landed; it
+/// reads back over the settle and reports `Reconciled`. The rerun then finds
+/// the key by its own pre-create settle, and issues no second POST.
+///
+/// The settles run on a clock this test owns: the kill is real, the waits are
+/// not.
+#[test]
+fn a_real_kill_between_the_post_and_its_reply_leaves_one_issue() -> TestResult {
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
+    let draft = IssueDraft::new("killed", "Killed mid-create", "")?;
+    let first = open_on_clock(&host, &clock, "kill-owner/kill", &draft)?;
+    assert_eq!(
+        opened(&first)?.settlement(),
+        Settlement::Reconciled,
+        "a signal death is an unknown outcome, settled by the read-back"
+    );
+    let again = open_on_clock(&host, &clock, "kill-owner/kill", &draft)?;
+    assert_eq!(opened(&again)?.settlement(), Settlement::Found);
+    assert_eq!(
+        opened(&again)?.number(),
+        opened(&first)?.number(),
+        "the rerun answers the issue the killed run created"
+    );
+    assert_eq!(creates_on("kill-owner")?, 1, "one POST across both runs");
+    assert_eq!(
+        held_on("kill-owner", "kill")?,
+        1,
+        "the killed create left one issue, and the rerun left none"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
-    let host = fake_host("acme", full_grant())?;
+    // Both settles are real waits, so this run owns a clock rather than the
+    // process timer: the journey is the typed indeterminate, not the delay.
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
     let draft = IssueDraft::new("refused", "Refused by the receiver", "")?;
-    let report = open(&host, "refused-owner/refuse", &draft)?;
+    let report = open_on_clock(&host, &clock, "refused-owner/refuse", &draft)?;
     assert!(
         matches!(
             *failed(&report)?,
@@ -310,9 +455,10 @@ fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
         "{:?}",
         report.result()
     );
-    // Read, create, read back: the one create, then the read that settles it.
+    // The pre-create scan's settle, the one create, then the lost-answer
+    // settle that reads before it concludes nothing landed.
     assert_eq!(creates_on("refused-owner")?, 1);
-    assert_eq!(calls_on("refused-owner")?.len(), 3);
+    assert_eq!(calls_on("refused-owner")?.len(), 17);
     Ok(())
 }
 
@@ -342,8 +488,9 @@ fn a_create_refused_for_its_credential_is_not_read_back() -> TestResult {
         "{:?}",
         report.result()
     );
-    // GitHub refused the write, so nothing landed and nothing is reconciled.
-    assert_eq!(calls_on("dc-owner")?.len(), 2);
+    // GitHub refused the write, so nothing landed and nothing is reconciled
+    // past the scan's own settle.
+    assert_eq!(calls_on("dc-owner")?.len(), 9);
     Ok(())
 }
 

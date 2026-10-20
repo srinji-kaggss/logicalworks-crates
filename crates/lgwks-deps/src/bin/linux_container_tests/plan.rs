@@ -7,12 +7,19 @@
 use crate::toml_subset::{list, raw, read_tables, text};
 use crate::{Failure, fail};
 
-/// The suites the leg runs, in the order a bare invocation runs them.
-pub(crate) const SUITES: [&str; 3] = ["workspace", "bot-full", "appcui"];
+/// The suites the leg runs, in the order a bare invocation runs them. The two
+/// target cells come first: they are compile-only, so a portability refusal is
+/// named before a suite spends minutes running.
+pub(crate) const SUITES: [&str; 4] = ["targets", "workspace", "bot-full", "appcui"];
 
 /// Where the container's build output lives: the target volume's mount, and the
 /// `CARGO_TARGET_DIR` every command inside it builds into.
 pub(crate) const CONTAINER_TARGET: &str = "/target";
+
+/// The triple the `targets` suite builds the two cells §4.7 records: the CI
+/// container is arm64, so its native C compiler targets this triple, exactly as
+/// `check-target-matrix.sh` cannot on the macOS host.
+const COVERAGE_TARGET: &str = "aarch64-unknown-linux-gnu";
 
 /// The ceiling of the container's `/tmp` tmpfs when no cap names another.
 const TMPFS: &str = "3g";
@@ -152,6 +159,28 @@ pub(crate) fn suite_commands(suite: &str, partition: Option<&str>) -> Option<Vec
             }
             Some(vec![command])
         }
+        "targets" => Some(vec![
+            words(&[
+                "cargo",
+                "check",
+                "--locked",
+                "-p",
+                "lgwks_std",
+                "--features",
+                "full",
+                "--target",
+                COVERAGE_TARGET,
+            ]),
+            words(&[
+                "cargo",
+                "check",
+                "--locked",
+                "-p",
+                "lgwks_ast",
+                "--target",
+                COVERAGE_TARGET,
+            ]),
+        ]),
         "bot-full" => Some(vec![words(&[
             "cargo",
             "nextest",
