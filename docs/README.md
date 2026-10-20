@@ -67,6 +67,15 @@ the rest of this table is design history and contributor policy.
 | [`docs/std-ast-deps-closure-matrix.md`](std-ast-deps-closure-matrix.md) | All twenty-one `lgwks_std` modules, `lgwks_ast` and `lgwks_deps`: each with its feature, its evidence state, the test that exists on the named revision, and its owning issue. |
 | [`docs/invariants-long-form.md`](invariants-long-form.md) | The reasoning, measurements and stated limits behind each one-line rule in `INVARIANTS.md`. |
 | [`docs/releasing.md`](releasing.md) | The release process. |
+| [`docs/governance/law.md`](governance/law.md) | Governance §2: the production engineering law. |
+| [`docs/governance/gates.md`](governance/gates.md) | Governance §3 and §4: the gates, and change control for governance. |
+| [`docs/governance/open-work.md`](governance/open-work.md) | Governance §6 and §7: open correctness and acceptance work, and the decisions requiring the Director. |
+| [`docs/governance/ledger-2026-10-09.md`](governance/ledger-2026-10-09.md) | Governance §5 ledger, 2026-10-09 to 2026-10-20: the newest part. |
+| [`docs/governance/ledger-2026-10-06.md`](governance/ledger-2026-10-06.md) | Governance §5 ledger, 2026-10-06 to 2026-10-08. |
+| [`docs/governance/ledger-2026-09-28-releases.md`](governance/ledger-2026-09-28-releases.md) | Governance §5 ledger: the release cuts of 2026-09-28 to 2026-10-06. |
+| [`docs/governance/ledger-2026-09-23.md`](governance/ledger-2026-09-23.md) | Governance §5 ledger, 2026-09-23 and 2026-09-27. |
+| [`docs/governance/ledger-2026-09-21.md`](governance/ledger-2026-09-21.md) | Governance §5 ledger, 2026-09-21 and 2026-09-22. |
+| [`docs/governance/ledger-2026-09-12.md`](governance/ledger-2026-09-12.md) | Governance §5 ledger: the 2026-09-21 campaigns and the standing doctrine of 2026-09-12. |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Per-release changes across all five crates. |
 | [`SECURITY.md`](../SECURITY.md) | Attack surface, reporting process, and advisories assessed. |
 

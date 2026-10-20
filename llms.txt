@@ -71,6 +71,15 @@ Development index. Every link below resolves against `main` as it stood when thi
 - [std × ast × deps closure matrix](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/std-ast-deps-closure-matrix.md) — All twenty-one `lgwks_std` modules, `lgwks_ast` and `lgwks_deps`: each with its feature, its evidence state, the test that exists on the named revision, and its owning issue.
 - [Invariants: the long form](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/invariants-long-form.md) — The reasoning, measurements and stated limits behind each one-line rule in `INVARIANTS.md`.
 - [Releasing](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/releasing.md) — The release process.
+- [Governance §2](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/law.md) — Governance §2: the production engineering law.
+- [Governance §3 and §4](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/gates.md) — Governance §3 and §4: the gates, and change control for governance.
+- [Governance §6 and §7](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/open-work.md) — Governance §6 and §7: open correctness and acceptance work, and the decisions requiring the Director.
+- [Governance §5 — completion and decision ledger 2026-10-09 to 2026-10-20](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-10-09.md) — Governance §5 ledger, 2026-10-09 to 2026-10-20: the newest part.
+- [Governance §5 — completion and decision ledger 2026-10-06 to 2026-10-08](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-10-06.md) — Governance §5 ledger, 2026-10-06 to 2026-10-08.
+- [Governance §5 — completion and decision ledger release cuts, 2026-09-28 to 2026-10-06](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-09-28-releases.md) — Governance §5 ledger: the release cuts of 2026-09-28 to 2026-10-06.
+- [Governance §5 — completion and decision ledger 2026-09-23 and 2026-09-27](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-09-23.md) — Governance §5 ledger, 2026-09-23 and 2026-09-27.
+- [Governance §5 — completion and decision ledger 2026-09-21 and 2026-09-22](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-09-21.md) — Governance §5 ledger, 2026-09-21 and 2026-09-22.
+- [Governance §5 — completion and decision ledger 2026-09-21 campaigns and the standing doctrine of 2026-09-12](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/governance/ledger-2026-09-12.md) — Governance §5 ledger: the 2026-09-21 campaigns and the standing doctrine of 2026-09-12.
 - [Changelog](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/CHANGELOG.md) — Per-release changes across all five crates.
 - [Security policy](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/SECURITY.md) — Attack surface, reporting process, and advisories assessed.
 
