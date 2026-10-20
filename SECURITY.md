@@ -84,6 +84,23 @@ release and requires `zip` 8, and the fix ships only in `zip >= 9.0.0`.
 **Reopen if** `candle-core` calls any `extract` method, or if a release
 requiring `zip >= 9` appears; that bump makes this entry obsolete.
 
+### Unmaintained transitive crates: ten default-off advisories behind `gpui` or Candle
+
+No advisory here has a patched version (`patched = []` in the database), so no
+bump clears one. Each is absent from the default graph and from every build that
+does not select the feature named below; one row per upstream chain (assessed
+2026-10-20). A `cargo update` offers `zbus_names 4.3.5` and `zvariant`/
+`zvariant_derive 5.15.1`, which stay flagged for the same reason, so the
+lockfile is left where it is.
+
+| Crates and versions | Advisory ids | Reached by | Reopen if |
+|---|---|---|---|
+| `rustybuzz` 0.14.1, 0.20.1; `ttf-parser` 0.20.0, 0.21.1, 0.25.1 | RUSTSEC-2026-0206, -0192 | `gpui` → `cosmic-text`, `usvg` → `fontdb`, `rustybuzz`, `ttf-parser` | `gpui` moves to a maintained text stack (`harfrust`), or a shipped binary enables `gpui` |
+| `async-std` 1.13.2; `rustls-pemfile` 2.2.0 | RUSTSEC-2025-0052, -0134 | `gpui` → `gpui_http_client` → `zed-async-tar`, `zed-reqwest` | `gpui` ships, or its HTTP client leaves the Zed forks |
+| `instant` 0.1.13; `proc-macro-error2` 2.0.1 | RUSTSEC-2024-0384, -0173 | `gpui` → `gpui_util` → `futures-lite` → `fastrand`; `gpui` → `stacksafe` → `stacksafe-macro` | `gpui` ships, or those parents drop them |
+| `zbus_names` 4.3.4; `zvariant` 5.15.0; `zvariant_derive` 5.15.0 | RUSTSEC-2026-0371, -0370, -0372 | `gpui` → `ashpd`, `oo7` → `zbus 5.19.0` → these three | `gpui` moves to `zbus` 6 (where these are modules), or ships |
+| `paste` 1.0.15 | RUSTSEC-2024-0436 | `gpui` → `image`, `metal`; `ml-candle` → `candle-core`, `tokenizers 0.22.2`; `ml-tokenizers` → `tokenizers 0.23.2` | any of the three features ships, or those parents drop `paste` |
+
 ## Reporting
 
 Report vulnerabilities privately to the repository owner via a GitHub private
