@@ -2,7 +2,7 @@
 //!
 //! # What this family is for
 //!
-//! The live driver in `main.rs` measures the real `Supervisor` and real raw
+//! The live driver in `driver.rs` measures the real `Supervisor` and real raw
 //! Tokio on real time, so it cannot answer two questions that a reader of its
 //! table has to be able to ask:
 //!
