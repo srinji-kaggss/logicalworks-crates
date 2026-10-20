@@ -266,6 +266,48 @@ required = true
 command = "cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000"
 ci_step = "Digest constant-time equality (dudect)"
 
+# INV-STD-UNSAFE-1: the Miri proof of the two `unsafe` modules, as a lane rather
+# than a paragraph. `cargo miri test` and not `cargo miri nextest run`: Miri
+# cannot be wrapped and `.config/nextest.toml` wraps every test on macOS in
+# `churn-slot`, so nextest handed the wrapper to the interpreter as a double
+# spawn and the run failed with exit 70 before a test started; Miri also
+# recompiles the test crate once per test, and all seventeen of these tests live
+# in one lib binary.
+#
+# Both halves are cross-interpreted by name, so one host proves both modules:
+# `process::darwin::tests` under `--target aarch64-apple-darwin` runs the sysctl
+# seam even on a Linux runner, and `process::windows::tests` under
+# `--target x86_64-pc-windows-msvc` runs the kernel32 seam. The live-kernel tests
+# are already `#[cfg(not(miri))]` in both modules, and the seeded bands already
+# shrink under `#[cfg(miri)]`, so no filter is needed here.
+#
+# The nightly is pinned in this lane, not in `rust-toolchain.toml`: the gate keeps
+# one compiler and the proof names its own. `rust-src` is installed up front
+# because `cargo miri` otherwise stops to ask before adding it, and a CI step has
+# nothing to answer with. `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=""` states that
+# Miri runs rustc itself (`.cargo/config.toml` wraps every workspace build in
+# clippy-driver, and Miri refuses a wrapper), and `-Zmiri-strict-provenance`
+# refuses an integer that becomes a pointer without its provenance, which is what
+# the Windows stand-in's handles would be if they stopped using
+# `without_provenance_mut`.
+#
+# Measured cold in the repository's Linux container: the install 12 s, the darwin
+# seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the lane; 16 s
+# on a warm darwin host. The negative control (the fill given a buffer of half
+# the length it names) is caught as an out-of-bounds dangling reference at
+# darwin/tests.rs:113 through darwin.rs:191.
+[[lane]]
+id = "miri-unsafe"
+surfaces = "local ci"
+required = true
+command = """\
+rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
+"""
+ci_step = "Prove the process unsafe seams under Miri"
+needs = ["bin:rustup"]
+
 [[lane]]
 id = "doc-tests"
 group = "workspace"

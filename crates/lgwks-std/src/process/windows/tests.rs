@@ -1,4 +1,5 @@
-//! The `kernel32` seam against stand-ins (run under Miri) and the live kernel.
+//! The `kernel32` seam against stand-ins (run by the `miri-unsafe` lane) and
+//! the live kernel.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
