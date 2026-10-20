@@ -1,0 +1,24 @@
+# The advisories this workspace has assessed and does not action.
+#
+# `cargo audit` reads this from the directory it runs in (the lane runs it at the
+# repository root), so the `advisories` lane of `scripts/gate-lanes.toml` silences
+# exactly these ids and nothing else. Each id is the machine-readable half of a
+# section of SECURITY.md: the reason and the "reopen if" live there, and this file
+# only silences the tool.
+#
+# A vulnerability this list does not name still fails the lane: cargo-audit exits
+# non-zero for one whatever `--deny` says. `--deny warnings` is deliberately not
+# set yet: the unmaintained crates issue (#637) owns recording the 13 unmaintained
+# warnings and feeding their ids into this list, and only then can the lane deny
+# warnings as well.
+
+[advisories]
+ignore = [
+  # SECURITY.md, "`zip 8.6.0`: RUSTSEC-2026-0367, -0368, -0369": SUID/SGID bits
+  # preserved on extraction, symlink targets outside the destination, and
+  # permissions applied through symlinks. candle-core is zip's only parent and
+  # never calls `extract`.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]

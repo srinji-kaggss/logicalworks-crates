@@ -294,6 +294,26 @@ jobs:
       - name: Root README quickstart matches its compiled example
         run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
 
+  # The RustSec advisories (#635), beside the gate rather than a step of it. The
+  # audit is a network read: a tool install plus a clone of the advisory database,
+  # neither of which this file can bound. The gate job's steps have measured 190
+  # to 225 s of its 300 s cap, so a slow fetch there would cancel a job that never
+  # failed. A job of its own also gives the lane a check row under its own name,
+  # and on a hosted Linux runner it takes no instance on this machine, whose
+  # job-seconds divided by thirteen are what set a run's wall clock.
+  advisories:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # The prebuilt release, checksum-verified, rather than a `cargo install`
+      # that compiles the audit's own dependency stack before it can run.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Audit RustSec advisories
+        run: cargo audit --file Cargo.lock
+
 
   # The two results the checks list names on every pull request. Each reads the
   # report its lane wrote in the job above and passes only on that lane's own

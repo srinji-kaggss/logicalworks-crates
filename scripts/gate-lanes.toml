@@ -565,6 +565,25 @@ required = true
 builtin = "readme-quickstart"
 ci_step = "Root README quickstart matches its compiled example"
 
+# The RustSec advisories, over the lockfile the gate's builds resolve. #635: four
+# advisories in `rustls 0.23.45` sat in `Cargo.lock` until a manual audit found
+# them, and no lane would have. The three `zip 8.6.0` ids SECURITY.md assesses as
+# unreachable are silenced in `.cargo/audit.toml`, which is where the decision is
+# written down, so a vulnerability nobody has assessed turns this lane red.
+# `--deny warnings` waits on the unmaintained crates issue (#637): its 13 warnings
+# are recorded and ignored first, then the lane denies what the list does not
+# name. Install the tool with `cargo install cargo-audit --locked`; `needs`
+# reports it missing rather than letting the lane pass without it. The database
+# is fetched from GitHub on every run: a cached copy the gate cannot prove is
+# current is not evidence about today's lockfile.
+[[lane]]
+id = "advisories"
+surfaces = "local ci"
+required = true
+command = "cargo audit --file Cargo.lock"
+ci_step = "Audit RustSec advisories"
+needs = ["bin:cargo-audit"]
+
 # ── local only ──────────────────────────────────────────────────────────────
 # Working-tree rules the editor hooks enforce on write. Re-checking them here
 # means a shell-authored or imported file cannot slip past by never passing
