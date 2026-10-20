@@ -25,7 +25,7 @@ an empty target directory:
 | Target | `lgwks_std` | `lgwks_std` `--no-default-features` | `lgwks_std` `--features random` | `lgwks_deps` | `lgwks_std` `--features full` | `lgwks_ast` |
 |---|---|---|---|---|---|---|
 | `aarch64-apple-darwin` (host) | builds | builds | builds | builds | builds | builds |
-| `aarch64-unknown-linux-gnu` | builds | builds | builds | builds | **not exercised** | **not exercised** |
+| `aarch64-unknown-linux-gnu` | builds | builds | builds | builds | **builds** | **builds** |
 | `x86_64-unknown-linux-musl` | builds | builds | builds | builds | **not exercised** | **not exercised** |
 | `wasm32-wasip1` | builds | builds | builds | builds | builds | **not exercised** |
 | `x86_64-unknown-freebsd` | builds | builds | builds | builds | **not exercised** | **not exercised** |
@@ -33,16 +33,16 @@ an empty target directory:
 | `aarch64-apple-ios` | builds | builds | builds | builds | builds | builds |
 
 **"Builds" is a build receipt and "not exercised" is a named gap, not a pass.**
-The nine not-exercised cells each fail with the exact error
-`failed to find tool "aarch64-linux-gnu-gcc"` (or the musl, Android, FreeBSD or
-`clang` equivalent): `ring`, reached through `http`'s rustls, and the
-tree-sitter grammars under `lgwks_ast` compile C per target, and this runner has
-no cross C toolchain for them. The lane accepts that one failure reason by name
-and fails on any other, so the exemption cannot become a lid. **Support is
-therefore claimed for `lgwks_std` on seven targets with the `full` feature set
-only where the row says `builds`, and for `lgwks_ast` and `lgwks_deps` on the
-targets where their row says `builds` — never for a target that was not
-exercised.**
+The two `aarch64-unknown-linux-gnu` cells marked **builds** come from the arm64
+Linux container (`linux-container-tests targets`), whose C compiler targets that
+triple; the host lane still records them exempt for want of a cross C toolchain
+(#642). The seven not-exercised cells each fail with `failed to find tool
+"aarch64-linux-gnu-gcc"` (or the musl, Android, FreeBSD or `clang` equivalent):
+`ring`, through `http`'s rustls, and the tree-sitter grammars under `lgwks_ast`
+compile C per target and this runner has no cross C toolchain; the lane names
+the compiler each would need and fails on any other reason, so the exemption
+cannot become a lid. **Support is claimed for `lgwks_std` on seven targets with
+`full` only where the row says `builds`, and for `lgwks_ast` and `lgwks_deps` where theirs does — never for a target not exercised.**
 
 `random` was the module that made the gap load-bearing: it carried a
 three-target `compile_error!` while the backend it wraps supported dozens more,

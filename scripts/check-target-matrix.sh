@@ -47,6 +47,32 @@ DEFAULT_TARGETS=(
   aarch64-apple-ios
 )
 
+# The C compiler each recorded target's C dependencies would need. This runner
+# has none of them for a foreign target, and taking one would be a new host
+# tool (#642). `aarch64-unknown-linux-gnu` is the one cell this host does close,
+# through the arm64 Linux container the `tests-linux` lane runs
+# (`linux-container-tests targets`), which is why it is named here rather than
+# left to the generic message. What the others would need, so a follow-up starts
+# from a named compiler:
+#
+#   x86_64-unknown-linux-musl  x86_64-linux-musl-gcc (musl cross toolchain)
+#   x86_64-unknown-freebsd     clang --target=x86_64-unknown-freebsd and a
+#                              FreeBSD sysroot, or a FreeBSD host
+#   aarch64-linux-android      aarch64-linux-android<api>-clang (Android NDK)
+#   wasm32-wasip1              wasm32-wasi-clang (wasi-sdk)
+#
+# One per the target's own arm, so an exempt line names what it is missing.
+needed_cc() {
+  case "$1" in
+    aarch64-unknown-linux-gnu) printf 'aarch64-linux-gnu-gcc, native in the arm64 Linux container' ;;
+    x86_64-unknown-linux-musl) printf 'x86_64-linux-musl-gcc from a musl cross toolchain' ;;
+    x86_64-unknown-freebsd) printf 'clang --target=x86_64-unknown-freebsd with a FreeBSD sysroot, or a FreeBSD host' ;;
+    aarch64-linux-android) printf 'aarch64-linux-android<api>-clang from the Android NDK' ;;
+    wasm32-wasip1) printf 'wasm32-wasi-clang from wasi-sdk' ;;
+    *) printf 'a C compiler for %s' "$1" ;;
+  esac
+}
+
 # The failures the recorded checks are allowed to report. Each names a C
 # toolchain this runner does not have for a dependency whose build script
 # compiles C per target: `ring` (through rustls, under `http`) and the
@@ -131,7 +157,7 @@ recorded_check() {
   status=$?
   if [ "$status" -ne 0 ] && is_exempt_toolchain_failure "$output"; then
     record "$target :: $*" "$started" "$output" 2
-    printf '          not exercised here: no C toolchain for %s; a new failure on this line is a regression\n' "$target"
+    printf '          not exercised here: no C toolchain for %s (needs %s); a new failure on this line is a regression\n' "$target" "$(needed_cc "$target")"
     return 0
   fi
   record "$target :: $*" "$started" "$output" "$status"
