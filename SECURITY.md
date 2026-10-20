@@ -25,6 +25,15 @@ reaches. Where the flagged code is unreachable from this workspace's dependency
 graph, it is recorded here with its evidence, so the position is checked rather
 than silent. Each entry names what would reopen it.
 
+For each RustSec advisory assessed here, the machine-readable half of the
+decision is `.cargo/audit.toml`, which the `advisories` lane of
+`scripts/gate-lanes.toml` reads: its `advisories.ignore` names these ids and
+nothing else, so a vulnerability none of these sections assesses fails the gate.
+The `grid` advisory has no RustSec id (it is a GitHub advisory, carried by
+Dependabot), so it cannot appear in that list. An id silenced there with no
+section here is a decision no reader can check, which is why the two are
+reviewed together.
+
 ### `grid`: GHSA-38c5-483c-4qqp, integer overflow in `Grid::expand_rows`
 
 Reached only by enabling the `gpui` storefront feature of `lgwks_deps`
