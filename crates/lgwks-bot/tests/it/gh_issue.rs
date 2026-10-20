@@ -299,6 +299,11 @@ fn a_key_that_names_two_issues_answers_the_first() -> TestResult {
 /// host is built on an advancing clock and this test moves it. The assertion
 /// on real elapsed time is the point: a wait that still read
 /// `rt::time::sleep` would spend the schedule for real.
+///
+/// Ten seconds, not one: the schedule is 15.75 s, so a real-wait regression
+/// cannot finish under the bound, while the fake receiver's own spawned
+/// processes cost up to a second on a loaded host and are the only real time
+/// this flow spends.
 #[test]
 fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
     let clock = Clock::virtual_at(Duration::ZERO);
@@ -318,8 +323,10 @@ fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
         clock.now()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "the settle must not wait the schedule in real time: {elapsed:?}"
+        elapsed < Duration::from_secs(10),
+        "the settle must not wait its 15.75 s schedule in real time; ten seconds is the fake \
+         receiver's own process cost under load, and a real wait cannot finish under it: \
+         {elapsed:?}"
     );
     Ok(())
 }
