@@ -245,7 +245,7 @@ jobs:
           { echo 'Lockfile out of date: run cargo update --workspace and commit Cargo.lock' >&2; exit 1; } &&
           for f in crates/lgwks-deps/tests/fixtures/*/Cargo.lock; do if ! cargo metadata --locked --format-version 1 --manifest-path "${f%.lock}.toml" >/dev/null; then echo "stale fixture lockfile $f: run cargo update --workspace --manifest-path ${f%.lock}.toml" >&2; exit 1; fi; done
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check
       - name: Enforce dependency edge ownership
         run: cargo run --locked -p lgwks_deps --bin lgwks-deps -- check .
       - name: Verify invariant enforcement references resolve

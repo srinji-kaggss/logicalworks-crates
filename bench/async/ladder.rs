@@ -27,37 +27,39 @@ const TIER_BOUND: usize = 64;
 /// the paired ratio's interval, not the raw p99, is what the table leans on.
 const TIER_ROUNDS: usize = 5;
 
-/// The process's peak resident set size in bytes, or `None` where the host does
-/// not expose it.
+/// The process's peak resident set size in bytes and how it was read, or `None`
+/// with the reason where the host does not expose it.
 ///
 /// Linux reads its own `/proc/self/status`, whose `VmHWM` is the kernel's
 /// high-water mark. macOS exposes no in-process high-water mark without a
 /// `getrusage` edge, so it reads the same documented `/bin/ps` sample the
-/// open-loop paths use ([`resident_bytes`]): one reader per host, and the field
-/// means a sample taken when the call runs rather than a high-water mark. The
-/// distinction is in the record's `rss_source`, so a reader is never told the
-/// two platforms measured the same thing.
+/// open-loop paths use ([`resident_bytes`]): the figure is the process's
+/// resident set when the call runs, not a maximum. Returning the label from the
+/// same function that reads the value is what keeps the record and the printed
+/// line from claiming a high-water mark the sample cannot support.
 ///
 /// It is *optional* rather than required, and the reason is stated rather than
 /// hidden: a peak-RSS column a host cannot fill is worse than none, because an
 /// empty cell in a results file reads as "small". Where it is unavailable the
-/// field is `null` and the report says so, and no figure is carried over from
+/// field is `null` and the label says why, and no figure is carried over from
 /// another platform.
-fn peak_rss_bytes() -> Option<u64> {
+fn peak_rss_bytes() -> (Option<u64>, &'static str) {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(value) = line.strip_prefix("VmHWM:") {
-                let kib: u64 = value.split_whitespace().next()?.parse().ok()?;
-                return Some(kib.saturating_mul(1024));
-            }
-        }
-        None
+        let read = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    let value = line.strip_prefix("VmHWM:")?;
+                    let kib: u64 = value.split_whitespace().next()?.parse().ok()?;
+                    Some(kib.saturating_mul(1024))
+                })
+            });
+        (read, "/proc/self/status VmHWM (kernel high-water mark)")
     }
     #[cfg(not(target_os = "linux"))]
     {
-        crate::driver::resident_bytes().0
+        crate::driver::resident_bytes()
     }
 }
 
@@ -115,14 +117,14 @@ pub(crate) fn tier_ladder(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("concurrency ladder: both sides at every tier the contract names");
     info!("bound {TIER_BOUND} on every tier, {TIER_ROUNDS} paired rounds each");
-    info!("peak RSS is the process high-water mark, read once at the end\n");
+    info!("peak RSS: VmHWM on Linux, a /bin/ps sample on macOS, read once at the end\n");
 
     let mut rows = Vec::new();
     for tasks in TIERS {
         let result = runtime.block_on(measure_tier(tasks))?;
         rows.push(result);
     }
-    let peak = peak_rss_bytes();
+    let (peak, rss_source) = peak_rss_bytes();
 
     info!(
         "{:>9} {:>11} {:>11} {:>11} {:>11} {:>11} {:>11}",
@@ -170,10 +172,10 @@ pub(crate) fn tier_ladder(
         ));
     }
     match peak {
-        Some(bytes) => info!("\npeak RSS for the whole process: {bytes} bytes"),
+        Some(bytes) => info!("\npeak RSS for the whole process: {bytes} bytes ({rss_source})"),
         None => info!(
-            "\npeak RSS: NOT AVAILABLE on this host — the field below is `null`, and no \
-             value is extrapolated from another platform"
+            "\npeak RSS: NOT AVAILABLE on this host ({rss_source}) — the field below is `null`, \
+             and no value is extrapolated from another platform"
         ),
     }
     info!(
@@ -188,7 +190,8 @@ pub(crate) fn tier_ladder(
         };
         let body = format!(
             "{{\"tool\":\"lgwks-bench-async-ladder\",\"bound\":{TIER_BOUND},\
-              \"rounds\":{TIER_ROUNDS},{peak_field},\"tiers\":[\n{json_rows}\n]}}"
+              \"rounds\":{TIER_ROUNDS},{peak_field},\"rss_source\":\"{rss_source}\",\
+              \"tiers\":[\n{json_rows}\n]}}"
         );
         std::fs::write(path, body)?;
         info!("\nwrote {path}");

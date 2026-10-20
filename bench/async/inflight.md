@@ -58,9 +58,10 @@ git log; it is superseded for concurrency claims by `--inflight`.
 
 Peak RSS for the whole four-tier process: 3,637,248 bytes. Wall time: 2.57 s.
 
-**Peak RSS is read in-process from `/proc/self/status` on Linux.** macOS has no
-in-process equivalent without a `getrusage` edge, so the column is a `ps` sample
-of the process's *current* RSS taken at the run's peak, labelled as such in the
-record's `rss_source`, and the process peak is measured by the `/usr/bin/time -l`
-wrapper. A peak figure reported under the name of the other is a false claim,
-and an unavailable one reported as a small one is worse than none.
+**Peak RSS is read in-process from `/proc/self/status` (`VmHWM`) on Linux.** macOS
+has no in-process equivalent without a `getrusage` edge, so the figure is a `ps`
+sample of the process's *current* RSS taken at the run's peak. The in-flight
+records and the ladder record both carry `rss_source`, and the ladder prints the
+arm it used, so a sample is never reported under the name of a high-water mark.
+The macOS peak is checked by the `/usr/bin/time -l` wrapper: on 2026-10-20 the
+ladder's sample read 4,177,920 bytes against 4,325,376 maximum resident set size.

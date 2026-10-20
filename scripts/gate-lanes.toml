@@ -115,7 +115,7 @@ id = "format"
 surfaces = "local ci"
 required = true
 fast = true
-command = "cargo fmt --all -- --check"
+command = "cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check"
 ci_step = "Check formatting"
 
 [[lane]]
