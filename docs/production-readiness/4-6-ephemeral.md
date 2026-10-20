@@ -79,22 +79,22 @@ ceiling-sized noise tail decided in bounded time). Their tests were not run agai
 the unfixed code, so for those two stores the control is the cut-append test only.
 The cost of the decision is measured, not estimated
 (`cargo run -p lgwks_bot --features script,ephemeral --release --example tail_cost`,
-64-frame files, Apple silicon, one run, peak RSS 6.3 MB for the whole process):
+64-frame files, Apple M5 Pro, 2026-10-20, peak RSS 5,046,272 B for the whole process):
 
 | Open of | journal p50 / p95 / p99 | run store p50 / p95 / p99 |
 |---|---|---|
-| an undamaged file (n=400) | 65 / 100 / 121 µs | 268 / 319 / 370 µs |
-| a final frame lengthened by 1–2048, refused (n=400) | 109 / 130 / 154 µs | 210 / 245 / 360 µs |
-| an append cut at a seeded byte, repaired (n=60, an `fsync` each) | 3,127 / 4,010 / 5,922 µs | 3,806 / 3,930 / 4,687 µs |
-| a ceiling-sized prefix over noise, trimmed (n=8) | 2,266,477 / 2,371,675 / 2,371,675 µs | 5,685 / 5,864 / 5,864 µs |
+| an undamaged file (n=400) | 76 / 110 / 135 µs | 182 / 331 / 403 µs |
+| a final frame lengthened by 1–2048, refused (n=400) | 41 / 46 / 48 µs | 161 / 169 / 175 µs |
+| an append cut at a seeded byte, repaired (n=60, an `fsync` each) | 3,878 / 4,974 / 5,746 µs | 3,867 / 4,718 / 5,113 µs |
+| a ceiling-sized prefix over noise, trimmed (n=8) | 4,683 / 4,826 / 4,826 µs | 5,695 / 6,667 / 6,667 µs |
 
-The last row is the stated worst case and it is slow for the journal: the search
-tries every payload length under the bytes present, each is a blake3 over a
-length-framed payload that cannot be extended from the one before, so a 64 KiB tail
-costs about 2.3 s once, at open. It is bounded and it needs a tail that is a
-maximal-size frame cut mid-write (or a hand-made one); a journal's ordinary frames
-are a few hundred bytes and cost the third row. The run store decodes each candidate
-and a wrong length fails at once, which is why its worst case is milliseconds.
+The last row is the stated worst case: the search tries every payload length under
+the bytes present. It cost the journal 1,409,390 µs at p50 on the same host and
+command until both stores asked the same question first: a candidate is hashed only
+when it decodes as a record the store writes (`scan::is_framed_record`, read from an
+aligned copy). A wrong length fails decoding at once, a head is reproduced only by
+bytes a writer framed, and the writer frames only records that decode, so the verdict
+is unchanged (`refusals::only_a_payload_this_writer_frames_is_a_tail_candidate`).
 
 The adapter's costs are measured, not estimated: a throwaway release-mode
 probe (since deleted) timed each path on the development machine's file

@@ -67,7 +67,9 @@ pub(super) fn resolve_ambiguous_tail(
         &position.head(),
         MAX_FRAME_BYTES,
         JournalError::Storage,
-        |previous, payload| Some(super::super::chain_over_bytes(previous, payload)),
+        |previous, payload| {
+            is_framed_record(payload).then(|| super::super::chain_over_bytes(previous, payload))
+        },
     )?;
     if acknowledged {
         let refusal = Err(JournalError::Corrupt(Box::new(Corruption::new(
@@ -78,6 +80,29 @@ pub(super) fn resolve_ambiguous_tail(
         return refusal;
     }
     Ok(offset)
+}
+
+/// Whether `payload` decodes as a record this journal's writer frames: a sealed
+/// checkpoint or an effect event.
+///
+/// A head is reproduced only by bytes a writer framed, and the writer frames only
+/// these two, so a candidate that decodes as neither cannot authenticate and is not
+/// hashed. The tail search tries every payload length under the bytes present and a
+/// wrong length fails decoding at once, as it does in the run store; without this,
+/// every candidate paid a blake3 over its length and a 64 KiB noise tail cost about
+/// 1.4 s to open (`--example tail_cost`). A damaged payload is still found by the
+/// search's second pass, which chains from the stored head before a later frame.
+///
+/// The search hands over a slice of the file at whatever offset the candidate
+/// starts, and the archive is read only from an aligned copy, as the run store
+/// reads its candidates (`frame::decodable`).
+pub(super) fn is_framed_record(payload: &[u8]) -> bool {
+    let aligned = super::super::frame::decodable(payload);
+    let bytes = aligned.as_slice();
+    match Continuation::from_payload(bytes) {
+        Some(decoded) => decoded.is_ok(),
+        None => from_bytes::<EffectEvent, WireError>(bytes).is_ok(),
+    }
 }
 
 /// A whole frame read from a journal file, before its payload is decoded.
