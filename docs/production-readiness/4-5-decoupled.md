@@ -78,9 +78,9 @@ Part of [production readiness](../production-readiness.md), §4, nine axes.
 *Not covered:* downstream compatibility rests on one consumer. Keel's migration
 to `lgwks_bot` 1.x (`docs/guides/lgwks-bot/migrating-to-1-0.md`) is the only
 external caller with evidence; a workspace caller search proves nothing about
-others. The newest tags (`git tag --sort=-creatordate`) are `lgwks_std-v1.1.0`,
-`lgwks_bot-v1.1.0`, `lgwks_deps-v1.1.0`, `lgwks_macros-v1.1.0` and
-`lgwks_ast-v1.0.0`, and the manifests at `977c79d4` read the same versions. A
+others. The newest tags (`git tag --sort=-creatordate`, 2026-10-20) are `lgwks_std-v3.0.0`,
+`lgwks_bot-v3.0.0`, `lgwks_deps-v4.0.0`, `lgwks_macros-v1.1.2` and
+`lgwks_ast-v2.0.0`, and the manifests at `d0f3cc0cf` read the same versions. A
 source tag is not a registry upload. The surface table fixes today's surface and
 every root has shrunk: the modules and re-exports of `lgwks_bot`, `lgwks_std`,
 `lgwks_deps` and `lgwks_ast` sit behind `#[doc(hidden)]`, so `lgwks_bot`'s rustdoc

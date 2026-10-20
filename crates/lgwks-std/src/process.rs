@@ -17,8 +17,8 @@
 //! primitives, `capture` the descendant capture and the running check,
 //! `identity` process identities and orphaned-group reaping, `cgroup` the
 //! Linux kernel-level containment, `darwin` the one macOS process-table read
-//! (a `sysctl` syscall) and `windows` the `kernel32` calls (the only `unsafe` in
-//! the workspace, #345, #263).
+//! (a `sysctl` syscall) and `windows` the `kernel32` calls; those two hold the
+//! only `unsafe` in the workspace (INV-STD-UNSAFE-1, #345, #263).
 
 use std::io;
 

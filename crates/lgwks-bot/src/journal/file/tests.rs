@@ -546,6 +546,28 @@ fn batch_admission_refuses_history_over_the_event_limit_without_writing() -> Tes
     Ok(())
 }
 
+/// A successor journal under `dir`: its predecessor took one event and sealed,
+/// and the successor holds the carried seal and then one event of its own.
+fn sealed_successor(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dir)?;
+    let mut journal = FileJournal::open_continuing_with(
+        dir.join("run.jrnl"),
+        crate::journal::ContinuationPolicy::declared(),
+    )?;
+    let first = EffectEvent::IntentAdmitted {
+        key: attempt_key(1)?,
+    };
+    journal.compare_and_append(journal.tail(), &first)?;
+    let mut next = journal
+        .continue_as_file()?
+        .ok_or("a continuing journal hands back its successor")?;
+    let second = EffectEvent::IntentAdmitted {
+        key: attempt_key(2)?,
+    };
+    next.compare_and_append(next.tail(), &second)?;
+    Ok(next.path().to_path_buf())
+}
+
 /// Writes three acknowledged frames and returns the file's bytes plus the
 /// byte offset where the third frame begins.
 fn three_frame_file(path: &Path) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
@@ -719,25 +741,7 @@ fn a_lengthened_acknowledged_final_frame_is_refused_not_trimmed() -> TestResult 
 #[test]
 fn a_lengthened_event_behind_a_carried_seal_is_refused_not_trimmed() -> TestResult {
     let (dir, _guard) = subject("lengthened-successor")?;
-    std::fs::create_dir_all(&dir)?;
-    let successor = {
-        let mut journal = FileJournal::open_continuing_with(
-            dir.join("run.jrnl"),
-            crate::journal::ContinuationPolicy::declared(),
-        )?;
-        let first = EffectEvent::IntentAdmitted {
-            key: attempt_key(1)?,
-        };
-        journal.compare_and_append(journal.tail(), &first)?;
-        let mut next = journal
-            .continue_as_file()?
-            .ok_or("a continuing journal hands back its successor")?;
-        let second = EffectEvent::IntentAdmitted {
-            key: attempt_key(2)?,
-        };
-        next.compare_and_append(next.tail(), &second)?;
-        next.path().to_path_buf()
-    };
+    let successor = sealed_successor(&dir)?;
     let bytes = std::fs::read(&successor)?;
     let event = frame_starts(&bytes, 0)?[1];
     let declared = declared_at(&bytes, event);

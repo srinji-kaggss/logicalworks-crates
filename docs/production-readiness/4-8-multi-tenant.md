@@ -79,9 +79,14 @@ Linux arm64 container (4 vCPU, `rust:1.99.0-bookworm`), one run each:
   `perf/admit-outside-lock-375`, 50 → 40 ns, not landed). The Linux container
   leg runs the deterministic family like every other test.
 
-*Not covered:* two tenants appending to one journal *file*; each tenant owns its
-own file, so the run proves the kill and the restart keep each file's prefix,
-not that a shared file separates tenants. The kill is a cut of the file a real writer produced, not a
+Two tenants cannot share one journal *file*: an open takes the file's exclusive
+advisory lock, so a second open of a held file is `JournalError::Locked` before a
+byte is read or repaired, the holder's history is unchanged, and the path opens
+again once the holder closes it
+(`refusals::a_second_tenant_opening_a_held_journal_is_refused_and_nothing_changes`,
+#641). The lock binds writers on one host that go through `FileJournal::open`.
+
+*Not covered:* the kill is a cut of the file a real writer produced, not a
 `SIGKILL` of two tenants' process (`durable_crash_observation` kills a single
 journal for real). The 11.2% neighbour gap was seen only on GitHub's x86_64
 runners and is still unreproduced anywhere else: arm64 Linux (container and

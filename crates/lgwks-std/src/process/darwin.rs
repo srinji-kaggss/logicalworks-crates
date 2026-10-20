@@ -6,7 +6,8 @@
 //! fills a buffer with one `struct kinfo_proc` per process, carrying the pid,
 //! the parent, the group, the run state and the start instant.
 //!
-//! **The only `unsafe` in the workspace** (Director, 2026-10-12: unsafe is
+//! **One of the two `unsafe` modules in the workspace**, with `windows.rs`
+//! (INV-STD-UNSAFE-1; Director, 2026-10-12: unsafe is
 //! allowed for direct syscalls behind FFI isolation with a Miri proof). The
 //! isolation is this file:
 //!
@@ -25,7 +26,7 @@
 //! The Miri proof: [`read_bytes`] takes the syscall as a function pointer, so
 //! the tests drive the exact `unsafe` call sites against a Rust stand-in that
 //! writes into the buffer the way the kernel does — and lies about the length,
-//! and fails with `ENOMEM` — under `cargo +nightly miri test`. Miri cannot run
+//! and fails with `ENOMEM` — under `cargo +nightly miri nextest run`. Miri cannot run
 //! the foreign call itself; the live tests below do, outside Miri.
 
 use std::ffi::{c_int, c_uint, c_void};

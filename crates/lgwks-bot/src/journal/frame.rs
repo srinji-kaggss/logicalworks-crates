@@ -574,7 +574,6 @@ pub(crate) struct Raw {
 /// the payload itself" is the whole contract, and an `Option` let the decoding
 /// site write `copy.unwrap_or(payload)` — a substituted value, in the one place
 /// where reading the wrong bytes means decoding rot as a record.
-#[cfg(feature = "script")]
 pub(crate) enum Decodable<'a> {
     /// The caller's own bytes: they already sit at an archive-aligned offset.
     Borrowed(&'a [u8]),
@@ -582,7 +581,6 @@ pub(crate) enum Decodable<'a> {
     Copied(lgwks_std::wire::AlignedVec),
 }
 
-#[cfg(feature = "script")]
 impl<'a> Decodable<'a> {
     /// The bytes to decode from, whichever of the two this is.
     pub(crate) fn as_slice(&self) -> &[u8] {
@@ -597,7 +595,6 @@ impl<'a> Decodable<'a> {
 }
 
 /// The bytes `payload` may be decoded from, copying only when it must.
-#[cfg(feature = "script")]
 pub(crate) fn decodable(payload: &[u8]) -> Decodable<'_> {
     const ARCHIVE_ALIGN: usize = 16;
     if payload.as_ptr().align_offset(ARCHIVE_ALIGN) == 0 {

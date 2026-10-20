@@ -88,6 +88,109 @@ fn an_undecodable_committed_frame_is_refused_not_trimmed() -> TestResult {
     Ok(())
 }
 
+/// The tail search hashes only a candidate that decodes as a record this writer
+/// frames. A real event payload is one; every shorter cut of it, and bytes no
+/// writer produced, are not, so a noise tail costs a decode per length instead
+/// of a blake3 over each (1.41 s to open before, `--example tail_cost`).
+#[test]
+fn only_a_payload_this_writer_frames_is_a_tail_candidate() -> TestResult {
+    let (path, _guard) = subject("framed-record")?;
+    let (bytes, third) = three_frame_file(&path)?;
+    let start = third.saturating_add(LENGTH_BYTES);
+    let end = start.saturating_add(usize::try_from(declared_at(&bytes, third))?);
+    let payload = bytes.get(start..end).ok_or("the third frame's payload")?;
+    assert!(
+        scan::is_framed_record(payload),
+        "an event this journal wrote is a candidate"
+    );
+    for cut in 1..payload.len() {
+        let prefix = payload.get(..cut).ok_or("a cut inside the payload")?;
+        assert!(
+            !scan::is_framed_record(prefix),
+            "a {cut}-byte cut of a {}-byte event is no record",
+            payload.len()
+        );
+    }
+    for fill in [0x00u8, 0xff, 0x5a] {
+        let noise = vec![fill; payload.len()];
+        assert!(
+            !scan::is_framed_record(&noise),
+            "{fill:#04x} noise of the event's length is no record"
+        );
+    }
+    Ok(())
+}
+
+/// A carried seal whose length is inflated past the end of the file still
+/// refuses under the filter: the event behind it decodes, so it is hashed, and
+/// it chains from the seal's stored head, so the successor is refused rather
+/// than trimmed back to an empty file.
+#[test]
+fn a_lengthened_carried_seal_is_refused_not_trimmed() -> TestResult {
+    let (dir, _guard) = subject("lengthened-seal")?;
+    let successor = sealed_successor(&dir)?;
+    let bytes = std::fs::read(&successor)?;
+    let seal = *frame_starts(&bytes, 0)?
+        .first()
+        .ok_or("a successor opens with its carried seal")?;
+    let declared = declared_at(&bytes, seal);
+    let past_end = u32::try_from(bytes.len().saturating_sub(seal))?;
+    for lied_length in [past_end, past_end.saturating_add(64)] {
+        let lied = with_prefix(&bytes, seal, lied_length);
+        std::fs::write(&successor, &lied)?;
+        require_refused_untouched(
+            &successor,
+            &lied,
+            0,
+            &format!("carried seal {declared} -> {lied_length}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// One journal file has one writer, so two tenants cannot share it (#641): a
+/// second open of a held file is `Locked` before a byte is read or repaired, the
+/// holder's history is untouched, and once the holder closes the file the same
+/// path opens again with exactly that history.
+#[test]
+fn a_second_tenant_opening_a_held_journal_is_refused_and_nothing_changes() -> TestResult {
+    let (path, _guard) = subject("shared-file")?;
+    let key = key()?;
+    let mut holder = FileJournal::open(&path)?;
+    holder.compare_and_append(holder.tail(), &EffectEvent::IntentAdmitted { key })?;
+    let before = std::fs::read(&path)?;
+    for attempt in 0..3 {
+        match FileJournal::open(&path) {
+            Err(JournalError::Locked { path: named }) => {
+                assert_eq!(
+                    named,
+                    path.display().to_string(),
+                    "the refusal names the file"
+                );
+            }
+            Err(other) => {
+                return Err(format!("open {attempt}: expected Locked, got {other}").into());
+            }
+            Ok(_) => {
+                return Err(format!("open {attempt}: a held journal took a second writer").into());
+            }
+        }
+        assert_eq!(
+            std::fs::read(&path)?,
+            before,
+            "a refused open changes no byte"
+        );
+    }
+    drop(holder);
+    let reopened = FileJournal::open(&path)?;
+    assert_eq!(
+        reopened.recover().len(),
+        1,
+        "the holder's one key survives the refusals"
+    );
+    Ok(())
+}
+
 #[test]
 fn the_ladder_refuses_a_second_prepared_dispatch_from_a_replayed_view() -> TestResult {
     let (path, _guard) = subject("ladder")?;
