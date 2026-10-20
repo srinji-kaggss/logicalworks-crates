@@ -601,11 +601,18 @@ jobs:
         run: cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}
 
   # The Linux leg. Every other job runs on the self-hosted macOS runner, so the
-  # Linux-only paths (`/proc` child lists, the Linux reap) and the AppCUI Linux
-  # backend execute here, in a container on the same machine, with the same
-  # cargo configuration. The workspace suite and the two §4.7 target cells are
-  # one job; the lgwks-bot full suite and the AppCUI storefront share the other,
-  # each pair with its own target volume.
+  # Linux-only paths (`/proc` child lists, the Linux reap) execute here, in a
+  # container on the same machine, with the same cargo configuration. The
+  # workspace suite and the two §4.7 target cells are one job; the lgwks-bot
+  # full suite is the other, each with its own target volume. The AppCUI
+  # storefront rode the bot-full leg until run 39503601863: its three commands
+  # (lib tests, doc tests, clippy, each an appcui compile) sat on top of a
+  # suite with 46 s of headroom alone (run 39021102172), and the leg was
+  # cancelled at the cap with its suite still running on runs 39250803813,
+  # 39251780293, 39253542698 and 39503601863. The three commands are exactly
+  # the AppCUI native storefront job's, so the storefront moved there, which
+  # gains a Linux leg on a hosted runner and leaves each feature set compiled
+  # by exactly one job.
   tests_linux:
     name: Tests (Linux container)
     # Each suite on its own instance, whose container target volume keeps the
@@ -627,7 +634,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [targets workspace, bot-full appcui]
+        suite: [targets workspace, bot-full]
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -668,7 +675,7 @@ jobs:
       # macOS shards' `lgwks-bot-junit-*` download pattern does not match, so
       # the receipt job records it as its own platform.
       - name: Upload Linux lgwks-bot JUnit report
-        if: matrix.suite == 'bot-full appcui'
+        if: matrix.suite == 'bot-full'
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-junit-linux
@@ -1054,8 +1061,11 @@ jobs:
         # instance's wall was their sum. lwc-8's own job is the 158 s Linux
         # workspace suite in a container with its own target volume, so the
         # native leg queues behind that instead and the instance stays under
-        # the budget once warm.
-        os: [[self-hosted, macOS, ARM64, lwc, lwc-8], windows-latest]
+        # the budget once warm. The Linux leg is hosted: the storefront's Linux
+        # coverage moved here from the Linux container leg, whose bot-full leg
+        # it cancelled at the cap (run 39503601863), and a hosted runner takes
+        # no instance on this machine.
+        os: [[self-hosted, macOS, ARM64, lwc, lwc-8], windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
