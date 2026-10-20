@@ -408,7 +408,9 @@ required = true
 command = """\
 cargo clippy --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features -- -D warnings && \
 cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features -- -D warnings && \
-cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser -- -D warnings\
+cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml --all-targets --no-default-features --features parser -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --no-default-features -- -D warnings && \
+cargo clippy --locked --manifest-path crates/lgwks-macros/Cargo.toml --all-targets --no-default-features -- -D warnings\
 """
 ci_step = "Clippy no default features"
 

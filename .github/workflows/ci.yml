@@ -743,7 +743,11 @@ jobs:
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
           --all-targets --no-default-features -- -D warnings &&
           cargo clippy --locked --manifest-path crates/lgwks-ast/Cargo.toml
-          --all-targets --no-default-features --features parser -- -D warnings
+          --all-targets --no-default-features --features parser -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-deps/Cargo.toml
+          --all-targets --no-default-features -- -D warnings &&
+          cargo clippy --locked --manifest-path crates/lgwks-macros/Cargo.toml
+          --all-targets --no-default-features -- -D warnings
       - name: Clippy process-only
         if: matrix.part == 'reduced'
         # `process` alone is a supported consumer shape: a bot that starts

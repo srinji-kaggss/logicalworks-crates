@@ -10,8 +10,7 @@ non-`default`/`full` features — `hash`, `pattern`, `json`, `wire`, `http`,
 `gpui`, `ml-candle`+`ml-tokenizers`); 4 `lgwks_bot` legs (no-default, `full`,
 `net`+`process`+`fs`+`signal`, and `wasm32-wasip1` with `rt`) and one combined
 28-grammar `lgwks_ast` invocation; plus RON flow parsing. It does **not** cover
-every crate or every feature: `lgwks_deps` and `lgwks_macros` have no bare
-`--no-default-features` lane, and `lgwks_std`'s remaining 5 features (`core`,
+every crate or every feature: `lgwks_std`'s remaining 5 features (`core`,
 `trace`, `random`, `ron`, `process`) have no per-feature lane of their own. The
 28-grammar figure is `DECLARED_GRAMMARS` in `crates/lgwks-ast/src/lib.rs`, not
 a wider matrix.
