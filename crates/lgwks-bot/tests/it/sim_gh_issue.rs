@@ -47,7 +47,7 @@ const RECEIVERS: [&str; 3] = ["accept", "drop", "refuse"];
 /// What the model says the `run`th open (from zero) of one key settles as.
 fn expected(receiver: &str, run: u32) -> &'static str {
     match (receiver, run) {
-        ("accept", 0) => "created",
+        ("accept" | "lag", 0) => "created",
         ("drop", 0) => "reconciled",
         ("refuse", _) => "indeterminate",
         _ => "found",
@@ -77,12 +77,18 @@ fn settled(
     }
 }
 
-/// One seed: two tenants, one repository, each rerunning its own key.
+/// One seed on a drawn receiver.
 fn seed(sim: &mut Sim) -> SimResult {
-    let pass = PASS.fetch_add(1, Ordering::Relaxed);
     let receiver = *RECEIVERS
         .get(usize::try_from(sim.rng().below(3))?)
         .ok_or("three receivers")?;
+    seed_on(sim, receiver)
+}
+
+/// One seed on `receiver`: two tenants, one repository, each rerunning its
+/// own key in a seeded order.
+fn seed_on(sim: &mut Sim, receiver: &str) -> SimResult {
+    let pass = PASS.fetch_add(1, Ordering::Relaxed);
     let owner = format!("sim{pass}");
     let repo = format!("{owner}/{receiver}");
     let tenants = [
@@ -142,4 +148,94 @@ fn seed(sim: &mut Sim) -> SimResult {
 #[test]
 fn one_key_holds_at_most_one_issue_under_reruns() -> SimResult {
     sim::assert_replays(Band::new(0, SEEDS), seed)
+}
+
+/// Seeds per receiver band: `lag` waits through two listing reads per create
+/// on the wall clock (#660), so its bands stay short.
+const BAND_SEEDS: u64 = 6;
+
+/// Band `index` of `receiver`, on seeds disjoint from every other band.
+fn receiver_band(receiver: &str, index: u64) -> SimResult {
+    let first = SEEDS.saturating_add(index.saturating_mul(BAND_SEEDS));
+    sim::assert_replays(Band::new(first, BAND_SEEDS), |sim| seed_on(sim, receiver))
+}
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_0() -> SimResult {
+    receiver_band("accept", 0)
+}
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_1() -> SimResult {
+    receiver_band("accept", 1)
+}
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_2() -> SimResult {
+    receiver_band("accept", 2)
+}
+
+#[test]
+fn an_answering_receiver_holds_one_issue_per_key_band_3() -> SimResult {
+    receiver_band("accept", 3)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_0() -> SimResult {
+    receiver_band("drop", 4)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_1() -> SimResult {
+    receiver_band("drop", 5)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_2() -> SimResult {
+    receiver_band("drop", 6)
+}
+
+#[test]
+fn a_lost_answer_is_reconciled_never_reposted_band_3() -> SimResult {
+    receiver_band("drop", 7)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_0() -> SimResult {
+    receiver_band("refuse", 8)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_1() -> SimResult {
+    receiver_band("refuse", 9)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_2() -> SimResult {
+    receiver_band("refuse", 10)
+}
+
+#[test]
+fn a_refused_create_holds_nothing_and_may_be_retried_band_3() -> SimResult {
+    receiver_band("refuse", 11)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_0() -> SimResult {
+    receiver_band("lag", 12)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_1() -> SimResult {
+    receiver_band("lag", 13)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_2() -> SimResult {
+    receiver_band("lag", 14)
+}
+
+#[test]
+fn a_lagging_listing_never_doubles_a_key_band_3() -> SimResult {
+    receiver_band("lag", 15)
 }
