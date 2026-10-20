@@ -194,7 +194,10 @@ impl Model {
 
     /// The store, or the poisoning a panicking holder left.
     fn store(&self) -> Result<MutexGuard<'_, Store>, ModelError> {
-        self.store.lock().map_err(|_poisoned| ModelError::Poisoned)
+        self.store.lock().map_err(|poisoned| {
+            lgwks_std::trace::debug!(error = %poisoned, "sim_keyed: the store's lock was poisoned");
+            ModelError::Poisoned
+        })
     }
 
     /// One read, answered now.
@@ -203,6 +206,7 @@ impl Model {
         store.settle(self.clock.now());
         if store.failing_reads > 0 {
             store.failing_reads = store.failing_reads.saturating_sub(1);
+            lgwks_std::trace::debug!(key, "sim_keyed: the model fails a read");
             return Err(ModelError::ReadFailed);
         }
         Ok(store.first(key))
@@ -211,6 +215,7 @@ impl Model {
     /// One create, answered now.
     fn write(&self, key: &str) -> Result<u64, ModelError> {
         if self.faults.reject {
+            lgwks_std::trace::debug!(key, "sim_keyed: the model rejects a create");
             return Err(ModelError::Rejected);
         }
         let mut store = self.store()?;
@@ -218,6 +223,7 @@ impl Model {
         let id = store.land(key.to_owned());
         store.failing_reads = self.faults.fail_after_create;
         if self.faults.lose_answers {
+            lgwks_std::trace::debug!(key, id, "sim_keyed: the model loses a create's answer");
             return Err(ModelError::Lost);
         }
         Ok(id)
@@ -268,7 +274,10 @@ fn outcome(
         Err(KeyedError::Refused(_)) => "refused",
         Err(KeyedError::Unread(_)) => "unread",
         Err(KeyedError::Indeterminate { .. }) => "indeterminate",
-        Err(ref other) => return Err(format!("an unmodelled failure {other:?}")),
+        Err(ref other) => {
+            lgwks_std::trace::debug!(failure = ?other, "sim_keyed: an unmodelled failure");
+            return Err(format!("an unmodelled failure {other:?}"));
+        }
     })
 }
 

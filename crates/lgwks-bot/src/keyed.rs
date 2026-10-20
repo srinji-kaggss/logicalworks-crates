@@ -52,7 +52,7 @@ use crate::clock::Clock;
 use crate::error::BotError;
 
 /// How many reads the read-back after a lost create answer makes at least.
-pub const SETTLE_SCANS: u8 = 8;
+const SETTLE_SCANS: u8 = 8;
 
 /// The wait before the read-back's second read; each later wait doubles.
 const FIRST_SETTLE_DELAY: Duration = Duration::from_millis(250);
