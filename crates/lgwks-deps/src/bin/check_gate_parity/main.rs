@@ -422,11 +422,24 @@ mod tests {
         Ok(())
     }
 
+    /// `manifest` with `from` replaced by `to`, refusing a substitution that
+    /// found nothing.
+    ///
+    /// A control whose mutation is a no-op proves nothing: when the format lane
+    /// gained a second command, the old anchor stopped matching and the test
+    /// failed at its assertion instead of saying the fixture had drifted.
+    fn substituted(manifest: &str, from: &str, to: &str) -> String {
+        let mutated = manifest.replacen(from, to, 1);
+        assert_ne!(mutated, manifest, "the fixture text the control mutates must exist: {from}");
+        mutated
+    }
+
     #[test]
     fn a_substituted_command_fails() -> TestResult {
         let (manifest, workflow) = files()?;
-        let shortened = manifest.replace(
-            "command = \"cargo fmt --all -- --check\"",
+        let shortened = substituted(
+            &manifest,
+            "command = \"cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check\"",
             "command = \"cargo fmt --all\"",
         );
         let problems = check_parity(&shortened, &workflow);
@@ -440,8 +453,9 @@ mod tests {
                 .any(|problem| problem.contains("cargo fmt --all")),
             "{problems:?}"
         );
-        let wholesale = manifest.replace(
-            "command = \"cargo fmt --all -- --check\"",
+        let wholesale = substituted(
+            &manifest,
+            "command = \"cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check\"",
             "command = \"cargo clippy --workspace --all-targets --locked -- -D warnings\"",
         );
         assert!(
