@@ -430,7 +430,10 @@ mod tests {
     /// failed at its assertion instead of saying the fixture had drifted.
     fn substituted(manifest: &str, from: &str, to: &str) -> String {
         let mutated = manifest.replacen(from, to, 1);
-        assert_ne!(mutated, manifest, "the fixture text the control mutates must exist: {from}");
+        assert_ne!(
+            mutated, manifest,
+            "the fixture text the control mutates must exist: {from}"
+        );
         mutated
     }
 
