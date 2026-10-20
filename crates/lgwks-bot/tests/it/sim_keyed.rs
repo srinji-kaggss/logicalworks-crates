@@ -14,9 +14,15 @@
 //! | `one_key_holds_at_most_one_effect_under_seeded_faults` | in-flight creates from killed runs, lost answers, rejected creates and failing reads never leave two effects for one key, and every answered open names the key's first effect |
 //! | `a_receiver_that_declares_no_in_flight_bound_is_duplicated_by_a_late_landing` | the fence is what holds the property: without the bound the same late landing doubles the key |
 //! | `a_failing_read_back_read_does_not_end_the_read_back` | a read-back read that fails is read past, not reported |
+//! | `a_rejecting_receiver_holds_nothing_whatever_the_reruns` | a create the receiver rejects lands nothing and is refused, never read back, on every rerun |
+//! | `a_receiver_that_loses_every_answer_holds_one_effect` | the first run reconciles through the read-back and every rerun finds that one effect |
+//! | `a_hundred_keys_each_hold_exactly_one_effect`, `a_thousand_keys_each_hold_exactly_one_effect` | at 100 and 1,000 keys on one receiver, with about half carrying a killed run's in-flight create, each key ends with exactly one effect |
+//! | `distinct_seeds_drive_distinct_traces` | the seed drives the run, so the trace hash is a receipt |
 //!
-//! The band is swept twice through `sim::assert_replays`, so one seed is one
-//! trace hash.
+//! Each band is swept twice through `sim::assert_replays`, so one seed is one
+//! trace hash. The key tiers stop at 1,000 opens in sequence on one receiver:
+//! each new key spends its fence on the virtual clock, so the cap is the
+//! test's own runtime, not a bound of the layer.
 
 #![cfg(feature = "script")]
 
@@ -398,5 +404,148 @@ fn a_failing_read_back_read_does_not_end_the_read_back() -> SimResult {
     assert_eq!(settlement, Settlement::Reconciled);
     assert_eq!(model.store()?.first("key"), Some(id));
     assert_eq!(model.store()?.held("key"), 1);
+    Ok(())
+}
+
+/// Open `key` `runs` times on `model`, recording each outcome, and return the
+/// outcomes in order.
+fn rerun(
+    sim: &mut Sim,
+    model: &Model,
+    key: &str,
+    runs: u32,
+) -> Result<Vec<&'static str>, Box<dyn Error>> {
+    let mut said = Vec::new();
+    for _ in 0..runs {
+        let word = outcome(&open(model, key))?;
+        sim.record(&format!("{key}:{word}@{}", model.clock.now().as_millis()));
+        said.push(word);
+    }
+    Ok(said)
+}
+
+/// A receiver that rejects every create holds nothing however often a key is
+/// rerun, and every run is refused rather than read back.
+fn rejecting(sim: &mut Sim) -> SimResult {
+    let faults = Faults {
+        lose_answers: sim.rng().below(2) == 0,
+        reject: true,
+        fail_after_create: sim.rng().below(3),
+    };
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let model = Model::new(&clock, faults, BOUND);
+    let runs = sim.rng().below(4).saturating_add(1);
+    let said = rerun(sim, &model, "refused-key", runs)?;
+    assert!(
+        said.iter().all(|&word| word == "refused"),
+        "seed {}: {said:?}",
+        sim.seed
+    );
+    assert_eq!(model.store()?.held("refused-key"), 0, "seed {}", sim.seed);
+    Ok(())
+}
+
+#[test]
+fn a_rejecting_receiver_holds_nothing_whatever_the_reruns() -> SimResult {
+    sim::assert_replays(Band::new(1_000, 64), rejecting)
+}
+
+/// A receiver that lands every create and loses every answer holds exactly
+/// one effect: the first run reconciles it through the read-back, and every
+/// rerun finds it.
+fn answerless(sim: &mut Sim) -> SimResult {
+    let faults = Faults {
+        lose_answers: true,
+        reject: false,
+        fail_after_create: sim.rng().below(3),
+    };
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let model = Model::new(&clock, faults, BOUND);
+    let runs = sim.rng().below(4).saturating_add(1);
+    let said = rerun(sim, &model, "lost-key", runs)?;
+    let (first, later) = said.split_first().ok_or("at least one run")?;
+    assert_eq!(*first, "reconciled", "seed {}: {said:?}", sim.seed);
+    assert!(
+        later.iter().all(|&word| word == "found"),
+        "seed {}: {said:?}",
+        sim.seed
+    );
+    assert_eq!(model.store()?.held("lost-key"), 1, "seed {}", sim.seed);
+    Ok(())
+}
+
+#[test]
+fn a_receiver_that_loses_every_answer_holds_one_effect() -> SimResult {
+    sim::assert_replays(Band::new(2_000, 64), answerless)
+}
+
+/// `keys` keys on one receiver, about half with a killed run's create still in
+/// flight, each opened once: every key ends with exactly one effect, created
+/// or found, and none ever with two.
+fn many_keys(sim: &mut Sim, keys: u32) -> SimResult {
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let model = Model::new(&clock, Faults::default(), BOUND);
+    let names: Vec<String> = (0..keys).map(|key| format!("tenant-{key}")).collect();
+    for name in &names {
+        if sim.rng().below(2) == 0 {
+            let lands = Duration::from_millis(u64::from(sim.rng().below(5_000)));
+            model.store()?.in_flight.push((name.clone(), lands));
+        }
+    }
+    let mut found = 0_u32;
+    for name in &names {
+        let (id, settlement) = open(&model, name).map_err(|failure| format!("{failure:?}"))?;
+        assert_eq!(
+            model.store()?.first(name),
+            Some(id),
+            "seed {}: {name}",
+            sim.seed
+        );
+        if settlement == Settlement::Found {
+            found = found.saturating_add(1);
+        }
+        // Every open's settlement and effect enter the trace, so the replay
+        // hash covers each key, not only the tier's totals.
+        sim.record(&format!("{name}:{}:{id}", settlement.as_str()));
+    }
+    let mut store = model.store()?;
+    store.settle(clock.now().saturating_add(BOUND));
+    for name in &names {
+        assert_eq!(
+            store.held(name),
+            1,
+            "seed {}: {name} at {keys} keys",
+            sim.seed
+        );
+    }
+    sim.record(&format!(
+        "keys:{keys} found:{found} at:{}",
+        clock.now().as_millis()
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_hundred_keys_each_hold_exactly_one_effect() -> SimResult {
+    sim::assert_replays(Band::new(3_000, 16), |sim| many_keys(sim, 100))
+}
+
+#[test]
+fn a_thousand_keys_each_hold_exactly_one_effect() -> SimResult {
+    sim::assert_replays(Band::new(4_000, 2), |sim| many_keys(sim, 1_000))
+}
+
+/// The trace hash is a receipt only if the seed drives the run: distinct
+/// seeds of the main family reach distinct traces.
+#[test]
+fn distinct_seeds_drive_distinct_traces() -> SimResult {
+    let mut hashes = sim::sweep(Band::new(0, 64), seed)?;
+    hashes.sort_unstable();
+    hashes.dedup();
+    assert!(
+        hashes.len() > 32,
+        "64 seeds reached only {} distinct traces",
+        hashes.len()
+    );
     Ok(())
 }
