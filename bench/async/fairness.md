@@ -35,8 +35,9 @@ Four real asymmetries were found and fixed *in the harness*, not in the crate:
 - **`Supervisor` retains terminal outcomes in a buffer capped at the in-flight
   bound** and counts the loss in `reports_dropped`. The baseline has no
   reporting layer and so bounds it at nothing. Comparing retained-list lengths
-  would compare reporting granularity, not execution. The retention asymmetry is
-  **reported separately**, as the asymmetry it is, and is not part of the gate.
+  would compare reporting granularity, not execution, so the tally the gate
+  compares carries neither figure and the asymmetry is **outside the gate** by
+  construction rather than carried and ignored.
 - **A time-bounded sweep point is not the same offered work on both sides.** The
   gate refused this, naming `placed`: offering "for one second" lets the faster
   side place more arrivals, and the offered work becomes a property of each
