@@ -117,6 +117,21 @@ pub enum GhError {
         /// The retained stderr.
         reason: String,
     },
+    /// GitHub rejected a write as a request (`400`, `410` or `422`), so it
+    /// landed nothing.
+    ///
+    /// Its own variant rather than a [`GhError::Transport`]: a transport
+    /// failure after a write started may have landed it and is read back,
+    /// while a rejection is GitHub's answer that it did not, and reading back
+    /// after one would only spend a settle finding nothing.
+    Rejected {
+        /// What the call was doing.
+        what: String,
+        /// The status the client named.
+        status: u16,
+        /// The retained stderr.
+        reason: String,
+    },
     /// The repository's answer was a moved-repository redirect.
     ///
     /// A renamed repository answers a request for its old name with a move
@@ -371,6 +386,14 @@ impl std::fmt::Display for GhError {
                 "{what} was refused by a credential that cannot reach the resource \
                  (HTTP {status}): {reason:?}"
             ),
+            Self::Rejected {
+                ref what,
+                status,
+                ref reason,
+            } => write!(
+                formatter,
+                "{what} was rejected by GitHub (HTTP {status}), so nothing landed: {reason:?}"
+            ),
             Self::MovedRepository {
                 ref requested,
                 ref canonical,
@@ -428,6 +451,7 @@ impl std::error::Error for GhError {
             | Self::TruncatedResponse { .. }
             | Self::ReviewCeiling { .. }
             | Self::Unauthorized { .. }
+            | Self::Rejected { .. }
             | Self::MovedRepository { .. }
             | Self::DiffUnavailable { .. }
             | Self::DiffFileCeiling { .. }
@@ -494,6 +518,11 @@ impl GhError {
             | GhError::NoRunner
             | GhError::PayloadNotSent { .. }
             | GhError::Staging { .. } => crate::error::DispatchCertainty::Refused,
+            // The child ran and GitHub answered that the request itself is
+            // unacceptable (`400`, `410`, `422`): the write landed nothing, and
+            // the same request draws the same refusal, which is what `Refused`
+            // says — permanent, not a retry — even though a child existed.
+            GhError::Rejected { .. } => crate::error::DispatchCertainty::Refused,
             // The client ran: whatever it was asked to do may have happened
             // and its answer been lost or misread.
             _ => crate::error::DispatchCertainty::NotDelivered,

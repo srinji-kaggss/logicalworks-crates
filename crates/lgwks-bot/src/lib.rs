@@ -280,6 +280,9 @@ pub mod journal;
 /// JSON through the shared facade (`lgwks_std::json`).
 #[doc(hidden)]
 pub mod json;
+#[doc(hidden)]
+#[cfg(feature = "time")]
+pub mod keyed;
 /// Language understanding: the tiered lexicon behind the resolver seam.
 #[doc(hidden)]
 pub mod language;

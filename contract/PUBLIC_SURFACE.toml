@@ -31,7 +31,7 @@
 "crates/lgwks-bot/src/domain/gh.rs" = 24
 "crates/lgwks-bot/src/domain/gh/error.rs" = 4
 "crates/lgwks-bot/src/domain/gh/ids.rs" = 8
-"crates/lgwks-bot/src/domain/gh/issue.rs" = 16
+"crates/lgwks-bot/src/domain/gh/issue.rs" = 15
 "crates/lgwks-bot/src/domain/gh/payload.rs" = 31
 "crates/lgwks-bot/src/domain/gh/record.rs" = 37
 "crates/lgwks-bot/src/domain/gh/verbs.rs" = 4
@@ -67,6 +67,7 @@
 "crates/lgwks-bot/src/journal/file/replay.rs" = 1
 "crates/lgwks-bot/src/journal/memory.rs" = 12
 "crates/lgwks-bot/src/journal/owner.rs" = 2
+"crates/lgwks-bot/src/keyed.rs" = 7
 "crates/lgwks-bot/src/journal/recover.rs" = 22
 "crates/lgwks-bot/src/journal/wire_form.rs" = 2
 "crates/lgwks-bot/src/json.rs" = 1
