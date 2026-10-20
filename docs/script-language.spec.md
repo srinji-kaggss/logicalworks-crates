@@ -33,7 +33,7 @@ One line each. The tracker names the issue that makes each one true.
 | SL-5 | **A refusal names its replacement.** The replacement is either a word or a typed failure. This holds in `crates/lgwks-ast/src/script/refuse.rs` and the parse refusals beside it. |
 | SL-6 | **A run reads back as its script.** For each step, the trail records the word and the source text of its line, so a person can read an execution line by line against the script that produced it. |
 | SL-7 | **Words are admitted like dependencies.** A new word needs six things: the recurring pattern it replaces, cited at three or more estate sites; its primitive; its refusals; its guarantees; a compile-fail test for each refusal; and a deterministic simulation of the primitive. Passthrough Rust that keeps recurring is the signal that a word is missing. |
-| SL-8 | **The lexicon fits on one page.** An agent's entire context for writing a script is the generated lexicon, about 4k tokens. If it outgrows that, the language is sprawling and words should merge. |
+| SL-8 | **The lexicon fits one context budget.** An agent's entire context for writing a script is the generated lexicon, about 4k tokens, committed as linked pages of at most 120 lines each (the size law), starting at `docs/script-lexicon.md`; `the_lexicon_page_is_rendered_from_the_lexicon` holds both bounds. If it outgrows the budget, the language is sprawling and words should merge. |
 
 ## What exists at the baseline
 

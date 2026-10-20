@@ -191,9 +191,6 @@ fn sim_document_sourced_fields_render_escaped() -> Outcome {
             BotError::UnregisteredDomain {
                 domain: text.to_owned(),
             },
-            BotError::UnjournaledEffect {
-                domain: text.to_owned(),
-            },
             BotError::IncompleteSpec {
                 field: "name",
                 cause: text.to_owned(),

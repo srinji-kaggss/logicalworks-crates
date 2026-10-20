@@ -739,6 +739,8 @@ fn stage_input(input: &[u8]) -> Result<StagedInput, GhError> {
 // path stays `domain::gh::<Name>`.
 mod error;
 mod ids;
+#[cfg(feature = "process")]
+mod issue;
 mod payload;
 mod record;
 mod verbs;
@@ -748,6 +750,10 @@ use record::MovedWire;
 
 pub use error::GhError;
 pub use ids::{CommitId, MAX_REPOSITORY_BYTES, Repository, SHA_HEX_LEN};
+#[cfg(feature = "process")]
+pub use issue::{
+    ISSUE_CREATE, IssueDraft, MAX_ISSUES_READ_BACK, OpenIssue, OpenedIssue, Settlement,
+};
 pub use payload::{
     GhOutcome, MAX_DIFF_BYTES, MAX_DIFF_FILES_PER_PULL, MAX_REVIEWS_PER_PULL, PullRequest,
     ReviewPayload,

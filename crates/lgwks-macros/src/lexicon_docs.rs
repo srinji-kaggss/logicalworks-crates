@@ -270,40 +270,122 @@ fn a_guarantee_whose_test_is_gone_is_refused() {
     );
 }
 
-/// Where the one-page lexicon is committed, from the workspace root.
-const PAGE: &str = "docs/script-lexicon.md";
-
-/// The page's budget: what an agent can hold whole beside its task.
+/// The lexicon's budget: what an agent can hold whole beside its task, over
+/// every page together.
 const PAGE_TOKENS: usize = 4_000;
 
-/// The variable that makes the page test write the page it renders.
+/// The most lines one committed page holds: the estate's size law for a
+/// repository `.md` file (Director 2026-10-10).
+const PAGE_LINES: usize = 120;
+
+/// The variable that makes the page test write the pages it renders.
 const WRITE_PAGE: &str = "LGWKS_WRITE_LEXICON_PAGE";
 
-/// The one-page lexicon (#385), an agent's whole context for writing a script:
-/// each word's forms, what it refuses, what it guarantees and an example,
-/// rendered from [`LEXICON`] so it cannot say what the parser does not do.
-/// Proofs are left to the README's table; the page carries what an author
-/// needs, inside its token budget.
-fn page() -> Result<String, String> {
-    let wrapped = wrapped_example();
-    let mut page = format!(
-        "# The `script!` lexicon\n\n\
+/// Page `number`'s file name under `docs/`. The first keeps the name the
+/// lexicon has always had, so every link to it still lands on its start.
+fn page_file(number: usize) -> String {
+    if number <= 1 {
+        String::from("script-lexicon.md")
+    } else {
+        format!("script-lexicon-{number}.md")
+    }
+}
+
+/// Page `number`'s path from the workspace root.
+fn page_path(number: usize) -> String {
+    format!("docs/{}", page_file(number))
+}
+
+/// How many lines `text` holds, counted as a file's newlines.
+fn lines(text: &str) -> usize {
+    text.matches('\n').count()
+}
+
+/// Refuse with `why`, logged first.
+fn refuse<T>(why: String) -> Result<T, String> {
+    lgwks_std::trace::debug!(error = %why, "lexicon pages: refused");
+    Err(why)
+}
+
+/// What every page opens with: its title, its generator and the line linking
+/// every page, `number` of `total` named and not linked.
+fn page_header(number: usize, total: usize) -> String {
+    let title = if number <= 1 {
+        String::new()
+    } else {
+        format!(", page {number}")
+    };
+    let links: Vec<String> = (1..=total)
+        .map(|other| {
+            if other == number {
+                format!("page {other}")
+            } else {
+                format!("[page {other}]({})", page_file(other))
+            }
+        })
+        .collect();
+    format!(
+        "# The `script!` lexicon{title}\n\n\
          <!-- Generated from `LEXICON` in crates/lgwks-ast/src/script/lexicon.rs by the \
          test `the_lexicon_page_is_rendered_from_the_lexicon` in lgwks_macros. Edit the \
          table, not this page. -->\n\n\
-         Everything needed to write `lgwks_bot::script!` flows. A script is one or \
+         Pages: {}.\n",
+        links.join(" · ")
+    )
+}
+
+/// What the first page says before the words.
+fn intro() -> String {
+    format!(
+        "\nEverything needed to write `lgwks_bot::script!` flows. A script is one or \
          more `flow`s inside the macro:\n\n\
-         ```rust\nlgwks_bot::script! {{\n{wrapped}}}\n```\n\n\
+         ```rust\nlgwks_bot::script! {{\n{}}}\n```\n\n\
          Each line is one step: it starts with one of the words below, or it is a \
          line of Rust. A line ending in `:` opens a block of the lines indented four \
          spaces beneath it. Inside a flow, `scope` is the current step's scope. A \
          line of Rust that could end or leak the program is refused when the macro \
-         expands, and the refusal names what to write instead.\n"
-    );
+         expands, and the refusal names what to write instead.\n",
+        wrapped_example()
+    )
+}
+
+/// The lexicon (#385), an agent's whole context for writing a script: each
+/// word's forms, what it refuses, what it guarantees and an example, rendered
+/// from [`LEXICON`] so it cannot say what the parser does not do. Proofs are
+/// left to the README's table; the pages carry what an author needs, inside
+/// the token budget.
+///
+/// Words fill pages in table order, a word never split, each page at most
+/// [`PAGE_LINES`] lines with its header, so the lexicon can grow without a page
+/// outgrowing the size law.
+fn pages() -> Result<Vec<String>, String> {
+    let header_lines = lines(&page_header(1, 1));
+    let mut bodies = vec![intro()];
     for row in &LEXICON {
-        page.push_str(&section(row)?);
+        let section = section(row)?;
+        let fits = |body: &str| {
+            header_lines
+                .saturating_add(lines(body))
+                .saturating_add(lines(&section))
+                <= PAGE_LINES
+        };
+        match bodies.last_mut() {
+            Some(body) if fits(body) => body.push_str(&section),
+            _ if !fits("") => {
+                return refuse(format!(
+                    "the `{}` section alone is past {PAGE_LINES} lines",
+                    heading(row.kind())
+                ));
+            }
+            _ => bodies.push(section),
+        }
     }
-    Ok(page)
+    let total = bodies.len();
+    Ok(bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| format!("{}{body}", page_header(index.saturating_add(1), total)))
+        .collect())
 }
 
 /// One word's section of the page.
@@ -364,30 +446,85 @@ fn stands(position: Position) -> Result<&'static str, String> {
     }
 }
 
-/// The committed page is the one the table renders, and it fits the budget.
-/// Tokens are counted as bytes divided by four, rounded up: a tokenizer-free
-/// bound that overcounts English prose, so a page under it is under it for any
-/// common tokenizer. Set `LGWKS_WRITE_LEXICON_PAGE` to write the rendered page
-/// instead of failing on a stale one.
+/// The committed pages are the ones the table renders, none past the size
+/// law, no page left over from a longer lexicon, and all of them together
+/// inside the budget. Tokens are counted as bytes divided by four, rounded up:
+/// a tokenizer-free bound that overcounts English prose, so pages under it are
+/// under it for any common tokenizer. Set `LGWKS_WRITE_LEXICON_PAGE` to write
+/// the rendered pages instead of failing on stale ones.
 #[test]
 fn the_lexicon_page_is_rendered_from_the_lexicon() -> Result<(), String> {
-    let rendered = page()?;
-    let path = workspace_root().join(PAGE);
-    if std::env::var_os(WRITE_PAGE).is_some() {
-        std::fs::write(&path, &rendered).map_err(|error| format!("{PAGE}: {error}"))?;
+    let rendered = pages()?;
+    let writing = std::env::var_os(WRITE_PAGE).is_some();
+    let mut bytes: usize = 0;
+    for (index, page) in rendered.iter().enumerate() {
+        let name = page_path(index.saturating_add(1));
+        let path = workspace_root().join(&name);
+        if writing {
+            std::fs::write(&path, page).map_err(|error| format!("{name}: {error}"))?;
+        }
+        let committed =
+            std::fs::read_to_string(&path).map_err(|error| format!("{name}: {error}"))?;
+        if committed != *page {
+            return refuse(format!(
+                "{name} is generated from LEXICON and differs from it; rerun this test \
+                 with {WRITE_PAGE}=1 and commit the pages"
+            ));
+        }
+        if lines(page) > PAGE_LINES {
+            return refuse(format!("{name} is past {PAGE_LINES} lines"));
+        }
+        bytes = bytes.saturating_add(page.len());
     }
-    let committed = std::fs::read_to_string(&path).map_err(|error| format!("{PAGE}: {error}"))?;
-    if committed != rendered {
-        return Err(format!(
-            "{PAGE} is generated from LEXICON and differs from it; rerun this test with \
-             {WRITE_PAGE}=1 and commit the page"
+    let leftover = page_path(rendered.len().saturating_add(1));
+    if workspace_root().join(&leftover).exists() {
+        return refuse(format!(
+            "{leftover} is a page the lexicon no longer renders; delete it"
         ));
     }
-    let tokens = rendered.len().div_ceil(4);
+    let tokens = bytes.div_ceil(4);
     if tokens > PAGE_TOKENS {
-        return Err(format!(
-            "{PAGE} is {tokens} tokens (bytes / 4, rounded up), past its {PAGE_TOKENS}"
+        return refuse(format!(
+            "the lexicon pages are {tokens} tokens (bytes / 4, rounded up), past {PAGE_TOKENS}"
         ));
+    }
+    Ok(())
+}
+
+/// Paging is not vacuous: every page fits the size law, the words appear once
+/// each in table order across the pages, and every page links every other.
+#[test]
+fn the_lexicon_pages_hold_every_word_once_within_the_size_law() -> Result<(), String> {
+    let rendered = pages()?;
+    let whole: String = rendered.concat();
+    let mut from = 0;
+    for row in &LEXICON {
+        let marker = format!("\n## `{}`\n", heading(row.kind()));
+        let Some(at) = whole.get(from..).and_then(|rest| rest.find(&marker)) else {
+            return refuse(format!(
+                "`{}` is missing or out of order",
+                heading(row.kind())
+            ));
+        };
+        from = from.saturating_add(at).saturating_add(marker.len());
+        assert_eq!(whole.matches(&marker).count(), 1, "{marker:?} appears once");
+    }
+    for (index, page) in rendered.iter().enumerate() {
+        assert!(
+            lines(page) <= PAGE_LINES,
+            "page {} is {} lines",
+            index + 1,
+            lines(page)
+        );
+        for other in 1..=rendered.len() {
+            if other != index.saturating_add(1) {
+                assert!(
+                    page.contains(&format!("({})", page_file(other))),
+                    "page {} links page {other}",
+                    index + 1
+                );
+            }
+        }
     }
     Ok(())
 }

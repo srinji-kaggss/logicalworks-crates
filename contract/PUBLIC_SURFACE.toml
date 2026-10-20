@@ -28,9 +28,10 @@
 "crates/lgwks-bot/src/domain/eval.rs" = 16
 "crates/lgwks-bot/src/domain/flow.rs" = 5
 "crates/lgwks-bot/src/domain/fs.rs" = 4
-"crates/lgwks-bot/src/domain/gh.rs" = 23
+"crates/lgwks-bot/src/domain/gh.rs" = 24
 "crates/lgwks-bot/src/domain/gh/error.rs" = 4
 "crates/lgwks-bot/src/domain/gh/ids.rs" = 8
+"crates/lgwks-bot/src/domain/gh/issue.rs" = 16
 "crates/lgwks-bot/src/domain/gh/payload.rs" = 31
 "crates/lgwks-bot/src/domain/gh/record.rs" = 37
 "crates/lgwks-bot/src/domain/gh/verbs.rs" = 4
