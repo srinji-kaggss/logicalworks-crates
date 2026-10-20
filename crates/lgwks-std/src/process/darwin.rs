@@ -26,8 +26,10 @@
 //! The Miri proof: [`read_bytes`] takes the syscall as a function pointer, so
 //! the tests drive the exact `unsafe` call sites against a Rust stand-in that
 //! writes into the buffer the way the kernel does — and lies about the length,
-//! and fails with `ENOMEM` — under `cargo +nightly miri nextest run`. Miri cannot run
-//! the foreign call itself; the live tests below do, outside Miri.
+//! and fails with `ENOMEM` — under the `miri-unsafe` gate lane, which runs
+//! `cargo +nightly-2026-10-01 miri test --target aarch64-apple-darwin` over this
+//! module. Miri cannot run the foreign call itself; the live tests below do,
+//! outside Miri.
 
 use std::ffi::{c_int, c_uint, c_void};
 use std::io;
