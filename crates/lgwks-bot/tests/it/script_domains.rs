@@ -77,10 +77,14 @@ impl Observe for PullRequestStatus {
     async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
         call.0.check(&[])?;
         record(format!("poll:{}:{}", self.domain_id(), self.repository));
-        Ok(OPEN_PULL_REQUESTS
+        // A repository the table does not know has no open pull requests.
+        match OPEN_PULL_REQUESTS
             .iter()
             .find(|&&(known, _)| known == self.repository)
-            .map_or(0, |&(_, open)| open))
+        {
+            Some(&(_, open)) => Ok(open),
+            None => Ok(0),
+        }
     }
 
     fn domain_id(&self) -> &str {
@@ -88,8 +92,8 @@ impl Observe for PullRequestStatus {
     }
 }
 
-/// An action whose effect leaves the process, which `act` must refuse before
-/// it runs; it records itself if it ever does.
+/// An action whose effect leaves the process, which `act` runs like any
+/// other; it records itself when it does.
 struct Post;
 
 impl Post {
@@ -466,20 +470,19 @@ fn an_action_output_reads_back_as_its_own_type_only() -> TestResult {
 }
 
 #[test]
-fn an_external_action_is_refused_naming_the_effect_ledger() -> TestResult {
+fn an_external_action_runs_with_the_flows_value() -> TestResult {
     let host = host("acme", GrantSet::empty())?;
     let posting = task("posting", |scope: Scope, value: u16| async move {
         post(&scope, "channel", value).await
     })?;
     let _ = take_trace();
     let report = lgwks_bot::block_on(host.run(&posting, 7));
-    let refused = bot_error(&report)?;
-    assert!(
-        matches!(*refused, BotError::UnjournaledEffect { ref domain } if domain == "test::post"),
-        "{refused:?}"
+    assert!(report.result().is_ok(), "{:?}", report.result());
+    assert_eq!(
+        take_trace(),
+        ["execute:test::post:7"],
+        "the action ran once"
     );
-    assert!(refused.to_string().contains("effect ledger"), "{refused}");
-    assert!(take_trace().is_empty(), "the action never ran");
     Ok(())
 }
 

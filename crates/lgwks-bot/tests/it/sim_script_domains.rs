@@ -14,7 +14,7 @@
 //! | `the_script_trace_is_the_spec_trace` | a flow and a spec over one registry poll and execute the same operations in the same order |
 //! | `an_unknown_domain_refuses_the_flow_before_any_step` | every undeclared identifier is named at the flow's entry, and no step runs |
 //! | `a_domain_short_of_authority_blocks_its_step` | a source's capabilities are checked against each host's own grant |
-//! | `an_external_action_is_refused_before_it_runs` | `act` never runs an effect that leaves the process |
+//! | `an_external_action_runs_once_under_its_grant` | `act` runs an effect that leaves the process exactly once, with the value the flow gave it |
 //!
 //! Each family sweeps its band twice through `sim::assert_replays`, so a
 //! nondeterministic run fails on its hash as well as on its oracle.
@@ -26,12 +26,12 @@ use std::error::Error;
 use lgwks_bot::script::Scope;
 use lgwks_bot::spec::{Bot, BotSpec};
 use lgwks_bot::task::{Host, task};
-use lgwks_bot::{BotError, Cap, GrantSet};
+use lgwks_bot::{Cap, GrantSet};
 
 use crate::effects::memory_scope;
 use crate::script_domains::{
-    SCRIPT_DOMAINS, blocked_on, bot_error, host, page_then_misspelled_source, page_when_over, post,
-    reach, two_misspellings, undeclared, unknown_in_registry,
+    SCRIPT_DOMAINS, blocked_on, host, page_then_misspelled_source, page_when_over, post, reach,
+    two_misspellings, undeclared, unknown_in_registry,
 };
 use crate::sim::{self, Band, Sim};
 use crate::spec_materialize::take_trace;
@@ -220,7 +220,7 @@ fn a_domain_short_of_authority_blocks_its_step() -> SimResult {
 // ── The effect family ──────────────────────────────────────────────────────
 
 /// One seed of the effect family: an external action under any grant, any
-/// target and any value is refused before it runs.
+/// target and any value runs once, with that value.
 fn effect_seed(hosts: &[Host; 2], sim: &mut Sim) -> SimResult {
     let host = hosts.get(usize::from(below(sim, 2)?)).ok_or("two hosts")?;
     let target = format!("channel-{}", sim.rng().below(16));
@@ -232,18 +232,16 @@ fn effect_seed(hosts: &[Host; 2], sim: &mut Sim) -> SimResult {
     let _ = take_trace();
     let report = lgwks_bot::block_on(host.run(&posting, (target.clone(), value)));
     assert!(
-        matches!(
-            *bot_error(&report)?,
-            BotError::UnjournaledEffect { ref domain } if domain == "test::post"
-        ),
+        report.result().is_ok(),
         "seed {}: {:?}",
         sim.seed,
         report.result()
     );
     let trace = take_trace();
-    assert!(
-        trace.is_empty(),
-        "seed {}: the action ran: {trace:?}",
+    assert_eq!(
+        trace,
+        [format!("execute:test::post:{value}")],
+        "seed {}: the action ran once with the flow's value",
         sim.seed
     );
     sim.record(&format!("{target}:{value}"));
@@ -251,7 +249,7 @@ fn effect_seed(hosts: &[Host; 2], sim: &mut Sim) -> SimResult {
 }
 
 #[test]
-fn an_external_action_is_refused_before_it_runs() -> SimResult {
+fn an_external_action_runs_once_under_its_grant() -> SimResult {
     let hosts = two_hosts()?;
     sim::assert_replays(Band::new(0, SEEDS), |sim| effect_seed(&hosts, sim))
 }

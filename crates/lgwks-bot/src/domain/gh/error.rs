@@ -42,6 +42,11 @@ pub enum GhError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// An issue draft GitHub would refuse, refused before any call.
+    IssueDraft {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// The client could not be run, or ran and could not be settled.
     #[cfg(feature = "process")]
     Process(crate::rt::process::ProcessRunError),
@@ -292,6 +297,9 @@ impl std::fmt::Display for GhError {
             Self::Marker { ref marker, reason } => {
                 write!(formatter, "{marker:?}: not a review marker: {reason}")
             }
+            Self::IssueDraft { reason } => {
+                write!(formatter, "the issue draft was not sent: {reason}")
+            }
             #[cfg(feature = "process")]
             Self::Process(ref source) => {
                 write!(formatter, "the GitHub client could not run: {source}")
@@ -413,6 +421,7 @@ impl std::error::Error for GhError {
             | Self::CommitId { .. }
             | Self::Event { .. }
             | Self::Marker { .. }
+            | Self::IssueDraft { .. }
             | Self::Transport { .. }
             | Self::Deadline { .. }
             | Self::Response { .. }
@@ -439,15 +448,26 @@ impl From<GhError> for crate::script::FlowError {
     /// stays one, so a flow's retry decision still knows that the publication
     /// may have happened. This is the same mapping the verb path makes.
     fn from(source: GhError) -> Self {
-        // A refused credential is its own typed outcome on this path too, with
-        // the repair attached, rather than a `DomainError` a flow would retry.
-        if let Some(rejection) = source.credential_rejection("gh") {
-            return crate::script::FlowError::Bot {
-                at: std::sync::Arc::from(""),
-                source: Box::new(rejection),
-            };
+        crate::script::FlowError::Bot {
+            at: std::sync::Arc::from(""),
+            source: Box::new(source.into_bot_error("gh")),
         }
-        let certainty = match source {
+    }
+}
+
+#[cfg(any(feature = "script", feature = "process"))]
+impl GhError {
+    /// This failure as the crate error a verb returns, attributed to `domain`.
+    ///
+    /// One mapping for the flow path and the verb path, so the certainty a
+    /// retry decision reads is the same however the adapter was reached.
+    pub(super) fn into_bot_error(self, domain: &str) -> BotError {
+        // A refused credential is its own typed outcome, with the repair
+        // attached, rather than a `DomainError` a caller would retry.
+        if let Some(rejection) = self.credential_rejection(domain) {
+            return rejection;
+        }
+        let certainty = match self {
             // The child started and did not settle: it may have reached
             // GitHub, so the effect is unsettled rather than undelivered. A
             // flow's retry policy reads that distinction, and a retry of an
@@ -470,6 +490,7 @@ impl From<GhError> for crate::script::FlowError {
             | GhError::CommitId { .. }
             | GhError::Event { .. }
             | GhError::Marker { .. }
+            | GhError::IssueDraft { .. }
             | GhError::NoRunner
             | GhError::PayloadNotSent { .. }
             | GhError::Staging { .. } => crate::error::DispatchCertainty::Refused,
@@ -477,22 +498,16 @@ impl From<GhError> for crate::script::FlowError {
             // and its answer been lost or misread.
             _ => crate::error::DispatchCertainty::NotDelivered,
         };
-        let cause = match certainty {
-            crate::error::DispatchCertainty::Unsettled => {
-                crate::error::BotError::EffectIndeterminate {
-                    domain: String::from("gh"),
-                    cause: source.to_string(),
-                }
-            }
-            _ => crate::error::BotError::DomainError {
-                domain: String::from("gh"),
-                certainty,
-                cause: source.to_string(),
+        match certainty {
+            crate::error::DispatchCertainty::Unsettled => BotError::EffectIndeterminate {
+                domain: domain.to_owned(),
+                cause: self.to_string(),
             },
-        };
-        crate::script::FlowError::Bot {
-            at: std::sync::Arc::from(""),
-            source: Box::new(cause),
+            _ => BotError::DomainError {
+                domain: domain.to_owned(),
+                certainty,
+                cause: self.to_string(),
+            },
         }
     }
 }

@@ -129,13 +129,6 @@ impl fmt::Display for BotError {
                     "this flow names domains its registry does not declare: {needs}"
                 )
             }
-            Self::UnjournaledEffect { ref domain } => write!(
-                f,
-                "`act` runs only an action whose effect stays in this process, and {} \
-                 reaches outside it; put it in a `BotSpec` chain, whose dispatch records \
-                 intent in the effect ledger before the effect leaves",
-                Escaped(domain)
-            ),
             Self::DuplicateDomain {
                 ref domain,
                 role,

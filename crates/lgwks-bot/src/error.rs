@@ -115,19 +115,6 @@ pub enum BotError {
         /// identifier, in source order.
         needs: crate::spec::NeedSet,
     },
-    /// A flow's `act` names an action whose effect leaves the process (#388).
-    ///
-    /// `act` runs an action as a step and nothing more; it writes no effect
-    /// journal, so an action that reaches a file, a socket or a queue would
-    /// leave with no intent recorded before it and no way to tell after a
-    /// crash whether it happened. Such an action belongs in a
-    /// [`BotSpec`](crate::spec::BotSpec) chain, whose dispatch records intent
-    /// before the effect leaves (the effect ledger). Refused before the
-    /// action runs, so nothing left the process.
-    UnjournaledEffect {
-        /// The action identifier the flow named.
-        domain: String,
-    },
     /// The registry declares one identifier twice within a single role.
     ///
     /// A duplicate would make dispatch depend on declaration order: the first

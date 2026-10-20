@@ -22,15 +22,16 @@
 //!   domain is then handed a grant of exactly those capabilities and nothing
 //!   wider.
 //!
-//! # What `act` does not run
+//! # What `act` owes a repeat
 //!
-//! `act` is a step, not an effect dispatch: it records no intent before the
-//! action runs. An action whose [`EffectLifetime`] is
-//! [`External`](EffectLifetime::External) is refused before it runs with
-//! [`BotError::UnjournaledEffect`], which names the `BotSpec` chain whose
-//! dispatch journals it. Only an effect that stays in the process runs here,
-//! and a local effect repeated after a restart is one the process alone could
-//! see.
+//! `act` runs whatever the registry declares, inside the process or outside
+//! it: an action is almost always an effect on something else, and refusing
+//! those left the word with nothing to do (the Director, 2026-10-20). It
+//! records no intent of its own, so an action whose effect leaves the process
+//! settles a repeat itself, by reading its receiver back before it writes.
+//! `gh::issue` is the pattern: a caller key travels with the issue, and a
+//! second run with that key finds the first run's issue instead of opening
+//! another.
 
 use std::any::{Any, type_name};
 
@@ -38,7 +39,6 @@ use crate::error::BotError;
 use crate::gate::GrantSet;
 use crate::registry::{DomainRegistry, Role};
 use crate::spec::{Erased, Need, NeedSet};
-use crate::verb::EffectLifetime;
 
 use super::{FlowError, Scope};
 
@@ -206,11 +206,10 @@ pub async fn observe<T: 'static>(scope: &Scope, id: &str, target: &str) -> Resul
 /// # Errors
 ///
 /// The identifier undeclared ([`BotError::UndeclaredDomains`]); the
-/// constructor's refusal of `target`; [`BotError::UnjournaledEffect`] for an
-/// action whose effect leaves the process, before it runs;
-/// [`FlowError::Blocked`] when the run's authority does not cover the action's
-/// capabilities; [`BotError::TypeMismatch`] when `value` is not the action's
-/// input; the action's own failure.
+/// constructor's refusal of `target`; [`FlowError::Blocked`] when the run's
+/// authority does not cover the action's capabilities, before it runs;
+/// [`BotError::TypeMismatch`] when `value` is not the action's input; the
+/// action's own failure.
 pub async fn act<V: 'static>(
     scope: &Scope,
     id: &str,
@@ -222,17 +221,6 @@ pub async fn act<V: 'static>(
         .build_action(id, target)
         .map_err(|refused| FlowError::from(refused).located(scope))?
         .into_execute_any();
-    match action.effect_lifetime() {
-        EffectLifetime::Local => {}
-        EffectLifetime::External => {
-            let refusal = Err(FlowError::from(BotError::UnjournaledEffect {
-                domain: id.to_owned(),
-            })
-            .located(scope));
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "act: returning an error to the caller");
-            return refusal;
-        }
-    }
     let caps = action.required_caps();
     scope.require(caps)?;
     let grants = exactly(caps);

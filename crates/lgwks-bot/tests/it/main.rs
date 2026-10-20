@@ -44,6 +44,10 @@ mod effects;
 #[path = "../support/fake_gh.rs"]
 mod fake_gh;
 
+#[cfg(all(unix, feature = "script", feature = "process", feature = "ephemeral"))]
+#[path = "../support/fake_gh_issues.rs"]
+mod fake_gh_issues;
+
 #[cfg(all(feature = "inspect", feature = "script"))]
 #[path = "../inspect_support/mod.rs"]
 mod inspect_support;
@@ -148,6 +152,7 @@ mod effect_journal;
 mod ephemeral;
 mod flow_ron;
 mod gh_binding;
+mod gh_issue;
 mod inspect;
 mod inspect_contract;
 mod inspect_non_execution;
@@ -214,6 +219,7 @@ mod sim_dist_lease_tcp;
 mod sim_ecs_backoff;
 mod sim_epoch_identity;
 mod sim_fan_out;
+mod sim_gh_issue;
 mod sim_group_commit;
 mod sim_inspect;
 mod sim_inspect_wiring;

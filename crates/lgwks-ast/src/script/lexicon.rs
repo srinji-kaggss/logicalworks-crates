@@ -638,8 +638,8 @@ pub const LEXICON: [Word; 15] = [
             ),
             domain_sim(
                 Axis::Ephemeral,
-                "only an effect that stays in the process runs; an external one is refused before it runs, naming the effect ledger",
-                "an_external_action_is_refused_before_it_runs",
+                "the action runs once, under exactly the grants it declares; an external one settles a repeat by reading its receiver back",
+                "an_external_action_runs_once_under_its_grant",
             ),
             SAME_AS_SPEC,
             UNKNOWN_DOMAIN_REFUSED,
