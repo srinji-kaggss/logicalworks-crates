@@ -231,3 +231,8 @@ path = "examples/journal_continuation.rs"
 name = "quickstart"
 path = "examples/quickstart.rs"
 required-features = ["script"]
+
+[[example]]
+name = "guarantees"
+path = "examples/guarantees.rs"
+required-features = ["script", "ephemeral"]
