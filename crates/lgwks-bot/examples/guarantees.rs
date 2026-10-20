@@ -152,6 +152,7 @@ fn deadline_demo() -> Result<(), Box<dyn Error>> {
             );
         }
         ref other => {
+            lgwks_std::trace::debug!(?other, "expected a timed-out run");
             return Err(format!("expected a timed-out run, got {other:?}").into());
         }
     }
@@ -159,9 +160,15 @@ fn deadline_demo() -> Result<(), Box<dyn Error>> {
 }
 
 /// The demo host: one tenant, no grants, a run store in a fresh temporary
-/// directory. Built once and shared by the refusal and resume demos.
+/// directory named by a random nonce — an OS process id is reused, a CSPRNG
+/// draw is not — so concurrent demo runs never share one. Built once and
+/// shared by the refusal and resume demos.
 fn demo_host() -> Result<Host, Box<dyn Error>> {
-    let store = std::env::temp_dir().join(format!("lgwks-quickstart-store-{}", std::process::id()));
+    let nonce = lgwks_std::random::bytes::<8>()?;
+    let store = std::env::temp_dir().join(format!(
+        "lgwks-quickstart-store-{}",
+        u64::from_le_bytes(nonce)
+    ));
     Ok(Host::builder("demo")?
         .domains(&DEMO_DOMAINS)
         .grants(GrantSet::empty())
@@ -190,7 +197,10 @@ fn refusal_demo(host: &Host) -> Result<(), Box<dyn Error>> {
             .shortages()
             .map(|short| short.required().clone())
             .collect::<Vec<Cap>>(),
-        ref other => return Err(format!("expected a blocked run, got {other:?}").into()),
+        ref other => {
+            lgwks_std::trace::debug!(?other, "expected a blocked run");
+            return Err(format!("expected a blocked run, got {other:?}").into());
+        }
     };
     assert_eq!(
         need,
@@ -215,6 +225,7 @@ fn resume_demo(host: &Host) -> Result<(), Box<dyn Error>> {
     let resuming = task("resuming", |scope: Scope, crash: bool| async move {
         let one = remember(&scope, "step-one", || async { Ok::<u64, FlowError>(1) }).await?;
         if crash {
+            lgwks_std::trace::debug!("modelled crash between the two recorded steps");
             return Err(FlowError::Cancelled {
                 at: Arc::from("step-two"),
             });
