@@ -504,6 +504,9 @@ fn many_keys(sim: &mut Sim, keys: u32) -> SimResult {
         if settlement == Settlement::Found {
             found = found.saturating_add(1);
         }
+        // Every open's settlement and effect enter the trace, so the replay
+        // hash covers each key, not only the tier's totals.
+        sim.record(&format!("{name}:{}:{id}", settlement.as_str()));
     }
     let mut store = model.store()?;
     store.settle(clock.now().saturating_add(BOUND));
