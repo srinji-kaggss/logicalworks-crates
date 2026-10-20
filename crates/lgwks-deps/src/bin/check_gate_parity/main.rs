@@ -437,14 +437,28 @@ mod tests {
         mutated
     }
 
+    /// The `command = ...` line of lane `id`, read from the lane table itself.
+    ///
+    /// A control that carried its own copy of the line broke on every edit to
+    /// the lane (#639); one that reads the line mutates whatever the lane says.
+    fn command_line<'m>(manifest: &'m str, id: &str) -> Result<&'m str, Box<dyn Error>> {
+        let anchor = format!("id = \"{id}\"\n");
+        let (_, rest) = manifest
+            .split_once(&anchor)
+            .ok_or_else(|| format!("the lane table has no lane `{id}`"))?;
+        let line = rest
+            .lines()
+            .take_while(|line| *line != "[[lane]]")
+            .find(|line| line.starts_with("command = "))
+            .ok_or_else(|| format!("lane `{id}` has no command"))?;
+        Ok(line)
+    }
+
     #[test]
     fn a_substituted_command_fails() -> TestResult {
         let (manifest, workflow) = files()?;
-        let shortened = substituted(
-            &manifest,
-            "command = \"cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check\"",
-            "command = \"cargo fmt --all\"",
-        );
+        let format = command_line(&manifest, "format")?;
+        let shortened = substituted(&manifest, format, "command = \"cargo fmt --all\"");
         let problems = check_parity(&shortened, &workflow);
         assert!(
             !problems.is_empty(),
@@ -458,7 +472,7 @@ mod tests {
         );
         let wholesale = substituted(
             &manifest,
-            "command = \"cargo fmt --all -- --check && cargo fmt --manifest-path bench/async/Cargo.toml --all -- --check\"",
+            format,
             "command = \"cargo clippy --workspace --all-targets --locked -- -D warnings\"",
         );
         assert!(

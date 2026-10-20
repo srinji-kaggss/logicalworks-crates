@@ -300,10 +300,16 @@ fn a_key_that_names_two_issues_answers_the_first() -> TestResult {
 /// on real elapsed time is the point: a wait that still read
 /// `rt::time::sleep` would spend the schedule for real.
 ///
-/// Ten seconds, not one: the schedule is 15.75 s, so a real-wait regression
-/// cannot finish under the bound, while the fake receiver's own spawned
-/// processes cost up to a second on a loaded host and are the only real time
-/// this flow spends.
+/// The two assertions split the work. The driver moves the flow clock only
+/// while a wait is parked on it, one second a step, so each settle's seven
+/// waits cost exactly 1 + 1 + 1 + 2 + 4 + 4 + 4 = 17 s of flow time, and the
+/// scan's settle and the read-back settle together read exactly 34 s. A wait
+/// moved to `rt::time::sleep` takes its steps off that total, so a partial
+/// regression fails the equality even where it spends too little real time
+/// for the second bound to see. That bound catches the whole schedule spent
+/// for real. It is ten seconds, not one, because the fake receiver's own
+/// spawned processes cost up to a second on a loaded host and are the only
+/// real time this flow spends.
 #[test]
 fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
     let clock = Clock::virtual_at(Duration::ZERO);
@@ -317,16 +323,16 @@ fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
     assert_eq!(issue.number(), 1);
     // The scan's settle, create, read #1, then the eight settle reads.
     assert_eq!(calls_on("stale-owner")?.len(), 18);
-    assert!(
-        clock.now() >= Duration::from_secs(15),
-        "the settle must spend its schedule on the flow's clock, which read {:?}",
-        clock.now()
+    assert_eq!(
+        clock.now(),
+        Duration::from_secs(34),
+        "both settles must spend every wait of their schedule on the flow's clock"
     );
     assert!(
         elapsed < Duration::from_secs(10),
         "the settle must not wait its 15.75 s schedule in real time; ten seconds is the fake \
-         receiver's own process cost under load, and a real wait cannot finish under it: \
-         {elapsed:?}"
+         receiver's own process cost under load, and the whole schedule cannot finish under \
+         it: {elapsed:?}"
     );
     Ok(())
 }

@@ -1,5 +1,6 @@
 //! The concurrency ladder: both sides at every tier the contract names, under a
-//! fixed in-flight ceiling, with the process high-water mark reported once.
+//! fixed in-flight ceiling, with the process's resident set reported once and
+//! labelled with how it was read.
 //!
 //! Moved from `main.rs` for #639; the behaviour it exercised is unchanged.
 
@@ -27,40 +28,30 @@ const TIER_BOUND: usize = 64;
 /// the paired ratio's interval, not the raw p99, is what the table leans on.
 const TIER_ROUNDS: usize = 5;
 
-/// The process's peak resident set size in bytes and how it was read, or `None`
-/// with the reason where the host does not expose it.
+/// One resident-set reading taken after a tier, and how it was read.
 ///
-/// Linux reads its own `/proc/self/status`, whose `VmHWM` is the kernel's
-/// high-water mark. macOS exposes no in-process high-water mark without a
-/// `getrusage` edge, so it reads the same documented `/bin/ps` sample the
-/// open-loop paths use ([`resident_bytes`]): the figure is the process's
-/// resident set when the call runs, not a maximum. Returning the label from the
-/// same function that reads the value is what keeps the record and the printed
-/// line from claiming a high-water mark the sample cannot support.
+/// The open-loop paths' reader ([`resident_bytes`]) is the one parser. On Linux
+/// its figure is `VmHWM`, the kernel's high-water mark, so the reading after the
+/// last tier is the peak. macOS has no in-process high-water mark without a
+/// `getrusage` edge, and its figure is a `/bin/ps` sample of the current RSS,
+/// taken here once a tier's tasks have finished, not while they were alive: the
+/// largest of those samples is a lower bound on the peak, and the label says so
+/// rather than borrowing the open-loop label, which a sample taken mid-run earns.
 ///
-/// It is *optional* rather than required, and the reason is stated rather than
-/// hidden: a peak-RSS column a host cannot fill is worse than none, because an
-/// empty cell in a results file reads as "small". Where it is unavailable the
-/// field is `null` and the label says why, and no figure is carried over from
-/// another platform.
-fn peak_rss_bytes() -> (Option<u64>, &'static str) {
-    #[cfg(target_os = "linux")]
-    {
-        let read = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status.lines().find_map(|line| {
-                    let value = line.strip_prefix("VmHWM:")?;
-                    let kib: u64 = value.split_whitespace().next()?.parse().ok()?;
-                    Some(kib.saturating_mul(1024))
-                })
-            });
-        (read, "/proc/self/status VmHWM (kernel high-water mark)")
-    }
+/// Where the host cannot report RSS the figure is `None` and the label says why:
+/// an empty cell in a results file reads as "small", and no figure is carried
+/// over from another platform.
+///
+/// [`resident_bytes`]: crate::driver::resident_bytes
+fn rss_after_tier() -> (Option<u64>, &'static str) {
+    let (bytes, source) = crate::driver::resident_bytes();
     #[cfg(not(target_os = "linux"))]
-    {
-        crate::driver::resident_bytes()
-    }
+    let source = if bytes.is_some() {
+        "/bin/ps -o rss= (current, largest of one sample after each tier; a lower bound on the peak)"
+    } else {
+        source
+    };
+    (bytes, source)
 }
 
 /// One tier's measured numbers, for the report and the JSON record.
@@ -117,20 +108,25 @@ pub(crate) fn tier_ladder(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("concurrency ladder: both sides at every tier the contract names");
     info!("bound {TIER_BOUND} on every tier, {TIER_ROUNDS} paired rounds each");
-    info!("peak RSS: VmHWM on Linux, a /bin/ps sample on macOS, read once at the end\n");
+    info!("RSS: VmHWM on Linux, a /bin/ps sample on macOS, read after every tier\n");
 
     let mut rows = Vec::new();
+    let mut rss: (Option<u64>, &'static str) = (None, "not read");
     for tasks in TIERS {
         let result = runtime.block_on(measure_tier(tasks))?;
         rows.push(result);
+        let read = rss_after_tier();
+        if read.0 >= rss.0 {
+            rss = read;
+        }
     }
-    let (peak, rss_source) = peak_rss_bytes();
+    let (peak, rss_source) = rss;
 
     info!(
         "{:>9} {:>11} {:>11} {:>11} {:>11} {:>11} {:>11}",
         "tasks", "f p50", "f p95", "f p99", "b p50", "b p95", "b p99"
     );
-    let mut json_rows = String::new();
+    let mut json_rows = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut f = row.facade.clone();
         let mut b = row.baseline.clone();
@@ -152,10 +148,7 @@ pub(crate) fn tier_ladder(
             percentiles[4],
             percentiles[5]
         );
-        if !json_rows.is_empty() {
-            json_rows.push('\n');
-        }
-        json_rows.push_str(&format!(
+        json_rows.push(format!(
             "{{\"tier\":{},\"bound\":{},\"facade_p50\":{},\"facade_p95\":{},\
              \"facade_p99\":{},\"baseline_p50\":{},\"baseline_p95\":{},\"baseline_p99\":{},\
              \"facade_work_units\":{},\"baseline_work_units\":{}}}",
@@ -172,7 +165,7 @@ pub(crate) fn tier_ladder(
         ));
     }
     match peak {
-        Some(bytes) => info!("\npeak RSS for the whole process: {bytes} bytes ({rss_source})"),
+        Some(bytes) => info!("\nRSS for the whole process: {bytes} bytes ({rss_source})"),
         None => info!(
             "\npeak RSS: NOT AVAILABLE on this host ({rss_source}) — the field below is `null`, \
              and no value is extrapolated from another platform"
@@ -184,17 +177,52 @@ pub(crate) fn tier_ladder(
     );
 
     if let Some(path) = json {
-        let peak_field = match peak {
-            Some(bytes) => format!("\"peak_rss_bytes\":{bytes}"),
-            None => String::from("\"peak_rss_bytes\":null"),
-        };
-        let body = format!(
-            "{{\"tool\":\"lgwks-bench-async-ladder\",\"bound\":{TIER_BOUND},\
-              \"rounds\":{TIER_ROUNDS},{peak_field},\"rss_source\":\"{rss_source}\",\
-              \"tiers\":[\n{json_rows}\n]}}"
-        );
-        std::fs::write(path, body)?;
+        std::fs::write(path, ladder_record(peak, rss_source, &json_rows))?;
         info!("\nwrote {path}");
     }
     Ok(())
+}
+
+/// The ladder's JSON record: the run's header and one object per tier.
+///
+/// The rows are joined with `join`, not by pushing a separator per row: the
+/// hand-pushed form wrote a newline and no comma, so every record with more
+/// than one tier was not JSON (#639).
+fn ladder_record(peak: Option<u64>, rss_source: &str, rows: &[String]) -> String {
+    let peak_field = match peak {
+        Some(bytes) => format!("\"peak_rss_bytes\":{bytes}"),
+        None => String::from("\"peak_rss_bytes\":null"),
+    };
+    let tiers = rows.join(",\n");
+    format!(
+        "{{\"tool\":\"lgwks-bench-async-ladder\",\"bound\":{TIER_BOUND},\
+          \"rounds\":{TIER_ROUNDS},{peak_field},\"rss_source\":\"{rss_source}\",\
+          \"tiers\":[\n{tiers}\n]}}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ladder_record;
+
+    /// Two tiers are separated by a comma, so the array is JSON.
+    #[test]
+    fn tier_rows_are_comma_separated() {
+        let rows = [
+            String::from("{\"tier\":100}"),
+            String::from("{\"tier\":1000}"),
+        ];
+        let record = ladder_record(Some(1), "probe", &rows);
+        assert!(
+            record.contains("\"tiers\":[\n{\"tier\":100},\n{\"tier\":1000}\n]}"),
+            "{record}"
+        );
+    }
+
+    /// An unreadable RSS is `null`, never a number.
+    #[test]
+    fn an_unread_rss_is_null() {
+        let record = ladder_record(None, "unreadable", &[String::from("{}")]);
+        assert!(record.contains("\"peak_rss_bytes\":null"), "{record}");
+    }
 }

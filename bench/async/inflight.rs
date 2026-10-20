@@ -160,12 +160,14 @@ pub(crate) struct TierRun {
     pub(crate) requested: usize,
     /// How many were concurrently admitted, as the bodies themselves observed.
     pub(crate) reached: u64,
-    /// The ceiling this tier admitted under, which is the tier itself.
+    /// The ceiling this tier admitted under, as the engine reports it.
     ///
-    /// The tier is the ceiling: `Supervisor::new(tier)` and `Semaphore::new(tier)`
-    /// both bound the run at exactly this many tasks. The engine's own maximum
-    /// (`Semaphore::MAX_PERMITS`) is not this row's ceiling and reporting it put a
-    /// number no run used beside the level the bodies actually reached.
+    /// `Supervisor::new(tier)` and `Semaphore::new(tier)` are each asked for the
+    /// tier, and each is read back (the supervisor's declared bound after its
+    /// clamp, the semaphore's permits once drained), so an engine that bounded
+    /// the run below the tier shows here. The engine's own maximum
+    /// (`Semaphore::MAX_PERMITS`), which records before #639 carry under this
+    /// name, is not this row's ceiling.
     pub(crate) ceiling: usize,
     pub(crate) placed: u64,
     pub(crate) completed: u64,
@@ -231,7 +233,7 @@ async fn inflight_tier_facade(tier: usize) -> Result<TierRun, String> {
         side: Side::Facade,
         requested: tier,
         reached,
-        ceiling: tier,
+        ceiling: supervisor.snapshot().max_in_flight(),
         placed: widen(tier),
         completed: stats.succeeded,
         aborted: stats.aborted,
@@ -279,7 +281,9 @@ async fn inflight_tier_baseline(tier: usize) -> Result<TierRun, String> {
         side: Side::Baseline,
         requested: tier,
         reached,
-        ceiling: tier,
+        // Every permit is back once the set has drained, so this is the pool the
+        // run was bounded by, read from the semaphore rather than restated.
+        ceiling: permits.available_permits(),
         placed: completed.saturating_add(aborted),
         completed,
         aborted,
@@ -328,11 +332,10 @@ async fn in_flight_tier(tier: usize, side: Side) -> Result<TierRun, Box<dyn std:
     let requested = widen(tier);
     if run.reached != requested {
         let refusal = Err(format!(
-            "{label}: only {} of {tier} tasks were concurrently admitted within {} s — \
-             requested {tier}, reached {}, run ceiling {}",
+            "{label}: only {} of {tier} tasks were concurrently admitted within {} s \
+             under an engine ceiling of {}",
             run.reached,
             TIER_ADMIT_LIMIT.as_secs(),
-            run.reached,
             run.ceiling
         )
         .into());
