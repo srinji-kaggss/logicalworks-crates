@@ -226,7 +226,7 @@ pub async fn act<V: 'static>(
     let grants = exactly(caps);
     let input = Erased::new(value);
     let output = action
-        .run_any(&grants, &input)
+        .run_any_on(scope.clock(), &grants, &input)
         .await
         .map_err(|failed| FlowError::from(failed).located(scope))?;
     Ok(Acted {

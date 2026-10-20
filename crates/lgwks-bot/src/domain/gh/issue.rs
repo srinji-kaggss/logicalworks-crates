@@ -26,6 +26,7 @@ use lgwks_std::json::{self, Deserialize, Serialize};
 use super::{Gh, GhError, Repository, stage_input};
 use crate::Action;
 use crate::cap::{Auth, Cap};
+use crate::clock::Clock;
 use crate::error::BotError;
 use crate::verb;
 
@@ -449,7 +450,13 @@ impl OpenIssue {
     /// next run's scan find it; [`Settlement::Unlisted`] says the bound ran
     /// out first. A listing read that fails is waited past, not reported: the
     /// issue is already confirmed at its number.
-    async fn listed(&self, created: IssueRecord, draft: &IssueDraft) -> OpenedIssue {
+    ///
+    /// The waits are spent on `clock`, the flow's own: a wall clock waits the
+    /// real schedule a live GitHub lag needs, while a caller-advanceable clock
+    /// lets a test spend the same schedule without waiting for it. Reading the
+    /// process's timer here would put the schedule on a timeline no scope
+    /// names.
+    async fn listed(&self, created: IssueRecord, draft: &IssueDraft, clock: &Clock) -> OpenedIssue {
         let mut delay = FIRST_SETTLE_DELAY;
         for poll in 1..=SETTLE_POLLS {
             match self.gh.newest_keyed(draft.key()).await {
@@ -462,7 +469,7 @@ impl OpenIssue {
                 }
             }
             if poll < SETTLE_POLLS {
-                crate::rt::time::sleep(delay).await;
+                clock.sleep(delay).await;
                 delay = delay.saturating_mul(2).min(MAX_SETTLE_DELAY);
             }
         }
@@ -470,7 +477,7 @@ impl OpenIssue {
     }
 
     /// Find the key's issue, or create it and read it back.
-    async fn open(&self, draft: &IssueDraft) -> Result<OpenedIssue, BotError> {
+    async fn open(&self, draft: &IssueDraft, clock: &Clock) -> Result<OpenedIssue, BotError> {
         let fail = |failure: GhError| failure.into_bot_error(DOMAIN);
         if let Some(found) = self.gh.issue_keyed(draft).await.map_err(fail)? {
             return Ok(found.settled(Settlement::Found));
@@ -478,7 +485,7 @@ impl OpenIssue {
         let lost = match self.gh.create_issue(draft).await {
             Ok(created) => {
                 return match self.gh.issue_numbered(created.number, draft).await {
-                    Ok(Some(read)) => Ok(self.listed(read, draft).await),
+                    Ok(Some(read)) => Ok(self.listed(read, draft, clock).await),
                     Ok(None) => Err(BotError::EffectIndeterminate {
                         domain: DOMAIN.to_owned(),
                         cause: format!(
@@ -533,9 +540,19 @@ impl verb::Execute for OpenIssue {
     }
 
     async fn execute_action(&self, call: (Auth, &IssueDraft)) -> Result<OpenedIssue, BotError> {
+        // The call that carried no flow scope measures on the process's wall
+        // clock, which is the live schedule a real GitHub lag needs.
+        self.execute_action_on(&Clock::wall(), call).await
+    }
+
+    async fn execute_action_on(
+        &self,
+        clock: &Clock,
+        call: (Auth, &IssueDraft),
+    ) -> Result<OpenedIssue, BotError> {
         // Checked before `gh` starts, so a denial created and read nothing.
         call.0.check(self.required_caps())?;
-        self.open(call.1).await
+        self.open(call.1, clock).await
     }
 
     fn domain_id(&self) -> &str {

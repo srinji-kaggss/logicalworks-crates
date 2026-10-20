@@ -17,6 +17,7 @@
 //! | `deny` | refuses every call's credential (HTTP 403) |
 //! | `denycreate` | answers reads, refuses the create's credential (HTTP 403) |
 //! | `lag` | as `accept`, but the two listings after a create omit that issue |
+//! | `lag-N` | as `lag`, with N listings omitting the created issue |
 //! | `stale` | as `accept`, but its listing never shows its newest issue |
 //!
 //! Each `owner/repo` has its own store, so tests that use distinct owners
@@ -193,8 +194,18 @@ if [ "$method" = "POST" ]; then
   number=${#raw}
   record="{\"number\":$number,\"html_url\":\"https://github.com/$owner/$repo/issues/$number\",${payload#\{}"
   printf '%s\n' "$record" >> "$store"
-  # `lag` hides this issue from the next two listings.
-  if [ "$repo" = "lag" ]; then printf 'xx' > "$dir/lag-$owner-$repo"; fi
+  # `lag` hides this issue from the next two listings; `lag-N` from the next N.
+  lag=0
+  case "$repo" in
+    lag) lag=2 ;;
+    lag-*) lag=${repo#lag-} ;;
+  esac
+  case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
+  if [ "$lag" -gt 0 ]; then
+    key=${payload##*<!-- lgwks-issue:}
+    key=${key%% -->*}
+    printf '%s' "$lag" > "$dir/lag-$owner-$repo-$key"
+  fi
   if [ "$repo" = "drop" ]; then
     printf 'connection reset by peer\n' >&2
     exit 7
@@ -224,33 +235,41 @@ case "$rest" in
 esac
 
 # A listing, filtered to the trailer the `--jq` names: newest first, as the
-# endpoint sorts `created desc`. GitHub's listing lags a create: `lag` omits
-# its newest issue from the two listings after a create, `stale` from all.
-held=0
+# endpoint sorts `created desc`. GitHub's listing lags a create: a key's lag
+# file names how many of the newest matching records this key cannot see yet,
+# and each listing read spends one. `stale` omits its newest match on every
+# read.
+lagging="$dir/lag-$owner-$repo-${tail%% -->*}"
+lag=0
+if [ -s "$lagging" ]; then IFS= read -r lag < "$lagging"; fi
+case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
+matches=0
 if [ -s "$store" ]; then
-  while IFS= read -r record; do held=$((held + 1)); done < "$store"
+  while IFS= read -r record; do
+    case "$record" in *"$wanted"*) matches=$((matches + 1)) ;; esac
+  done < "$store"
 fi
-lagging="$dir/lag-$owner-$repo"
-if [ "$repo" = "lag" ] && [ -s "$lagging" ]; then
-  held=$((held - 1))
-  pending=""
-  IFS= read -r pending < "$lagging"
-  printf '%s' "${pending#x}" > "$lagging"
-fi
-if [ "$repo" = "stale" ]; then held=$((held - 1)); fi
+keep=$((matches - lag))
+if [ "$keep" -lt 0 ]; then keep=0; fi
+if [ "$repo" = "stale" ] && [ "$keep" -gt 0 ]; then keep=$((keep - 1)); fi
 out=""
 seen=0
 if [ -s "$store" ]; then
   while IFS= read -r record; do
-    seen=$((seen + 1))
-    if [ "$seen" -gt "$held" ]; then break; fi
     case "$record" in
       *"$wanted"*)
-        kept=$(project "$record")
-        if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
+        seen=$((seen + 1))
+        if [ "$seen" -le "$keep" ]; then
+          kept=$(project "$record")
+          if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
+        fi
         ;;
     esac
   done < "$store"
+fi
+if [ "$lag" -gt 0 ]; then
+  lag=$((lag - 1))
+  if [ "$lag" -eq 0 ]; then : > "$lagging"; else printf '%s' "$lag" > "$lagging"; fi
 fi
 printf '[%s]\n' "$out"
 exit 0
