@@ -6,31 +6,45 @@
 //! that renders as nothing. Every open reads the repository's newest
 //! [`MAX_ISSUES_READ_BACK`] issues first, so a second run with the same key —
 //! a rerun, a resume after a kill, a retry after a lost answer — finds the
-//! first run's issue instead of opening another. A create whose answer was
-//! lost is reconciled by reading the key back over the same settle; one that
-//! still cannot be found is [`BotError::EffectIndeterminate`], never a second
-//! create.
+//! first run's issue instead of opening another.
 //!
-//! GitHub's listing lags a create by seconds, so a create is confirmed at the
-//! number GitHub answered and then reported only once the listing shows it;
-//! until it does, a rerun could not find it.
+//! # The listing lags; the numbers do not
 //!
-//! A key scan that finds nothing therefore **settles before it creates**. A
-//! rerun whose earlier run lost the create's answer — a crash or `kill -9`
-//! between the POST and its reply — has no number to ask for, so its only
-//! evidence is the listing, and the listing a create lags. Spending the same
-//! bounded settle schedule a create's confirmation spends, before the create,
-//! lets that rerun see the earlier issue once the listing catches up instead of
-//! opening a second one (#658). The same settle answers a create whose answer
-//! this run lost, so one run never creates twice either.
+//! GitHub's listing lags a create by seconds (the first live open, #657, was
+//! missing from the read made right after GitHub answered it, and an immediate
+//! rerun then opened #659 beside #658). An issue's own address answers at
+//! once, and issue numbers are one sequence per repository, shared with pull
+//! requests. So a scan that does not find the key in the listing reads every
+//! number past the newest one the listing reached, until GitHub answers that
+//! a number does not exist yet. What the listing has not caught up on is
+//! exactly that run of numbers, so the scan sees it whole in one listing read
+//! and, in the common case, one 404 — never a wait for the listing to catch
+//! up. That is what makes a new key cost one listing read, one number read
+//! and the create, rather than a settle schedule of reads and sleeps.
 //!
-//! The bounds are stated rather than hidden: an issue older than the newest
-//! [`MAX_ISSUES_READ_BACK`] in its repository is not found, a key reused after
-//! that many newer issues opens a new one, and the settle covers the listing's
-//! lag, not a repository's whole history. A genuinely new key pays the settle's
-//! schedule too — about 16 s on the wall clock — because no local record of an
-//! earlier run's answered number exists for the scan to ask instead; the run
-//! store that could hold one is not part of this action's seam.
+//! A create is confirmed from GitHub's own `201` answer, which carries the
+//! stored issue: its number, its title and the key trailer in its body.
+//!
+//! # The one path that still waits
+//!
+//! A create whose answer was lost — a reset connection, a `kill -9` between
+//! the POST and its reply — may still be landing when this run reads back, so
+//! that read-back alone repeats the scan over a bounded schedule on the flow's
+//! [`Clock`]. One that still cannot find the key is
+//! [`BotError::EffectIndeterminate`], never a second create. A create GitHub
+//! refused outright (`400`, `410`, `422`) landed nothing and is reported as
+//! that refusal at once.
+//!
+//! # Bounds, stated
+//!
+//! An issue older than the newest [`MAX_ISSUES_READ_BACK`] in its repository
+//! is not found, and a key reused after that many newer issues opens a new
+//! one. A scan reads at most 16 numbers past the listing;
+//! a repository whose listing is further behind than that refuses the open
+//! rather than creating over a window it could not read. Two runs that open
+//! the same key at the same instant, on hosts that share nothing, can both
+//! find nothing and both create: GitHub offers no conditional create, and the
+//! key makes every later run answer the first of them.
 
 use std::time::Duration;
 
@@ -54,6 +68,14 @@ pub const ISSUE_CREATE: &str = "github.issue.create";
 /// GitHub's page ceiling, read as one page: the read is bounded by this
 /// number, never by the repository's history.
 pub const MAX_ISSUES_READ_BACK: usize = 100;
+
+/// How many numbers past the listing's newest one scan reads by number.
+///
+/// GitHub's listing trails its creates by a few issues at most; a repository
+/// opening more than this many issues inside one listing lag is refused
+/// rather than scanned partially, because a create over a window nobody read
+/// is the duplicate this action exists to prevent.
+const MAX_UNLISTED_READS: u64 = 16;
 
 /// The domain identifier a registry declares this action under.
 const DOMAIN: &str = "gh::issue";
@@ -159,18 +181,12 @@ fn trailer(key: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Settlement {
-    /// This run created it, and the read-back shows it.
+    /// This run created it, and GitHub's answer to the create shows it.
     Created,
     /// An earlier run with this key had opened it; nothing was created.
     Found,
     /// This run's create lost its answer, and the read-back found the issue.
     Reconciled,
-    /// This run created it and read it back at its number, but the listing a
-    /// rerun's key scan reads had not shown it when the settle bound ran out.
-    /// A rerun still spends the scan's own settle before it creates, so it
-    /// finds the issue once the listing catches up rather than opening a
-    /// second one.
-    Unlisted,
 }
 
 impl Settlement {
@@ -181,41 +197,36 @@ impl Settlement {
             Self::Created => "created",
             Self::Found => "found",
             Self::Reconciled => "reconciled",
-            Self::Unlisted => "unlisted",
         }
     }
 }
 
-/// How many listing reads one settle makes.
-///
-/// Shared by a create waiting for its issue to be listed and a key scan
-/// waiting for an earlier create to surface, so neither can wait on a bound
-/// the other does not know.
-const SETTLE_POLLS: u8 = 8;
+/// How many scans the read-back after a lost create answer makes.
+const SETTLE_SCANS: u8 = 8;
 
-/// The wait before the second listing read; each later wait doubles.
+/// The wait before the read-back's second scan; each later wait doubles.
 const FIRST_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
-/// The longest single wait between listing reads; eight reads span about 20 s.
+/// The longest single wait between the read-back's scans.
 const MAX_SETTLE_DELAY: Duration = Duration::from_secs(4);
 
-/// The bounded read schedule a settle follows.
+/// The bounded schedule the read-back after a lost create answer follows.
 ///
-/// One definition for both settles in this module — a create waiting for its
-/// issue to be listed, and a key scan waiting for an earlier create to appear —
-/// so a change to the bound cannot leave one of them waiting on a schedule the
-/// other does not know. [`SETTLE_POLLS`] reads: the first immediately, the
-/// wait before each later one starting at [`FIRST_SETTLE_DELAY`] and doubling
-/// up to [`MAX_SETTLE_DELAY`].
+/// The only wait in this module: a create whose answer was lost may still be
+/// landing on GitHub's side when the read-back starts, and a single scan that
+/// misses it would report an indeterminate create. [`SETTLE_SCANS`] scans: the
+/// first immediately, the wait before each later one starting at
+/// [`FIRST_SETTLE_DELAY`] and doubling up to [`MAX_SETTLE_DELAY`], about 16 s
+/// on the flow's clock in all.
 struct Settle {
-    /// The wait to make before the next read.
+    /// The wait to make before the next scan.
     next: Duration,
-    /// How many reads this settle has made.
+    /// How many scans this settle has made.
     made: u8,
 }
 
 impl Settle {
-    /// A settle with every read still to make.
+    /// A settle with every scan still to make.
     const fn new() -> Self {
         Self {
             next: FIRST_SETTLE_DELAY,
@@ -223,11 +234,11 @@ impl Settle {
         }
     }
 
-    /// Record one read, and return the wait before the next, or `None` when
+    /// Record one scan, and return the wait before the next, or `None` when
     /// the bound has been spent.
     fn spent(&mut self) -> Option<Duration> {
         self.made = self.made.saturating_add(1);
-        if self.made >= SETTLE_POLLS {
+        if self.made >= SETTLE_SCANS {
             return None;
         }
         let wait = self.next;
@@ -279,8 +290,8 @@ struct IssueWire<'draft> {
     body: &'draft str,
 }
 
-/// The fields of an issue a read-back compares: exactly what [`PROJECTION`]
-/// keeps, so no body crosses the capture ceiling.
+/// The fields of an issue a read-back compares: exactly what
+/// [`keyed_projection`] keeps, so no body crosses the capture ceiling.
 #[derive(Debug, Default, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 struct IssueRecord {
@@ -293,28 +304,47 @@ struct IssueRecord {
     /// The title.
     #[serde(default)]
     title: String,
+    /// Whether it is an issue, not a pull request, whose body carries the
+    /// scanned key's trailer.
+    #[serde(default)]
+    keyed: bool,
 }
 
-/// The `gh --jq` projection every answer is cut to before it is printed.
+/// What one listing read saw.
+#[derive(Debug, Default, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+struct Listing {
+    /// The highest number the listing reached, issue or pull request; `0`
+    /// when the repository lists nothing.
+    #[serde(default)]
+    newest: u64,
+    /// The issues carrying the key, newest first.
+    #[serde(default)]
+    keyed: Vec<IssueRecord>,
+}
+
+/// The `gh --jq` projection every issue is cut to before it is printed.
 ///
 /// GitHub answers an issue with its whole body, and a hundred bodies run to
 /// megabytes, past any capture a supervised child is given (a live read of
 /// this repository's newest 100 issues was 567,275 bytes against a 65,536-byte
 /// ceiling). `gh` evaluates the filter in its own process, so what is captured
-/// is three fields per issue, whatever the bodies hold.
-const PROJECTION: &str = "{number, html_url, title}";
-
-/// The filter that keeps, of a page of issues, the ones carrying `key`'s
-/// trailer, newest first, projected.
-///
-/// Pull requests share the issues endpoint and are dropped: a key names an
-/// issue. The key's alphabet (`[A-Za-z0-9._:-]`, enforced by
-/// [`IssueDraft::new`]) holds no quote or backslash, so it is a literal inside
-/// the filter's string.
-fn keyed_filter(key: &str) -> String {
+/// is four fields per issue, whatever the bodies hold. The key's alphabet
+/// (`[A-Za-z0-9._:-]`, enforced by [`IssueDraft::new`]) holds no quote or
+/// backslash, so it is a literal inside the filter's string.
+fn keyed_projection(key: &str) -> String {
     format!(
-        "[.[] | select(.pull_request == null) | select((.body // \"\") | contains(\"{}\")) | {PROJECTION}]",
+        "{{number, html_url, title, keyed: (.pull_request == null and ((.body // \"\") | contains(\"{}\")))}}",
         trailer(key)
+    )
+}
+
+/// The filter that cuts a page of issues to the newest number on it and the
+/// issues carrying `key`, newest first, projected.
+fn listing_filter(key: &str) -> String {
+    format!(
+        "{{newest: ([.[].number] | max // 0), keyed: [.[] | {} | select(.keyed)]}}",
+        keyed_projection(key)
     )
 }
 
@@ -327,83 +357,129 @@ impl IssueRecord {
             settlement,
         }
     }
+
+    /// This record as `draft`'s issue, or the refusal of a key that names an
+    /// issue about something else.
+    ///
+    /// One key names one issue, and handing back an issue with another title
+    /// would report an open that never happened.
+    fn for_draft(self, draft: &IssueDraft) -> Result<Self, GhError> {
+        if self.title == draft.title() {
+            return Ok(self);
+        }
+        let refusal = Err(GhError::Response {
+            path: self.html_url,
+            reason: format!(
+                "the key {} already names issue #{} with another title; a key names one issue",
+                draft.key(),
+                self.number
+            ),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "for_draft: returning an error to the caller");
+        refusal
+    }
 }
 
 impl Gh {
-    /// Of the repository's newest [`MAX_ISSUES_READ_BACK`] issues, the ones
-    /// carrying `key`, newest first, filtered inside `gh`.
-    async fn newest_keyed(&self, key: &str) -> Result<Vec<IssueRecord>, GhError> {
+    /// One listing read: the newest number the repository lists and, of its
+    /// newest [`MAX_ISSUES_READ_BACK`] issues, the ones carrying `key`.
+    async fn listing(&self, key: &str) -> Result<Listing, GhError> {
         let path = format!(
             "repos/{}/issues?state=all&sort=created&direction=desc&per_page={MAX_ISSUES_READ_BACK}",
             self.repository.as_str()
         );
-        let filter = keyed_filter(key);
+        let filter = listing_filter(key);
         let args = self.args_for(&["--method", "GET", &path, "--jq", &filter]);
         let outcome = self.call(&args).await?;
         outcome.require_success("reading the repository's newest issues")?;
-        let issues = outcome.parse_json::<Vec<IssueRecord>>()?;
-        if issues.len() > MAX_ISSUES_READ_BACK {
+        let listing = outcome.parse_json::<Listing>()?;
+        if listing.keyed.len() > MAX_ISSUES_READ_BACK {
             let refusal = Err(GhError::Response {
                 path,
                 reason: format!(
                     "{} issues answered a read of at most {MAX_ISSUES_READ_BACK}",
-                    issues.len()
+                    listing.keyed.len()
                 ),
             });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "newest_keyed: returning an error to the caller");
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "listing: returning an error to the caller");
             return refusal;
         }
-        Ok(issues)
+        Ok(listing)
     }
 
-    /// The first issue opened under `draft`'s key, when one is in the window.
+    /// Issue `number` as `key`'s scan sees it, or `None` when GitHub has no
+    /// such number yet.
     ///
-    /// The oldest match, not the newest: when a key ever names two issues (the
-    /// live duplicate #659 beside #658), every later run answers the one the
-    /// key was opened as, never the duplicate.
-    ///
-    /// A key found on an issue with another title is refused rather than
-    /// adopted: one key names one issue, and handing back an issue about
-    /// something else would report an open that never happened.
-    async fn issue_keyed(&self, draft: &IssueDraft) -> Result<Option<IssueRecord>, GhError> {
-        match self.newest_keyed(draft.key()).await?.into_iter().last() {
-            Some(issue) if issue.title != draft.title() => {
-                let refusal = Err(GhError::Response {
-                    path: issue.html_url,
-                    reason: format!(
-                        "the key {} already names issue #{} with another title; a key names one issue",
-                        draft.key(),
-                        issue.number
-                    ),
-                });
-                lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "issue_keyed: returning an error to the caller");
-                refusal
+    /// A `404` right after a listing this credential read is the end of the
+    /// repository's numbers, not a permission loss. A `410` is a deleted
+    /// issue: the number is spent and carries no key, so it reads as an issue
+    /// that is not this key's.
+    async fn numbered(&self, number: u64, key: &str) -> Result<Option<IssueRecord>, GhError> {
+        let path = format!("repos/{}/issues/{number}", self.repository.as_str());
+        let filter = keyed_projection(key);
+        let args = self.args_for(&["--method", "GET", &path, "--jq", &filter]);
+        let outcome = self.call(&args).await?;
+        if !outcome.succeeded() && !outcome.deadline_fired() {
+            match outcome.http_status() {
+                Some(404) => return Ok(None),
+                Some(410) => {
+                    return Ok(Some(IssueRecord {
+                        number,
+                        ..IssueRecord::default()
+                    }));
+                }
+                _ => {}
             }
-            other => Ok(other),
         }
+        outcome.require_success("reading an issue past the listing")?;
+        outcome.parse_json::<IssueRecord>().map(Some)
     }
 
-    /// The key's issue, waited for over the settle bound when the first read
+    /// The first issue opened under `draft`'s key, listed or not yet listed.
+    ///
+    /// The listing's oldest match, not its newest: when a key ever names two
+    /// issues (the live duplicate #659 beside #658), every later run answers
+    /// the one the key was opened as. When the listing holds no match, every
+    /// number past its newest is read in turn until GitHub has no such number,
+    /// which is the whole of what the listing had not caught up on.
+    ///
+    /// A read that fails is returned rather than read past: a create issued
+    /// over a window nobody could read is the duplicate this scan exists to
+    /// prevent, so a failed scan fails the run and creates nothing.
+    async fn issue_keyed(&self, draft: &IssueDraft) -> Result<Option<IssueRecord>, GhError> {
+        let listing = self.listing(draft.key()).await?;
+        if let Some(listed) = listing.keyed.into_iter().last() {
+            return listed.for_draft(draft).map(Some);
+        }
+        let mut number = listing.newest;
+        for _ in 0..MAX_UNLISTED_READS {
+            number = number.saturating_add(1);
+            match self.numbered(number, draft.key()).await? {
+                None => return Ok(None),
+                Some(unlisted) if unlisted.keyed => return unlisted.for_draft(draft).map(Some),
+                Some(_) => {}
+            }
+        }
+        let refusal = Err(GhError::Response {
+            path: format!("repos/{}/issues", self.repository.as_str()),
+            reason: format!(
+                "more than {MAX_UNLISTED_READS} issues exist past #{} the listing reached, so the \
+                 scan could not read the window a create would land in",
+                listing.newest
+            ),
+        });
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "issue_keyed: returning an error to the caller");
+        refusal
+    }
+
+    /// The key's issue, scanned for over the settle bound when the first scan
     /// finds nothing.
     ///
-    /// This is the pre-create scan and the lost-answer read-back. A rerun whose
-    /// earlier run lost the create's answer has no number to ask for; the
-    /// listing is its only evidence, and the listing lags. Reading it once and
-    /// creating is what opened a second issue beside #658; reading it over the
-    /// same bounded schedule a create's confirmation spends is what lets the
-    /// earlier issue surface before this run writes.
-    ///
-    /// A read that fails is returned rather than retried past: a create issued
-    /// over a listing nobody could read is the one risk this settle exists to
-    /// remove, so a failed scan fails the run and creates nothing.
-    ///
-    /// The waits are spent on `clock`, the flow's own, exactly as
-    /// [`OpenIssue::listed`] spends them: a wall clock waits the real schedule
-    /// a live lag needs, and a caller-advanceable clock spends the same
+    /// The read-back after a create whose answer was lost, and only that: the
+    /// create may still be landing, so one scan that misses it is not yet an
+    /// answer. The waits are spent on `clock`, the flow's own: a wall clock
+    /// waits the real schedule, and a caller-advanceable clock spends the same
     /// schedule without waiting for it.
-    ///
-    /// After the bound the key is still only visible within the newest
-    /// [`MAX_ISSUES_READ_BACK`] issues, which is the scan's own declared window.
     async fn settled_keyed(
         &self,
         draft: &IssueDraft,
@@ -421,31 +497,13 @@ impl Gh {
         }
     }
 
-    /// Issue `number`, when it carries `draft`'s key and title.
+    /// Create `draft` once, through a staged `--input` payload, and confirm it
+    /// from GitHub's answer.
     ///
-    /// The read that confirms a create. GitHub's listing lags a create by
-    /// seconds (the first live open, #657, was missing from the newest-issues
-    /// read made right after GitHub answered it), while the issue's own address
-    /// answers at once; so the create is confirmed where it was answered, and
-    /// the key scan is left to the reads that have no number to ask for.
-    async fn issue_numbered(
-        &self,
-        number: u64,
-        draft: &IssueDraft,
-    ) -> Result<Option<IssueRecord>, GhError> {
-        let path = format!("repos/{}/issues/{number}", self.repository.as_str());
-        let filter = format!(
-            "if ((.body // \"\") | contains(\"{}\")) then {PROJECTION} else {{number: 0}} end",
-            trailer(draft.key())
-        );
-        let args = self.args_for(&["--method", "GET", &path, "--jq", &filter]);
-        let outcome = self.call(&args).await?;
-        outcome.require_success("reading the created issue back")?;
-        let read = outcome.parse_json::<IssueRecord>()?;
-        Ok((read.number == number && read.title == draft.title()).then_some(read))
-    }
-
-    /// Create `draft` once, through a staged `--input` payload.
+    /// The `201` answer is the issue as GitHub stored it, so its number, its
+    /// title and the trailer in its body are read from that answer; an answer
+    /// that does not show all three is not a confirmation, and the caller reads
+    /// back as it would after a lost answer.
     async fn create_issue(&self, draft: &IssueDraft) -> Result<IssueRecord, GhError> {
         let wire = IssueWire {
             title: draft.title(),
@@ -457,6 +515,7 @@ impl Gh {
         let path = format!("repos/{}/issues", self.repository.as_str());
         // Bound here so the staged file is removed on every path out.
         let staging = stage_input(body.as_bytes())?;
+        let projection = keyed_projection(draft.key());
         let args = self.args_for(&[
             "--method",
             "POST",
@@ -464,15 +523,31 @@ impl Gh {
             "--input",
             staging.path_str(),
             "--jq",
-            PROJECTION,
+            &projection,
         ]);
         let outcome = self.run_spec(&args).await?;
+        if !outcome.succeeded()
+            && !outcome.deadline_fired()
+            && let Some(status @ (400 | 410 | 422)) = outcome.http_status()
+        {
+            let refusal = Err(GhError::Rejected {
+                what: String::from("opening the issue"),
+                status,
+                reason: outcome.stderr().trim().to_owned(),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "create_issue: returning an error to the caller");
+            return refusal;
+        }
         outcome.require_success("opening the issue")?;
         let created = outcome.parse_json::<IssueRecord>()?;
-        if created.number == 0 {
+        if created.number == 0 || !created.keyed || created.title != draft.title() {
             let refusal = Err(GhError::Response {
                 path,
-                reason: String::from("the created issue has no number"),
+                reason: format!(
+                    "the create's answer (#{}) does not show key {} and its title",
+                    created.number,
+                    draft.key()
+                ),
             });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "create_issue: returning an error to the caller");
             return refusal;
@@ -482,7 +557,8 @@ impl Gh {
 }
 
 /// Whether a failed create is known to have created nothing, so no read-back
-/// is owed: it never started, or GitHub refused the credential.
+/// is owed: it never started, GitHub refused the credential, or GitHub
+/// rejected the request itself.
 const fn created_nothing(failure: &GhError) -> bool {
     matches!(
         *failure,
@@ -491,6 +567,7 @@ const fn created_nothing(failure: &GhError) -> bool {
             | GhError::Staging { .. }
             | GhError::NoRunner
             | GhError::Unauthorized { .. }
+            | GhError::Rejected { .. }
             | GhError::Process(
                 crate::rt::process::ProcessRunError::Refused
                     | crate::rt::process::ProcessRunError::NotStarted { .. }
@@ -536,88 +613,28 @@ impl OpenIssue {
         Ok(Action::new(Self::new(Gh::new(repository))))
     }
 
-    /// The issue this run created, once the listing shows it.
+    /// Find the key's issue, or create it.
     ///
-    /// A rerun decides "already opened" from the listing, and the listing lags
-    /// a create: an immediate live rerun opened #659 beside #658. So a create
-    /// is not reported until the listing shows it, which is what makes the
-    /// next run's scan find it; [`Settlement::Unlisted`] says the bound ran
-    /// out first, and the next run's own pre-create settle (`settled_keyed`)
-    /// is what closes that window. A listing read that fails is waited past,
-    /// not reported: the issue is already confirmed at its number.
-    ///
-    /// The waits are spent on `clock`, the flow's own: a wall clock waits the
-    /// real schedule a live GitHub lag needs, while a caller-advanceable clock
-    /// lets a test spend the same schedule without waiting for it. Reading the
-    /// process's timer here would put the schedule on a timeline no scope
-    /// names.
-    async fn listed(&self, created: IssueRecord, draft: &IssueDraft, clock: &Clock) -> OpenedIssue {
-        let mut settle = Settle::new();
-        loop {
-            match self.gh.newest_keyed(draft.key()).await {
-                Ok(listed) if listed.iter().any(|read| read.number == created.number) => {
-                    return created.settled(Settlement::Created);
-                }
-                Ok(_) => {}
-                Err(unread) => {
-                    lgwks_std::trace::debug!(error = %unread, "gh::issue: a settle read failed");
-                }
-            }
-            match settle.spent() {
-                Some(wait) => clock.sleep(wait).await,
-                None => return created.settled(Settlement::Unlisted),
-            }
-        }
-    }
-
-    /// Find the key's issue, or create it and read it back.
-    ///
-    /// Both key scans settle: the one before the create, because a rerun after
-    /// a lost answer has only the listing to go on, and the one after a lost
-    /// create answer, because the issue it may have created lags the listing
-    /// too. A scan that finds the key returns it and no create is issued; a
-    /// create whose answer arrives is read back at its number and never
-    /// repeated.
+    /// The scan before the create reads the listing and every number past it,
+    /// so a rerun after a lost answer finds the earlier issue however far the
+    /// listing lags, without waiting for it. A create whose answer arrives is
+    /// confirmed from that answer and never repeated; one whose answer was lost
+    /// is read back over the settle bound.
     async fn open(&self, draft: &IssueDraft, clock: &Clock) -> Result<OpenedIssue, BotError> {
         let fail = |failure: GhError| failure.into_bot_error(DOMAIN);
-        if let Some(found) = self.gh.settled_keyed(draft, clock).await.map_err(fail)? {
+        if let Some(found) = self.gh.issue_keyed(draft).await.map_err(fail)? {
             return Ok(found.settled(Settlement::Found));
         }
         let lost = match self.gh.create_issue(draft).await {
-            Ok(created) => {
-                return match self.gh.issue_numbered(created.number, draft).await {
-                    Ok(Some(read)) => Ok(self.listed(read, draft, clock).await),
-                    Ok(None) => Err(BotError::EffectIndeterminate {
-                        domain: DOMAIN.to_owned(),
-                        cause: format!(
-                            "GitHub answered the create with issue #{}, and reading #{} back \
-                             does not show key {} and its title",
-                            created.number,
-                            created.number,
-                            draft.key()
-                        ),
-                    }),
-                    Err(unread) => Err(BotError::EffectIndeterminate {
-                        domain: DOMAIN.to_owned(),
-                        cause: format!(
-                            "GitHub answered the create with issue #{}, and reading it back \
-                             failed: {unread}",
-                            created.number
-                        ),
-                    }),
-                };
-            }
+            Ok(created) => return Ok(created.settled(Settlement::Created)),
             Err(failure) if created_nothing(&failure) => {
                 lgwks_std::trace::debug!(error = %failure, key = draft.key(), "gh::issue: the create was refused before anything landed");
                 return Err(fail(failure));
             }
             Err(failure) => failure,
         };
-        // The create ran and its answer is not one: the issue may exist. The
-        // read-back settles for the same reason the pre-create scan does — the
-        // issue this run may have opened lags the listing, and a single read
-        // that misses it would report an indeterminate create a rerun could
-        // then duplicate.
+        // The create ran and its answer is not one: the issue may exist, and
+        // may still be landing, so the read-back settles.
         match self.gh.settled_keyed(draft, clock).await {
             Ok(Some(found)) => Ok(found.settled(Settlement::Reconciled)),
             Ok(None) => Err(BotError::EffectIndeterminate {

@@ -16,12 +16,19 @@
 //! | `droplag-N` | as `drop`, and its listings hide the issue for N reads |
 //! | `kill` | holds the issue, then `SIGKILL`s itself before answering |
 //! | `kill-N` | as `kill`, and its listings hide the issue for N reads |
-//! | `refuse` | refuses the create without holding it (HTTP 422) |
+//! | `refuse` | rejects the create without holding it (HTTP 422) |
+//! | `vanish` | loses the create's answer (exit 7) without holding the issue |
 //! | `deny` | refuses every call's credential (HTTP 403) |
 //! | `denycreate` | answers reads, refuses the create's credential (HTTP 403) |
 //! | `lag` | as `accept`, but the two listings after a create omit that issue |
 //! | `lag-N` | as `lag`, with N listings omitting the created issue |
 //! | `stale` | as `accept`, but its listing never shows its newest issue |
+//!
+//! It models what GitHub is: one number sequence per repository, an issue's
+//! own address that answers at once (`404` for a number not yet used), and a
+//! listing that trails the creates. A created issue's lag is the issue's own,
+//! spent by every listing read whatever key it scans, so the listing hides
+//! the newest issues and never an older one while showing a newer.
 //!
 //! A lost answer and a lagging listing are two independent faults, so they are
 //! two axes of the same name: `drop` and `kill` differ in *how* the answer is
@@ -175,15 +182,22 @@ for arg in "$@"; do
   case "$arg" in repos/*) path="$arg" ;; esac
   previous="$arg"
 done
-# Every answer is cut to number, page and title inside `gh`, as `--jq` does,
-# so a call without the projection would print bodies past the capture.
+# Every answer is cut to number, page, title and a keyed flag inside `gh`, as
+# `--jq` does, so a call without the projection would print bodies past the
+# capture.
 if [ -z "$jq" ]; then
   printf 'fake gh: every call must pass --jq\n' >&2
   exit 64
 fi
-# A record's body is its last field, so the projection drops the tail.
+tail=${jq#*<!-- lgwks-issue:}
+wanted="<!-- lgwks-issue:${tail%% -->*} -->"
+# A record's body is its last field, so the projection drops the tail and
+# says whether the body carried the scanned key's trailer.
 project() {
-  printf '%s}' "${1%%,\"body\":*}"
+  case "$1" in
+    *"$wanted"*) printf '%s,"keyed":true}' "${1%%,\"body\":*}" ;;
+    *) printf '%s,"keyed":false}' "${1%%,\"body\":*}" ;;
+  esac
 }
 rest=${path#repos/}
 owner=${rest%%/*}
@@ -206,6 +220,10 @@ if [ "$method" = "POST" ]; then
     printf 'gh: Validation Failed (HTTP 422)\n' >&2
     exit 1
   fi
+  if [ "$repo" = "vanish" ]; then
+    printf 'connection reset by peer\n' >&2
+    exit 7
+  fi
   payload=""
   IFS= read -r payload < "$input"
   # One atomic append per create; its byte count is the issue number.
@@ -226,9 +244,7 @@ if [ "$method" = "POST" ]; then
   esac
   case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
   if [ "$lag" -gt 0 ]; then
-    key=${payload##*<!-- lgwks-issue:}
-    key=${key%% -->*}
-    printf '%s' "$lag" > "$dir/lag-$owner-$repo-$key"
+    printf '%s' "$lag" > "$dir/lag-$owner-$repo-$number"
   fi
   # The answer is lost after the issue is held. `drop` exits non-zero with a
   # transport error; `kill` dies by SIGKILL, as a `kill -9` of the child
@@ -248,62 +264,58 @@ if [ "$method" = "POST" ]; then
   exit 0
 fi
 
-tail=${jq#*<!-- lgwks-issue:}
-wanted="<!-- lgwks-issue:${tail%% -->*} -->"
-
-# A read of one issue by number: projected when it carries the trailer.
+# A read of one issue by number answers at once, lag or not: projected when
+# the number exists, `404` when it does not exist yet.
 case "$rest" in
   */issues/[0-9]*)
     number=${rest##*/}
     if [ -s "$store" ]; then
       while IFS= read -r record; do
         case "$record" in
-          "{\"number\":$number,"*"$wanted"*) project "$record"; printf '\n'; exit 0 ;;
+          "{\"number\":$number,"*) project "$record"; printf '\n'; exit 0 ;;
         esac
       done < "$store"
     fi
-    printf '{"number":0}\n'
-    exit 0
+    printf 'gh: Not Found (HTTP 404)\n' >&2
+    exit 1
     ;;
 esac
 
-# A listing, filtered to the trailer the `--jq` names: newest first, as the
-# endpoint sorts `created desc`. GitHub's listing lags a create: a key's lag
-# file names how many of the newest matching records this key cannot see yet,
-# and each listing read spends one. `stale` omits its newest match on every
-# read.
-lagging="$dir/lag-$owner-$repo-${tail%% -->*}"
-lag=0
-if [ -s "$lagging" ]; then IFS= read -r lag < "$lagging"; fi
-case "$lag" in ''|*[!0-9]*) lag=0 ;; esac
-matches=0
-if [ -s "$store" ]; then
+# A listing: the newest number it reaches and the records carrying the
+# trailer the `--jq` names, newest first, as the endpoint sorts `created
+# desc`. A record whose lag file still counts is hidden, and the read spends
+# one of its count. `stale` never lists its newest record.
+top=0
+if [ "$repo" = "stale" ] && [ -s "$store" ]; then
   while IFS= read -r record; do
-    case "$record" in *"$wanted"*) matches=$((matches + 1)) ;; esac
+    n=${record#\{\"number\":}; n=${n%%,*}
+    if [ "$n" -gt "$top" ]; then top=$n; fi
   done < "$store"
 fi
-keep=$((matches - lag))
-if [ "$keep" -lt 0 ]; then keep=0; fi
-if [ "$repo" = "stale" ] && [ "$keep" -gt 0 ]; then keep=$((keep - 1)); fi
+newest=0
 out=""
-seen=0
 if [ -s "$store" ]; then
   while IFS= read -r record; do
+    n=${record#\{\"number\":}; n=${n%%,*}
+    lagging="$dir/lag-$owner-$repo-$n"
+    left=0
+    if [ -s "$lagging" ]; then IFS= read -r left < "$lagging"; fi
+    case "$left" in ''|*[!0-9]*) left=0 ;; esac
+    if [ "$left" -gt 0 ]; then
+      left=$((left - 1))
+      if [ "$left" -eq 0 ]; then : > "$lagging"; else printf '%s' "$left" > "$lagging"; fi
+      continue
+    fi
+    if [ "$repo" = "stale" ] && [ "$n" -eq "$top" ]; then continue; fi
+    if [ "$n" -gt "$newest" ]; then newest=$n; fi
     case "$record" in
       *"$wanted"*)
-        seen=$((seen + 1))
-        if [ "$seen" -le "$keep" ]; then
-          kept=$(project "$record")
-          if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
-        fi
+        kept=$(project "$record")
+        if [ -z "$out" ]; then out="$kept"; else out="$kept,$out"; fi
         ;;
     esac
   done < "$store"
 fi
-if [ "$lag" -gt 0 ]; then
-  lag=$((lag - 1))
-  if [ "$lag" -eq 0 ]; then : > "$lagging"; else printf '%s' "$lag" > "$lagging"; fi
-fi
-printf '[%s]\n' "$out"
+printf '{"newest":%s,"keyed":[%s]}\n' "$newest" "$out"
 exit 0
 "#;

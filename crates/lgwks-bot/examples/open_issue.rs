@@ -14,19 +14,21 @@
 //! grants running `gh` and reaching the network; the write, the capability
 //! `github.issue.create`, only when the operator names it with `--grant`. The
 //! key is what makes a rerun safe: the action reads GitHub back for it before
-//! it creates, so a rerun after a crash or a lost answer finds the first
-//! run's issue.
+//! it creates — the listing, then every issue number past it — so a rerun
+//! after a crash or a lost answer finds the first run's issue without waiting
+//! for GitHub's listing to catch up. A new key costs three `gh` calls: the
+//! listing, one number read and the create.
 //!
 //! Exit status: 0 an issue is open; 2 refused before anything was written;
 //! 3 a write may or may not have landed (rerun with the same key to settle
-//! it); 1 anything else. `gh` and its credentials are the operator's; this
-//! program never reads a token.
+//! it); 1 anything else, a create GitHub rejected included. `gh` and its
+//! credentials are the operator's; this program never reads a token.
 
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use lgwks_bot::domain::gh::{ISSUE_CREATE, IssueDraft, OpenIssue, OpenedIssue, Settlement};
+use lgwks_bot::domain::gh::{ISSUE_CREATE, IssueDraft, OpenIssue, OpenedIssue};
 use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{BotError, Cap, GrantSet, domains};
@@ -151,14 +153,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         writeln!(out, "{}", json::to_string(&answer)?)?;
     } else if let (Some(url), Some(settlement)) = (answer.url, answer.settlement) {
         writeln!(out, "{settlement} {url}")?;
-        if settlement == Settlement::Unlisted.as_str() {
-            writeln!(
-                out,
-                "  GitHub has not listed it within the settle bound; a rerun with this key \
-                 settles the listing before it creates, so it finds this issue rather than \
-                 opening a second"
-            )?;
-        }
     } else if let Some(ref error) = answer.error {
         writeln!(out, "{}: {error}", answer.outcome)?;
         if answer.outcome == "refused" && !args.grants.iter().any(|name| name == ISSUE_CREATE) {

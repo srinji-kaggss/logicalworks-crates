@@ -214,9 +214,9 @@ fn a_flow_opens_an_issue_and_reads_it_back() -> TestResult {
     assert_eq!(issue.number(), 1);
     assert_eq!(issue.url(), "https://github.com/j1-owner/accept/issues/1");
     assert_eq!(creates_on("j1-owner")?, 1, "one create");
-    // The scan settles before it creates (eight reads), then the create, the
-    // read at the answered number and the listing read that shows it.
-    assert_eq!(calls_on("j1-owner")?.len(), 11);
+    // One listing read, one read of the number past it (a 404: nothing is
+    // unlisted), and the create, confirmed from its own answer. No settle.
+    assert_eq!(calls_on("j1-owner")?.len(), 3);
     Ok(())
 }
 
@@ -246,16 +246,18 @@ fn a_repository_of_long_issues_still_reads_back_within_the_capture() -> TestResu
 
 /// The live failures of 2026-10-20: GitHub created #657 and the listing read
 /// right after did not show it; then an immediate rerun opened #659 beside
-/// #658. A create is confirmed at its number and reported only once the
-/// listing shows it, so the rerun straight after finds it.
+/// #658. The rerun's listing still hides #1, so its scan reads the number past
+/// the listing's newest and finds the key there, without waiting for the
+/// listing to catch up.
 #[test]
-fn a_create_waits_for_the_listing_so_an_immediate_rerun_finds_it() -> TestResult {
+fn an_immediate_rerun_under_a_lagging_listing_finds_the_issue_by_number() -> TestResult {
     let host = fake_host("acme", full_grant())?;
     let draft = IssueDraft::new("lagged", "Listed late", "")?;
     let first = open(&host, "lag-owner/lag", &draft)?;
     let again = open(&host, "lag-owner/lag", &draft)?;
     assert_eq!(opened(&first)?.settlement(), Settlement::Created);
     assert_eq!(opened(&again)?.settlement(), Settlement::Found);
+    assert_eq!(opened(&again)?.number(), 1);
     assert_eq!(
         creates_on("lag-owner")?,
         1,
@@ -266,11 +268,11 @@ fn a_create_waits_for_the_listing_so_an_immediate_rerun_finds_it() -> TestResult
         calls
             .iter()
             .any(|argv| argv.iter().any(|arg| arg.ends_with("/issues/1"))),
-        "the create is confirmed at the number GitHub answered: {calls:?}"
+        "the rerun read #1 by its number: {calls:?}"
     );
-    // Scan's settle, create, read #1, the two lagging listings and the one
-    // that shows it, and the rerun's scan.
-    assert_eq!(calls.len(), 14);
+    // The first run's listing, its 404 past it and the create; the rerun's
+    // listing (still lagging) and its read of #1.
+    assert_eq!(calls.len(), 5);
     Ok(())
 }
 
@@ -291,36 +293,44 @@ fn a_key_that_names_two_issues_answers_the_first() -> TestResult {
     Ok(())
 }
 
-/// A listing that never shows the issue within the settle bound is reported
-/// as `Unlisted`, not as a create a rerun is safe after.
-///
-/// The settle schedule — 250 ms doubling to four seconds, about 16 s across
-/// eight reads — is spent on the flow's clock, not on the process's timer: the
-/// host is built on an advancing clock and this test moves it. The assertion
-/// on real elapsed time is the point: a wait that still read
-/// `rt::time::sleep` would spend the schedule for real.
+/// A listing that never shows the newest issue cannot hide it: the create is
+/// reported from its own answer, and the rerun reads past the listing by
+/// number and answers the same issue.
 #[test]
-fn a_create_the_listing_never_shows_is_reported_unlisted() -> TestResult {
-    let clock = Clock::virtual_at(Duration::ZERO);
-    let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
+fn a_listing_that_never_shows_the_issue_is_read_past_by_number() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
     let draft = IssueDraft::new("stale", "Never listed", "")?;
-    let started = Instant::now();
-    let report = open_on_clock(&host, &clock, "stale-owner/stale", &draft)?;
-    let elapsed = started.elapsed();
-    let issue = opened(&report)?.clone();
-    assert_eq!(issue.settlement(), Settlement::Unlisted);
-    assert_eq!(issue.number(), 1);
-    // The scan's settle, create, read #1, then the eight settle reads.
-    assert_eq!(calls_on("stale-owner")?.len(), 18);
-    assert!(
-        clock.now() >= Duration::from_secs(15),
-        "the settle must spend its schedule on the flow's clock, which read {:?}",
-        clock.now()
+    let first = opened(&open(&host, "stale-owner/stale", &draft)?)?.clone();
+    let again = opened(&open(&host, "stale-owner/stale", &draft)?)?.clone();
+    assert_eq!(first.settlement(), Settlement::Created);
+    assert_eq!(again.settlement(), Settlement::Found);
+    assert_eq!(again.number(), first.number());
+    assert_eq!(creates_on("stale-owner")?, 1);
+    assert_eq!(calls_on("stale-owner")?.len(), 5);
+    Ok(())
+}
+
+/// A key held by an issue the listing has not reached, behind an unlisted
+/// issue of another key, is still found: the scan reads every number past
+/// the listing until GitHub has none.
+#[test]
+fn the_scan_reads_past_an_unlisted_issue_of_another_key() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let ours = IssueDraft::new("ours", "Ours", "")?;
+    let theirs = IssueDraft::new("theirs", "Theirs", "")?;
+    // `lag-5` hides each created issue from the next five listing reads.
+    assert_eq!(
+        opened(&open(&host, "past-owner/lag-5", &theirs)?)?.number(),
+        1
     );
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "the settle must not wait the schedule in real time: {elapsed:?}"
+    assert_eq!(
+        opened(&open(&host, "past-owner/lag-5", &ours)?)?.number(),
+        2
     );
+    let again = opened(&open(&host, "past-owner/lag-5", &ours)?)?.clone();
+    assert_eq!(again.settlement(), Settlement::Found);
+    assert_eq!(again.number(), 2);
+    assert_eq!(creates_on("past-owner")?, 2);
     Ok(())
 }
 
@@ -407,8 +417,8 @@ fn a_lost_answer_is_reconciled_by_reading_back_and_never_reposted() -> TestResul
 /// has held the issue and before it prints the answer — the same instant a
 /// `kill -9` of `gh` catches. What the supervisor reports is a signal death,
 /// not an exit code, so the action cannot know whether the create landed; it
-/// reads back over the settle and reports `Reconciled`. The rerun then finds
-/// the key by its own pre-create settle, and issues no second POST.
+/// reads back and reports `Reconciled`. The rerun then finds the key by its
+/// own pre-create scan, and issues no second POST.
 ///
 /// The settles run on a clock this test owns: the kill is real, the waits are
 /// not.
@@ -439,14 +449,21 @@ fn a_real_kill_between_the_post_and_its_reply_leaves_one_issue() -> TestResult {
     Ok(())
 }
 
+/// A lost answer whose issue never appears is indeterminate after the
+/// read-back's settle, and the settle is spent on the flow's clock.
+///
+/// The schedule — 250 ms doubling to four seconds, 15.75 s across eight
+/// scans — runs on a clock this test advances. The bound on real elapsed time
+/// is below the schedule itself, so a wait that read the process timer would
+/// fail it whatever the host's load.
 #[test]
-fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
-    // Both settles are real waits, so this run owns a clock rather than the
-    // process timer: the journey is the typed indeterminate, not the delay.
+fn a_lost_answer_that_landed_nowhere_is_indeterminate_after_the_settle() -> TestResult {
     let clock = Clock::virtual_at(Duration::ZERO);
     let host = fake_host_with_clock("acme", full_grant(), clock.clone())?;
-    let draft = IssueDraft::new("refused", "Refused by the receiver", "")?;
-    let report = open_on_clock(&host, &clock, "refused-owner/refuse", &draft)?;
+    let draft = IssueDraft::new("vanished", "Lost and never held", "")?;
+    let started = Instant::now();
+    let report = open_on_clock(&host, &clock, "vanish-owner/vanish", &draft)?;
+    let elapsed = started.elapsed();
     assert!(
         matches!(
             *failed(&report)?,
@@ -455,10 +472,40 @@ fn a_create_that_landed_nowhere_is_indeterminate_not_failed() -> TestResult {
         "{:?}",
         report.result()
     );
-    // The pre-create scan's settle, the one create, then the lost-answer
-    // settle that reads before it concludes nothing landed.
-    assert_eq!(creates_on("refused-owner")?, 1);
-    assert_eq!(calls_on("refused-owner")?.len(), 17);
+    // The scan (listing, 404), the create, then eight read-back scans.
+    assert_eq!(creates_on("vanish-owner")?, 1);
+    assert_eq!(calls_on("vanish-owner")?.len(), 19);
+    assert!(
+        clock.now() >= Duration::from_millis(15_750),
+        "the settle must spend its schedule on the flow's clock, which read {:?}",
+        clock.now()
+    );
+    assert!(
+        elapsed < Duration::from_millis(15_750),
+        "the settle must not wait the schedule in real time: {elapsed:?}"
+    );
+    Ok(())
+}
+
+/// GitHub rejecting the create (`422`) landed nothing: the run reports the
+/// rejection at once, reads nothing back, and a rerun may create.
+#[test]
+fn a_rejected_create_is_refused_at_once_and_not_read_back() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let draft = IssueDraft::new("rejected", "Rejected by the receiver", "")?;
+    let report = open(&host, "rejected-owner/refuse", &draft)?;
+    assert!(
+        matches!(
+            *failed(&report)?,
+            BotError::DomainError { ref domain, ref cause, .. }
+                if domain == "gh::issue" && cause.contains("rejected by GitHub (HTTP 422)")
+        ),
+        "{:?}",
+        report.result()
+    );
+    assert_eq!(creates_on("rejected-owner")?, 1);
+    assert_eq!(held_on("rejected-owner", "refuse")?, 0);
+    assert_eq!(calls_on("rejected-owner")?.len(), 3);
     Ok(())
 }
 
@@ -488,9 +535,9 @@ fn a_create_refused_for_its_credential_is_not_read_back() -> TestResult {
         "{:?}",
         report.result()
     );
-    // GitHub refused the write, so nothing landed and nothing is reconciled
-    // past the scan's own settle.
-    assert_eq!(calls_on("dc-owner")?.len(), 9);
+    // GitHub refused the write, so nothing landed and nothing is read back:
+    // the listing, its 404 past it, the create.
+    assert_eq!(calls_on("dc-owner")?.len(), 3);
     Ok(())
 }
 
