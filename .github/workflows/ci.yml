@@ -411,6 +411,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.0"
+      # rust-cache hashes every installed toolchain, not the one this job builds
+      # with, so a toolchain the image happens to add rotates the key and throws
+      # away a 400 MB cache. That is not a slow suite: it is a cold build of
+      # lgwks_std's full feature set (118 s) plus its 863 tests (64.9 s), which
+      # overran this step's three-minute bound by 7 s on run 39379487172 while
+      # every test passed. Image 20261018.339.1 added stable 1.99.1 beside the
+      # pinned 1.99.0 and did exactly that; main's run on image 20261012.334.1
+      # still restored the cache. The job selects 1.99.0 and nothing else, so
+      # nothing else is installed when the key is computed.
+      - name: Set up the pinned toolchain alone
+        run: |
+          rustup default 1.99.0
+          for installed in $(rustup toolchain list --quiet); do
+            case "$installed" in
+              1.99.0*) ;;
+              *) rustup toolchain uninstall "$installed" ;;
+            esac
+          done
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
