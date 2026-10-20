@@ -37,7 +37,7 @@
 //!
 //! # Bounds, stated
 //!
-//! The read-back makes [`SETTLE_SCANS`] reads, the first at once and the waits
+//! The read-back makes at least eight reads, the first at once and the waits
 //! between them starting at 250 ms and doubling to 4 s (15.75 s in all), and
 //! keeps reading past that until the in-flight bound has passed since the
 //! create was sent. Two runs that open one key at the same instant on hosts
