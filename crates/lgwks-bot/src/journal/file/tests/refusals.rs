@@ -148,6 +148,49 @@ fn a_lengthened_carried_seal_is_refused_not_trimmed() -> TestResult {
     Ok(())
 }
 
+/// One journal file has one writer, so two tenants cannot share it (#641): a
+/// second open of a held file is `Locked` before a byte is read or repaired, the
+/// holder's history is untouched, and once the holder closes the file the same
+/// path opens again with exactly that history.
+#[test]
+fn a_second_tenant_opening_a_held_journal_is_refused_and_nothing_changes() -> TestResult {
+    let (path, _guard) = subject("shared-file")?;
+    let key = key()?;
+    let mut holder = FileJournal::open(&path)?;
+    holder.compare_and_append(holder.tail(), &EffectEvent::IntentAdmitted { key })?;
+    let before = std::fs::read(&path)?;
+    for attempt in 0..3 {
+        match FileJournal::open(&path) {
+            Err(JournalError::Locked { path: named }) => {
+                assert_eq!(
+                    named,
+                    path.display().to_string(),
+                    "the refusal names the file"
+                );
+            }
+            Err(other) => {
+                return Err(format!("open {attempt}: expected Locked, got {other}").into());
+            }
+            Ok(_) => {
+                return Err(format!("open {attempt}: a held journal took a second writer").into());
+            }
+        }
+        assert_eq!(
+            std::fs::read(&path)?,
+            before,
+            "a refused open changes no byte"
+        );
+    }
+    drop(holder);
+    let reopened = FileJournal::open(&path)?;
+    assert_eq!(
+        reopened.recover().len(),
+        1,
+        "the holder's one key survives the refusals"
+    );
+    Ok(())
+}
+
 #[test]
 fn the_ladder_refuses_a_second_prepared_dispatch_from_a_replayed_view() -> TestResult {
     let (path, _guard) = subject("ladder")?;
