@@ -13,7 +13,8 @@
 //!   else is foreign;
 //! - every call goes through [`Api`], a table of function pointers, so the
 //!   tests drive these exact `unsafe` call sites against Rust stand-ins under
-//!   `cargo +nightly miri nextest run --target x86_64-pc-windows-msvc`;
+//!   the `miri-unsafe` gate lane (`cargo +nightly-2026-10-01 miri test
+//!   --target x86_64-pc-windows-msvc`);
 //! - every handle is an [`Owned`] that closes itself once, on drop;
 //! - every buffer handed to the kernel is a `#[repr(C)]` value of the size it
 //!   declares (`PROCESSENTRY32W.dwSize`, `FILETIME`), never a byte slice.

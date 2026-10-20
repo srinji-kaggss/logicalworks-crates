@@ -1212,3 +1212,35 @@ jobs:
         run: |
           echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
           test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
+
+  # INV-STD-UNSAFE-1: the Miri proof, on every change. The two `unsafe` modules
+  # carry a function-pointer seam each so the interpreter can drive the exact
+  # call sites, and until this job existed nothing re-ran that proof.
+  #
+  # A hosted runner, for the reason the docs.rs matrix is one: this lane installs
+  # a nightly toolchain and builds a Miri sysroot per target, which is a download
+  # the single macOS machine cannot make cheap, and neither proof needs a native
+  # kernel. Both seams are cross-interpreted by name, so `process::darwin` runs
+  # its sysctl code on a Linux runner and `process::windows` runs its `kernel32`
+  # code without a Windows one; the live-kernel tests are `#[cfg(not(miri))]` in
+  # both modules, so the interpreter never reaches a foreign call.
+  #
+  # The step carries the lane's command text verbatim, so `check-gate-parity`
+  # compares them: the nightly is pinned in the lane table, not in
+  # `rust-toolchain.toml`, and `rust-src` is installed up front because
+  # `cargo miri` otherwise stops to ask before adding it.
+  #
+  # Measured cold in the repository's Linux container: the install 12 s, the
+  # darwin seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the
+  # whole lane inside this job's 5-minute bound.
+  miri_unsafe:
+    name: Miri unsafe seams
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove the process unsafe seams under Miri
+        run: |
+          rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests
