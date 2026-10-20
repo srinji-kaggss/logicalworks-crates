@@ -107,8 +107,9 @@ data in `bench/async/vps/profile.toml`. Taken 2026-10-11 at host load 2.8,
   memory bandwidth and noisy neighbours, and `nproc` read 4 because the quota
   limits CPU time and not visible cores. Every open-loop body is a timer, so a
   CPU-bound body on two real cores is unmeasured.
-- The synchronous rig still reports only `ns/tick` for a schedule of up to 256
-  sources, and `Bot::tick` beyond 256 sources is still unmeasured (#279).
+- `Bot::tick` scaling is now measured to 16,384 sources (#640): 54 663 /
+  238 706 / 1 167 019 / 8 471 300 ns/tick at 256 / 1 024 / 4 096 / 16 384, a
+  log-log slope of 1.206; `act` carries the superlinear term (§4.9).
 - The closed-loop p99 ratios are point readings (the paired interval is on p50
   only; the p50 spread between runs is about 0.1x, and a second run read p99
   1.05x / 1.01x / 1.12x / 1.05x). Every figure is one host, and nothing here is a

@@ -32,6 +32,10 @@
 //! exactly the same work, with the work counted) and the cost decomposition
 //! (`poll-only-*` scenarios), and both are present. See `README.md`.
 
+mod fit;
+mod probes;
+mod profile;
+mod scenarios;
 mod stats;
 
 use std::cell::Cell;
@@ -43,11 +47,10 @@ use lgwks_bot::broker::Broker;
 use lgwks_bot::effect::{EnvironmentId, FlowRevision, RunId};
 use lgwks_bot::journal::{MAX_JOURNAL_EVENTS, MemoryJournal};
 use lgwks_bot::spec::{EffectIdentity, EffectScope};
-use lgwks_bot::{
-    Auth, Bot, BotError, Cap, EffectLifetime, Evaluate, Execute, GrantSet, Observe, TickProfile,
-    TickStage,
-};
+use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, Evaluate, Execute, GrantSet, Observe};
 use lgwks_std::trace::info;
+
+use scenarios::{SCENARIOS, Scenario};
 
 // ── The allocation counter ───────────────────────────────────────────────────
 //
@@ -289,83 +292,6 @@ impl HandRolled {
     }
 }
 
-// ── Scenario ─────────────────────────────────────────────────────────────────
-
-/// One measured configuration.
-#[derive(Clone, Copy)]
-struct Scenario {
-    name: &'static str,
-    /// Why this scenario is in the set. Printed with the result so a reader does
-    /// not have to infer the intent from the numbers.
-    intent: &'static str,
-    sources: usize,
-    period: u64,
-    entries: usize,
-    /// Timed ticks in one round. Bounded by the bot's own journal ceiling: every
-    /// fired effect writes three events, and `MAX_JOURNAL_EVENTS` refuses the
-    /// next one rather than dropping evidence, so a round longer than this would
-    /// be a rig that stops measuring rather than one that measures more.
-    ticks_per_round: u64,
-    /// Untimed ticks on each round's own bot, before the timer starts. The first
-    /// ticks of a fresh bot grow its buffers and prime its queries, and charging
-    /// those to a round would report the warm-up as the tick's cost.
-    warmup_ticks: u64,
-    rounds: usize,
-}
-
-const SCENARIOS: &[Scenario] = &[
-    Scenario {
-        name: "poll-only-64x100",
-        intent: "cost decomposition floor: poll 64 sources and detect change, with no entries to walk",
-        sources: 64,
-        period: 100,
-        entries: 0,
-        ticks_per_round: 2_000,
-        warmup_ticks: 200,
-        rounds: 32,
-    },
-    Scenario {
-        name: "steady-64x100",
-        intent: "change detection is the bot's stated advantage: 64 sources, one change per 100 ticks",
-        sources: 64,
-        period: 100,
-        entries: 1,
-        ticks_per_round: 2_000,
-        warmup_ticks: 200,
-        rounds: 32,
-    },
-    Scenario {
-        name: "churn-64x1",
-        intent: "worst case for change detection: every source moves every tick",
-        sources: 64,
-        period: 1,
-        entries: 1,
-        ticks_per_round: 200,
-        warmup_ticks: 50,
-        rounds: 32,
-    },
-    Scenario {
-        name: "fanout-1x64",
-        intent: "chain-walk cost: one source, sixty-four (condition, action) entries",
-        sources: 1,
-        period: 1,
-        entries: 64,
-        ticks_per_round: 200,
-        warmup_ticks: 50,
-        rounds: 32,
-    },
-    Scenario {
-        name: "wide-256x10",
-        intent: "does per-source cost scale linearly with source count",
-        sources: 256,
-        period: 10,
-        entries: 1,
-        ticks_per_round: 250,
-        warmup_ticks: 50,
-        rounds: 32,
-    },
-];
-
 // ── Building both engines ────────────────────────────────────────────────────
 
 fn build_bot(
@@ -397,6 +323,38 @@ fn build_handrolled(scenario: &Scenario) -> Vec<HandRolled> {
     (0..scenario.sources)
         .map(|_| HandRolled::new(scenario.period, scenario.entries))
         .collect()
+}
+
+/// Advance the bot `ticks` ticks from `tick`, returning the effects it fired.
+///
+/// One tick loop for the timing rows, the allocation window and the profile,
+/// because three copies of `clock.set` + `bot.tick` + advance is three places a
+/// round's workload could drift apart — and a per-tick cost measured over a
+/// different workload than the one reported is the defect this rig exists to
+/// refuse.
+fn run_bot_ticks(
+    bot: &mut Bot,
+    clock: &Clock,
+    tick: &mut u64,
+    ticks: u64,
+) -> Result<u64, BotError> {
+    let mut fired = 0u64;
+    for _ in 0..ticks {
+        clock.set(*tick);
+        fired = fired.saturating_add(bot.tick()? as u64);
+        *tick = tick.saturating_add(1);
+    }
+    Ok(fired)
+}
+
+/// Advance the hand-rolled chains `ticks` ticks from `tick`, returning their fires.
+fn run_base_ticks(chains: &mut [HandRolled], evals: &Cell<u64>, tick: &mut u64, ticks: u64) -> u64 {
+    let mut fired = 0u64;
+    for _ in 0..ticks {
+        fired = fired.saturating_add(chains.iter_mut().map(|c| c.tick(*tick, evals)).sum::<u64>());
+        *tick = tick.saturating_add(1);
+    }
+    fired
 }
 
 // ── Measurement ──────────────────────────────────────────────────────────────
@@ -471,40 +429,30 @@ fn measure(scenario: &Scenario) -> Result<Measurement, Box<dyn std::error::Error
         let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
         let mut chains = build_handrolled(scenario);
 
-        for _ in 0..scenario.warmup_ticks {
-            clock.set(bot_tick);
-            let fired = bot.tick()?;
-            effects_bot = effects_bot.saturating_add(fired as u64);
-            bot_tick = bot_tick.saturating_add(1);
-        }
-        for _ in 0..scenario.warmup_ticks {
-            let fired: u64 = chains
-                .iter_mut()
-                .map(|c| c.tick(base_tick, &evals_base_cell))
-                .sum();
-            effects_base = effects_base.saturating_add(fired);
-            base_tick = base_tick.saturating_add(1);
-        }
+        let warm = run_bot_ticks(&mut bot, &clock, &mut bot_tick, scenario.warmup_ticks)?;
+        effects_bot = effects_bot.saturating_add(warm);
+        let warm = run_base_ticks(
+            &mut chains,
+            &evals_base_cell,
+            &mut base_tick,
+            scenario.warmup_ticks,
+        );
+        effects_base = effects_base.saturating_add(warm);
 
         let start = Instant::now();
-        for _ in 0..scenario.ticks_per_round {
-            clock.set(bot_tick);
-            let fired = bot.tick()?;
-            effects_bot = effects_bot.saturating_add(fired as u64);
-            bot_tick = bot_tick.saturating_add(1);
-        }
+        let fired = run_bot_ticks(&mut bot, &clock, &mut bot_tick, scenario.ticks_per_round)?;
         let bot_elapsed = start.elapsed();
+        effects_bot = effects_bot.saturating_add(fired);
 
         let start = Instant::now();
-        for _ in 0..scenario.ticks_per_round {
-            let fired: u64 = chains
-                .iter_mut()
-                .map(|c| c.tick(base_tick, &evals_base_cell))
-                .sum();
-            effects_base = effects_base.saturating_add(fired);
-            base_tick = base_tick.saturating_add(1);
-        }
+        let fired = run_base_ticks(
+            &mut chains,
+            &evals_base_cell,
+            &mut base_tick,
+            scenario.ticks_per_round,
+        );
         let base_elapsed = start.elapsed();
+        effects_base = effects_base.saturating_add(fired);
 
         journal_events = journal_events.max(retained_events(bot));
         bot_times.push(bot_elapsed.as_secs_f64());
@@ -532,289 +480,34 @@ fn measure(scenario: &Scenario) -> Result<Measurement, Box<dyn std::error::Error
 ///
 /// `into_journal` rather than an accessor on the bot: the journal is the host's
 /// record, and a measurement instrument is not a reason to add a getter to the
-/// thing being measured.
+/// thing being measured. A journal that cannot answer retains nothing this rig
+/// can report, which is a zero rather than a claim.
 fn retained_events(bot: Bot) -> usize {
-    bot.into_journal().map_or(0, |journal| {
-        journal.committed().map_or(0, |events| events.len())
-    })
-}
-
-// ── Capability-check scaling ─────────────────────────────────────────────────
-
-/// Time `Auth::check` as the number of required capabilities grows.
-///
-/// `Auth` is minted by cloning the required slice into a `Vec`, and `check`
-/// then asks, for each required capability, whether that `Vec` contains it. That
-/// is a linear scan inside a linear scan, so the expected shape is quadratic in
-/// the capability count. Four shipped capabilities make that invisible; the
-/// measurement is here to establish where it stops being invisible, because
-/// `Cap::new` accepts any name by convention and a custom domain may require
-/// many.
-fn cap_check_scaling() -> Result<Vec<(usize, f64)>, Box<dyn std::error::Error>> {
-    let mut out = Vec::new();
-    for count in [1usize, 2, 4, 8, 16, 32, 64, 128] {
-        let mut grants = GrantSet::empty();
-        let mut caps = Vec::with_capacity(count);
-        for index in 0..count {
-            let cap = Cap::new(format!("bench.cap.{index}"));
-            grants = grants.grant(cap.clone());
-            caps.push(cap);
-        }
-        let auth = grants.issue(&caps)?;
-
-        // Warm the cache and the branch predictor before timing.
-        for _ in 0..1_000 {
-            auth.check(&caps)?;
-        }
-
-        const ITERATIONS: u32 = 200_000;
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            auth.check(&caps)?;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        let per_call_ns = (elapsed / f64::from(ITERATIONS)) * 1e9;
-        out.push((count, per_call_ns));
-    }
-    Ok(out)
-}
-
-/// Time `Bot::builder(..).build(&grants)` -- the admission path.
-fn build_cost(sources: usize) -> Result<Duration, Box<dyn std::error::Error>> {
-    let clock = Clock::new();
-    let tally = Rc::new(Cell::new(0u64));
-    let evals = Rc::new(Cell::new(0u64));
-    let scenario = Scenario {
-        name: "build",
-        intent: "admission cost",
-        sources,
-        period: 100,
-        entries: 1,
-        ticks_per_round: 1,
-        warmup_ticks: 1,
-        rounds: 1,
-    };
-    let start = Instant::now();
-    let _bot = build_bot(&scenario, &clock, &tally, &evals)?;
-    Ok(start.elapsed())
-}
-
-// ── Determinism ──────────────────────────────────────────────────────────────
-
-/// Run the same scenario twice and compare the per-tick effect counts.
-///
-/// This is a *correctness* observation, not a timing one, and it is the only
-/// claim in this rig that the timings cannot make: that the schedule is a
-/// function of its inputs. The formal statement of the same property, and the
-/// proof, are in `../proofs/`.
-fn determinism_probe(
-    scenario: &Scenario,
-    ticks: u64,
-) -> Result<(bool, usize), Box<dyn std::error::Error>> {
-    let run = || -> Result<Vec<u64>, Box<dyn std::error::Error>> {
-        let clock = Clock::new();
-        let tally = Rc::new(Cell::new(0u64));
-        let evals = Rc::new(Cell::new(0u64));
-        let mut bot = build_bot(scenario, &clock, &tally, &evals)?;
-        let mut per_tick = Vec::with_capacity(ticks as usize);
-        for tick in 0..ticks {
-            clock.set(tick);
-            per_tick.push(bot.tick()? as u64);
-        }
-        Ok(per_tick)
-    };
-    let first = run()?;
-    let second = run()?;
-    let fired: u64 = first.iter().sum();
-    Ok((first == second, fired as usize))
-}
-
-// ── The per-stage profile ────────────────────────────────────────────────────
-//
-// A ratio against a hand-rolled loop says the bot is slower; it does not say
-// which half of the tick the difference is made of. This drives the crate's own
-// `tick_profiled` -- the same four phases, with the per-stage instrument armed --
-// so the breakdown is a decomposition of the real tick rather than of a model of
-// it.
-//
-// The instrument is not free: seven clock reads on a tick. So every row is
-// measured twice on the same bot and the same workload, once through `tick` and
-// once through `tick_profiled`, and the difference is printed beside the stages.
-// The shares are what the profile supports; the absolute times carry the
-// instrument and are printed with its cost subtracted.
-
-/// One scenario's stage breakdown, plus what the instrument cost on it.
-struct StageRow {
-    name: &'static str,
-    profile: TickProfile,
-    /// ns/tick through `tick()`, measured on the same workload.
-    plain_ns: f64,
-    /// ns/tick through `tick_profiled()`, measured on the same workload.
-    profiled_ns: f64,
-}
-
-/// Profile one scenario through both doors and report the stages.
-///
-/// Per-round construction for the same reason `measure` does it: the bot's
-/// journal is bounded by one round's workload, and the warm-up that grows every
-/// buffer sits outside the measured window on both legs. The two legs run the
-/// *same* window on the *same* bot, back to back, so the difference between them
-/// is the instrument and nothing else.
-fn profile_row(scenario: &Scenario) -> Result<StageRow, Box<dyn std::error::Error>> {
-    let clock = Clock::new();
-    let tally = Rc::new(Cell::new(0u64));
-    let evals = Rc::new(Cell::new(0u64));
-
-    let mut plain_rounds: Vec<f64> = Vec::with_capacity(scenario.rounds);
-    let mut profiled_rounds: Vec<f64> = Vec::with_capacity(scenario.rounds);
-    let mut profile = TickProfile::new();
-    let mut tick = 0u64;
-
-    for _ in 0..scenario.rounds {
-        let mut bot = build_bot(scenario, &clock, &tally, &evals)?;
-        for _ in 0..scenario.warmup_ticks {
-            clock.set(tick);
-            let _ = bot.tick()?;
-            tick = tick.saturating_add(1);
-        }
-
-        let start = Instant::now();
-        for _ in 0..scenario.ticks_per_round {
-            clock.set(tick);
-            let _ = bot.tick()?;
-            tick = tick.saturating_add(1);
-        }
-        plain_rounds.push(per_tick_ns(start.elapsed(), scenario.ticks_per_round));
-
-        let start = Instant::now();
-        for _ in 0..scenario.ticks_per_round {
-            clock.set(tick);
-            let (_, measured) = lgwks_std::task::block_on(bot.tick_profiled());
-            profile.absorb(measured);
-            tick = tick.saturating_add(1);
-        }
-        profiled_rounds.push(per_tick_ns(start.elapsed(), scenario.ticks_per_round));
-    }
-    Ok(StageRow {
-        name: scenario.name,
-        profile,
-        plain_ns: stats::median(&mut plain_rounds),
-        profiled_ns: stats::median(&mut profiled_rounds),
-    })
-}
-
-/// A round's wall time as ns/tick.
-fn per_tick_ns(elapsed: Duration, ticks: u64) -> f64 {
-    if ticks == 0 {
-        return f64::NAN;
-    }
-    (elapsed.as_secs_f64() / ticks as f64) * 1e9
-}
-
-/// The per-stage table, for every scenario.
-///
-/// The percentages are the claim the profile supports; the nanoseconds beside
-/// them carry the instrument, and the `plain` column is what the same workload
-/// costs with the instrument off. The `instrument` column is the difference, and
-/// the clock's own cost is printed under the table because on this host it is
-/// what the instrument mostly is.
-fn stage_report() -> Result<String, Box<dyn std::error::Error>> {
-    let mut rows = Vec::with_capacity(SCENARIOS.len());
-    for scenario in SCENARIOS {
-        rows.push(profile_row(scenario)?);
-    }
-
-    let mut out = String::new();
-    writeln!(
-        out,
-        "\nper-stage profile -- where a tick goes, measured on the tick path itself\n\
-         ================================================================================="
-    )?;
-    writeln!(
-        out,
-        "  {} timed ticks per round x {} rounds per window, release, one process; the two\n\
-         windows run the same workload on the same bot, back to back",
-        SCENARIOS[0].ticks_per_round, SCENARIOS[0].rounds
-    )?;
-    writeln!(
-        out,
-        "  scenario                {:>9} {:>11} {:>9} {:>9} {:>8} {:>8} {:>10} {:>10}",
-        "poll", "fingerprint", "compare", "schedule", "decide", "act", "plain", "instrument"
-    )?;
-    for row in &rows {
-        write!(out, "  {:<20}", row.name)?;
-        for stage in TickStage::ALL {
-            let _ = write!(out, " {value:>9.1}", value = ns_of(row, stage));
-        }
-        let _ = writeln!(
-            out,
-            " {:>10.1} {:>+10.1}",
-            row.plain_ns,
-            row.profiled_ns - row.plain_ns
-        );
-    }
-    writeln!(out, "\n  shares of the measured tick")?;
-    writeln!(
-        out,
-        "  scenario                {:>9} {:>11} {:>9} {:>9} {:>8} {:>8}",
-        "poll", "fingerprint", "compare", "schedule", "decide", "act"
-    )?;
-    for row in &rows {
-        write!(out, "  {:<20}", row.name)?;
-        for stage in TickStage::ALL {
-            let _ = write!(out, " {:>8.1}%", row.profile.share(stage) * 100.0);
-        }
-        out.push('\n');
-    }
-    writeln!(
-        out,
-        "\n  The stage columns carry the instrument: a tick reads the clock once per charge\n\
-         plus once to open the window, and `plain` is the same workload with the instrument\n\
-         off. One clock read costs {:.0} ns on this host, so a seven-read instrument adds about\n\
-         {:.0} ns/tick whatever the tick does. `schedule` is a residual: the stages nested\n\
-         inside it charge first, so what it reports is the dispatch of the two systems plus the\n\
-         commit bookkeeping in `observe_fold` that nothing else claims.",
-        clock_read_ns(),
-        clock_read_ns() * 7.0
-    )?;
-    Ok(out)
-}
-
-/// What one `Instant::now()` costs on this host.
-///
-/// Measured rather than assumed, because on this host it is the largest single
-/// term in the instrument column above: macOS does not put `clock_gettime` in the
-/// vDSO, so a clock read is a real syscall and a seven-read instrument costs more
-/// than a short tick. A reader who wants the stage absolutes without the
-/// instrument needs this number to subtract it.
-fn clock_read_ns() -> f64 {
-    /// Reads in the calibration. Enough that the syscall's own jitter is a small
-    /// share of the total, and small enough to cost nothing to run.
-    const READS: u64 = 200_000;
-    let start = Instant::now();
-    let mut sink = 0u64;
-    for _ in 0..READS {
-        sink = sink.wrapping_add(Instant::now().elapsed().subsec_nanos() as u64);
-    }
-    // The sink is read so the loop cannot be optimized away, and the sum is
-    // deliberately meaningless: what is measured is the elapsed time around it.
-    let elapsed = (start.elapsed().as_secs_f64() / READS as f64) * 1e9;
-    let _ = sink;
-    elapsed
-}
-
-/// One stage's ns/tick for one row, read through the profile's own accessor.
-///
-/// `NAN` for a row that measured no ticks, which prints as `NaN` in the table
-/// rather than a zero nobody measured.
-fn ns_of(row: &StageRow, stage: TickStage) -> f64 {
-    match row.profile.per_tick(stage) {
-        Some(mean) => mean.as_secs_f64() * 1e9,
-        None => f64::NAN,
+    match bot.into_journal() {
+        Some(journal) => match journal.committed() {
+            Ok(events) => events.len(),
+            Err(error) => {
+                lgwks_std::trace::debug!(
+                    error = ?error,
+                    "retained_events: the journal refused its committed events, so this round retains no row"
+                );
+                0
+            }
+        },
+        None => 0,
     }
 }
 
 // ── The allocation model ─────────────────────────────────────────────────────
+
+/// Rounds the allocation window counts, each on its own bot.
+///
+/// A round per window rather than one long window, because the journal is
+/// bounded per bot: a single bot over 576 ticks of `churn-64x1` asks for 110,592
+/// events against a ceiling of 100,000, and the report aborted there before
+/// #640 instead of reaching the rows it exists for. Each round's warm-up stays
+/// outside the counted window, as it stays outside the timed one.
+const ALLOC_ROUNDS: usize = 8;
 
 /// Count one scenario's steady-state allocations and append its row.
 fn alloc_row(out: &mut String, scenario: &Scenario) -> Result<(), Box<dyn std::error::Error>> {
@@ -823,53 +516,53 @@ fn alloc_row(out: &mut String, scenario: &Scenario) -> Result<(), Box<dyn std::e
     let evals_bot_cell = Rc::new(Cell::new(0u64));
     let evals_base_cell = Cell::new(0u64);
 
-    let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
-    let mut chains = build_handrolled(scenario);
+    let mut bot_allocs = 0u64;
+    let mut bot_bytes = 0u64;
+    let mut base_allocs = 0u64;
+    let mut bot_tick = 0u64;
+    let mut base_tick = 0u64;
 
-    // Warm up, so anything allocated once by the schedule's first run (a
-    // lazily-grown buffer, a query's internal state) is already in place.
-    let warm = 64u64;
-    for tick in 0..warm {
-        clock.set(tick);
-        let _ = bot.tick()?;
-    }
-    for tick in 0..warm {
-        let _ = chains
-            .iter_mut()
-            .map(|c| c.tick(tick, &evals_base_cell))
-            .sum::<u64>();
+    for _ in 0..ALLOC_ROUNDS {
+        let mut bot = build_bot(scenario, &clock, &tally, &evals_bot_cell)?;
+        let mut chains = build_handrolled(scenario);
+        let _ = run_bot_ticks(&mut bot, &clock, &mut bot_tick, scenario.warmup_ticks)?;
+        let _ = run_base_ticks(
+            &mut chains,
+            &evals_base_cell,
+            &mut base_tick,
+            scenario.warmup_ticks,
+        );
+
+        alloc_count::reset();
+        alloc_count::start();
+        let _ = run_bot_ticks(&mut bot, &clock, &mut bot_tick, scenario.ticks_per_round)?;
+        alloc_count::stop();
+        let (allocs, bytes) = alloc_count::snapshot();
+        bot_allocs = bot_allocs.saturating_add(allocs);
+        bot_bytes = bot_bytes.saturating_add(bytes);
+
+        alloc_count::reset();
+        alloc_count::start();
+        let _ = run_base_ticks(
+            &mut chains,
+            &evals_base_cell,
+            &mut base_tick,
+            scenario.ticks_per_round,
+        );
+        alloc_count::stop();
+        let (allocs, _) = alloc_count::snapshot();
+        base_allocs = base_allocs.saturating_add(allocs);
     }
 
-    let ticks = 512u64;
-    alloc_count::reset();
-    alloc_count::start();
-    for tick in warm..warm.saturating_add(ticks) {
-        clock.set(tick);
-        let _ = bot.tick()?;
-    }
-    alloc_count::stop();
-    let (bot_allocs, bot_bytes) = alloc_count::snapshot();
-
-    alloc_count::reset();
-    alloc_count::start();
-    for tick in warm..warm.saturating_add(ticks) {
-        let _ = chains
-            .iter_mut()
-            .map(|c| c.tick(tick, &evals_base_cell))
-            .sum::<u64>();
-    }
-    alloc_count::stop();
-    let (base_allocs, _) = alloc_count::snapshot();
-
-    let per_tick = bot_allocs as f64 / ticks as f64;
+    let ticks = scenario.ticks_per_round as f64 * ALLOC_ROUNDS as f64;
     writeln!(
         out,
         "  {:<20} {:>10.1}   {:>10.1}   {:>10.1}   {:>19.1}",
         scenario.name,
-        per_tick,
-        bot_bytes as f64 / ticks as f64,
+        bot_allocs as f64 / ticks,
+        bot_bytes as f64 / ticks,
         bot_bytes as f64 / bot_allocs.max(1) as f64,
-        base_allocs as f64 / ticks as f64,
+        base_allocs as f64 / ticks,
     )?;
     Ok(())
 }
@@ -881,7 +574,7 @@ fn alloc_row(out: &mut String, scenario: &Scenario) -> Result<(), Box<dyn std::e
 /// through the same window, which is the control: a hand-rolled loop over the
 /// same workload should allocate nothing, and a non-zero count there would mean
 /// the counter is picking up something other than the bot.
-fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
+fn alloc_report(only: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
     let mut out = String::new();
     writeln!(
         out,
@@ -893,7 +586,7 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
         "  scenario                allocs/tick   bytes/tick   mean bytes   baseline allocs/tick"
     )?;
 
-    for scenario in SCENARIOS {
+    for scenario in selected(only)? {
         alloc_row(&mut out, scenario)?;
     }
     // Per-tick trace for one scenario. A mean over 512 ticks hides the shape of
@@ -901,6 +594,12 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
     // moving one has the same mean as one that allocates the same amount every
     // tick, and only the trace tells them apart. This is what says whether the
     // observation path still allocates on a tick where nothing moved.
+    if only.is_some() {
+        // A filtered report is one row, and the trace belongs to `steady-64x100`
+        // whatever was asked for: printing it beside another row would attach one
+        // scenario's shape to another scenario's mean.
+        return Ok(out);
+    }
     let scenario = &SCENARIOS[1];
     let clock = Clock::new();
     let tally = Rc::new(Cell::new(0u64));
@@ -930,12 +629,38 @@ fn alloc_report() -> Result<String, Box<dyn std::error::Error>> {
 
 // ── Reporting ────────────────────────────────────────────────────────────────
 
+/// The scenarios this invocation measures: the one `--scenario=` names, or every
+/// row in the table.
+///
+/// A name the table does not hold is refused rather than ignored: a mistyped
+/// scenario that silently ran the whole rig would print numbers for a run nobody
+/// asked for, and a mistyped one that ran nothing would report success.
+fn selected(only: Option<&str>) -> Result<Vec<&'static Scenario>, Box<dyn std::error::Error>> {
+    let Some(name) = only else {
+        return Ok(SCENARIOS.iter().collect());
+    };
+    match scenarios::named(name) {
+        Some(scenario) => Ok(vec![scenario]),
+        None => {
+            let known = SCENARIOS
+                .iter()
+                .map(|scenario| scenario.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let refusal =
+                Err(format!("--scenario={name} names no scenario; the table holds {known}").into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "selected: refusing an unknown scenario name");
+            refusal
+        }
+    }
+}
+
 /// Measure one scenario, refuse an unfair comparison, and append its human and JSON rows.
 fn scenario_report(
     scenario: &Scenario,
     human: &mut String,
     json: &mut String,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Measurement, Box<dyn std::error::Error>> {
     let m = measure(scenario)?;
 
     // THE FAIRNESS GATE, on both axes. A ratio between two engines doing
@@ -1054,6 +779,54 @@ fn scenario_report(
         m.journal_ceiling,
         m.build_bot.as_secs_f64() * 1e3
     )?;
+    Ok(m)
+}
+
+/// One measured row's ns/tick, the figure the slope is fitted on.
+fn ns_per_tick(m: &Measurement) -> f64 {
+    let mut rounds = m.bot.clone();
+    let median = stats::median(&mut rounds);
+    if m.ticks_per_round == 0 {
+        return f64::NAN;
+    }
+    (median / m.ticks_per_round as f64) * 1e9
+}
+
+/// The slope of ns/tick against source count over the `wide-*` rows in `rows`.
+///
+/// Appended to the human report, so the sentence a reader quotes from §4.9 is a
+/// line through the medians printed directly above it. A run that measured fewer
+/// than two wide rows has no line to fit and says so rather than printing a
+/// slope from one point.
+fn wide_scaling(rows: &[Measurement], human: &mut String) -> Result<(), std::fmt::Error> {
+    let points: Vec<(f64, f64)> = rows
+        .iter()
+        .filter(|row| row.name.starts_with("wide-"))
+        .filter_map(|row| {
+            scenarios::named(row.name).map(|scenario| (scenario.sources as f64, ns_per_tick(row)))
+        })
+        .collect();
+    if points.len() < 2 {
+        return Ok(());
+    }
+    match fit::loglog(&points) {
+        Some((slope, _)) => {
+            writeln!(
+                human,
+                "wide scaling -- least squares of ln(ns/tick) on ln(sources), {count} rows\n  \
+                 slope {slope:.3} (1.000 is linear in the source count, 2.000 quadratic); \
+                 {factor:.2}x cost per doubling",
+                count = points.len(),
+                factor = 2f64.powf(slope),
+            )?;
+        }
+        None => {
+            writeln!(
+                human,
+                "wide scaling -- no fit: the wide rows carry a non-positive value"
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1063,14 +836,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     lgwks_std::trace::install_default("lgwks-bench")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let run_timings = !args.iter().any(|a| a == "--capcheck-only");
+    // Both spellings, `--scenario NAME` and `--scenario=NAME`: the issue and
+    // `bench/README.md` write the first, and a command that silently ignored its
+    // filter would report every row without saying so.
+    let named_scenario = match args.iter().position(|a| a == "--scenario") {
+        Some(index) => match args.get(index.saturating_add(1)) {
+            Some(value) => Some(value.clone()),
+            None => {
+                let refusal: Result<(), Box<dyn std::error::Error>> =
+                    Err("--scenario needs a scenario name".into());
+                lgwks_std::trace::warn!(error = ?refusal.as_ref().err(), "main: refusing a filter with no name");
+                return refusal;
+            }
+        },
+        None => args
+            .iter()
+            .find_map(|a| a.strip_prefix("--scenario="))
+            .map(str::to_owned),
+    };
+    let only = named_scenario.as_deref();
 
-    if args.iter().any(|a| a == "--alloc-report") {
-        info!("{}", alloc_report()?);
-        return Ok(());
-    }
-
-    if args.iter().any(|a| a == "--profile") {
-        info!("{}", stage_report()?);
+    // Both doors are asked for together in the issue's verification command, and
+    // a command that silently ran one of the two would report half a measurement
+    // under a name that names both.
+    let want_alloc = args.iter().any(|a| a == "--alloc-report");
+    let want_profile = args.iter().any(|a| a == "--profile");
+    if want_alloc || want_profile {
+        if want_alloc {
+            info!("{}", alloc_report(only)?);
+        }
+        if want_profile {
+            info!("{}", profile::stage_report(only)?);
+        }
         return Ok(());
     }
 
@@ -1083,14 +880,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          ==============================================================================\n"
     )?;
 
+    let mut rows: Vec<Measurement> = Vec::new();
     if run_timings {
-        for scenario in SCENARIOS {
-            scenario_report(scenario, &mut human, &mut json)?;
+        for scenario in selected(only)? {
+            rows.push(scenario_report(scenario, &mut human, &mut json)?);
         }
     }
 
     // Capability-check scaling.
-    let scaling = cap_check_scaling()?;
+    let scaling = probes::cap_check_scaling()?;
     writeln!(
         human,
         "capability-check scaling -- Auth::check as required-capability count grows"
@@ -1126,8 +924,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Build cost.
-    let build_1 = build_cost(1)?;
-    let build_64 = build_cost(64)?;
+    let build_1 = probes::build_cost(1)?;
+    let build_64 = probes::build_cost(64)?;
     writeln!(
         human,
         "admission (build) cost\n  1 source: {:.3} ms\n  64 sources: {:.3} ms\n",
@@ -1136,13 +934,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Determinism.
-    let (deterministic, fired) = determinism_probe(&SCENARIOS[1], 500)?;
+    let (deterministic, fired) = probes::determinism_probe(&SCENARIOS[1], 500)?;
     writeln!(
         human,
         "determinism probe (500 ticks, replayed)\n  identical per-tick effect sequence: {}\n  total effects: {}\n",
         if deterministic { "YES" } else { "NO" },
         fired
     )?;
+
+    // The slope over the wide rows, after the rows it is fitted on.
+    wide_scaling(&rows, &mut human)?;
 
     json.push_str(&format!(
         "  \"cap_check_scaling\": [{}],\n  \"determinism\": {},\n  \"build_ms_1\": {:.4},\n  \"build_ms_64\": {:.4}\n}}\n",

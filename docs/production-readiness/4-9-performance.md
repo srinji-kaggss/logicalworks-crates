@@ -3,30 +3,39 @@
 Part of [production readiness](../production-readiness.md), §4, nine axes.
 
 **⚠️ — measured honestly on both paths: the synchronous tick loses by 26x to
-2 670x, and the async facade loses by 2% to 17% at p50, with one scenario's
+2 738x, and the async facade loses by 2% to 17% at p50, with one scenario's
 interval spanning parity.**
 
 Full method, raw numbers, fairness gate and exclusions are in
 [`../bench/README.md`](../../bench/README.md). The summary, with the loss stated at
-the same volume as the wins (one run of `bench/` on this host with #279's
-changes; the last column is the run on main `940e253cd` just before them):
+the same volume as the wins (one run of `bench/` on this host on 2026-10-20, load
+average 2.02 to 2.27 across the three doors, Rust 1.99.0; the last column is the
+run on main `940e253cd` just before #279's changes):
 
 | scenario | `lgwks_bot` ns/tick | hand-rolled loop ns/tick | ratio | 95% CI | before #279 |
 |---|---:|---:|---:|---|---:|
-| `poll-only-64x100` | 854.9 | 32.4 | 26.36x slower | [26.30, 26.47] | 47.22x |
-| `steady-64x100` | 2 044.8 | 32.4 | 63.04x slower | [62.75, 63.15] | 83.09x |
-| `churn-64x1` | 137 039.0 | 51.2 | 2 669.73x slower | [2 640.78, 2 682.76] | 2 698.16x |
-| `fanout-1x64` | 113 404.1 | 44.8 | 2 534.11x slower | [2 525.44, 2 576.10] | 2 553.41x |
-| `wide-256x10` | 55 214.3 | 135.4 | 407.15x slower | [406.07, 408.09] | 429.32x |
+| `poll-only-64x100` | 834.3 | 32.4 | 25.61x slower | [25.37, 26.11] | 47.22x |
+| `steady-64x100` | 2 000.9 | 31.4 | 64.20x slower | [61.36, 65.11] | 83.09x |
+| `churn-64x1` | 136 810.7 | 49.9 | 2 738.39x slower | [2 696.48, 2 766.73] | 2 698.16x |
+| `fanout-1x64` | 112 783.5 | 42.3 | 2 652.57x slower | [2 643.48, 2 668.72] | 2 553.41x |
+| `wide-256x10` | 54 662.7 | 130.1 | 414.36x slower | [401.03, 423.36] | 429.32x |
+| `wide-1024x10` | 238 705.6 | 530.6 | 451.45x slower | [440.97, 458.55] | — |
+| `wide-4096x10` | 1 167 018.7 | 2 053.1 | 568.06x slower | [550.42, 575.49] | — |
+| `wide-16384x10` | 8 471 299.9 | 8 490.6 | 996.37x slower | [988.15, 1 004.88] | — |
 
-A hand-rolled loop doing provably identical work is **26x to 2 670x faster**.
+The interval is the rig's own: a bootstrap over the per-round paired ratios, so
+it bounds the ratio and not the ns/tick column. The four `wide-*x10` rows hold the
+change-tick fraction at one in ten and vary only the source count, and the log-log
+least squares over them reads **slope 1.206** — 2.31x cost per doubling of the
+source count — printed by the same run as `wide scaling`.
+
+A hand-rolled loop doing provably identical work is **26x to 2 706x faster**.
 If your workload is a hot path, use the loop. This document says so with a
 number rather than burying it. #279's targets (≤ 10x quiet, ≤ 30x churn) are
-**missed** on every scenario. A second run of the same binary read 29.47x,
+**missed** on every scenario. The previous run of the same binary read 29.47x,
 66.61x, 2 691.57x, 2 569.68x and 409.54x, so the run-to-run spread is about two
 to three points on the quiet rows and wider than any bootstrap interval; the
-quiet rows moved by far more than that, and the effect-heavy rows did not move
-(this change does not touch the effect path).
+effect-heavy rows did not move at all (no change here touches the effect path).
 
 **What changed, and what it bought.** Three things, all on the quiet tick. A
 thread's `block_on` keeps one waker instead of building one per call; the
@@ -38,39 +47,40 @@ confirm that nothing happened. **A quiet tick now makes no heap allocation**
 102:0`), down from one — `block_on`'s waker — and from 20 before per-source
 change ticks. The 558 on the tick where 64 sources move is the boxed
 observation, the ledger transition and the journal records, about 8.7 per moved
-chain. Means: 4.2 (`poll-only`), 8.0 (`steady`), 878.0 (`churn`), 345.0
-(`fanout`), 347.4 (`wide`) allocations per tick, against 0.0 for the baseline.
-A fourth thing, timed against the code it replaced in one binary over three
-alternating rounds: a tick that polled nothing, holds no transition and is not
-parked settles in place instead of dispatching the schedule, and reads each
-source's declared cache state once. `poll-only` read 985.4 ns/tick on the old
-path and 849.9 on the new (13.8% faster, 30.0x to 26.5x), `steady` 2 132.3 and
-2 004.8 (6.0%); the effect-heavy rows moved by 1% to 2% and are not claimed
+chain. Means: 4.3 (`poll-only`), 8.8 (`steady`), 878.1 (`churn`), 345.1
+(`fanout`), and 346.1 / 1 404.9 / 5 624.9 / 22 483.2 for the wide rows — linear
+in the source count (4.06x, 4.00x, 4.00x per four times the sources) — against
+0.0 for the baseline.
+A fourth thing, timed against the code it replaced in one binary: a tick that
+polled nothing, holds no transition and is not parked settles in place and reads
+each source's declared cache state once — `poll-only` 985.4 ns/tick on the old
+path against 849.9 on the new (13.8%), `steady` 2 132.3 against 2 004.8 (6.0%)
 ([`../bench/bot-headline.md`](../../bench/bot-headline.md)).
 
-**The gap, itemised by stage** (`--profile`, same run; ns per tick, which
-includes the one tick in a hundred that moves, and the instrument adds about
-206 ns). `poll-only` (plain tick 855.7): poll 405 (49.4%), schedule 243 (29.6%),
-the other four 170 together. `steady` (plain 2 032.8): poll 394 (20.4%),
-schedule 240 (12.5%), fingerprint 77, compare 39, decide 63, act 1 113 (57.8%).
-`churn`, `fanout` and `wide`: act is 83.6%, 98.7% and 79.7%. The profile and the
-paired timing above ran at different host loads, so the stage columns are shares,
-not a second measurement of the saving. The ≤ 10x quiet
-target is not reachable by this route: it asks for a tick of about 323 ns
-against a baseline of 32.4 ns, and the poll stage alone is 405 ns, 6.3 ns per
-source for the `revision()` read, the change-tick compare and one declared-state
-read. The ≤ 30x churn target is not reachable by design: each effect writes a
-ledger transition, a warrant and a journal record, and `act` is where the time
-goes.
+**The gap, itemised by stage** (`--profile`, same binary; ns per tick, and the
+instrument adds about 212 ns). `poll-only` (plain tick 860.3): poll 411 (51.0%),
+schedule 222 (27.5%), the other four 141 together. `steady` (plain 2 012.9):
+poll 398 (20.7%), schedule 218 (11.4%), fingerprint 76, compare 38, decide 64,
+act 1 123 (58.5%). `churn`, `fanout` and `wide-256`: act is 83.9%, 98.7% and
+79.9%. The ≤ 10x quiet target is not reachable by this route: it asks for a tick
+of about 323 ns against a baseline of 32.4 ns, and the poll stage alone is 411
+ns, 6.4 ns per source for the `revision()` read, the change-tick compare and one
+declared-state read. The ≤ 30x churn target is not reachable by design: each
+effect writes a ledger transition, a warrant and a journal record, and `act` is
+where the time goes.
 
 These ratios are larger than the 72x–256x this section once carried because
 that run's bots fired effects with no ledger, no warrant and no record, and
 skipped 99 of every 100 polls through a digest seam that has since been
 removed; neither configuration is one the crate builds today
-([`../bench/README.md`](../../bench/README.md) states both). Admission and cost
-stay linear in source count with no superlinear term. `Auth::check` was
-quadratic in the capability count and is now `n·log2 n`: 12.9 µs → 3.6 µs at
-128 capabilities.
+([`../bench/README.md`](../../bench/README.md) states both). **Admission stays
+linear; the tick does not.** Building 16,384 chains costs 3.7 ms against 1.1 ms
+at 64 chains, but per fired effect `act` reads 2.9, 3.6, 5.1 and 9.7 µs at 256,
+1 024, 4 096 and 16 384 sources — 178x for 64x the sources, while poll,
+fingerprint, compare, schedule and decide grow 63x to 70x over the same range.
+The profile charges that to the effect dispatch; this run does not separate the
+ledger write from the journal record inside it. `Auth::check` was quadratic in
+the capability count and is now `n·log2 n`: 12.9 µs → 3.6 µs at 128 capabilities.
 
 **Two exclusions that favour this crate and are named so they cannot be
 unnoticed later:**
