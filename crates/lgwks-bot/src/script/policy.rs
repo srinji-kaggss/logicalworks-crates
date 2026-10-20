@@ -25,7 +25,28 @@
 //! retries. So a single flaky step keeps its full `retry up to N times`
 //! (N ≤ the reserve), while a thousand items failing together spend at most
 //! `reserve + 0.2 × 1000` retries, not `1000 × (N - 1)`. It counts operations
-//! rather than reading a clock, so a replay under simulation is exact.
+//! rather than reading a wall clock, so a replay under simulation is exact;
+//! the one place a budget reads a clock at all — the shared host window
+//! below — reads the estate's injectable clock, never the wall.
+//!
+//! # One budget per run, or one per host
+//!
+//! The budget above belongs to one run: a root scope mints it, and two
+//! concurrent runs hold two budgets. That is the right shape for a run, and
+//! the wrong shape for a host that admits many runs against one failing
+//! backend: the host admits cores × 64 runs at once, so N concurrent runs
+//! would hold N reserves and multiply the load a retry storm adds exactly
+//! when the backend can least absorb it. So a host installs a second shape
+//! of the same policy: [`Policy::for_this_host`] gives every admitted run
+//! one shared window. Credit above the reserve is still earned by first
+//! attempts at [`RETRY_RATIO_MILLI`], but it is earned by the host's
+//! traffic, it expires after [`RETRY_TTL_NANOS`] of clock time without a
+//! first attempt, and the balance never exceeds [`RETRY_CEILING_MILLI`] —
+//! twice the reserve — so the host's instant exposure to one backend is
+//! bounded no matter how many runs it admits. That is the per-server shape
+//! of gRPC's retry throttle, which tracks one `token_count` per server
+//! rather than per call, beside Finagle's per-client budget whose tokens
+//! expire after ten seconds.
 //!
 //! # Fan-out is sized to the machine
 //!
@@ -39,6 +60,8 @@
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::rt::clock::{Clock, duration_to_nanos};
 
 use super::MAX_IN_FLIGHT;
 
@@ -55,37 +78,111 @@ const RETRY_RATIO_MILLI: u64 = 200;
 /// Thousandths per whole retry.
 const MILLI: u64 = 1_000;
 
+/// The reserve in thousandths: what a budget starts with, and what credit
+/// older than the expiry is clamped back to.
+const RETRY_RESERVE_MILLI: u64 = RETRY_RESERVE * MILLI;
+
+/// The most credit first attempts may hold above the reserve, in thousandths:
+/// the reserve itself, so a shared budget's instant exposure is at most twice
+/// the reserve.
+const RETRY_EARNED_CAP_MILLI: u64 = RETRY_RESERVE_MILLI;
+
+/// The most a shared budget may hold at once, in thousandths: the reserve plus
+/// the earned cap.
+const RETRY_CEILING_MILLI: u64 = RETRY_RESERVE_MILLI + RETRY_EARNED_CAP_MILLI;
+
+/// How long credit above the reserve stays spendable, in clock nanoseconds:
+/// ten seconds, Finagle's default token time to live.
+const RETRY_TTL_NANOS: u64 = 10_000_000_000;
+
 /// The decisions shared by every step under one root scope.
 #[derive(Debug)]
-pub(super) struct Policy {
+pub(crate) struct Policy {
     /// Bodies an unbounded `each` may run at once.
     fan_out: NonZeroUsize,
     /// Retries left, in thousandths.
     retries: AtomicU64,
+    /// The shared window, when this policy belongs to a host rather than to
+    /// one run.
+    window: Option<Window>,
+}
+
+/// The shared window behind a host's budget: when credit above the reserve
+/// was last earned, and the clock that says when it has expired.
+#[derive(Debug)]
+struct Window {
+    /// The last clock time, in nanoseconds, a first attempt earned credit.
+    ///
+    /// Updated with `fetch_max`, so two runs that read the clock out of
+    /// order cannot move the stamp backwards and make earned credit look
+    /// older than it is.
+    earned_at: AtomicU64,
+    /// The host's clock, read through `now` and never advanced here.
+    clock: Clock,
+}
+
+impl Window {
+    /// A fresh window: nothing earned yet, so the stamp is the epoch. A
+    /// budget that has earned nothing holds only the reserve, which is
+    /// exactly what a stamp of zero says on any clock that starts at or
+    /// above the expiry.
+    const fn new(clock: Clock) -> Self {
+        Self {
+            earned_at: AtomicU64::new(0),
+            clock,
+        }
+    }
 }
 
 impl Policy {
     /// The policy for the machine this runs on.
     pub(super) fn for_this_machine() -> Self {
-        // A machine that cannot report its parallelism runs one body per core
-        // it is known to have, which is one.
+        match Self::machine_fan_out() {
+            Some(fan_out) => Self {
+                fan_out,
+                retries: AtomicU64::new(RETRY_RESERVE_MILLI),
+                window: None,
+            },
+            None => Self::one_body_per_core_placeholder(),
+        }
+    }
+
+    /// The policy every run a host admits shares.
+    ///
+    /// One budget for the host, not one per run: the reserve is the host's,
+    /// credit above it is earned by the host's first attempts and expires
+    /// after [`RETRY_TTL_NANOS`] of clock time, and the balance is capped at
+    /// [`RETRY_CEILING_MILLI`]. The fan-out is still sized to the machine —
+    /// sharing a retry budget says nothing about how many bodies one `each`
+    /// may wait on at once.
+    pub(crate) fn for_this_host(clock: Clock) -> Self {
+        let fan_out = match Self::machine_fan_out() {
+            Some(fan_out) => fan_out,
+            // A machine that reported no parallelism runs one body per core
+            // it is known to have, which is one.
+            None => NonZeroUsize::MIN,
+        };
+        Self {
+            fan_out,
+            retries: AtomicU64::new(RETRY_RESERVE_MILLI),
+            window: Some(Window::new(clock)),
+        }
+    }
+
+    /// The fan-out this machine can honestly run, or `None` when it reported
+    /// no parallelism at all.
+    fn machine_fan_out() -> Option<NonZeroUsize> {
         let cores = match std::thread::available_parallelism() {
             Ok(cores) => cores.get(),
             Err(_) => 1,
         };
-        let fan_out = cores.saturating_mul(FAN_OUT_PER_CORE).min(MAX_IN_FLIGHT);
         // The fan-out is non-zero by construction rather than by substitution:
         // `cores` is at least one, `FAN_OUT_PER_CORE` is non-zero and
-        // `MAX_IN_FLIGHT` is one or more, so the product is one or more before the
-        // ceiling and the ceiling itself is one or more after it. A `NonZeroUsize`
-        // here is the invariant, not a fallback for a value that failed to arrive.
-        let Some(fan_out) = NonZeroUsize::new(fan_out) else {
-            return Self::one_body_per_core_placeholder();
-        };
-        Self {
-            fan_out,
-            retries: AtomicU64::new(RETRY_RESERVE.saturating_mul(MILLI)),
-        }
+        // `MAX_IN_FLIGHT` is one or more, so the product is one or more before
+        // the ceiling and the ceiling itself is one or more after it. A
+        // `NonZeroUsize` here is the invariant, not a fallback for a value
+        // that failed to arrive.
+        NonZeroUsize::new(cores.saturating_mul(FAN_OUT_PER_CORE).min(MAX_IN_FLIGHT))
     }
 
     /// The policy a machine that reported no parallelism gets.
@@ -96,7 +193,8 @@ impl Policy {
     fn one_body_per_core_placeholder() -> Self {
         Self {
             fan_out: NonZeroUsize::MIN,
-            retries: AtomicU64::new(RETRY_RESERVE.saturating_mul(MILLI)),
+            retries: AtomicU64::new(RETRY_RESERVE_MILLI),
+            window: None,
         }
     }
 
@@ -107,19 +205,82 @@ impl Policy {
 
     /// A `retry` block is making its first attempt: earn a fraction of a retry.
     pub(super) fn first_attempt(&self) {
-        // Relaxed: the balance is a counter, not a guard for other memory.
-        let _previous = self
-            .retries
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-                Some(held.saturating_add(RETRY_RATIO_MILLI))
-            });
+        match self.window.as_ref() {
+            Some(window) => self.earn_windowed(window),
+            None => {
+                // Relaxed: the balance is a counter, not a guard for other memory.
+                let _previous =
+                    self.retries
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                            Some(held.saturating_add(RETRY_RATIO_MILLI))
+                        });
+            }
+        }
     }
 
     /// Spend one retry if the run still has one; `false` means the failure is
     /// systemic and repeating it would only add load.
     pub(super) fn take_retry(&self) -> bool {
+        match self.window.as_ref() {
+            Some(window) => self.spend_windowed(window),
+            None => self
+                .retries
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                    held.checked_sub(MILLI)
+                })
+                .is_ok(),
+        }
+    }
+
+    /// Earn credit into a shared window: clamp credit older than the expiry
+    /// back to the reserve, add the ratio, cap the balance at the ceiling,
+    /// and stamp the window with now.
+    fn earn_windowed(&self, window: &Window) {
+        let now = duration_to_nanos(window.clock.now());
+        let stamp = window.earned_at.load(Ordering::Relaxed);
+        // The staleness decision is read once, before the update, on purpose.
+        // A concurrent first attempt that refreshes the stamp between this
+        // read and the update can make freshly earned credit look stale once,
+        // which clamps it back to the reserve — bounded, and the next attempt
+        // earns again. Re-reading inside the closure could not see the stamp
+        // it clamps against without a lock, and the retry path takes none.
+        let stale = now.saturating_sub(stamp) > RETRY_TTL_NANOS;
+        let _previous = self
+            .retries
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                let held = if stale {
+                    held.min(RETRY_RESERVE_MILLI)
+                } else {
+                    held
+                };
+                Some(
+                    held.saturating_add(RETRY_RATIO_MILLI)
+                        .min(RETRY_CEILING_MILLI),
+                )
+            });
+        // `fetch_max`, not a store: two runs that read the clock out of order
+        // must not move the stamp backwards, which would make earned credit
+        // look older than it is.
+        window.earned_at.fetch_max(now, Ordering::Relaxed);
+    }
+
+    /// Spend one retry from a shared window, with the same staleness clamp
+    /// the earning side applies.
+    ///
+    /// Spending does not refresh the stamp: the surplus is earned by traffic,
+    /// so a host that only retries — no first attempts — watches its surplus
+    /// lapse at the expiry, which is the point.
+    fn spend_windowed(&self, window: &Window) -> bool {
+        let now = duration_to_nanos(window.clock.now());
+        let stamp = window.earned_at.load(Ordering::Relaxed);
+        let stale = now.saturating_sub(stamp) > RETRY_TTL_NANOS;
         self.retries
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                let held = if stale {
+                    held.min(RETRY_RESERVE_MILLI)
+                } else {
+                    held
+                };
                 held.checked_sub(MILLI)
             })
             .is_ok()

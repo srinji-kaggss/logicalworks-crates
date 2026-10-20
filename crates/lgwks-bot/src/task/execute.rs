@@ -278,13 +278,15 @@ impl Host {
         // The host's clock, not a fresh one: a run's admission wait and its
         // body's `within` budget are two readings of the same timeline, and
         // minting a second clock here would make a run that is admitted late
-        // look to its own body as if it had started on time.
+        // look to its own body as if it had started on time. The policy is the
+        // host's for the same reason: one shared retry budget, not one per run.
         let root = Scope::rooted(
             self.inner.tenant.clone(),
             self.inner.token.child_token(),
             Arc::clone(&trail),
             self.inner.clock.clone(),
             run,
+            Arc::clone(&self.inner.policy),
         );
         let scope = match root.enter(task_name.as_str()) {
             Ok(scope) => scope,

@@ -48,11 +48,16 @@ asynchronous, concurrent and bounded. What every flow gets without asking:
   shared by every `retry` under the root scope: 10 retries, plus one for every
   five first attempts (Finagle's `RetryBudget` defaults). One flaky step keeps
   its full `N`; a thousand items failing together spend about 210 retries,
-  not thousands, and the refusal is a typed `Throttled`. Per-call-site retry
-  counts are how retry storms happen: under correlated failure a naive policy
-  cut success from 55.4% to 41.5% against not retrying at all, while a budget
-  held the baseline ([arXiv:2608.25403](https://arxiv.org/abs/2608.25403));
-  the same loop sustains metastable outages
+  not thousands, and the refusal is a typed `Throttled`. A host that admits
+  many runs (`Host::builder`) installs one shared budget instead of one per
+  run: the reserve is the host's, credit above it is earned by the host's
+  traffic, expires after ten seconds without a first attempt and never pools
+  past twice the reserve — gRPC's per-server throttle shape beside Finagle's
+  per-client budget. Per-call-site retry counts are how retry storms happen:
+  under correlated failure a naive policy cut success from 55.4% to 41.5%
+  against not retrying at all, while a budget held the baseline
+  ([arXiv:2608.25403](https://arxiv.org/abs/2608.25403)); the same loop
+  sustains metastable outages
   ([arXiv:2510.03551](https://arxiv.org/abs/2510.03551)).
 - **One tenant, one scope.** Every flow takes a `Scope` first. A step's
   `scope.key()` is BLAKE3 over its tenant and its *structural* path

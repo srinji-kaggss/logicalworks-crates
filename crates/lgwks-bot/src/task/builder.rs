@@ -12,7 +12,7 @@ use crate::journal::frame::SaturatingFrom;
 use crate::registry::DomainRegistry;
 use crate::rt::clock::Clock;
 use crate::rt::sync::{CancellationToken, Semaphore};
-use crate::script::Tenant;
+use crate::script::{Policy, Tenant};
 
 use super::admit::{HighWater, LiveRuns};
 use super::host::Installation;
@@ -298,6 +298,7 @@ impl HostBuilder {
                 peak_in_flight: HighWater::default(),
                 admitted: AtomicU64::new(0),
                 refused: AtomicU64::new(0),
+                policy: Arc::new(Policy::for_this_host(self.clock.clone())),
                 clock: self.clock,
                 store: self.store,
                 codec: self.codec,

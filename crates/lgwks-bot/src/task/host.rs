@@ -13,7 +13,7 @@ use crate::registry::DomainRegistry;
 use crate::rt::clock::Clock;
 use crate::rt::runtime::Runtime;
 use crate::rt::sync::{CancellationToken, Semaphore};
-use crate::script::{DEFAULT_TRAIL_STEPS, Durable, FlowError, Scope, Tenant};
+use crate::script::{DEFAULT_TRAIL_STEPS, Durable, FlowError, Policy, Scope, Tenant};
 
 use super::admit::{HighWater, LiveRuns};
 use super::builder::{
@@ -81,6 +81,13 @@ pub(super) struct Installation {
     /// Read by the admission wait and handed to each run's root scope, so one
     /// timeline governs the whole host rather than each step choosing its own.
     pub(super) clock: Clock,
+    /// The retry budget every run this host admits shares.
+    ///
+    /// One budget for the host, not one per run: a host that admits many runs
+    /// against one failing backend holds one reserve, not one per run, so the
+    /// load a retry storm adds does not scale with concurrency. Handed to each
+    /// run's root scope beside the clock.
+    pub(super) policy: Arc<Policy>,
     /// The durable step-record store, when one was installed.
     ///
     /// `None` is the honest local mode: no record survives the process, so no
