@@ -120,7 +120,7 @@
 "crates/lgwks-bot/src/script/ready/readiness.rs" = 16
 "crates/lgwks-bot/src/script/ready/state.rs" = 1
 "crates/lgwks-bot/src/script/run_store.rs" = 12
-"crates/lgwks-bot/src/script/scope.rs" = 23
+"crates/lgwks-bot/src/script/scope.rs" = 24
 "crates/lgwks-bot/src/script/trail.rs" = 11
 "crates/lgwks-bot/src/semantic.rs" = 21
 "crates/lgwks-bot/src/session.rs" = 9
@@ -204,3 +204,5 @@
 # The doc-example ceiling (#526): per documentation file, how many fenced Rust
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
+
+"crates/lgwks-bot/src/script/scope.rs" = 1

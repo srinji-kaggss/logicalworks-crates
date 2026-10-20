@@ -219,11 +219,20 @@ fn two_tenants_never_share_a_step_key() -> TestResult {
     Ok(())
 }
 
-/// The same tenant and path key the same on every run, so a key is usable as an
-/// idempotency key across a retry.
+/// Two runs of one flow never share a step key, so a receiver deduplicating on
+/// `scope.key()` answers one run's effect once and a second run is never
+/// mistaken for the first's repeat (issue #646).
+///
+/// The host needs a store: a run id is minted only for a host that installed
+/// one, and the `ephemeral` entropy source is what mints it. A host with no
+/// store mints no run, keys by tenant and path alone, and is the local form the
+/// `StepKey` doc describes — never a cross-run idempotency key.
+#[cfg(feature = "ephemeral")]
 #[test]
-fn a_step_key_is_stable_across_runs_for_one_tenant() -> TestResult {
-    let host = host("acme")?;
+fn two_runs_of_one_flow_never_share_a_step_key() -> TestResult {
+    use crate::scratch::Scratch;
+    let scratch = Scratch::new("two-runs-key-apart")?;
+    let host = Host::builder("acme")?.run_store(scratch.path())?.build()?;
     let observed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let body_log = Rc::clone(&observed);
     let keyed: Shared<_> = Rc::new(task("keyed", move |scope: Scope, value: u32| {
@@ -239,9 +248,9 @@ fn a_step_key_is_stable_across_runs_for_one_tenant() -> TestResult {
 
     let keys = observed.borrow();
     assert_eq!(keys.len(), 2, "each run recorded its key once");
-    assert_eq!(
+    assert_ne!(
         keys[0], keys[1],
-        "the same tenant and the same path key the same every run"
+        "two runs of one flow, one tenant, one input: the keys must differ"
     );
     Ok(())
 }

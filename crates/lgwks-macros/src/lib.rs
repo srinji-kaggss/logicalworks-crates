@@ -37,6 +37,10 @@
 //! | `give back value` | return from the flow |
 //! | `fail with reason` / `fail transiently with reason` | stop with a permanent / retryable failure |
 //!
+//! Every step keys by tenant, run and path (`Scope::key`): one run's attempts
+//! and restarts share a key, two runs of one flow never do, and work that is
+//! one act across runs names itself with `Scope::business_key`.
+//!
 //! Any other line is Rust, passed through as written. Inside every flow
 //! `scope` is the current [`Scope`], and `.or_fail()` / `.or_retry()` turn a
 //! foreign error into a flow failure.

@@ -514,8 +514,9 @@ fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     }
     let grown = doubled.min(MAX_BACKOFF);
     // The jitter byte comes from the step key, so two siblings that failed
-    // together spread out rather than retrying in lockstep, and the same step
-    // always waits the same time. The key is 32 bytes and the index is masked to
+    // together spread out rather than retrying in lockstep, and one run's step
+    // always waits the same time (two runs of one flow key differently, #646).
+    // The key is 32 bytes and the index is masked to
     // its low five bits, so the byte always exists: there is no missing case to
     // give a default. The annotation pins the width the mask relies on, so a key
     // of another width stops compiling here instead of reading out of range.

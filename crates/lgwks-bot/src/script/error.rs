@@ -131,6 +131,16 @@ pub enum FlowError {
         /// What is wrong with it.
         reason: &'static str,
     },
+    /// A business key name did not validate.
+    ///
+    /// A business key is the name a caller gives
+    /// [`Scope::business_key`](crate::script::Scope::business_key) to hash one
+    /// piece of cross-run work under, so it is validated before it is hashed
+    /// and refused here rather than at the first deduplication.
+    InvalidBusinessKey {
+        /// What is wrong with it.
+        reason: &'static str,
+    },
     /// A step reached for authority this run does not have.
     ///
     /// The one flow failure that is not a defect in the step and not a transient
@@ -244,6 +254,7 @@ impl FlowError {
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::InvalidRequestKey { .. }
+            | Self::InvalidBusinessKey { .. }
             | Self::InvalidBound { .. }
             | Self::Incompatible { .. }
             | Self::Store { .. } => false,
@@ -329,6 +340,7 @@ impl FlowError {
             Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::InvalidRequestKey { .. }
+            | Self::InvalidBusinessKey { .. }
             | Self::InvalidBound { .. } => {}
         }
         self
@@ -388,6 +400,9 @@ impl fmt::Display for FlowError {
             Self::InvalidRequestKey { reason } => {
                 write!(formatter, "invalid request key: {reason}")
             }
+            Self::InvalidBusinessKey { reason } => {
+                write!(formatter, "invalid business key: {reason}")
+            }
             Self::InvalidBound { what, value, max } => {
                 write!(formatter, "{what}: {value} is outside 1..={max}")
             }
@@ -422,6 +437,7 @@ impl std::error::Error for FlowError {
             | Self::InvalidName { .. }
             | Self::Incompatible { .. }
             | Self::InvalidRequestKey { .. }
+            | Self::InvalidBusinessKey { .. }
             | Self::InvalidBound { .. } => None,
         }
     }

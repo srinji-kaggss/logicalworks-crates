@@ -790,7 +790,10 @@ where
     records
         .agrees(run, definition)
         .map_err(|error| error.located_at(scope.shared_path()))?;
-    let key = scope.key();
+    // The store keys records by the run-less form (#646): a record's identity
+    // is the step's definition-level key, so a resumed run replays the records
+    // a previous run wrote without a migration.
+    let key = scope.record_key();
     let tenant = scope.tenant().as_str();
 
     if let Some(stored) = records.lookup(tenant, run, key)? {

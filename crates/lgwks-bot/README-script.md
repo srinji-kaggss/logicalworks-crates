@@ -55,10 +55,12 @@ asynchronous, concurrent and bounded. What every flow gets without asking:
   the same loop sustains metastable outages
   ([arXiv:2510.03551](https://arxiv.org/abs/2510.03551)).
 - **One tenant, one scope.** Every flow takes a `Scope` first. A step's
-  `scope.key()` is BLAKE3 over its tenant and its *structural* path
+  `scope.key()` is BLAKE3 over its tenant, its run and its *structural* path
   (`crawl/each:page#41/retry`), never a line number, so the key an effect is
-  deduplicated by survives an edit, a retry and a restart, and two tenants
-  never share one.
+  deduplicated by survives an edit, a retry and a restart, two tenants never
+  share one, and two runs of one flow never share one either. Work that is one
+  effect across runs — one charge per order — names itself with
+  `scope.business_key(name, &input)` instead.
 - **Stop reaches everything.** The scope carries a `CancellationToken`; a
   supervisor's shutdown, a failed sibling or a caller's cancel stops every
   body beneath it, and no new step starts after a stop.
