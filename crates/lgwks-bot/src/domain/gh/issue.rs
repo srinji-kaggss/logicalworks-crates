@@ -196,7 +196,8 @@ const SETTLE_POLLS: u8 = 8;
 /// The wait before the second listing read; each later wait doubles.
 const FIRST_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
-/// The longest single wait between listing reads; eight reads span about 20 s.
+/// The longest single wait between listing reads; the seven waits between eight
+/// reads are 250 + 500 + 1,000 + 2,000 + 4,000 + 4,000 + 4,000 = 15.75 s.
 const MAX_SETTLE_DELAY: Duration = Duration::from_secs(4);
 
 /// The bounded read schedule a settle follows.
