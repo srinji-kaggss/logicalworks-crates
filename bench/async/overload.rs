@@ -1,7 +1,8 @@
 //! Overload and recovery: a baseline phase, twice-the-knee overload, then back
 //! down, measuring the drain and the return to the baseline p99.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

@@ -1,7 +1,8 @@
 //! Allocation attribution: each operation counted in its own process-wide window,
 //! never mixed with a timed round, with the unit named on every row.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

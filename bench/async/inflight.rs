@@ -1,7 +1,8 @@
 //! The in-flight tiers: that many tasks concurrently admitted, so the bound is
 //! the tier and the observed peak in flight is the tier.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

@@ -2,7 +2,8 @@
 //! body both sides run, the drain helpers, the tally the fairness gate compares,
 //! and the print/refusal helpers every table shares.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

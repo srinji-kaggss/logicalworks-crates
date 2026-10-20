@@ -1,7 +1,8 @@
 //! The saturation sweep: offered rate past the knee at every declared bound, on
 //! one admission door, with the knee read from the measured rows.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

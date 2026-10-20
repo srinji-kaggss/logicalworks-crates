@@ -1,7 +1,8 @@
 //! The engine surfaces both sides implement, and the box that lets a multi-phase
 //! run drive either one through a single loop.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

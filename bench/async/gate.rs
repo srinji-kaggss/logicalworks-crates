@@ -2,7 +2,8 @@
 //! both sides must pass, and the checks that stand in for it once the two sides
 //! legitimately diverge past the knee.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

@@ -1,7 +1,8 @@
 //! The §3 workload matrix: one receipt per scenario the crate can actually drive
 //! today, gated by the counts each row produced rather than by a summary line.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 

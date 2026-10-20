@@ -1,7 +1,8 @@
 //! The open-loop generator: one arrival schedule, a bounded queue-depth trace,
 //! the arrival both engines consume, and the run that offers one side's load.
 //!
-//! Moved verbatim from `main.rs` for #639; the items below are unchanged.
+//! Moved from `main.rs` for #639: the behaviour, printed lines, numbers and
+//! bounds are unchanged.
 
 use super::*;
 
