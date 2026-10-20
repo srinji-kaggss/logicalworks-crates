@@ -83,6 +83,14 @@ pub(crate) fn fair(left: &Tally, right: &Tally) -> Result<(), String> {
 /// 50 ms ceiling would otherwise be smaller than one service time at the wide bounds.
 pub(crate) const SLO_P99_NANOS: u64 = 50_000_000;
 
+/// The same floor in whole milliseconds, which is the unit every table prints it in.
+///
+/// Derived from [`SLO_P99_NANOS`] rather than typed a second time: the table read
+/// `50000000 ms` for a 50 ms budget when a message interpolated the nanosecond
+/// constant beside a `ms` label, and a second literal would be the same defect
+/// waiting for the next edit.
+pub(crate) const SLO_P99_MILLIS: u64 = SLO_P99_NANOS / 1_000_000;
+
 /// Extra service times of queueing the p99 budget allows on top of the floor.
 ///
 /// One, and it is the standard queueing reading: below the knee an arrival waits less than
@@ -285,4 +293,22 @@ pub(crate) fn open_loop_pair_fair(
     };
     fair(&tally(facade), &tally(baseline)).map_err(|reason| format!("{label}: {reason}"))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SLO_P99_MILLIS, SLO_P99_NANOS};
+
+    /// The millisecond spelling of the floor is the nanosecond spelling, not a
+    /// second number: a table printing the nanoseconds beside a `ms` label read
+    /// `50000000 ms` for a 50 ms budget.
+    #[test]
+    fn the_printed_floor_is_the_floor() {
+        assert_eq!(SLO_P99_MILLIS, 50, "50 ms is the estate's budget");
+        assert_eq!(
+            SLO_P99_MILLIS.saturating_mul(1_000_000),
+            SLO_P99_NANOS,
+            "the millisecond spelling must be the same budget"
+        );
+    }
 }

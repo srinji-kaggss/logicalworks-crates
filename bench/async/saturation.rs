@@ -10,7 +10,8 @@ use std::time::Duration;
 use crate::driver::{OpenLoopSpec, open_loop_side};
 use crate::engine::{Admission, Side};
 use crate::gate::{
-    BUDGET_EXTRA_BODIES, SLO_P99_NANOS, SideRun, open_loop_conserved, open_loop_pair_fair,
+    BUDGET_EXTRA_BODIES, SLO_P99_MILLIS, SLO_P99_NANOS, SideRun, open_loop_conserved,
+    open_loop_pair_fair,
 };
 use crate::support::{micros, print_columns, print_row, worker_and_core_cells};
 // ── The saturation sweep ─────────────────────────────────────────────────────
@@ -332,7 +333,7 @@ pub(crate) async fn saturation_sweep(
         );
         info!(
             "bound {bound}  (declared capacity {} arrivals/s at a {} us body; knee budget \
-             {:.1} ms = the {SLO_P99_NANOS} ms floor or {BUDGET_EXTRA_BODIES} further service \
+             {:.1} ms = the {SLO_P99_MILLIS} ms floor or {BUDGET_EXTRA_BODIES} further service \
              time{}, whichever is larger)",
             capacity_per_second(bound, body_micros),
             body_micros,
@@ -412,7 +413,7 @@ pub(crate) async fn saturation_sweep(
 fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64) {
     info!(
         "knee — the highest offered rate with no refusal and p99 inside the bound's budget \
-         ({SLO_P99_NANOS} ms or {BUDGET_EXTRA_BODIES} further service time, whichever is \
+         ({SLO_P99_MILLIS} ms or {BUDGET_EXTRA_BODIES} further service time, whichever is \
          larger)"
     );
     print_columns(&KNEE_COLUMNS);
