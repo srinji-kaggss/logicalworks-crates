@@ -247,7 +247,14 @@ fn read_root(root: &Path) -> Result<Root, String> {
                 Ok(script) => entry
                     .flows
                     .extend(script.flows().iter().map(|flow| flow.shape().clone())),
-                Err(refusal) => return Err(refused(&file, refusal)),
+                Err(refusal) => {
+                    lgwks_std::trace::debug!(
+                        path = %file.display(),
+                        error = %refusal.message(),
+                        "script diff: a script was refused while reading a root"
+                    );
+                    return Err(refused(&file, refusal));
+                }
             }
         }
         files.insert(relative(&file, root), entry);
