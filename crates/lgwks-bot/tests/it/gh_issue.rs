@@ -23,9 +23,10 @@ use lgwks_bot::domain::gh::{
 use lgwks_bot::rt::clock::Clock;
 use lgwks_bot::script::{FlowError, Scope};
 use lgwks_bot::task::{Host, MAX_TASK_DEADLINE, Report, task};
-use lgwks_bot::{BotError, Cap, GrantSet, domains};
+use lgwks_bot::{BotError, Cap, DispatchCertainty, GrantSet, domains};
 
-use crate::fake_gh_issues::{calls_on, creates_on, held_on, hold, issue_on_fake};
+use crate::fake_gh_issues::{calls_on, creates_on, held_on, hide, hold, issue_on_fake, land_later};
+use crate::sim_keyed::drive;
 
 /// A test's result: an error fails it with the error's text.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -65,13 +66,13 @@ pub(crate) fn full_grant() -> GrantSet {
         .grant(Cap::new(ISSUE_CREATE))
 }
 
-/// A host for `tenant` over the fake receiver, on the production wall clock.
+/// A host for `tenant` over the fake receiver, on a clock [`open`] drives.
+///
+/// Every new key waits out GitHub's in-flight bound before its create, so a
+/// host on the wall clock would spend eleven real seconds per create; on this
+/// clock the wait is spent by the driver and costs nothing.
 pub(crate) fn fake_host(tenant: &str, grants: GrantSet) -> Result<Host, Box<dyn Error>> {
-    Ok(Host::builder(tenant)?
-        .domains(&FAKE_ISSUES)
-        .grants(grants)
-        .default_deadline(Duration::from_secs(120))
-        .build()?)
+    fake_host_with_clock(tenant, grants, Clock::virtual_at(Duration::ZERO))
 }
 
 /// A host for `tenant` whose runs measure every wait on `clock`.
@@ -92,36 +93,23 @@ pub(crate) fn fake_host_with_clock(
         .build()?)
 }
 
-/// Run the flow once on `host`.
+/// Run the flow once on `host`, driving the host's own clock.
+///
+/// A wall-clock host is never advanced: the driver's advance is refused and
+/// the run's waits, if any, are real.
 pub(crate) fn open(
     host: &Host,
     repo: &str,
     draft: &IssueDraft,
 ) -> Result<Report<OpenedIssue>, Box<dyn Error>> {
-    let opening = task(
-        "opening",
-        |scope: Scope, (repo, draft): (String, IssueDraft)| async move {
-            open_issue(&scope, &repo, draft).await
-        },
-    )?;
-    Ok(lgwks_bot::block_on(
-        host.run(&opening, (repo.to_owned(), draft.clone())),
-    ))
+    open_on_clock(host, &host.clock().clone(), repo, draft)
 }
-
-/// How far one driver step moves a test's flow clock.
-///
-/// A second is the smallest step that always advances a settle wait: the
-/// schedule's longest single wait is four seconds, so at most four steps are
-/// spent on one. Nothing here reads the wall clock.
-const DRIVE_STEP: Duration = Duration::from_secs(1);
 
 /// Run the flow once on `host`, advancing `clock` until the run settles.
 ///
 /// Every wait the action makes is on this clock, so a run parked on one makes
-/// no progress until the driver moves it. The driver advances only while a
-/// wait is actually parked (`Clock::has_waiters`), so a run waiting on a child
-/// process does not burn logical time, and it stops on the run's own return.
+/// no progress until [`drive`] moves it; a run waiting on a child process
+/// burns no logical time.
 pub(crate) fn open_on_clock(
     host: &Host,
     clock: &Clock,
@@ -134,44 +122,10 @@ pub(crate) fn open_on_clock(
             open_issue(&scope, &repo, draft).await
         },
     )?;
-    let finished = lgwks_bot::rt::sync::CancellationToken::new();
-    let run_finished = finished.clone();
-    let driver_clock = clock.clone();
-    let report = lgwks_bot::block_on(async {
-        let run = async {
-            let report = host.run(&opening, (repo.to_owned(), draft.clone())).await;
-            // A driver parked on `wait_for_waiter` is woken by the stop, so a
-            // run that ends between two waits cannot leave the join open.
-            run_finished.cancel();
-            report
-        };
-        let drive = async move {
-            loop {
-                if finished.is_cancelled() {
-                    return;
-                }
-                if driver_clock.has_waiters() {
-                    if driver_clock.advance(DRIVE_STEP).is_err() {
-                        return;
-                    }
-                    // Let the woken wait be polled before the next step; a
-                    // four-second wait needs four of them.
-                    lgwks_bot::rt::task::yield_now().await;
-                } else {
-                    // Nothing is waiting on the clock, so the run is busy with
-                    // a child or the next step: park here rather than spin,
-                    // and wake when a wait registers.
-                    lgwks_bot::select! {
-                        () = driver_clock.wait_for_waiter() => {}
-                        () = finished.cancelled() => return,
-                    }
-                }
-            }
-        };
-        let (report, ()) = lgwks_bot::join!(run, drive);
-        report
-    });
-    Ok(report)
+    Ok(drive(
+        clock,
+        host.run(&opening, (repo.to_owned(), draft.clone())),
+    ))
 }
 
 /// The issue a run settled on, or why it did not settle.
@@ -196,27 +150,33 @@ pub(crate) fn failed(report: &Report<OpenedIssue>) -> Result<&BotError, String> 
     }
 }
 
-/// Open `key` on `repo` from a fresh fully granted host, requiring that this
-/// run created the issue.
-fn open_new(repo: &str, key: &str, title: &str) -> Result<OpenedIssue, Box<dyn Error>> {
-    let host = fake_host("acme", full_grant())?;
-    let draft = IssueDraft::new(key, title, "Body text.")?;
-    let issue = opened(&open(&host, repo, &draft)?)?.clone();
-    assert_eq!(issue.settlement(), Settlement::Created, "{key} on {repo}");
-    Ok(issue)
-}
-
 // ── J1 ─────────────────────────────────────────────────────────────────────
 
+/// A new key finds nothing, waits out GitHub's in-flight bound on the flow's
+/// clock, finds nothing again, and creates once.
 #[test]
 fn a_flow_opens_an_issue_and_reads_it_back() -> TestResult {
-    let issue = open_new("j1-owner/accept", "j1", "The harness opened this")?;
+    let host = fake_host("acme", full_grant())?;
+    let draft = IssueDraft::new("j1", "The harness opened this", "Body text.")?;
+    let started = Instant::now();
+    let issue = opened(&open(&host, "j1-owner/accept", &draft)?)?.clone();
+    let elapsed = started.elapsed();
+    assert_eq!(issue.settlement(), Settlement::Created);
     assert_eq!(issue.number(), 1);
     assert_eq!(issue.url(), "https://github.com/j1-owner/accept/issues/1");
     assert_eq!(creates_on("j1-owner")?, 1, "one create");
-    // One listing read, one read of the number past it (a 404: nothing is
-    // unlisted), and the create, confirmed from its own answer. No settle.
-    assert_eq!(calls_on("j1-owner")?.len(), 3);
+    // Two finds (a listing, then two 404s past it, each) around the fence,
+    // and the create, confirmed from its own answer.
+    assert_eq!(calls_on("j1-owner")?.len(), 7);
+    assert!(
+        host.clock().now() >= Duration::from_secs(11),
+        "the fence waits GitHub's 10 s request bound plus 1 s on the flow's clock: {:?}",
+        host.clock().now()
+    );
+    assert!(
+        elapsed < Duration::from_secs(11),
+        "the fence must not wait in real time: {elapsed:?}"
+    );
     Ok(())
 }
 
@@ -270,9 +230,9 @@ fn an_immediate_rerun_under_a_lagging_listing_finds_the_issue_by_number() -> Tes
             .any(|argv| argv.iter().any(|arg| arg.ends_with("/issues/1"))),
         "the rerun read #1 by its number: {calls:?}"
     );
-    // The first run's listing, its 404 past it and the create; the rerun's
-    // listing (still lagging) and its read of #1.
-    assert_eq!(calls.len(), 5);
+    // The first run's two finds and the create; the rerun's listing (still
+    // lagging) and its read of #1.
+    assert_eq!(calls.len(), 9);
     Ok(())
 }
 
@@ -306,7 +266,7 @@ fn a_listing_that_never_shows_the_issue_is_read_past_by_number() -> TestResult {
     assert_eq!(again.settlement(), Settlement::Found);
     assert_eq!(again.number(), first.number());
     assert_eq!(creates_on("stale-owner")?, 1);
-    assert_eq!(calls_on("stale-owner")?.len(), 5);
+    assert_eq!(calls_on("stale-owner")?.len(), 9);
     Ok(())
 }
 
@@ -472,9 +432,10 @@ fn a_lost_answer_that_landed_nowhere_is_indeterminate_after_the_settle() -> Test
         "{:?}",
         report.result()
     );
-    // The scan (listing, 404), the create, then eight read-back scans.
+    // Two finds around the fence, the create, then eight read-back finds of
+    // three calls each (a listing and two 404s).
     assert_eq!(creates_on("vanish-owner")?, 1);
-    assert_eq!(calls_on("vanish-owner")?.len(), 19);
+    assert_eq!(calls_on("vanish-owner")?.len(), 31);
     assert!(
         clock.now() >= Duration::from_millis(15_750),
         "the settle must spend its schedule on the flow's clock, which read {:?}",
@@ -505,7 +466,129 @@ fn a_rejected_create_is_refused_at_once_and_not_read_back() -> TestResult {
     );
     assert_eq!(creates_on("rejected-owner")?, 1);
     assert_eq!(held_on("rejected-owner", "refuse")?, 0);
-    assert_eq!(calls_on("rejected-owner")?.len(), 3);
+    assert_eq!(calls_on("rejected-owner")?.len(), 7);
+    Ok(())
+}
+
+/// GitHub's other two rejections of a create, `400` and `410`, are refusals
+/// too: nothing landed, nothing is read back, and the certainty a retry
+/// policy reads is `Refused`.
+#[test]
+fn a_create_rejected_with_400_or_410_is_refused_at_once() -> TestResult {
+    for status in ["400", "410"] {
+        let owner = format!("rejected{status}-owner");
+        let repo = format!("refuse-{status}");
+        let host = fake_host("acme", full_grant())?;
+        let draft = IssueDraft::new("rejected", "Rejected by the receiver", "")?;
+        let report = open(&host, &format!("{owner}/{repo}"), &draft)?;
+        let error = failed(&report)?;
+        assert!(
+            matches!(
+                *error,
+                BotError::DomainError { ref cause, .. }
+                    if cause.contains(&format!("rejected by GitHub (HTTP {status})"))
+            ),
+            "{error:?}"
+        );
+        assert_eq!(error.dispatch_certainty(), DispatchCertainty::Refused);
+        assert_eq!(held_on(&owner, &repo)?, 0);
+        assert_eq!(calls_on(&owner)?.len(), 7, "no read-back after a rejection");
+    }
+    Ok(())
+}
+
+/// A read-back read that fails does not end the read-back: the next read
+/// finds the issue the lost create left, and the run is reconciled.
+#[test]
+fn a_failed_read_back_read_does_not_end_the_read_back() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let draft = IssueDraft::new("flaky", "Read back through a failure", "")?;
+    let report = open(&host, "flaky-owner/dropflaky", &draft)?;
+    assert_eq!(opened(&report)?.settlement(), Settlement::Reconciled);
+    assert_eq!(creates_on("flaky-owner")?, 1);
+    assert_eq!(held_on("flaky-owner", "dropflaky")?, 1);
+    Ok(())
+}
+
+// ── Finding what the listing has not shown ─────────────────────────────────
+
+/// A Discussion's number inside the sequence answers `404` at an issue's
+/// address, and does not end the find: the key's unlisted issue past it is
+/// still read, and no duplicate is created.
+#[test]
+fn a_discussion_number_inside_the_sequence_does_not_end_the_find() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let ours = IssueDraft::new("ours", "Ours", "")?;
+    let theirs = IssueDraft::new("theirs", "Theirs", "")?;
+    // #1 is listed, #2 is a Discussion (no issue), #3 is ours and unlisted.
+    hold("gap-owner", "accept", 1, &theirs)?;
+    hold("gap-owner", "accept", 3, &ours)?;
+    hide("gap-owner", "accept", 3, 99)?;
+    let issue = opened(&open(&host, "gap-owner/accept", &ours)?)?.clone();
+    assert_eq!(issue.settlement(), Settlement::Found);
+    assert_eq!(issue.number(), 3);
+    assert_eq!(creates_on("gap-owner")?, 0);
+    Ok(())
+}
+
+/// An older issue can trail a newer one into the listing. The key's issue
+/// below the listing's newest, not yet listed, is read by its number.
+#[test]
+fn an_unlisted_issue_below_a_listed_one_is_found() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let ours = IssueDraft::new("ours", "Ours", "")?;
+    let theirs = IssueDraft::new("theirs", "Theirs", "")?;
+    hold("below-owner", "accept", 1, &ours)?;
+    hide("below-owner", "accept", 1, 99)?;
+    hold("below-owner", "accept", 2, &theirs)?;
+    let issue = opened(&open(&host, "below-owner/accept", &ours)?)?.clone();
+    assert_eq!(issue.settlement(), Settlement::Found);
+    assert_eq!(issue.number(), 1);
+    assert_eq!(creates_on("below-owner")?, 0);
+    Ok(())
+}
+
+/// A run killed after sending its create leaves that create in flight. A
+/// rerun that finds nothing at first waits out GitHub's in-flight bound,
+/// reads again, and finds the issue the killed create landed, instead of
+/// creating a second.
+#[test]
+fn a_create_still_in_flight_from_a_killed_run_is_found_not_duplicated() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let draft = IssueDraft::new("inflight", "Sent by a killed run", "")?;
+    // It lands on the fourth call: after the first find's three, before the
+    // read that follows the fence is answered.
+    land_later("flight-owner", "accept", &draft, 4)?;
+    let issue = opened(&open(&host, "flight-owner/accept", &draft)?)?.clone();
+    assert_eq!(issue.settlement(), Settlement::Found);
+    assert_eq!(issue.number(), 1);
+    assert_eq!(creates_on("flight-owner")?, 0, "the rerun created nothing");
+    assert_eq!(held_on("flight-owner", "accept")?, 1);
+    assert!(host.clock().now() >= Duration::from_secs(11));
+    Ok(())
+}
+
+/// A repository whose listing trails by more than sixteen numbers refuses the
+/// open rather than creating over a window it could not read.
+#[test]
+fn a_listing_more_than_sixteen_numbers_behind_refuses_the_open() -> TestResult {
+    let host = fake_host("acme", full_grant())?;
+    let theirs = IssueDraft::new("theirs", "Theirs", "")?;
+    for number in 1..=17 {
+        hold("behind-owner", "accept", number, &theirs)?;
+        hide("behind-owner", "accept", number, 99)?;
+    }
+    let ours = IssueDraft::new("ours", "Ours", "")?;
+    let report = open(&host, "behind-owner/accept", &ours)?;
+    assert!(
+        matches!(
+            *failed(&report)?,
+            BotError::DomainError { ref cause, .. } if cause.contains("more than 16 issue numbers")
+        ),
+        "{:?}",
+        report.result()
+    );
+    assert_eq!(creates_on("behind-owner")?, 0);
     Ok(())
 }
 
@@ -536,8 +619,8 @@ fn a_create_refused_for_its_credential_is_not_read_back() -> TestResult {
         report.result()
     );
     // GitHub refused the write, so nothing landed and nothing is read back:
-    // the listing, its 404 past it, the create.
-    assert_eq!(calls_on("dc-owner")?.len(), 3);
+    // the two finds around the fence, the create.
+    assert_eq!(calls_on("dc-owner")?.len(), 7);
     Ok(())
 }
 

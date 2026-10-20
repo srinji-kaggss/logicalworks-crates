@@ -517,10 +517,12 @@ impl GhError {
             | GhError::IssueDraft { .. }
             | GhError::NoRunner
             | GhError::PayloadNotSent { .. }
-            | GhError::Staging { .. }
-            // GitHub answered that the request itself is unacceptable: the
-            // child ran, and the write still landed nothing.
-            | GhError::Rejected { .. } => crate::error::DispatchCertainty::Refused,
+            | GhError::Staging { .. } => crate::error::DispatchCertainty::Refused,
+            // The child ran and GitHub answered that the request itself is
+            // unacceptable (`400`, `410`, `422`): the write landed nothing, and
+            // the same request draws the same refusal, which is what `Refused`
+            // says — permanent, not a retry — even though a child existed.
+            GhError::Rejected { .. } => crate::error::DispatchCertainty::Refused,
             // The client ran: whatever it was asked to do may have happened
             // and its answer been lost or misread.
             _ => crate::error::DispatchCertainty::NotDelivered,

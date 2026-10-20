@@ -30,9 +30,10 @@
 //! sees. The drawn value is recorded in the trace so a sweep says which lags
 //! it reached.
 //!
-//! The fake receiver forks a shell per call, and an open makes three calls
-//! when nothing is lost, so the family pays in process starts rather than in
-//! seconds. Each tenant opens at most twice, which is the fewest that still
+//! The fake receiver forks a shell per call, and a new key's open makes seven
+//! calls when nothing is lost (two finds around the in-flight fence, which the
+//! scenario's clock spends, and the create), so the family pays in process
+//! starts rather than in seconds. Each tenant opens at most twice, which is the fewest that still
 //! holds a duplicate to its own key, and the host caps this family by process
 //! starts rather than by the tiers the action itself would serve.
 

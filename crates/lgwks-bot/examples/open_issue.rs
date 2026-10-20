@@ -13,11 +13,14 @@
 //! The body is the flow below and nothing else: one `act` line. The host
 //! grants running `gh` and reaching the network; the write, the capability
 //! `github.issue.create`, only when the operator names it with `--grant`. The
-//! key is what makes a rerun safe: the action reads GitHub back for it before
-//! it creates — the listing, then every issue number past it — so a rerun
-//! after a crash or a lost answer finds the first run's issue without waiting
-//! for GitHub's listing to catch up. A new key costs three `gh` calls: the
-//! listing, one number read and the create.
+//! key is what makes a rerun safe: the action (through `lgwks_bot::keyed`)
+//! reads GitHub back for it before it creates — the listing, then the numbers
+//! the listing has not caught up on — so a rerun after a crash or a lost
+//! answer finds the first run's issue without waiting for GitHub's listing. A
+//! key that exists costs one read. A new key also waits out GitHub's 10 s
+//! request bound (11 s from the open's start) and reads again before its one
+//! create, so a create a killed run left in flight lands before this run
+//! decides, rather than beside a second issue.
 //!
 //! Exit status: 0 an issue is open; 2 refused before anything was written;
 //! 3 a write may or may not have landed (rerun with the same key to settle

@@ -17,6 +17,8 @@
 //! | `kill` | holds the issue, then `SIGKILL`s itself before answering |
 //! | `kill-N` | as `kill`, and its listings hide the issue for N reads |
 //! | `refuse` | rejects the create without holding it (HTTP 422) |
+//! | `refuse-N` | rejects the create with HTTP `N` (`400`, `410`) |
+//! | `dropflaky` | as `drop`, and the next listing read fails (HTTP 502) |
 //! | `vanish` | loses the create's answer (exit 7) without holding the issue |
 //! | `deny` | refuses every call's credential (HTTP 403) |
 //! | `denycreate` | answers reads, refuses the create's credential (HTTP 403) |
@@ -36,6 +38,13 @@
 //! its reply), and `-N` names how many listing reads still hide the issue. Each
 //! `owner/repo` has its own store, so tests that use distinct owners never see
 //! each other's issues however they are scheduled.
+//!
+//! Two faults are set up by a test rather than by the name: [`hide`] keeps a
+//! held issue out of the next N listings, and [`land_later`] leaves a create in
+//! flight that lands as the Nth call after it reaches the fake, as a create
+//! sent by a run killed before its answer lands while the rerun reads. A number
+//! the store does not hold answers `404`, which is also how GitHub answers a
+//! Discussion's number at an issue's address.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -133,6 +142,42 @@ pub fn hold(
     Ok(())
 }
 
+/// Hide `owner/repo`'s issue `number` from the next `reads` listings.
+pub fn hide(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    reads: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::write(
+        dir()?.join(format!("lag-{owner}-{repo}-{number}")),
+        reads.to_string(),
+    )?;
+    Ok(())
+}
+
+/// Leave `draft`'s create in flight on `owner/repo`: it lands as the
+/// `calls`th call after this reaches the fake, before that call is answered,
+/// taking the next number.
+pub fn land_later(
+    owner: &str,
+    repo: &str,
+    draft: &IssueDraft,
+    calls: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = format!(
+        "{{\"title\":{},\"body\":{}}}\n",
+        lgwks_std::json::to_string(draft.title())?,
+        lgwks_std::json::to_string(draft.body())?
+    );
+    std::fs::write(dir()?.join(format!("pending-{owner}-{repo}.json")), payload)?;
+    std::fs::write(
+        dir()?.join(format!("pending-{owner}-{repo}")),
+        calls.to_string(),
+    )?;
+    Ok(())
+}
+
 /// How many creates the action issued against `owner`.
 pub fn creates_on(owner: &str) -> Result<usize, Box<dyn std::error::Error>> {
     Ok(calls_on(owner)?
@@ -206,6 +251,35 @@ repo=${rest%%/*}
 repo=${repo%%\?*}
 store="$dir/issues-$owner-$repo.jsonl"
 
+# Hold one issue: its number is the next in the repository's one sequence,
+# taken by one atomic append, and `$1` is the create's payload.
+land() {
+  printf 'x' >> "$dir/count-$owner-$repo"
+  raw=""
+  IFS= read -r raw < "$dir/count-$owner-$repo"
+  number=${#raw}
+  record="{\"number\":$number,\"html_url\":\"https://github.com/$owner/$repo/issues/$number\",${1#\{}"
+  printf '%s\n' "$record" >> "$store"
+}
+
+# A create still in flight lands when its count of calls runs out, before
+# this call is answered.
+pending="$dir/pending-$owner-$repo"
+if [ -s "$pending" ]; then
+  left=""
+  IFS= read -r left < "$pending"
+  case "$left" in ''|*[!0-9]*) left=1 ;; esac
+  left=$((left - 1))
+  if [ "$left" -le 0 ]; then
+    : > "$pending"
+    late=""
+    IFS= read -r late < "$pending.json"
+    land "$late"
+  else
+    printf '%s' "$left" > "$pending"
+  fi
+fi
+
 if [ "$repo" = "deny" ]; then
   printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
   exit 1
@@ -216,23 +290,23 @@ if [ "$method" = "POST" ]; then
     printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
     exit 1
   fi
-  if [ "$repo" = "refuse" ]; then
-    printf 'gh: Validation Failed (HTTP 422)\n' >&2
-    exit 1
-  fi
+  case "$repo" in
+    refuse)
+      printf 'gh: Validation Failed (HTTP 422)\n' >&2
+      exit 1
+      ;;
+    refuse-*)
+      printf 'gh: Rejected (HTTP %s)\n' "${repo#refuse-}" >&2
+      exit 1
+      ;;
+  esac
   if [ "$repo" = "vanish" ]; then
     printf 'connection reset by peer\n' >&2
     exit 7
   fi
   payload=""
   IFS= read -r payload < "$input"
-  # One atomic append per create; its byte count is the issue number.
-  printf 'x' >> "$dir/count-$owner-$repo"
-  raw=""
-  IFS= read -r raw < "$dir/count-$owner-$repo"
-  number=${#raw}
-  record="{\"number\":$number,\"html_url\":\"https://github.com/$owner/$repo/issues/$number\",${payload#\{}"
-  printf '%s\n' "$record" >> "$store"
+  land "$payload"
   # `lag` hides this issue from the next two listings; `lag-N` from the next N.
   # A lost answer carries a lag the same way: `droplag-N` and `kill-N`.
   lag=0
@@ -251,6 +325,11 @@ if [ "$method" = "POST" ]; then
   # between the POST and its reply does, so the parent reads a signal death and
   # no exit code at all.
   case "$repo" in
+    dropflaky)
+      printf '1' > "$dir/flaky-$owner-$repo"
+      printf 'connection reset by peer\n' >&2
+      exit 7
+      ;;
     drop|droplag-*)
       printf 'connection reset by peer\n' >&2
       exit 7
@@ -281,10 +360,17 @@ case "$rest" in
     ;;
 esac
 
-# A listing: the newest number it reaches and the records carrying the
-# trailer the `--jq` names, newest first, as the endpoint sorts `created
-# desc`. A record whose lag file still counts is hidden, and the read spends
-# one of its count. `stale` never lists its newest record.
+# A listing: the numbers it shows and the records carrying the trailer the
+# `--jq` names, newest first, as the endpoint sorts `created desc`. A record
+# whose lag file still counts is hidden, and the read spends one of its count.
+# `stale` never lists its newest record; `dropflaky` fails the listing after a
+# lost create once.
+flaky="$dir/flaky-$owner-$repo"
+if [ -s "$flaky" ]; then
+  : > "$flaky"
+  printf 'gh: Server Error (HTTP 502)\n' >&2
+  exit 1
+fi
 top=0
 if [ "$repo" = "stale" ] && [ -s "$store" ]; then
   while IFS= read -r record; do
@@ -293,6 +379,7 @@ if [ "$repo" = "stale" ] && [ -s "$store" ]; then
   done < "$store"
 fi
 newest=0
+shown=""
 out=""
 if [ -s "$store" ]; then
   while IFS= read -r record; do
@@ -308,6 +395,7 @@ if [ -s "$store" ]; then
     fi
     if [ "$repo" = "stale" ] && [ "$n" -eq "$top" ]; then continue; fi
     if [ "$n" -gt "$newest" ]; then newest=$n; fi
+    if [ -z "$shown" ]; then shown="$n"; else shown="$n,$shown"; fi
     case "$record" in
       *"$wanted"*)
         kept=$(project "$record")
@@ -316,6 +404,6 @@ if [ -s "$store" ]; then
     esac
   done < "$store"
 fi
-printf '{"newest":%s,"keyed":[%s]}\n' "$newest" "$out"
+printf '{"newest":%s,"numbers":[%s],"keyed":[%s]}\n' "$newest" "$shown" "$out"
 exit 0
 "#;

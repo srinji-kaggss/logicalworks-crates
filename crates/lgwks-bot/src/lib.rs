@@ -254,6 +254,9 @@ pub mod gate;
 /// real duplicating proxy in front of the adapter (issue #278, row 6).
 #[doc(hidden)]
 pub mod idempotent;
+#[doc(hidden)]
+#[cfg(feature = "time")]
+pub mod keyed;
 /// Typed in-process structural code inspection (R8, feature `inspect`).
 ///
 /// Check risky code over its structure without executing it: parse the subject
