@@ -35,6 +35,7 @@ mod check_cli;
 mod contract_schema_compat;
 mod default_run;
 mod embedding;
+mod estate_edges;
 mod feature_policy;
 mod identity_binding;
 mod metadata_dimensions;

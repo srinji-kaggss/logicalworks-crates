@@ -215,6 +215,26 @@ fn edge_matches(entry: &contract::Entry, edge: &DirectEdge) -> bool {
         && target_matches(entry, edge)
 }
 
+// ── Estate edges (#701) ─────────────────────────────────────────────────────
+
+/// Whether `edge` reaches a published estate crate, which needs no approval.
+///
+/// Two facts decide it, and neither is a name alone: the package is one of the
+/// five published estate crates ([`crate::estate::is_estate_crate`]), and the
+/// edge resolves from the canonical registry. A path or Git package calling
+/// itself `lgwks_std` keeps its name and loses its provenance, so it is audited
+/// as the ordinary external edge it is — the same rule that keeps a copied
+/// foreign crate from being read as a workspace member.
+///
+/// The rung is the ladder's: `lgwks_std` is rung 2, "preferred. The common
+/// substrate", and a consumer that climbs the ladder to it was refused for
+/// doing exactly what the ladder asks.
+fn is_estate_edge(edge: &DirectEdge) -> bool {
+    edge.source.class() == "registry"
+        && is_crates_io(edge.source.detail())
+        && crate::estate::is_estate_crate(&edge.package)
+}
+
 // ── Licence audit (#208) ────────────────────────────────────────────────────
 
 /// What a manifest with no `license` key is reported as.
@@ -531,6 +551,10 @@ pub(crate) fn surface_refusals(members: &[String], register: &Contract) -> Vec<R
 /// approval still true (`UnusedApproval`), is every declared licence one this
 /// repository accepts and the one the register approved (#208), and does every
 /// approval's tier agree with the source its edge resolves from (#210).
+///
+/// An edge to a published estate crate is admitted before the ownership
+/// question is asked: it is rung 2 of the ladder, and the register is not the
+/// body that admits it (#701).
 pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
     let mut refusals = frozen_surface_tier_refusals(register);
     refusals.extend(vendor_tier_refusals(edges, register));
@@ -549,10 +573,16 @@ pub fn audit_direct(edges: &[DirectEdge], register: &Contract) -> Vec<Refusal> {
             }
         }
     }
-    // Workspace membership is the only exemption, and it is decided by
-    // `workspace_members` in Cargo's own metadata, not by a package name.
+    // Two things need no register entry, and neither is decided by a name
+    // alone: workspace membership, from Cargo's own `workspace_members`, and an
+    // estate edge, which is an estate-namespace package from the canonical
+    // registry (`is_estate_edge`, #701). Every other external edge needs an
+    // approval.
     let external: Vec<&DirectEdge> = edges.iter().filter(|edge| !edge.workspace).collect();
     for edge in &external {
+        if is_estate_edge(edge) {
+            continue;
+        }
         let approvals: Vec<&contract::Entry> = register.approvals_for(&edge.package).collect();
         if approvals.is_empty() {
             refusals.push(Refusal::UnregisteredEdge {

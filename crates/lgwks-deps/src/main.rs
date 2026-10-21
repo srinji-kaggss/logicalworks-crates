@@ -35,6 +35,11 @@ use lgwks_deps::{
     repository_root,
 };
 
+/// The estate's published crates, shared with the library's audit by path so
+/// `request` asks the same question without a public export (#701).
+#[path = "estate.rs"]
+mod estate;
+
 /// How a `check` run reached its register, which is what the receipt binds.
 ///
 /// Committed enforcement reads `PATH/contract/APPROVED.toml` beside the code;
@@ -97,7 +102,11 @@ USAGE
   second PATH exits 2 without auditing anything. --contract's FILE is a
   register and never the audit target, whichever order the two appear in.
   lgwks-deps invariants [PATH]         audit the optional invariant register
-  lgwks-deps request <CRATE> <VERSION> print an approval block to fill in
+  lgwks-deps request <CRATE> <VERSION> print the approval block a third-party
+                                       edge needs. An estate crate
+                                       (`lgwks_std`, `lgwks_bot`, …) needs
+                                       none, and is refused here rather than
+                                       printed as a boundary form
   lgwks-deps init [PATH]               write a fail-closed starting register
    lgwks-deps tiers                     print the admission ladder
    lgwks-deps freshness [PATH]          check resolved deps against crates.io
@@ -802,7 +811,8 @@ fn run_vendor_check(
 ///
 /// Read lowest rung first: each step up is an escalation that needs a stated
 /// reason, and only the last two rungs (`VENDOR` and `BOUNDARY`) produce a
-/// register entry at all.
+/// register entry at all. Rung 2, `ESTATE`, is the estate's own substrate: it is
+/// admitted by provenance, so it produces no entry either (#701).
 pub(crate) const LADDER: &str = "\
 The core admission ladder (INV-DEP-EDGE-OWNED)
 
@@ -813,9 +823,13 @@ Lower rungs are preferred; each step up is an escalation that requires a reason.
   1. Rust standard library (std / core / alloc)
      Preferred unconditionally. Zero dependencies, zero supply-chain risk.
 
-  2. Workspace stdlib+ (`lgwks_std`)
-     The common substrate: id (uuid v4), hex, time (RFC 3339), glob, fs, leb128, task.
-     The workspace facade owns its audited external implementations behind one API.
+  2. ESTATE (`lgwks_std`, `lgwks_bot`, `lgwks_ast`, `lgwks_deps`, `lgwks_macros`)
+     The estate's own published crates, rung 2: `lgwks_std` is the common
+     substrate (id, hex, time, glob, fs, leb128, task) and the facade owns its
+     audited external implementations behind one API. A published estate crate
+     from crates.io is admitted by provenance: `check` needs no `[[approved]]`
+     block for it, and `request` prints no form. Nothing to sign, nothing to
+     copy into five repositories.
 
   3. ELIMINATE
      Crates whose functionality belongs in `lgwks_std` or std.

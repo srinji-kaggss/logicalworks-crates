@@ -7,6 +7,8 @@ use std::process::ExitCode;
 
 use lgwks_deps::CONTRACT_PATH;
 
+use crate::estate::is_estate_crate;
+
 use crate::{LADDER, USAGE, refuse, resolve_repository_root, subject_path};
 
 // ── request ─────────────────────────────────────────────────────────────────
@@ -44,11 +46,28 @@ pub(crate) fn print_request_template(
     )
 }
 
+/// Why `request` prints no block for an estate crate.
+///
+/// `request` takes the tier from the ladder, not from a default: one of the
+/// five published estate crates is rung 2, admitted by provenance with nothing
+/// for a human to sign, so the only block this command could print for one is
+/// the third-party form for a crate that is not third-party (#701).
+fn estate_refusal(krate: &str, version: &str) -> String {
+    format!(
+        "{krate} {version} is the estate's own crate: rung 2 of the ladder admits an edge to a \
+         published `lgwks_*` crate from crates.io by provenance, so there is no approval block to \
+         fill in and no commit to sign. `lgwks-deps init` writes a register that already admits \
+         it; run `lgwks-deps check .` to confirm."
+    )
+}
+
 /// Prints an approval template, or the usage block when either argument is
 /// missing.
 ///
 /// Both arguments are required (a template with no crate name is not useful),
-/// so a partial invocation is a usage error on stderr with exit code 2.
+/// so a partial invocation is a usage error on stderr with exit code 2. An
+/// estate crate is refused for its own reason rather than printed as a
+/// third-party boundary approval.
 pub(crate) fn run_request(
     krate: Option<&String>,
     version: Option<&String>,
@@ -59,6 +78,9 @@ pub(crate) fn run_request(
         write!(err, "{USAGE}")?;
         return Ok(ExitCode::from(2));
     };
+    if is_estate_crate(krate) {
+        return refuse(&estate_refusal(krate, version), err);
+    }
     print_request_template(krate, version, out)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -77,6 +99,9 @@ pub(crate) const STARTER: &str = "\
 # A crate reaches this file only after the ladder in `lgwks-deps tiers` has been
 # climbed and every rung above a dependency was rejected for a stated reason.
 # Adding a block here is an approval; the commit that adds it is the signature.
+#
+# An edge to a published estate crate (`lgwks_std`, `lgwks_bot`, `lgwks_ast`, …)
+# needs no block and no signature: rung 2 of the ladder admits it by provenance.
 #
 # ELIMINATE and CONSOLIDATE crates never appear here. They become a module in
 # `lgwks_std` instead, which is why `tier` admits only `boundary` and `vendor`.
