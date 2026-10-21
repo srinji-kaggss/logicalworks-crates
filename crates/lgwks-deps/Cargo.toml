@@ -138,6 +138,13 @@ path = "src/main.rs"
 name = "llms-txt"
 path = "src/bin/llms_txt.rs"
 
+# The project page, written to a build directory and deployed by the Pages
+# workflow: the repository holds Rust, so the page is generated, never checked
+# in, and cannot drift from the crate list (`every_crate_directory_is_on_the_page`).
+[[bin]]
+name = "render-site"
+path = "src/bin/render_site.rs"
+
 [[bin]]
 name = "check-requirements"
 path = "src/bin/check_requirements.rs"
