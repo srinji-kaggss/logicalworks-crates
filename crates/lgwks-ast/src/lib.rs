@@ -58,7 +58,6 @@ pub use thiserror::*;
 /// [`Severity`] in almost every signature it writes, and reaching into
 /// `lgwks_ast::diagnostic::` for all four is a tax on the common case. The
 /// module stays public for a caller who prefers the longer path.
-#[doc(hidden)]
 pub use diagnostic::{Diagnostic, Pos, Severity, Span};
 
 #[cfg(feature = "parser")]
@@ -68,10 +67,21 @@ mod parser;
 #[doc(hidden)]
 pub use parser::*;
 
+/// The supported parser surface: identify a language, parse under the checked
+/// bounds, inspect the tree, and report a typed refusal.
+///
+/// These are the items a consumer compiles against. Everything else in the
+/// parser is support code with no compatibility promise.
+#[cfg(feature = "parser")]
+pub use parser::{
+    AstMetrics, AstNode, ContentDetection, Language, MAX_AST_DEPTH, MAX_AST_NODES,
+    MAX_DETECT_BYTES, MAX_SOURCE_BYTES, ParseError, Parsed, SyntaxDiagnostic, SyntaxIssueKind,
+    inspect_ast, parse, try_detect_content, try_parse, try_parse_with, try_parse_within,
+};
+
 /// The zero-gate source detectors (INV-SCAN-ZERO, #408), reading Rust through
 /// the checked parse: `scan::scan_source` and `scan::scan_path`.
 #[cfg(feature = "scan")]
-#[doc(hidden)]
 pub mod scan;
 
 /// The `script!` language's one reader (SL-2, #383): `script::parse` turns a

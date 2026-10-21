@@ -31,7 +31,9 @@
     "README-supervision.md"
   ],
   "rules": [
-    "The supported interface of lgwks_bot 3.1 is the script! macro, the try_join! macro and the lgwks_bot::script module. Everything else in the five crates is #[doc(hidden)] support code with no compatibility promise; do not build on it.",
+    "The supported surfaces are script!, try_join! and lgwks_bot::script; lgwks_ast's documented parser and scan module; and lgwks_deps's gate and storefront module. Every other item is support code with no compatibility promise.",
+    "The lgwks_deps gate is check_dependencies/check_verdict returning Verdict, Refusal and GateError; lgwks_ast::scan::scan_path runs the five defect detectors through the same checked parse.",
+    "Use lgwks_ast::Language::of_path or of_shebang, then try_parse and inspect_ast; a refused source is reported through ParseError::to_diagnostic, never treated as clean.",
     "Write orchestration as a script! block, not as hand-rolled spawn, sleep and retry loops. Each block is one bounded primitive: fan-out, deadline, retry, overlap, named step, readiness and admitted plan.",
     "Fan out with `each x in xs, at most N at once:`, bound a wait with `within 2s:`, retry with `retry up to 3 times, waiting 100ms:`, overlap branches with `together:`, and name a step with `step name:`.",
     "Every flow takes a Scope first. The scope carries the tenant, the step path and the cancellation token, and a step key hashes tenant, run and structural path, so two runs of one flow never share a key.",
@@ -46,7 +48,8 @@
     "lgwks_bot enables script! through its default `script` feature. Its other features (io, net, process, fs, signal, inspect, ephemeral, profile) are off by default; --no-default-features withdraws the runtime surface.",
     "Prefer lgwks_std over a third-party crate for encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing; each is a Cargo feature and the default build carries only core and trace.",
     "Use lgwks_std::trace for diagnostics. Applications call install_default once at the process edge; libraries emit structured events and return typed errors, and do not unwrap or expect on recoverable paths.",
-    "lgwks_deps is the storefront: every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is an optional, default-off feature there, and the lgwks-deps CLI audits a repository against contract/APPROVED.toml.",
+    "Every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is a default-off lgwks_deps feature reached through lgwks_deps::storefront.",
+    "The lgwks-deps CLI audits a repository against contract/APPROVED.toml, and check_verdict is the same verdict as a library call.",
     "Licences differ by crate: lgwks_bot is MPL-2.0 (file-level copyleft), while lgwks_std, lgwks_ast, lgwks_deps and lgwks_macros are Apache-2.0. The LICENSE file in a crate's directory governs that crate.",
     "A release is uploaded before it is tagged: `cargo run -p lgwks_deps --bin published-consumer` proves the published crates at their newest tags before any tag is created."
   ],

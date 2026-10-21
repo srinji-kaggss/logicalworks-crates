@@ -1,4 +1,4 @@
-The supported way to use this crate is `script!` (`lgwks_bot::script!`): orchestration written the way it is said.
+This crate's rustdoc opens with the `script!` lexicon, the orchestration language this workspace ships. Each crate page also documents its own library front door; `script!` is the supported orchestration interface, not the only way to use every crate.
 
 ```text
 lgwks_bot::script! {

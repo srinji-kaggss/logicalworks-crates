@@ -552,8 +552,10 @@ const PAGE_URL: &str =
 /// not do.
 fn front() -> String {
     format!(
-        "The supported way to use this crate is `script!` (`lgwks_bot::script!`): \
-         orchestration written the way it is said.\n\n\
+        "This crate's rustdoc opens with the `script!` lexicon, the orchestration \
+         language this workspace ships. Each crate page also documents its own library \
+         front door; `script!` is the supported orchestration interface, not the only \
+         way to use every crate.\n\n\
          ```text\nlgwks_bot::script! {{\n{}}}\n```\n\n\
          Each line is one step. It starts with one of the words below, or it is a \
          line of Rust, passed through as written. What each word refuses and \
