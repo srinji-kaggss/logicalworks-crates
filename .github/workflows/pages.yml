@@ -1,0 +1,45 @@
+name: Pages
+
+# The one page whose title is the repository's exact name. It runs on `main` and
+# by hand only, so no pull request pays for it, and the five-minute budget is
+# untouched. The page is generated from the crate list by `render-site`; nothing
+# HTML-shaped is committed, because a repository holds Rust.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Publish the project page
+    runs-on: [self-hosted, macOS, ARM64, lwc]
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+      - name: Render the page
+        run: cargo run --locked -q -p lgwks_deps --bin render-site -- target/site
+      # `enablement` creates the Pages site on the first run, so the page does
+      # not wait on a settings change no workflow can make.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site
+      - id: deployment
+        uses: actions/deploy-pages@v4
