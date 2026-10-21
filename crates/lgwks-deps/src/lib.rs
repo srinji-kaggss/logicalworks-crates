@@ -45,19 +45,23 @@
 //! ## No name-based exemption
 //!
 //! There is no package whose name alone escapes the audit. An edge is exempt
-//! only when Cargo's own `workspace_members` list names its target, so an
-//! internal edge is exempt because it is *this* workspace's code and not
-//! because of how it is spelled. A path or Git package that calls itself
-//! `lgwks_std` — or `lgwks-std`, which Cargo folds to the same name — is an
-//! ordinary external edge and must be approved like any other; the refusal
-//! keeps the source it came from so the two cannot be confused.
+//! when Cargo's own `workspace_members` list names its target — an internal edge
+//! is exempt because it is *this* workspace's code, not because of how it is
+//! spelled — or when it is an **estate edge**: a crate in the estate's published
+//! `lgwks_` namespace *and* resolved from the canonical crates.io registry, which
+//! is rung 2 of the ladder and the `estate` tier (#701). Both halves are
+//! required, so a path or Git package that calls itself `lgwks_std` — or
+//! `lgwks-std`, which Cargo folds to the same name — is an ordinary external
+//! edge and must be approved like any other; the refusal keeps the source it came
+//! from so the two cannot be confused.
 //!
 //! The gate is not gated by itself, but that is a consequence of the build
 //! graph rather than an exemption: the `lgwks_deps` → `lgwks_std` edge in this
 //! repository targets a workspace member, and a consumer that reaches a
-//! *published* `lgwks_std` declares a real registry edge, which the register
-//! must review. Building the checker and interpreting a subject's metadata are
-//! different operations, so auditing a same-named package creates no cycle.
+//! *published* `lgwks_std` declares a real registry edge, which rung 2 admits for
+//! every such crate at once rather than one register entry per consumer.
+//! Building the checker and interpreting a subject's metadata are different
+//! operations, so auditing a same-named package creates no cycle.
 //!
 //! ## Storefront
 //!
@@ -121,6 +125,9 @@ pub mod vendor;
 
 /// The audit itself: every direct edge judged against the register.
 mod audit;
+/// The estate's five published crates: rung 2 of the ladder, admitted by
+/// provenance (#701).
+mod estate;
 /// `[patch]`, `[replace]` and source replacement: overrides the register cannot see.
 mod overrides;
 /// What the gate refuses and why it could not reach a verdict.
