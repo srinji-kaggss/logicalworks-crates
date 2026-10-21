@@ -9,7 +9,7 @@ breaks are listed explicitly under the crate.
 
 ## Releases, newest first
 
-- Unreleased: `lgwks_ast` exposes its parser, diagnostics and scanner as a documented supported surface, and `lgwks_deps` exposes its gate and a `storefront` module, so an agent can compile against the code-understanding and admission SDK instead of only `script!` (INV-SURFACE-1, #526).
+- lgwks_std 3.0.2 / lgwks_bot 3.1.1 / lgwks_ast 2.2.0 / lgwks_deps 4.2.0 / lgwks_macros 1.1.4 - 2026-10-21: [notes](docs/changelog/02-sdk-front-doors-2026-10-21.md)
 - lgwks_std 3.0.1 / lgwks_bot 3.1.0 / lgwks_ast 2.1.0 / lgwks_deps 4.1.0 / lgwks_macros 1.1.3 - 2026-10-21: [notes](docs/changelog/01-lgwks-std-3-0-1-lgwks-bot-3-1-2026-10-21.md)
 - lgwks_std 3.0.0 / lgwks_bot 3.0.0 / lgwks_ast 2.0.0 / lgwks_deps 4.0.0 / lgwks_macros 1.1.2 - 2026-10-18: [1](docs/changelog/00-lgwks-std-3-0-0-lgwks-bot-3-0-p1.md) · [2](docs/changelog/00-lgwks-std-3-0-0-lgwks-bot-3-0-p2.md)
 - lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1 - 2026-10-07: [1](docs/changelog/02-lgwks-std-2-2-0-lgwks-bot-2-2-p1.md) · [2](docs/changelog/02-lgwks-std-2-2-0-lgwks-bot-2-2-p2.md)
