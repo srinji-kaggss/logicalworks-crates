@@ -241,24 +241,24 @@ pub use tokenizers;
 /// declares the upstream crate itself. No feature is on by default; the
 /// feature table on the crate page names what each one enables.
 pub mod storefront {
-    #[cfg(feature = "tokio")]
-    pub use crate::tokio;
-    #[cfg(feature = "bevy-ecs")]
-    pub use crate::bevy_ecs;
-    #[cfg(feature = "bevy-app")]
-    pub use crate::bevy_app;
-    #[cfg(feature = "bevy-time")]
-    pub use crate::bevy_time;
-    #[cfg(feature = "bevy-state")]
-    pub use crate::bevy_state;
-    #[cfg(feature = "gpui")]
-    pub use crate::gpui;
     #[cfg(feature = "appcui")]
     pub use crate::appcui;
-    #[cfg(feature = "ml-candle")]
-    pub use crate::{candle_core, candle_nn, candle_transformers};
+    #[cfg(feature = "bevy-app")]
+    pub use crate::bevy_app;
+    #[cfg(feature = "bevy-ecs")]
+    pub use crate::bevy_ecs;
+    #[cfg(feature = "bevy-state")]
+    pub use crate::bevy_state;
+    #[cfg(feature = "bevy-time")]
+    pub use crate::bevy_time;
+    #[cfg(feature = "gpui")]
+    pub use crate::gpui;
     #[cfg(feature = "ml-tokenizers")]
     pub use crate::tokenizers;
+    #[cfg(feature = "tokio")]
+    pub use crate::tokio;
+    #[cfg(feature = "ml-candle")]
+    pub use crate::{candle_core, candle_nn, candle_transformers};
 }
 
 use std::path::{Path, PathBuf};
