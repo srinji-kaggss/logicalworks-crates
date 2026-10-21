@@ -54,6 +54,13 @@ lgwks_bot::script! {
     flow keyed() -> String:
         step inner:
             scope.key().to_hex()
+
+    /// Retry past a shared budget until the host's policy refuses.
+    flow always_busy(busy: &AtomicU32) -> u32:
+        retry up to 8 times, waiting 1ms:
+            if busy.fetch_add(1, Ordering::SeqCst) < u32::MAX:
+                fail transiently with "busy"
+            7
 }
 
 /// A host whose trail keeps `capacity` entries and whose runs have time to
@@ -177,6 +184,36 @@ fn a_script_step_keys_as_its_path_entered_by_hand() -> TestResult {
     let written = lgwks_bot::block_on(keyed(&Scope::root(tenant.clone())))?;
     let by_hand = Scope::root(tenant).enter("keyed")?.enter("inner")?.key();
     assert_eq!(written, by_hand.to_hex());
+    Ok(())
+}
+
+/// INV-BOT-171: one host, one retry budget. The first run earns and spends
+/// past its reserve; the second shares what is left and is throttled by the
+/// budget, not by its own allowance.
+#[test]
+fn a_hosts_runs_share_one_retry_budget_and_a_spent_one_is_throttled() -> TestResult {
+    let host = host(64)?;
+    let busy = task("busy", |scope: Scope, busy: Arc<AtomicU32>| async move {
+        always_busy(&scope, &busy).await
+    })?;
+    let first = lgwks_bot::block_on(host.run(&busy, Arc::new(AtomicU32::new(0))));
+    assert!(
+        matches!(
+            first.error(),
+            Some(FlowError::Exhausted { attempts: 8, .. })
+        ),
+        "the first run spent its allowance: {:?}",
+        first.error()
+    );
+    let second = lgwks_bot::block_on(host.run(&busy, Arc::new(AtomicU32::new(0))));
+    assert!(
+        matches!(
+            second.error(),
+            Some(FlowError::Throttled { attempts: 4, .. })
+        ),
+        "the second run shares the host's budget: {:?}",
+        second.error()
+    );
     Ok(())
 }
 

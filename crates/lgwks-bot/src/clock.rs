@@ -754,7 +754,11 @@ impl WallClock {
 /// arithmetic left is the scaling, and `saturating_mul`/`saturating_add` put
 /// the ceiling in that arithmetic instead of in a conversion that could fail
 /// and leave a caller holding a default.
-fn duration_to_nanos(duration: Duration) -> u64 {
+///
+/// Crate-visible because the script budget's shared window stamps its earned
+/// credit with the same conversion, so a window stamp and a clock deadline
+/// are measured by one rule.
+pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     const NANOS_PER_SEC: u64 = 1_000_000_000;
     duration
         .as_secs()

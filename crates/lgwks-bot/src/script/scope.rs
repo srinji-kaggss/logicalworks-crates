@@ -285,7 +285,14 @@ impl Scope {
         trail: Arc<Trail>,
         clock: Clock,
     ) -> Self {
-        Self::rooted(tenant, token, trail, clock, None)
+        Self::rooted(
+            tenant,
+            token,
+            trail,
+            clock,
+            None,
+            Arc::new(Policy::for_this_machine()),
+        )
     }
 
     /// A root scope measured on `clock` whose durable steps are keyed by `run`.
@@ -296,13 +303,16 @@ impl Scope {
     /// local form, and a step under it is never durable. The clock and the run
     /// are set together because they are both the host's: a resumed run whose
     /// steps were keyed to the host but timed on a fresh clock would measure its
-    /// deadlines on a timeline nothing else in the run shares.
+    /// deadlines on a timeline nothing else in the run shares. The policy is the
+    /// host's shared retry budget when a host admits the run, and a fresh
+    /// per-run one otherwise.
     pub(crate) fn rooted(
         tenant: Tenant,
         token: CancellationToken,
         trail: Arc<Trail>,
         clock: Clock,
         run: Option<RunId>,
+        policy: Arc<Policy>,
     ) -> Self {
         Self {
             inner: Arc::new(ScopeInner {
@@ -310,7 +320,7 @@ impl Scope {
                 path: Arc::from(""),
                 depth: 0,
                 token,
-                policy: Arc::new(Policy::for_this_machine()),
+                policy,
                 trail,
                 clock,
                 run,
