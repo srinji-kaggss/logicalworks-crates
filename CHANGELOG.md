@@ -9,7 +9,7 @@ breaks are listed explicitly under the crate.
 
 ## Releases, newest first
 
-- Unreleased: lgwks_bot gains `keyed`, one effect per caller key on a receiver with no idempotency key (find, in-flight fence, one create, lost-answer read-back); `gh::issue` becomes its adapter, reading by number past a lagging listing (#676).
+- lgwks_std 3.0.1 / lgwks_bot 3.1.0 / lgwks_ast 2.1.0 / lgwks_deps 4.1.0 / lgwks_macros 1.1.3 - 2026-10-21: [notes](docs/changelog/01-lgwks-std-3-0-1-lgwks-bot-3-1-2026-10-21.md)
 - lgwks_std 3.0.0 / lgwks_bot 3.0.0 / lgwks_ast 2.0.0 / lgwks_deps 4.0.0 / lgwks_macros 1.1.2 - 2026-10-18: [1](docs/changelog/00-lgwks-std-3-0-0-lgwks-bot-3-0-p1.md) · [2](docs/changelog/00-lgwks-std-3-0-0-lgwks-bot-3-0-p2.md)
 - lgwks_std 2.2.0 / lgwks_bot 2.2.0 / lgwks_deps 3.0.1 - 2026-10-07: [1](docs/changelog/02-lgwks-std-2-2-0-lgwks-bot-2-2-p1.md) · [2](docs/changelog/02-lgwks-std-2-2-0-lgwks-bot-2-2-p2.md)
 - lgwks_std 2.1.0 / lgwks_bot 2.1.0 - 2026-10-06: [notes](docs/changelog/03-lgwks-std-2-1-0-lgwks-bot-2-1.md)

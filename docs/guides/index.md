@@ -32,11 +32,11 @@ after the upload it names.
 
 | Crate | `Cargo.toml` version | Read it at |
 |---|---|---|
-| `lgwks_std` | 3.0.0 | [docs.rs/lgwks_std](https://docs.rs/lgwks_std) |
-| `lgwks_bot` | 3.0.0 | [docs.rs/lgwks_bot](https://docs.rs/lgwks_bot) |
-| `lgwks_ast` | 2.0.0 | [docs.rs/lgwks_ast](https://docs.rs/lgwks_ast) |
-| `lgwks_deps` | 4.0.0 | [docs.rs/lgwks_deps](https://docs.rs/lgwks_deps) |
-| `lgwks_macros` | 1.1.2 | [docs.rs/lgwks_macros](https://docs.rs/lgwks_macros) |
+| `lgwks_std` | 3.0.1 | [docs.rs/lgwks_std](https://docs.rs/lgwks_std) |
+| `lgwks_bot` | 3.1.0 | [docs.rs/lgwks_bot](https://docs.rs/lgwks_bot) |
+| `lgwks_ast` | 2.1.0 | [docs.rs/lgwks_ast](https://docs.rs/lgwks_ast) |
+| `lgwks_deps` | 4.1.0 | [docs.rs/lgwks_deps](https://docs.rs/lgwks_deps) |
+| `lgwks_macros` | 1.1.3 | [docs.rs/lgwks_macros](https://docs.rs/lgwks_macros) |
 
 From those versions on, the supported interface is `script!`, `try_join!` and
 the `script` module of `lgwks_bot`, `lgwks_ast::script`, and a small page each
