@@ -135,6 +135,9 @@ mod refusal;
 /// The origin and label predicates, model-checked against a reference.
 #[cfg(test)]
 mod sim_edge;
+/// The closed estate list, swept over seeded name draws (#701).
+#[cfg(test)]
+mod sim_estate;
 
 #[doc(hidden)]
 pub use audit::{audit_direct, declared_scope};
