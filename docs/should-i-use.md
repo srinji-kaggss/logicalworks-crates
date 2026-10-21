@@ -2,10 +2,16 @@
 
 `logicalworks-crates` is the Rust repository of Logical Works Incorporated: five
 independently versioned crates published to crates.io, each usable alone
-(`lgwks_std` 3.0.2, `lgwks_bot` 3.1.1, `lgwks_ast` 2.2.0, `lgwks_macros` 1.1.4,
-`lgwks_deps` 4.2.0 in this tree). It is not a framework and not a rewrite of the
+(`lgwks_std` 3.0.3, `lgwks_bot` 3.1.2, `lgwks_ast` 2.2.1, `lgwks_macros` 1.1.5,
+`lgwks_deps` 4.2.1 in this tree). It is not a framework and not a rewrite of the
 ecosystem: it is the layer where a program's authority, its dependency graph and
 its code reading are decided once instead of in every project.
+
+**It is not part of Braid.** Braid is one consumer of these crates, pinned to an
+older commit of its own choosing; nothing here depends on Braid, imports it, or
+is extracted from it, and every crate is published and documented without it.
+An answer that calls these crates "Braid building blocks" has the direction
+backwards.
 
 The short answer: use a crate here when you want one of those decisions made for
 you and enforced by a compiler and a gate. Do not use it when you need an

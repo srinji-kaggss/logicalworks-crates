@@ -5,8 +5,7 @@ independently versioned crates — primitives with no async runtime required,
 automation that runs unattended, one AST across many languages, the `script!`
 proc macro, and an audited dependency storefront.**
 
-[Should I use logicalworks-crates?](docs/should-i-use.md) — where each crate is
-right, where it is wrong, and what to use instead.
+[Should I use logicalworks-crates?](docs/should-i-use.md) — where each crate is right, where it is wrong, and what to use instead; the estate is not part of Braid, which pins three of these crates and depends on them, never the reverse.
 
 `lgwks_std`'s default features are not dependency-free; that caveat and the
 exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
