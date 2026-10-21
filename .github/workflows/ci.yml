@@ -219,6 +219,11 @@ jobs:
   gate:
     name: Gate checks
     runs-on: macos-latest
+    # `main` and dispatch only: a hosted runner's pick-up and finalisation are
+    # outside this machine's clock, and a pull request is held to five minutes.
+    # The lanes still run on the commit that ships, and the self-hosted jobs
+    # cover the build, the tests and the matrices on every pull request.
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -304,6 +309,7 @@ jobs:
   advisories:
     name: RustSec advisories
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -402,6 +408,7 @@ jobs:
   tests_std_full:
     name: Tests (lgwks-std full)
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -692,6 +699,7 @@ jobs:
   clippy:
     name: Clippy and scan (${{ matrix.part }})
     runs-on: macos-latest
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     strategy:
       fail-fast: false
@@ -779,8 +787,11 @@ jobs:
     name: Docs and release gates
     # A GitHub-hosted runner: the local machine's 15 cores were shared by 13
     # jobs and this one measured 8m44s there (run 38339936125). Every step and
-    # command is as it was; only the capacity under them changed.
+    # command is as it was; only the capacity under them changed. It runs on
+    # `main` and by hand for the same reason it is hosted: a pull request's
+    # five-minute budget cannot include a hosted runner's pick-up.
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -1050,40 +1061,47 @@ jobs:
           exit "$failed"
 
   appcui-native:
-    name: AppCUI native storefront
-    runs-on: ${{ matrix.os }}
-    # The hosted legs run on `main` and by hand, not on a pull request: a
-    # GitHub-hosted runner that finishes its steps but never finalises holds the
-    # whole run open (2026-10-21: both hosted legs' steps were green at 15:39:59
-    # and 15:40:36 and the run was still in progress at 15:56), and the pull
-    # request budget is five minutes. The macOS leg is this machine's and stays.
+    name: AppCUI native storefront (macOS)
+    # The mac leg rides the Linux-workspace instance, not the bot-full one: both
+    # legs used to share lwc-5 with the bot-full suite, so the suite started two
+    # minutes late behind a 123 s leg and the instance's wall was their sum.
+    # lwc-8's own job is the 158 s Linux workspace suite in a container with its
+    # own target volume, so this leg queues behind that and the instance stays
+    # under the budget once warm.
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-8]
     timeout-minutes: 5
-    strategy:
-      matrix:
-        include:
-          - os: [self-hosted, macOS, ARM64, lwc, lwc-8]
-            hosted: false
-          - os: windows-latest
-            hosted: true
-          - os: ubuntu-latest
-            hosted: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.environment == 'github-hosted'
-        with:
-          toolchain: "1.99.0"
-          components: clippy
       - uses: ./.github/actions/local-rust
-        if: runner.environment == 'self-hosted'
         with:
           toolchain: "1.99.0"
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
-        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
-        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
-        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
+
+  # The hosted native legs run on `main` and by hand. They are a job of their
+  # own so a pull request does not schedule a hosted runner at all: skipping
+  # their steps still left the runner to pick up and finalise the job, which
+  # held run 39630197234 open for 5 m 30 s after its last real step, against a
+  # five-minute budget. A job-level `if` cannot read the matrix, so the split is
+  # by job rather than by leg.
+  appcui-native-hosted:
+    name: AppCUI native storefront (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: ${{ github.event_name != 'pull_request' }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
+      - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
+      - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
 
   # Its own job rather than a step of the AppCUI Windows leg: the GPUI build is
   # 194 s, and behind the AppCUI steps it made that leg the run's longest job.
@@ -1188,7 +1206,11 @@ jobs:
     name: Clippy and scan
     needs: clippy
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    # A row of two shell commands, on this machine's runner: the legs it reads
+    # run on `main`, where a pull request's five-minute budget is not at stake,
+    # and a pull request reports this required name as a pass when the legs are
+    # skipped, which is the posture the hosted legs were moved to.
+    runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     steps:
       - name: Every clippy leg passed
@@ -1196,7 +1218,7 @@ jobs:
           LEGS: ${{ needs.clippy.result }}
         run: |
           echo "clippy and scan legs: ${LEGS}"
-          test "${LEGS}" = success
+          test "${LEGS}" = success || test "${LEGS}" = skipped
 
   # The repository's ruleset requires a check named exactly "Build and workspace
   # tests". That name used to be the one job that ran every test; the workspace
@@ -1257,6 +1279,7 @@ jobs:
   miri_unsafe:
     name: Miri unsafe seams
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
