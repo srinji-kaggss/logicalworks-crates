@@ -20,10 +20,10 @@ or interrupted metadata read could not confirm.
 ### lgwks_deps — the supported metadata surface (#526)
 
 - **Added** `lgwks_deps::metadata::Collected` to the supported surface. It is
-  the type `check_verdict` returns: the gate's verdict plus the cleanup
-  obligation for the capture files a metadata read created,
-  `Option<CleanupObligation>`. `Collected::into_parts` is the only way out of
-  it, so a consumer cannot read the verdict and forget the cleanup.
+  the type `check_verdict` returns: the gate's verdict plus the cleanup failure
+  a metadata read could not confirm, as `Option<MetadataError>`.
+  `Collected::into_parts` is the only way out of it, so a consumer cannot read
+  the verdict and forget the cleanup.
 - **Added** `lgwks_deps::metadata::MetadataError` to the supported surface. It
   is the typed reason a metadata read refused — the cargo command failed, the
   document would not decode, the byte budget was spent, the deadline passed —
