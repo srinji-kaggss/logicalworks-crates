@@ -1052,20 +1052,21 @@ jobs:
   appcui-native:
     name: AppCUI native storefront
     runs-on: ${{ matrix.os }}
+    # The hosted legs run on `main` and by hand, not on a pull request: a
+    # GitHub-hosted runner that finishes its steps but never finalises holds the
+    # whole run open (2026-10-21: both hosted legs' steps were green at 15:39:59
+    # and 15:40:36 and the run was still in progress at 15:56), and the pull
+    # request budget is five minutes. The macOS leg is this machine's and stays.
     timeout-minutes: 5
     strategy:
       matrix:
-        # The mac leg rides the Linux-workspace instance, not the bot-full
-        # one: both legs of this job shared lwc-5 with the bot-full suite, so
-        # the suite started two minutes late behind a 123 s leg, and the
-        # instance's wall was their sum. lwc-8's own job is the 158 s Linux
-        # workspace suite in a container with its own target volume, so the
-        # native leg queues behind that instead and the instance stays under
-        # the budget once warm. The Linux leg is hosted: the storefront's Linux
-        # coverage moved here from the Linux container leg, whose bot-full leg
-        # it cancelled at the cap (run 39503601863), and a hosted runner takes
-        # no instance on this machine.
-        os: [[self-hosted, macOS, ARM64, lwc, lwc-8], windows-latest, ubuntu-latest]
+        include:
+          - os: [self-hosted, macOS, ARM64, lwc, lwc-8]
+            hosted: false
+          - os: windows-latest
+            hosted: true
+          - os: ubuntu-latest
+            hosted: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -1078,14 +1079,20 @@ jobs:
         with:
           toolchain: "1.99.0"
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
+        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
+        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
+        if: ${{ github.event_name != 'pull_request' || matrix.hosted == false }}
 
   # Its own job rather than a step of the AppCUI Windows leg: the GPUI build is
   # 194 s, and behind the AppCUI steps it made that leg the run's longest job.
   gpui-windows:
     name: GPUI Windows renderer
     runs-on: windows-latest
+    # `main` and dispatch only: a hosted job's queue and finalisation are not
+    # this machine's clock, and the pull request budget is five minutes.
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -1123,6 +1130,10 @@ jobs:
   process-windows:
     name: Process containment on Windows
     runs-on: windows-latest
+    # `main` and dispatch only, as the renderer above: the Windows receipt is a
+    # post-merge record, and a hosted runner's finalisation can hold a pull
+    # request open past its five-minute budget.
+    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     env:
       # Lints run once, in the Clippy job.
