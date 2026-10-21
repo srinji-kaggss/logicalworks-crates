@@ -14,6 +14,7 @@ the rest of this table is design history and contributor policy.
 |---|---|
 | [`docs/use-cases.md`](use-cases.md) | What each crate is for, what none of them is, how they differ from the crates a search finds first, agent security and in-process background work. |
 | [`docs/choosing-a-crate.md`](choosing-a-crate.md) | Which crate and feature for a need, the exact dependency graph, and the default-feature caveat on the zero-dependency core. |
+| [`docs/should-i-use.md`](should-i-use.md) | The decision question a reader arrives with: who publishes this, when to use each crate, when not to, and what to use instead. |
 | [`docs/guides/index.md`](guides/index.md) | Choose a crate, the versions in this tree, and the supported interface. |
 | [`docs/guides/lgwks-bot/index.md`](guides/lgwks-bot/index.md) | `lgwks_bot`: purpose, non-goals, and the supported versions. |
 | [`docs/guides/lgwks-bot/getting-started.md`](guides/lgwks-bot/getting-started.md) | One source, one condition, one effect, compiled and run. |

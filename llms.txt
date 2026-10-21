@@ -1,6 +1,6 @@
 # logicalworks-crates
 
-> Five independently versioned Rust crates: a zero-external-dependency core, a runtime for long-running automation, a multi-language AST front end, a proc-macro support crate, and an audited dependency storefront. Each is usable on its own. Take one and ignore the rest.
+> **logicalworks-crates is the Rust crate estate behind Logical Works: five independently versioned crates — primitives with no async runtime required, automation that runs unattended, one AST across many languages, the `script!` proc macro, and an audited dependency storefront.**
 
 Source: https://github.com/srinji-kaggss/logicalworks-crates
 
@@ -18,6 +18,7 @@ Development index. Every link below resolves against `main` as it stood when thi
 
 - [Use cases and boundaries](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/use-cases.md) — What each crate is for, what none of them is, how they differ from the crates a search finds first, agent security and in-process background work.
 - [Choosing a crate](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/choosing-a-crate.md) — Which crate and feature for a need, the exact dependency graph, and the default-feature caveat on the zero-dependency core.
+- [Should I use logicalworks-crates?](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md) — The decision question a reader arrives with: who publishes this, when to use each crate, when not to, and what to use instead.
 - [Consumer guides](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/index.md) — Choose a crate, the versions in this tree, and the supported interface.
 - [lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/index.md) — `lgwks_bot`: purpose, non-goals, and the supported versions.
 - [Getting started with lgwks_bot](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/guides/lgwks-bot/getting-started.md) — One source, one condition, one effect, compiled and run.

@@ -1,9 +1,12 @@
 # logicalworks-crates
 
-Five independently versioned Rust crates: a zero-external-dependency core, a
-runtime for long-running automation, a multi-language AST front end, a proc-macro
-support crate, and an audited dependency storefront. Each is usable on its own.
-Take one and ignore the rest.
+**logicalworks-crates is the Rust crate estate behind Logical Works: five
+independently versioned crates — primitives with no async runtime required,
+automation that runs unattended, one AST across many languages, the `script!`
+proc macro, and an audited dependency storefront.**
+
+[Should I use logicalworks-crates?](docs/should-i-use.md) — where each crate is
+right, where it is wrong, and what to use instead.
 
 `lgwks_std`'s default features are not dependency-free; that caveat and the
 exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
@@ -18,16 +21,12 @@ exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
 | `lgwks_macros` | 1.1.4 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
 | `lgwks_deps` | 4.2.0 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
-Versions move independently from one repository and one tag. The table lists the
-versions in this tree's manifests. A manifest version is not an upload: the
-registry and the repository's release tags say what is published, and
-[`docs/releasing.md`](docs/releasing.md) keeps the two apart.
+Versions move independently from one repository and one tag; the table lists
+this tree's manifests, not what is published. [`docs/releasing.md`](docs/releasing.md)
+keeps the two apart.
 
-> **Names.** Package `lgwks_std` (underscore) lives in directory
-> `crates/lgwks-std` (hyphen) and is imported as `use lgwks_std::...`. The one
-> exception is the gate binary `lgwks-deps` (hyphen), built from the library
-> `lgwks_deps` (underscore): `cargo install lgwks_deps` for the CLI,
-> `cargo add lgwks_deps` for the storefront library.
+> **Names.** `lgwks_std` (underscore) lives in `crates/lgwks-std` (hyphen) and is
+> imported `use lgwks_std::...`; `cargo install lgwks_deps` builds `lgwks-deps`.
 
 ## Quickstart
 
@@ -86,8 +85,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-The snippet above is compiled by the workspace gate, from
-[`crates/lgwks-bot/examples/quickstart.rs`](crates/lgwks-bot/examples/quickstart.rs); the other guarantees fire in [`examples/guarantees.rs`](crates/lgwks-bot/examples/guarantees.rs) with `--features ephemeral`.
+The snippet is compiled by the workspace gate, from
+[`crates/lgwks-bot/examples/quickstart.rs`](crates/lgwks-bot/examples/quickstart.rs); the other guarantees fire in
+[`examples/guarantees.rs`](crates/lgwks-bot/examples/guarantees.rs) with `--features ephemeral`.
 
 The dependency gate reads a project's lockfile and its committed register, so it
 runs as a command against a project rather than from a library call:
