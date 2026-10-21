@@ -25,7 +25,8 @@ use super::{FlowError, MAX_IN_FLIGHT, POLL_BUDGET, Scope};
 ///   is started, and that error is returned located at its item's path. No
 ///   sibling outlives the call.
 /// - **Keyed.** Item `i` runs in the scope `<step>#i`, so its [`StepKey`](crate::script::StepKey) is
-///   stable across runs over the same input order and distinct per tenant.
+///   stable across the attempts and restarts of one run and distinct per
+///   tenant and per run.
 /// - **Woken precisely.** Each slot has its own waker; a wake re-polls that
 ///   body only, so one wake costs `O(1)` polls rather than a scan of every
 ///   body in flight.

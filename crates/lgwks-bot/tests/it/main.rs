@@ -257,6 +257,7 @@ mod sim_skew;
 mod sim_source_matrix;
 mod sim_spec_materialize;
 mod sim_stability;
+mod sim_step_key_runs;
 mod sim_store_faults;
 mod sim_store_scale;
 mod sim_substrate;

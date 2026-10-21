@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use lgwks_std::hash::{Digest, Hasher};
 
-use crate::effect::RunId;
+use crate::effect::{InputIdentity, RunId};
 use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
+use crate::task::{InputDigest, MAX_REQUEST_KEY_BYTES};
 
 use super::policy::Policy;
 use super::trail::{Mark, Outcome, Site, Trail};
@@ -106,14 +107,18 @@ impl fmt::Display for Tenant {
 
 // ── StepKey ─────────────────────────────────────────────────────────────────
 
-/// The stable identity of one step of one flow for one tenant.
+/// The stable identity of one step of one run of one flow for one tenant.
 ///
-/// BLAKE3 over the tenant and the step path, each length-framed so no two
-/// different pairs can hash the same bytes. It is the same on every attempt of
-/// a [`retry`](crate::script::retry) and on every run of the same flow over the same input order,
-/// which is what makes it usable as an idempotency key for an effect the step
-/// performs: an effect sent twice under one key is one effect to any receiver
-/// that deduplicates by it.
+/// BLAKE3 over the tenant, the step path and — when a host minted a run — a
+/// domain label and the run id, each length-framed so no two different triples
+/// can hash the same bytes. It is the same on every attempt of a
+/// [`retry`](crate::script::retry)
+/// and on every restart of the same run, which is what makes it usable as an
+/// idempotency key for an effect the step performs: an effect sent twice under
+/// one key is one effect to any receiver that deduplicates by it. Two different
+/// runs of the same flow hash different keys, so a second run's effect is never
+/// mistaken for the first's; a caller whose work is one effect across runs
+/// names it with [`Scope::business_key`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StepKey(Digest);
 
@@ -131,8 +136,10 @@ impl StepKey {
     }
 }
 
-/// The [`StepKey`] of `path` for `tenant`: one definition, so a reserved record a
-/// host writes and a step a body enters cannot key the same path differently.
+/// The run-less [`StepKey`] of `path` for `tenant`: one definition, so a
+/// reserved record a host writes and a step a body enters cannot key the same
+/// path differently. The run store keys every record by this form, which is why
+/// a record's bytes do not move when [`Scope::key`] gains a run id.
 pub(crate) fn step_key(tenant: &str, path: &str) -> StepKey {
     let mut hasher = Hasher::new();
     hasher
@@ -140,6 +147,28 @@ pub(crate) fn step_key(tenant: &str, path: &str) -> StepKey {
         .write_framed(path.as_bytes());
     StepKey(hasher.finalize())
 }
+
+/// The [`StepKey`] of `path` for one run of `tenant`: a domain label and the
+/// run id join the hash, so two runs of the same flow over the same input
+/// never share a key while every attempt and restart of one run does
+/// (issue #646).
+pub(crate) fn step_key_in_run(tenant: &str, run: RunId, path: &str) -> StepKey {
+    let mut hasher = Hasher::new();
+    hasher
+        .write_framed(STEP_KEY_RUN_DOMAIN)
+        .write_framed(tenant.as_bytes())
+        .write_framed(run.id().to_hex().as_bytes())
+        .write_framed(path.as_bytes());
+    StepKey(hasher.finalize())
+}
+
+/// The domain-separation label mixed into the in-run [`StepKey`], so no run's
+/// key can hash the bytes a run-less key or a [`Scope::business_key`] hashes,
+/// whatever a tenant is named (issue #646).
+const STEP_KEY_RUN_DOMAIN: &[u8] = b"lgwks.bot.step-key-run.v1";
+
+/// The domain-separation label mixed into a [`Scope::business_key`].
+const BUSINESS_KEY_DOMAIN: &[u8] = b"lgwks.bot.business-key.v1";
 
 impl fmt::Display for StepKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -492,10 +521,87 @@ impl Scope {
         &self.inner.path
     }
 
-    /// The idempotency key for this step and tenant. See [`StepKey`].
+    /// The idempotency key for this step of this run and tenant. See
+    /// [`StepKey`].
+    ///
+    /// Under a host that minted a run, the run id is part of the hash: two runs
+    /// of the same flow never share a key, so an effect deduplicating by this
+    /// key happens once per run, and every attempt and restart of one run
+    /// shares the key and happens once per run. A scope built by hand has no
+    /// run and keys by tenant and path alone — the form the run store records
+    /// under. Enforced by `two_runs_of_one_flow_never_share_a_step_key`
+    /// (`tests/it/task_front_door/limits.rs`) and
+    /// `a_retry_attempts_share_one_step_key` (`tests/it/script_trail.rs`).
     #[must_use]
     pub fn key(&self) -> StepKey {
+        match self.inner.run {
+            Some(run) => step_key_in_run(self.inner.tenant.as_str(), run, &self.inner.path),
+            None => step_key(self.inner.tenant.as_str(), &self.inner.path),
+        }
+    }
+
+    /// The key the run store records this step's output under: the run-less
+    /// form, so a record's bytes are what they have always been and a store
+    /// written before run-scoped keys existed replays without a migration.
+    pub(crate) fn record_key(&self) -> StepKey {
         step_key(self.inner.tenant.as_str(), &self.inner.path)
+    }
+
+    /// The idempotency key for one piece of business work, stable across runs.
+    ///
+    /// [`Scope::key`] is per run, so an effect that must happen once for a
+    /// piece of work no matter which run performs it — a card charged for an
+    /// order, a mail sent for a signup — deduplicates on this instead: BLAKE3
+    /// over a domain label, the tenant, `name` and the input's canonical
+    /// [`InputDigest`], each length-framed. Two calls with the same name and input
+    /// under any two runs
+    /// of any flow for one tenant return the same key; a different name or
+    /// input hashes differently.
+    ///
+    /// `name` follows the same rule as a request key: 1 to
+    /// [`MAX_REQUEST_KEY_BYTES`] bytes of ASCII letters, digits, and `-`, `_`,
+    /// `.`, `:`.
+    ///
+    /// ```
+    /// use lgwks_bot::script::{Scope, Tenant};
+    ///
+    /// let scope = Scope::root(Tenant::new("acme")?);
+    /// let first = scope.business_key("charge-card", &9001_u32)?;
+    /// let again = scope.business_key("charge-card", &9001_u32)?;
+    /// assert!(first == again, "one order, one charge, whatever ran it");
+    /// # Ok::<(), lgwks_bot::script::FlowError>(())
+    /// ```
+    ///
+    /// Enforced by `sim_business_key_dedups_across_runs`
+    /// (`tests/it/sim_step_key_runs.rs`).
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError::InvalidBusinessKey`] when `name` is not a legal identifier.
+    pub fn business_key<I: InputIdentity>(
+        &self,
+        name: &str,
+        input: &I,
+    ) -> Result<Digest, FlowError> {
+        if let Some(fault) = name_fault(name, MAX_REQUEST_KEY_BYTES) {
+            let reason = match fault {
+                NameFault::Empty => "the business key name is empty",
+                NameFault::TooLong => "the business key name is longer than MAX_REQUEST_KEY_BYTES",
+                NameFault::BadChar => {
+                    "the business key name may hold only ASCII letters, digits, '-', '_', '.' and ':'"
+                }
+            };
+            let refusal = Err(FlowError::InvalidBusinessKey { reason });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "business_key: returning an error to the caller");
+            return refusal;
+        }
+        let mut hasher = Hasher::new();
+        hasher
+            .write_framed(BUSINESS_KEY_DOMAIN)
+            .write_framed(self.inner.tenant.as_str().as_bytes())
+            .write_framed(name.as_bytes())
+            .write_framed(InputDigest::of(input).as_bytes());
+        Ok(hasher.finalize())
     }
 
     /// The token that stops this scope's work.

@@ -42,8 +42,9 @@
 //! Every flow takes a [`Scope`] first. The scope carries the [`Tenant`], the
 //! path of steps that led here, and the cancellation token, so identity,
 //! location and cancellation reach every step without being threaded by hand,
-//! and a [`StepKey`] is always the hash of *tenant and path*: two tenants
-//! running the same flow over the same input never share a key.
+//! and a [`StepKey`] is the hash of *tenant, run and path*: two tenants never
+//! share a key, and two runs of one flow never share one either, while every
+//! attempt and restart of one run does.
 //!
 //! # Orchestration is the architecture
 //!
