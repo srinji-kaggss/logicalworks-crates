@@ -1,7 +1,7 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Logical Works Crates",
-  "description": "Five Rust crates for orchestration and dependency discipline: lgwks_bot and lgwks_macros provide the script! language for bounded, deadline-carrying, tenant-keyed async flows; lgwks_std holds everyday primitives (codecs, hashing, JSON, HTTP, tracing); lgwks_ast parses source code and the script! language; lgwks_deps is the dependency storefront and doctor CLI.",
+  "description": "Five Rust crates for orchestration and dependency discipline: lgwks_bot's script! language for bounded, tenant-keyed async flows; lgwks_std primitives; lgwks_ast parsers; lgwks_deps the audited dependency storefront.",
   "folders": [
     "crates"
   ],
@@ -31,22 +31,40 @@
     "README-supervision.md"
   ],
   "rules": [
-    "The supported interface of lgwks_bot 3 is the script! macro, the try_join! macro and the lgwks_bot::script module. Everything else in the five crates is #[doc(hidden)] support code with no compatibility promise; do not build on it.",
-    "Write orchestration as a script! block, not as hand-rolled spawn, sleep and retry loops. Each block is one bounded primitive: `each x in xs, at most N at once:` for fan-out, `within 2s:` for a deadline, `retry up to 3 times, waiting 100ms:` for retries, `together:` for overlapping branches, `step name:` for a named step, `await ready(&db, 30s)` for readiness and `admit the model's plan:` for untrusted model output.",
-    "Every flow takes a Scope first. The scope carries the tenant, the step path and the cancellation token, and a step key is the hash of tenant and path, so two tenants running one flow over the same input never share a key. Inside a retry the key is identical on every attempt, so an effect keyed by it happens once.",
-    "A script! block also emits a constant ARCHITECTURE: the flows it declares and the tree of blocks inside, with bounds, deadlines and retry budgets. Read or diff that instead of re-deriving the orchestration from source.",
+    "The supported interface of lgwks_bot 3.1 is the script! macro, the try_join! macro and the lgwks_bot::script module. Everything else in the five crates is #[doc(hidden)] support code with no compatibility promise; do not build on it.",
+    "Write orchestration as a script! block, not as hand-rolled spawn, sleep and retry loops. Each block is one bounded primitive: fan-out, deadline, retry, overlap, named step, readiness and admitted plan.",
+    "Fan out with `each x in xs, at most N at once:`, bound a wait with `within 2s:`, retry with `retry up to 3 times, waiting 100ms:`, overlap branches with `together:`, and name a step with `step name:`.",
+    "Every flow takes a Scope first. The scope carries the tenant, the step path and the cancellation token, and a step key hashes tenant, run and structural path, so two runs of one flow never share a key.",
+    "Inside a retry the key is identical on every attempt, so an effect keyed by it happens once. Work that is one act across runs names itself with Scope::business_key, which stays run-free.",
+    "A host's runs share one retry budget: the reserve is 10, credit above it is earned by first attempts, expires after ten seconds without one and never pools past twice the reserve; a refused run is Throttled.",
+    "A script! block also emits a constant ARCHITECTURE: the flows it declares and the tree of blocks inside, with bounds, deadlines and retry budgets. Read or diff that instead of re-deriving the orchestration.",
+    "`lgwks-ast script diff <base> <head> [--json]` classifies the architecture change between two checked-out source roots; it exits 1 on a widening with no `// lgwks-architecture-approved: <reason>` line in the head.",
     "Untrusted model or tool output enters a run only through admit, which returns a typed Plan or a typed FlowError carrying the provenance of the refused bytes. Do not parse model output and act on it directly.",
-    "A flow fails with a FlowError that names the step path. Retry is decided by the variant, never by the message: FlowError::is_retryable is the only rule retry reads. Match on the variant; never parse an error string to decide whether to retry.",
-    "lgwks_macros is the proc-macro crate behind script!. It depends on lgwks_ast, which owns the one parser for the language (lgwks_ast::script::parse) and the one refusal vocabulary. lgwks_ast also parses source code in many languages behind its lang-* features.",
+    "A flow fails with a FlowError that names the step path. Retry is decided by the variant, never by the message: FlowError::is_retryable is the only rule retry reads. Match the variant; never parse an error string.",
+    "lgwks_bot::keyed keeps one effect per caller key on a receiver with no idempotency key: read, wait out the in-flight bound, read again, create once, and reconcile a lost create answer by read-back. gh::issue is its adapter.",
+    "lgwks_macros is the proc-macro crate behind script!. It depends on lgwks_ast, which owns the one parser for the language (lgwks_ast::script::parse) and the one refusal vocabulary.",
     "lgwks_bot enables script! through its default `script` feature. Its other features (io, net, process, fs, signal, inspect, ephemeral, profile) are off by default; --no-default-features withdraws the runtime surface.",
-    "Prefer lgwks_std over a third-party crate for what it provides: encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing. Each is behind a Cargo feature and the default build carries only core and trace.",
-    "Use lgwks_std::trace for diagnostics. Applications call install_default once at the process edge; libraries emit structured events and return typed errors. println! and eprintln! are not used in library code, and library code does not unwrap or expect on recoverable paths.",
-    "lgwks_deps is the storefront: every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is an optional, default-off feature there, and the lgwks-deps CLI audits a repository's dependencies against the register in contract/APPROVED.toml.",
-    "Licences differ by crate: lgwks_bot is MPL-2.0 (file-level copyleft), while lgwks_std, lgwks_ast, lgwks_deps and lgwks_macros are Apache-2.0. The LICENSE file in a crate's directory governs that crate; LICENSING.md at the repository root states the model."
+    "Prefer lgwks_std over a third-party crate for encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing; each is a Cargo feature and the default build carries only core and trace.",
+    "Use lgwks_std::trace for diagnostics. Applications call install_default once at the process edge; libraries emit structured events and return typed errors, and do not unwrap or expect on recoverable paths.",
+    "lgwks_deps is the storefront: every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is an optional, default-off feature there, and the lgwks-deps CLI audits a repository against contract/APPROVED.toml.",
+    "Licences differ by crate: lgwks_bot is MPL-2.0 (file-level copyleft), while lgwks_std, lgwks_ast, lgwks_deps and lgwks_macros are Apache-2.0. The LICENSE file in a crate's directory governs that crate.",
+    "A release is uploaded before it is tagged: `cargo run -p lgwks_deps --bin published-consumer` proves the published crates at their newest tags before any tag is created."
   ],
   "previousVersions": [
     {
-      "tag": "lgwks_bot-v2.2.0"
+      "tag": "lgwks_std-v3.0.0"
+    },
+    {
+      "tag": "lgwks_bot-v3.0.0"
+    },
+    {
+      "tag": "lgwks_ast-v2.0.0"
+    },
+    {
+      "tag": "lgwks_deps-v4.0.0"
+    },
+    {
+      "tag": "lgwks_macros-v1.1.2"
     }
   ]
 }

@@ -12,7 +12,7 @@ unwired code is a wiring defect, not a closed item.
 | Priority | Work | Observed gap and completion evidence |
 |---|---|---|
 | P0 | Main red on run 37933518033 | Three load-sensitive instruments (flood lock wait, fixed cleanup grace, median retry window). Fix in #393; done when #393 merges and main's next run is green |
-| P0 | Publish verification | `crates.io` publish is manual and needs a human-held token. A green dry-run is not evidence. Reconcile the published artifacts against the 2.2.0 cut |
+| P0 | Publish verification | Reconciled for the 2026-10-21 cut: five crates uploaded in dependency order and `published-consumer` printed eight passing receipts (`ledger-2026-10-21.md`). Each later cut repeats it; a green dry-run is still not evidence |
 | P0 | Cross-OS lane reproduction | The three-OS matrix executes on hosted Actions and is the Portable evidence. A lane that did not run is `skip`, named in the receipt, never `pass` |
 | P1 | Flood decision-mean bound (#375) | Quarantined from Linux container legs 2026-10-08; enforced on mac lanes. #392 judges paired medians; #393 stops charging the lock wait (mac: 10/10 inside the bound at 2× ncpu load). Return: the container leg re-measured with the new instrument, then 20 consecutive green container runs |
 | P1 | Every gate under 5 minutes (#272) | PR wall 3m59s; one warm main run 240 s. Still needs five consecutive mains < 300 s, serial local < 300 s, cold build < 60 s / cold test < 90 s |
