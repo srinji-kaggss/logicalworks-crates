@@ -158,6 +158,7 @@
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
 "crates/lgwks-deps/src/lib.rs" = 25
 "crates/lgwks-deps/src/lock.rs" = 7
+"crates/lgwks-deps/src/metadata.rs" = 2
 "crates/lgwks-deps/src/metadata/capture.rs" = 2
 "crates/lgwks-deps/src/metadata/collect.rs" = 9
 "crates/lgwks-deps/src/metadata/edges.rs" = 1
