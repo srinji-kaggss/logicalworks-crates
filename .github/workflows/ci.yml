@@ -1061,7 +1061,7 @@ jobs:
           exit "$failed"
 
   appcui-native:
-    name: AppCUI native storefront (macOS)
+    name: AppCUI native storefront
     # The mac leg rides the Linux-workspace instance, not the bot-full one: both
     # legs used to share lwc-5 with the bot-full suite, so the suite started two
     # minutes late behind a 123 s leg and the instance's wall was their sum.
@@ -1086,7 +1086,7 @@ jobs:
   # five-minute budget. A job-level `if` cannot read the matrix, so the split is
   # by job rather than by leg.
   appcui-native-hosted:
-    name: AppCUI native storefront (${{ matrix.os }})
+    name: AppCUI native storefront hosted (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
