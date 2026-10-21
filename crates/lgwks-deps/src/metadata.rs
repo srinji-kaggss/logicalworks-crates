@@ -32,11 +32,13 @@ mod sim_edges_parse;
 
 #[doc(hidden)]
 pub use self::capture::CleanupObligation;
+/// A complete collection and the cleanup that could not be confirmed after it.
+pub use self::collect::Collected;
 #[doc(hidden)]
-pub use self::collect::{
-    Collected, EdgesAndMembers, Member, read, read_with_members, workspace_members,
-};
+pub use self::collect::{EdgesAndMembers, Member, read, read_with_members, workspace_members};
 #[doc(hidden)]
 pub use self::edges::parse;
+/// Why a metadata read refused.
+pub use self::types::MetadataError;
 #[doc(hidden)]
-pub use self::types::{DependencyKind, DependencySource, DirectEdge, MetadataError};
+pub use self::types::{DependencyKind, DependencySource, DirectEdge};
