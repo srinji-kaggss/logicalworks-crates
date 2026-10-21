@@ -31,15 +31,31 @@ jobs:
       - uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.0"
+      # The deploy is conditional on a site existing. Creating one needs an
+      # admin token the workflow cannot hold: the first run on 184d819e0 failed
+      # with `Resource not accessible by integration` from the create-site
+      # endpoint. So the page is rendered either way, a run without a site says
+      # why in one notice, and the first run after the site exists publishes
+      # with no further change.
+      - name: Is a Pages site published?
+        id: site
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Pages site exists for this repository; the page was rendered into target/site and not published."
+          fi
       - name: Render the page
         run: cargo run --locked -q -p lgwks_deps --bin render-site -- target/site
-      # `enablement` creates the Pages site on the first run, so the page does
-      # not wait on a settings change no workflow can make.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
+        if: steps.site.outputs.exists == 'true'
       - uses: actions/upload-pages-artifact@v3
+        if: steps.site.outputs.exists == 'true'
         with:
           path: target/site
       - id: deployment
         uses: actions/deploy-pages@v4
+        if: steps.site.outputs.exists == 'true'
