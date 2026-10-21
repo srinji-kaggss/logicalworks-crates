@@ -106,7 +106,6 @@
 // links deny) comes from the workspace root.
 
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
-#[doc(hidden)]
 pub mod contract;
 /// The optional authored invariant register and its repository-aware validator.
 #[doc(hidden)]
@@ -115,7 +114,6 @@ pub mod invariants;
 #[doc(hidden)]
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
-#[doc(hidden)]
 pub mod metadata;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 #[doc(hidden)]
@@ -133,7 +131,7 @@ mod sim_edge;
 
 #[doc(hidden)]
 pub use audit::{audit_direct, declared_scope};
-#[doc(hidden)]
+/// The verdict and the failures that keep one from being reached.
 pub use refusal::{GateError, Refusal};
 
 #[cfg(any(feature = "macro", feature = "script"))]
@@ -237,19 +235,43 @@ pub use candle_transformers;
 #[doc(hidden)]
 pub use tokenizers;
 
+/// The supported storefront: enable a feature and reach its engine here.
+///
+/// Every path below is one audited edge this crate owns, so a consumer never
+/// declares the upstream crate itself. No feature is on by default; the
+/// feature table on the crate page names what each one enables.
+pub mod storefront {
+    #[cfg(feature = "tokio")]
+    pub use crate::tokio;
+    #[cfg(feature = "bevy-ecs")]
+    pub use crate::bevy_ecs;
+    #[cfg(feature = "bevy-app")]
+    pub use crate::bevy_app;
+    #[cfg(feature = "bevy-time")]
+    pub use crate::bevy_time;
+    #[cfg(feature = "bevy-state")]
+    pub use crate::bevy_state;
+    #[cfg(feature = "gpui")]
+    pub use crate::gpui;
+    #[cfg(feature = "appcui")]
+    pub use crate::appcui;
+    #[cfg(feature = "ml-candle")]
+    pub use crate::{candle_core, candle_nn, candle_transformers};
+    #[cfg(feature = "ml-tokenizers")]
+    pub use crate::tokenizers;
+}
+
 use std::path::{Path, PathBuf};
 
 use contract::Contract;
 use metadata::DirectEdge;
 
 /// Register location relative to the repository root.
-#[doc(hidden)]
 pub const CONTRACT_PATH: &str = "contract/APPROVED.toml";
 
 // ── Filesystem entry points ─────────────────────────────────────────────────
 
 /// Walks up from `start` to the nearest directory holding a `Cargo.lock`.
-#[doc(hidden)]
 pub fn repository_root(start: &Path) -> Result<PathBuf, GateError> {
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
@@ -285,7 +307,6 @@ fn ensure_contract_file(path: &Path) -> Result<(), GateError> {
 /// A receipt that names only the root cannot tell two runs over the same tree
 /// with a changed manifest apart. The subject fingerprint binds the direct-edge
 /// identities Cargo reported, so the receipt names the graph as audited.
-#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subject {
@@ -295,7 +316,6 @@ pub struct Subject {
     edges: usize,
 }
 
-#[doc(hidden)]
 impl Subject {
     /// The stable fingerprint of the audited direct-edge graph.
     #[must_use]
@@ -316,7 +336,6 @@ impl Subject {
 /// This is what a receipt binds: `contract` and `subject` are the two identities
 /// the CLI stamps beside the verdict, and the policy mode is the caller's
 /// (committed enforcement or `--contract` diagnosis).
-#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Verdict {
@@ -328,7 +347,6 @@ pub struct Verdict {
     subject: Subject,
 }
 
-#[doc(hidden)]
 impl Verdict {
     /// The approved-dependency register this verdict was judged against, as parsed from `contract/APPROVED.toml`.
     #[must_use]
@@ -385,7 +403,6 @@ fn subject_fingerprint(edges: &[DirectEdge]) -> String {
 /// The verdict comes back inside a [`metadata::Collected`]: a Cargo capture
 /// file that could not be removed after a complete read is reported beside the
 /// verdict rather than replacing it.
-#[doc(hidden)]
 pub fn check_dependencies(
     root: &Path,
 ) -> Result<metadata::Collected<(Contract, Vec<Refusal>)>, GateError> {
@@ -397,7 +414,6 @@ pub fn check_dependencies(
 /// The register is `contract_path` when `Some`, else the committed
 /// `contract/APPROVED.toml` beside `root`. The distinction is the receipt's
 /// policy mode: a committed register is enforcement, an override is diagnosis.
-#[doc(hidden)]
 pub fn check_verdict(
     root: &Path,
     contract_path: Option<&Path>,
@@ -437,7 +453,6 @@ pub fn check_verdict(
 /// register of its own. `enforce` never calls it: a build always reads the
 /// register committed beside the code it is building, so no build can be
 /// pointed at a more permissive contract than the one in its own tree.
-#[doc(hidden)]
 pub fn check_dependencies_against(
     root: &Path,
     contract_path: &Path,

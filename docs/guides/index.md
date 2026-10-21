@@ -38,10 +38,15 @@ after the upload it names.
 | `lgwks_deps` | 4.1.0 | [docs.rs/lgwks_deps](https://docs.rs/lgwks_deps) |
 | `lgwks_macros` | 1.1.3 | [docs.rs/lgwks_macros](https://docs.rs/lgwks_macros) |
 
-From those versions on, the supported interface is `script!`, `try_join!` and
-the `script` module of `lgwks_bot`, `lgwks_ast::script`, and a small page each
-for `lgwks_std` and `lgwks_deps`. Every other item is `#[doc(hidden)]` support
-code with no compatibility promise (#526). The migration notes are under
+From those versions on, three surfaces carry a compatibility promise. The
+orchestration surface is `script!`, `try_join!` and the `script` module of
+`lgwks_bot`, plus `lgwks_ast::script`. The code-understanding surface is
+`lgwks_ast`'s documented parser (`Language`, `try_parse`, `inspect_ast`,
+`ParseError`, `Diagnostic`) and scanner (`lgwks_ast::scan`). The admission
+surface is `lgwks_deps`'s gate (`check_dependencies`, `check_verdict`,
+`Verdict`, `Refusal`, `GateError`, `contract::Contract`) and its
+`storefront` module. Every other item is `#[doc(hidden)]` support code with no
+compatibility promise (#526). The migration notes are under
 [`../changelog/`](../changelog).
 
 Many guide pages below describe that support code in depth. They remain

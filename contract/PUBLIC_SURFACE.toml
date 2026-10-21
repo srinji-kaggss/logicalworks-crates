@@ -4,7 +4,7 @@
 [ceilings]
 "crates/lgwks-ast/src/diagnostic.rs" = 20
 "crates/lgwks-ast/src/error.rs" = 1
-"crates/lgwks-ast/src/lib.rs" = 1
+"crates/lgwks-ast/src/lib.rs" = 4
 "crates/lgwks-ast/src/parser.rs" = 22
 "crates/lgwks-ast/src/parser/check.rs" = 7
 "crates/lgwks-ast/src/parser/language.rs" = 14
@@ -67,10 +67,10 @@
 "crates/lgwks-bot/src/journal/file/replay.rs" = 1
 "crates/lgwks-bot/src/journal/memory.rs" = 12
 "crates/lgwks-bot/src/journal/owner.rs" = 2
-"crates/lgwks-bot/src/keyed.rs" = 7
 "crates/lgwks-bot/src/journal/recover.rs" = 22
 "crates/lgwks-bot/src/journal/wire_form.rs" = 2
 "crates/lgwks-bot/src/json.rs" = 1
+"crates/lgwks-bot/src/keyed.rs" = 7
 "crates/lgwks-bot/src/language.rs" = 19
 "crates/lgwks-bot/src/lib.rs" = 3
 "crates/lgwks-bot/src/proposal/artifact.rs" = 18
@@ -156,6 +156,7 @@
 "crates/lgwks-deps/src/invariants/binding.rs" = 1
 "crates/lgwks-deps/src/invariants/resolve.rs" = 2
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
+"crates/lgwks-deps/src/lib.rs" = 25
 "crates/lgwks-deps/src/lock.rs" = 7
 "crates/lgwks-deps/src/metadata/capture.rs" = 2
 "crates/lgwks-deps/src/metadata/collect.rs" = 9
@@ -204,5 +205,4 @@
 # The doc-example ceiling (#526): per documentation file, how many fenced Rust
 # blocks name a workspace crate by path and hold no `script!`. Exact, like the one above.
 [examples]
-
 "crates/lgwks-bot/src/script/scope.rs" = 1
