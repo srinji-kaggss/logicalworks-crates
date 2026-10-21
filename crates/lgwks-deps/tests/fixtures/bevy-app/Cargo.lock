@@ -527,7 +527,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lgwks_deps"
-version = "4.2.0"
+version = "4.2.1"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "3.0.2"
+version = "3.0.3"
 dependencies = [
  "getrandom",
  "serde",
