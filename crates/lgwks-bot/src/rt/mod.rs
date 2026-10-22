@@ -1,10 +1,11 @@
-//! Async runtime: the async and runner surface of [`lgwks_bot`].
+//! Async orchestration runtime: the async and runner surface of [`lgwks_bot`].
 //!
-//! This is the crate's async tier. It wraps tokio **core** behind a deliberate
-//! surface and sources the engine from the [`lgwks_deps`] storefront
-//! (`feature = "tokio"`), so `lgwks_deps` is the only crate that authors a
+//! This is the crate's async tier and the runtime its callers enter. It owns the
+//! orchestration surface — bounded fan-out, supervision, deadlines, cancellation —
+//! and drives it through a private driver sourced from the [`lgwks_deps`]
+//! storefront (`feature = "tokio"`), so `lgwks_deps` is the only crate that authors a
 //! `tokio` edge (`INV-DEP-EDGE-OWNED`) and `lgwks_bot` is the crate a consumer
-//! reaches async through.
+//! reaches async through. No caller names the driver directly.
 //!
 //! [`lgwks_bot`]: crate
 //! [`lgwks_deps`]: lgwks_deps
@@ -45,13 +46,17 @@
 //!   `Semaphore`, `Notify`, `Barrier` (feature `sync`).
 //! - `net` — async TCP/UDP and `lookup_host` (feature `net`).
 //! - `process`, `fs`, `signal` — opt-in drivers.
-//! - `select!`, `join!`, `try_join!` — tokio's `macro_rules!` combinators,
-//!   re-exported at the crate root so a consumer never names `tokio`.
+//! - `select!`, `join!`, `try_join!` — the driver's `macro_rules!` combinators,
+//!   re-exported at the crate root so a consumer never names the driver. They are
+//!   the spelling for branches already owned by the awaiting task; work that must
+//!   outlive the call belongs on a `Supervisor` or in `join_all_bounded`, never in
+//!   a bare combinator.
 //!
 //! # Entering async
 //!
-//! There is no attribute macro: a re-exported proc-macro expands to `::tokio`
-//! paths a consumer without a `tokio` edge cannot resolve. Entry is explicit:
+//! There is one front door and no attribute macro: a re-exported proc-macro would
+//! expand to driver paths a consumer without a driver edge cannot resolve. Entry is
+//! explicit and owned:
 //!
 //! `the_runtime_is_entered_through_block_on` (`tests/it/rt_front_door.rs`) runs it:
 //! `Runtime::new()` builds the owned runtime and `block_on` drives one future to completion on it.
@@ -86,11 +91,11 @@ pub use crate::clock;
 pub mod runtime;
 pub mod task;
 
-/// Declare task-local storage, re-exported from the engine so a caller of
-/// [`crate::task`] never names `tokio` to reach it.
+/// Declare task-local storage, re-exported from the driver so a caller of
+/// [`crate::task`] never names the driver to reach it.
 ///
 /// It is a `macro_rules!` macro, so it cannot be listed inside `sync`: the
-/// engine's `task_local!` needs only the `rt` feature this module already
+/// driver's `task_local!` needs only the `rt` feature this module already
 /// requires, and a `pub use` of a macro is what keeps that true.
 pub use lgwks_deps::tokio::task_local;
 

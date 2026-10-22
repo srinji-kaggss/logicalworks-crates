@@ -1,9 +1,11 @@
-//! Explicit ownership of the async runtime.
+//! The orchestration runtime, explicitly owned.
 //!
-//! This crate does not hide a global reactor. A [`Runtime`] is constructed,
-//! owned, and dropped by its caller; every task runs on a runtime the caller
-//! can name. [`Handle`] is the cloneable capability to place work on a runtime
-//! that is owned elsewhere.
+//! `lgwks_bot` is the async runtime its callers enter: a [`Runtime`] is
+//! constructed, owned, and dropped by its caller, and every task runs on a
+//! runtime the caller can name. There is no global reactor. [`Handle`] is the
+//! cloneable capability to place work on a runtime that is owned elsewhere,
+//! and the free [`block_on`] is the current-thread one-off for synchronous code
+//! with no runtime to name.
 
 use std::future::Future;
 use std::io;
@@ -29,9 +31,10 @@ pub const MAX_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// construction and every later read sees the same string.
 pub(crate) const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 
-/// Configures and builds an owned [`Runtime`].
+/// Configures and builds the owned orchestration [`Runtime`].
 ///
-/// Native targets use Tokio's multi-thread scheduler. WASM targets use the
+/// Native targets drive a multi-thread scheduler through the crate-owned
+/// engine. WASM targets use the
 /// current-thread scheduler because WASM has no native worker-thread driver.
 /// Native defaults are discovered, never hardcoded: worker count follows
 /// [`std::thread::available_parallelism`] and the thread name is
@@ -58,7 +61,7 @@ pub struct Builder {
 
 impl Default for Builder {
     /// A builder with every knob at its declared default: the discovered worker
-    /// count, `"lgwks-bot"`, and the engine's own blocking and stack
+    /// count, `"lgwks-bot"`, and the driver's own blocking and stack
     /// defaults. Written out rather than derived because `#[derive(Default)]`
     /// would leave `thread_name` empty, and an empty OS thread name is not a
     /// default a stack trace can be read from.
@@ -104,8 +107,8 @@ impl Builder {
         self
     }
 
-    /// Cap the blocking pool used by the `fs` driver. Pass `None` for Tokio's
-    /// default (512). The value is a [`NonZeroUsize`] because Tokio refuses
+    /// Cap the blocking pool used by the `fs` driver. Pass `None` for the
+    /// driver's default (512). The value is a [`NonZeroUsize`] because the driver refuses
     /// zero (`assert!(val > 0)`), so an unbounded or zero pool cannot be
     /// expressed by accident; callers that fan out blocking work pair this with
     /// [`crate::rt::task::join_all_bounded`] to keep both async and blocking
@@ -123,7 +126,7 @@ impl Builder {
     }
 
     /// Give each native worker thread a stack of `bytes`, or pass `None` for the
-    /// engine's default of 2 MiB. Has no effect on WASM.
+    /// driver's default of 2 MiB. Has no effect on WASM.
     ///
     /// A future's own state lives in the task, but every synchronous call a poll
     /// makes uses the worker's stack, and a chain of bounded but deep calls can
@@ -208,18 +211,18 @@ fn discover_workers() -> Option<NonZeroUsize> {
     std::thread::available_parallelism().ok()
 }
 
-/// An owned async runtime. Native targets use multiple worker threads; WASM
+/// An owned orchestration runtime. Native targets use multiple worker threads; WASM
 /// targets use a current-thread scheduler.
 ///
 /// Dropping the runtime shuts it down and aborts async tasks that have not
-/// finished. Started blocking tasks cannot be aborted by Tokio and may outlive
+/// finished. Started blocking tasks cannot be aborted by the driver and may outlive
 /// the runtime. [`Runtime::shutdown_timeout`] bounds the wait for the blocking
 /// pool; it does not give async tasks a grace period. A task already executing
 /// non-yielding code cannot be forcibly stopped, and a started blocking task
 /// may continue on its blocking thread after shutdown returns.
 #[derive(Debug)]
 pub struct Runtime {
-    /// The owned engine runtime. Private so the engine type never appears in
+    /// The owned driver runtime. Private so the driver type never appears in
     /// this crate's public surface: a consumer names [`Runtime`], never
     /// `lgwks_deps::tokio::runtime::Runtime`.
     inner: lgwks_deps::tokio::runtime::Runtime,
@@ -251,10 +254,10 @@ impl Runtime {
 
     /// Wait up to `timeout` for shutdown to finish.
     ///
-    /// Tokio shuts down async workers as shutdown begins, dropping tasks that
+    /// Shutdown stops the async workers as it begins, dropping tasks that
     /// have not completed. A task already executing non-yielding code cannot be
     /// forcibly stopped. The timeout applies to the blocking pool; a started
-    /// blocking task cannot be aborted by Tokio and may continue on its
+    /// blocking task cannot be aborted by the driver and may continue on its
     /// blocking thread after this method returns.
     pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.shutdown_timeout(timeout);
@@ -273,8 +276,9 @@ impl Runtime {
 /// reports how it ended.
 #[derive(Clone, Debug)]
 pub struct Handle {
-    /// The engine's cloneable handle. Private for the same reason as
-    /// [`Runtime::inner`]: the engine type stays behind the facade. It holds no
+    /// The driver's cloneable handle. Private for the same reason as
+    /// [`Runtime::inner`]: the driver type stays behind the orchestration
+    /// surface. It holds no
     /// ownership of the runtime, which is why a handle outliving its runtime
     /// cannot keep the runtime alive.
     inner: lgwks_deps::tokio::runtime::Handle,
@@ -290,22 +294,24 @@ impl Handle {
 
 /// Whether a runtime is already driving the calling thread.
 ///
-/// The one place this crate asks the engine that question. The synchronous
+/// The one place this crate asks the driver that question. The synchronous
 /// entry points — `EcsBot::tick` and `Host::block_on` — refuse to start a
 /// second driver on a thread a runtime already drives, because blocking that
 /// thread would stall every task the outer runtime has parked on it. Both read
-/// the answer here, so the engine is named once rather than at every refusal.
+/// the answer here, so the driver is named once rather than at every refusal.
 pub(crate) fn inside_runtime() -> bool {
     lgwks_deps::tokio::runtime::Handle::try_current().is_ok()
 }
 
 /// Run one future to completion on a private current-thread runtime.
 ///
-/// This is the convenience entry for a one-off async call from synchronous
-/// code. It builds and tears down a runtime per call, so code that makes
-/// repeated async calls should hold a [`Runtime`] instead. Panics if called
-/// from within an async context, and panics if the OS refuses the runtime's
-/// driver resources, a condition under which no async work could proceed.
+/// This is the one-off entry for synchronous code that has no runtime to name:
+/// it builds and tears it down per call, so code that makes repeated async
+/// calls must hold a [`Runtime`] instead. Current-thread, so a borrowed or
+/// non-`Send` one-off drives where a multi-thread driver would refuse it.
+/// Panics if called from within an async context, and panics if the OS refuses
+/// the runtime's driver resources, a condition under which no async work could
+/// proceed.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
