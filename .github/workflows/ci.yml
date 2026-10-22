@@ -844,9 +844,26 @@ jobs:
   # apart from the lgwks-std feature matrix: the two share no feature set, and
   # as one job they took 454 s (run 37633462471).
   storefront-matrix:
-    name: Target and storefront matrix
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
+    name: Target and storefront matrix (${{ matrix.part }})
+    # Four legs, each holding one family of checks, because the six checks in one
+    # job took 5 m 16 s on run 39819450072: the GPUI and ML storefronts each
+    # compile a hundred crates of their own, and together with the fixture
+    # renderer they reached the cap with two steps never run. A leg runs only the
+    # steps named for it, so every check still runs exactly once per commit.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: deps
+            instance: lwc-13
+          - part: gpui
+            instance: lwc-2
+          - part: ml
+            instance: lwc-11
+          - part: consumers
+            instance: lwc-6
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -859,14 +876,19 @@ jobs:
           # yields nothing: 20 of 20 tests passed there, 225 to 241 s earlier.
           defer: "0"
       - name: Check lgwks-deps
+        if: matrix.part == 'deps'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
+        if: matrix.part == 'deps'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio
       - name: Check lgwks-deps GPUI storefront feature
+        if: matrix.part == 'gpui'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
+        if: matrix.part == 'ml'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
       - name: Check normal GPUI renderer feature
+        if: matrix.part == 'gpui'
         # The fixture is its own workspace, so by default it builds into its
         # own target directory and compiles the GPUI stack a second time.
         # Pointing it at the directory the first check just filled reuses
@@ -878,9 +900,11 @@ jobs:
           --target-dir "${CARGO_TARGET_DIR:-target}"
           --no-default-features --features gpui --example gpui
       - name: Check Candle Metal storefront features
+        if: matrix.part == 'ml'
         run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
       # Standalone consumer packages, one cargo build per storefront family.
       - name: Build storefront consumers
+        if: matrix.part == 'consumers'
         run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
 
   # The declared target matrix, one leg per group of targets. Run in one job it
@@ -966,6 +990,26 @@ jobs:
         # either bound, so a slower implementation cannot land behind a green
         # suite (ADR 0003).
         run: cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails
+
+  # The async fairness gate and concurrency ladder, in a job of its own: beside
+  # the two digest measurements it took the instance to 5 m 24 s on run
+  # 39819450072, and both of those had already passed. It compiles the bench
+  # workspace and runs it four ways (the suite, a mutant check, the tiers and the
+  # matrix), which is a job's work on its own instance rather than a step behind
+  # two others.
+  timing_async:
+    name: Async fairness gate and concurrency ladder
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          # It measures wall time, so it takes no share of the machine's test
+          # slots and yields its first cargo call at once.
+          defer: "0"
       - name: Async fairness gate and concurrency ladder
         run: cargo test --locked --manifest-path bench/async/Cargo.toml --bin lgwks-bench-async && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --matrix
 
