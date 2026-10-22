@@ -440,12 +440,6 @@ required = true
 command = "cargo run --locked -p lgwks_deps --bin check-doc-citations"
 ci_step = "Documentation citations resolve"
 
-# The capability catalog (#732) and the documentation set (#732, ADR 0004) run in
-# the local gate under the two `[[lane]]` blocks at the top of this file. They are
-# `local` there because their `ci.yml` steps are the one change this session
-# cannot make: that file needs the Director to name it. The checks are the same
-# commands either way.
-
 [[lane]]
 id = "contract-drift"
 surfaces = "local ci"
@@ -753,10 +747,7 @@ id = "gpui-macos"
 group = "check"
 surfaces = "local ci"
 required = false
-command = """\
-cargo check --locked -p lgwks_deps --all-targets --features gpui && \
-cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir \"${CARGO_TARGET_DIR:-target}\" --no-default-features --features gpui --example gpui\
-"""
+command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir \"${CARGO_TARGET_DIR:-target}\" --no-default-features --features gpui --example gpui"
 ci_step = "Check normal GPUI renderer feature"
 platforms = ["darwin"]
 needs = ["bin:xcodebuild"]

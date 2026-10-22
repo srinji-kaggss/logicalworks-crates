@@ -860,6 +860,8 @@ jobs:
             instance: lwc-13
           - part: gpui
             instance: lwc-2
+          - part: gpui-fixture
+            instance: lwc-12
           - part: ml
             instance: lwc-11
           - part: consumers
@@ -888,13 +890,12 @@ jobs:
         if: matrix.part == 'ml'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
       - name: Check normal GPUI renderer feature
-        if: matrix.part == 'gpui'
-        # The fixture is its own workspace, so by default it builds into its
-        # own target directory and compiles the GPUI stack a second time.
-        # Pointing it at the directory the first check just filled reuses
-        # every unit whose features match.
+        if: matrix.part == 'gpui-fixture'
+        # The fixture is its own workspace, so it compiles the GPUI stack into
+        # the target directory this leg owns. In the leg with the storefront
+        # feature check it was the second full GPUI compile of the same job and
+        # the pair took 5 m 23 s on run 39821047107, so it has a leg of its own.
         run: >
-          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
           --target-dir "${CARGO_TARGET_DIR:-target}"
