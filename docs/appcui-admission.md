@@ -6,7 +6,7 @@ resource: /docs/appcui-admission.md
 tags: [dependencies, appcui, terminal, rocco]
 decision: 2026-09-17
 stale_after: 2026-10-17
-sources: [/docs/dependency-doctrine.md, /contract/APPROVED.toml, https://github.com/gdt050579/AppCUI-rs, https://crates.io/crates/appcui/0.5.1]
+sources: [/docs/dependency-doctrine.md, /contract/APPROVED.toml, https://github.com/gdt050579/AppCUI-rs, https://crates.io/crates/appcui/0.5.5]
 ---
 
 # AppCUI native terminal storefront admission
@@ -39,7 +39,7 @@ widget engine. Current `lgwks_deps` GPUI is a desktop renderer, not a native
 terminal replacement. Direct AppCUI or a second custom terminal engine would
 violate the selected framework and the ownership model. Optional `lgwks_deps`
 AppCUI is the BOUNDARY rung, with only `lgwks_deps` as a normal-kind authored
-consumer. Published appcui 0.5.1 reports MIT. Its platform closure includes
+consumer. Published appcui 0.5.5 reports MIT; the pin moved from 0.5.1 on 2026-10-22. Its platform closure includes
 clipboard, terminal and OS dependencies; transitive code is upstream, not newly
 authored wrappers in this workspace. No universal safety or advisory-clean claim
 is implied.
@@ -48,8 +48,7 @@ is implied.
 
 1. No AppCUI in the default or no-default-feature resolved graph; inspect
    `cargo tree` before/after feature selection.
-2. Explicit AppCUI feature resolves pinned 0.5.1 and the native re-export;
-   feature build, macro doctest and clippy check it.
+2. Explicit AppCUI feature resolves pinned 0.5.5 and the native re-export, and the feature build, macro doctest and clippy check it.
 3. The real admission gate accepts the owned edge; its existing negative
    controls reject missing/wrong-owner/requirement approvals. Closure test
    continues to require optional dependencies; no baseline threshold relaxed.
@@ -87,7 +86,7 @@ On the edited source, macOS arm64, Rust 1.98.0:
 - AppCUI no-default-feature library tests: 38 passed. Re-export macro doctest:
   1 passed. Both normal and AppCUI-feature clippy runs passed with warnings denied.
 - Default/selected `cargo tree` assertions: AppCUI absent by default, pinned
-  appcui 0.5.1 present when explicitly selected.
+  appcui 0.5.5 present when explicitly selected.
 - Required package-smoke script: package verification and fresh extracted
   consumer both passed, printed `lgwks_std package smoke passed`; disposal
   used the available OS Trash tool, not irreversible removal.

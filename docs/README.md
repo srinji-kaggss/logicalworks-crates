@@ -55,6 +55,7 @@ the rest of this table is design history and contributor policy.
 | [`docs/bot-on-ecs.md`](bot-on-ecs.md) | Bot semantics on an ECS substrate, and what that mapping costs. |
 | [`docs/effect-kernel.md`](effect-kernel.md) | The durable effect dispatch and recovery kernel: the journal ladder, the recovery fold, settlement unification, durability admission, and what one authority means. |
 | [`docs/bevy-admission.md`](bevy-admission.md) | The Bevy ECS decision and the alternatives measured against it. |
+| [`docs/bevy-0.20-spike.md`](bevy-0.20-spike.md) | The admission's spike re-run on `bevy_ecs` 0.20: the deferred-effect control, `Changed<T>`, the slot-count caveat, and the cost. |
 | [`docs/candle-admission.md`](candle-admission.md) | ML inference admission: authority, transitive surface, verification. |
 | [`docs/appcui-admission.md`](appcui-admission.md) | Native terminal UI admission: authority and verification. |
 | [`docs/distributed-boundaries.md`](distributed-boundaries.md) | What these crates do and refuse on a distributed network path. Read it before placing them on one. |
