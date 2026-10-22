@@ -91,7 +91,7 @@ lgwks_std = { workspace = true, features = ["json"] }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 quote = { version = "1", optional = true }
 gpui = { version = "0.2", optional = true }
-appcui = { version = "=0.5.1", default-features = false, optional = true }
+appcui = { version = "=0.5.5", default-features = false, optional = true }
 # Bevy's ECS and the three crates that make it a runtime. `default-features =
 # false` throughout, and two omissions are deliberate: `bevy_reflect` stays off
 # (it is the expensive half of `bevy_ecs`'s default set and this workspace does not
@@ -99,10 +99,10 @@ appcui = { version = "=0.5.1", default-features = false, optional = true }
 # multithreaded executor admits any system whose access set is disjoint from the
 # running set, so the order of two non-conflicting systems is not fixed. A bot
 # polling sources does not need parallel scheduling and cannot afford that.
-bevy_ecs = { version = "0.19", default-features = false, features = ["std"], optional = true }
-bevy_app = { version = "0.19", default-features = false, optional = true }
-bevy_time = { version = "0.19", default-features = false, optional = true }
-bevy_state = { version = "0.19", default-features = false, optional = true }
+bevy_ecs = { version = "0.20", default-features = false, features = ["std"], optional = true }
+bevy_app = { version = "0.20", default-features = false, optional = true }
+bevy_time = { version = "0.20", default-features = false, optional = true }
+bevy_state = { version = "0.20", default-features = false, optional = true }
 # The engine is compiled `default-features = false` with the portable `rt`
 # feature always on. Native targets add `rt-multi-thread`; WASM targets use the
 # current-thread runtime because Tokio does not provide its multi-thread driver

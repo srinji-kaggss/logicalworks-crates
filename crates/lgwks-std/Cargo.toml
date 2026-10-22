@@ -87,7 +87,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["float_roundtrip"], optional = true }
 ron = { version = "0.12", optional = true }
 getrandom = { version = "0.4", optional = true }
-ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc"], optional = true }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 iri-string = { version = "0.7", optional = true }
 
