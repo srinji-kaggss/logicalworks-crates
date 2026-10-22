@@ -1,0 +1,115 @@
+# Dependabot keeps every lockfile this repository builds against at its newest
+# release, without letting an automated PR change a decision the gate owns.
+#
+# Two rules shape the layout below.
+#
+# 1. A version *within* an approved requirement is freshness: `cargo update`
+#    work, safe to land as a grouped PR, and the `lockfile`, `tests` and
+#    `advisories` lanes judge it. Those PRs arrive in `rust-patch-minor`.
+#
+# 2. A new major is an *admission*, not freshness. `contract/APPROVED.toml`
+#    records a version rung per external edge (AGENTS.md, INV-DEP-5), so a bump
+#    past it is refused by `lgwks-deps check .` until the register is edited in
+#    the same change. Majors therefore arrive in `rust-major`, one PR whose
+#    review is the register edit: the rung moves only with its reason and its
+#    `approved_on` date. `appcui` is pinned exactly (`=0.5.5`) for the same
+#    reason, and a PR that moves the pin is that review.
+#
+# Only real workspace roots are listed. The fixtures under
+# `crates/lgwks-deps/tests/fixtures/` are separate roots whose lockfiles hold
+# this workspace's path crates and one deliberately exact pin (`check-both`'s
+# `itoa`); `cargo update --workspace` on these roots is what the `lockfile` lane
+# already enforces on every version bump, so an update PR there would only
+# duplicate the root's.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10
+    groups:
+      rust-patch-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      rust-major:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # The four measurement rigs are workspace roots of their own, deliberately
+  # outside `contract/APPROVED.toml` (bench/*/Cargo.toml says why). Their
+  # lockfiles still resolve this workspace's crates and the one raw edge a
+  # comparison needs (`bench/async`'s tokio), so they are kept current too.
+  - package-ecosystem: cargo
+    directory: "/bench"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/bench/ai-authoring"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/bench/async"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/bench/std-measure"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  # `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`
+  # and the composite action the workflows call. A pinned action is a
+  # dependency with a tag for a version, so it is reviewed the same way; a
+  # major here is a runner-contract change, so it stays its own group.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      actions-patch-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      actions-major:
+        patterns: ["*"]
+        update-types: ["major"]
+
+  # The compiler is a pin, not a requirement: `rust-toolchain.toml` names the
+  # channel, `scripts/gate-lanes.toml` repeats it under `[toolchain]`, and every
+  # job of `.github/workflows/ci.yml` names it in the local-rust step, whose
+  # check fails when the three disagree. A PR from here therefore arrives red by
+  # design: moving the channel means moving all three together and re-taking the
+  # gate's measurements, which is the review.
+  - package-ecosystem: rust-toolchain
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(toolchain)"
+    open-pull-requests-limit: 2

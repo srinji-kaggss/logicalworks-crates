@@ -136,8 +136,8 @@ full = [
 ]
 
 [dependencies]
-ast-grep-core = { version = "0.45", optional = true }
-ast-grep-language = { version = "0.45", default-features = false, optional = true }
+ast-grep-core = { version = "0.51", optional = true }
+ast-grep-language = { version = "0.51", default-features = false, optional = true }
 thiserror = { version = "2", default-features = false }
 # The `unlogged-err-return` rule requires a recorded signal on every refusal,
 # and `print_stderr` is `forbid` in library code. `lgwks_ast` stands outside the
@@ -148,7 +148,7 @@ tracing = { version = "0.1", default-features = false, features = ["std"], optio
 # calls `parse` with no progress callback, so a parse through it cannot be
 # stopped; `Parser::parse_with_options` and `ParseOptions::progress_callback` can.
 # Admitted on the Director's word (2026-10-05) in `contract/APPROVED.toml`. The
-# requirement is the one `ast-grep-core` 0.45 already resolves (0.27.0, default
+# requirement is the one `ast-grep-core` 0.51 already resolves (0.27.1, default
 # features), so this names an edge that was already compiled rather than adding
 # a crate: the `Tree` built here is the type `StrDoc` holds.
 tree-sitter = { version = "0.27", optional = true }
