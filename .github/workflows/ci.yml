@@ -1095,11 +1095,13 @@ jobs:
           # On the instance whose target holds lgwks-bot's graph: the leg on
           # lwc-10 spent 5 m 33 s compiling four feature resolutions on a cold
           # target and was cancelled at the cap (run 39837239411), where the same
-          # leg reads 1 m 19 s warm. lwc-5 builds the bot-full suite, so the
-          # graph is there; the leg queues behind those shards and its own clock
-          # still covers one check.
+          # leg reads 1 m 19 s warm. Two resolutions per leg now, so a cold target
+          # pays half the work: the no-default and default builds here, the
+          # feature subsets and all-features on the leg below.
           - part: lgwks-bot
             instance: lwc-5
+          - part: lgwks-bot all
+            instance: lwc-10
           - part: lgwks-ast
             instance: lwc-12
           - part: lgwks-bot WASI
@@ -1129,6 +1131,10 @@ jobs:
           set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets
+      - name: Check lgwks-bot all-features matrix
+        if: matrix.part == 'lgwks-bot all'
+        run: |
+          set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
       - name: Check lgwks-bot WASI runtime boundary

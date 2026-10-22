@@ -78,10 +78,11 @@ ci_step = "ADRs and PRDs hold their required fields"
 id = "latency-tails"
 surfaces = "local ci"
 required = true
-# The per-call cost of what is on by default: p50 at or under 500 ns and p99 at
-# or under 1500 ns for one 64-byte digest, one glob match and one small document
-# parsed. The example refuses over either bound (ADR 0003).
-command = "cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails"
+# The per-call cost of every leaf call in `lgwks_std`, not a sample of them:
+# nineteen rows, each bounded at p50 500 ns and p99 1 500 ns, and the entropy row
+# on its tail alone because its cost is the kernel's. The example refuses over
+# either bound (ADR 0003).
+command = "cargo run --release --locked -p lgwks_std --example latency_tails"
 ci_step = "The hot calls hold their latency tails"
 
 [[lane]]
@@ -562,11 +563,24 @@ surfaces = "local ci"
 required = true
 command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets\
+"""
+ci_step = "Check lgwks-bot async feature matrix"
+
+# The two resolutions above the default set, on a leg of their own: four
+# resolutions in one leg spent 5 m 33 s on a target that had never held them and
+# was cancelled at the cap (run 39837239411), while the same work reads under
+# three minutes when each leg starts against a target that holds its graph.
+[[lane]]
+id = "feat-bot-all"
+group = "check"
+surfaces = "local ci"
+required = true
+command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal && \
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features\
 """
-ci_step = "Check lgwks-bot async feature matrix"
+ci_step = "Check lgwks-bot all-features matrix"
 
 [[lane]]
 id = "feat-ast"
