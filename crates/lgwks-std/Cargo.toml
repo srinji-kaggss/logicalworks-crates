@@ -62,6 +62,9 @@ core = []
 trace = ["dep:tracing", "dep:tracing-subscriber"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
+# A build script's input digest and cargo directives: composes `hash` and
+# `fs`, and reports failures through `trace`, so it adds no dependency.
+build = ["hash", "trace"]
 sign = ["random", "hash", "dep:ed25519-dalek"]
 pattern = ["dep:regex"]
 json = ["dep:serde", "dep:serde_json"]
@@ -71,7 +74,7 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-full = ["trace", "random", "hash", "sign", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
+full = ["trace", "random", "hash", "build", "sign", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
 
 [dependencies]
 # `attributes` is deliberately NOT enabled. It is the half of `tracing` that

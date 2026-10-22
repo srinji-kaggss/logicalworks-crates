@@ -34,6 +34,8 @@ mod glob_public;
 mod pattern_external;
 mod process_parity;
 mod prop_codecs;
+#[cfg(feature = "build")]
+mod sim_build;
 // Builds its own downstream packages with its own json and ron features, so
 // the run's features cannot change its result; once under `full`, not once per
 // per-feature run (a nested build of 55-198 s each time).

@@ -29,6 +29,8 @@
 //!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
+//! - `build` — build. A build script's input digest and cargo directives.
+//!   Implies `hash` and `trace`; adds no dependency of its own.
 //! - `sign` — sign. Adds `ed25519-dalek` (default-features off, `alloc` only).
 //!   Implies `random` (key generation reads the one entropy source) and `hash`
 //!   (the sealed message carries the BLAKE3 of the record).
@@ -58,6 +60,10 @@
 #[cfg(test)]
 extern crate self as lgwks_std;
 
+/// A build script's input digest and checked cargo directives (feature `build`).
+#[cfg(feature = "build")]
+#[doc(hidden)]
+pub mod build;
 ///
 /// Single-import encoding primitives: base64 and percent-encoding.
 #[doc(hidden)]
