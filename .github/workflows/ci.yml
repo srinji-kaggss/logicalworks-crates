@@ -394,10 +394,11 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    # Two shards on two instances: one instance ran the compile and the suite to
-    # 5 m 32 s and the cap cancelled it (run 39824581301), against 2 m 33 s for
-    # the same job on a quiet host. `--partition` splits the tests; `sccache` is
-    # shared, so the second shard's compile is mostly cache hits.
+    # Two shards, both on the instance that holds this graph warm. A shard on an
+    # instance that has never built it pays the whole compile: 5 m 30 s against
+    # 1 m 33 s for the warm shard of the same commit (run 39827897865, lwc-10
+    # against lwc-5). The two shards queue on the one instance instead, so each
+    # job's own clock covers a shard rather than a compile.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -406,7 +407,7 @@ jobs:
         include:
           - instance: lwc-5
             partition: count:1/2
-          - instance: lwc-10
+          - instance: lwc-5
             partition: count:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
@@ -891,11 +892,12 @@ jobs:
     # steps named for it, so every check still runs exactly once per commit.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
-    # A leg compiles one storefront family, and the family's target directory is
-    # cold the first time the leg lands on an instance: the consumer legs spent
-    # 5 m 20 s and 5 m 26 s there while the warm gpui leg took 20 s (run
-    # 39826369522). sccache cannot cache an incremental build, so it is off here
-    # and a cold instance reads the shared cache instead.
+    # A leg compiles one storefront family, and a leg on an instance that has
+    # never built it pays the whole compile: the consumer shard on lwc-11 spent
+    # 5 m 53 s where the shard on lwc-6 took 1 m 21 s (run 39827897865). Both
+    # consumer shards therefore queue on lwc-6, which holds the consumer
+    # families warm; `CARGO_INCREMENTAL` is off so sccache can serve whatever is
+    # not already there.
     env:
       CARGO_INCREMENTAL: "0"
     strategy:
@@ -914,7 +916,7 @@ jobs:
             instance: lwc-6
             partition: count:1/2
           - part: consumers-2
-            instance: lwc-11
+            instance: lwc-6
             partition: count:2/2
     steps:
       - uses: actions/checkout@v4
