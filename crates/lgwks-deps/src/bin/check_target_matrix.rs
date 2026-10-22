@@ -201,9 +201,12 @@ fn checks_for(target: &str) -> Vec<Check> {
     // required: a storefront that needed C to build would not be a storefront.
     push("lgwks_deps", &[], false);
     // Recorded: the default sets. `lgwks_std`'s carries `hash`, whose backend
-    // compiles C per target, and `lgwks_ast`'s carries the grammars.
-    push("lgwks_std", &[], true);
+    // compiles C per target, and `lgwks_ast`'s carries the grammars. The cheaper
+    // one runs first: once a target has shown it has no C compiler, the other is
+    // exempt by the same reason, and spending a minute proving it again is how a
+    // five-minute job became a six-minute one (run 39812986575).
     push("lgwks_ast", &[], true);
+    push("lgwks_std", &[], true);
     checks
 }
 
@@ -262,7 +265,17 @@ fn run(out: &mut impl Write, targets: &[String]) -> Result<Summary, MatrixError>
                 continue;
             }
         }
+        let mut no_c_toolchain = false;
         for check in checks_for(target) {
+            if check.exemptible && no_c_toolchain {
+                summary.exempt = summary.exempt.saturating_add(1);
+                writeln!(out, "  exempt    0s  {}", check.label)?;
+                writeln!(
+                    out,
+                    "          not attempted: this target has no C toolchain, established by the check above"
+                )?;
+                continue;
+            }
             let started = std::time::Instant::now();
             let (verdict, output) = check.run();
             let seconds = started.elapsed().as_secs();
@@ -276,6 +289,7 @@ fn run(out: &mut impl Write, targets: &[String]) -> Result<Summary, MatrixError>
                 Verdict::Pass => {}
                 Verdict::Exempt => {
                     summary.exempt = summary.exempt.saturating_add(1);
+                    no_c_toolchain = true;
                     for line in output.lines().filter(|line| line.starts_with("error")) {
                         writeln!(out, "          {line}")?;
                     }
