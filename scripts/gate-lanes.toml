@@ -331,6 +331,12 @@ ci_step = "Digest constant-time equality (dudect)"
 # the Windows stand-in's handles would be if they stopped using
 # `without_provenance_mut`.
 #
+# `--no-default-features --features process` states the one capability the proof
+# needs. With the default set on, `hash` pulled `blake3`, whose C/NEON build ran
+# the runner's Linux `cc` with `-arch arm64 -mmacosx-version-min=11.0` and failed
+# before Miri started (run 39842979620): the proof is about `lgwks_std`'s two
+# syscall modules, and no hash is involved in either.
+#
 # Measured cold in the repository's Linux container: the install 12 s, the darwin
 # seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the lane; 16 s
 # on a warm darwin host. The negative control (the fill given a buffer of half
@@ -342,8 +348,8 @@ surfaces = "local ci"
 required = true
 command = """\
 rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
 """
 ci_step = "Prove the process unsafe seams under Miri"
 needs = ["bin:rustup"]
