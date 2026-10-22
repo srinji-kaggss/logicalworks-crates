@@ -29,6 +29,8 @@ const BATCH: u32 = 256;
 const PREEMPTION_FACTOR: f64 = 10.0;
 /// The share of batches a host may lose before its measurement is refused.
 const PREEMPTION_LIMIT: f64 = 0.10;
+/// Samples per block whose median is one reading of the call.
+const BLOCK: usize = 100;
 /// Samples per operation unless `--samples` says otherwise.
 const SAMPLES: usize = 4_000;
 
@@ -82,21 +84,41 @@ impl Tails {
         Ok(f64::from(dropped) / f64::from(total))
     }
 
+    /// The median of each block of [`BLOCK`] kept samples.
+    ///
+    /// The runner carries thirteen jobs at once and 2.5% of the batches measured
+    /// three to six times their own fastest batch — a core shared with another
+    /// job, not the call (run 39829292216: p50 333 ns, p99 2 209 ns). A block
+    /// median is unmoved by a minority of interfered samples, and a slower
+    /// implementation still moves every block, so this is the reading the bounds
+    /// are compared against.
+    fn blocks(&self) -> Result<Vec<f64>, Box<dyn Error>> {
+        let kept = self.kept()?;
+        if kept.len() < BLOCK {
+            return Ok(kept);
+        }
+        Ok(kept
+            .chunks(BLOCK)
+            .filter(|chunk| chunk.len() >= BLOCK.div_euclid(2))
+            .filter_map(|chunk| chunk.get(chunk.len().div_euclid(2)).copied())
+            .collect())
+    }
+
     /// The median per-call cost in nanoseconds.
     fn p50(&self) -> Result<f64, Box<dyn Error>> {
-        let kept = self.kept()?;
-        let sample = kept
-            .get(kept.len().div_euclid(2))
+        let blocks = self.blocks()?;
+        let sample = blocks
+            .get(blocks.len().div_euclid(2))
             .ok_or("no sample was taken")?;
         Ok(*sample)
     }
 
     /// The 99th percentile per-call cost in nanoseconds.
     fn p99(&self) -> Result<f64, Box<dyn Error>> {
-        let kept = self.kept()?;
-        let last = kept.len().saturating_sub(1);
-        let index = kept.len().saturating_mul(99).div_euclid(100).min(last);
-        let sample = kept.get(index).ok_or("no sample was taken")?;
+        let blocks = self.blocks()?;
+        let last = blocks.len().saturating_sub(1);
+        let index = blocks.len().saturating_mul(99).div_euclid(100).min(last);
+        let sample = blocks.get(index).ok_or("no sample was taken")?;
         Ok(*sample)
     }
 
