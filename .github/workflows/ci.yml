@@ -136,9 +136,24 @@ jobs:
     # lgwks_bot's tests run in the lgwks_bot jobs below, and `build_verdict`
     # reports this check's required name only when those three, this job and its
     # tail job all passed, so every test is still required.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
+    #
+    # Two shards on two instances: one instance ran the compile and the 1,431
+    # tests to 5 m 25 s and the cap cancelled it (run 39824581301, started
+    # 17:39:18, cancelled 17:44:43), against 2 m 17 s for the same job on a quiet
+    # host. `sccache` is shared across the instances, so the second shard's
+    # compile reads what the first wrote.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - instance: lwc-3
+            partition: count:1/2
+          - instance: lwc-4
+            partition: count:2/2
     env:
+      PARTITION: ${{ matrix.partition }}
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating
@@ -370,12 +385,23 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    # The run's critical path: 263 s and 274 s on runs 39060016758 and 39059515989,
-    # and 4,228 of 4,731 tests done at the 5-minute cap on warm run 39062648303.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
+    # Two shards on two instances: one instance ran the compile and the suite to
+    # 5 m 32 s and the cap cancelled it (run 39824581301), against 2 m 33 s for
+    # the same job on a quiet host. `--partition` splits the tests; `sccache` is
+    # shared, so the second shard's compile is mostly cache hits.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - instance: lwc-5
+            partition: count:1/2
+          - instance: lwc-10
+            partition: count:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
+      PARTITION: ${{ matrix.partition }}
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
@@ -408,7 +434,7 @@ jobs:
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: lgwks-bot-junit-full
+          name: lgwks-bot-junit-full-${{ matrix.instance }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
@@ -861,11 +887,15 @@ jobs:
           - part: gpui
             instance: lwc-2
           - part: gpui-fixture
-            instance: lwc-12
+            instance: lwc-2
           - part: ml
             instance: lwc-11
-          - part: consumers
+          - part: consumers-1
             instance: lwc-6
+            partition: count:1/2
+          - part: consumers-2
+            instance: lwc-11
+            partition: count:2/2
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -903,10 +933,15 @@ jobs:
       - name: Check Candle Metal storefront features
         if: matrix.part == 'ml'
         run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
-      # Standalone consumer packages, one cargo build per storefront family.
+      # Standalone consumer packages, one cargo build per storefront family. The
+      # seventeen families are separate `cargo check` calls that share one target
+      # directory, and all of them on one instance took 5 m 31 s and the cap
+      # cancelled the job (run 39824581301), so the tests are sharded across two.
       - name: Build storefront consumers
-        if: matrix.part == 'consumers'
-        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
+        if: startsWith(matrix.part, 'consumers')
+        env:
+          PARTITION: ${{ matrix.partition }}
+        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers ${PARTITION:+--partition $PARTITION}
 
   # The declared target matrix, one leg per group of targets. Run in one job it
   # took over 7 minutes (run 38412846693: the sixth of seven targets was

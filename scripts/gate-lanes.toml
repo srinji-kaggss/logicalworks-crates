@@ -173,7 +173,7 @@ id = "storefront-consumers"
 group = "storefront"
 surfaces = "local ci"
 required = true
-command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers"
+command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers ${PARTITION:+--partition $PARTITION}"
 ci_step = "Build storefront consumers"
 
 [[lane]]
