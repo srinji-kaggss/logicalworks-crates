@@ -154,6 +154,15 @@ jobs:
             partition: count:2/2
     env:
       PARTITION: ${{ matrix.partition }}
+      # sccache refuses to cache an incremental compilation, and the workflow's
+      # `CARGO_INCREMENTAL: "1"` therefore left these shards rebuilding every
+      # dependency on a cold instance: shard 1 finished in 1 m 21 s on its warm
+      # target and shard 2 spent 5 m 23 s on the identical work and was
+      # cancelled at the cap (run 39826369522). Off here, the two shards share
+      # one compile through the cache across instances; a persistent target
+      # directory is what incremental would have helped, and a shard only has
+      # one when it is already warm.
+      CARGO_INCREMENTAL: "0"
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating
@@ -402,6 +411,10 @@ jobs:
     # One job, so the full feature set is compiled once (see the header).
     env:
       PARTITION: ${{ matrix.partition }}
+      # As in the workspace job: sccache cannot cache an incremental build, and
+      # the second shard landed on a cold instance and spent 5 m 40 s on the
+      # compile the first shard did in 2 m 30 s (run 39826369522).
+      CARGO_INCREMENTAL: "0"
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
@@ -878,6 +891,13 @@ jobs:
     # steps named for it, so every check still runs exactly once per commit.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    # A leg compiles one storefront family, and the family's target directory is
+    # cold the first time the leg lands on an instance: the consumer legs spent
+    # 5 m 20 s and 5 m 26 s there while the warm gpui leg took 20 s (run
+    # 39826369522). sccache cannot cache an incremental build, so it is off here
+    # and a cold instance reads the shared cache instead.
+    env:
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
