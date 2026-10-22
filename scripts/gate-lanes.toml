@@ -52,7 +52,7 @@ rust = "1.99.0"
 
 [[lane]]
 id = "catalog"
-surfaces = "local"
+surfaces = "local ci"
 required = true
 fast = true
 # The capability register is the surface #732 refused to leave implicit: one row
@@ -60,20 +60,29 @@ fast = true
 # like. The check refuses a row whose owner file, feature or module is gone, a
 # row missing for an owner the std-first gate can name in a refusal, and a
 # `docs/catalog.md` that is not a fresh render of the register.
-#
-# Local until the Director names `.github/workflows/ci.yml` for the step: the
-# lane runs in every local gate, and the CI step is the same command.
-command = "cargo run --locked -p lgwks_deps --bin catalog -- --check"
+command = "cargo run --locked -p lgwks_deps --bin catalog -- --check ."
+ci_step = "The capability catalog matches the tree"
 
 [[lane]]
 id = "doc-governance"
-surfaces = "local"
+surfaces = "local ci"
 required = true
 fast = true
 # ADRs hold the ISO/IEC/IEEE 42010 fields and PRDs the ISO/IEC/IEEE 29148
 # attributes (ADR 0004). The reader refuses the record that omits one, so a
 # decision cannot be recorded in a shape no reader can find its rationale in.
 command = "cargo run --locked -p lgwks_deps --bin check-docs"
+ci_step = "ADRs and PRDs hold their required fields"
+
+[[lane]]
+id = "latency-tails"
+surfaces = "local ci"
+required = true
+# The per-call cost of what is on by default: p50 at or under 500 ns and p99 at
+# or under 1500 ns for one 64-byte digest, one glob match and one small document
+# parsed. The example refuses over either bound (ADR 0003).
+command = "cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails"
+ci_step = "The hot calls hold their latency tails"
 
 [[lane]]
 id = "lockfile"
@@ -506,18 +515,19 @@ ci_step = "Clippy process-only"
 # The declared target matrix, executed. Before this lane the only non-native
 # build in the gate was the bot's WASI boundary, so `lgwks_std`, `lgwks_ast` and
 # `lgwks_deps` were never checked for a target the gate does not run on, and
-# `random` refused at compile time on every target but three. The script runs
-# `cargo check --target <t>` per target and per crate: the Rust-only surface is
-# required on every target, and a check that needs a C toolchain this runner
-# lacks is recorded with the exact error rather than dropped. (#276)
+# `random` refused at compile time on every target but three. The runner checks
+# every declared target per crate: the Rust-only surface is required, and each
+# crate's default set is recorded with its declared C-toolchain exemption, so an
+# exemption cannot become a lid over a real regression. It is Rust rather than
+# the shell script it replaced (#276, ADR 0003). (#276)
 [[lane]]
 id = "target-matrix"
 group = "targets"
 surfaces = "local ci"
 required = true
-command = "./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}"
+command = "cargo run --locked -q -p lgwks_deps --bin check-target-matrix -- ${MATRIX_TARGETS:-}"
 ci_step = "Check lgwks-std across the declared target matrix"
-needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
+needs = ["bin:rustup"]
 
 [[lane]]
 id = "feat-deps-base"

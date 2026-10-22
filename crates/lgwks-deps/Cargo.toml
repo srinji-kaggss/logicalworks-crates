@@ -31,12 +31,11 @@ default-run = "lgwks-deps"
 # storefront and the Bevy runtime set. ADR 0003 is the decision.
 #
 # The storefront's default selection is empty, and that is a decision this
-# register states rather than an omission: `scripts/check-target-matrix.sh`
-# builds this crate with no flags as a *required* claim for every declared
-# target, `wasm32-wasip1` among them, and every storefront group is either
-# native (`appcui`, `gpui`) or a driver with no wasm surface (`tokio-net`,
-# `tokio-process`, `tokio-signal`). A default that cannot build on a declared
-# target is not a default (ADR 0003).
+# register states rather than an omission: the target matrix builds this crate
+# with no flags as a *required* claim for every declared target, `wasm32-wasip1`
+# among them, and every storefront group is either native (`appcui`, `gpui`) or a
+# driver with no wasm surface (`tokio-net`, `tokio-process`, `tokio-signal`). A
+# default that cannot build on a declared target is not a default (ADR 0003).
 #
 # Discovery is what a storefront owes its user, and it is the catalog's job
 # rather than a compile's: `lgwks-deps catalog` prints every group with its
@@ -193,6 +192,14 @@ path = "src/bin/catalog/main.rs"
 [[bin]]
 name = "check-docs"
 path = "src/bin/check_docs/main.rs"
+
+# The declared target matrix, executed: the required Rust-only surface on every
+# target, and each crate's default set recorded with its declared C-toolchain
+# exemption. It replaced a shell script on 2026-10-22, when `hash` joined the
+# default set and the required check had to name a set with no C in it.
+[[bin]]
+name = "check-target-matrix"
+path = "src/bin/check_target_matrix.rs"
 
 [[bin]]
 name = "check-spec-owners"

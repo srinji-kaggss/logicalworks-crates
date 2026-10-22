@@ -296,6 +296,16 @@ jobs:
         # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
         # repository; the script names that exemption rather than guessing.
         run: cargo run --locked -p lgwks_deps --bin check-doc-citations
+      - name: The capability catalog matches the tree
+        # #732: one register, one generated page, and a refusal for a row whose
+        # owner file, feature or module is gone, for an owner the std-first gate
+        # can name with no row, and for a page that is not a fresh render.
+        run: cargo run --locked -p lgwks_deps --bin catalog -- --check .
+      - name: ADRs and PRDs hold their required fields
+        # ADR 0004: every ADR against ISO/IEC/IEEE 42010 and every PRD
+        # requirement against ISO/IEC/IEEE 29148. A record missing a field a
+        # reader or an auditor needs is refused here rather than in review.
+        run: cargo run --locked -p lgwks_deps --bin check-docs
       - name: Root README quickstart matches its compiled example
         run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
 
@@ -913,21 +923,25 @@ jobs:
           tmp-gib: "0"
       - name: Check lgwks-std across the declared target matrix
         # `cargo check --target <t>` for every declared target and crate. The
-        # script installs the target with rustup first, requires the Rust-only
+        # runner installs the target with rustup first, requires the Rust-only
         # surface everywhere, and records with its exact error any check this
-        # runner has no C toolchain to reach. MATRIX_TARGETS names the targets
-        # this leg checks (unset, the script checks them all), as SATURATION_FILTER
-        # does for the saturation tiers: the gate-parity check compares this
-        # text with scripts/gate-lanes.toml.
+        # runner has no C toolchain to reach. A *required* check names a set with
+        # no C in it: `lgwks_std`'s default set carries `hash`, whose backend
+        # compiles C per target, so the default set is the recorded check and
+        # the required one is the Rust-only surface (ADR 0003, "the target
+        # veto"). MATRIX_TARGETS names the targets this leg checks (unset, the
+        # runner checks them all), as SATURATION_FILTER does for the saturation
+        # tiers: the gate-parity check compares this text with
+        # scripts/gate-lanes.toml.
         env:
           MATRIX_TARGETS: ${{ matrix.targets }}
-        run: ./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}
+        run: cargo run --locked -q -p lgwks_deps --bin check-target-matrix -- ${MATRIX_TARGETS:-}
 
   # The two release-build timing gates, apart from the lints: each measures
   # wall time, and a measurement taken beside a clippy pass on the same
   # instance measures the clippy pass.
   timing_gates:
-    name: Timing gates (dudect, async fairness)
+    name: Timing gates (dudect, async fairness, latency tails)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
     timeout-minutes: 5
     steps:
@@ -945,6 +959,13 @@ jobs:
         # t ≈ 8 at 250k against the same threshold. The threshold, the
         # batching, the cropping and the control are untouched.
         run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000
+      - name: The hot calls hold their latency tails
+        # The per-call cost of the capabilities that are on by default: p50 at
+        # or under 500 ns and p99 at or under 1500 ns for one 64-byte digest,
+        # one glob match and one small document parsed. The example fails over
+        # either bound, so a slower implementation cannot land behind a green
+        # suite (ADR 0003).
+        run: cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails
       - name: Async fairness gate and concurrency ladder
         run: cargo test --locked --manifest-path bench/async/Cargo.toml --bin lgwks-bench-async && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --matrix
 

@@ -38,10 +38,13 @@ the default, not the agent.
    `lgwks_ast` and the portable `lgwks_bot` core. A consumer says it once, at the
    edge, instead of assembling a surface from flags it must learn first.
 4. **The target veto.** The default set is the set that builds on every declared
-   target: `scripts/check-target-matrix.sh` builds `lgwks_std` and `lgwks_deps`
-   with *no flags* as a required claim for `wasm32-wasip1`, `x86_64-linux-musl`,
-   `x86_64-freebsd`, `aarch64-android` and `aarch64-ios`. A default that fails
-   that claim is not a default, it is a broken build on a target we ship.
+   target, and the claim is executed rather than asserted: the target matrix
+   (`lgwks-deps check-target-matrix`) *requires* the Rust-only surface on
+   `wasm32-wasip1`, `x86_64-linux-musl`, `x86_64-freebsd`, `aarch64-android` and
+   `aarch64-ios`, and *records* each crate's default set, exempting a failure
+   only when the exact cc-rs toolchain phrases name a compiler this runner does
+   not have. A default that cannot build on a target we ship, and has no
+   recorded exemption, is not a default.
 
 ## The measurement
 

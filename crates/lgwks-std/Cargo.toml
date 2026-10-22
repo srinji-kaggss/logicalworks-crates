@@ -57,10 +57,11 @@ keywords = ["stdlib", "zero-dependencies", "json", "tracing", "debug"]
 #   `full`     — `standard` plus `http`.
 #
 # `http` is the only capability whose dependency stack compiles C per target
-# (`ureq` → `rustls` → `ring`), and `scripts/check-target-matrix.sh` builds this
-# crate with no flags as a *required* claim for every declared target. Measured
-# 2026-10-22: `cargo check --locked -p lgwks_std --target x86_64-unknown-linux-musl`
-# with `http` on failed in 7 s with `error occurred in cc-rs: failed to find tool
+# (`ureq` → `rustls` → `ring`), and the target matrix requires the Rust-only
+# surface on every declared target while recording each crate's default set with
+# its C-toolchain exemption. Measured 2026-10-22:
+# `cargo check --locked -p lgwks_std --target x86_64-unknown-linux-musl` with
+# `http` on failed in 7 s with `error occurred in cc-rs: failed to find tool
 # "x86_64-linux-musl-gcc"`. A default that cannot build on a declared target is
 # not a default (ADR 0003), so the C-carrying capability is one flag away and the
 # catalog prints it that way: `--features http`, or `--features full`.
