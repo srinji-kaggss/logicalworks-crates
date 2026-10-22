@@ -57,7 +57,8 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use self::kernels::{
-    geometry_score, normalize_text, normalized_path, sequence_similarity, unique_count, unit_score,
+    char_sequence_similarity, geometry_score, normalize_text, normalized_path, sequence_similarity,
+    unique_count, unit_score,
 };
 
 /// The checked half: refusals, evidence, weighted and checked compositions.
@@ -177,7 +178,7 @@ impl EditDistance {
     pub fn try_score(&self, left: &str, right: &str) -> Result<f64, EditDistanceError> {
         let left = normalize_text(left, self.maximum_length)?;
         let right = normalize_text(right, self.maximum_length)?;
-        Ok(sequence_similarity(&left, &right))
+        Ok(char_sequence_similarity(&left, &right))
     }
 }
 
