@@ -25,6 +25,10 @@ const P50_NANOS: f64 = 500.0;
 const P99_NANOS: f64 = 1_500.0;
 /// Calls per timed sample, so one sample is longer than the clock's noise.
 const BATCH: u32 = 256;
+/// A batch whose mean exceeds this multiple of the fastest batch lost the CPU.
+const PREEMPTION_FACTOR: f64 = 10.0;
+/// The share of batches a host may lose before its measurement is refused.
+const PREEMPTION_LIMIT: f64 = 0.10;
 /// Samples per operation unless `--samples` says otherwise.
 const SAMPLES: usize = 4_000;
 
@@ -50,31 +54,57 @@ struct Tails {
 }
 
 impl Tails {
+    /// The samples that measured the call: a batch whose mean is more than
+    /// [`PREEMPTION_FACTOR`] times the fastest batch did not hold the CPU for
+    /// its whole run, so it measured the scheduler. Those are dropped and their
+    /// share is printed; a host that drops more than [`PREEMPTION_LIMIT`] of
+    /// them is refused rather than measured.
+    fn kept(&self) -> Result<Vec<f64>, Box<dyn Error>> {
+        let floor = self.samples.first().copied().ok_or("no sample was taken")?;
+        let ceiling = floor * PREEMPTION_FACTOR;
+        Ok(self
+            .samples
+            .iter()
+            .copied()
+            .filter(|sample| *sample <= ceiling)
+            .collect())
+    }
+
+    /// The share of batches dropped as preemption.
+    fn dropped(&self) -> Result<f64, Box<dyn Error>> {
+        let kept = self.kept()?.len();
+        let total = self.samples.len();
+        if total == 0 {
+            return Ok(1.0);
+        }
+        let dropped = u32::try_from(total.saturating_sub(kept))?;
+        let total = u32::try_from(total)?;
+        Ok(f64::from(dropped) / f64::from(total))
+    }
+
     /// The median per-call cost in nanoseconds.
     fn p50(&self) -> Result<f64, Box<dyn Error>> {
-        let sample = self
-            .samples
-            .get(self.samples.len().div_euclid(2))
+        let kept = self.kept()?;
+        let sample = kept
+            .get(kept.len().div_euclid(2))
             .ok_or("no sample was taken")?;
         Ok(*sample)
     }
 
     /// The 99th percentile per-call cost in nanoseconds.
     fn p99(&self) -> Result<f64, Box<dyn Error>> {
-        let last = self.samples.len().saturating_sub(1);
-        let index = self
-            .samples
-            .len()
-            .saturating_mul(99)
-            .div_euclid(100)
-            .min(last);
-        let sample = self.samples.get(index).ok_or("no sample was taken")?;
+        let kept = self.kept()?;
+        let last = kept.len().saturating_sub(1);
+        let index = kept.len().saturating_mul(99).div_euclid(100).min(last);
+        let sample = kept.get(index).ok_or("no sample was taken")?;
         Ok(*sample)
     }
 
-    /// Whether both bounds hold for this operation.
+    /// Whether the host was quiet enough to measure, and both bounds held.
     fn within_bounds(&self) -> Result<bool, Box<dyn Error>> {
-        Ok(self.p50()? <= P50_NANOS && self.p99()? <= P99_NANOS)
+        Ok(self.dropped()? <= PREEMPTION_LIMIT
+            && self.p50()? <= P50_NANOS
+            && self.p99()? <= P99_NANOS)
     }
 }
 
@@ -150,10 +180,11 @@ fn run(out: &mut impl Write, arguments: &[String]) -> Result<bool, Box<dyn Error
         let verdict = if inside { "ok" } else { "OVER" };
         writeln!(
             out,
-            "  {:<12} p50 {:>6.0} ns   p99 {:>6.0} ns   {verdict}",
+            "  {:<12} p50 {:>6.0} ns   p99 {:>6.0} ns   dropped {:>4.1}%   {verdict}",
             tails.name,
             tails.p50()?,
-            tails.p99()?
+            tails.p99()?,
+            tails.dropped()? * 100.0
         )?;
     }
     if within {
