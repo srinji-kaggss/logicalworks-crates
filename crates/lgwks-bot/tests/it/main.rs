@@ -150,6 +150,8 @@ mod durable_dispatch;
 mod effect_identity;
 mod effect_journal;
 mod ephemeral;
+#[cfg(feature = "script")]
+mod estate;
 mod flow_ron;
 mod gh_binding;
 mod gh_issue;

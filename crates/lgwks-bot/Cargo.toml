@@ -236,3 +236,8 @@ required-features = ["script"]
 name = "guarantees"
 path = "examples/guarantees.rs"
 required-features = ["script", "ephemeral"]
+
+[[bin]]
+name = "estate"
+path = "src/bin/estate.rs"
+required-features = ["script", "ephemeral"]
