@@ -51,6 +51,31 @@ rust = "1.99.0"
 # ── shared: one command, both surfaces ──────────────────────────────────────
 
 [[lane]]
+id = "catalog"
+surfaces = "local"
+required = true
+fast = true
+# The capability register is the surface #732 refused to leave implicit: one row
+# per capability, its owner path, its default, and what a hand-rolled copy looks
+# like. The check refuses a row whose owner file, feature or module is gone, a
+# row missing for an owner the std-first gate can name in a refusal, and a
+# `docs/catalog.md` that is not a fresh render of the register.
+#
+# Local until the Director names `.github/workflows/ci.yml` for the step: the
+# lane runs in every local gate, and the CI step is the same command.
+command = "cargo run --locked -p lgwks_deps --bin catalog -- --check"
+
+[[lane]]
+id = "doc-governance"
+surfaces = "local"
+required = true
+fast = true
+# ADRs hold the ISO/IEC/IEEE 42010 fields and PRDs the ISO/IEC/IEEE 29148
+# attributes (ADR 0004). The reader refuses the record that omits one, so a
+# decision cannot be recorded in a shape no reader can find its rationale in.
+command = "cargo run --locked -p lgwks_deps --bin check-docs"
+
+[[lane]]
 id = "lockfile"
 surfaces = "local ci"
 required = true
@@ -406,6 +431,12 @@ required = true
 command = "cargo run --locked -p lgwks_deps --bin check-doc-citations"
 ci_step = "Documentation citations resolve"
 
+# The capability catalog (#732) and the documentation set (#732, ADR 0004) run in
+# the local gate under the two `[[lane]]` blocks at the top of this file. They are
+# `local` there because their `ci.yml` steps are the one change this session
+# cannot make: that file needs the Director to name it. The checks are the same
+# commands either way.
+
 [[lane]]
 id = "contract-drift"
 surfaces = "local ci"
@@ -557,6 +588,10 @@ id = "wasi-boundary"
 group = "check"
 surfaces = "local ci"
 required = false
+# The CI step adds the target with rustup and then runs exactly this command
+# with the defaults on: the bot's default set is `script` — the token-stream
+# reader, no grammar — and that is the portable boundary the step builds and the
+# T22 row asserts on (ADR 0003). Measured 2026-10-22: 55 s, exit 0.
 command = """\
 rustup target add wasm32-wasip1 && \
 RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\

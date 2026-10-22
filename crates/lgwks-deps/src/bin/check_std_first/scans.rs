@@ -13,26 +13,28 @@ use super::manifest::Record;
 /// The register `reason` prefix of an admitted-not-implemented edge (#418).
 pub(super) const POLICY_ONLY: &str = "policy-only:";
 
-/// Why a hand-formatted hex encoder is a finding.
-const WHY_HEX: &str = "hand-formatted hex; `lgwks_std::hex::encode` is the estate's encoder";
+/// Why a hand-formatted hex encoder is a finding. Every refusal names its
+/// catalog entry (#732): a refusal that points at an owner nobody can look up is
+/// the dead end the catalog exists to close.
+const WHY_HEX: &str = "hand-formatted hex; `lgwks_std::hex::encode` is the estate's encoder, see the `hex` row of docs/catalog.md";
 
 /// Why a written-out base64 alphabet is a finding.
-const WHY_BASE64: &str = "a base64 alphabet written out; `lgwks_std::encoding` owns base64";
+const WHY_BASE64: &str = "a base64 alphabet written out; `lgwks_std::encoding` owns base64, see the `encoding` row of docs/catalog.md";
 
 /// Why raw FFI is a finding.
-const WHY_FFI: &str = "raw FFI; `lgwks_std` is where an audited syscall is allowed to live";
+const WHY_FFI: &str = "raw FFI; `lgwks_std` is where an audited syscall is allowed to live, see the `process` and `fs` rows of docs/catalog.md";
 
 /// Why an OS thread or process id used as an identity is a finding.
 const WHY_ID: &str = "a thread or process id used as an identity; both are reused by the OS, so \
-                      `lgwks_std::random` is the distinguishable source";
+                      `lgwks_std::random` is the distinguishable source, see the `id` row of docs/catalog.md";
 
 /// Why an untracked thread is a finding.
 const WHY_SPAWN: &str = "an untracked thread; `lgwks_std::task` and the bot's `JoinSet` are where a \
-                         spawn is owned";
+                         spawn is owned, see the `task` row of docs/catalog.md";
 
 /// Why entropy from outside `lgwks_std::random` is a finding.
 const WHY_ENTROPY: &str = "entropy from outside `lgwks_std::random`; INV-RANDOM-ONE-SOURCE admits one \
-                           CSPRNG backend and `lgwks_std` owns it";
+                           CSPRNG backend and `lgwks_std` owns it, see the `random` row of docs/catalog.md";
 
 /// The base64 alphabet, as it would be written out.
 /// Spelled in two pieces so this file does not contain the pattern it looks for.

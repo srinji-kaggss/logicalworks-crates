@@ -1,0 +1,422 @@
+# The estate catalog (#732): one row per capability this repository owns, with
+# the path that owns it, the crate and feature that carry it, and whether it is
+# on by default.
+#
+# This file is the source of truth. `docs/catalog.md` is generated from it
+# (never edited), the published page renders from it, `lgwks-deps catalog
+# --json` prints it, and the `catalog` lane refuses a catalog that disagrees
+# with the tree: a row whose file does not exist, a row naming a feature its
+# crate does not declare, a capability the gate can refuse with no row, or a
+# generated page that differs from a fresh render.
+#
+# Fields
+#   name      the capability as a person or an agent searches for it
+#   path      the Rust path that owns it (omitted for a documentation capability)
+#   file      the source or document that implements it, relative to the root
+#   crate     the publishing crate, or `repository` for the repository itself
+#   feature   the cargo feature that carries it, or `always` when no feature gates it
+#   default   `on` or `off`; `off` requires `reason`
+#   words     the spellings a search may use to reach the owner
+#   replaces  the hand-rolled thing an agent writes when it cannot find the owner,
+#             which is what the std-first gate refuses
+
+[[capability]]
+name = "build scripts"
+path = "lgwks_std::build"
+file = "crates/lgwks-std/src/build.rs"
+crate = "lgwks_std"
+feature = "build"
+default = "on"
+words = ["build script", "build.rs", "rerun-if-changed", "OUT_DIR", "cargo directive", "input digest", "build input"]
+replaces = ["println!(\"cargo:rerun-if-changed=…\")", "a sha2 digest of the build inputs", "std::env::var(\"OUT_DIR\")"]
+
+[[capability]]
+name = "hash"
+path = "lgwks_std::hash"
+file = "crates/lgwks-std/src/hash.rs"
+crate = "lgwks_std"
+feature = "hash"
+default = "on"
+words = ["hash", "digest", "blake3", "sha2", "sha256", "fingerprint", "content identity"]
+replaces = ["data.iter().fold(…)", "a sha2::Sha256 written out by hand"]
+
+[[capability]]
+name = "trace"
+path = "lgwks_std::trace"
+file = "crates/lgwks-std/src/trace.rs"
+crate = "lgwks_std"
+feature = "trace"
+default = "on"
+words = ["trace", "tracing", "logging", "log", "subscriber", "debug output", "println", "eprintln"]
+replaces = ["println! in library code", "eprintln! in library code", "tracing::subscriber::set_global_default built by hand"]
+
+[[capability]]
+name = "hex"
+path = "lgwks_std::hex"
+file = "crates/lgwks-std/src/hex.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["hex", "hexadecimal", "encode hex", "decode hex"]
+replaces = ["{:02x} formatting in a loop", "a digit table written out"]
+
+[[capability]]
+name = "encoding"
+path = "lgwks_std::encoding"
+file = "crates/lgwks-std/src/encoding.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["base64", "percent", "percent-encoding", "url encoding"]
+replaces = ["a base64 alphabet written out", "a percent-escape table written out"]
+
+[[capability]]
+name = "json"
+path = "lgwks_std::json"
+file = "crates/lgwks-std/src/json.rs"
+crate = "lgwks_std"
+feature = "json"
+default = "on"
+words = ["json", "serde", "serde_json", "deserialize", "serialize"]
+replaces = ["serde_json as a direct edge", "a hand-written JSON scanner"]
+
+[[capability]]
+name = "ron"
+path = "lgwks_std::ron"
+file = "crates/lgwks-std/src/ron.rs"
+crate = "lgwks_std"
+feature = "ron"
+default = "on"
+words = ["ron", "config notation", "human-facing document"]
+replaces = ["ron as a direct edge"]
+
+[[capability]]
+name = "wire"
+path = "lgwks_std::wire"
+file = "crates/lgwks-std/src/wire.rs"
+crate = "lgwks_std"
+feature = "wire"
+default = "on"
+words = ["wire", "rkyv", "binary serialization", "zero-copy"]
+replaces = ["rkyv as a direct edge"]
+
+[[capability]]
+name = "http"
+path = "lgwks_std::http"
+file = "crates/lgwks-std/src/http.rs"
+crate = "lgwks_std"
+feature = "http"
+default = "off"
+reason = "ureq -> rustls -> ring compiles C per target, and scripts/check-target-matrix.sh builds lgwks_std with no flags as a required claim for every declared target: cargo check -p lgwks_std --target x86_64-unknown-linux-musl failed in 7 s for a missing x86_64-linux-musl-gcc. One flag: --features http, or --features full (ADR 0003)."
+words = ["http", "https", "get", "post", "request", "ureq", "reqwest", "fetch"]
+replaces = ["ureq as a direct edge", "reqwest as a direct edge"]
+
+[[capability]]
+name = "online"
+path = "lgwks_std::online"
+file = "crates/lgwks-std/src/online.rs"
+crate = "lgwks_std"
+feature = "online"
+default = "on"
+words = ["online", "reachability", "tcp probe", "is it up", "connect check"]
+replaces = ["a TcpStream::connect probe written out"]
+
+[[capability]]
+name = "pattern"
+path = "lgwks_std::pattern"
+file = "crates/lgwks-std/src/pattern.rs"
+crate = "lgwks_std"
+feature = "pattern"
+default = "on"
+words = ["regex", "pattern", "match", "replace", "capture"]
+replaces = ["regex as a direct edge"]
+
+[[capability]]
+name = "glob"
+path = "lgwks_std::glob"
+file = "crates/lgwks-std/src/glob.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["glob", "wildcard", "star match", "*.rs"]
+replaces = ["glob as a direct edge", "a wildcard matcher written out"]
+
+[[capability]]
+name = "time"
+path = "lgwks_std::time"
+file = "crates/lgwks-std/src/time/mod.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["time", "rfc 3339", "timestamp", "date", "calendar", "instant", "chrono"]
+replaces = ["chrono as a direct edge", "a leap-year table written out"]
+
+[[capability]]
+name = "id"
+path = "lgwks_std::id"
+file = "crates/lgwks-std/src/id.rs"
+crate = "lgwks_std"
+feature = "random"
+default = "on"
+words = ["id", "uuid", "identifier", "unique id"]
+replaces = ["uuid as a direct edge", "a v4 uuid assembled from bytes by hand"]
+
+[[capability]]
+name = "random"
+path = "lgwks_std::random"
+file = "crates/lgwks-std/src/random.rs"
+crate = "lgwks_std"
+feature = "random"
+default = "on"
+words = ["random", "entropy", "getrandom", "urandom", "csprng", "seed"]
+replaces = ["/dev/urandom read by hand", "getrandom as a direct edge", "a clock as an identity"]
+
+[[capability]]
+name = "seeded"
+path = "lgwks_std::seeded"
+file = "crates/lgwks-std/src/seeded.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["seeded", "deterministic", "simulation seed", "xoshiro", "splitmix"]
+replaces = ["a hand-rolled prng in a test", "rand as a direct edge in a simulation"]
+
+[[capability]]
+name = "sign"
+path = "lgwks_std::sign"
+file = "crates/lgwks-std/src/sign.rs"
+crate = "lgwks_std"
+feature = "sign"
+default = "on"
+words = ["sign", "signature", "ed25519", "seal", "verify sealed record"]
+replaces = ["ed25519-dalek as a direct edge"]
+
+[[capability]]
+name = "similarity"
+path = "lgwks_std::similarity"
+file = "crates/lgwks-std/src/similarity.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["similarity", "cosine", "jaccard", "score", "distance"]
+replaces = ["a cosine loop written out", "a jaccard set intersection written out"]
+
+[[capability]]
+name = "fs"
+path = "lgwks_std::fs"
+file = "crates/lgwks-std/src/fs/mod.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["fs", "filesystem", "walk", "walkdir", "directory walk", "read dir", "openat", "handle-relative"]
+replaces = ["walkdir as a direct edge", "std::fs::read_dir recursion written out"]
+
+[[capability]]
+name = "task"
+path = "lgwks_std::task"
+file = "crates/lgwks-std/src/task.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["task", "block_on", "executor", "spawn_blocking", "join_all", "pool"]
+replaces = ["std::thread::spawn written out", "pollster as a direct edge", "futures as a direct edge"]
+
+[[capability]]
+name = "process"
+path = "lgwks_std::process"
+file = "crates/lgwks-std/src/process.rs"
+crate = "lgwks_std"
+feature = "process"
+default = "on"
+words = ["process", "kill", "process group", "subprocess", "pgid", "job object", "reap"]
+replaces = ["libc::kill by hand", "a kernel32 job object by hand"]
+
+[[capability]]
+name = "retry"
+path = "lgwks_std::retry"
+file = "crates/lgwks-std/src/retry.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["retry", "backoff", "exponential", "attempts", "deadline"]
+replaces = ["a retry loop written out", "backoff as a direct edge"]
+
+[[capability]]
+name = "leb128"
+path = "lgwks_std::leb128"
+file = "crates/lgwks-std/src/leb128.rs"
+crate = "lgwks_std"
+feature = "core"
+default = "on"
+words = ["leb128", "varint", "variable length integer"]
+replaces = ["a shift-and-mask varint loop written out"]
+
+[[capability]]
+name = "script"
+path = "lgwks_bot::script"
+file = "crates/lgwks-bot/src/script/mod.rs"
+crate = "lgwks_bot"
+feature = "script"
+default = "on"
+words = ["script", "script!", "flow", "orchestration language"]
+replaces = ["a hand-written orchestration flow"]
+
+[[capability]]
+name = "async"
+path = "lgwks_bot::rt"
+file = "crates/lgwks-bot/src/rt/mod.rs"
+crate = "lgwks_bot"
+feature = "rt"
+default = "on"
+words = ["async", "runtime", "tokio", "spawn", "supervisor", "cancel"]
+replaces = ["tokio as a direct edge", "a JoinHandle stored to keep work alive"]
+
+[[capability]]
+name = "inspect"
+path = "lgwks_bot::inspect"
+file = "crates/lgwks-bot/src/inspect.rs"
+crate = "lgwks_bot"
+feature = "inspect"
+default = "off"
+reason = "native tree-sitter grammars cannot build for wasm32-wasip1, which the bot's default set builds; `--features inspect` (or `full`) turns it on and the suite runs it there (ADR 0003)."
+words = ["inspect", "code check", "structural check", "safe review"]
+replaces = ["executing untrusted code to decide whether it is safe"]
+
+[[capability]]
+name = "authority"
+path = "lgwks_bot::cap"
+file = "crates/lgwks-bot/src/cap.rs"
+crate = "lgwks_bot"
+feature = "always"
+default = "on"
+words = ["authority", "grant", "capability", "permission"]
+replaces = ["a configuration lookup standing in for a grant"]
+
+[[capability]]
+name = "journal"
+path = "lgwks_bot::journal"
+file = "crates/lgwks-bot/src/journal.rs"
+crate = "lgwks_bot"
+feature = "always"
+default = "on"
+words = ["journal", "durable", "effect record", "replay", "crash recovery"]
+replaces = ["a second record of what happened"]
+
+[[capability]]
+name = "ecs"
+path = "lgwks_bot::ecs"
+file = "crates/lgwks-bot/src/ecs.rs"
+crate = "lgwks_bot"
+feature = "always"
+default = "on"
+words = ["ecs", "schedule", "change detection", "tick", "observe evaluate execute"]
+replaces = ["a hand-rolled poll loop"]
+
+[[capability]]
+name = "parse"
+path = "lgwks_ast::parser"
+file = "crates/lgwks-ast/src/parser.rs"
+crate = "lgwks_ast"
+feature = "parser"
+default = "on"
+words = ["parse", "parser", "ast", "tree-sitter", "ast-grep", "syntax"]
+replaces = ["a second reader of the same language", "syn as a direct edge"]
+
+[[capability]]
+name = "scan"
+path = "lgwks_ast::scan"
+file = "crates/lgwks-ast/src/scan/mod.rs"
+crate = "lgwks_ast"
+feature = "scan"
+default = "on"
+words = ["scan", "zero gate", "source detectors", "lint"]
+replaces = ["a second detector reading a different tree"]
+
+[[capability]]
+name = "script reader"
+path = "lgwks_ast::script"
+file = "crates/lgwks-ast/src/script/mod.rs"
+crate = "lgwks_ast"
+feature = "script"
+default = "on"
+words = ["script reader", "script parse", "lexicon"]
+replaces = ["a second parser of the script language"]
+
+[[capability]]
+name = "dependency admission"
+path = "lgwks_deps"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "always"
+default = "on"
+words = ["dependency", "admission", "approved", "edge owner", "lgwks-deps check"]
+replaces = ["a dependency added without a register row"]
+
+[[capability]]
+name = "storefront"
+path = "lgwks_deps::storefront"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "always"
+default = "on"
+words = ["storefront", "install and select", "feature selection"]
+replaces = ["a third-party crate reached past the storefront"]
+
+[[capability]]
+name = "async storefront"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "tokio-full"
+default = "off"
+reason = "the crate's no-flag build is a required claim for every declared target; tokio-net, tokio-process and tokio-signal have no wasm32-wasip1 surface. One flag: --features tokio-full (ADR 0003)."
+words = ["tokio", "async engine", "runtime storefront", "tokio-net", "tokio-process"]
+replaces = ["tokio as a direct edge in any crate"]
+
+[[capability]]
+name = "ecs storefront"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "bevy-app"
+default = "off"
+reason = "the storefront's default is the empty selection; the Bevy runtime set is one flag away and lgwks_bot reaches the ECS it needs through bevy-ecs (ADR 0003)."
+words = ["bevy", "ecs storefront", "bevy-app", "bevy-time", "bevy-state"]
+replaces = ["bevy as a direct edge in any crate"]
+
+[[capability]]
+name = "native tui"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "appcui"
+default = "off"
+reason = "a native terminal UI cannot build for wasm32-wasip1, which the crate's no-flag build claims; measured 35 s warm. One flag: --features appcui (ADR 0003)."
+words = ["tui", "terminal ui", "appcui", "widgets"]
+replaces = ["appcui as a direct edge"]
+
+[[capability]]
+name = "gpu ui"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "gpui"
+default = "off"
+reason = "objc2 refuses to compile off Apple targets, so a default carrying it would break Linux and Windows; measured 122 s warm on macOS. One flag: --features gpui (ADR 0003)."
+words = ["gpui", "gpu ui", "desktop ui", "zed"]
+replaces = ["gpui as a direct edge"]
+
+[[capability]]
+name = "ml inference"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "ml-candle"
+default = "off"
+reason = "an inference runtime plus a network-capable tokenizer closure, measured 90 s warm and paid by every job that builds the crate; ml-candle-metal builds only on macOS. One flag: --features ml-candle,ml-tokenizers (ADR 0003)."
+words = ["ml", "inference", "candle", "tokenizers", "huggingface"]
+replaces = ["candle-core as a direct edge", "tokenizers as a direct edge"]
+
+[[capability]]
+name = "documentation governance"
+file = "docs/adr/README.md"
+crate = "repository"
+feature = "always"
+default = "on"
+words = ["adr", "architecture decision record", "prd", "product requirements", "iso 42010", "iso 29148", "governance"]
+replaces = ["a design decision recorded only in a pull request", "a requirement edited instead of superseded"]

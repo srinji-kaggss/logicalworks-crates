@@ -50,14 +50,25 @@ keywords = ["stdlib", "zero-dependencies", "json", "tracing", "debug"]
 #                   installer. `attributes` stays off, so no instrumentation
 #                   proc macro enters the foundation.
 [features]
-# `trace` is default-on, and that is a recorded decision rather
-# than a convenience. Library code here does not print to the terminal, and
-# `tracing` is the replacement. Until this feature
-# existed, no crate here could reach `tracing` at all, so the requirement
-# banned the only logging path that was actually available and named one that
-# was not. `--no-default-features --features core` withdraws it and restores a
-# genuinely zero-dependency build.
-default = ["core", "trace"]
+# Every capability this crate owns is on by default (Director, 2026-10-22, #732),
+# in one of two named sets so the portability claim stays honest:
+#
+#   `standard` — default. Every capability below, minus `http`.
+#   `full`     — `standard` plus `http`.
+#
+# `http` is the only capability whose dependency stack compiles C per target
+# (`ureq` → `rustls` → `ring`), and `scripts/check-target-matrix.sh` builds this
+# crate with no flags as a *required* claim for every declared target. Measured
+# 2026-10-22: `cargo check --locked -p lgwks_std --target x86_64-unknown-linux-musl`
+# with `http` on failed in 7 s with `error occurred in cc-rs: failed to find tool
+# "x86_64-linux-musl-gcc"`. A default that cannot build on a declared target is
+# not a default (ADR 0003), so the C-carrying capability is one flag away and the
+# catalog prints it that way: `--features http`, or `--features full`.
+#
+# The opt-outs below are the shape of the crate, not its policy:
+# `--no-default-features --features core` is the genuinely zero-dependency build,
+# and `--no-default-features --features <one>` builds one capability alone.
+default = ["standard"]
 core = []
 trace = ["dep:tracing", "dep:tracing-subscriber"]
 random = ["dep:getrandom"]
@@ -74,7 +85,8 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-full = ["trace", "random", "hash", "build", "sign", "pattern", "json", "ron", "wire", "http", "online", "fs-raw", "process"]
+standard = ["trace", "random", "hash", "build", "sign", "pattern", "json", "ron", "wire", "online", "fs-raw", "process"]
+full = ["standard", "http"]
 
 [dependencies]
 # `attributes` is deliberately NOT enabled. It is the half of `tracing` that

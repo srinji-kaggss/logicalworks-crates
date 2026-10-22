@@ -12,20 +12,22 @@
 //! out of the documented surface by #526. The feature map below names what each
 //! feature unlocks.
 //!
-//! Each optional feature unlocks one capability with one audited stack. The
-//! default build carries `core` **and `trace`**: this workspace forbids
-//! `println!` in library code and names `tracing` as the replacement, so a
-//! build without `trace` would leave that rule with nothing to point at.
-//! `--no-default-features --features core` restores a genuinely
-//! zero-dependency build. (Kept on one line on purpose: rustdoc joins these
+//! Each feature unlocks one capability with one audited stack, and **every one
+//! of them is on by default**: adding this crate is the decision (ADR 0003,
+//! #732). `--no-default-features --features core` restores a genuinely
+//! zero-dependency build, and `--no-default-features --features <one>` builds
+//! one capability alone. (Kept on one line on purpose: rustdoc joins these
 //! lines but not a word broken across them, so a wrapped flag renders as a
 //! flag nobody can paste.)
 //!
 //! ## Feature map
 //!
-//! - `core` (default) — encoding, fs, glob, hex, leb128, retry, seeded,
+//! - `standard` (default) — all of the below except `http`.
+//! - `full` — `standard` plus `http`, for a consumer that knows its target
+//!   carries a C toolchain.
+//! - `core` — encoding, fs, glob, hex, leb128, retry, seeded,
 //!   similarity, task, time. Zero deps.
-//! - `trace` (default) — trace. Adds `tracing` plus the default subscriber
+//! - `trace` — trace. Adds `tracing` plus the default subscriber
 //!   bootstrap (`std` only; no `attributes`, so no `syn`).
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
@@ -50,7 +52,6 @@
 //!   supervisor that still owes signals to it). Unix adds `rustix/process`;
 //!   Windows reaches `kernel32` directly (`process::ProcessJob` is its job
 //!   object) and adds no dependency.
-//! - `full` — all of the above.
 //!
 //! Lint contract: workspace `missing_docs` deny, `unsafe_code` forbid,
 //! `broken_intra_doc_links` deny; see the workspace root `Cargo.toml`.

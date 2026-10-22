@@ -127,13 +127,11 @@ pub(crate) fn inspect_debug_surface(root: &Path) -> Result<DebugSurface, String>
     let manifest_path = root.join("crates/lgwks-std/Cargo.toml");
     let manifest = std::fs::read_to_string(&manifest_path)
         .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
-    // A manifest that assigns no `default` or no `trace` list declares no
-    // features there, so the question the surface answers is "does that list
-    // include this entry" and an absent list answers it for itself.
-    let default_value = assignment_value(&manifest, "default");
+    // The manifest's `default` and `trace` lists decide the surface; an absent
+    // list declares nothing, so the answer is "no" rather than a guess.
     let trace_value = assignment_value(&manifest, "trace");
     Ok(DebugSurface {
-        default_includes_trace: default_value.is_some_and(|list| list.contains("\"trace\"")),
+        default_includes_trace: default_reaches(&manifest, "trace"),
         trace_includes_tracing: trace_value
             .as_ref()
             .is_some_and(|list| list.contains("\"dep:tracing\"")),
@@ -143,6 +141,65 @@ pub(crate) fn inspect_debug_surface(root: &Path) -> Result<DebugSurface, String>
         tracing_declared: dependency_declared(&manifest, "tracing"),
         subscriber_declared: dependency_declared(&manifest, "tracing-subscriber"),
     })
+}
+
+/// The quoted entries of a feature list, with the quotes removed.
+fn feature_names(list: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = list;
+    while let Some(open) = rest.find('"') {
+        let after = match rest.get(open.saturating_add(1)..) {
+            Some(tail) => tail,
+            None => break,
+        };
+        let Some(close) = after.find('"') else {
+            break;
+        };
+        if let Some(name) = after.get(..close) {
+            names.push(name.to_owned());
+        }
+        rest = match after.get(close.saturating_add(1)..) {
+            Some(tail) => tail,
+            None => break,
+        };
+    }
+    names
+}
+
+/// Whether the manifest's `default` feature set reaches `wanted`, following
+/// feature names through the `[features]` table.
+///
+/// The doctor used to read the `default` list literally, which was true while
+/// `lgwks_std` wrote `default = ["core", "trace"]`. Since ADR 0003 it writes
+/// `default = ["full"]`, and a literal read would report the default debugger
+/// as absent while every capability it names, `trace` among them, is on. A
+/// check that answers the question by spelling is a check that lies the moment
+/// a list names another list.
+#[must_use]
+pub(crate) fn default_reaches(text: &str, wanted: &str) -> bool {
+    let mut queue = vec!["default".to_owned()];
+    let mut visited: Vec<String> = Vec::new();
+    while let Some(name) = queue.pop() {
+        if visited.contains(&name) {
+            continue;
+        }
+        visited.push(name.clone());
+        let Some(list) = assignment_value(text, &name) else {
+            continue;
+        };
+        for entry in feature_names(&list) {
+            if entry == wanted {
+                return true;
+            }
+            // `dep:crate` enables a dependency and `crate/feature` forwards to
+            // one; neither names a feature of this crate.
+            if entry.contains(':') || entry.contains('/') {
+                continue;
+            }
+            queue.push(entry);
+        }
+    }
+    false
 }
 
 /// Reads one TOML assignment value as text, including a multi-line array.
@@ -276,4 +333,36 @@ pub(crate) fn print_debug_json(report: &DebugReport, out: &mut impl io::Write) -
     });
     let rendered = lgwks_std::json::to_string_pretty(&payload).map_err(io::Error::other)?;
     writeln!(out, "{rendered}")
+}
+
+/// The debugger doctor's own tests.
+#[cfg(test)]
+mod tests {
+    use super::default_reaches;
+
+    /// A `default` that names a feature which enables `trace` is default-on.
+    ///
+    /// Derived from issue #732: the default feature set must carry every
+    /// capability, and `lgwks_std` states that as one name. The requirement it
+    /// proves is "the doctor reads the default set as cargo resolves it".
+    #[test]
+    fn a_default_naming_a_feature_that_enables_trace_reaches_it() {
+        let manifest = "default = [\"full\"]\n\nfull = [\"core\", \"trace\", \"hash\"]\n";
+        assert!(default_reaches(manifest, "trace"));
+    }
+
+    /// A manifest whose default never reaches `trace` is reported as such.
+    #[test]
+    fn a_default_that_never_reaches_trace_is_not_claimed() {
+        let manifest = "default = [\"core\"]\n\ncore = []\n\ntrace = [\"dep:tracing\"]\n";
+        assert!(!default_reaches(manifest, "trace"));
+    }
+
+    /// A forwarding entry (`crate/feature`) names no feature of this crate, so
+    /// following it must not claim a capability this crate does not own.
+    #[test]
+    fn a_forwarded_entry_is_not_followed_as_a_local_feature() {
+        let manifest = "default = [\"lgwks_std/trace\"]\n";
+        assert!(!default_reaches(manifest, "trace"));
+    }
 }

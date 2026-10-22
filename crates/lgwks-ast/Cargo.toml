@@ -31,15 +31,13 @@ keywords = ["parser", "ast", "tree-sitter", "static-analysis", "code-analysis"]
 # An extension with no compiled grammar is not recognised, so a consumer never
 # pays to compile a grammar it cannot select.
 [features]
-default = [
-    "lang-rust",
-    "lang-python",
-    "lang-typescript",
-    "lang-javascript",
-    "lang-go",
-    "lang-java",
-    "lang-swift",
-]
+# Every capability this crate owns is on by default (Director, 2026-10-22, #732):
+# all 28 grammars, the `script!` reader (SL-2's one parser), the `lgwks-ast` tool
+# and the zero-gate detectors. A consumer that wants the typed-diagnostic derive
+# alone opts out with `--no-default-features`; one that wants a smaller parser
+# opts out with `--no-default-features --features parser,lang-rust`. ADR 0003 is
+# the decision; the compile cost of the full set is printed by `docs/catalog.md`.
+default = ["full", "script", "tool", "scan"]
 # The multi-language parser and its grammar stack (#367). Every `lang-*`
 # feature enables it, so the default set has it; without it this crate is the
 # typed-error derive and the diagnostic types alone, with no tree-sitter, so a
@@ -155,7 +153,7 @@ tree-sitter = { version = "0.27", optional = true }
 # The token streams `script` reads (feature `script`, #383), through the
 # storefront that owns the edge; the macro's build pulls `proc-macro2` and
 # nothing else here.
-lgwks_deps = { workspace = true, features = ["script"], optional = true }
+lgwks_deps = { workspace = true, default-features = false, features = ["script"], optional = true }
 # The script tool's tree walk and JSON (feature `tool`, #384).
 lgwks_std = { workspace = true, features = ["json"], optional = true }
 
