@@ -171,7 +171,7 @@ jobs:
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -206,7 +206,7 @@ jobs:
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -226,7 +226,7 @@ jobs:
           mkdir -p gate-evidence
           cargo run --locked -p lgwks_deps --bin ci-local -- --lane debug-e2e | tee gate-evidence/debug-e2e.txt
       - name: Upload gate evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gate-evidence
           path: gate-evidence/
@@ -252,7 +252,7 @@ jobs:
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -346,7 +346,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The prebuilt release, checksum-verified, rather than a `cargo install`
       # that compiles the audit's own dependency stack before it can run.
       - name: Install cargo-audit
@@ -368,7 +368,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Download gate evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gate-evidence
           path: gate-evidence
@@ -384,7 +384,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Download gate evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: gate-evidence
           path: gate-evidence
@@ -430,7 +430,7 @@ jobs:
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -456,7 +456,7 @@ jobs:
       # shard that wrote none fails here rather than leaving the receipt job to
       # find an empty glob (run 37536766485).
       - name: Upload lgwks-bot JUnit report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lgwks-bot-junit-full-${{ matrix.instance }}-${{ strategy.job-index }}
           path: target/nextest/ci/junit.xml
@@ -473,7 +473,7 @@ jobs:
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -558,7 +558,7 @@ jobs:
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -591,7 +591,7 @@ jobs:
       # the acceptance job downloads: the review-path tests (T31-T34) are named
       # in `docs/acceptance/t-rows.toml`, so the macOS receipt reads them here.
       - name: Upload lgwks-bot saturation JUnit report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lgwks-bot-junit-saturation-${{ matrix.instance }}
           path: target/nextest/ci/junit.xml
@@ -609,7 +609,7 @@ jobs:
     env:
       REVISION: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -618,19 +618,19 @@ jobs:
           tmp-gib: "0"
           defer: "0"
       - name: Download lgwks-bot JUnit reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: lgwks-bot-junit-*
           path: acceptance-artifact
       - name: Download the Linux and Windows JUnit reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: acceptance-junit-*
           path: acceptance-junit
       - name: Record acceptance receipts
         run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process,script,ephemeral --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
       - name: Upload acceptance receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: acceptance-receipts
           path: acceptance-artifact/
@@ -651,7 +651,7 @@ jobs:
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -703,7 +703,7 @@ jobs:
       matrix:
         suite: [targets workspace, bot-full]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -743,7 +743,7 @@ jobs:
       # the receipt job records it as its own platform.
       - name: Upload Linux lgwks-bot JUnit report
         if: matrix.suite == 'bot-full'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: acceptance-junit-linux
           path: target/nextest/ci/junit.xml
@@ -766,7 +766,7 @@ jobs:
       matrix:
         part: [workspace, scan, reduced]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -854,7 +854,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -929,7 +929,7 @@ jobs:
             instance: lwc-6
             partition: count:2/2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -1004,7 +1004,7 @@ jobs:
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -1037,7 +1037,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -1073,7 +1073,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -1117,7 +1117,7 @@ jobs:
           - part: lgwks-bot WASI
             instance: lwc-13
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
@@ -1219,7 +1219,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-8]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/local-rust
         with:
           toolchain: "1.99.1"
@@ -1242,7 +1242,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99.1"
@@ -1261,7 +1261,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -1317,7 +1317,7 @@ jobs:
       # #620's first run).
       CARGO_HOME: D:\cargo-home
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -1336,7 +1336,7 @@ jobs:
         run: cargo nextest run --locked -p lgwks_bot --no-default-features --features 'process,script,ephemeral' --test process_job --test it --cargo-profile dev --profile ci --no-fail-fast -E 'binary(process_job) | test(/_t[0-9]{2}$/)'
       - name: Upload the Windows JUnit report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: acceptance-junit-windows
           path: target/nextest/ci/junit.xml
@@ -1430,7 +1430,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Prove the process unsafe seams under Miri
         run: |
           rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
