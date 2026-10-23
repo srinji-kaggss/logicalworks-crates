@@ -34,25 +34,24 @@
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
 //! side effect to gate.
 //!
-//! # Async surface
+//! # Async orchestration runtime
 //!
-//! With the default `rt` feature, `lgwks_bot` is also the async and runner
-//! surface of this workspace: `Runtime`, `rt::task::join_all_bounded`, timers,
-//! channels, and the opt-in `net`/`process`/`fs`/`signal` drivers. The engine is
-//! sourced from the `lgwks_deps` dependency facade (`feature = "tokio"`), so no
-//! other crate authors a `tokio` edge. `--no-default-features` withdraws the
-//! async surface — no `tokio` at all — and drives the four verbs on
-//! `lgwks_std::task`'s executor instead. It is not a dependency-light build:
-//! the `bevy_ecs` substrate and the `lgwks_deps` facade are unconditional, so a
-//! no-default bot still runs on the ECS schedule. The two axes — the async
-//! surface and the ECS substrate — are independent.
+//! `lgwks_bot` is the async orchestration runtime of this workspace: `Runtime`,
+//! `rt::task::join_all_bounded`, timers, channels, and the opt-in `net`/`process`/
+//! `fs`/`signal` drivers. The driver behind it is sourced from the `lgwks_deps`
+//! dependency storefront (`feature = "tokio"`), so no other crate authors a driver
+//! edge and no consumer names one. `--no-default-features` is a narrow test build
+//! with no driver at all, driving the four verbs on `lgwks_std::task`'s executor
+//! instead; it is not the supported surface. The supported surface is the runtime:
+//! one front door (`Runtime`), one way to start supervised work (`Supervisor`,
+//! `join_all_bounded`, `script!`), and no handle to a running task anywhere.
 //!
 //! # Features
 //!
 //! | Feature | Default | Enables |
 //! |---|---|---|
-//! | `rt` | on | the async runtime surface, on the `lgwks_deps` tokio engine |
-//! | `time`, `sync`, `macros` | on | the matching tokio drivers; each implies `rt` |
+//! | `rt` | on | the orchestration runtime surface, driven by the `lgwks_deps` driver |
+//! | `time`, `sync`, `macros` | on | the matching runtime drivers; each implies `rt` |
 //! | `script` | on | `script!` and the `script` module; implies `rt`, `time`, `sync` and `macros` |
 //! | `io` | off | reader and writer traits; implies `rt` |
 //! | `net`, `fs` | off | sockets, files; each implies `io` (`net` also `lgwks_std/random`) |
@@ -570,7 +569,7 @@ pub use inspect::{
 
 /// Wait for all of a set of futures, returning their outputs in input order.
 ///
-/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`. For a
+/// Re-exported from the crate-owned driver so callers never name it. For a
 /// fan-out that must be bounded, prefer `rt::task::join_all_bounded`.
 #[cfg(all(feature = "rt", feature = "macros"))]
 #[doc(hidden)]
@@ -578,13 +577,13 @@ pub use lgwks_deps::tokio::join;
 
 /// Race a set of futures, running the first branch that becomes ready.
 ///
-/// Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
+/// Re-exported from the crate-owned driver so callers never name it.
 #[cfg(all(feature = "rt", feature = "macros"))]
 #[doc(hidden)]
 pub use lgwks_deps::tokio::select;
 
 /// Wait for all of a set of fallible futures, short-circuiting on the first
-/// error. Re-exported from the `lgwks_deps` engine so callers never name `tokio`.
+/// error. Re-exported from the crate-owned driver so callers never name it.
 ///
 /// Every branch is polled on the task that awaits the macro, so the branches may
 /// borrow the caller's locals. The result is `Ok` with a tuple of the branches'

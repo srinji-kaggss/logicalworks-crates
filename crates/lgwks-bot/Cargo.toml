@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_bot"
-description = "Capability-gated automation bots on a change-detecting ECS schedule: Observe, Evaluate, Execute, and Query, with an async runtime facade."
+description = "Opinionated async orchestration runtime: bounded fan-out, deadlines, retries under a shared budget, tenant-keyed steps. The runtime Observe, Evaluate, Execute and Query enter."
 version = "3.1.2"
 edition = "2024"
 rust-version = "1.98"
@@ -17,10 +17,10 @@ readme = "README.md"
 categories = ["development-tools", "asynchronous", "concurrency"]
 keywords = ["automation", "bot", "workflow", "agent", "ecs"]
 
-# The async engine is the bot's, per the deps law; its `tokio` edge is owned by
-# the `lgwks_deps` storefront. `--no-default-features` withdraws the async
-# surface entirely (no tokio), leaving the four verbs on `lgwks_std::task`'s
-# zero-dependency executor — the ECS schedule and every verb still work.
+# The driver behind the orchestration runtime is this crate's, per the deps law;
+# its `tokio` edge is owned by the `lgwks_deps` storefront. `--no-default-features`
+# is a narrow test build with no driver, leaving the four verbs on
+# `lgwks_std::task`'s zero-dependency executor; it is not the supported surface.
 #
 # `io` is not implied by `rt` for the same reason the storefront splits it: a
 # consumer reading a pipe needs `AsyncRead` without a socket layer.

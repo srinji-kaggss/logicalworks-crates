@@ -34,17 +34,17 @@ runnable example.
 
 | Feature | Default | Enables |
 |---|---|---|
-| `rt`, `time`, `sync`, `macros` | on | the async runtime surface, on the `lgwks_deps` tokio engine |
+| `rt`, `time`, `sync`, `macros` | on | the orchestration runtime surface, driven through `lgwks_deps` |
 | `script` | on | `script!` and the `script` module |
 | `io`, `net`, `fs`, `process`, `signal` | off | the matching runtime drivers |
 | `inspect` | off | structural code inspection through `lgwks_ast` |
 | `ephemeral`, `profile` | off | run identities from `lgwks_std::random`; the per-stage profiler |
 | `full` | off | every feature above |
 
-## Relationship to tokio
+## Relationship to the driver
 
-It runs on tokio rather than replacing it. The async engine comes from the
-`lgwks_deps` storefront, so a consumer never names `tokio` directly. What tokio
+It is the runtime. The driver behind it is owned through the
+`lgwks_deps` storefront, so a consumer never names it directly. What the driver
 does not give you is the layer above: what to bound, what to retry, which tenant
 a step belongs to and where a failure happened.
 
