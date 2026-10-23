@@ -413,6 +413,17 @@ words = ["ml", "inference", "candle", "tokenizers", "huggingface"]
 replaces = ["candle-core as a direct edge", "tokenizers as a direct edge"]
 
 [[capability]]
+name = "zoned time (interim)"
+path = "lgwks_deps::storefront::jiff"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "time-jiff"
+default = "off"
+reason = "DST-aware calendar arithmetic and IANA zones need a database lgwks_std::time does not carry; interim opt-in until ELIMINATE lands. One flag: --features time-jiff (ADR 0003)."
+words = ["zoned time", "timezone", "dst arithmetic", "jiff", "calendar arithmetic", "rfc 9557"]
+replaces = ["jiff as a direct edge", "chrono as a direct edge for zoned work"]
+
+[[capability]]
 name = "documentation governance"
 file = "docs/adr/README.md"
 crate = "repository"

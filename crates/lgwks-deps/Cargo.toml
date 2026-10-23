@@ -109,6 +109,10 @@ bevy-ecs = ["dep:bevy_ecs"]
 bevy-app = ["bevy-ecs", "dep:bevy_app"]
 bevy-time = ["bevy-ecs", "dep:bevy_time"]
 bevy-state = ["bevy-ecs", "dep:bevy_state"]
+# Interim zoned time (jiff): DST-aware calendar arithmetic and IANA zones
+# until ELIMINATE lands in lgwks_std::time. Default-off; lgwks_std::time stays
+# the UTC RFC 3339 core.
+time-jiff = ["dep:jiff"]
 
 [dependencies]
 # The foundation this gate is built on, named rather than inherited: `core` is
@@ -148,6 +152,10 @@ candle-core = { version = "0.11", optional = true }
 candle-nn = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", default-features = false, optional = true }
 tokenizers = { version = "0.23", optional = true }
+# Interim zoned time: jiff with system zoneinfo plus bundled fallback, no
+# default features so the no-flag build stays portable. Consumers opt in via
+# --features time-jiff and reach it only through lgwks_deps::storefront::jiff.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo", "tzdb-concatenated"], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }

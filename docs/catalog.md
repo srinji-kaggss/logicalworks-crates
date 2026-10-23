@@ -49,6 +49,7 @@ the crate is the decision. An `off` row states why in ADR 0003.
 | native tui | `crates/lgwks-deps/src/lib.rs` | `lgwks_deps` | `appcui` | off — a native terminal UI cannot build for wasm32-wasip1, which the crate's no-flag build claims; measured 35 s warm. One flag: --features appcui (ADR 0003). | tui, terminal ui, appcui, widgets |
 | gpu ui | `crates/lgwks-deps/src/lib.rs` | `lgwks_deps` | `gpui` | off — objc2 refuses to compile off Apple targets, so a default carrying it would break Linux and Windows; measured 122 s warm on macOS. One flag: --features gpui (ADR 0003). | gpui, gpu ui, desktop ui, zed |
 | ml inference | `crates/lgwks-deps/src/lib.rs` | `lgwks_deps` | `ml-candle` | off — an inference runtime plus a network-capable tokenizer closure, measured 90 s warm and paid by every job that builds the crate; ml-candle-metal builds only on macOS. One flag: --features ml-candle,ml-tokenizers (ADR 0003). | ml, inference, candle, tokenizers, huggingface |
+| zoned time (interim) | `lgwks_deps::storefront::jiff` | `lgwks_deps` | `time-jiff` | off — DST-aware calendar arithmetic and IANA zones need a database lgwks_std::time does not carry; interim opt-in until ELIMINATE lands. One flag: --features time-jiff (ADR 0003). | zoned time, timezone, dst arithmetic, jiff, calendar arithmetic, rfc 9557 |
 | documentation governance | `docs/adr/README.md` | `repository` | `always` | on | adr, architecture decision record, prd, product requirements, iso 42010, iso 29148, governance |
 
 ## When the gate refuses your code

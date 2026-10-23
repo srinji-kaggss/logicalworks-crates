@@ -258,6 +258,13 @@ pub use candle_transformers;
 #[doc(hidden)]
 pub use tokenizers;
 
+/// Interim zoned time (jiff): DST-aware calendar arithmetic and IANA zones
+/// until ELIMINATE lands in `lgwks_std::time`. `lgwks_std::time` stays the
+/// UTC RFC 3339 core; reach zoned work only through here.
+#[cfg(feature = "time-jiff")]
+#[doc(hidden)]
+pub use jiff;
+
 /// The supported storefront: enable a feature and reach its engine here.
 ///
 /// Every path below is one audited edge this crate owns, so a consumer never
@@ -282,6 +289,8 @@ pub mod storefront {
     pub use crate::tokio;
     #[cfg(feature = "ml-candle")]
     pub use crate::{candle_core, candle_nn, candle_transformers};
+    #[cfg(feature = "time-jiff")]
+    pub use crate::jiff;
 }
 
 use std::path::{Path, PathBuf};
