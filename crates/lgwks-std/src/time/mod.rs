@@ -2,6 +2,10 @@
 //! enforcing INV-TIME-PURE: all formatting and parsing is pure, timezone-agnostic
 //! (UTC-normalized), allocation-minimal, and requires zero external dependencies
 //! like `chrono`.
+//!
+//! UTC core only. For zoned calendars, DST arithmetic, or IANA zones use the
+//! interim `lgwks_deps::storefront::jiff` (`--features time-jiff`) until the
+//! owned ELIMINATE lands; do not add a second time path beside these two.
 
 pub mod calendar;
 pub mod error;
