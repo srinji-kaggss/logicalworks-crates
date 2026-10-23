@@ -18,6 +18,15 @@ mod consumer_probe;
 #[path = "../support/group_leader.rs"]
 mod group_leader;
 
+#[path = "../support/adversary.rs"]
+mod adversary;
+
+#[path = "../support/json_attacks.rs"]
+mod json_attacks;
+
+#[path = "../support/leb128_attacks.rs"]
+mod leb128_attacks;
+
 #[path = "../support/rng.rs"]
 mod rng;
 
@@ -34,6 +43,19 @@ mod glob_public;
 mod pattern_external;
 mod process_parity;
 mod prop_codecs;
+mod sim_adversary_base64;
+mod sim_adversary_calendar;
+mod sim_adversary_digest;
+mod sim_adversary_fixture;
+mod sim_adversary_hex;
+mod sim_adversary_json_lexical;
+mod sim_adversary_json_structure;
+mod sim_adversary_leb128;
+mod sim_adversary_percent;
+mod sim_adversary_retry;
+mod sim_adversary_sign;
+mod sim_adversary_time;
+mod sim_adversary_uuid;
 #[cfg(feature = "build")]
 mod sim_build;
 // Builds its own downstream packages with its own json and ron features, so

@@ -133,6 +133,26 @@ pub(super) struct Installation {
     pub(super) reactor: Mutex<Option<Runtime>>,
 }
 
+impl Drop for Installation {
+    /// End the lazily built reactor without parking the dropping thread.
+    ///
+    /// The last clone of a host can drop anywhere, including inside async code, and dropping a
+    /// multi-thread runtime there panics ("Cannot drop a runtime in a context where blocking is
+    /// not allowed"). Terminating it in the background never parks the thread, so a host that
+    /// ran through [`Host::block_on`] can be dropped from any context. In-flight work on the
+    /// reactor is dropped, exactly as a plain drop would drop it; only the join is skipped.
+    /// Poisoning recovers, as the slot's other readers do: a runtime's termination is infallible.
+    fn drop(&mut self) {
+        let slot = match self.reactor.get_mut() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(runtime) = slot.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 /// What one call to [`Host::execute`] is asking for.
 ///
 /// A run id and a definition identity are two different facts about a run — the

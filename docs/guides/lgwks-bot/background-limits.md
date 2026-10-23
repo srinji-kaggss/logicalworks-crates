@@ -9,7 +9,7 @@ Pages of this guide: [tasks](background-work.md) ·
 
 These are the places the bounds stop applying.
 
-**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:73`
+**A bound on tasks is not a bound on time.** `crates/lgwks-bot/src/rt/mod.rs:82`
 states it: this is not a scheduler with realtime guarantees, and future
 completion order across worker threads is not deterministic. Only the result
 order of `join_all_bounded` is. The same applies to a child process: the

@@ -1,5 +1,6 @@
 //! `build` gives a Cargo build script the two things it needs to bind what it
-//! generates to what it read. An [`InputDigest`] is a function of its domain
+//! generates to what it read. An [`InputDigest`](crate::build::InputDigest) is a
+//! function of its domain
 //! tag, the bytes and root-relative names of its input files, its build
 //! variables and the enabled cargo features, and of nothing else, so two
 //! checkouts of one tree at different paths digest equal; the seeded family
@@ -11,7 +12,8 @@
 //! [`crate::fs::walk_dir_entries`], strict and depth-bounded, and only regular
 //! files are inputs; a symlink is neither followed nor hashed.
 //!
-//! Cargo reads a build script's instructions from its stdout. [`directive`]
+//! Cargo reads a build script's instructions from its stdout.
+//! [`directive`](crate::build::directive)
 //! writes one `cargo:` line to the writer it is given and returns the write
 //! error, where `println!` would panic on a closed pipe; a build script passes
 //! `&mut std::io::stdout().lock()`. Failures are also emitted as `debug!`

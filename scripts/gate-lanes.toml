@@ -78,10 +78,11 @@ ci_step = "ADRs and PRDs hold their required fields"
 id = "latency-tails"
 surfaces = "local ci"
 required = true
-# The per-call cost of what is on by default: p50 at or under 500 ns and p99 at
-# or under 1500 ns for one 64-byte digest, one glob match and one small document
-# parsed. The example refuses over either bound (ADR 0003).
-command = "cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails"
+# The per-call cost of every leaf call in `lgwks_std`, not a sample of them:
+# nineteen rows, each bounded at p50 500 ns and p99 1 500 ns, and the entropy row
+# on its tail alone because its cost is the kernel's. The example refuses over
+# either bound (ADR 0003).
+command = "cargo run --release --locked -p lgwks_std --example latency_tails"
 ci_step = "The hot calls hold their latency tails"
 
 [[lane]]
@@ -330,6 +331,12 @@ ci_step = "Digest constant-time equality (dudect)"
 # the Windows stand-in's handles would be if they stopped using
 # `without_provenance_mut`.
 #
+# `--no-default-features --features process` states the one capability the proof
+# needs. With the default set on, `hash` pulled `blake3`, whose C/NEON build ran
+# the runner's Linux `cc` with `-arch arm64 -mmacosx-version-min=11.0` and failed
+# before Miri started (run 39842979620): the proof is about `lgwks_std`'s two
+# syscall modules, and no hash is involved in either.
+#
 # Measured cold in the repository's Linux container: the install 12 s, the darwin
 # seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the lane; 16 s
 # on a warm darwin host. The negative control (the fill given a buffer of half
@@ -341,8 +348,8 @@ surfaces = "local ci"
 required = true
 command = """\
 rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
 """
 ci_step = "Prove the process unsafe seams under Miri"
 needs = ["bin:rustup"]
@@ -562,11 +569,24 @@ surfaces = "local ci"
 required = true
 command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets\
+"""
+ci_step = "Check lgwks-bot async feature matrix"
+
+# The two resolutions above the default set, on a leg of their own: four
+# resolutions in one leg spent 5 m 33 s on a target that had never held them and
+# was cancelled at the cap (run 39837239411), while the same work reads under
+# three minutes when each leg starts against a target that holds its graph.
+[[lane]]
+id = "feat-bot-all"
+group = "check"
+surfaces = "local ci"
+required = true
+command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal && \
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features\
 """
-ci_step = "Check lgwks-bot async feature matrix"
+ci_step = "Check lgwks-bot all-features matrix"
 
 [[lane]]
 id = "feat-ast"

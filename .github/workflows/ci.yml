@@ -399,6 +399,16 @@ jobs:
     # 1 m 33 s for the warm shard of the same commit (run 39827897865, lwc-10
     # against lwc-5). The two shards queue on the one instance instead, so each
     # job's own clock covers a shard rather than a compile.
+    #
+    # A push that edits lgwks_bot is the cold case. Run 39902657263 compiled its
+    # 23 test binaries for 3 m 15 s and built the `build-churn-slot` setup script
+    # for 28 s, and the cap cancelled the job at 5 m 24 s with the tests 78 s in;
+    # the same suite on main's source had passed inside 4 m 7 s on run
+    # 39902057915. The instance holds one build of the crate: run 39899054364
+    # compiled this source here, runs of main's source followed, and the next run
+    # compiled it again. So the run after an edit is cancelled at the bound, and
+    # the next one, with no other source built here between them, is the job's
+    # measurement.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -448,7 +458,7 @@ jobs:
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: lgwks-bot-junit-full-${{ matrix.instance }}
+          name: lgwks-bot-junit-full-${{ matrix.instance }}-${{ strategy.job-index }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
@@ -1042,12 +1052,15 @@ jobs:
         # batching, the cropping and the control are untouched.
         run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000
       - name: The hot calls hold their latency tails
-        # The per-call cost of the capabilities that are on by default: p50 at
-        # or under 500 ns and p99 at or under 1500 ns for one 64-byte digest,
-        # one glob match and one small document parsed. The example fails over
-        # either bound, so a slower implementation cannot land behind a green
-        # suite (ADR 0003).
-        run: cargo run --release --locked -p lgwks_std --features hash,json --example latency_tails
+        # Every leaf call in lgwks_std, not a sample of them: nineteen rows —
+        # digest and hex, hex and base64 round trips, glob, LEB128 both ways,
+        # the seeded stream, edit distance, digest hex, digest comparison, JSON
+        # parsed and written, UUID parsed, rendered and generated, and a compiled
+        # regex match. Each row is bounded at 500 ns p50 and 1 500 ns p99, and
+        # the example fails over either, so a slower implementation cannot land
+        # behind a green suite (ADR 0003). The entropy row is bounded on its
+        # tail alone and says why. Default features carry every row.
+        run: cargo run --release --locked -p lgwks_std --example latency_tails
 
   # The async fairness gate and concurrency ladder, in a job of its own: beside
   # the two digest measurements it took the instance to 5 m 24 s on run
@@ -1089,7 +1102,15 @@ jobs:
         include:
           - part: docs.rs
             instance: lwc-11
+          # On the instance whose target holds lgwks-bot's graph: the leg on
+          # lwc-10 spent 5 m 33 s compiling four feature resolutions on a cold
+          # target and was cancelled at the cap (run 39837239411), where the same
+          # leg reads 1 m 19 s warm. Two resolutions per leg now, so a cold target
+          # pays half the work: the no-default and default builds here, the
+          # feature subsets and all-features on the leg below.
           - part: lgwks-bot
+            instance: lwc-5
+          - part: lgwks-bot all
             instance: lwc-10
           - part: lgwks-ast
             instance: lwc-12
@@ -1120,6 +1141,10 @@ jobs:
           set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets
+      - name: Check lgwks-bot all-features matrix
+        if: matrix.part == 'lgwks-bot all'
+        run: |
+          set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
       - name: Check lgwks-bot WASI runtime boundary
@@ -1409,5 +1434,5 @@ jobs:
       - name: Prove the process unsafe seams under Miri
         run: |
           rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
-          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests

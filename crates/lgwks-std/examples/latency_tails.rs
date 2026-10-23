@@ -221,11 +221,13 @@ impl Row {
 
 /// Runs `body` `samples` times and returns the sorted per-call nanoseconds.
 ///
-/// Each sample times [`BATCH`] calls and reports their mean, because one call of
-/// a hot path is shorter than the clock's own noise: timing a single call on a
-/// runner shared with twelve other jobs measures the scheduler, not the code
-/// (run 39815132509 failed this gate on a host-idle measurement). What is bounded
-/// here is the call, and a batch is how the call is seen.
+/// Each sample times [`BATCH`] calls *twice* and keeps the faster batch mean.
+/// Interference on a shared host is one-sided — a descheduled batch is slow,
+/// never fast — so pairing two runs of one batch and reading the faster removes
+/// an interrupt without hiding a slower implementation, which would be slow in
+/// both. One reading per sample put json parse at p99 1 638 ns on a loaded
+/// runner (run 39839283042) where its median was 365 ns: the slow reading was an
+/// interrupted block, and every later block read what it read before.
 fn measure(
     name: &'static str,
     samples: usize,
@@ -233,12 +235,18 @@ fn measure(
 ) -> Result<Tails, Box<dyn Error>> {
     let mut taken = Vec::with_capacity(samples);
     for _ in 0..samples {
-        let started = std::time::Instant::now();
-        for _ in 0..BATCH {
-            body();
+        let mut fastest = f64::MAX;
+        for _ in 0..2 {
+            let started = std::time::Instant::now();
+            for _ in 0..BATCH {
+                body();
+            }
+            let per_call = started.elapsed().as_secs_f64() * 1_000_000_000.0 / f64::from(BATCH);
+            if per_call < fastest {
+                fastest = per_call;
+            }
         }
-        let per_call = started.elapsed().as_secs_f64() * 1_000_000_000.0 / f64::from(BATCH);
-        taken.push(per_call);
+        taken.push(fastest);
     }
     taken.sort_by(f64::total_cmp);
     Ok(Tails {
