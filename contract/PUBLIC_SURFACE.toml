@@ -158,7 +158,7 @@
 "crates/lgwks-deps/src/invariants/binding.rs" = 1
 "crates/lgwks-deps/src/invariants/resolve.rs" = 2
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
-"crates/lgwks-deps/src/lib.rs" = 25
+"crates/lgwks-deps/src/lib.rs" = 26
 "crates/lgwks-deps/src/lock.rs" = 7
 "crates/lgwks-deps/src/metadata.rs" = 2
 "crates/lgwks-deps/src/metadata/capture.rs" = 2
