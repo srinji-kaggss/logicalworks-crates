@@ -1,10 +1,11 @@
-//! The estate evening as a deployment smoke: every tier, both doors, every refusal, one report.
+//! The estate evening as a smoke: every tier, both doors, every refusal, one report.
 //!
-//! Operators run this after a deploy to prove the assembly on the live artifact. It builds each
-//! tier, runs through `run_task` and `run_blocking`, cancels, drains both ways, exercises every
-//! typed refusal, and prints the terminal record. Every number it prints is also asserted: the
-//! first deviation records a mismatch and the exit is non-zero, so a silent exit is a proved
-//! evening.
+//! Run it on a built artifact to prove the assembly there. It builds each tier, runs through
+//! `run_task` and `run_blocking`, cancels, drains both ways, drops an estate inside a runtime,
+//! exercises every typed refusal, and prints the terminal record. Every number it prints is also
+//! asserted: the first deviation records a mismatch and the exit is non-zero, so a clean exit is a
+//! proved evening. `the_smoke_binary_proves_the_evening` (`tests/it/estate.rs`) runs it on every
+//! test run and reads the same exit.
 
 use std::io::Write as _;
 
@@ -36,16 +37,28 @@ fn record(mismatch: &mut Option<String>, message: String) {
     }
 }
 
+/// The smoke's scratch directory, removed on every exit — an early `?` return included.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    /// Remove the directory; a refusal is logged, because a destructor has nowhere to return it.
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            lgwks_std::trace::debug!(error = ?error, "estate-smoke: the scratch dir was not removed");
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mismatch: Option<String> = None;
     let driver = Runtime::new()?;
-    let estate = Estate::supervised("acme", 8)?;
+    let mut estate = Estate::supervised("acme", 8)?;
+    let supervised = estate.supervisor().is_some();
     say(&format!(
-        "estate: tenant={} tier={} runtime={} supervisor={} store={}",
+        "estate: tenant={} tier={} runtime={} supervisor={supervised} store={}",
         estate.tenant(),
         estate.tier(),
-        estate.has_runtime(),
-        estate.has_supervisor(),
+        estate.handle().is_some(),
         estate.run_store().is_some(),
     ))?;
     let probe = task("estate-probe", |_scope, input: u64| async move {
@@ -113,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let estate = Estate::supervised("acme", 8)?;
+    let mut estate = Estate::supervised("acme", 8)?;
     estate.cancel();
     let report = estate
         .shutdown_blocking()
@@ -130,11 +143,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let bare = Estate::in_process("acme")?;
+    let mut bare = Estate::in_process("acme")?;
     say(&format!(
         "in-process: runtime={} supervisor={}",
-        bare.has_runtime(),
-        bare.has_supervisor(),
+        bare.handle().is_some(),
+        bare.supervisor().is_some(),
     ))?;
     let run = bare
         .run_blocking(&probe, 6)
@@ -170,11 +183,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
     }
+    // The run above built the host's own reactor; dropping the estate inside a runtime is the
+    // panic tokio raises for a plain runtime drop, so reaching the next line proves the host ends
+    // its reactor in the background.
+    driver.block_on(async move { drop(bare) });
+    say("in-process drop inside a runtime: ok")?;
 
     let unique = lgwks_std::random::bytes::<8>()
         .map_err(|error| format!("the scratch name failed: {error}"))?;
     let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
     let dir = std::env::temp_dir().join(format!("lgwks-estate-smoke-{hex}"));
+    let _scratch = Scratch(dir.clone());
     let durable = Estate::durable("acme", 8, &dir)?;
     say(&format!("durable: store={}", durable.run_store().is_some()))?;
     let run = durable
@@ -268,10 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    std::fs::remove_dir_all(&dir).map_err(|error| format!("the scratch dir failed: {error}"))?;
 
-    Runtime::new()?.shutdown_background();
-    say("background shutdown: done")?;
     if let Some(mismatch) = mismatch {
         lgwks_std::trace::debug!(
             mismatch = mismatch.as_str(),
