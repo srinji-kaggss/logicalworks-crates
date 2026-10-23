@@ -34,10 +34,10 @@ There are three dependency surfaces and one standalone parser:
 
 - `lgwks_std`: the core surface.
 - `lgwks_bot`: async, runners, and the actor roles.
-- `lgwks_deps`: everything else, the **storefront**. The end user installs
-  `lgwks_deps` and selects which dependency features to turn on.
+- `lgwks_deps`: everything else, the **storefront**. The end user installs it
+  and holds every feature that builds on their target; selecting is an opt-out.
 - `lgwks_ast`: standalone, and the one parser. It reads source in many
-  languages through tree-sitter and, behind its default-off `script` feature,
+  languages through tree-sitter and, through its default `script` feature,
   reads the `script!` language (`lgwks_ast::script::parse`), which
   `lgwks_macros` compiles and every tool reads through (SL-2, the Director's
   direction of 2026-10-08, #383). It is not a candidate for other capability;
@@ -45,18 +45,17 @@ There are three dependency surfaces and one standalone parser:
 
 If a capability exists in `std`, `lgwks_std`, `lgwks_bot`, or `lgwks_ast`, use
 it. A **new** third-party dependency is an optional, feature-gated edge of
-`lgwks_deps`, never built unless the end user selects it, registered in
-`contract/APPROVED.toml` with `owner = "lgwks_deps"`. `lgwks-deps check .`
-refuses every authored external edge with no owner, and refuses an approval
-with no authored edge.
+`lgwks_deps`, registered in `contract/APPROVED.toml` with `owner =
+"lgwks_deps"`, and on by default unless ADR 0003 records its cost. `lgwks-deps
+check .` refuses every authored external edge with no owner, and refuses an
+approval with no authored edge.
 
 ## The dependency policy (2026-09-12)
 
 1. The surfaces are `std`, `bot`, and `deps`; `ast` is the one standalone crate.
 2. `lgwks_deps` is the install-and-select storefront: every other dependency is
-   an optional feature there (`--features gpui`). Every storefront feature is
-   default-off; `scan` was the one default-on exception until it moved to
-   `lgwks_ast` (#408).
+   an optional feature there, on by default where the target can carry it and
+   the measured cost is recorded in ADR 0003 (today: `gpui`, the `ml-*` set).
 3. A new dependency is registered under `lgwks_deps`. Do not introduce a new
    owner crate or a new top-level crate for third-party code.
 4. Grandfathered: `lgwks_std`'s existing core feature stack and `lgwks_ast`'s

@@ -3,31 +3,45 @@
 Status: **accepted**, 2026-10-12. Issue: #408. Supersedes the "Not yet routed"
 consequence of `0001-one-rust-reader.md`, which is not edited.
 
-## What changed
+Stakeholders: the Director; the gate's author; a contributor whose file the scan reads; a consumer reading a refusal
+Concerns: a refused file must not end the walk or abort the run; the gate must hold one reader; a detector port must agree verdict for verdict with the reader it replaces
+Requirements: R8, R13
+Viewpoint: the detector viewpoint — one view per reader, each view the finding count, the wall time and the peak RSS over one corpus
+Elements and relations: `lgwks_ast::scan`, its five detectors, the `lgwks-ast scan` command, the `scan` lane and `contract/APPROVED.toml`; relations: `lane runs command`, `command runs detectors`, `detector reads through parser`
+
+## Context
+
+ADR 0001 measured the two Rust readers and chose `lgwks_ast`'s, but its own
+"not yet routed" consequence left the `scan` gate still reading with `syn`, with
+both measured hazards open: memory that grows with the corpus, and an abort on
+deeply nested input. `lgwks_deps` could not host the port: `lgwks_ast`'s `script`
+feature depends on it, so the reverse edge is a cycle Cargo refuses. This record
+is that routing.
+
+## Decision
 
 - The five zero-gate detectors (`ERROR-SWALLOW`, `unlogged-err-return`,
   `ALLOW-SILENCE`, `long-try-chain`, `tautological-doc`) moved from
-  `lgwks_deps::scan` (`syn::visit`) to `lgwks_ast::scan` (tree-sitter nodes), behind
-  the default-off `scan` feature, with the `lgwks-ast scan [--json] [PATH...]`
-  subcommand. `lgwks_deps` could not host it: `lgwks_ast`'s `script` feature
-  depends on `lgwks_deps`.
+  `lgwks_deps::scan` (`syn::visit`) to `lgwks_ast::scan` (tree-sitter nodes),
+  behind the `scan` feature, with the `lgwks-ast scan [--json] [PATH...]`
+  subcommand.
 - The `scan` gate lane and its CI step run `lgwks-ast scan` (same feature set as
   `script-check`, so the pair builds once).
-- `lgwks-deps scan` is gone and says where it went. `lgwks_deps` has no default
-  feature and no `syn` edge.
-- The `syn` approval (`scan.rust_parser`) is retired from `contract/APPROVED.toml`.
-  `lgwks_macros` needed `syn::Error` only to report a refusal, so it now writes
-  its own `compile_error!` (`crates/lgwks-macros/src/error.rs`). **No consumer of
-  `syn` remains in the workspace's authored edges.** `proc-macro2` stays, for
-  the `script!` token streams, and its approval is renamed `tokens.span_locations`.
+- `lgwks-deps scan` is gone and says where it went. `lgwks_deps` has no `syn`
+  edge.
+- The `syn` approval (`scan.rust_parser`) is retired from
+  `contract/APPROVED.toml`. `lgwks_macros` needed `syn::Error` only to report a
+  refusal, so it now writes its own `compile_error!`
+  (`crates/lgwks-macros/src/error.rs`). **No consumer of `syn` remains in the
+  workspace's authored edges.** `proc-macro2` stays, for the `script!` token
+  streams, and its approval is renamed `tokens.span_locations`.
 - A file the checked parse refuses is `ScanError::Refused` (byte ceiling, node
   budget, depth bound `AstTooDeep`, deadline) or `Unparseable` (syntax, with the
   line of the first damage). It is counted, named, and the run continues.
-- `lgwks_deps`'s `main.rs` was over the size law on `main` (2,100 lines), so touching
-  it for the `scan` stub meant splitting it, by moving code verbatim into
-  `check_report`, `debug_cmd`, `request_cmd` and `freshness_cmd` (836 lines now).
-  Its `lib.rs` is already split on `main` and is only trimmed of `pub mod scan` and
-  `pub use syn`.
+- `lgwks_deps`'s `main.rs` was over the size law on `main` (2,100 lines), so
+  touching it for the `scan` stub meant splitting it, by moving code verbatim
+  into `check_report`, `debug_cmd`, `request_cmd` and `freshness_cmd` (836 lines
+  now).
 
 ## Fidelity
 
@@ -40,9 +54,10 @@ Verdict for verdict, against the reader this replaces:
 - Differential, the old `lgwks-deps scan` built from `main` against the new
   `lgwks-ast scan`, one run per checkout, outputs sorted because the two walk in a
   different order: this repository (696 files, zero findings from both) and five
-  third-party checkouts (bevy, helix, wezterm, gosub-engine, rust-sdk: 3,164 files).
-  Where both read a file they agree on **every finding**: 2,147 identical findings,
-  all five rules among them. The old binary reports 2,173 and the new 2,152.
+  third-party checkouts (bevy, helix, wezterm, gosub-engine, rust-sdk: 3,164
+  files). Where both read a file they agree on **every finding**: 2,147 identical
+  findings, all five rules among them. The old binary reports 2,173 and the new
+  2,152.
 - The 26 the new one lacks are all in 6 files that tree-sitter-rust 0.24 refuses
   (bevy `mesh.rs`, `render_context.rs`, `scene_viewer/main.rs`; wezterm
   `keyevent.rs`; gosub `property_definitions.rs`, `syntax_matcher.rs`). In all, it
@@ -58,42 +73,41 @@ Verdict for verdict, against the reader this replaces:
 
 ## Measurement
 
-Taken 2026-10-15 on `main` at `eb6d4f4d9` plus this change: release builds, a Mac
-shared with other sessions (load average 1.7 to 4.3), one reader per process so a
-peak RSS (`/usr/bin/time -l`) is that reader's own.
+The wall-time and peak-RSS tables, the per-file latency table and the hostile
+nesting rows are in
+[`measurements/0002-scan-route-measurement.md`](measurements/0002-scan-route-measurement.md).
 
-The gate itself, the old binary against the new, wall time and peak RSS:
+## Alternatives rejected
 
-| corpus | old `lgwks-deps scan` | new `lgwks-ast scan` |
-|---|---|---|
-| this repository, 696 files (3 runs each) | 0.60 to 0.68 s, 35 MB | 1.63 to 1.65 s, 11 MB |
-| bevy, 1,900 files | 1.46 s, 59 MB | 3.07 s, 13 MB |
+- **Port the detectors into `lgwks_deps`.** A cycle: `lgwks_ast`'s `script`
+  feature depends on `lgwks_deps`, which already carries the script token
+  reader, so `lgwks_deps` cannot depend back on it.
+- **Keep `scan` reading `syn` beside the routed reader.** That is the second
+  reader ADR 0001 and SL-2 forbid, and the two already disagree on 57 files.
+- **Abort the walk on the first refused file.** The measured cost is the five
+  `xtask` findings and every file that sorts after a refusal; a refusal is now
+  counted and named, and the run continues.
 
-**The port is 2.1x to 2.7x slower in wall time** and holds 3.2x to 4.5x less memory,
-which no longer grows with the corpus. The cause is the detectors, which walk the
-tree several times with per-node allocation: the scan costs 3x the checked parse
-alone (below). An index pass or fewer walks would recover most of it and is not
-done here. The gate lane takes 1.6 s, far inside its budget.
+## Consequences
 
-`rust_readers`, 5 rounds over every file, per-file latency:
+- The gate is 2.1x to 2.7x slower in wall time and holds 3.2x to 4.5x less
+  memory, which no longer grows with the corpus; the lane still takes 1.6 s.
+- `lgwks_deps` holds no Rust grammar, and `syn` is gone from every authored
+  edge, so the workspace compiles one fewer proc-macro stack.
+- A third-party grammar gap now fails the gate by design: 34 of 3,164 third-party
+  files are refused, none of them first-party.
+- The detectors' per-node allocation is the remaining cost; an index pass would
+  recover most of it and is not done here.
 
-| corpus, reader | accepted | p50 / p99 / max | one round | peak RSS |
-|---|---|---|---|---|
-| this repository (696 files, 12.2 MB), `try_parse` | 696 | 510 us / 4.2 ms / 9.0 ms | 474 ms | 10.0 MB |
-| this repository, `scan` | 696 | 1.6 ms / 14.1 ms / 26.3 ms | 1,517 ms | 10.5 MB |
-| bevy (1,900 files, 23.6 MB), `try_parse` | 1,871 | 232 us / 4.2 ms / 7.4 ms | 941 ms | 11.6 MB |
-| bevy, `scan` | 1,871 | 704 us / 13.3 ms / 36.6 ms | 2,967 ms | 12.9 MB |
+## Correspondence
 
-ADR 0001 measured the `syn` reader at 1,080 MB over a 107 MB corpus (the vendored
-tree it used is gone from `main`, so that row is cited, not repeated).
+Routes the "not yet routed" consequence of
+[ADR 0001](0001-one-rust-reader.md) and does not edit it. Serves
+`INV-SCAN-ZERO` and `INV-AST-ONE-PARSER`.
 
-Hostile nesting, one process per depth (`rust_readers nest`, all exit 0):
+## Verification
 
-| depth | 10,000 | 100,000 | 1,000,000 |
-|---|---|---|---|
-| `syn` (ADR 0001) | abort, exit 134 | abort | abort |
-| `try_parse` | `AstTooDeep` in 3.2 ms | 32 ms | 328 ms |
-| `scan` | `AstTooDeep` in 3.2 ms | 31 ms | 330 ms |
-
-`scan_bounds` holds these rows, and holds that a tree at the depth bound is
-scanned on a 512 KiB stack in four nesting shapes.
+The `scan` lane (`lgwks-ast scan`, exit 2 on any finding or refused file);
+`sim_scan_detectors` against its independent model; `scan_verdicts` and
+`scan_cases` for the verdicts; `scan_bounds` for the hostile rows; and
+`scan_evidence` for the command itself.

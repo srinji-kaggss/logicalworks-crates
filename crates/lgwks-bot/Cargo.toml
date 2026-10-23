@@ -25,7 +25,16 @@ keywords = ["automation", "bot", "workflow", "agent", "ecs"]
 # `io` is not implied by `rt` for the same reason the storefront splits it: a
 # consumer reading a pipe needs `AsyncRead` without a socket layer.
 [features]
-default = ["rt", "time", "sync", "macros", "script"]
+# The default set is the portable boundary, and this crate is the one where that
+# is the whole of the rule (ADR 0003, "the target veto"): the WASI boundary step
+# builds exactly these defaults for `wasm32-wasip1`, and the T22 row asserts on
+# this set — through a consumer that names no features — that `script!`, `task`
+# and the four verbs are reachable and that a process description is not. A
+# default carrying `net`, `process`, `fs`, `signal` or `inspect` fails both: it
+# cannot compile for the boundary target, and it would make the row's claim false
+# rather than untested. Every other capability is one feature away, `full`
+# carries all of them, and the suite runs `full` so none rots.
+default = ["script"]
 rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
 sync = ["rt", "lgwks_deps/tokio-sync"]
@@ -58,10 +67,17 @@ fs = ["io", "lgwks_deps/tokio-fs"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 # `inspect`: typed in-process structural code inspection (R8). Host-only, like
 # `process`/`fs`/`net`: it pulls the native tree-sitter grammars through
-# `lgwks_ast`, which cannot build for the WASI boundary target. Not on by
-# default for that reason; `full` turns it on so the gate exercises it rather
-# than letting it rot as an unbuilt candidate.
-inspect = ["dep:lgwks_ast", "lgwks_ast/default"]
+# `lgwks_ast`, which cannot build for the WASI boundary target. `full` turns it
+# on so the gate exercises it rather than letting it rot as an unbuilt candidate.
+#
+# Every grammar, so a subject in any language the estate carries is inspected
+# rather than answered `Unsupported`; `lgwks_ast/full` is exactly that list and
+# no more. It does not name `lgwks_ast/default`, which also carries the
+# `lgwks-ast` CLI (`tool`) and the zero-gate detectors (`scan`) — capabilities
+# of that crate, unreachable from this one, and the difference was measured: the
+# bot-full suite job went from 263 s to past its 300 s cap compiling them
+# (run 39784616607).
+inspect = ["dep:lgwks_ast", "lgwks_ast/parser", "lgwks_ast/full"]
 # Minting a run identity needs an entropy source, and the estate has exactly
 # one: `lgwks_std::random`, whose `random` feature is `getrandom` under
 # `lgwks_std`'s ownership. This crate authors no edge of its own — it turns on a

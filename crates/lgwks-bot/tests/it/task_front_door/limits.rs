@@ -319,3 +319,25 @@ fn a_synchronous_run_refuses_inside_a_running_runtime() -> TestResult {
     );
     Ok(())
 }
+
+/// A host that ran through `block_on` owns a reactor, and its last clone can drop anywhere,
+/// including inside async code. Dropping a runtime there panics, so the host ends its reactor in
+/// the background: the drop returns, and the thread that dropped it is not parked.
+#[test]
+fn a_host_that_ran_synchronously_can_drop_inside_a_running_runtime() -> TestResult {
+    let host = host("acme")?;
+    let echo = task("echo", |_scope: Scope, value: u32| async move { Ok(value) })?;
+    let ran = host.block_on(&echo, 5_u32)?;
+    assert_eq!(
+        ran.output().copied(),
+        Some(5),
+        "the sync path built a reactor"
+    );
+
+    let answer = drive(async move {
+        drop(host);
+        2 + 2
+    });
+    assert_eq!(answer, 4, "the caller carried on after the host dropped");
+    Ok(())
+}

@@ -26,30 +26,54 @@ default-run = "lgwks-deps"
 # which reads Rust through its one tree-sitter parser (ADR 0002, #408), so this
 # crate authors no Rust grammar at all.
 [features]
+# Every capability this crate owns is on by default (Director, 2026-10-22, #732):
+# the proc-macro authoring stack, the `script!` token reader, the whole tokio
+# storefront and the Bevy runtime set. ADR 0003 is the decision.
+#
+# The storefront's default selection is empty, and that is a decision this
+# register states rather than an omission: the target matrix builds this crate
+# with no flags as a *required* claim for every declared target, `wasm32-wasip1`
+# among them, and every storefront group is either native (`appcui`, `gpui`) or a
+# driver with no wasm surface (`tokio-net`, `tokio-process`, `tokio-signal`). A
+# default that cannot build on a declared target is not a default (ADR 0003).
+#
+# Discovery is what a storefront owes its user, and it is the catalog's job
+# rather than a compile's: `lgwks-deps catalog` prints every group with its
+# feature, its owner and its measured cost, so nothing here is hidden behind a
+# flag an agent has to guess. Three groups are default-off with their measured
+# cost in ADR 0003:
+#
+#   * `gpui` — the Apple-only GPU UI framework. `objc2` refuses to compile off
+#     Apple targets, so a default carrying it would make this crate fail to build
+#     on Linux and Windows.
+#   * `ml-candle`, `ml-candle-metal`, `ml-tokenizers` — an ML inference runtime
+#     and the HuggingFace tokenizer. Measured on this machine 2026-10-22:
+#     `cargo check -p lgwks_deps --features ml-candle,ml-tokenizers` cost 90 s on
+#     a warm target directory, against 35 s for `appcui`.
+default = []
 # Proc-macro authoring storefront: token streams (`proc-macro2`) and
 # quasi-quoting (`quote`) a first-party proc-macro crate needs. `lgwks_macros` is
 # the one consumer; it reaches both through the re-exports below, so this crate
-# stays the only author of each edge. Default off: a runtime consumer pulls
-# neither.
+# stays the only author of each edge.
 macro = ["dep:proc-macro2", "dep:quote"]
 # The token stream the `script!` language is read from (`lgwks_ast`'s `script`
 # feature, #383): `proc-macro2` with span locations and nothing else, so a tool
 # that reads scripts, and the macro that compiles them, share one parser
-# without either pulling `syn` or `quote` for it. Default off.
+# without either pulling `syn` or `quote` for it.
 script = ["dep:proc-macro2"]
 # Storefront features. `lgwks_deps` is the install-and-select surface:
-# the end user enables exactly the third-party capability they want, and the
-# default build pulls none of them. gpui is Zed's GPU desktop UI framework;
-# `tokio` is the async engine behind `lgwks_bot`'s runner surface.
+# the end user enables the third-party capability they want. gpui is Zed's GPU
+# desktop UI framework; `tokio` is the async engine behind `lgwks_bot`'s runner
+# surface. Both are selected above except gpui, whose Apple-only closure is why
+# it is not in the default set.
 gpui = ["dep:gpui", "gpui/default"]
 appcui = ["dep:appcui"]
 # ML inference storefront. Candle is HuggingFace's minimalist Rust ML framework:
 # `ml-candle` brings tensor compute, NN layers, and the transformer model
 # registry; `ml-candle-metal` adds the macOS Metal backend to that set.
 # `ml-tokenizers` is the HuggingFace subword tokenizer used for tokenizer
-# parity with the reference runtime. All three stay default-off, so the default
-# `scan` build and every consumer that does not select them pull none of
-# Candle's closure.
+# parity with the reference runtime. The measured cost of selecting them is in
+# the `default` comment above and ADR 0003.
 ml-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
 ml-candle-metal = ["ml-candle", "candle-transformers/metal"]
 ml-tokenizers = ["dep:tokenizers"]
@@ -79,15 +103,22 @@ tokio-full = [
 # ECS storefront. One state substrate serves three consumers: `lgwks_bot`'s
 # four-verb actors, drishti's incremental derivation, and the GPU framework's
 # demand-driven execution. `bevy-ecs` is the substrate; the other three are what
-# turn it into a runtime rather than a data structure. All four stay default-off
-# and pull no renderer, no windowing, and no audio.
+# turn it into a runtime rather than a data structure. All four are in the
+# default set and pull no renderer, no windowing, and no audio.
 bevy-ecs = ["dep:bevy_ecs"]
 bevy-app = ["bevy-ecs", "dep:bevy_app"]
 bevy-time = ["bevy-ecs", "dep:bevy_time"]
 bevy-state = ["bevy-ecs", "dep:bevy_state"]
 
 [dependencies]
-lgwks_std = { workspace = true, features = ["json"] }
+# The foundation this gate is built on, named rather than inherited: `core` is
+# the walk, clock and encoding it reads with, `trace` is how it logs a refusal,
+# and `json` is the register and report format. `default-features = false`
+# because a *tool's* edge declares the capabilities it uses; the storefront's
+# own default set is what it sells to a consumer, and that is argued in the
+# `[features]` block above. Keeping the edge exact also keeps the four
+# storefront fixtures' lockfiles independent of `lgwks_std`'s default set.
+lgwks_std = { workspace = true, default-features = false, features = ["core", "trace", "json"] }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 quote = { version = "1", optional = true }
 gpui = { version = "0.2", optional = true }
@@ -128,7 +159,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 # capture files from a clock and a sequence under exclusive creation instead.
 # This adds no edge of its own — a feature of a dependency already held —
 # which keeps the tree at one entropy source rather than two.
-lgwks_std = { workspace = true, features = ["random"] }
+lgwks_std = { workspace = true, default-features = false, features = ["random"] }
 
 [[bin]]
 name = "lgwks-deps"
@@ -148,6 +179,27 @@ path = "src/bin/render_site.rs"
 [[bin]]
 name = "check-requirements"
 path = "src/bin/check_requirements.rs"
+
+# The capability catalog (#732): the discovery half of the std-first gate. It
+# prints the register, emits it as JSON for an agent, writes the generated page
+# and refuses a register that disagrees with the tree.
+[[bin]]
+name = "catalog"
+path = "src/bin/catalog/main.rs"
+
+# The documentation-governance reader: every ADR against ISO/IEC/IEEE 42010 and
+# every PRD requirement against ISO/IEC/IEEE 29148.
+[[bin]]
+name = "check-docs"
+path = "src/bin/check_docs/main.rs"
+
+# The declared target matrix, executed: the required Rust-only surface on every
+# target, and each crate's default set recorded with its declared C-toolchain
+# exemption. It replaced a shell script on 2026-10-22, when `hash` joined the
+# default set and the required check had to name a set with no C in it.
+[[bin]]
+name = "check-target-matrix"
+path = "src/bin/check_target_matrix.rs"
 
 [[bin]]
 name = "check-spec-owners"

@@ -43,9 +43,17 @@ the rest of this table is design history and contributor policy.
 | [`docs/declarative-orchestration-composition.spec.md`](declarative-orchestration-composition.spec.md) | Part two of the task-first specification: composition, admission and repair, one registry and execution path, ownership and visibility. |
 | [`docs/orchestration-lifecycle.spec.md`](orchestration-lifecycle.spec.md) | Single-owner state, atomic fingerprint and value commits, attempt-bound evidence, readiness and process-tree ownership, and the honest durability boundary. |
 | [`docs/script-language.spec.md`](script-language.spec.md) | The `script!` language: one lexicon, one parser, one call per line, guarantees carried by words, and where the parser lives. Proposed, not shipped. |
+| [`docs/catalog.md`](catalog.md) | Every capability the estate owns, its owner path, its crate, its feature and whether it is on by default. Generated from `contract/CATALOG.toml`; the std-first gate's refusals name rows in it. |
+| [`docs/adr/README.md`](adr/README.md) | The architecture decision record contract: every record against ISO/IEC/IEEE 42010, the fields it must hold, and the index of records. |
 | [`docs/adr/0001-one-rust-reader.md`](adr/0001-one-rust-reader.md) | ADR 0001: Rust is read by one parser, `lgwks_ast`. The decision is backed by fidelity, latency, peak-RSS and hostile-nesting measurements on this repository's own sources. |
 | [`docs/adr/0002-scan-routed-through-lgwks-ast.md`](adr/0002-scan-routed-through-lgwks-ast.md) | ADR 0002: the `scan` gate reads Rust through `lgwks_ast`, so `lgwks_deps` no longer carries `syn`, and `lgwks-deps scan` points at `lgwks-ast scan` (#408). |
-| [`docs/adr/0003-bot-core-is-an-event-driven-ecs.md`](adr/0003-bot-core-is-an-event-driven-ecs.md) | ADR 0003: the bot core is an event-driven ECS with tokio and the executors as drivers below it; the five-step refactor (seal, wake, run events, drishti in, measure) and the rule that every admitted engine is replaced by ours on a matched benchmark. |
+| [`docs/adr/0003-every-capability-on-by-default.md`](adr/0003-every-capability-on-by-default.md) | ADR 0003: every capability is on by default, with the measured cost of the default and the three rows an opt-out is justified for (#732). |
+| [`docs/adr/0004-documentation-governance.md`](adr/0004-documentation-governance.md) | ADR 0004: ADRs are held to ISO/IEC/IEEE 42010 and PRDs to ISO/IEC/IEEE 29148, read by `check-docs` in the `doc-governance` lane. |
+| [`docs/adr/0005-bot-core-is-an-event-driven-ecs.md`](adr/0005-bot-core-is-an-event-driven-ecs.md) | ADR 0005: the bot core is an event-driven ECS with tokio and the executors as drivers below it; the five-step refactor (seal, wake, run events, drishti in, measure) and the rule that every admitted engine is replaced by ours on a matched benchmark. |
+| [`docs/adr/measurements/0001-rust-readers.md`](adr/measurements/0001-rust-readers.md) | The corpus, commands and result tables behind ADR 0001. |
+| [`docs/adr/measurements/0002-scan-route-measurement.md`](adr/measurements/0002-scan-route-measurement.md) | The wall-time, peak-RSS and hostile-nesting tables behind ADR 0002. |
+| [`docs/prd/README.md`](prd/README.md) | The product requirement document contract: every requirement against ISO/IEC/IEEE 29148, the attributes it must carry, and the index of documents. |
+| [`docs/prd/0001-discoverable-opinionated-estate.md`](prd/0001-discoverable-opinionated-estate.md) | PRD 0001: opinionated defaults, one catalog, the build-script surface, complete tracing, gate-catalog agreement and the published page (#732). |
 | [`docs/ai-orchestration.spec.md`](ai-orchestration.spec.md) | AI-authored scripts and AI workloads: constrained proposals, bounded artifact context, subject pinning, no-progress intervention and same-model evaluation. |
 | [`docs/pr-review-orchestration.spec.md`](pr-review-orchestration.spec.md) | The reference journey: a pinned snapshot through script, checked publication and lost-response reconciliation, and its explicit non-CAS freshness limit. |
 | [`docs/orchestration-acceptance.spec.md`](orchestration-acceptance.spec.md) | The 36 public-interface falsifiers, the requirement each one owns, and the per-revision table of the tests that drive them. No row is accepted yet. |
@@ -71,6 +79,13 @@ the rest of this table is design history and contributor policy.
 | [`docs/invariants-long-form.md`](invariants-long-form.md) | The reasoning, measurements and stated limits behind each one-line rule in `INVARIANTS.md`. |
 | [`docs/releasing.md`](releasing.md) | The release process. |
 | [`docs/governance/law.md`](governance/law.md) | Governance §2: the production engineering law. |
+| [`docs/workflow/local-ci.md`](workflow/local-ci.md) | Workflow §1, §10 and §11: local CI, the runner map, and the mandatory WWFD cycle. |
+| [`docs/workflow/delivery-loop.md`](workflow/delivery-loop.md) | Workflow §2 and §3: the delivery loop, its seven rules, and RAG for implementation expertise. |
+| [`docs/workflow/one-path.md`](workflow/one-path.md) | Workflow §4 and §5: one path, one opinion, one architecture; compounding, buildable, surgical change. |
+| [`docs/workflow/evidence.md`](workflow/evidence.md) | Workflow §6 and §7: evidence proportionality, the nine axes, and how work ends with a PR. |
+| [`docs/workflow/agents.md`](workflow/agents.md) | Workflow §8 and §9: agent economics, data safety, and the five guard rules. |
+| [`docs/workflow/ci-layout.md`](workflow/ci-layout.md) | Workflow §12: the CI budget, what sets the wall clock, and the nine axes the CI is held to. |
+| [`docs/workflow/ci-runs.md`](workflow/ci-runs.md) | Workflow §12: the 25 measured CI runs, their layouts, wall clocks and verdicts. |
 | [`docs/governance/gates.md`](governance/gates.md) | Governance §3 and §4: the gates, and change control for governance. |
 | [`docs/governance/open-work.md`](governance/open-work.md) | Governance §6 and §7: open correctness and acceptance work, and the decisions requiring the Director. |
 | [`docs/governance/ledger-2026-10-21.md`](governance/ledger-2026-10-21.md) | Governance §5 ledger, 2026-10-21: the newest part. |

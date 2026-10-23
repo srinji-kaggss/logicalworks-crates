@@ -48,7 +48,7 @@ be inferred:
 - `kernel-check` of `proofs/bot-spec.sml` is an abstract-model proof, **not** a
   refinement proof of this Rust.
 
-## Part 1 — the twenty-two `lgwks_std` modules
+## Part 1 — the twenty-three `lgwks_std` modules
 
 One row per `pub mod` in `crates/lgwks-std/src/lib.rs`, on its own page,
 [Part 1](std-ast-deps-closure-matrix-std.md), checked against `lib.rs` by
