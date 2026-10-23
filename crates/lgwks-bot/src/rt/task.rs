@@ -45,7 +45,8 @@
 //! Every verb in this crate is deliberately **not** `Send`, so a bot's own
 //! futures cannot be placed on another worker thread — that is why
 //! [`BoxFuture`](crate::BoxFuture) is unconstrained. A non-`Send` future is
-//! driven by awaiting it, or by
+//! driven by awaiting it, by [`Host::run`](crate::task::Host::run) whose bodies
+//! are polled on the calling task and need not be `Send`, or by
 //! [`lgwks_std::task::join_all`], which polls many
 //! futures on the calling thread and returns their outputs in input order.
 //!
@@ -61,14 +62,14 @@ use std::future::Future;
 
 /// A task owner with a deliberately narrow API: there is no `detach_all`.
 ///
-/// The engine's raw set can detach tasks without aborting them; this one
+/// The driver's raw set can detach tasks without aborting them; this one
 /// cannot. Every task stays owned until joined, aborted, or the set is dropped,
 /// which aborts the rest. Blocking and local tasks are absent too: blocking
 /// work needs a non-preemptible owner. Enforced by `tests/it/rt_joinset.rs`
 /// (#415): joins at 100 to 100,000 tasks, a drop aborting a parked task (seen
 /// through its own drop), and a consumer probe refused `E0599` on `detach_all`.
 pub struct JoinSet<T> {
-    /// The engine set kept private so callers cannot detach its tasks.
+    /// The driver set kept private so callers cannot detach its tasks.
     inner: lgwks_deps::tokio::task::JoinSet<T>,
 }
 
@@ -95,7 +96,7 @@ impl<T: Send + 'static> JoinSet<T> {
         self.inner.join_next().await
     }
 
-    /// Join the next completed task and include its engine task identity.
+    /// Join the next completed task and include its driver task identity.
     pub async fn join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
         self.inner.join_next_with_id().await
     }
@@ -105,7 +106,7 @@ impl<T: Send + 'static> JoinSet<T> {
         self.inner.try_join_next()
     }
 
-    /// Join a completed task and include its engine identity if one is ready.
+    /// Join a completed task and include its driver identity if one is ready.
     pub fn try_join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
         self.inner.try_join_next_with_id()
     }

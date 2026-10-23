@@ -1,14 +1,14 @@
-# lgwks_bot: the async runtime surface and the other crates
+# lgwks_bot: the async orchestration runtime and the other crates
 
 Pages of this README: [overview](README.md) · [execution model](README-execution.md) · [failure](README-failure.md) · [authority, domains and specs](README-authority.md) · [script!](README-script.md) · [async runtime](README-runtime.md) · [supervision](README-supervision.md)
 
-## Async runtime surface
+## Async orchestration runtime
 
-`lgwks_bot` also provides the asynchronous runtime surface (default feature
-`rt`). The `tokio` edge appears in `contract/APPROVED.toml` with
+`lgwks_bot` is the asynchronous orchestration runtime (default feature
+`rt`). The driver edge appears in `contract/APPROVED.toml` with
 `owner = "lgwks_deps"`, and `lgwks-deps check` refuses any other workspace crate
-that declares `tokio` directly (`INV-DEP-EDGE-OWNED`). `--no-default-features`
-compiles the crate with no tokio at all.
+that declares it directly (`INV-DEP-EDGE-OWNED`). `--no-default-features`
+is a narrow test build with no driver at all, not the supported surface.
 
 On `wasm32-wasip1`, the `rt` feature uses a current-thread runtime;
 `Builder::worker_threads(Some(_))` returns `Unsupported`. The native-only
@@ -21,15 +21,17 @@ On `wasm32-wasip1`, the `rt` feature uses a current-thread runtime;
 | `rt::time` | `time` | `sleep`, `sleep_until`, `timeout`, `timeout_at`, `interval`, `Instant`, `Elapsed` |
 | `rt::sync` | `sync` | `CancellationToken`, `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `OnceCell` |
 | `rt::io` | `io` | `AsyncRead`/`AsyncWrite`/`AsyncBufRead` and their extensions, `BufReader`, `BufWriter`, `duplex`, `copy` |
-| `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host`; Unix `UnixListener`, `UnixStream`, `UnixDatagram`; the split halves at tokio's own paths, `rt::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf, ReuniteError}` and the same five under `rt::net::unix` |
+| `rt::net` | `net` | `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host`; Unix `UnixListener`, `UnixStream`, `UnixDatagram`; the split halves at the driver's own paths, `rt::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf, ReuniteError}` and the same five under `rt::net::unix` |
 | `rt::process` | `process` | `Command` — describing what to run, with `StdioPolicy::Capture` for a bounded stream. Running it is `Supervisor::spawn_process` (reported later) or `Supervisor::run_process` (returns its output); `Child` and its pipes are not exported |
 | `rt::fs` | `fs` | async filesystem (blocking-threadpool wrapper) |
 | `rt::signal` | `signal` | OS signal streams (Unix/Windows) |
 
-`select!`, `join!`, and `try_join!` are re-exported at the crate root. There is
-deliberately **no attribute macro**: a re-exported proc-macro expands to
-`::tokio` paths a consumer without a `tokio` edge cannot resolve. Enter through
-`Runtime::block_on` instead.
+`select!`, `join!`, and `try_join!` are re-exported at the crate root. They are
+the spelling for branches already owned by the awaiting task; work that must
+outlive the call belongs on a `Supervisor` or in `join_all_bounded`, never in a
+bare combinator. There is deliberately **no attribute macro**: a re-exported
+proc-macro would expand to driver paths a consumer without a driver edge cannot
+resolve. Enter through `Runtime::block_on` instead.
 
 ### Cancellation
 
@@ -68,7 +70,7 @@ release process, not a dependency graph: `lgwks_bot` and `lgwks_deps` depend on
 |---|---|
 | [`lgwks_std`](https://docs.rs/lgwks_std) | Everyday primitives with no async runtime required: codecs, a blocking HTTP client, retry, default structured debugging, time, hashing, ids |
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
-| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks. `lgwks_bot`'s async engine is selected through it, so this crate's tokio edge is the workspace's only one |
+| [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks. The runtime's driver is selected through it, so this crate's driver edge is the workspace's only one |
 
 The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
 indexes the design documents.
