@@ -131,21 +131,31 @@ runs:
         fi
     # One compile cache for the machine, shared by every instance and every job.
     # Each instance keeps its own target directory (see the step above), so an
-    # identical compile happens once per instance that needs it: measured on run
-    # 38450101413, lgwks_bot with one feature set was compiled by the bot suite
+    # identical compile would happen once per instance that needs it: measured on
+    # run 38450101413, lgwks_bot with one feature set was compiled by the bot suite
     # and by both saturation legs, on three instances, and the build job's own
-    # "Build all workspace targets" step read 765 s. sccache keys a compilation
-    # by its preprocessed source, compiler and flags, so the second and later
-    # jobs of a run read instead of compiling. SCCACHE_BASEDIRS is what makes
-    # that work across instances: each runner checks out under its own `rN/`, and
-    # without it the absolute paths inside the invocation would make every
-    # instance's key, and so every instance's compile, distinct. Measured on this
-    # machine with two identical checkouts at different absolute paths under one
-    # SCCACHE_BASEDIRS: the second build was a cache hit. In CI at a 39% hit rate
-    # over 909 compilations (run 38483769601), and the two heaviest feature-matrix
-    # legs met their 5-minute bound on the attempt after their units were cached.
-    # The cache is content-addressed and never stores a failed compilation, so a
-    # hit cannot hide a broken build.
+    # "Build all workspace targets" step read 765 s. sccache keys a compilation by
+    # its source, compiler, flags and the CARGO_ variables rustc is given, and
+    # cargo gives rustc its whole environment, including the CARGO_TARGET_DIR the
+    # step above exports, which names the instance. So no instance read another's
+    # compile: one checkout built into a second target directory hit a registry
+    # crate 0 of 2 with the variable set and 2 of 2 with the directory passed as
+    # a flag (sccache 0.18.0), and a toolchain pin took the pull request that made
+    # it seven runs (#738, runs 39960738059 to 39974411070), each instance
+    # compiling the whole graph itself. RUSTC_WRAPPER is therefore a program built
+    # from `rustc-sccache/main.rs`, beside this file, in the step after the toolchain
+    # pin: it runs sccache without that one variable. A second
+    # instance's compile of tokio, regex, serde, serde_json and syn, with this
+    # step's environment, went from 25 s with 0 of 27 Rust compiles served to
+    # 11 s with 22 of 27, at a load average of 81. Proc macros and build scripts
+    # are never cached, and a workspace crate's key still holds its checkout path.
+    #
+    # SCCACHE_BASEDIRS does not reach Rust in 0.18.0, and the server reads it once,
+    # when it starts: the machine's server has run since 2026-10-13 with the base
+    # directories of the tool that started it, so the `--start-server` below is a
+    # no-op while it lives. The step prints the Rust counts and the base
+    # directories in force, not the ones asked for. The cache is content-addressed
+    # and never stores a failed compilation, so a hit cannot hide a broken build.
     - name: One compile cache shared by the machine's instances
       shell: bash
       run: |
@@ -160,7 +170,6 @@ runs:
         SCCACHE_DIR="${dir}" SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}" \
           SCCACHE_BASEDIRS="${root}" sccache --start-server >/dev/null 2>&1 || true
         {
-          echo "RUSTC_WRAPPER=sccache"
           echo "SCCACHE_DIR=${dir}"
           echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-30G}"
           echo "SCCACHE_BASEDIRS=${root}"
@@ -169,8 +178,12 @@ runs:
           # cost this job a directory it could not reuse.
           echo "CARGO_INCREMENTAL=0"
         } >> "${GITHUB_ENV}"
-        SCCACHE_DIR="${dir}" sccache --show-stats 2>/dev/null | head -6 || true
-        echo "compile cache: ${dir} (basedirs ${root})"
+        SCCACHE_DIR="${dir}" sccache --show-stats 2>/dev/null | while IFS= read -r line; do
+          case "${line}" in
+            "Cache hits (Rust)"*|"Cache misses (Rust)"*|"Base directories"*) echo "${line}" ;;
+          esac
+        done || true
+        echo "compile cache: ${dir}"
     # Four independent pieces of setup, run together because each one waits on
     # the machine and not on the others: the RAM disk for temporary files, this
     # job's share of the cores, the toolchain check and the nextest check. Every
@@ -369,6 +382,20 @@ runs:
           exit 1
         fi
         cat "${out}/ram.env" "${out}/share.env" >> "${GITHUB_ENV}"
+    # sccache without the variable that names the instance (see the compile cache
+    # above). The wrapper is built here by the pinned rustc alone: cargo would
+    # compile this repository's dependency graph first, which is the work the
+    # wrapper exists to share. It has no dependencies and builds in well under a
+    # second. A job without sccache keeps cargo's own rustc, as it did.
+    - name: sccache without the instance's target directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v sccache >/dev/null 2>&1; then
+          wrapper="${RUNNER_TEMP}/rustc-sccache"
+          rustc --edition 2021 "${{ github.action_path }}/rustc-sccache/main.rs" -o "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "${GITHUB_ENV}"
+        fi
     # Codegen objects (`*.rcgu.o`) that a killed compile left in the target
     # directory. rustc deletes its own when it finishes, so a cancelled or
     # timed-out job leaves the rest, and nothing else ever removes them: on
