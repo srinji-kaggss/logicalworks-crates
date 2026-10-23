@@ -362,6 +362,16 @@ jobs:
     name: Tests (lgwks-bot full, lgwks-std full)
     # The run's critical path: 263 s and 274 s on runs 39060016758 and 39059515989,
     # and 4,228 of 4,731 tests done at the 5-minute cap on warm run 39062648303.
+    #
+    # A push that edits lgwks_bot is the cold case. Run 39902657263 compiled its
+    # 23 test binaries for 3 m 15 s and built the `build-churn-slot` setup script
+    # for 28 s, and the cap cancelled the job at 5 m 24 s with the tests 78 s in;
+    # the same suite on main's source had passed inside 4 m 7 s on run
+    # 39902057915. The instance holds one build of the crate: run 39899054364
+    # compiled this source here, runs of main's source followed, and the next run
+    # compiled it again. So the run after an edit is cancelled at the bound, and
+    # the next one, with no other source built here between them, is the job's
+    # measurement.
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
     timeout-minutes: 5
     # One job, so the full feature set is compiled once (see the header).

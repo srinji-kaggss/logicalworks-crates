@@ -259,6 +259,17 @@ impl Runtime {
     pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.shutdown_timeout(timeout);
     }
+
+    /// Shut the runtime down without waiting for anything to finish.
+    ///
+    /// The async-safe counterpart to [`Runtime::shutdown_timeout`]: in-flight work is dropped
+    /// rather than joined, so calling this from inside async never parks the calling thread —
+    /// including from the shutdown path of an owner the runtime would otherwise outlive. A
+    /// blocking task already executing keeps its thread; it is detached from the shutdown, not
+    /// aborted by it.
+    pub fn shutdown_background(self) {
+        self.inner.shutdown_background();
+    }
 }
 
 /// A cloneable capability to run work on a [`Runtime`] owned elsewhere.

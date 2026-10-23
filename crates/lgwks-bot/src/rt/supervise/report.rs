@@ -149,7 +149,7 @@ impl ShutdownReport {
 /// caller that needs to know whether the work succeeded reads
 /// [`Stats::succeeded`](crate::rt::supervise::Stats::succeeded) and cannot get the answer wrong by reading `completed`
 /// instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
     /// Tasks started, including any that have since finished.

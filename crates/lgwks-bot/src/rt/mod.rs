@@ -31,6 +31,10 @@
 //!   starters — the first two report later, the last hands back what the child
 //!   wrote — and nothing here returns a handle to a running task or process, so
 //!   nothing can be started and then forgotten.
+//! - [`estate`](crate::rt::estate) — [`Estate`](crate::rt::estate::Estate): the assembled runtime.
+//!   One owned runtime, one supervisor and one host behind three declared tiers
+//!   (`in_process`, `supervised`, `durable`), so a caller declares the tier once instead of
+//!   wiring three builders.
 //! - [`tenancy`](crate::rt::tenancy) — per-tenant capacity: the
 //!   [`TenancyPolicy`](crate::rt::tenancy::TenancyPolicy) a supervisor admits
 //!   under, the [`SpawnRefused`](crate::rt::tenancy::SpawnRefused) a
@@ -99,6 +103,8 @@ pub use lgwks_deps::tokio::task_local;
 /// the ECS substrate is reached through `spec` rather than named directly.
 #[cfg(feature = "sync")]
 mod cancel;
+#[cfg(feature = "script")]
+pub mod estate;
 #[cfg(feature = "fs")]
 pub mod fs;
 #[cfg(feature = "io")]

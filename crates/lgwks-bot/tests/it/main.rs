@@ -150,6 +150,8 @@ mod durable_dispatch;
 mod effect_identity;
 mod effect_journal;
 mod ephemeral;
+#[cfg(feature = "script")]
+mod estate;
 mod flow_ron;
 mod gh_binding;
 mod gh_issue;
@@ -218,6 +220,8 @@ mod sim_dist_lease;
 mod sim_dist_lease_tcp;
 mod sim_ecs_backoff;
 mod sim_epoch_identity;
+#[cfg(feature = "script")]
+mod sim_estate;
 mod sim_fan_out;
 mod sim_gh_issue;
 mod sim_group_commit;
