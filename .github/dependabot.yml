@@ -101,10 +101,10 @@ updates:
 
   # The compiler is a pin, not a requirement: `rust-toolchain.toml` names the
   # channel, `scripts/gate-lanes.toml` repeats it under `[toolchain]`, and every
-  # job of `.github/workflows/ci.yml` names it in the local-rust step, whose
-  # check fails when the three disagree. A PR from here therefore arrives red by
-  # design: moving the channel means moving all three together and re-taking the
-  # gate's measurements, which is the review.
+  # job of `.github/workflows/ci.yml` and `pages.yml` names it in the local-rust
+  # step, whose check fails when they disagree. A PR from here therefore arrives
+  # red by design: moving the channel means moving all of them together and
+  # re-taking the gate's measurements, which is the review.
   - package-ecosystem: rust-toolchain
     directory: "/"
     schedule:

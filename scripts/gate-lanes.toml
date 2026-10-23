@@ -46,7 +46,7 @@
 #             set run in one job rather than each compiling it again.
 
 [toolchain]
-rust = "1.99.0"
+rust = "1.99.1"
 
 # ── shared: one command, both surfaces ──────────────────────────────────────
 

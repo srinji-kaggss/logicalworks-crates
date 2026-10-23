@@ -19,11 +19,13 @@
 //!      `cargo run --locked -p lgwks_deps --bin ci-local -- --lane <id>`, so the
 //!      text of the check exists once.
 //!   4. Toolchain agreement. The manifest's `toolchain.rust` is the version
-//!      every `toolchain:` pin in the workflow installs.
+//!      every `toolchain:` pin in `ci.yml` and in `pages.yml` installs.
 //!
 //! Usage: `check-gate-parity [ROOT]`. Exit 0 when all rules hold.
 
 mod reader;
+#[cfg(test)]
+mod sim_pins;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -39,6 +41,10 @@ const MANIFEST_REL: &str = "scripts/gate-lanes.toml";
 
 /// The workflow, relative to the repository root.
 const WORKFLOW_REL: &str = ".github/workflows/ci.yml";
+
+/// The Pages workflow, relative to the repository root. It installs its toolchain
+/// through the same action as `ci.yml`, so its pin is held to the manifest too.
+const PAGES_REL: &str = ".github/workflows/pages.yml";
 
 /// Step-name prefixes that are setup, not gate.
 const SKIP_STEP_PREFIXES: [&str; 7] = [
@@ -172,6 +178,26 @@ fn toolchain_pins(workflow: &str) -> Vec<String> {
     pins
 }
 
+/// The rule-4 violations of one workflow: it pins no toolchain, or pins one that
+/// is not `rust`, the manifest's.
+///
+/// Every pin, not any pin: one job left on an older toolchain builds a different
+/// compiler's output while the manifest names another.
+fn pin_problems(rust: &str, workflow: &str, text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let pins = toolchain_pins(text);
+    if pins.is_empty() {
+        problems.push(format!("{workflow} installs no pinned toolchain"));
+    }
+    let drifted: BTreeSet<&String> = pins.iter().filter(|pin| pin.as_str() != rust).collect();
+    if !drifted.is_empty() {
+        problems.push(format!(
+            "toolchain.rust is {rust:?} but {workflow} also pins {drifted:?}"
+        ));
+    }
+    problems
+}
+
 /// The rule violations between the lane table and the workflow. Empty means they agree.
 fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
@@ -267,20 +293,8 @@ fn check_parity(manifest_text: &str, workflow_text: &str) -> Vec<String> {
         ));
     }
 
-    // Every pin, not any pin: one job left on an older toolchain builds a
-    // different compiler's output while the manifest names another.
     if !manifest.rust.is_empty() {
-        let pins = toolchain_pins(workflow_text);
-        if pins.is_empty() {
-            problems.push("ci.yml installs no pinned toolchain".to_owned());
-        }
-        let drifted: BTreeSet<&String> = pins.iter().filter(|pin| **pin != manifest.rust).collect();
-        if !drifted.is_empty() {
-            problems.push(format!(
-                "toolchain.rust is {:?} but ci.yml also pins {drifted:?}",
-                manifest.rust
-            ));
-        }
+        problems.extend(pin_problems(&manifest.rust, "ci.yml", workflow_text));
     }
     problems
 }
@@ -293,7 +307,12 @@ fn execute(
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let manifest_text = read(&root.join(MANIFEST_REL))?;
     let workflow_text = read(&root.join(WORKFLOW_REL))?;
-    let problems = check_parity(&manifest_text, &workflow_text);
+    let pages_text = read(&root.join(PAGES_REL))?;
+    let manifest = read_manifest(&manifest_text);
+    let mut problems = check_parity(&manifest_text, &workflow_text);
+    if !manifest.rust.is_empty() {
+        problems.extend(pin_problems(&manifest.rust, "pages.yml", &pages_text));
+    }
     if !problems.is_empty() {
         writeln!(err, "gate parity refused: {} problem(s)", problems.len())?;
         for problem in &problems {
@@ -301,7 +320,6 @@ fn execute(
         }
         return Ok(1);
     }
-    let manifest = read_manifest(&manifest_text);
     let shared = manifest
         .lanes
         .iter()
@@ -341,7 +359,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANIFEST_REL, WORKFLOW_REL, check_parity, step_segments};
+    use super::{MANIFEST_REL, WORKFLOW_REL, check_parity, pin_problems, step_segments};
     use std::error::Error;
     use std::path::{Path, PathBuf};
 
@@ -557,6 +575,20 @@ mod tests {
                 .iter()
                 .any(|problem| problem.contains("0.0.0-drifted")),
             "{problems:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_workflow_with_no_pin_is_refused_by_name() -> TestResult {
+        let (manifest, workflow) = files()?;
+        let pin = pinned(&manifest)?;
+        let stripped = workflow.replace("toolchain: \"", "tool-chain: \"");
+        assert_ne!(stripped, workflow, "the mutation must remove every pin");
+        assert_eq!(
+            pin_problems(&pin, "ci.yml", &stripped),
+            vec!["ci.yml installs no pinned toolchain".to_owned()],
+            "a workflow with no pin is named, and nothing else is said"
         );
         Ok(())
     }
