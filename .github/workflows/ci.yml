@@ -399,6 +399,16 @@ jobs:
     # 1 m 33 s for the warm shard of the same commit (run 39827897865, lwc-10
     # against lwc-5). The two shards queue on the one instance instead, so each
     # job's own clock covers a shard rather than a compile.
+    #
+    # A push that edits lgwks_bot is the cold case. Run 39902657263 compiled its
+    # 23 test binaries for 3 m 15 s and built the `build-churn-slot` setup script
+    # for 28 s, and the cap cancelled the job at 5 m 24 s with the tests 78 s in;
+    # the same suite on main's source had passed inside 4 m 7 s on run
+    # 39902057915. The instance holds one build of the crate: run 39899054364
+    # compiled this source here, runs of main's source followed, and the next run
+    # compiled it again. So the run after an edit is cancelled at the bound, and
+    # the next one, with no other source built here between them, is the job's
+    # measurement.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:

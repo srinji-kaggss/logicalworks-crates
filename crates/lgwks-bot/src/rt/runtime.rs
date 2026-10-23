@@ -259,6 +259,21 @@ impl Runtime {
     pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.shutdown_timeout(timeout);
     }
+
+    /// Shut the runtime down without waiting for anything to finish.
+    ///
+    /// The async-safe counterpart to [`Runtime::shutdown_timeout`]: in-flight work is dropped
+    /// rather than joined, so calling this from inside async never parks the calling thread —
+    /// including from the shutdown path of an owner the runtime would otherwise outlive. A
+    /// blocking task already executing keeps its thread; it is detached from the shutdown, not
+    /// aborted by it.
+    ///
+    /// Crate-private: its callers are the `script` tier's owners of a runtime (`task::Host` and
+    /// `rt::estate`), and a caller outside the crate has [`Runtime::shutdown_timeout`].
+    #[cfg(feature = "script")]
+    pub(crate) fn shutdown_background(self) {
+        self.inner.shutdown_background();
+    }
 }
 
 /// A cloneable capability to run work on a [`Runtime`] owned elsewhere.

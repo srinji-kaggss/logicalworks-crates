@@ -39,3 +39,16 @@ temporary-directory path. Typed errors derive through `lgwks_ast`
 `join!`/`select!`/`try_join!` re-exports in `lgwks_bot` require the `macros`
 feature, and there is deliberately no `#[tokio::main]` equivalent: entry is
 through `Runtime::block_on`.
+
+## The assembled runtime
+
+One tenant, one call: `lgwks_bot::rt::estate::Estate` (the `script` feature)
+owns the runtime, the supervisor and the host behind three declared tiers
+(`in_process`, `supervised`, `durable`), runs tasks through `run_task` or
+`run_blocking`, and drains to one terminal report with `shutdown` or
+`shutdown_blocking`. `durable` also needs the `ephemeral` feature and does not
+exist without it. `host`, `supervisor` and `handle` reach what the estate owns,
+so supervised work is counted on the report. `tests/it/estate.rs` runs every
+door, including a drop and a refused build inside a runtime, and
+`tests/it/sim_estate.rs` holds the ceiling at 100, 1,000 and 10,000 runs.
+`src/bin/estate.rs` runs the same evening as a smoke that a test runs.
