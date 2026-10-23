@@ -732,6 +732,7 @@ fn deps_are_approved_leaves() -> TestResult {
                 "candle-nn",
                 "candle-transformers",
                 "tokenizers",
+                "jiff",
             ],
             "unexpected gate dependencies: {declared:?}"
         );

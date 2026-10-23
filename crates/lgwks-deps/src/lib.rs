@@ -283,14 +283,14 @@ pub mod storefront {
     pub use crate::bevy_time;
     #[cfg(feature = "gpui")]
     pub use crate::gpui;
+    #[cfg(feature = "time-jiff")]
+    pub use crate::jiff;
     #[cfg(feature = "ml-tokenizers")]
     pub use crate::tokenizers;
     #[cfg(feature = "tokio")]
     pub use crate::tokio;
     #[cfg(feature = "ml-candle")]
     pub use crate::{candle_core, candle_nn, candle_transformers};
-    #[cfg(feature = "time-jiff")]
-    pub use crate::jiff;
 }
 
 use std::path::{Path, PathBuf};
