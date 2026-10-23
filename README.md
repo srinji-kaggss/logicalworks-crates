@@ -5,6 +5,11 @@ independently versioned crates — primitives with no async runtime required,
 automation that runs unattended, one AST across many languages, the `script!`
 proc macro, and an audited dependency storefront.**
 
+[![CI](https://github.com/srinji-kaggss/logicalworks-crates/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/srinji-kaggss/logicalworks-crates/actions/workflows/ci.yml) ![status: unstable](https://img.shields.io/badge/status-unstable-orange) ![license: Apache-2.0 and MPL-2.0](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MPL--2.0-blue)
+[![lgwks_std](https://img.shields.io/crates/v/lgwks_std?label=lgwks_std)](https://crates.io/crates/lgwks_std) [![lgwks_bot](https://img.shields.io/crates/v/lgwks_bot?label=lgwks_bot)](https://crates.io/crates/lgwks_bot) [![lgwks_ast](https://img.shields.io/crates/v/lgwks_ast?label=lgwks_ast)](https://crates.io/crates/lgwks_ast) [![lgwks_macros](https://img.shields.io/crates/v/lgwks_macros?label=lgwks_macros)](https://crates.io/crates/lgwks_macros) [![lgwks_deps](https://img.shields.io/crates/v/lgwks_deps?label=lgwks_deps)](https://crates.io/crates/lgwks_deps)
+
+> **Unstable.** Every interface here changes without notice until we stop breaking something every other day. A breaking change still bumps the major version, but nothing outside Logical Works is promised a stable surface yet. This note comes off when that is true.
+
 [Should I use logicalworks-crates?](docs/should-i-use.md) — where each crate is right, where it is wrong, and what to use instead; the estate is not part of Braid, which pins three of these crates and depends on them, never the reverse.
 
 `lgwks_std`'s default features are not dependency-free; that caveat and the
@@ -20,9 +25,8 @@ exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
 | `lgwks_macros` | 1.1.5 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
 | `lgwks_deps` | 4.2.1 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
-Versions move independently from one repository and one tag; the table lists
-this tree's manifests, not what is published. [`docs/releasing.md`](docs/releasing.md)
-keeps the two apart.
+Versions move independently from one repository and one tag; the table lists this tree's
+manifests, not what is published ([`docs/releasing.md`](docs/releasing.md) keeps the two apart).
 
 > **Names.** `lgwks_std` (underscore) lives in `crates/lgwks-std` (hyphen) and is
 > imported `use lgwks_std::...`; `cargo install lgwks_deps` builds `lgwks-deps`.
@@ -84,9 +88,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-The snippet is compiled by the workspace gate, from
-[`crates/lgwks-bot/examples/quickstart.rs`](crates/lgwks-bot/examples/quickstart.rs); the other guarantees fire in
-[`examples/guarantees.rs`](crates/lgwks-bot/examples/guarantees.rs) with `--features ephemeral`.
+The snippet is compiled by the workspace gate, from [`crates/lgwks-bot/examples/quickstart.rs`](crates/lgwks-bot/examples/quickstart.rs);
+the other guarantees fire in [`examples/guarantees.rs`](crates/lgwks-bot/examples/guarantees.rs) with `--features ephemeral`.
 
 The dependency gate reads a project's lockfile and its committed register, so it
 runs as a command against a project rather than from a library call:
@@ -106,13 +109,11 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md); the checks a change must pass are in
-[`AGENTS.md`](AGENTS.md#checks-that-must-pass). Report vulnerabilities through
-the process in [`SECURITY.md`](SECURITY.md), not as a public issue.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md); the checks a change must pass are in [`AGENTS.md`](AGENTS.md#checks-that-must-pass).
+Report vulnerabilities through the process in [`SECURITY.md`](SECURITY.md), not as a public issue.
 
 ## License
 
-Copyright 2026 Logical Works Incorporated. `lgwks_std`, `lgwks_ast` and
-`lgwks_deps` are Apache-2.0; `lgwks_bot` is [MPL-2.0](crates/lgwks-bot/LICENSE),
-file-level copyleft. Each crate ships its own `LICENSE`; [`LICENSING.md`](LICENSING.md)
-states the rule, why the bot differs, and the commercial licence.
+Copyright 2026 Logical Works Incorporated. `lgwks_std`, `lgwks_ast` and `lgwks_deps` are Apache-2.0;
+`lgwks_bot` is [MPL-2.0](crates/lgwks-bot/LICENSE), file-level copyleft. Each crate ships its own `LICENSE`;
+[`LICENSING.md`](LICENSING.md) states the rule, why the bot differs, and the commercial licence.
