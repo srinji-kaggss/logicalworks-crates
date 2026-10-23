@@ -118,6 +118,12 @@ rustix = { version = "1", default-features = false, features = ["std", "fs"], op
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 tempfile = "3.20"
 
+# The latency gate's statistics have tests, and cargo builds an example without
+# running its tests unless the target says so (rust-lang/cargo#6831).
+[[example]]
+name = "latency_tails"
+test = true
+
 # The workspace lint table, copied because Cargo cannot override one inherited
 # lint (`workspace = true` admits no per-member entry). ONE line differs:
 # `unsafe_code = "allow"`, for the direct syscalls behind FFI isolation the
