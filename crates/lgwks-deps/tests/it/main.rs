@@ -42,6 +42,10 @@ mod metadata_dimensions;
 mod metadata_public_api;
 mod origin_binding;
 mod prop_parsers;
+// The runners are macOS machines with sccache in front of rustc; the Linux
+// container the workspace suite also runs in has neither.
+#[cfg(target_os = "macos")]
+mod sccache_target_key;
 mod sdk_surface;
 // The wrapper's journeys run `/bin/sh` and a program that reads a pipe.
 #[cfg(unix)]

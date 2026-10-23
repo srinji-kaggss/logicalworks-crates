@@ -70,6 +70,21 @@ every job's temporary files are on an APFS RAM disk, the filesystem of the
 machine's own disk, so the move changes how fast a sync is and nothing a test
 observes.
 
+**The compile cache.** One sccache serves all thirteen instances, so the first
+instance to compile a registry crate pays and the rest read it. That held only on
+paper until 2026-10-23: sccache keys a compile by the `CARGO_` variables rustc is
+given, cargo gives rustc its whole environment, and the action's
+`CARGO_TARGET_DIR` names the instance, so no instance read another's compile and
+a toolchain pin cost its pull request seven runs (#738, runs 39960738059 to
+39974411070). `RUSTC_WRAPPER` is now the program built from
+`.github/actions/local-rust/rustc-sccache/main.rs`, which runs sccache without
+that variable: a second instance's compile of tokio, regex, serde, serde_json and
+syn went from 25 s with 0 of 27 Rust compiles served to 11 s with 22 of 27, at a
+load average of 81. Enforced by `sccache_target_key` in
+`crates/lgwks-deps/tests/it`: one crate into two target directories, plain sccache
+must miss and the wrapper must hit. Proc macros and build scripts are never
+cached, and `SCCACHE_BASEDIRS` does not reach Rust before a release after 0.18.0.
+
 **Why the RAM disk changes no assertion.** No test simulates power loss. The
 crash tests kill with `SIGKILL`, and a killed process's written pages survive
 in the page cache, so what a reopen reads is the same whichever device holds
