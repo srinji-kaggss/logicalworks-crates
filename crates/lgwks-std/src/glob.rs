@@ -25,12 +25,20 @@
 //! with two rolling rows keeps this crate's zero-dependency single-pattern
 //! contract while bounding each token transition to one path scan.
 
+use core::cell::RefCell;
 use core::fmt;
 
 /// The rolling DP rows the matcher retains: the previous token's row and the
 /// one being written. A third would buy nothing, since only these two are ever
 /// read.
 const ROLLING_ROWS: usize = 2;
+
+thread_local! {
+    /// The calling thread's matching scratch, so [`GlobPattern::is_match`] makes
+    /// no allocation per call. It is one buffer per thread for the whole
+    /// program, grown to the longest path that thread has matched.
+    static SCRATCH: RefCell<GlobScratch> = const { RefCell::new(GlobScratch::new()) };
+}
 
 /// Selects the syntax accepted while compiling a glob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,10 +178,24 @@ impl GlobPattern {
         compile_pattern(pattern, dialect, &mut work)
     }
 
-    /// Matches a path using newly allocated temporary matching scratch.
+    /// Matches a path, reusing one scratch per thread.
+    ///
+    /// The scratch is the calling thread's own, so a match allocates only while
+    /// the thread's first path grows its buffers: the per-call scratch this used
+    /// to take made three allocations on every match, and on the CI host that
+    /// showed up as a 1.9 µs p99 against a 490 ns p50 (run 39821047107). A
+    /// caller that already owns a [`GlobScratch`] and wants to state its memory
+    /// account should call [`Self::is_match_with`]; the two produce the same
+    /// answer.
     #[must_use]
     pub fn is_match(&self, path: &str) -> bool {
-        self.is_match_with(path, &mut GlobScratch::new())
+        SCRATCH.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut scratch) => scratch.match_path(self, path),
+            // Reached only if a match is started from inside a match on the same
+            // thread, which no caller of this type does; the fresh scratch keeps
+            // the call correct rather than panicking inside a match.
+            Err(_) => GlobScratch::new().match_path(self, path),
+        })
     }
 
     /// Matches a path while reusing scalar indexing and rolling-row storage.

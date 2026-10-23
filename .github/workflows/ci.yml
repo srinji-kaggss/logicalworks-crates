@@ -136,9 +136,33 @@ jobs:
     # lgwks_bot's tests run in the lgwks_bot jobs below, and `build_verdict`
     # reports this check's required name only when those three, this job and its
     # tail job all passed, so every test is still required.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-3]
+    #
+    # Two shards on two instances: one instance ran the compile and the 1,431
+    # tests to 5 m 25 s and the cap cancelled it (run 39824581301, started
+    # 17:39:18, cancelled 17:44:43), against 2 m 17 s for the same job on a quiet
+    # host. `sccache` is shared across the instances, so the second shard's
+    # compile reads what the first wrote.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - instance: lwc-3
+            partition: count:1/2
+          - instance: lwc-4
+            partition: count:2/2
     env:
+      PARTITION: ${{ matrix.partition }}
+      # sccache refuses to cache an incremental compilation, and the workflow's
+      # `CARGO_INCREMENTAL: "1"` therefore left these shards rebuilding every
+      # dependency on a cold instance: shard 1 finished in 1 m 21 s on its warm
+      # target and shard 2 spent 5 m 23 s on the identical work and was
+      # cancelled at the cap (run 39826369522). Off here, the two shards share
+      # one compile through the cache across instances; a persistent target
+      # directory is what incremental would have helped, and a shard only has
+      # one when it is already warm.
+      CARGO_INCREMENTAL: "0"
       # The Clippy job is where lints run, with `-D warnings`, over the same
       # workspace. `.cargo/config.toml` also routes every workspace compile
       # through clippy-driver so a plain local build enforces them; repeating
@@ -296,6 +320,16 @@ jobs:
         # in it. `docs/bevy-admission.md` is exempt because it cites Bevy's own
         # repository; the script names that exemption rather than guessing.
         run: cargo run --locked -p lgwks_deps --bin check-doc-citations
+      - name: The capability catalog matches the tree
+        # #732: one register, one generated page, and a refusal for a row whose
+        # owner file, feature or module is gone, for an owner the std-first gate
+        # can name with no row, and for a page that is not a fresh render.
+        run: cargo run --locked -p lgwks_deps --bin catalog -- --check .
+      - name: ADRs and PRDs hold their required fields
+        # ADR 0004: every ADR against ISO/IEC/IEEE 42010 and every PRD
+        # requirement against ISO/IEC/IEEE 29148. A record missing a field a
+        # reader or an auditor needs is refused here rather than in review.
+        run: cargo run --locked -p lgwks_deps --bin check-docs
       - name: Root README quickstart matches its compiled example
         run: cargo run --locked -p lgwks_deps --bin ci-local -- --lane readme-quickstart
 
@@ -360,8 +394,11 @@ jobs:
 
   tests_bot_full:
     name: Tests (lgwks-bot full, lgwks-std full)
-    # The run's critical path: 263 s and 274 s on runs 39060016758 and 39059515989,
-    # and 4,228 of 4,731 tests done at the 5-minute cap on warm run 39062648303.
+    # Two shards, both on the instance that holds this graph warm. A shard on an
+    # instance that has never built it pays the whole compile: 5 m 30 s against
+    # 1 m 33 s for the warm shard of the same commit (run 39827897865, lwc-10
+    # against lwc-5). The two shards queue on the one instance instead, so each
+    # job's own clock covers a shard rather than a compile.
     #
     # A push that edits lgwks_bot is the cold case. Run 39902657263 compiled its
     # 23 test binaries for 3 m 15 s and built the `build-churn-slot` setup script
@@ -372,10 +409,23 @@ jobs:
     # compiled it again. So the run after an edit is cancelled at the bound, and
     # the next one, with no other source built here between them, is the job's
     # measurement.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-5]
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - instance: lwc-5
+            partition: count:1/2
+          - instance: lwc-5
+            partition: count:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
+      PARTITION: ${{ matrix.partition }}
+      # As in the workspace job: sccache cannot cache an incremental build, and
+      # the second shard landed on a cold instance and spent 5 m 40 s on the
+      # compile the first shard did in 2 m 30 s (run 39826369522).
+      CARGO_INCREMENTAL: "0"
       # As in the workspace job: lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
       LWC_CHURN_SLOTS: "12"
@@ -408,7 +458,7 @@ jobs:
       - name: Upload lgwks-bot JUnit report
         uses: actions/upload-artifact@v4
         with:
-          name: lgwks-bot-junit-full
+          name: lgwks-bot-junit-full-${{ matrix.instance }}-${{ strategy.job-index }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
@@ -844,9 +894,40 @@ jobs:
   # apart from the lgwks-std feature matrix: the two share no feature set, and
   # as one job they took 454 s (run 37633462471).
   storefront-matrix:
-    name: Target and storefront matrix
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-13]
+    name: Target and storefront matrix (${{ matrix.part }})
+    # Four legs, each holding one family of checks, because the six checks in one
+    # job took 5 m 16 s on run 39819450072: the GPUI and ML storefronts each
+    # compile a hundred crates of their own, and together with the fixture
+    # renderer they reached the cap with two steps never run. A leg runs only the
+    # steps named for it, so every check still runs exactly once per commit.
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
+    # A leg compiles one storefront family, and a leg on an instance that has
+    # never built it pays the whole compile: the consumer shard on lwc-11 spent
+    # 5 m 53 s where the shard on lwc-6 took 1 m 21 s (run 39827897865). Both
+    # consumer shards therefore queue on lwc-6, which holds the consumer
+    # families warm; `CARGO_INCREMENTAL` is off so sccache can serve whatever is
+    # not already there.
+    env:
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: deps
+            instance: lwc-13
+          - part: gpui
+            instance: lwc-2
+          - part: gpui-fixture
+            instance: lwc-2
+          - part: ml
+            instance: lwc-11
+          - part: consumers-1
+            instance: lwc-6
+            partition: count:1/2
+          - part: consumers-2
+            instance: lwc-6
+            partition: count:2/2
     steps:
       - uses: actions/checkout@v4
       - name: Pin Rust 1.99.0
@@ -859,29 +940,40 @@ jobs:
           # yields nothing: 20 of 20 tests passed there, 225 to 241 s earlier.
           defer: "0"
       - name: Check lgwks-deps
+        if: matrix.part == 'deps'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets
       - name: Check lgwks-deps storefront engine feature
+        if: matrix.part == 'deps'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features tokio
       - name: Check lgwks-deps GPUI storefront feature
+        if: matrix.part == 'gpui'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features gpui
       - name: Check lgwks-deps ML storefront features
+        if: matrix.part == 'ml'
         run: cargo check --locked --manifest-path crates/lgwks-deps/Cargo.toml --all-targets --features ml-candle,ml-tokenizers
       - name: Check normal GPUI renderer feature
-        # The fixture is its own workspace, so by default it builds into its
-        # own target directory and compiles the GPUI stack a second time.
-        # Pointing it at the directory the first check just filled reuses
-        # every unit whose features match.
+        if: matrix.part == 'gpui-fixture'
+        # The fixture is its own workspace, so it compiles the GPUI stack into
+        # the target directory this leg owns. In the leg with the storefront
+        # feature check it was the second full GPUI compile of the same job and
+        # the pair took 5 m 23 s on run 39821047107, so it has a leg of its own.
         run: >
-          cargo check --locked -p lgwks_deps --all-targets --features gpui &&
           cargo check --locked
           --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml
           --target-dir "${CARGO_TARGET_DIR:-target}"
           --no-default-features --features gpui --example gpui
       - name: Check Candle Metal storefront features
+        if: matrix.part == 'ml'
         run: cargo check --locked -p lgwks_deps --all-targets --features ml-candle-metal,ml-tokenizers
-      # Standalone consumer packages, one cargo build per storefront family.
+      # Standalone consumer packages, one cargo build per storefront family. The
+      # seventeen families are separate `cargo check` calls that share one target
+      # directory, and all of them on one instance took 5 m 31 s and the cap
+      # cancelled the job (run 39824581301), so the tests are sharded across two.
       - name: Build storefront consumers
-        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers
+        if: startsWith(matrix.part, 'consumers')
+        env:
+          PARTITION: ${{ matrix.partition }}
+        run: cargo nextest run --locked -p lgwks_deps --test storefront_consumers ${PARTITION:+--partition $PARTITION}
 
   # The declared target matrix, one leg per group of targets. Run in one job it
   # took over 7 minutes (run 38412846693: the sixth of seven targets was
@@ -923,21 +1015,25 @@ jobs:
           tmp-gib: "0"
       - name: Check lgwks-std across the declared target matrix
         # `cargo check --target <t>` for every declared target and crate. The
-        # script installs the target with rustup first, requires the Rust-only
+        # runner installs the target with rustup first, requires the Rust-only
         # surface everywhere, and records with its exact error any check this
-        # runner has no C toolchain to reach. MATRIX_TARGETS names the targets
-        # this leg checks (unset, the script checks them all), as SATURATION_FILTER
-        # does for the saturation tiers: the gate-parity check compares this
-        # text with scripts/gate-lanes.toml.
+        # runner has no C toolchain to reach. A *required* check names a set with
+        # no C in it: `lgwks_std`'s default set carries `hash`, whose backend
+        # compiles C per target, so the default set is the recorded check and
+        # the required one is the Rust-only surface (ADR 0003, "the target
+        # veto"). MATRIX_TARGETS names the targets this leg checks (unset, the
+        # runner checks them all), as SATURATION_FILTER does for the saturation
+        # tiers: the gate-parity check compares this text with
+        # scripts/gate-lanes.toml.
         env:
           MATRIX_TARGETS: ${{ matrix.targets }}
-        run: ./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}
+        run: cargo run --locked -q -p lgwks_deps --bin check-target-matrix -- ${MATRIX_TARGETS:-}
 
   # The two release-build timing gates, apart from the lints: each measures
   # wall time, and a measurement taken beside a clippy pass on the same
   # instance measures the clippy pass.
   timing_gates:
-    name: Timing gates (dudect, async fairness)
+    name: Timing gates (dudect, async fairness, latency tails)
     runs-on: [self-hosted, macOS, ARM64, lwc, lwc-10]
     timeout-minutes: 5
     steps:
@@ -955,6 +1051,36 @@ jobs:
         # t ≈ 8 at 250k against the same threshold. The threshold, the
         # batching, the cropping and the control are untouched.
         run: cargo run --release --locked -p lgwks_std --features hash --example digest_timing -- --samples 250000
+      - name: The hot calls hold their latency tails
+        # Every leaf call in lgwks_std, not a sample of them: nineteen rows —
+        # digest and hex, hex and base64 round trips, glob, LEB128 both ways,
+        # the seeded stream, edit distance, digest hex, digest comparison, JSON
+        # parsed and written, UUID parsed, rendered and generated, and a compiled
+        # regex match. Each row is bounded at 500 ns p50 and 1 500 ns p99, and
+        # the example fails over either, so a slower implementation cannot land
+        # behind a green suite (ADR 0003). The entropy row is bounded on its
+        # tail alone and says why. Default features carry every row.
+        run: cargo run --release --locked -p lgwks_std --example latency_tails
+
+  # The async fairness gate and concurrency ladder, in a job of its own: beside
+  # the two digest measurements it took the instance to 5 m 24 s on run
+  # 39819450072, and both of those had already passed. It compiles the bench
+  # workspace and runs it four ways (the suite, a mutant check, the tiers and the
+  # matrix), which is a job's work on its own instance rather than a step behind
+  # two others.
+  timing_async:
+    name: Async fairness gate and concurrency ladder
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-2]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.0"
+          # It measures wall time, so it takes no share of the machine's test
+          # slots and yields its first cargo call at once.
+          defer: "0"
       - name: Async fairness gate and concurrency ladder
         run: cargo test --locked --manifest-path bench/async/Cargo.toml --bin lgwks-bench-async && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --mutant-check && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --tiers && cargo run --release --locked --manifest-path bench/async/Cargo.toml -- --matrix
 
@@ -976,7 +1102,15 @@ jobs:
         include:
           - part: docs.rs
             instance: lwc-11
+          # On the instance whose target holds lgwks-bot's graph: the leg on
+          # lwc-10 spent 5 m 33 s compiling four feature resolutions on a cold
+          # target and was cancelled at the cap (run 39837239411), where the same
+          # leg reads 1 m 19 s warm. Two resolutions per leg now, so a cold target
+          # pays half the work: the no-default and default builds here, the
+          # feature subsets and all-features on the leg below.
           - part: lgwks-bot
+            instance: lwc-5
+          - part: lgwks-bot all
             instance: lwc-10
           - part: lgwks-ast
             instance: lwc-12
@@ -1007,6 +1141,10 @@ jobs:
           set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets
+      - name: Check lgwks-bot all-features matrix
+        if: matrix.part == 'lgwks-bot all'
+        run: |
+          set -eu
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal
            cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features
       - name: Check lgwks-bot WASI runtime boundary
@@ -1296,5 +1434,5 @@ jobs:
       - name: Prove the process unsafe seams under Miri
         run: |
           rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
-          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests

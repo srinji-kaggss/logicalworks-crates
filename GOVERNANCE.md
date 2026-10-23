@@ -41,8 +41,10 @@ top of the row above.
 
 A capability is either the architecture or it does not exist. There is no third
 state. No default-off parallel path, no second implementation of a job, no seam
-left open after its task. A storefront may keep capability features default-off,
-because selecting is its stated purpose. A **consumer** states its opinion.
+left open after its task. A storefront selects by opt-out: a capability is off
+only where ADR 0003 records the measured cost, and `contract/CATALOG.toml` is
+where that decision is written down. A **consumer** states its opinion, and the
+default is the decision (#732).
 
 ### Decision rights
 

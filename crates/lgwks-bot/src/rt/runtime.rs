@@ -267,7 +267,11 @@ impl Runtime {
     /// including from the shutdown path of an owner the runtime would otherwise outlive. A
     /// blocking task already executing keeps its thread; it is detached from the shutdown, not
     /// aborted by it.
-    pub fn shutdown_background(self) {
+    ///
+    /// Crate-private: its callers are the `script` tier's owners of a runtime (`task::Host` and
+    /// `rt::estate`), and a caller outside the crate has [`Runtime::shutdown_timeout`].
+    #[cfg(feature = "script")]
+    pub(crate) fn shutdown_background(self) {
         self.inner.shutdown_background();
     }
 }

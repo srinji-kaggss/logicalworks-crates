@@ -56,20 +56,6 @@ fn the_runtime_is_entered_through_block_on() -> TestResult {
 }
 
 #[test]
-fn a_background_shutdown_terminates_without_blocking_the_caller() -> TestResult {
-    let runtime = Runtime::new()?;
-    let owned = Runtime::new()?;
-    let answer = runtime.block_on(async {
-        // The blocking shutdown has no business inside async: the background one ends the runtime
-        // it is called on, and the evening continues on this one.
-        owned.shutdown_background();
-        2 + 2
-    });
-    assert_eq!(answer, 4);
-    Ok(())
-}
-
-#[test]
 fn work_placed_on_a_default_supervisor_is_owned_and_reported() -> TestResult {
     let runtime = Runtime::new()?;
     runtime.block_on(async {

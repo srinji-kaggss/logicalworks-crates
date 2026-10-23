@@ -93,7 +93,7 @@
 "crates/lgwks-bot/src/rt/process.rs" = 46
 "crates/lgwks-bot/src/rt/process/confine.rs" = 14
 "crates/lgwks-bot/src/rt/process/frames.rs" = 17
-"crates/lgwks-bot/src/rt/runtime.rs" = 18
+"crates/lgwks-bot/src/rt/runtime.rs" = 17
 "crates/lgwks-bot/src/rt/signal.rs" = 1
 "crates/lgwks-bot/src/rt/supervise.rs" = 20
 "crates/lgwks-bot/src/rt/supervise/admit.rs" = 1
@@ -152,6 +152,7 @@
 "crates/lgwks-bot/src/tenant_store/store.rs" = 14
 "crates/lgwks-bot/src/verb.rs" = 8
 "crates/lgwks-deps/src/audit.rs" = 2
+"crates/lgwks-deps/src/catalog.rs" = 13
 "crates/lgwks-deps/src/contract.rs" = 16
 "crates/lgwks-deps/src/invariants.rs" = 21
 "crates/lgwks-deps/src/invariants/binding.rs" = 1

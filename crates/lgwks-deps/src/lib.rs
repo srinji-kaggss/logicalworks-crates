@@ -73,10 +73,17 @@
 //! exposes Bevy's state API.
 //! `tokio` is the async engine behind `lgwks_bot::rt` (`use
 //! lgwks_deps::tokio::...` only when bypassing the bot facade), and `gpui` is
-//! the GPU desktop UI. Every feature is default-off: the zero-gate source scan
-//! that was the one default-on exception now lives in `lgwks_ast` (feature
-//! `scan`, `lgwks-ast scan`; ADR 0002), so a consumer takes exactly the engine
-//! it needs and no Rust grammar rides along with a runtime edge.
+//! the GPU desktop UI. The default selection is empty, and that is a decision
+//! rather than an omission (ADR 0003): this crate's no-flag build is a required
+//! portability claim for every declared target, `wasm32-wasip1` among them, and
+//! every storefront group is either native (`gpui`, `appcui`) or a driver with
+//! no wasm surface (`tokio-net`, `tokio-process`, `tokio-signal`). A default
+//! that cannot build on a declared target is not a default, so selection is one
+//! flag away and `lgwks-deps catalog` prints every group with its feature, its
+//! owner and its measured cost, so nothing is hidden behind a guess. The
+//! zero-gate source scan lives in `lgwks_ast` (feature `scan`, `lgwks-ast scan`;
+//! ADR 0002), so a consumer takes exactly the engine it needs and no Rust
+//! grammar rides along with a runtime edge.
 //!
 //! Do NOT `cargo add tokio` / `cargo add gpui` directly: the gate refuses any
 //! second edge, and the facade (`lgwks_bot::rt`, `lgwks_deps::tokio`) is the
@@ -84,9 +91,11 @@
 //!
 //! ## Feature table
 //!
-//! No feature is on by default. docs.rs builds this page with `tokio-full`,
-//! `appcui`, `bevy-app`, `bevy-time` and `bevy-state`; `gpui` and
-//! `ml-candle-metal` bind to Apple targets and are checked by their own jobs.
+//! The default selection is empty (ADR 0003, #732) because the no-flag build is
+//! a required portability claim on every declared target; each group below is
+//! one flag away, and `lgwks-deps catalog --json` prints the whole table with
+//! each group's default state and its recorded reason. `docs.rs` builds this
+//! page with `tokio-full`, `appcui`, `bevy-app`, `bevy-time` and `bevy-state`.
 //!
 //! | Feature | Enables |
 //! |---|---|
@@ -109,6 +118,10 @@
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
 
+/// The capability catalog (#732): the estate's one register of what it owns,
+/// read from `contract/CATALOG.toml` and rendered as `docs/catalog.md`.
+#[doc(hidden)]
+pub mod catalog;
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
 pub mod contract;
 /// The optional authored invariant register and its repository-aware validator.

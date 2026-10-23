@@ -51,6 +51,41 @@ rust = "1.99.0"
 # ── shared: one command, both surfaces ──────────────────────────────────────
 
 [[lane]]
+id = "catalog"
+surfaces = "local ci"
+required = true
+fast = true
+# The capability register is the surface #732 refused to leave implicit: one row
+# per capability, its owner path, its default, and what a hand-rolled copy looks
+# like. The check refuses a row whose owner file, feature or module is gone, a
+# row missing for an owner the std-first gate can name in a refusal, and a
+# `docs/catalog.md` that is not a fresh render of the register.
+command = "cargo run --locked -p lgwks_deps --bin catalog -- --check ."
+ci_step = "The capability catalog matches the tree"
+
+[[lane]]
+id = "doc-governance"
+surfaces = "local ci"
+required = true
+fast = true
+# ADRs hold the ISO/IEC/IEEE 42010 fields and PRDs the ISO/IEC/IEEE 29148
+# attributes (ADR 0004). The reader refuses the record that omits one, so a
+# decision cannot be recorded in a shape no reader can find its rationale in.
+command = "cargo run --locked -p lgwks_deps --bin check-docs"
+ci_step = "ADRs and PRDs hold their required fields"
+
+[[lane]]
+id = "latency-tails"
+surfaces = "local ci"
+required = true
+# The per-call cost of every leaf call in `lgwks_std`, not a sample of them:
+# nineteen rows, each bounded at p50 500 ns and p99 1 500 ns, and the entropy row
+# on its tail alone because its cost is the kernel's. The example refuses over
+# either bound (ADR 0003).
+command = "cargo run --release --locked -p lgwks_std --example latency_tails"
+ci_step = "The hot calls hold their latency tails"
+
+[[lane]]
 id = "lockfile"
 surfaces = "local ci"
 required = true
@@ -139,7 +174,7 @@ id = "storefront-consumers"
 group = "storefront"
 surfaces = "local ci"
 required = true
-command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers"
+command = "cargo nextest run --locked -p lgwks_deps --test storefront_consumers ${PARTITION:+--partition $PARTITION}"
 ci_step = "Build storefront consumers"
 
 [[lane]]
@@ -296,6 +331,12 @@ ci_step = "Digest constant-time equality (dudect)"
 # the Windows stand-in's handles would be if they stopped using
 # `without_provenance_mut`.
 #
+# `--no-default-features --features process` states the one capability the proof
+# needs. With the default set on, `hash` pulled `blake3`, whose C/NEON build ran
+# the runner's Linux `cc` with `-arch arm64 -mmacosx-version-min=11.0` and failed
+# before Miri started (run 39842979620): the proof is about `lgwks_std`'s two
+# syscall modules, and no hash is involved in either.
+#
 # Measured cold in the repository's Linux container: the install 12 s, the darwin
 # seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the lane; 16 s
 # on a warm darwin host. The negative control (the fill given a buffer of half
@@ -307,8 +348,8 @@ surfaces = "local ci"
 required = true
 command = """\
 rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
-CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
+CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests\
 """
 ci_step = "Prove the process unsafe seams under Miri"
 needs = ["bin:rustup"]
@@ -475,18 +516,19 @@ ci_step = "Clippy process-only"
 # The declared target matrix, executed. Before this lane the only non-native
 # build in the gate was the bot's WASI boundary, so `lgwks_std`, `lgwks_ast` and
 # `lgwks_deps` were never checked for a target the gate does not run on, and
-# `random` refused at compile time on every target but three. The script runs
-# `cargo check --target <t>` per target and per crate: the Rust-only surface is
-# required on every target, and a check that needs a C toolchain this runner
-# lacks is recorded with the exact error rather than dropped. (#276)
+# `random` refused at compile time on every target but three. The runner checks
+# every declared target per crate: the Rust-only surface is required, and each
+# crate's default set is recorded with its declared C-toolchain exemption, so an
+# exemption cannot become a lid over a real regression. It is Rust rather than
+# the shell script it replaced (#276, ADR 0003). (#276)
 [[lane]]
 id = "target-matrix"
 group = "targets"
 surfaces = "local ci"
 required = true
-command = "./scripts/check-target-matrix.sh ${MATRIX_TARGETS:-}"
+command = "cargo run --locked -q -p lgwks_deps --bin check-target-matrix -- ${MATRIX_TARGETS:-}"
 ci_step = "Check lgwks-std across the declared target matrix"
-needs = ["script:scripts/check-target-matrix.sh", "bin:rustup"]
+needs = ["bin:rustup"]
 
 [[lane]]
 id = "feat-deps-base"
@@ -527,11 +569,24 @@ surfaces = "local ci"
 required = true
 command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --no-default-features && \
-cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets && \
+cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets\
+"""
+ci_step = "Check lgwks-bot async feature matrix"
+
+# The two resolutions above the default set, on a leg of their own: four
+# resolutions in one leg spent 5 m 33 s on a target that had never held them and
+# was cancelled at the cap (run 39837239411), while the same work reads under
+# three minutes when each leg starts against a target that holds its graph.
+[[lane]]
+id = "feat-bot-all"
+group = "check"
+surfaces = "local ci"
+required = true
+command = """\
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --features net,process,fs,signal && \
 cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --all-targets --all-features\
 """
-ci_step = "Check lgwks-bot async feature matrix"
+ci_step = "Check lgwks-bot all-features matrix"
 
 [[lane]]
 id = "feat-ast"
@@ -557,6 +612,10 @@ id = "wasi-boundary"
 group = "check"
 surfaces = "local ci"
 required = false
+# The CI step adds the target with rustup and then runs exactly this command
+# with the defaults on: the bot's default set is `script` — the token-stream
+# reader, no grammar — and that is the portable boundary the step builds and the
+# T22 row asserts on (ADR 0003). Measured 2026-10-22: 55 s, exit 0.
 command = """\
 rustup target add wasm32-wasip1 && \
 RUSTFLAGS="" cargo check --locked --manifest-path crates/lgwks-bot/Cargo.toml --target wasm32-wasip1 --features rt\
@@ -708,10 +767,7 @@ id = "gpui-macos"
 group = "check"
 surfaces = "local ci"
 required = false
-command = """\
-cargo check --locked -p lgwks_deps --all-targets --features gpui && \
-cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir \"${CARGO_TARGET_DIR:-target}\" --no-default-features --features gpui --example gpui\
-"""
+command = "cargo check --locked --manifest-path crates/lgwks-deps/tests/fixtures/storefront-matrix/Cargo.toml --target-dir \"${CARGO_TARGET_DIR:-target}\" --no-default-features --features gpui --example gpui"
 ci_step = "Check normal GPUI renderer feature"
 platforms = ["darwin"]
 needs = ["bin:xcodebuild"]

@@ -7,7 +7,13 @@
 //! as the README cannot drift from it: a test walks `crates/` and fails when a
 //! crate is missing here.
 //!
-//! Usage: `render_site <DIRECTORY>` (default: `target/site`).
+//! The capability table is rendered from `contract/CATALOG.toml` (#732), the
+//! same register `lgwks-deps catalog --check` and the std-first gate read, so
+//! the public page cannot list a capability the code does not own.
+//!
+//! Usage: `render_site <DIRECTORY>` (default: `target/site`), and
+//! `render_site --check` to prove the register reads and every row it names
+//! exists without writing anything.
 
 use std::fmt::Write as FmtWrite;
 use std::fmt::{self, Display, Formatter};
@@ -15,6 +21,8 @@ use std::fs;
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use lgwks_deps::catalog;
 
 /// Where the page is served from, with its trailing slash.
 const SITE_URL: &str = "https://srinji-kaggss.github.io/logicalworks-crates/";
@@ -72,6 +80,11 @@ enum Error {
         /// Why the formatter refused.
         cause: fmt::Error,
     },
+    /// The capability register could not be read, so no page is rendered.
+    Catalog {
+        /// Why the register refused.
+        cause: String,
+    },
 }
 
 impl Display for Error {
@@ -83,6 +96,9 @@ impl Display for Error {
                 ref cause,
             } => write!(formatter, "cannot write {}: {cause}", path.display()),
             Self::Render { ref cause } => write!(formatter, "rendering failed: {cause}"),
+            Self::Catalog { ref cause } => {
+                write!(formatter, "cannot read the capability register: {cause}")
+            }
         }
     }
 }
@@ -92,7 +108,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Render { ref cause } => Some(cause),
-            Self::Io { .. } => None,
+            Self::Io { .. } | Self::Catalog { .. } => None,
         }
     }
 }
@@ -115,6 +131,16 @@ fn crate_rows(html: &mut String) -> Result<(), Error> {
         )
         .map_err(|cause| Error::Render { cause })?;
     }
+    Ok(())
+}
+
+/// The capability rows of the page, rendered from `contract/CATALOG.toml` by
+/// the same reader `lgwks-deps catalog --check` uses.
+fn capability_rows(html: &mut String, abilities: &catalog::Catalog) -> Result<(), Error> {
+    let section = catalog::render_site_section(abilities).map_err(|error| Error::Catalog {
+        cause: error.to_string(),
+    })?;
+    html.push_str(&section);
     Ok(())
 }
 
@@ -155,7 +181,7 @@ fn entity_graph() -> String {
 }
 
 /// The whole page.
-fn render_index() -> Result<String, Error> {
+fn render_index(abilities: &catalog::Catalog) -> Result<String, Error> {
     let mut html = String::new();
     html.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     writeln!(html, "<title>{TITLE}</title>").map_err(|cause| Error::Render { cause })?;
@@ -174,6 +200,10 @@ fn render_index() -> Result<String, Error> {
     html.push_str("<p><strong>logicalworks-crates</strong> is the Rust repository of Logical Works Incorporated. It is not a framework and not a rewrite of the ecosystem: it is the layer where a program's authority, its dependency graph and its reading of source code are decided once, and enforced by a compiler and a gate rather than by review.</p>\n");
     html.push_str("<h2>The five crates</h2>\n<table>\n<thead><tr><th>Crate</th><th>What it gives you</th></tr></thead>\n<tbody>\n");
     crate_rows(&mut html)?;
+    html.push_str("</tbody>\n</table>\n");
+    html.push_str("<h2>What you can reach, and whether you have to ask</h2>\n");
+    html.push_str("<p>Every capability the estate owns, its owner path, and whether it is on in the default build. <code>opt-in</code> means the crate cannot carry it on every target or the measured cost is recorded in ADR 0003; everything else is on when you add the crate.</p>\n<table>\n<thead><tr><th>Capability</th><th>Owner</th><th>Crate</th><th>Default</th></tr></thead>\n<tbody>\n");
+    capability_rows(&mut html, abilities)?;
     html.push_str("</tbody>\n</table>\n<h2>Use it, or don't</h2>\n<div class=\"grid\">\n<div>\n<h3>Use it when</h3>\n<ul>\n");
     html.push_str(
         "<li>you want bounded, cancellable automation whose authority is a checked value;</li>\n",
@@ -217,25 +247,46 @@ fn render_sitemap() -> String {
 }
 
 /// Renders the three files into `directory`, creating it when absent.
-fn run(directory: &Path, out: &mut impl IoWrite) -> Result<(), Error> {
+fn run(
+    directory: &Path,
+    abilities: &catalog::Catalog,
+    out: &mut impl IoWrite,
+) -> Result<(), Error> {
     fs::create_dir_all(directory).map_err(|cause| Error::Io {
         path: directory.to_path_buf(),
         cause,
     })?;
-    write_file(&directory.join("index.html"), &render_index()?)?;
+    write_file(&directory.join("index.html"), &render_index(abilities)?)?;
     write_file(&directory.join("robots.txt"), &render_robots())?;
     write_file(&directory.join("sitemap.xml"), &render_sitemap())?;
     writeln!(
         out,
-        "wrote {} — index.html, robots.txt, sitemap.xml, {} crates",
+        "wrote {} — index.html, robots.txt, sitemap.xml, {} crates, {} capabilities",
         directory.display(),
-        CRATES.len()
+        CRATES.len(),
+        abilities.capabilities()
     )
     .map_err(|cause| Error::Io {
         path: PathBuf::from("<stdout>"),
         cause,
     })?;
     Ok(())
+}
+
+/// The repository the page is rendered from.
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// The register, read from the repository, or a refusal naming what failed.
+///
+/// A page that renders after the register failed to read would be a page with a
+/// capabilities table built from nothing, which is the drift this renderer
+/// exists to prevent.
+fn read_capabilities() -> Result<catalog::Catalog, Error> {
+    catalog::read(&repository_root()).map_err(|cause| Error::Catalog {
+        cause: cause.to_string(),
+    })
 }
 
 /// The directory named on the command line, else `target/site`.
@@ -246,13 +297,50 @@ fn directory_argument() -> PathBuf {
     }
 }
 
-/// Renders the page and reports what it wrote.
+/// Whether the invocation is the read-only check.
+fn is_check() -> bool {
+    std::env::args_os().any(|argument| argument == "--check")
+}
+
+/// Renders the page and reports what it wrote, or checks the register reads.
 fn main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let stderr = io::stderr();
     let mut err = stderr.lock();
-    match run(&directory_argument(), &mut out) {
+    let abilities = match read_capabilities() {
+        Ok(abilities) => abilities,
+        Err(error) => {
+            if writeln!(err, "error: {error}").is_err() {
+                return ExitCode::from(2);
+            }
+            return ExitCode::from(1);
+        }
+    };
+    if is_check() {
+        let written = render_index(&abilities).and_then(|page| {
+            writeln!(
+                out,
+                "OK  {} capabilities on a {}-byte page; the register reads and every row has an owner",
+                abilities.capabilities(),
+                page.len()
+            )
+            .map_err(|cause| Error::Io {
+                path: PathBuf::from("<stdout>"),
+                cause,
+            })
+        });
+        return match written {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                if writeln!(err, "error: {error}").is_err() {
+                    return ExitCode::from(2);
+                }
+                ExitCode::from(1)
+            }
+        };
+    }
+    match run(&directory_argument(), &abilities, &mut out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if writeln!(err, "error: {error}").is_err() {
@@ -266,8 +354,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        CRATES, DESCRIPTION, SITE_URL, TITLE, render_index, render_robots, render_sitemap,
+        CRATES, DESCRIPTION, SITE_URL, TITLE, read_capabilities, render_index, render_robots,
+        render_sitemap,
     };
+    use lgwks_deps::catalog;
     use std::error::Error;
     use std::fs;
     use std::path::Path;
@@ -279,7 +369,7 @@ mod tests {
     #[test]
     fn every_crate_directory_is_on_the_page() -> TestResult {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let rendered = render_index()?;
+        let rendered = render_index(&read_capabilities()?)?;
         for entry in fs::read_dir(root.join("crates"))? {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let package = name.replace('-', "_");
@@ -291,11 +381,42 @@ mod tests {
         Ok(())
     }
 
+    /// Every capability in the register is on the page with its owner, so the
+    /// page cannot list one the code does not own or miss one it does (#732).
+    #[test]
+    fn every_catalog_row_is_on_the_page() -> TestResult {
+        let abilities = read_capabilities()?;
+        let rendered = render_index(&abilities)?;
+        let section =
+            catalog::render_site_section(&abilities).map_err(|error| error.to_string())?;
+        assert!(
+            abilities.capabilities() >= 30,
+            "the register must cover the estate"
+        );
+        assert_eq!(
+            section.lines().count(),
+            abilities.capabilities(),
+            "the page carries one row per capability"
+        );
+        for row in section.lines() {
+            assert!(
+                rendered.contains(row),
+                "the page does not carry this register row: {row}"
+            );
+            assert_eq!(
+                row.split("<td>").count(),
+                5,
+                "a row is a capability, an owner, a crate and a default: {row}"
+            );
+        }
+        Ok(())
+    }
+
     /// The title, description and canonical address are the ones a crawler and
     /// an answer engine read.
     #[test]
     fn the_head_names_the_page_and_its_entity() -> TestResult {
-        let rendered = render_index()?;
+        let rendered = render_index(&read_capabilities()?)?;
         assert!(rendered.contains(TITLE), "the title is missing");
         assert!(rendered.contains(DESCRIPTION), "the description is missing");
         let canonical = format!("<link rel=\"canonical\" href=\"{SITE_URL}\">");
