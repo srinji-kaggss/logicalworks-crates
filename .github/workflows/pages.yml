@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       # The deploy is conditional on a site existing. Creating one needs an
       # admin token the workflow cannot hold: the first run on 184d819e0 failed
       # with `Resource not accessible by integration` from the create-site

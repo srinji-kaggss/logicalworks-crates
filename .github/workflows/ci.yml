@@ -175,7 +175,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           # Eight, the share bot-full is green at (its comment names the limit).
           # Run 38867517459 ran the suite, then 5,569 tests with lgwks_bot's, in
@@ -210,7 +210,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           test-share: "8"
           build-share: "3"
@@ -256,7 +256,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           components: clippy, rustfmt
       - name: Install lld, the linker the repository's cargo configuration names
         run: brew install lld
@@ -434,7 +434,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           # Eight is the share this suite was green at: ten threads failed the
           # drain-grace test (`shutdown_reports_every_draining_cleanup_...`,
@@ -477,7 +477,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       # rust-cache hashes every installed toolchain, not the one this job builds
       # with, so a toolchain the image happens to add rotates the key and throws
       # away a 400 MB cache. That is not a slow suite: it is a cold build of
@@ -562,7 +562,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           # Eight, as the bot-full job: the lwc-2 leg runs 43 tests beside the
           # 10,000 tier, which only logs its latency tails, and the lwc-12 leg
@@ -613,7 +613,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           # It runs no tests and it is the last link of the run's critical path.
           tmp-gib: "0"
           defer: "0"
@@ -655,7 +655,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           test-share: "6"
           build-share: "3"
@@ -707,7 +707,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           # 254 s for the bot-full leg on run 39021102172: 46 s inside the cap,
           # so it yielded 15 s. On a loaded host that margin is gone: the
@@ -770,7 +770,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           components: clippy
       - name: Install lld, the linker the repository's cargo configuration names
         run: brew install lld
@@ -858,7 +858,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           components: clippy
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -933,7 +933,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           nextest: "true"
           build-share: "1"
           # Cut in its last step at the cap on run 39069794871 (host idle), so it
@@ -1008,7 +1008,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           build-share: "1"
           # No test runs here, so no RAM disk for temporary files (the input's
           # description says why).
@@ -1041,7 +1041,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - name: Digest constant-time equality (dudect)
         # 250,000 samples per class, not the harness's 1,000,000 default: the
         # wall is linear in samples (47 s idle at 1M, ~12 s at 250k) while the
@@ -1077,7 +1077,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           # It measures wall time, so it takes no share of the machine's test
           # slots and yields its first cargo call at once.
           defer: "0"
@@ -1121,7 +1121,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           build-share: "2"
           # Only the lgwks-ast leg runs tests; the others only check.
           tmp-gib: ${{ matrix.part == 'lgwks-ast' && '4' || '0' }}
@@ -1222,7 +1222,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/local-rust
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
@@ -1245,7 +1245,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           components: clippy
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --lib
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
@@ -1265,7 +1265,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -1321,7 +1321,7 @@ jobs:
       - name: Pin Rust 1.99.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
