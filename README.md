@@ -106,6 +106,7 @@ lgwks-deps check .        # audit, and refuse any unowned external edge
 - [Use cases and boundaries](docs/use-cases.md): what each crate is for, and is not.
 - [Choosing a crate](docs/choosing-a-crate.md): which crate and feature for a need.
 - [Documentation](docs/README.md): every guide, spec and decision record.
+- [Boundaries and failure](docs/distributed-boundaries.md): what async clients do not get, plus [bounded background work](docs/guides/lgwks-bot/background-work.md) and [what a failed tick means](docs/guides/lgwks-bot/failures.md).
 
 ## Contributing
 
