@@ -355,10 +355,10 @@ pub(super) fn put_polled(world: &mut World, polled: Vec<Result<Option<Erased>, B
 /// fresh `Auth` from the retained `GrantSet`, which is where the proof belongs.
 ///
 /// The load-bearing word is *retained*. `assemble` clones the set into the world
-/// as `Grants(grants.clone())` and nothing revokes it, so this substrate offers
-/// exactly the snapshot boundary `Bot` documents and not a live lease: changing
-/// or dropping the caller's `GrantSet` after build cannot narrow a bot that is
-/// already running. An earlier version of this comment claimed the opposite.
+/// as `Grants(grants.clone())`; `EcsBot::replace_grants` swaps that resource between
+/// ticks and reports what it withdrew. Changing or dropping the caller's `GrantSet`
+/// after build still cannot narrow a running bot, so the snapshot boundary holds,
+/// narrowed only through that operation.
 ///
 /// Conditions are evaluated here, in the schedule, and the effects they select
 /// are run by the driver afterwards. That is a reordering of *when* each verb

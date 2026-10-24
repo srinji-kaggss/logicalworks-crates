@@ -20,7 +20,7 @@ and `NeedSet::proposed_grants` turns it into a grant set. Both are
 again, so neither feeds a retry loop. The shipped `gh` adapter reports a
 refused token this way on its `Observe` verb and in every flow.
 
-## The grant set is a snapshot
+## The grant set is a snapshot, narrowed only through `replace_grants`
 
 This is the part that surprises people. `EcsBot::assemble` clones the set into
 the world (`crates/lgwks-bot/src/ecs/builder.rs:630`):
@@ -32,24 +32,25 @@ world.insert_resource(Grants(grants.clone()));
 `Grants` is a private resource holding that clone. `GrantSet`
 (`crates/lgwks-bot/src/gate.rs:14`) has three methods that add or inspect:
 `empty`, `all_shipped`, `grant`, plus `admit` and `issue`. There is no `revoke`,
-and no method that removes a capability.
+and no method that removes a capability: the set is data, and revoking it is an
+operation on the bot that holds it — `EcsBot::replace_grants` — not on the set.
 
 The consequences, stated plainly:
 
 - Dropping or changing the `GrantSet` you passed to `build` does not narrow the
-  bot. It keeps the authority it was admitted with for its whole life.
+  bot. It keeps the authority it was admitted with until you narrow it through
+  `replace_grants`.
 - An `Auth` you hold stays valid for the capabilities it covers. It is a
   capability-membership proof inside this process, not a signature and not an
   identity. A proof minted from an expiring grant lapses when its lifetime has
   passed (see "A credential can lapse" below), but that lifetime is fixed at the
   mint and a built bot mints afresh on every call, so it does not narrow a
   running bot.
-- Narrowing a running bot is a decision made outside this API. Build it from a
-  narrower set, or stop calling `tick`.
-
-If that is the property you need, it is not here yet. Live narrowing would need
-a linearization point, a token generation, and a defined answer for effects
-already in flight. None of those exist in the inspected source.
+- Narrowing a running bot is `replace_grants`: it swaps the retained set
+  between ticks — atomic with respect to them, since both take `&mut self` —
+  and reports what it withdrew and added. The next tick's calls for a withdrawn
+  capability are denied; proofs already minted keep covering what they were
+  minted for until their lifetimes lapse.
 
 ## It is not a sandbox
 
@@ -81,14 +82,16 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
   `run_any_on` share `execute_erased`, which calls
   `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:694`),
   and the action then checks `call.0.check(self.required_caps())`. The two cannot
-  disagree, and nothing narrows `Grants` after `assemble` — the only writer is
-  `assemble` itself.
+  disagree, and the only writer of `Grants` besides `assemble` is
+  `EcsBot::replace_grants`, which swaps the whole list rather than holding an
+  entry.
 
-So `Auth::check` cannot fail inside a running bot.
-`BotError::CapabilityDenied` is a build-time failure, and the `failure_state` arm
-that folds it into an abandoned entry (`crates/lgwks-bot/src/ecs/admit.rs:344`) is
-defensive rather than live. A hold was built on top of that arm and then removed,
-because machinery whose only caller is a contrived test is not a feature.
+So a run-time hold has nothing to resume from: `BotError::CapabilityDenied`
+after admission means the retained list itself narrowed — through
+`replace_grants` — and the repair is a wider `replace_grants`, not a held
+entry. The `failure_state` arm that folds a denial into an abandoned entry
+(`crates/lgwks-bot/src/ecs/admit.rs:344`) is the record of exactly that: a
+denial now reachable at run time, reported rather than resumed.
 
 The consequence worth knowing is the *reverse* of a hold, and it is a real gap:
 

@@ -16,13 +16,13 @@ narrower proof presented to a broader domain is denied (no confused deputies).
 `Evaluate` takes no proof, because it is pure boolean logic with no side effect
 to gate.
 
-### Authority is a snapshot
+### Authority is a snapshot, narrowed only through `replace_grants`
 
 A built bot owns a *clone* of the grant set it was built with. `GrantSet` has no
 `revoke`, and an `Auth` holds the capabilities it was issued with, so:
 
 - Changing or dropping the `GrantSet` you passed to `build` does not narrow the
-  bot. It keeps the authority it was admitted with for its whole life.
+  bot. It keeps the authority it was admitted with until you narrow it.
 - An `Auth` in hand stays valid for the capabilities it covers. It is a
   capability-membership proof inside this process — not a signature and not an
   identity. A proof minted from a grant that named a lifetime
@@ -33,13 +33,14 @@ A built bot owns a *clone* of the grant set it was built with. `GrantSet` has no
 - A lifetime bounds a proof *in hand*, not a built bot: the bot mints a fresh
   proof from the set it retained on every call, so each call's proof starts a
   fresh lifetime.
-- Narrowing a running bot is therefore a decision made *outside* this API: build
-  it from a narrower set, or stop calling `tick`. There is no in-process
-  revocation, and nothing here should be described as one.
+- Narrowing a running bot is `EcsBot::replace_grants`: it swaps the retained
+  set between ticks — atomic with respect to them, since both take `&mut self`
+  — and reports what it withdrew and added. The next tick's calls for a
+  withdrawn capability are denied; proofs already minted keep covering what
+  they were minted for.
 
-This is a real limitation and it is stated as one. Live revocation needs a
-linearization point, a token generation, and a defined answer for effects
-already in flight; none of those exist here yet.
+The linearization point is the borrow checker: no tick observes a half-swapped
+set, and effects already in flight keep the proofs they started with.
 
 | Capability | Constant | Description |
 |------------|----------|-------------|

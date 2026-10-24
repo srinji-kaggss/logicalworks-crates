@@ -5,7 +5,7 @@ use std::time::Duration;
 use lgwks_deps::bevy_ecs::{prelude::World, schedule::Schedule};
 
 use crate::error::BotError;
-use crate::gate::GrantSet;
+use crate::gate::{GrantReplacement, GrantSet};
 use crate::journal::EffectJournal;
 use crate::registry::DomainRegistry;
 use crate::spec::{Admission, BotSpec, Need, NeedSet};
@@ -532,5 +532,32 @@ impl EcsBot {
     #[must_use]
     pub fn tick_report(&self) -> TickReport {
         self.world.resource::<TickReport>().clone()
+    }
+
+    /// Swap the grant set this bot mints proofs from, reporting what changed.
+    ///
+    /// The live-revocation operation (#716): the framework mints a fresh proof
+    /// per call from the set it retained at build, so replacing that set is
+    /// what narrows a running bot. Atomic with respect to a tick by
+    /// construction — both take `&mut self`, so no tick observes a half-swapped
+    /// set, and ticks are stepped by hand rather than on a background thread.
+    /// Returns what the swap withdrew and added, each sorted by dotted name,
+    /// so an operator can audit the narrowing.
+    ///
+    /// What it does not do: proofs already minted (`Auth` in hand) keep the
+    /// caps they were minted with until their lifetimes lapse — a credential
+    /// is judged by what it carries, not by the set that minted it — and
+    /// replacing the *caller's* set still changes nothing for a built bot;
+    /// only this call narrows it.
+    ///
+    /// It lives at the end of this `impl` so the line numbers the guides cite
+    /// above it never move for it.
+    #[must_use]
+    pub fn replace_grants(&mut self, next: &GrantSet) -> GrantReplacement {
+        let held = self.world.resource::<super::resources::Grants>();
+        let report = held.0.difference(next);
+        self.world
+            .insert_resource(super::resources::Grants(next.clone()));
+        report
     }
 }

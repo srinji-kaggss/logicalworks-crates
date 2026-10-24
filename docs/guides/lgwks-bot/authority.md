@@ -85,3 +85,18 @@ nothing. Both cases have tests in `crates/lgwks-bot/src/spec.rs`
 
 The framework mints a fresh proof per call from the grant set it retained, so you
 never thread an `Auth` through your own call sites for the chained path.
+
+## Revocation is `replace_grants`
+
+Withdrawing the caller's set never narrowed a built bot, and still does not.
+Narrowing the bot itself is one operation: `EcsBot::replace_grants` swaps the
+retained set the framework mints from and reports what it withdrew and added
+(`GrantReplacement::withdrawn` / `added`, each sorted), so the next tick's
+calls for a withdrawn capability are denied with `BotError::CapabilityDenied`.
+
+Atomicity is the borrow checker's: the swap and every tick take `&mut self`,
+and ticks are stepped by hand rather than on a background thread, so no tick
+observes a half-swapped set. Proofs already minted keep covering what they
+were minted for until their lifetimes lapse; only subsequent mints read the
+new set. That is live revocation of future calls, not retroactive invalidation
+of credentials in hand.
