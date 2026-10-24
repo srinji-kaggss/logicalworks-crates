@@ -9,9 +9,14 @@
 
 use std::io::Write as _;
 
+use lgwks_bot::gate::GrantReplacement;
 use lgwks_bot::rt::estate::{Estate, EstateError, EstateReport};
 use lgwks_bot::rt::runtime::Runtime;
+use lgwks_bot::rt::supervise::TaskId;
+use lgwks_bot::spec::EffectScope;
 use lgwks_bot::task::{Disposition, task};
+use lgwks_bot::verb::{Execute, Observe};
+use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
 
 /// One line to the caller's locked stdout; a write error reaches `main` as an I/O error.
 fn say(line: &str) -> std::io::Result<()> {
@@ -27,6 +32,70 @@ struct RunCheck {
     output: Option<u64>,
     /// The located failure, when it did not.
     error: Option<String>,
+}
+
+/// A source that answers once and requires `bot.net`, so the grant-replacement
+/// arm below (live revocation) has an authority to withdraw mid-run.
+struct SmokeSource {
+    /// The one capability this source requires.
+    caps: [Cap; 1],
+}
+
+impl SmokeSource {
+    /// A source that requires `bot.net`.
+    fn gated() -> Self {
+        Self { caps: [Cap::net()] }
+    }
+}
+
+impl Observe for SmokeSource {
+    /// The observed value.
+    type Output = u16;
+
+    fn required_caps(&self) -> &[Cap] {
+        &self.caps
+    }
+
+    async fn poll(&self, call: (Auth, ())) -> Result<u16, BotError> {
+        call.0.check(self.required_caps())?;
+        Ok(503)
+    }
+
+    fn domain_id(&self) -> &str {
+        "smoke::source"
+    }
+}
+
+/// An action that counts its invocations: the observable effect a live
+/// revocation has to stop.
+struct SmokeAction {
+    /// How many times the action ran.
+    fired: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Execute for SmokeAction {
+    /// The observed value it consumes.
+    type Input = u16;
+    /// It answers nothing.
+    type Output = ();
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    fn effect_lifetime(&self) -> EffectLifetime {
+        EffectLifetime::Local
+    }
+
+    async fn execute_action(&self, call: (Auth, &u16)) -> Result<(), BotError> {
+        call.0.check(Execute::required_caps(self))?;
+        self.fired.set(self.fired.get().saturating_add(1));
+        Ok(())
+    }
+
+    fn domain_id(&self) -> &str {
+        "smoke::action"
+    }
 }
 
 /// Record the first deviation and keep it: the first mismatch is the root cause, and later ones
@@ -286,6 +355,164 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "an unopenable store must not build".to_owned(),
             );
         }
+    }
+
+    // The #703 owner pattern on the shipped artifact: place probe tasks on the
+    // estate's own supervisor and reconcile the tracked set through the same
+    // accessors an owner reads. Nothing here depends on scheduler timing: the
+    // tracked set changes only on this thread (spawn, reap, wait_idle join),
+    // so a snapshot and the accessors read beside it always agree, and
+    // `wait_idle` ends every placed body before the drain counts its reports.
+    // Every number below is asserted, so a lost report fails the smoke rather
+    // than parking an owner.
+    let mut tracked_estate = Estate::supervised("acme", 8)?;
+    let mut seen: Vec<TaskId> = Vec::new();
+    let tracking = driver.block_on(async {
+        let supervisor = tracked_estate.supervisor()?;
+        for _ in 0..3 {
+            supervisor.spawn(|_| async {}).await;
+        }
+        // One state read three ways, with no entry point between the reads
+        // that could reap: a listed task is tracked, always.
+        let snapshot = supervisor.snapshot();
+        if supervisor.in_flight()
+            != snapshot.live().len().saturating_add(snapshot.live_truncated())
+        {
+            record(
+                &mut mismatch,
+                format!(
+                    "the tracking accessors disagree with the snapshot: in_flight={} listed={} truncated={}",
+                    supervisor.in_flight(),
+                    snapshot.live().len(),
+                    snapshot.live_truncated(),
+                ),
+            );
+        }
+        for live in snapshot.live() {
+            seen.push(live.task);
+            if supervisor.task_state(live.task).is_none() {
+                record(
+                    &mut mismatch,
+                    format!("a listed task has no state: {}", live.task.get()),
+                );
+            }
+        }
+        // Every placed body ends here, never on a timer: `wait_idle` joins
+        // what the spawns' own reaps have not already joined, and the roomy
+        // bound keeps every report. Totals come from the supervisor's own
+        // counters, so a body absorbed early still counts exactly once.
+        supervisor.wait_idle().await;
+        supervisor.reap();
+        let mut drained = 0usize;
+        while supervisor.next_report().is_some() {
+            drained = drained.saturating_add(1);
+        }
+        let stats = supervisor.stats();
+        Some((stats.spawned, stats.completed, drained, supervisor.in_flight()))
+    });
+    match tracking {
+        Some((spawned, completed, drained, live_now)) => {
+            say(&format!(
+                "tracking: placed=3 spawned={spawned} completed={completed} drained={drained} live_now={live_now}"
+            ))?;
+            if spawned != 3 || completed != 3 {
+                record(
+                    &mut mismatch,
+                    format!(
+                        "three placed tasks did not end exactly once: spawned={spawned} completed={completed}"
+                    ),
+                );
+            }
+            if drained != 3 {
+                record(
+                    &mut mismatch,
+                    format!("three placed probe tasks drained {drained} reports, not 3"),
+                );
+            }
+            if live_now != 0 {
+                record(
+                    &mut mismatch,
+                    format!("the drain left {live_now} tasks tracked"),
+                );
+            }
+        }
+        None => {
+            record(
+                &mut mismatch,
+                "the supervised tier has no supervisor to track".to_owned(),
+            );
+        }
+    }
+    // Joins are consumptive: every task the snapshot listed above left the
+    // set through a join, so each has a report and no state.
+    if let Some(supervisor) = tracked_estate.supervisor() {
+        for task in &seen {
+            if supervisor.task_state(*task).is_some() {
+                record(
+                    &mut mismatch,
+                    format!("a joined task still has a state: {}", task.get()),
+                );
+            }
+        }
+    }
+
+    // Live revocation on the shipped artifact (#716): a firing bot is narrowed
+    // mid-run through `replace_grants`, and its very next tick is denied
+    // naming the withdrawn capability. Every number below is asserted, so a
+    // grant replacement that does not take effect fails the smoke.
+    let fired = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let mut bot = Bot::builder("smoke-replace")
+        .observe(SmokeSource::gated())
+        .on(
+            |value: &u16| *value >= 500,
+            SmokeAction {
+                fired: std::rc::Rc::clone(&fired),
+            },
+        )
+        .with_effects(
+            EffectScope::ephemeral().map_err(|error| format!("the smoke scope failed: {error}"))?,
+        )
+        .build(&GrantSet::empty().grant(Cap::net()))
+        .map_err(|error| format!("the smoke bot was refused: {error}"))?;
+    match bot.tick() {
+        Ok(1) => {
+            say("grant replacement: the bot fired once under its grant")?;
+        }
+        other => {
+            record(
+                &mut mismatch,
+                format!("the smoke bot did not fire once under its grant: {other:?}"),
+            );
+        }
+    }
+    let report: GrantReplacement = bot.replace_grants(&GrantSet::empty());
+    say(&format!(
+        "grant replacement: withdrawn={:?} added={:?}",
+        report.withdrawn(),
+        report.added()
+    ))?;
+    if report.withdrawn().to_vec() != vec![Cap::net()] || !report.added().is_empty() {
+        record(
+            &mut mismatch,
+            format!("the swap did not report exactly the withdrawn net grant: {report:?}"),
+        );
+    }
+    match bot.tick() {
+        Err(BotError::CapabilityDenied { .. }) => {
+            say("grant replacement: the next tick is denied")?;
+        }
+        other => {
+            record(
+                &mut mismatch,
+                format!("the tick after the swap must be denied, got {other:?}"),
+            );
+        }
+    }
+    if fired.get() != 1 {
+        record(
+            &mut mismatch,
+            format!("the effect ran {} times, not once", fired.get()),
+        );
     }
 
     if let Some(mismatch) = mismatch {

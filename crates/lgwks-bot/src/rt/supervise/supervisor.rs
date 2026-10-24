@@ -464,6 +464,47 @@ impl Supervisor {
         }
     }
 
+    /// How many tasks this supervisor is still tracking.
+    ///
+    /// The tracked count, not the accounting one:
+    /// [`Stats::in_flight`](crate::rt::supervise::Stats::in_flight) reads
+    /// `spawned - completed`, which keeps counting a task that ended and
+    /// released its permit until the next reap. This reads the identity map
+    /// `reap` drains, so it is the live tasks plus the ended-but-unreaped
+    /// ones — it can briefly exceed the in-flight bound, exactly as the
+    /// counters can, and
+    /// [`Supervisor::snapshot`](crate::rt::supervise::Supervisor::snapshot) lists the first bound of
+    /// it with the remainder in `live_truncated`. An owner reconciling its
+    /// own ledger against this supervisor reads this and
+    /// [`task_state`](Self::task_state), not the counters: a task the owner
+    /// placed that this no longer tracks, with no report drained for it, is
+    /// how a lost report shows itself (#703).
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.identities.len()
+    }
+
+    /// What `task` is doing right now, or `None` when this supervisor no
+    /// longer tracks it.
+    ///
+    /// The checkable form of #703: a task the owner placed that is neither
+    /// tracked here nor in a drained report was absorbed without attribution
+    /// (counted in [`Stats::reports_dropped`](crate::rt::supervise::Stats::reports_dropped)) or was never
+    /// placed. Terminal outcomes are not listed; they are in the report
+    /// stream ([`Supervisor::next_report`](crate::rt::supervise::Supervisor::next_report)), so a task whose
+    /// report is still queued already reads `None` here. The position is the
+    /// spawn order among the tracked tasks, the same numbering
+    /// [`Supervisor::snapshot`](crate::rt::supervise::Supervisor::snapshot) uses.
+    #[must_use]
+    pub fn task_state(&self, task: TaskId) -> Option<TaskState> {
+        let mut ordered: Vec<TaskId> = self.identities.values().copied().collect();
+        ordered.sort_unstable_by_key(|live| live.get());
+        ordered
+            .iter()
+            .position(|live| *live == task)
+            .map(|position| TaskState::Running { position })
+    }
+
     /// The oldest terminal outcome this supervisor has not yet handed over.
     ///
     /// `None` means every task that has ended has been reported and read. A

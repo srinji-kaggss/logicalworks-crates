@@ -11,24 +11,35 @@
 //! > A contract/API test should prevent revocation claims when no operation
 //! > exists.
 //!
-//! Three tests carry it:
+//! Five tests carry it:
 //!
 //! - [`a_proof_minted_from_a_grant_set_outlives_that_set`] executes the issue's
 //!   own counterexample and pins the behaviour it demonstrates — an `Auth` in
 //!   hand still authorizes after the set that minted it is gone. That is the
 //!   snapshot boundary, tested rather than described.
 //! - [`withdrawing_authority_after_build_means_building_again`] walks the
-//!   supported path end to end: admission refuses an ungranted bot at build, a
-//!   built bot keeps the authority it was admitted with even after the caller
+//!   caller-side path end to end: admission refuses an ungranted bot at build,
+//!   a built bot keeps the authority it was admitted with even after the caller
 //!   replaces its set, and withdrawing a capability means building again —
-//!   which refuses.
+//!   which refuses. Replacing the caller's set is still not revocation.
 //! - [`no_first_party_text_claims_revocation_this_crate_lacks`] reads every
 //!   first-party text file in the repository and requires each mention of
-//!   `revo*` to sit in text that denies the operation, so a claim with no
-//!   operation behind it fails the build. It is the grep, left behind as a test.
+//!   `revo*` to sit in text that denies the operation, puts it on another
+//!   subject, or ties it to the shipped one (`EcsBot::replace_grants`), so a
+//!   claim with no operation behind it fails the build. It is the grep, left
+//!   behind as a test.
 //! - [`the_claim_guard_flags_the_claim_it_was_written_for`] is that guard's own
 //!   control: it feeds the guard the pre-fix sentence, and both spellings of the
-//!   family, and requires each to be reported.
+//!   family, and requires each to be reported — and requires a mention tied to
+//!   `replace_grants` to pass.
+//! - [`the_authority_source_offers_no_revoke_operation`] holds the authority
+//!   source (`gate.rs`, `cap.rs`) to offering no revoke operation of its own,
+//!   including the shipped operation's name: the operation lives on the bot,
+//!   and the source must never shadow it.
+//!
+//! The bot-side operation itself — narrowing a running bot between ticks and
+//! reporting what it withdrew — is exercised in `grant_replace.rs`, because
+//! this file is at its size ceiling and the journey is its own responsibility.
 //!
 //! Nothing here asserts that an in-process SDK confines a process. The issue's
 //! own evidence section says the same: this is an authority-lifetime contract,
@@ -62,11 +73,16 @@ type TestResult = Result<(), Box<dyn Error>>;
 type ScopeResult<T> = Result<T, Box<dyn Error>>;
 
 // ── Test doubles ────────────────────────────────────────────────────────────
+//
+// Owned here and shared with `grant_replace.rs`, which builds the same "bot
+// that needs `bot.net`" for the revocation journey: one definition of the
+// doubles, called from both files, so the two cannot drift into different
+// meanings of the same setup.
 
 /// A scripted source: yields the next value from `values` on each poll, and
 /// requires `bot.net`, so a chain on it is subject to build-time admission and
 /// to the narrowing these tests are about.
-struct Script {
+pub(crate) struct Script {
     /// The values to yield, in poll order.
     values: Vec<u16>,
     /// How many polls have happened.
@@ -81,7 +97,7 @@ struct Script {
 
 impl Script {
     /// A source that yields `values` in order and requires `bot.net`.
-    fn new(values: Vec<u16>) -> Self {
+    pub(crate) fn new(values: Vec<u16>) -> Self {
         Self {
             values,
             cursor: Cell::new(0),
@@ -124,7 +140,7 @@ impl Observe for Script {
 
 /// An action that counts its invocations: the observable effect a revocation
 /// claim would have to stop, and the only evidence a test can read back.
-struct Counted(Rc<Cell<usize>>);
+pub(crate) struct Counted(pub(crate) Rc<Cell<usize>>);
 
 impl Execute for Counted {
     type Input = u16;
@@ -162,7 +178,7 @@ impl Execute for Counted {
 /// Returns `ScopeResult` because building a scope crosses `IdError` and
 /// `BrokerError` as well as `BotError`, and none of the three converts into
 /// another; the tests below report through `Box<dyn Error>` for the same reason.
-fn test_effects() -> ScopeResult<EffectScope> {
+pub(crate) fn test_effects() -> ScopeResult<EffectScope> {
     effects::memory_scope()
 }
 
@@ -362,12 +378,17 @@ fn a_proof_minted_for_one_tenant_does_not_cover_the_others_grant() -> TestResult
 
 // ── The API surface ─────────────────────────────────────────────────────────
 
-/// Method names that would be a revocation or authority-generation operation.
+/// Method names that would be a revocation or authority-generation operation
+/// on the authority source.
 ///
-/// The crate contract denies these exist, and the denial is only true while it
-/// is checked: an authority generation is exactly the "shared policy handle"
-/// the issue's repair section describes, so adding one is a decision that has
-/// to bring the prose with it.
+/// The scan reads `gate.rs` and `cap.rs` only. `fn replace_grants` stays in
+/// this list even though #716 shipped that exact operation on `EcsBot`: the
+/// source must never shadow the bot's operation with one of its own, and the
+/// other eight names are still denied everywhere. The crate contract denies
+/// these on the source, and the denial is only true while it is checked: an
+/// authority generation is exactly the "shared policy handle" the issue's
+/// repair section describes, so adding one is a decision that has to bring
+/// the prose with it.
 const REVOCATION_OPERATIONS: [&str; 9] = [
     "fn revoke",
     "fn withdraw",
@@ -485,6 +506,22 @@ const DENIALS: [&str; 7] = [
     "no in process revocation",
     // `the name is wrong for what exists` — the security-posture row.
     "wrong for what exists",
+];
+
+/// Phrases that tie a mention to the operation that now exists.
+///
+/// `EcsBot::replace_grants` (#716) swaps the retained set between ticks and
+/// reports what it withdrew, so a mention written about that operation is the
+/// operation's own documentation rather than a claim with nothing behind it.
+/// Flattened text turns `replace_grants` into `replace grants`, which every
+/// spelling of the call carries.
+const OPERATION: [&str; 3] = [
+    // The operation, in any spelling: `replace_grants`, `EcsBot::replace_grants`.
+    "replace grants",
+    // Its report: `GrantReplacement::withdrawn` / `added`.
+    "grant replacement",
+    // The property it implements, named as the guide names it.
+    "live revocation",
 ];
 
 /// Phrases that show the mention is about a different subject.
@@ -631,6 +668,7 @@ fn unqualified_mentions(file: &str, text: &str) -> Vec<String> {
         let qualified = DENIALS
             .iter()
             .chain(OTHER_SUBJECTS.iter())
+            .chain(OPERATION.iter())
             .any(|phrase| window.contains(phrase));
         if !qualified {
             flagged.push(format!("{file}: {window}"));
@@ -717,6 +755,16 @@ fn the_claim_guard_flags_the_claim_it_was_written_for() -> TestResult {
         unqualified_mentions("synthetic.md", &denied).is_empty(),
         "a claim that carries the denial must pass: {:#?}",
         unqualified_mentions("synthetic.md", &denied)
+    );
+
+    // The operation's own documentation is not a claim: a mention that names
+    // `replace_grants` passes, so the guard keeps refusing unqualified claims
+    // without forbidding the operation's manual.
+    let operated = "revocation is EcsBot::replace_grants, which swaps the retained set and reports grant replacement";
+    assert!(
+        unqualified_mentions("synthetic.md", operated).is_empty(),
+        "a mention tied to the shipped operation must pass: {:#?}",
+        unqualified_mentions("synthetic.md", operated)
     );
 
     // Both spellings of the family, because each earlier version of this scan
@@ -811,7 +859,8 @@ fn no_first_party_text_claims_revocation_this_crate_lacks() -> TestResult {
         flagged.is_empty(),
         "these mentions read as revocation claims, and no operation backs them:\n{flagged:#?}\n\
          Each mention must sit in text that denies the operation (`{DENIALS:?}`), or in one that \
-         shows it is about another subject (`{OTHER_SUBJECTS:?}`), or the file must be listed in \
+         shows it is about another subject (`{OTHER_SUBJECTS:?}`), or in one that ties it to the \
+         shipped operation (`{OPERATION:?}`), or the file must be listed in \
          `NOT_AUTHORITY_CLAIMS` with the reason it is not a claim about this crate"
     );
     Ok(())

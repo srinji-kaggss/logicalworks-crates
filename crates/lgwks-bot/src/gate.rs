@@ -201,6 +201,63 @@ impl GrantSet {
     pub(crate) fn caps(&self) -> impl Iterator<Item = &Cap> {
         self.granted.iter()
     }
+
+    /// The [`GrantReplacement`] `next` reports against this set: what it
+    /// withdraws and adds, each sorted by dotted name, so two runs over the
+    /// same pair of sets report the same lists.
+    ///
+    /// [`EcsBot::replace_grants`](crate::ecs::EcsBot::replace_grants) is the one caller:
+    /// a bot that swaps its retained set reports exactly this, which is what
+    /// makes the narrowing auditable. It lives at the end of this `impl` so
+    /// the line numbers the guides cite above it never move for it.
+    pub(crate) fn difference(&self, next: &GrantSet) -> GrantReplacement {
+        let mut withdrawn: Vec<Cap> = self
+            .granted
+            .iter()
+            .filter(|cap| !next.grants(cap))
+            .cloned()
+            .collect();
+        let mut added: Vec<Cap> = next
+            .granted
+            .iter()
+            .filter(|cap| !self.grants(cap))
+            .cloned()
+            .collect();
+        withdrawn.sort();
+        added.sort();
+        GrantReplacement { withdrawn, added }
+    }
+}
+
+/// What swapping a built bot's grant set withdrew and added.
+///
+/// Returned by [`EcsBot::replace_grants`](crate::ecs::EcsBot::replace_grants): the two lists
+/// that tell an operator what changed, so revocation is auditable rather than
+/// silent. Both lists are sorted by dotted name. It lives after the `GrantSet`
+/// implementation for the same reason `difference` lives at the end of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GrantReplacement {
+    /// Capabilities the bot held that the new set does not grant.
+    withdrawn: Vec<Cap>,
+    /// Capabilities the new set grants that the bot did not hold.
+    added: Vec<Cap>,
+}
+
+impl GrantReplacement {
+    /// Capabilities the bot held that the new set does not grant, sorted by
+    /// dotted name. A capability named here is denied on the bot's next call.
+    #[must_use]
+    pub fn withdrawn(&self) -> &[Cap] {
+        &self.withdrawn
+    }
+
+    /// Capabilities the new set grants that the bot did not hold, sorted by
+    /// dotted name.
+    #[must_use]
+    pub fn added(&self) -> &[Cap] {
+        &self.added
+    }
 }
 
 #[cfg(test)]

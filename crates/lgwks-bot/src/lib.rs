@@ -27,9 +27,11 @@
 //! minted from a grant that named a lifetime lapses once that lifetime has
 //! passed, but the lifetime is fixed at the mint and a bot mints afresh on
 //! every call, so it bounds a proof in hand rather than a running bot. Narrowing
-//! a running bot's authority needs a mechanism this crate does not have yet,
-//! and the boundary is spelled out under "Authority is a snapshot" in the crate
-//! `README.md`.
+//! a running bot is one operation: [`Bot::replace_grants`](crate::Bot::replace_grants)
+//! swaps the retained set between ticks, atomically with respect to them, and
+//! reports the capabilities it withdrew — which the next tick's calls are denied
+//! for. Replacing the caller's set is still not that operation, and the boundary
+//! is spelled out under "Authority is a snapshot" in the crate `README.md`.
 //!
 //! `Evaluate` takes no proof: it is pure (boolean in, boolean out) with no
 //! side effect to gate.
