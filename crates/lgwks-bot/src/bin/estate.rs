@@ -12,6 +12,7 @@ use std::io::Write as _;
 use lgwks_bot::gate::GrantReplacement;
 use lgwks_bot::rt::estate::{Estate, EstateError, EstateReport};
 use lgwks_bot::rt::runtime::Runtime;
+use lgwks_bot::rt::supervise::TaskId;
 use lgwks_bot::spec::EffectScope;
 use lgwks_bot::task::{Disposition, task};
 use lgwks_bot::verb::{Execute, Observe};
@@ -357,59 +358,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The #703 owner pattern on the shipped artifact: place probe tasks on the
-    // estate's own supervisor, reconcile the tracked set through the same
-    // accessors an owner reads, drain, and require nothing tracked afterwards.
+    // estate's own supervisor and reconcile the tracked set through the same
+    // accessors an owner reads. Nothing here depends on scheduler timing: the
+    // tracked set changes only on this thread (spawn, reap, wait_idle join),
+    // so a snapshot and the accessors read beside it always agree, and
+    // `wait_idle` ends every placed body before the drain counts its reports.
     // Every number below is asserted, so a lost report fails the smoke rather
     // than parking an owner.
     let mut tracked_estate = Estate::supervised("acme", 8)?;
+    let mut seen: Vec<TaskId> = Vec::new();
     let tracking = driver.block_on(async {
         let supervisor = tracked_estate.supervisor()?;
         for _ in 0..3 {
             supervisor.spawn(|_| async {}).await;
         }
+        // One state read three ways, with no entry point between the reads
+        // that could reap: a listed task is tracked, always.
         let snapshot = supervisor.snapshot();
-        let live = snapshot.live().len();
-        let tracked = supervisor.in_flight();
-        let listed = live.saturating_add(snapshot.live_truncated());
-        let mut states = 0usize;
-        let mut ids = Vec::new();
-        for task in snapshot.live() {
-            ids.push(task.task);
-            if supervisor.task_state(task.task).is_some() {
-                states = states.saturating_add(1);
+        if supervisor.in_flight()
+            != snapshot.live().len().saturating_add(snapshot.live_truncated())
+        {
+            record(
+                &mut mismatch,
+                format!(
+                    "the tracking accessors disagree with the snapshot: in_flight={} listed={} truncated={}",
+                    supervisor.in_flight(),
+                    snapshot.live().len(),
+                    snapshot.live_truncated(),
+                ),
+            );
+        }
+        for live in snapshot.live() {
+            seen.push(live.task);
+            if supervisor.task_state(live.task).is_none() {
+                record(
+                    &mut mismatch,
+                    format!("a listed task has no state: {}", live.task.get()),
+                );
             }
         }
+        // Every placed body ends here, never on a timer: `wait_idle` joins
+        // what the spawns' own reaps have not already joined, and the roomy
+        // bound keeps every report. Totals come from the supervisor's own
+        // counters, so a body absorbed early still counts exactly once.
+        supervisor.wait_idle().await;
         supervisor.reap();
         let mut drained = 0usize;
         while supervisor.next_report().is_some() {
             drained = drained.saturating_add(1);
         }
-        let mut still_tracked = 0usize;
-        for task in &ids {
-            if supervisor.task_state(*task).is_some() {
-                still_tracked = still_tracked.saturating_add(1);
-            }
-        }
-        Some((
-            tracked,
-            listed,
-            states,
-            live,
-            drained,
-            still_tracked,
-            supervisor.in_flight(),
-        ))
+        let stats = supervisor.stats();
+        Some((stats.spawned, stats.completed, drained, supervisor.in_flight()))
     });
     match tracking {
-        Some((tracked, listed, states, live, drained, still_tracked, live_now)) => {
+        Some((spawned, completed, drained, live_now)) => {
             say(&format!(
-                "tracking: tracked={tracked} listed={listed} states={states} drained={drained} live_now={live_now}"
+                "tracking: placed=3 spawned={spawned} completed={completed} drained={drained} live_now={live_now}"
             ))?;
-            if tracked != listed || states != live {
+            if spawned != 3 || completed != 3 {
                 record(
                     &mut mismatch,
                     format!(
-                        "the tracking accessors disagree with the snapshot: tracked={tracked} listed={listed} states={states} live={live}"
+                        "three placed tasks did not end exactly once: spawned={spawned} completed={completed}"
                     ),
                 );
             }
@@ -419,12 +429,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     format!("three placed probe tasks drained {drained} reports, not 3"),
                 );
             }
-            if still_tracked != 0 || live_now != 0 {
+            if live_now != 0 {
                 record(
                     &mut mismatch,
-                    format!(
-                        "the drain left {still_tracked} tasks with a state and {live_now} tracked"
-                    ),
+                    format!("the drain left {live_now} tasks tracked"),
                 );
             }
         }
@@ -433,6 +441,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut mismatch,
                 "the supervised tier has no supervisor to track".to_owned(),
             );
+        }
+    }
+    // Joins are consumptive: every task the snapshot listed above left the
+    // set through a join, so each has a report and no state.
+    if let Some(supervisor) = tracked_estate.supervisor() {
+        for task in &seen {
+            if supervisor.task_state(*task).is_some() {
+                record(
+                    &mut mismatch,
+                    format!("a joined task still has a state: {}", task.get()),
+                );
+            }
         }
     }
 
