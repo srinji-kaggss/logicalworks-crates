@@ -59,6 +59,10 @@ carries a symbol is in [`CHANGELOG.md`](../../CHANGELOG.md), with the 3.0.0
 migration notes under [`docs/changelog/`](../../docs/changelog). The minimum
 supported Rust version is 1.98.
 
+## Boundaries and failure
+
+Async-client limits are in [distributed-mesh boundaries](../../docs/distributed-boundaries.md); background bounds in [bounded background work](../../docs/guides/lgwks-bot/background-work.md); tick failures in [what a failed tick means](../../docs/guides/lgwks-bot/failures.md).
+
 ## License
 
 MPL-2.0 — Copyright 2026 Logical Works Incorporated
