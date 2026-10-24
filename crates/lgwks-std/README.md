@@ -72,6 +72,7 @@ The feature table, module reference, JSON and RON decoder notes, entropy target
 rules, walk threat models, time profile and glob text semantics are in the
 [reference](../../docs/guides/lgwks-std/reference.md) and the
 [time and glob notes](../../docs/guides/lgwks-std/time-and-glob.md).
+Boundaries: [distributed-mesh boundaries](../../docs/distributed-boundaries.md), [bounded background work](../../docs/guides/lgwks-bot/background-work.md), [what a failed tick means](../../docs/guides/lgwks-bot/failures.md).
 
 ## Dependency philosophy
 
@@ -96,8 +97,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
   same stream to JSON lines. `attributes` stays off, so `#[instrument]` and its
   proc-macro stack do not enter this crate.
 
-`core` alone carries zero external dependencies; the default build is `core`
-plus `trace`. Every other feature flag is one capability and one stack.
+`core` alone carries zero external dependencies; the default build is `core` plus `trace`. Every other feature flag is one capability and one stack.
 
 ## Minimum supported Rust version
 
