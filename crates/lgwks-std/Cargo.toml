@@ -136,6 +136,7 @@ test = true
 # writes `unsafe`).
 [lints.rust]
 missing_docs = "deny"
+# scan-approved: INV-STD-UNSAFE-1 — the direct syscalls behind FFI isolation, held closed by the two tests named above.
 unsafe_code = "allow"
 unused_must_use = "forbid"
 improper_ctypes = "forbid"

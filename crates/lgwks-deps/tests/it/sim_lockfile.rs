@@ -192,7 +192,12 @@ fn dress(rng: &mut Rng, noisy: bool, line: &str) -> String {
 }
 
 /// Lines the reader must ignore inside a block, drawn when `noisy`.
-fn block_noise(rng: &mut Rng, noisy: bool, out: &mut Rendered) {
+///
+/// `array_open` says the block has not yet been given a `dependencies` array.
+/// A key defined twice in one table is invalid TOML (1.0.0, "Keys"), and the
+/// reader refuses it as it refuses a second `name`, so the array is written at
+/// most once per block.
+fn block_noise(rng: &mut Rng, noisy: bool, array_open: &mut bool, out: &mut Rendered) {
     if !noisy {
         return;
     }
@@ -203,7 +208,8 @@ fn block_noise(rng: &mut Rng, noisy: bool, out: &mut Rendered) {
         1 => {
             out.push("# a comment Cargo never writes".to_owned());
         }
-        2 => {
+        2 if *array_open => {
+            *array_open = false;
             out.push("dependencies = [".to_owned());
             out.push(" \"serde\",".to_owned());
             out.push(" \"libc 0.2.170\",".to_owned());
@@ -265,12 +271,13 @@ fn render_block(
     let header = out.push("[[package]]".to_owned());
     out.layout.headers.push(header);
     let mut declared = Vec::new();
+    let mut array_open = true;
     let mut keys = key_lines(package);
     if noisy && keys.len() > 1 && rng.coin() {
         keys.swap(0, 1);
     }
     for (key, line) in keys {
-        block_noise(rng, noisy, out);
+        block_noise(rng, noisy, &mut array_open, out);
         let Some((written, seen)) = faulted_line(fault, index, key, line, package.name) else {
             continue;
         };
@@ -285,7 +292,7 @@ fn render_block(
         let number = out.push(format!("{key} = \"again\""));
         out.layout.duplicate = Some(number);
     }
-    block_noise(rng, noisy, out);
+    block_noise(rng, noisy, &mut array_open, out);
     out.layout.keys.push(declared);
 }
 

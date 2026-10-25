@@ -82,6 +82,11 @@ authored edge still resolves from a registry or git source is refused by name as
 debugger no longer rides the default trace surface. `--json` writes the report
 to stdout and leaves trace events on stderr.
 
+`freshness` asks crates.io's sparse index about every locked package, 32 at a time
+(`--jobs N`, `--index URL`). A pre-release is offered only to a lock already on
+one, a yanked version never, and each row names the direct dependency it comes
+through (`via`). Exit 0 is current, 1 behind, 2 the check did not finish.
+
 ### Register syntax
 
 `contract/APPROVED.toml` and `contract/INVARIANTS.toml` use the same strict
@@ -105,9 +110,8 @@ enforced.
 
 ## The other crates
 
-Five crates ship from this repository and each is usable on its own. The
-[repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
-lists them and indexes the design documents.
+Logical Works Incorporated publishes `lgwks_deps` as one of five independently versioned crates in [logicalworks-crates](https://github.com/srinji-kaggss/logicalworks-crates#readme): `lgwks_std`, `lgwks_bot`, `lgwks_ast`, `lgwks_macros` and `lgwks_deps`.
+[Should I use logicalworks-crates?](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md) says when to reach for each one and when to skip it.
 
 ## License
 

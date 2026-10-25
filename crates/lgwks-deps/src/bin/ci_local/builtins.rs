@@ -426,7 +426,8 @@ fn declared_in_manifest(context: &Context<'_>) -> Result<BTreeSet<String>, GateE
     )?))
 }
 
-/// README dependency philosophy and version pins track the manifests.
+/// README dependency philosophy and version pins track the manifests, and every
+/// crate README carries the publisher block (`readme_block`).
 pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError> {
     let manifest_deps = declared_in_manifest(context)?;
     let readme = read(&context.root.join("crates/lgwks-std/README.md"))?;
@@ -483,16 +484,20 @@ pub(super) fn contract_drift(context: &Context<'_>) -> Result<Verdict, GateError
             }
         }
     }
-    if bad.is_empty() {
-        Ok(pass(
-            "README dependency philosophy and version pins track the manifests",
-        ))
-    } else {
-        Ok(refuse(format!(
-            "Stale README version pins:\n{}",
-            bad.join("\n")
-        )))
+    let gaps = super::readme_block::gaps(context.root)?;
+    if bad.is_empty() && gaps.is_empty() {
+        return Ok(pass(
+            "README dependency philosophy and version pins track the manifests; each crate README names its publisher and the front page links llms.txt",
+        ));
     }
+    let mut refusals = Vec::new();
+    if !bad.is_empty() {
+        refusals.push(format!("Stale README version pins:\n{}", bad.join("\n")));
+    }
+    if !gaps.is_empty() {
+        refusals.push(format!("README publisher blocks:\n{}", gaps.join("\n")));
+    }
+    Ok(refuse(refusals.join("\n")))
 }
 
 /// The fenced rust blocks of `section`.

@@ -10,7 +10,10 @@
 //! trailing comments — because a spelling skipped is a package dropped or a
 //! registry crate read as local. Anything outside the subset is skipped rather
 //! than guessed at, and a `[[package]]` block missing a name is reported,
-//! never silently dropped.
+//! never silently dropped. The one array it reads is `dependencies`, on one
+//! line or many with comments between the entries; a list that is not a closed
+//! run of quoted strings is refused, because an entry skipped is an edge the
+//! graph would not show.
 //!
 //! A package with no `source` key is local: a workspace member or a path
 //! dependency. That is Cargo's own encoding of "this came from the filesystem,
@@ -21,8 +24,9 @@
 
 /// One entry from the resolved dependency graph.
 ///
-/// Non-exhaustive: the audit reads `name`, `version`, and `local`, so a future
-/// key Cargo adds to a package block is an additive change here.
+/// Non-exhaustive: the audit reads `name`, `version`, `source`, `checksum` and
+/// `dependencies`, so a future key Cargo adds to a package block is an additive
+/// change here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Resolved {
@@ -30,13 +34,18 @@ pub struct Resolved {
     name: String,
     /// Resolved version.
     version: String,
-    /// True when the package has no `source` key, meaning Cargo resolved it
-    /// from the filesystem: a workspace member or a path dependency.
-    local: bool,
+    /// The `source` key when present. A package with none is local: Cargo
+    /// resolved it from the filesystem, as a workspace member or a path
+    /// dependency.
+    source: Option<String>,
     /// The `checksum` key when present: sha256 of the `.crate` file for
     /// registry packages. Absent for local packages and for git sources,
     /// which Cargo tracks by revision instead.
     checksum: Option<String>,
+    /// The `dependencies` entries as written, in order: `name`, `name version`
+    /// or `name version (source)`, the longer forms only where the shorter one
+    /// would name two packages. Empty when the block has none.
+    dependencies: Vec<String>,
 }
 
 impl Resolved {
@@ -61,7 +70,7 @@ impl Resolved {
     /// member or a path dependency, which is a package with no `source` key.
     #[must_use]
     pub const fn is_local(&self) -> bool {
-        self.local
+        self.source.is_none()
     }
 
     /// The `checksum` key when present: sha256 of the `.crate` file for a
@@ -70,6 +79,21 @@ impl Resolved {
     #[must_use]
     pub fn checksum(&self) -> Option<&str> {
         self.checksum.as_deref()
+    }
+
+    /// The `source` key when present, as written: `registry+<url>`,
+    /// `sparse+<url>` or `git+<url>`. `None` exactly when [`Self::is_local`].
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// The `dependencies` entries as the block writes them, in order. An entry
+    /// is a package name, optionally followed by its version and its source in
+    /// parentheses when the name alone is ambiguous in this lock.
+    #[must_use]
+    pub fn dependencies(&self) -> &[String] {
+        &self.dependencies
     }
 }
 
@@ -109,6 +133,17 @@ pub enum LockError {
         /// One-based line of the second assignment.
         line: usize,
     },
+    /// A `dependencies` array that is not a closed list of quoted strings.
+    ///
+    /// Refused rather than read short: an entry dropped from the list is an edge
+    /// the dependency graph never shows, and a file that ends inside the array
+    /// is a truncated lock, which is the shape this reader refuses everywhere
+    /// else.
+    UnreadableDependencies {
+        /// One-based line of the offending text, or of the line that opened an
+        /// array the file never closed.
+        line: usize,
+    },
 }
 
 impl std::fmt::Display for LockError {
@@ -126,6 +161,12 @@ impl std::fmt::Display for LockError {
                 write!(
                     f,
                     "line {line}: {key:?} is assigned twice in one [[package]] block"
+                )
+            }
+            Self::UnreadableDependencies { line } => {
+                write!(
+                    f,
+                    "line {line}: the `dependencies` array is not a closed list of quoted strings"
                 )
             }
         }
@@ -155,12 +196,19 @@ struct Pending {
     /// The `version` key. A block that omits it is refused at its own line
     /// rather than reported with a version no line declared.
     version: Option<String>,
-    /// Whether a `source` key was seen. Its absence is Cargo's encoding of a
-    /// filesystem-resolved package, which is what `Resolved::local` reports.
-    has_source: bool,
+    /// The `source` key. Its absence is Cargo's encoding of a
+    /// filesystem-resolved package, which is what `Resolved::is_local` reports.
+    source: Option<String>,
     /// The `checksum` key, present only for registry packages; git sources are
     /// tracked by revision and carry none.
     checksum: Option<String>,
+    /// The `dependencies` entries read so far, in order.
+    dependencies: Vec<String>,
+    /// Whether a `dependencies` key was seen, so a second one is refused.
+    has_dependencies: bool,
+    /// One-based line of the `dependencies = [` that has not closed yet, while
+    /// the reader is inside that array.
+    array_opened: Option<usize>,
     /// Whether the reader is inside a `[[package]]` block. False for top-level
     /// keys and for every other table.
     open: bool,
@@ -212,19 +260,80 @@ fn apply_key_value(
     let already = match key {
         "name" => pending.name.replace(value.to_owned()).is_some(),
         "version" => pending.version.replace(value.to_owned()).is_some(),
-        "source" => core::mem::replace(&mut pending.has_source, true),
+        "source" => pending.source.replace(value.to_owned()).is_some(),
         "checksum" => pending.checksum.replace(value.to_owned()).is_some(),
         _ => false,
     };
     if already {
-        let refusal = Err(LockError::DuplicateKey {
-            key: key.to_owned(),
-            line,
-        });
-        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_key_value: a package key is assigned twice");
-        return refusal;
+        return duplicate(key, line);
     }
     Ok(())
+}
+
+/// The refusal for a key assigned twice in one block, logged where it is made.
+fn duplicate(key: &str, line: usize) -> Result<(), LockError> {
+    let refusal = Err(LockError::DuplicateKey {
+        key: key.to_owned(),
+        line,
+    });
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "apply_key_value: a package key is assigned twice");
+    refusal
+}
+
+/// The refusal for a `dependencies` array that is not a closed list of quoted
+/// strings, logged where it is made.
+fn unreadable<T>(line: usize) -> Result<T, LockError> {
+    let refusal = Err(LockError::UnreadableDependencies { line });
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "a dependencies array is not a closed list of quoted strings");
+    refusal
+}
+
+/// The text after `dependencies = [` when `line` opens that array, in any
+/// spelling of the key TOML allows.
+fn dependencies_opener(line: &str) -> Option<&str> {
+    let (name, rest) = key(line)?;
+    if name != "dependencies" {
+        return None;
+    }
+    rest.trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .strip_prefix('[')
+}
+
+/// Reads the quoted entries of the `dependencies` array out of `text`, which is
+/// the rest of one line, into `pending`.
+///
+/// `true` when the closing bracket was on this line and `false` when the line
+/// ended inside the array. Anything but a quoted string, a comma, a comment or
+/// the closing bracket is a refusal at `line`: an entry skipped is an edge the
+/// graph would not show.
+fn read_entries(text: &str, line: usize, pending: &mut Pending) -> Result<bool, LockError> {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with('#') {
+            return Ok(false);
+        }
+        if let Some(tail) = rest.strip_prefix(']') {
+            return if ends_line(tail) {
+                Ok(true)
+            } else {
+                unreadable(line)
+            };
+        }
+        if let Some(tail) = rest.strip_prefix(',') {
+            rest = tail;
+            continue;
+        }
+        match quoted(rest) {
+            Some((entry, tail)) => {
+                pending.dependencies.push(entry.to_owned());
+                rest = tail;
+            }
+            None => return unreadable(line),
+        }
+    }
 }
 
 /// Feeds one raw lockfile line into the reader.
@@ -240,6 +349,15 @@ fn process_line(
     out: &mut Vec<Resolved>,
 ) -> Result<(), LockError> {
     let line = raw_line.trim();
+    // `index` is zero-based and bounded by the input length (see
+    // `handle_header`), so the one-based line cannot saturate.
+    let at = index.saturating_add(1);
+    if pending.array_opened.is_some() {
+        if read_entries(line, at, pending)? {
+            pending.array_opened = None;
+        }
+        return Ok(());
+    }
     if line.starts_with('[') {
         handle_header(line, index, pending, out)?;
         return Ok(());
@@ -247,10 +365,17 @@ fn process_line(
     if !pending.open {
         return Ok(());
     }
+    if let Some(after) = dependencies_opener(line) {
+        if core::mem::replace(&mut pending.has_dependencies, true) {
+            return duplicate("dependencies", at);
+        }
+        if !read_entries(after, at, pending)? {
+            pending.array_opened = Some(at);
+        }
+        return Ok(());
+    }
     if let Some((key, value)) = key_and_value(line) {
-        // `index` is zero-based and bounded by the input length (see
-        // `handle_header`), so the one-based line cannot saturate.
-        apply_key_value(key, value, index.saturating_add(1), pending)?;
+        apply_key_value(key, value, at, pending)?;
     }
     Ok(())
 }
@@ -279,6 +404,9 @@ fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError
     if !pending.open {
         return Ok(());
     }
+    if let Some(opened) = pending.array_opened {
+        return unreadable(opened);
+    }
     let name = match pending.name.take() {
         Some(name) => name,
         None => {
@@ -302,8 +430,9 @@ fn flush(pending: &mut Pending, out: &mut Vec<Resolved>) -> Result<(), LockError
     out.push(Resolved {
         name,
         version,
-        local: !pending.has_source,
+        source: pending.source.take(),
         checksum: pending.checksum.take(),
+        dependencies: core::mem::take(&mut pending.dependencies),
     });
     pending.open = false;
     Ok(())
@@ -494,5 +623,88 @@ version = "0.1.0"
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].name(), "lgwks_std");
         Ok(())
+    }
+
+    /// The spelling Cargo writes: one quoted entry per line, the longer forms
+    /// only where a name alone would be ambiguous.
+    #[test]
+    fn a_dependencies_array_is_read_in_order_with_the_source_beside_it() -> TestResult {
+        let input = "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\ndependencies = [\n \"b\",\n \"c 2.0.0\",\n \"c 3.0.0 (registry+https://github.com/rust-lang/crates.io-index)\",\n]\n";
+        let pkgs = parse(input)?;
+        assert_eq!(
+            pkgs[0].dependencies(),
+            [
+                "b",
+                "c 2.0.0",
+                "c 3.0.0 (registry+https://github.com/rust-lang/crates.io-index)"
+            ]
+        );
+        assert_eq!(
+            pkgs[0].source(),
+            Some("registry+https://github.com/rust-lang/crates.io-index")
+        );
+        Ok(())
+    }
+
+    /// TOML allows the whole array on one line, a quoted key and comments.
+    #[test]
+    fn a_dependencies_array_is_read_in_the_other_spellings_toml_allows() -> TestResult {
+        let input = "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n\"dependencies\" = [\"b\", 'c 1.0.0', ] # two\n\n[[package]]\nname = \"d\"\nversion = \"1.0.0\"\ndependencies = [ # open\n \"e\", # one\n # between\n \"f\" ,\n ] # closed\n";
+        let pkgs = parse(input)?;
+        assert_eq!(pkgs[0].dependencies(), ["b", "c 1.0.0"]);
+        assert_eq!(pkgs[1].dependencies(), ["e", "f"]);
+        Ok(())
+    }
+
+    /// A key outside a package block is never a package's dependency.
+    #[test]
+    fn a_dependencies_key_outside_a_package_block_is_not_read() -> TestResult {
+        let input =
+            "[metadata]\ndependencies = [\"x\"]\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n";
+        let pkgs = parse(input)?;
+        assert!(pkgs[0].dependencies().is_empty(), "the block declared none");
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_dependencies_key_is_refused_at_its_line() {
+        let input = "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\ndependencies = [\"b\"]\ndependencies = [\"c\"]\n";
+        assert_eq!(
+            parse(input),
+            Err(LockError::DuplicateKey {
+                key: "dependencies".to_owned(),
+                line: 5
+            })
+        );
+    }
+
+    /// A file that ends inside the array is a truncated lock, refused at the
+    /// line that opened the array rather than read with the entries so far.
+    #[test]
+    fn an_array_the_file_never_closes_is_refused_at_its_opening_line() {
+        let input = "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\ndependencies = [\n \"b\",\n";
+        assert_eq!(
+            parse(input),
+            Err(LockError::UnreadableDependencies { line: 4 })
+        );
+    }
+
+    /// Anything but quoted strings, commas, comments and the closing bracket is
+    /// refused at its own line.
+    #[test]
+    fn an_array_holding_anything_else_is_refused_at_its_line() {
+        for (body, line) in [
+            ("dependencies = [\n bare,\n]\n", 5),
+            ("dependencies = [\n \"b\"\n] junk\n", 6),
+            ("dependencies = [ \"b\" } ]\n", 4),
+            ("dependencies = [\n \"b\n]\n", 5),
+        ] {
+            let input = format!("[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n{body}");
+            assert_eq!(
+                parse(&input),
+                Err(LockError::UnreadableDependencies { line }),
+                "{body:?}"
+            );
+        }
     }
 }

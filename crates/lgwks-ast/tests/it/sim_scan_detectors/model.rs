@@ -10,6 +10,8 @@ use lgwks_ast::scan::scan_source;
 
 use crate::sim::{Rng, Trace, receipt};
 
+use super::allow::{allow_block, cfg_attr_block};
+
 /// What a scenario reports when a precondition did not hold.
 pub(super) type TestResult = Result<(), Box<dyn Error>>;
 
@@ -58,7 +60,7 @@ pub(super) const CLIPPY_LINTS: [&str; 6] = [
 ];
 
 /// Lints an `allow` may name that are not clippy's: rustc's own and another
-/// tool's, which the rule leaves alone by contract.
+/// tool's, which silence exactly as a clippy lint does (#699).
 pub(super) const OTHER_LINTS: [&str; 5] = [
     "dead_code",
     "unused_variables",
@@ -69,6 +71,10 @@ pub(super) const OTHER_LINTS: [&str; 5] = [
 
 /// Lint levels that raise a lint rather than silence it.
 pub(super) const LOUD_LEVELS: [&str; 3] = ["deny", "warn", "forbid"];
+
+/// Lint levels that silence: `allow` suppresses the emission, and `expect`
+/// suppresses it while recording the expectation.
+pub(super) const SILENCING_LEVELS: [&str; 2] = ["allow", "expect"];
 
 /// Attributes that exempt a function from the try-chain rule: `test` as the
 /// last path segment, or any name starting `test_`.
@@ -100,8 +106,16 @@ pub(super) const FILLER_LINES: [&str; 4] = ["", "// filler", "/* filler */", "co
 /// What the model says one line must report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Expect {
-    /// An `allow` naming this clippy path.
-    Allow(String),
+    /// A silencing attribute at `level` naming this lint, written directly on
+    /// the item or inside a `cfg_attr`.
+    Allow {
+        /// The level that silenced: `allow` or `expect`.
+        level: &'static str,
+        /// The lint the attribute names.
+        lint: String,
+        /// Whether the attribute is written inside a `cfg_attr`.
+        nested: bool,
+    },
     /// A statement of `count` `?` operators in the function declared at
     /// `fn_offset` of the same block.
     Chain {
@@ -161,7 +175,19 @@ pub(super) struct File {
 pub(super) fn render(base: usize, offset: usize, wanted: &Expect) -> Finding {
     let line = base.saturating_add(offset);
     match *wanted {
-        Expect::Allow(ref lint) => (line, ALLOW, format!("#[allow({lint})]")),
+        Expect::Allow {
+            level,
+            ref lint,
+            nested,
+        } => (
+            line,
+            ALLOW,
+            if nested {
+                format!("#[cfg_attr(.., {level}({lint}))]")
+            } else {
+                format!("#[{level}({lint})]")
+            },
+        ),
         Expect::Chain { fn_offset, count } => (
             line,
             CHAIN,
@@ -286,67 +312,6 @@ pub(super) enum Lints {
     ClippyOnly,
     /// Never clippy's.
     OtherOnly,
-}
-
-/// A lint attribute at `level` naming one to four lints, written at
-/// `placement`, and one expected finding per clippy path when `level` is
-/// `allow`.
-pub(super) fn allow_block(
-    rng: &mut Rng,
-    index: u32,
-    placement: Placement,
-    level: &str,
-    lints: Lints,
-) -> Drawn<Block> {
-    let mut names = Vec::new();
-    let mut silenced = Vec::new();
-    for _ in 0..rng.between(1, 4) {
-        let clippy = match lints {
-            Lints::Mixed => rng.coin(),
-            Lints::ClippyOnly => true,
-            Lints::OtherOnly => false,
-        };
-        let table: &[&str] = if clippy { &CLIPPY_LINTS } else { &OTHER_LINTS };
-        let name = *rng.pick_named("lints", table)?;
-        names.push(name);
-        if clippy && level == "allow" {
-            silenced.push(name);
-        }
-    }
-    let attribute = format!("#[{level}({})]", names.join(", "));
-    let mut block = Block::default();
-    let at = match placement {
-        Placement::Item => {
-            let at = block.line(attribute);
-            block.line(format!("fn allowed_{index}() {{}}"));
-            at
-        }
-        Placement::Statement => {
-            block.line(format!("fn allowed_{index}() {{"));
-            let at = block.line(format!("    {attribute}"));
-            block.line("    let held = 1_u8;");
-            block.line("    drop(held);");
-            block.line("}");
-            at
-        }
-        Placement::Method => {
-            block.line(format!("impl Allowed{index} {{"));
-            let at = block.line(format!("    {attribute}"));
-            block.line("    fn method(&self) {}");
-            block.line("}");
-            at
-        }
-        Placement::TestFunction => {
-            block.line("#[test]");
-            let at = block.line(attribute);
-            block.line(format!("fn allowed_{index}() {{}}"));
-            at
-        }
-    };
-    for name in silenced {
-        block.want(at, Expect::Allow(name.to_owned()));
-    }
-    Ok(block)
 }
 
 // ── long-try-chain blocks ───────────────────────────────────────────────────
@@ -691,10 +656,16 @@ pub(super) fn mixed_block(rng: &mut Rng, index: u32) -> Drawn<Block> {
             let placement = *rng.pick_named("placements", &PLACEMENTS)?;
             let level = if rng.chance(150) {
                 *rng.pick_named("loud levels", &LOUD_LEVELS)?
-            } else {
+            } else if rng.coin() {
                 "allow"
+            } else {
+                "expect"
             };
-            allow_block(rng, index, placement, level, Lints::Mixed)
+            if rng.coin() {
+                cfg_attr_block(rng, index, placement, level, Lints::Mixed)
+            } else {
+                allow_block(rng, index, placement, level, Lints::Mixed)
+            }
         }
         1 => {
             let exempt = rng.chance(200);

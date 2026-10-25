@@ -10,7 +10,8 @@
 "crates/lgwks-ast/src/parser/language.rs" = 14
 "crates/lgwks-ast/src/parser/markdown.rs" = 1
 "crates/lgwks-ast/src/parser/walk.rs" = 6
-"crates/lgwks-ast/src/scan/mod.rs" = 7
+"crates/lgwks-ast/src/scan/manifest.rs" = 1
+"crates/lgwks-ast/src/scan/mod.rs" = 13
 "crates/lgwks-ast/src/script/find.rs" = 5
 "crates/lgwks-ast/src/script/json.rs" = 1
 "crates/lgwks-ast/src/script/lexicon.rs" = 23
@@ -159,7 +160,7 @@
 "crates/lgwks-deps/src/invariants/resolve.rs" = 2
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
 "crates/lgwks-deps/src/lib.rs" = 26
-"crates/lgwks-deps/src/lock.rs" = 7
+"crates/lgwks-deps/src/lock.rs" = 9
 "crates/lgwks-deps/src/metadata.rs" = 2
 "crates/lgwks-deps/src/metadata/capture.rs" = 2
 "crates/lgwks-deps/src/metadata/collect.rs" = 9

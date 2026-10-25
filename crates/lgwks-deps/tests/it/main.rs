@@ -19,6 +19,14 @@ mod sim;
 #[path = "../support/replay.rs"]
 mod replay;
 
+/// A `Cargo.lock` writer and the scratch directory to put it in.
+#[path = "../support/lock_fixture.rs"]
+mod lock_fixture;
+
+/// A sparse-index registry on a loopback port, for driving `freshness`.
+#[path = "../support/stub_index.rs"]
+mod stub_index;
+
 /// The estate's one seed substrate: the generator and the replay trace every
 /// workspace simulation draws from, so a seed means one stream in every crate.
 #[path = "../../../lgwks-bot/tests/sim/seed.rs"]
@@ -51,8 +59,10 @@ mod sdk_surface;
 #[cfg(unix)]
 mod sim_churn_slot;
 mod sim_dependency_policy;
+mod sim_freshness_cli;
 mod sim_invariant_register;
 mod sim_license_policy;
+mod sim_lock_dependencies;
 mod sim_lock_spellings;
 mod sim_lockfile;
 mod sim_metadata_dimensions;

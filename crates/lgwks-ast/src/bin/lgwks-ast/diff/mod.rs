@@ -31,7 +31,7 @@ use std::process::ExitCode;
 
 use lgwks_ast::script::{FlowShape, Kind, StepShape, read_source};
 
-use super::{USAGE, files_under, read_bounded};
+use super::{USAGE, Wanted, files_under, read_bounded};
 
 /// The comment an author adds to the head source to approve a widening.
 const APPROVAL_PREFIX: &str = "// lgwks-architecture-approved:";
@@ -235,8 +235,8 @@ fn is_directory(root: &Path) -> Result<bool, String> {
 /// not read.
 fn read_root(root: &Path) -> Result<Root, String> {
     let mut files = BTreeMap::new();
-    for file in files_under(root)? {
-        let text = read_bounded(&file)?;
+    for file in files_under(root, Wanted::Rust).map_err(|error| error.to_string())? {
+        let text = read_bounded(&file).map_err(|error| error.to_string())?;
         let invocations = read_source(&text).map_err(|refusal| located(&file, &refusal))?;
         let mut entry = FileMap {
             approvals: approvals(&text),
