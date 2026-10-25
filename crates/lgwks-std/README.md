@@ -115,6 +115,5 @@ when code or dependency requirements demand it.
 | [`lgwks_ast`](https://docs.rs/lgwks_ast) | Parse many languages into one AST type, with bounded traversal and typed diagnostics |
 | [`lgwks_deps`](https://docs.rs/lgwks_deps) | The audited storefront for third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
 
-The [repository README](https://github.com/srinji-kaggss/logicalworks-crates#readme)
-indexes the design documents. License: Apache-2.0, Copyright 2026 Logical Works
-Incorporated.
+Logical Works Incorporated publishes `lgwks_std` as one of five independently versioned crates in [logicalworks-crates](https://github.com/srinji-kaggss/logicalworks-crates#readme): `lgwks_std`, `lgwks_bot`, `lgwks_ast`, `lgwks_macros` and `lgwks_deps`.
+[Should I use logicalworks-crates?](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md) says when to reach for each one and when to skip it. License: Apache-2.0, Copyright 2026 Logical Works Incorporated.

@@ -52,6 +52,7 @@ mod invariants;
 mod lanes;
 mod modules;
 mod process;
+mod readme_block;
 mod receipt;
 mod runners;
 mod scratch;
