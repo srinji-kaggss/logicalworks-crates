@@ -150,7 +150,9 @@ impl Subject {
     /// The model's verdict: the newest unyanked version, a pre-release only for a
     /// lock already on one, and stale when it outranks the lock.
     fn expected(&self) -> Expected {
-        if !self.listed {
+        // A file that lists no version at all is a hollow answer: whatever was
+        // locked was published, so nothing was learned and the row is an error.
+        if !self.listed || self.published.is_empty() {
             return Expected {
                 latest: None,
                 stale: false,
@@ -465,39 +467,52 @@ fn the_three_exit_codes_mean_current_behind_and_unfinished() -> TestResult {
 
 #[test]
 fn a_stale_package_is_an_answer_even_when_another_lookup_failed() -> TestResult {
-    let scratch = Scratch::new("stale-and-failed")?;
-    let stub = Stub::start(
-        &[
-            ("3/o/old", Reply::Body(index_line("old", "2.0.0", false))),
-            ("3/b/bad", Reply::Status(500)),
-        ],
-        0,
-    )?;
-    let root = scratch.write_lock(&[
-        Package::local("app", &["old", "bad"]),
-        Package::registry("old", "1.0.0", &[]),
-        Package::registry("bad", "1.0.0", &[]),
-    ])?;
-    let outcome = freshness(&root, &["--json", "--index", &stub.url()])?;
-    check(outcome.code == Some(1), streams(&outcome))?;
-    let found = rows(&outcome)?;
-    check(
-        found.iter().filter(|row| row.stale).count() == 1,
-        format!("{found:?}"),
-    )?;
-    check(
-        found
-            .iter()
-            .any(|row| row.name == "bad" && row.error.as_deref() == Some("HTTP 500")),
-        format!("the failed lookup keeps its status: {found:?}"),
-    )?;
-    check(
-        outcome.stderr.contains("2 checked, 1 stale, 1 errors"),
-        format!(
-            "--json says why the code is not zero: {}",
-            streams(&outcome)
-        ),
-    )
+    // The other lookup fails two ways: a server error, and a registry that never
+    // finishes and is cut at the read cap. Either costs its own row only.
+    let failures = [
+        (Reply::Status(500), "HTTP 500"),
+        (Reply::Endless, "response larger than"),
+    ];
+    for (reply, reason) in failures {
+        let scratch = Scratch::new("stale-and-failed")?;
+        let stub = Stub::start(
+            &[
+                ("3/o/old", Reply::Body(index_line("old", "2.0.0", false))),
+                ("3/b/bad", reply),
+            ],
+            0,
+        )?;
+        let root = scratch.write_lock(&[
+            Package::local("app", &["old", "bad"]),
+            Package::registry("old", "1.0.0", &[]),
+            Package::registry("bad", "1.0.0", &[]),
+        ])?;
+        let outcome = freshness(&root, &["--json", "--index", &stub.url()])?;
+        check(outcome.code == Some(1), streams(&outcome))?;
+        let found = rows(&outcome)?;
+        check(
+            found.iter().filter(|row| row.stale).count() == 1,
+            format!("{reason}: {found:?}"),
+        )?;
+        check(
+            found.iter().any(|row| {
+                row.name == "bad"
+                    && row
+                        .error
+                        .as_deref()
+                        .is_some_and(|text| text.contains(reason))
+            }),
+            format!("the failed lookup keeps its reason, {reason}: {found:?}"),
+        )?;
+        check(
+            outcome.stderr.contains("2 checked, 1 stale, 1 errors"),
+            format!(
+                "--json says why the code is not zero: {}",
+                streams(&outcome)
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -667,6 +682,36 @@ fn a_registry_that_is_gone_is_an_unfinished_check_not_a_current_one() -> TestRes
         }),
         format!("{found:?}"),
     )
+}
+
+#[test]
+fn a_hollow_answer_is_an_unfinished_check_not_a_current_one() -> TestResult {
+    // The review of #754 found an empty 200, and a 200 of blank lines, printed
+    // as a row with no error and exit 0: a registry that said nothing counted
+    // as a dependency that is current.
+    let scratch = Scratch::new("hollow")?;
+    let (empty, root) = one_package(&scratch, "1.0.0", &[])?;
+    let blank = registry(&[("3/l/lib".to_owned(), "\n  \r\n\n".to_owned())], 0)?;
+    for (label, url) in [("empty", empty.url()), ("blank lines", blank.url())] {
+        let outcome = freshness(&root, &["--json", "--index", &url])?;
+        check(
+            outcome.code == Some(2),
+            format!("{label}: {}", streams(&outcome)),
+        )?;
+        let found = rows(&outcome)?;
+        check(
+            found.iter().all(|row| {
+                !row.stale
+                    && row.latest.is_none()
+                    && row
+                        .error
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("no version record"))
+            }),
+            format!("{label}: {found:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
