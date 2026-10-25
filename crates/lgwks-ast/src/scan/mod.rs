@@ -27,6 +27,12 @@
 //! rendering, which is canonical where token text is incidental (whitespace,
 //! trailing commas). Both sides of every comparison use the same function, so
 //! verdicts agree.
+//!
+//! [`scan_manifest`]: crate::scan::scan_manifest
+//! [`scan_source_with`]: crate::scan::scan_source_with
+//! [`scan_source`]: crate::scan::scan_source
+//! [`Rule`]: crate::scan::Rule
+//! [`Rule::ALL`]: crate::scan::Rule::ALL
 
 mod allow;
 mod binding;
