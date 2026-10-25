@@ -33,6 +33,9 @@
 //!   each verifying only its own review.
 //! - `retention_is_bounded_by_the_declared_ceiling`: what the adapter holds is
 //!   bounded by its declaration, not by what the child wrote.
+//! - `the_run_bound_outlasts_every_call_a_run_makes`: no host in this binary
+//!   declares a run bound shorter than the per-call bound times the calls a run
+//!   makes, so a loaded machine can slow a run and never change its verdict.
 //!
 //! `sim_review_pr.rs` and this file split the work deliberately: the first
 //! checks the *logic* exhaustively and cheaply, this one checks that the logic
@@ -61,7 +64,7 @@ use std::time::Duration;
 use lgwks_bot::domain::gh::{Gh, PullRequest, Repository};
 use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
 use lgwks_bot::script::Scope;
-use lgwks_bot::task::{Host, Report, Task, task};
+use lgwks_bot::task::{Host, MAX_TASK_DEADLINE, Report, Task, task};
 
 // Its own binary rather than a module of `it` (#272): the saturation CI job
 // runs only this file's tiers, and building the whole `it` binary for them put
@@ -87,9 +90,12 @@ use fake_gh::{FakeGh, HANG_BOUND, Scenario};
 
 // The families, by responsibility (the size law): the fault space and the
 // tenant, retention and cancellation families; the saturation machinery; the
-// subject fault space; and the subject sweeps and per-arm properties. The
-// fault enum, the run record and the harness stay here and the modules reach
-// them as descendants of this crate root.
+// subject fault space; the subject sweeps and per-arm properties; and the
+// ordering of the run bound against the call bound. The fault enum, the run
+// record and the harness stay here and the modules reach them as descendants
+// of this crate root.
+#[path = "sim_review_families/bounds.rs"]
+mod bounds;
 #[path = "sim_review_families/families.rs"]
 mod families;
 #[path = "sim_review_families/saturation.rs"]
@@ -380,12 +386,29 @@ fn text_hash(text: &str) -> u64 {
 
 // ── The harness ─────────────────────────────────────────────────────────────
 
-/// A host sized for a family's worst case, with a deadline generous enough that
-/// a test fails on a real hang rather than on the clock.
+/// A host sized for a family's worst case, bounded only by the host's own
+/// ceiling so a test fails on a real hang rather than on the clock.
 fn host() -> Result<Host, Box<dyn std::error::Error>> {
-    Ok(Host::builder("reviewer-sim")?
-        .max_concurrent_tasks(NonZeroUsize::new(64).ok_or("a non-zero ceiling")?)
-        .default_deadline(Duration::from_secs(60))
+    host_named("reviewer-sim", 64)
+}
+
+/// The one constructor every host in this binary comes from: `tasks` admitted at
+/// once, and a run bound that is the host's own ceiling.
+///
+/// `script::within` arms an engine timer as the real-time watchdog for either
+/// clock, so a host's deadline is a wall bound on the whole run. A run makes
+/// several `gh` calls, each already bounded by [`HANG_BOUND`] and each naming what
+/// it was reading when it was stopped. A run bound shorter than those calls
+/// together fires on a run whose every call is inside its own bound, and on a
+/// loaded host that run is slow, not hung: the same seed concluded
+/// `DeadlineExceeded` on one run and `Succeeded` on its replay (main CI run
+/// 40085291776, seeds 75 and 15, issue #751). The ceiling removes that verdict;
+/// the per-call bound and nextest's own termination remain the hang detectors,
+/// and `bounds::the_run_bound_outlasts_every_call_a_run_makes` holds the ordering.
+fn host_named(name: &str, tasks: usize) -> Result<Host, Box<dyn std::error::Error>> {
+    Ok(Host::builder(name)?
+        .max_concurrent_tasks(NonZeroUsize::new(tasks).ok_or("a non-zero ceiling")?)
+        .default_deadline(MAX_TASK_DEADLINE)
         .build()?)
 }
 

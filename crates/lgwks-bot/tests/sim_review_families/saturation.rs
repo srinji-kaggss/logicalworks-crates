@@ -7,16 +7,14 @@
 //! the saturation lane select by, are unchanged; the subject family's
 //! saturation test reaches the same `run_saturation_tier`.
 
-use std::num::NonZeroUsize;
-use std::time::Duration;
-
 use lgwks_bot::domain::gh::Gh;
 use lgwks_bot::review::{ReviewOutcome, ReviewRequest};
-use lgwks_bot::task::{Host, Report};
+use lgwks_bot::task::Report;
 
 use super::fake_gh::{FakeGh, Scenario};
 use super::{
-    BODY, CAPTURE, HEAD, TestResult, gh_spawned_directly, request, review_task_send, why_unknown,
+    BODY, CAPTURE, HEAD, TestResult, gh_spawned_directly, host_named, request, review_task_send,
+    why_unknown,
 };
 
 /// How many runs of a saturation tier share one receiver.
@@ -258,10 +256,7 @@ pub(super) fn run_saturation_tier(
             Ok(fake)
         })
         .collect::<Result<Vec<FakeGh>, std::io::Error>>()?;
-    let host = Host::builder("reviewer-saturation")?
-        .max_concurrent_tasks(NonZeroUsize::new(concurrency).ok_or("a non-zero ceiling")?)
-        .default_deadline(Duration::from_secs(300))
-        .build()?;
+    let host = host_named("reviewer-saturation", concurrency)?;
 
     let started = std::time::Instant::now();
     // Every input is built up front and owned, because a spawned task is
