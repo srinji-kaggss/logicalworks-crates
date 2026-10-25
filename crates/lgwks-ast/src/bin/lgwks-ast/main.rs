@@ -36,6 +36,7 @@ mod diff;
 #[cfg(feature = "scan")]
 mod scan;
 
+use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -266,11 +267,11 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
     }
     let mut readings = Vec::new();
     for root in &parsed.roots {
-        match files_under(root) {
+        match files_under(root, Wanted::Rust) {
             Ok(files) => readings.extend(files.into_iter().map(read_file)),
             Err(error) => readings.push(FileReading {
                 path: root.clone(),
-                outcome: Err(error),
+                outcome: Err(error.to_string()),
             }),
         }
     }
@@ -329,23 +330,114 @@ fn run_scan(
     Ok(ExitCode::from(EXIT_USAGE))
 }
 
-/// Every `.rs` file under `root`, in walk order, or `root` itself when it is a
-/// file.
+/// Which files a walk keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wanted {
+    /// Every `.rs` file: the input of the script verbs and the source scan.
+    Rust,
+    /// Every `Cargo.toml`: where a package lowers a lint for a whole table,
+    /// which the source scan cannot see (#699).
+    Manifest,
+}
+
+impl Wanted {
+    /// Whether a walked entry is one of the files this walk keeps.
+    fn keeps(self, path: &Path) -> bool {
+        match self {
+            Self::Rust => path.extension().is_some_and(|extension| extension == "rs"),
+            Self::Manifest => path.file_name().is_some_and(|name| name == "Cargo.toml"),
+        }
+    }
+}
+
+/// Why a tree could not be walked, or a file could not be read.
+///
+/// A caller decides on the cause, so the cause is a value: a root it cannot
+/// state is a different answer from a directory it cannot list, and a file past
+/// the byte bound is neither. The rendered forms are the ones the tool has
+/// always printed, so a reader of the log sees the same words.
+#[derive(Debug)]
+enum ReadingError {
+    /// The root could not be stated or read at all.
+    UnreadableRoot {
+        /// The root as the caller named it.
+        root: PathBuf,
+        /// Why it could not be read.
+        cause: io::Error,
+    },
+    /// A directory under the root could not be listed.
+    UnlistableRoot {
+        /// The root as the caller named it.
+        root: PathBuf,
+        /// Why the walk stopped.
+        cause: io::Error,
+    },
+    /// A file could not be stated or read, or is not UTF-8.
+    UnreadableFile {
+        /// The file as the caller named it.
+        path: PathBuf,
+        /// Why it could not be read.
+        cause: io::Error,
+    },
+    /// A file is past [`MAX_FILE_BYTES`].
+    TooLarge {
+        /// The file as the caller named it.
+        path: PathBuf,
+        /// The size it reports.
+        length: u64,
+    },
+}
+
+impl fmt::Display for ReadingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::UnreadableRoot {
+                ref root,
+                ref cause,
+            } => {
+                write!(formatter, "cannot read {}: {cause}", root.display())
+            }
+            Self::UnlistableRoot {
+                ref root,
+                ref cause,
+            } => {
+                write!(formatter, "cannot walk {}: {cause}", root.display())
+            }
+            Self::UnreadableFile {
+                ref path,
+                ref cause,
+            } => {
+                write!(formatter, "cannot read {}: {cause}", path.display())
+            }
+            Self::TooLarge { ref path, length } => write!(
+                formatter,
+                "{} is {length} bytes, past the {MAX_FILE_BYTES}-byte bound on one source file",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReadingError {}
+
+/// Every file of `wanted` under `root`, in walk order, or `root` itself when it
+/// is such a file.
 ///
 /// # Errors
 ///
-/// The root does not exist, or a directory under it could not be listed: a
-/// check that skipped an unreadable directory would report a clean tree it
-/// never read.
-fn files_under(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let metadata = match std::fs::metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            let refusal = format!("cannot read {}: {error}", root.display());
-            lgwks_std::trace::debug!(error = %refusal, "files_under: returning an error to the caller");
-            return Err(refusal);
-        }
-    };
+/// [`ReadingError::UnreadableRoot`] when the root does not exist, and
+/// [`ReadingError::UnlistableRoot`] when a directory under it could not be
+/// listed: a check that skipped an unreadable directory would report a clean
+/// tree it never read.
+fn files_under(root: &Path, wanted: Wanted) -> Result<Vec<PathBuf>, ReadingError> {
+    let metadata = std::fs::metadata(root).map_err(|cause| {
+        let refusal = ReadingError::UnreadableRoot {
+            root: root.to_path_buf(),
+            cause,
+        };
+        lgwks_std::trace::debug!(error = %refusal, "files_under: returning an error to the caller");
+        refusal
+    })?;
     if !metadata.is_dir() {
         return Ok(vec![root.to_path_buf()]);
     }
@@ -361,20 +453,17 @@ fn files_under(root: &Path) -> Result<Vec<PathBuf>, String> {
             Descend::Enter
         }
     })
-    .map_err(|error| {
-        let refusal = format!("cannot walk {}: {error}", root.display());
+    .map_err(|cause| {
+        let refusal = ReadingError::UnlistableRoot {
+            root: root.to_path_buf(),
+            cause,
+        };
         lgwks_std::trace::debug!(error = %refusal, "files_under: returning an error to the caller");
         refusal
     })?;
     Ok(entries
         .iter()
-        .filter(|entry| {
-            entry.kind() == FileKind::File
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "rs")
-        })
+        .filter(|entry| entry.kind() == FileKind::File && wanted.keeps(entry.path()))
         // `.` is the default root: name files from it as `src/lib.rs`, not
         // `./src/lib.rs`, so a location pastes into an editor as the compiler's does.
         .map(|entry| {
@@ -389,17 +478,19 @@ fn files_under(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Read one file and every `script!` in it.
 fn read_file(path: PathBuf) -> FileReading {
-    let outcome = read_bounded(&path).and_then(|text| {
-        read_source(&text).map_err(|refusal| {
-            format!(
-                "{}:{}:{}: {}",
-                path.display(),
-                refusal.line(),
-                refusal.column().saturating_add(1),
-                refusal.message()
-            )
-        })
-    });
+    let outcome = read_bounded(&path)
+        .map_err(|refusal| refusal.to_string())
+        .and_then(|text| {
+            read_source(&text).map_err(|refusal| {
+                format!(
+                    "{}:{}:{}: {}",
+                    path.display(),
+                    refusal.line(),
+                    refusal.column().saturating_add(1),
+                    refusal.message()
+                )
+            })
+        });
     FileReading { path, outcome }
 }
 
@@ -407,21 +498,28 @@ fn read_file(path: PathBuf) -> FileReading {
 ///
 /// # Errors
 ///
-/// The file cannot be stated or read, is not UTF-8, or is larger than the bound.
-fn read_bounded(path: &Path) -> Result<String, String> {
+/// [`ReadingError::UnreadableFile`] when the file cannot be stated or read, or
+/// is not UTF-8, and [`ReadingError::TooLarge`] when it is past the bound.
+fn read_bounded(path: &Path) -> Result<String, ReadingError> {
     let length = std::fs::metadata(path)
         .map(|metadata| metadata.len())
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        .map_err(|cause| ReadingError::UnreadableFile {
+            path: path.to_path_buf(),
+            cause,
+        })?;
     if length > MAX_FILE_BYTES {
-        let refusal = format!(
-            "{} is {length} bytes, past the {MAX_FILE_BYTES}-byte bound on one source file",
-            path.display()
-        );
+        let refusal = ReadingError::TooLarge {
+            path: path.to_path_buf(),
+            length,
+        };
         lgwks_std::trace::debug!(error = %refusal, "read_bounded: returning an error to the caller");
         return Err(refusal);
     }
-    std::fs::read_to_string(path).map_err(|error| {
-        let refusal = format!("cannot read {}: {error}", path.display());
+    std::fs::read_to_string(path).map_err(|cause| {
+        let refusal = ReadingError::UnreadableFile {
+            path: path.to_path_buf(),
+            cause,
+        };
         lgwks_std::trace::debug!(error = %refusal, "read_bounded: returning an error to the caller");
         refusal
     })
