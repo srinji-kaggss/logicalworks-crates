@@ -109,8 +109,17 @@ USAGE
                                        printed as a boundary form
   lgwks-deps init [PATH]               write a fail-closed starting register
    lgwks-deps tiers                     print the admission ladder
-   lgwks-deps freshness [PATH]          check resolved deps against crates.io
-              [--json]                  output as JSON instead of a table
+   lgwks-deps freshness [PATH]          check every locked registry package against
+                                        the newest version it could move to
+              [--json]                  output a JSON array instead of a table
+              [--jobs N]                lookups in flight at once, 1 to 256
+                                        (default 32)
+              [--index URL]             the sparse index to ask (default
+                                        https://index.crates.io)
+  `freshness` ranks versions by SemVer 2.0 precedence, never offers a yanked
+  version, offers a pre-release only to a lock already on one, and names the
+  direct dependency each package comes through (`via`). It refuses an unknown
+  --flag, a repeated --jobs or --index, and a second PATH, exiting 2.
    lgwks-deps vendor check [PATH]       prove every locked package resolves
                                         to the shared vendor tree
    lgwks-deps debug [PATH]              run the cargo-doctor-style debugger
@@ -118,7 +127,11 @@ USAGE
 
 EXIT
    0  every authored external edge has an admitted semantic owner
+      (freshness: every locked package is current)
+   1  freshness only: at least one locked package is behind its newest version
    2  a refusal, a missing register, or an unparseable one
+      (freshness: the check could not complete, or lookups failed and nothing
+      was found behind)
 ";
 
 /// Turns a command's write result into the process exit code.
@@ -715,6 +728,45 @@ pub(crate) fn read_lock_text(root: &Path) -> Result<String, String> {
     let lock_path = root.join("Cargo.lock");
     std::fs::read_to_string(&lock_path)
         .map_err(|error| format!("cannot read {}: {error}", lock_path.display()))
+}
+
+/// Whether `package` comes from the registry whose sparse index is `index`.
+///
+/// crates.io is the answer in either spelling Cargo has written its source in,
+/// whatever mirror the index URL names, because a mirror serves the same
+/// crates. Any other registry is the answer only to an `--index` that names it:
+/// asking crates.io about a crate from a private registry would answer for a
+/// different crate of the same name. A path or git package has no registry to
+/// ask.
+pub(crate) fn served_by(index: &str, package: &lgwks_deps::lock::Resolved) -> bool {
+    match package.source() {
+        Some(source) => {
+            matches!(
+                source,
+                "registry+https://github.com/rust-lang/crates.io-index"
+                    | "sparse+https://index.crates.io/"
+            ) || source
+                .strip_prefix("sparse+")
+                .is_some_and(|url| url.trim_end_matches('/') == index.trim_end_matches('/'))
+        }
+        None => false,
+    }
+}
+
+/// The lock's dependency graph, from which `freshness` names the direct
+/// dependency each package comes through.
+pub(crate) fn locked_graph(resolved: &[lgwks_deps::lock::Resolved]) -> freshness_cmd::Graph {
+    freshness_cmd::Graph::new(
+        resolved
+            .iter()
+            .map(|package| freshness_cmd::Node {
+                name: package.name().to_owned(),
+                version: package.version().to_owned(),
+                source: package.source().map(str::to_owned),
+                dependencies: package.dependencies().to_vec(),
+            })
+            .collect(),
+    )
 }
 
 // ── vendor ──────────────────────────────────────────────────────────────────

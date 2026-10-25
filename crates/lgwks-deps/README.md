@@ -82,6 +82,11 @@ authored edge still resolves from a registry or git source is refused by name as
 debugger no longer rides the default trace surface. `--json` writes the report
 to stdout and leaves trace events on stderr.
 
+`freshness` asks crates.io's sparse index about every locked package, 32 at a time
+(`--jobs N`, `--index URL`). A pre-release is offered only to a lock already on
+one, a yanked version never, and each row names the direct dependency it comes
+through (`via`). Exit 0 is current, 1 behind, 2 the check did not finish.
+
 ### Register syntax
 
 `contract/APPROVED.toml` and `contract/INVARIANTS.toml` use the same strict

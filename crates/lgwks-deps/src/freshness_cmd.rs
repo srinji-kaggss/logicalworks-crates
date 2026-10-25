@@ -1,347 +1,398 @@
 //! The `freshness` command: every registry dependency in the lock file against
-//! crates.io.
+//! the registry's sparse index.
+//!
+//! The lookups run concurrently, a bounded number at a time, because the time
+//! they take is network latency and not work: this repository's own 943 locked
+//! packages took 77 s at `--jobs 1` and 12 s at the default 32, with the same
+//! table both times (measured 2026-10-25 against crates.io). Each package is
+//! judged by SemVer precedence against the newest version it could move to, and
+//! each is reported with the direct dependency it comes through, so the reader
+//! knows whose release to wait for.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
-use std::path::Path;
 use std::process::ExitCode;
 
-use crate::{read_lock_text, refuse, resolve_repository_root, subject_path};
+use crate::{
+    USAGE, handle_help, locked_graph, read_lock_text, refuse, resolve_repository_root, served_by,
+    subject_path,
+};
 
-// ── freshness ──────────────────────────────────────────────────────────────
+mod args;
+mod fetch;
+mod index;
+mod pool;
+mod report;
+mod repository;
+mod version;
+mod via;
 
-/// Reports every registry dependency in the lock file against crates.io.
+pub(crate) use via::{Graph, Node};
+
+use fetch::FetchError;
+use index::{Entry, IndexError};
+use report::FreshnessResult;
+use version::Version;
+
+/// Exit status when at least one package is behind the newest version on offer.
+const EXIT_STALE: u8 = 1;
+
+/// Exit status when the check could not complete: a refusal, an unreadable
+/// lock, or lookups that failed with nothing found stale. A caller that reads
+/// `0` or `1` as an answer must never be handed one by a check that did not
+/// finish.
+const EXIT_INCOMPLETE: u8 = 2;
+
+/// Reports every registry dependency in the lock file against the registry.
 ///
-/// Exit 0 when nothing is stale and 1 when at least one package is behind, so
-/// a cron job can distinguish "up to date" from "action needed". A local or
-/// path package is skipped rather than queried. `--json` selects the stable
-/// object-array form over the human table; both carry the same fields.
+/// Exit 0 when every package is current, 1 when at least one is behind, and 2
+/// when the check could not complete: a refused invocation, an unreadable lock,
+/// or a lookup that failed when nothing else was found stale. A package from
+/// another source (a git or path dependency, or another registry than the one
+/// asked) is counted as skipped rather than asked about the wrong index.
 pub(crate) fn handle_freshness(
-    args: &[String],
+    arguments: &[String],
     out: &mut impl io::Write,
     err: &mut impl io::Write,
 ) -> io::Result<ExitCode> {
-    let json_output = args.iter().any(|arg| arg == "--json");
-    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    let start = subject_path(
-        positional
-            .first()
-            .map(|candidate| Path::new(candidate.as_str())),
-    );
+    let request = match args::parse(arguments) {
+        Ok(request) => request,
+        Err(error) => {
+            writeln!(err, "lgwks-deps: {error}\n")?;
+            write!(err, "{USAGE}")?;
+            return Ok(ExitCode::from(EXIT_INCOMPLETE));
+        }
+    };
+    let run = match request {
+        args::Request::Help => return handle_help(out),
+        args::Request::Run(run) => run,
+    };
 
+    let start = subject_path(run.target.as_deref());
     let root = unwrap_or_refuse!(resolve_repository_root(&start), err);
     let lock_text = unwrap_or_refuse!(read_lock_text(&root), err);
-
     let resolved = match lgwks_deps::lock::parse(&lock_text) {
         Ok(parsed) => parsed,
         Err(error) => return refuse(&format!("Cargo.lock: {error}"), err),
     };
 
-    let registry: Vec<&lgwks_deps::lock::Resolved> = resolved
+    let served: Vec<(usize, &lgwks_deps::lock::Resolved)> = resolved
         .iter()
-        .filter(|package| !package.is_local())
+        .enumerate()
+        .filter(|pair| served_by(&run.index, pair.1))
         .collect();
-
-    if registry.is_empty() {
-        writeln!(out, "no registry dependencies in Cargo.lock")?;
+    let skipped = resolved
+        .iter()
+        .filter(|package| !package.is_local() && !served_by(&run.index, package))
+        .count();
+    if served.is_empty() {
+        if skipped == 0 {
+            writeln!(out, "no registry dependencies in Cargo.lock")?;
+        } else {
+            writeln!(
+                out,
+                "no locked package comes from {} ({skipped} from other sources)",
+                run.index
+            )?;
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
-    let results = query_crates_io(&registry);
-
-    if json_output {
-        print_freshness_json(&results, out)?;
-    } else {
-        print_freshness_table(&results, out)?;
-    }
-
-    let stale_count = results.iter().filter(|result| result.stale).count();
-    if stale_count > 0 {
-        Ok(ExitCode::from(1))
-    } else {
-        Ok(ExitCode::SUCCESS)
-    }
-}
-
-/// One registry package's freshness verdict.
-///
-/// A package whose lookup failed carries an `error` and is not stale: a network
-/// fault is not evidence that the dependency is out of date, and reporting it as
-/// stale would fail a build for a reason the lockfile cannot support.
-pub(crate) struct FreshnessResult {
-    /// Package name as it appears in `Cargo.lock`.
-    name: String,
-    /// Version the lock file resolved.
-    resolved: String,
-    /// Latest version crates.io reports, or `None` when it published none.
-    latest: Option<String>,
-    /// Upstream repository URL crates.io reports, or `None` when it published
-    /// none. A published version carries no repository, and an unpublished one
-    /// carries neither; neither is an empty string crates.io sent.
-    repository: Option<String>,
-    /// Whether `latest` is a real version newer than `resolved`.
-    stale: bool,
-    /// Why the lookup failed, when it did.
-    error: Option<String>,
-}
-
-impl FreshnessResult {
-    /// Successful registry lookup.
-    fn found(
-        package: &lgwks_deps::lock::Resolved,
-        latest: Option<String>,
-        repository: Option<String>,
-    ) -> Self {
-        // A registry that publishes no version for a crate cannot be compared,
-        // so nothing is claimed: `stale` is only ever decided between two
-        // versions the registry and the lock both named.
-        let stale = match latest.as_deref() {
-            Some(latest) => latest != package.version(),
-            None => false,
-        };
-        Self {
-            name: package.name().to_owned(),
-            resolved: package.version().to_owned(),
-            latest,
-            repository,
-            stale,
-            error: None,
-        }
-    }
-
-    /// Failed registry lookup, which is reported but not treated as stale.
-    fn lookup_failed(package: &lgwks_deps::lock::Resolved, error: String) -> Self {
-        Self {
-            name: package.name().to_owned(),
-            resolved: package.version().to_owned(),
-            latest: None,
-            repository: None,
-            stale: false,
-            error: Some(error),
-        }
-    }
-}
-
-/// The `User-Agent` crates.io's crawler policy asks for: this tool's name and
-/// version and where to reach its maintainers, read from the crate's own
-/// manifest. Compiled from `Cargo.toml` rather than written here, so the
-/// version cannot go stale and no person's address is baked into every copy
-/// of a published binary.
-pub(crate) const USER_AGENT: &str = concat!(
-    "User-Agent: lgwks-deps/",
-    env!("CARGO_PKG_VERSION"),
-    " (",
-    env!("CARGO_PKG_REPOSITORY"),
-    ")"
-);
-
-/// Queries crates.io for each distinct package name.
-///
-/// Names are de-duplicated first: a lock file commonly resolves several
-/// versions of one package, and the registry answer is per name. The lookup
-/// shells out to `curl` rather than pulling an HTTP client (INV-GATE-ZERO-DEPS),
-/// with a ten-second cap so an unreachable registry cannot hang the command.
-pub(crate) fn query_crates_io(packages: &[&lgwks_deps::lock::Resolved]) -> Vec<FreshnessResult> {
-    let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
-
-    for package in packages {
-        if !seen.insert(package.name()) {
-            continue;
-        }
-
-        let completed = std::process::Command::new("curl")
-            .args([
-                "-sf",
-                "--max-time",
-                "10",
-                "-H",
-                USER_AGENT,
-                &format!("https://crates.io/api/v1/crates/{}", package.name()),
-            ])
-            .output();
-
-        match completed {
-            Ok(response) if response.status.success() => {
-                let body = String::from_utf8_lossy(&response.stdout);
-                let (latest, repo) = parse_crate_response(&body);
-                results.push(FreshnessResult::found(package, latest, repo));
-            }
-            Ok(response) => {
-                results.push(FreshnessResult::lookup_failed(
-                    package,
-                    format!("HTTP {}", response.status),
-                ));
-            }
-            Err(error) => {
-                results.push(FreshnessResult::lookup_failed(package, error.to_string()));
-            }
-        }
-    }
-    results
-}
-
-/// INV-GATE-ZERO-DEPS: no JSON parser; extract fields by line scan.
-pub(crate) fn parse_crate_response(body: &str) -> (Option<String>, Option<String>) {
-    let newest = extract_json_string(body, "newest_version");
-    let repo = extract_json_string(body, "repository");
-    (newest, repo)
-}
-
-/// Reads the value of `key` out of a JSON object by scanning for its quoted
-/// form.
-///
-/// Both `"key":"value"` and `"key": "value"` spacing are accepted, and a key
-/// that is absent yields `None` rather than an empty string: freshness is a
-/// best-effort advisory, so a missing field is not a failure, and an empty
-/// string is a value crates.io never sent. `None` is what the caller reports as
-/// "not published", and an unterminated value is refused the same way, because
-/// a half-read value is not a shorter one. This is deliberately not a JSON
-/// parser; see the zero-deps invariant above.
-pub(crate) fn extract_json_string(body: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{}\":\"", key);
-    let alt_needle = format!("\"{}\": \"", key);
-    // Each `index` is a byte offset at which `body` matched `needle`, so the
-    // sum is a position inside `body` and cannot exceed `body.len()`; the
-    // additions therefore cannot overflow `usize`.
-    let start = body
-        .find(&needle)
-        .map(|index| index.saturating_add(needle.len()))
-        .or_else(|| {
-            body.find(&alt_needle)
-                .map(|index| index.saturating_add(alt_needle.len()))
-        });
-    // Three refusals, one answer: the key is absent, the value is unterminated,
-    // and the key is absent under the spaced spelling. None of them is a value
-    // crates.io sent.
-    let value_start = start?;
-    // `end_offset` indexes the closing quote inside the slice that begins at
-    // `value_start`, so the sum stays within `body`.
-    let end_offset = body[value_start..].find('"')?;
-    Some(body[value_start..value_start.saturating_add(end_offset)].to_string())
-}
-
-// Each label is a column value; the format string owns the alignment. The final
-// column is spelled inside the format string rather than passed as an argument:
-// a trailing string literal in a `{}` slot is what `clippy::write_literal`
-// flags, and the rendered line is byte-identical either way.
-/// The table cell for a field crates.io may not have published.
-///
-/// `?` is the marker a failed lookup already prints, and a version the registry
-/// never published is the same fact to a reader: the value is not known. Naming
-/// the mapping keeps one cell spelling for "not known" instead of an empty column
-/// that reads as a value crates.io sent.
-pub(crate) fn or_unpublished(value: Option<&str>) -> &str {
-    match value {
-        Some(value) => value,
-        None => "?",
-    }
-}
-
-/// Prints the human-readable freshness table.
-///
-/// A failed lookup is shown as `?` / `err` rather than as a version, so an
-/// unreachable registry cannot be misread as an up-to-date dependency.
-pub(crate) fn print_freshness_table(
-    results: &[FreshnessResult],
-    out: &mut impl io::Write,
-) -> io::Result<()> {
-    writeln!(
-        out,
-        "{:<30} {:<12} {:<12} {:<5} repository",
-        "crate", "resolved", "latest", "stale"
-    )?;
-    writeln!(out, "{}", "-".repeat(90))?;
-    for result in results {
-        if let Some(failure) = result.error.as_ref() {
-            writeln!(
-                out,
-                "{:<30} {:<12} {:<12} {:<5} {}",
-                result.name, result.resolved, "?", "err", failure
-            )?;
-        } else {
-            let stale_mark = if result.stale { "YES" } else { "" };
-            writeln!(
-                out,
-                "{:<30} {:<12} {:<12} {:<5} {}",
-                result.name,
-                result.resolved,
-                or_unpublished(result.latest.as_deref()),
-                stale_mark,
-                or_unpublished(result.repository.as_deref())
-            )?;
-        }
-    }
-    let stale_count = results.iter().filter(|result| result.stale).count();
-    let err_count = results
+    let graph = locked_graph(&resolved);
+    let outcomes = look_up(&served, &run);
+    let sources = repository::registry_sources();
+    let results: Vec<FreshnessResult> = served
         .iter()
-        .filter(|result| result.error.is_some())
-        .count();
-    writeln!(
-        out,
-        "\n{} checked, {} stale, {} errors",
-        results.len(),
-        stale_count,
-        err_count
-    )?;
-    Ok(())
+        .map(|pair| {
+            row(
+                pair.1,
+                graph.via(pair.0),
+                outcomes.get(pair.1.name()),
+                sources.as_deref(),
+            )
+        })
+        .collect();
+
+    if run.json {
+        report::print_json(&results, out)?;
+    } else {
+        report::print_table(&results, skipped, out)?;
+    }
+    let status = exit_status(report::stale_count(&results), report::error_count(&results));
+    if run.json && status != 0 {
+        writeln!(
+            err,
+            "freshness: {}",
+            report::summary_line(&results, skipped)
+        )?;
+    }
+    Ok(ExitCode::from(status))
 }
 
-/// Prints the freshness results as a JSON array of objects.
+/// The exit status for `stale` packages behind and `errors` failed lookups.
 ///
-/// The shape is contractual: one object per checked package, in the order they
-/// were queried, with `error` present only when the lookup failed. A stale
-/// count is not emitted; consumers read `stale` per row and the process exit
-/// code carries the aggregate.
-///
-/// Built through `lgwks_std::json`, like `check --json`. The previous version
-/// assembled JSON by concatenation and escaped only the double quote, so any
-/// `repository` or `error` string containing a backslash produced a payload no
-/// parser would accept, from the crate whose whole purpose is enforcing that
-/// dependencies go through the facade.
-pub(crate) fn print_freshness_json(
-    results: &[FreshnessResult],
-    out: &mut impl io::Write,
-) -> io::Result<()> {
-    use lgwks_std::json::{Map, Value};
+/// A stale package is an answer, whatever else failed: the caller has something
+/// to act on. Failures alone are not an answer, so they are never `0`.
+fn exit_status(stale: usize, errors: usize) -> u8 {
+    match (stale, errors) {
+        (0, 0) => 0,
+        (0, _) => EXIT_INCOMPLETE,
+        _ => EXIT_STALE,
+    }
+}
 
-    let mut rows = Vec::with_capacity(results.len());
-    for result in results {
-        let mut row = Map::new();
-        row.insert("name".to_owned(), Value::String(result.name.clone()));
-        row.insert(
-            "resolved".to_owned(),
-            Value::String(result.resolved.clone()),
-        );
-        // `null` for a field crates.io did not publish, so a consumer reads
-        // "not published" rather than a version nobody published.
-        row.insert(
-            "latest".to_owned(),
-            match result.latest.as_ref() {
-                Some(latest) => Value::String(latest.clone()),
-                None => Value::Null,
-            },
-        );
-        row.insert("stale".to_owned(), Value::Bool(result.stale));
-        row.insert(
-            "repository".to_owned(),
-            match result.repository.as_ref() {
-                Some(repository) => Value::String(repository.clone()),
-                None => Value::Null,
-            },
-        );
-        // Always present, `null` when the lookup succeeded: a consumer reads a
-        // fixed set of keys rather than testing for the existence of each.
-        row.insert(
-            "error".to_owned(),
-            match result.error.as_ref() {
-                Some(failure) => Value::String(failure.clone()),
-                None => Value::Null,
-            },
-        );
-        rows.push(Value::Object(row));
+/// What asking the index about one name came to.
+enum Lookup {
+    /// The index file, read.
+    Found(Vec<Entry>),
+    /// Why it could not be read.
+    Failed(String),
+}
+
+/// Why one name's lookup failed, before it is worded for a row.
+enum LookupError {
+    /// The name or the file was refused.
+    Index(IndexError),
+    /// The request did not return a body.
+    Fetch(FetchError),
+}
+
+impl From<IndexError> for LookupError {
+    fn from(error: IndexError) -> Self {
+        Self::Index(error)
+    }
+}
+
+impl From<FetchError> for LookupError {
+    fn from(error: FetchError) -> Self {
+        Self::Fetch(error)
+    }
+}
+
+impl fmt::Display for LookupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Index(ref error) => fmt::Display::fmt(error, formatter),
+            Self::Fetch(ref error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+/// Asks the index about every distinct name among `served`, a bounded number at
+/// a time.
+///
+/// Names are de-duplicated first: a lock commonly resolves several versions of
+/// one package, and the index answers once per name.
+fn look_up(
+    served: &[(usize, &lgwks_deps::lock::Resolved)],
+    run: &args::Args,
+) -> BTreeMap<String, Lookup> {
+    let names: Vec<String> = served
+        .iter()
+        .map(|pair| pair.1.name())
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let index_url = run.index.clone();
+    let done = pool::run(
+        names.clone(),
+        run.jobs,
+        move |name: String| match fetch_entries(&index_url, &name) {
+            Ok(entries) => Lookup::Found(entries),
+            Err(error) => Lookup::Failed(error.to_string()),
+        },
+    );
+    lgwks_std::trace::debug!(
+        workers = done.workers,
+        names = names.len(),
+        "freshness lookups finished"
+    );
+    names
+        .into_iter()
+        .zip(done.results)
+        .map(|(name, result)| {
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(error) => Lookup::Failed(error.to_string()),
+            };
+            (name, outcome)
+        })
+        .collect()
+}
+
+/// One name's index file, fetched and read.
+fn fetch_entries(index_url: &str, name: &str) -> Result<Vec<Entry>, LookupError> {
+    let path = index::path(name)?;
+    let body = fetch::get(&format!("{index_url}/{path}"))?;
+    Ok(index::parse(&body)?)
+}
+
+/// The row for one locked package, given what the index said about its name.
+fn row(
+    package: &lgwks_deps::lock::Resolved,
+    via: &[String],
+    lookup: Option<&Lookup>,
+    sources: Option<&std::path::Path>,
+) -> FreshnessResult {
+    let name = package.name();
+    let locked = package.version();
+    let Some(lookup) = lookup else {
+        return FreshnessResult::failed(name, locked, via, "no lookup was made".to_owned());
+    };
+    match *lookup {
+        Lookup::Found(ref entries) => match Version::parse(locked) {
+            Ok(resolved) => FreshnessResult::found(
+                name,
+                locked,
+                index::newest(entries, &resolved),
+                sources.and_then(|directory| repository::cached(directory, name, locked)),
+                via,
+            ),
+            Err(error) => FreshnessResult::failed(
+                name,
+                locked,
+                via,
+                format!("the locked version is unreadable: {error}"),
+            ),
+        },
+        Lookup::Failed(ref reason) => FreshnessResult::failed(name, locked, via, reason.clone()),
+    }
+}
+
+/// What the setup of a simulation anywhere under this module can fail with.
+///
+/// A helper returns this rather than a boxed trait object, so its caller can
+/// match the cause; a `#[test]` converts it with `?`.
+#[cfg(test)]
+#[derive(Debug)]
+enum SimError {
+    /// The seeded stream refused a draw.
+    Draw(lgwks_std::seeded::DrawError),
+    /// The operating system had no entropy for a scratch name.
+    Entropy(lgwks_std::random::EntropyError),
+    /// A scratch directory could not be made.
+    Io(io::Error),
+    /// A version the simulation spelled or drew did not parse.
+    Version(version::VersionError),
+    /// An index body the simulation built did not parse.
+    Index(IndexError),
+    /// The arguments a simulation spelled were refused.
+    Args(args::ArgsError),
+    /// A number in a drawn version did not parse.
+    Number(std::num::ParseIntError),
+    /// Something the simulation relies on was not there.
+    Missing(&'static str),
+}
+
+#[cfg(test)]
+impl fmt::Display for SimError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Draw(ref error) => write!(formatter, "the seeded stream: {error}"),
+            Self::Entropy(ref error) => write!(formatter, "no entropy: {error}"),
+            Self::Io(ref error) => write!(formatter, "scratch directory: {error}"),
+            Self::Version(ref error) => write!(formatter, "version: {error}"),
+            Self::Index(ref error) => write!(formatter, "index: {error}"),
+            Self::Args(ref error) => write!(formatter, "arguments: {error}"),
+            Self::Number(ref error) => write!(formatter, "number: {error}"),
+            Self::Missing(what) => write!(formatter, "missing: {what}"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::error::Error for SimError {}
+
+#[cfg(test)]
+impl From<lgwks_std::seeded::DrawError> for SimError {
+    fn from(error: lgwks_std::seeded::DrawError) -> Self {
+        Self::Draw(error)
+    }
+}
+
+#[cfg(test)]
+impl From<lgwks_std::random::EntropyError> for SimError {
+    fn from(error: lgwks_std::random::EntropyError) -> Self {
+        Self::Entropy(error)
+    }
+}
+
+#[cfg(test)]
+impl From<io::Error> for SimError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[cfg(test)]
+impl From<version::VersionError> for SimError {
+    fn from(error: version::VersionError) -> Self {
+        Self::Version(error)
+    }
+}
+
+#[cfg(test)]
+impl From<IndexError> for SimError {
+    fn from(error: IndexError) -> Self {
+        Self::Index(error)
+    }
+}
+
+#[cfg(test)]
+impl From<args::ArgsError> for SimError {
+    fn from(error: args::ArgsError) -> Self {
+        Self::Args(error)
+    }
+}
+
+#[cfg(test)]
+impl From<std::num::ParseIntError> for SimError {
+    fn from(error: std::num::ParseIntError) -> Self {
+        Self::Number(error)
+    }
+}
+
+#[cfg(test)]
+impl From<&'static str> for SimError {
+    fn from(what: &'static str) -> Self {
+        Self::Missing(what)
+    }
+}
+
+#[cfg(test)]
+mod sim_exit {
+    //! The exit status over every pair of counts: the part of the contract a
+    //! caller scripts against.
+
+    use super::{EXIT_INCOMPLETE, EXIT_STALE, exit_status};
+
+    #[test]
+    fn the_status_is_zero_only_when_nothing_is_behind_and_nothing_failed() {
+        assert_eq!(exit_status(0, 0), 0, "every package current");
+        for stale in 1..40_usize {
+            for errors in 0..40_usize {
+                assert_eq!(
+                    exit_status(stale, errors),
+                    EXIT_STALE,
+                    "{stale} stale with {errors} failed is an answer"
+                );
+            }
+        }
+        for errors in 1..40_usize {
+            assert_eq!(
+                exit_status(0, errors),
+                EXIT_INCOMPLETE,
+                "{errors} failed with nothing stale did not complete"
+            );
+        }
     }
 
-    let rendered =
-        lgwks_std::json::to_string_pretty(&Value::Array(rows)).map_err(io::Error::other)?;
-    writeln!(out, "{rendered}")
+    #[test]
+    fn the_three_statuses_are_distinct() {
+        assert_ne!(EXIT_STALE, 0, "stale is not success");
+        assert_ne!(EXIT_INCOMPLETE, 0, "incomplete is not success");
+        assert_ne!(EXIT_STALE, EXIT_INCOMPLETE, "stale is not incomplete");
+    }
 }
