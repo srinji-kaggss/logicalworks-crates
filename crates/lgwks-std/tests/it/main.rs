@@ -74,6 +74,7 @@ mod sim_hash;
 mod sim_hex;
 mod sim_http;
 mod sim_id;
+mod sim_id_v7;
 mod sim_join_all;
 #[cfg(feature = "json")]
 mod sim_json;

@@ -8,7 +8,7 @@ Part of the [lgwks_std consumer guide](index.md). Moved from the crate README.
 |---------|---------|-------------|---------------|
 | `core` (default) | encoding, fs, glob, hex, leb128, retry, seeded, similarity, task, time | — | **0** |
 | `trace` (default) | trace | Structured logging plus default debugger install | tracing, tracing-subscriber stack |
-| `random` | random, id | UUID v4, OS entropy | getrandom |
+| `random` | random, id | UUID v4 and time-ordered v7, OS entropy | getrandom |
 | `hash` | hash | BLAKE3 content-addressable hashing | blake3 |
 | `pattern` | pattern | Compiled regex with explicit compile, input and replacement-output limits | regex |
 | `json` | json | JSON serialization | serde, serde_json |
@@ -34,7 +34,7 @@ Part of the [lgwks_std consumer guide](index.md). Moved from the crate README.
 | `task` | Executor that drives futures on the current thread: `block_on`, interleaved `join_all`, off-thread `spawn_blocking` | — |
 | `time` | RFC 3339 timestamps, calendar math | `chrono`, `time` |
 | `random` | OS entropy via `getrandom`, typed OS cause | `getrandom` |
-| `id` | UUID v4 generation and parsing | `uuid` |
+| `id` | UUID v4 generation, time-ordered v7 generation (strictly increasing across the process, safe under a backwards clock) and parsing | `uuid` |
 | `hash` | BLAKE3 content-addressable hashing | `blake3` |
 | `pattern` | Compiled regex matching: single search is O(m*n); complete greedy iteration may be O(m*n^2). `Regex::with_config` bounds source-pattern bytes, compiled size, nesting, input bytes and replacement output bytes. | `regex` |
 | `json` | JSON encoding and decoding via serde | `serde_json` |
