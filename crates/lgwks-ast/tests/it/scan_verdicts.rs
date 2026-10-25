@@ -591,9 +591,106 @@ fn clippy_allow_is_silence() -> TestResult {
     Ok(())
 }
 
+/// A rustc lint silences exactly as a clippy lint does: the rule is about the
+/// act of silencing, not about which tool owns the lint (#699).
 #[test]
-fn rustc_allow_is_not_silence() -> TestResult {
-    assert!(scan("#[allow(dead_code)]\nstruct Unused;\n")?.is_empty());
+fn rustc_allow_is_silence() -> TestResult {
+    let hits = scan("#[allow(dead_code)]\nstruct Unused;\n")?;
+    assert_eq!(rules(&hits), vec!["ALLOW-SILENCE"], "{hits:?}");
+    assert!(
+        hits.first()
+            .is_some_and(|hit| hit.snippet() == "#[allow(dead_code)]"),
+        "the evidence names what was written: {hits:?}"
+    );
+    Ok(())
+}
+
+/// `expect` suppresses the emission the way `allow` does, and the evidence says
+/// which level was written.
+#[test]
+fn expect_is_silence() -> TestResult {
+    let hits = scan("#[expect(clippy::needless_return)]\nfn f() {}\n")?;
+    assert_eq!(rules(&hits), vec!["ALLOW-SILENCE"], "{hits:?}");
+    assert!(
+        hits.first()
+            .is_some_and(|hit| hit.snippet() == "#[expect(clippy::needless_return)]"),
+        "{hits:?}"
+    );
+    Ok(())
+}
+
+/// A `reason` explains a silence; it does not stop it being one.
+#[test]
+fn a_reason_does_not_hide_the_lint() -> TestResult {
+    let hits =
+        scan("#[allow(unused_mut, reason = \"only moved on some platforms\")]\nfn f() {}\n")?;
+    assert_eq!(rules(&hits), vec!["ALLOW-SILENCE"], "{hits:?}");
+    assert!(
+        hits.first()
+            .is_some_and(|hit| hit.snippet() == "#[allow(unused_mut)]"),
+        "the lint is named without the reason: {hits:?}"
+    );
+    Ok(())
+}
+
+/// A condition does not make a silence something else: `cfg_attr` applies an
+/// attribute, and this one lowers a lint.
+#[test]
+fn a_cfg_attr_allow_is_silence() -> TestResult {
+    let hits = scan("#[cfg_attr(target_os = \"linux\", allow(dead_code))]\nfn f() {}\n")?;
+    assert_eq!(rules(&hits), vec!["ALLOW-SILENCE"], "{hits:?}");
+    assert!(
+        hits.first()
+            .is_some_and(|hit| hit.snippet() == "#[cfg_attr(.., allow(dead_code))]"),
+        "{hits:?}"
+    );
+    Ok(())
+}
+
+/// A tool lint and a group name are silences too, and a raised level is not.
+#[test]
+fn every_lint_path_silences_and_a_raised_level_does_not() -> TestResult {
+    let silenced = scan(
+        "#[allow(rustdoc::broken_intra_doc_links)]\nfn a() {}\n\n#[expect(warnings)]\nfn b() {}\n",
+    )?;
+    assert_eq!(
+        rules(&silenced),
+        vec!["ALLOW-SILENCE", "ALLOW-SILENCE"],
+        "{silenced:?}"
+    );
+    let raised = scan("#[deny(dead_code)]\n#[warn(unused_variables)]\nfn c() {}\n")?;
+    assert!(
+        raised.is_empty(),
+        "a raised lint is not a silence: {raised:?}"
+    );
+    Ok(())
+}
+
+/// The exemption is a scope, not a spelling: a helper inside a `#[cfg(test)]`
+/// module is test code even when nothing marks the helper itself (#699).
+#[test]
+fn a_helper_inside_a_cfg_test_module_is_exempt() -> TestResult {
+    let hits = scan(
+        "#[cfg(test)]\nmod tests {\n    fn helper() -> Result<(), String> {\n        return Err(String::new());\n    }\n}\n",
+    )?;
+    assert!(
+        !rules(&hits).contains(&"unlogged-err-return"),
+        "an enclosing test module is test code: {hits:?}"
+    );
+    Ok(())
+}
+
+/// A module under a `cfg` that can hold outside a test is production code, so
+/// its returns are judged.
+#[test]
+fn a_module_under_another_cfg_is_not_exempt() -> TestResult {
+    let hits = scan(
+        "#[cfg(unix)]\nmod platform {\n    fn helper() -> Result<(), String> {\n        return Err(String::new());\n    }\n}\n",
+    )?;
+    assert!(
+        rules(&hits).contains(&"unlogged-err-return"),
+        "code that ships is judged: {hits:?}"
+    );
     Ok(())
 }
 

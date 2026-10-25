@@ -387,7 +387,7 @@ fn tokens_read(tokens: &[Tok], name: &str) -> bool {
             Tok::Literal(ref literal) => {
                 literal.contains(&format!("{{{name}}}")) || literal.contains(&format!("{{{name}:"))
             }
-            Tok::Group(ref inner) => tokens_read(inner, name),
+            Tok::Group { ref inner, .. } => tokens_read(inner, name),
             Tok::Punct(_) | Tok::Other => false,
         };
         if found {

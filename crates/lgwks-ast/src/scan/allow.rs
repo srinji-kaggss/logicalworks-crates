@@ -1,15 +1,32 @@
-//! Detector ALLOW-SILENCE: an `#[allow(clippy::*)]` annotation silences a lint
-//! with a mechanical fix. rustc's own lints are untouched by construction;
-//! `#[cfg_attr]` is out of scope (conditional).
+//! Detector ALLOW-SILENCE: any attribute that lowers a lint's level so a
+//! violation goes unreported.
+//!
+//! The Rust reference gives one syntax to five levels — `allow`, `expect`,
+//! `warn`, `deny` and `forbid` — and two of them silence: `allow` suppresses the
+//! emission, and `expect` suppresses it too while recording the expectation.
+//! Every way of naming a lint is read: a rustc lint (`dead_code`), a tool lint
+//! (`clippy::unwrap_used`, `rustdoc::broken_intra_doc_links`), and a group
+//! (`warnings`, `unused`). A `reason = ".."` argument states why the lint was
+//! silenced; it does not make the silence anything else, so it is read past
+//! rather than accepted as the whole story (#699).
+//!
+//! `cfg_attr(predicate, allow(..))` is the same act under a condition, so it is
+//! read the same way, through the meta list the attribute arguments already
+//! parse into, including a `cfg_attr` nested in another.
 //!
 //! Every attribute in the file is visited, not only item-level ones, so an
 //! allow on a `let`, a statement, a field or a match arm is caught by the same
-//! walk.
+//! walk. A list this reader cannot model is not guessed at: it answers nothing
+//! rather than reporting a lint name it did not read.
 
 use tree_sitter::Node;
 
 use super::cfg::{self, Meta};
 use super::{Hit, each_node, syntax};
+
+/// The lint levels that silence. `warn`, `deny` and `forbid` raise or keep a
+/// lint visible and are not findings.
+const SILENCING_LEVELS: [&str; 2] = ["allow", "expect"];
 
 /// Runs the ALLOW-SILENCE detector over a whole file.
 pub(super) fn detect(source: &str, root: Node<'_>, hits: &mut Vec<Hit>) {
@@ -17,48 +34,92 @@ pub(super) fn detect(source: &str, root: Node<'_>, hits: &mut Vec<Hit>) {
         if !matches!(node.kind(), "attribute_item" | "inner_attribute_item") {
             return;
         }
-        for lint in clippy_lints_allowed_by(source, node) {
-            hits.push(Hit::new(
-                "ALLOW-SILENCE",
-                syntax::line(node),
-                format!("#[allow({lint})]"),
-            ));
+        for silenced in silenced_by(source, node) {
+            hits.push(Hit::new("ALLOW-SILENCE", syntax::line(node), silenced));
         }
     });
 }
 
-/// Names every clippy lint an attribute silences, in source order.
-///
-/// An attribute that is not `allow`, that has no argument list (`#[allow]`), or
-/// whose arguments are not a well-formed lint list answers empty: the detector
-/// refuses to guess at token soup rather than reporting a lint name it did not
-/// read.
-fn clippy_lints_allowed_by(source: &str, item: Node<'_>) -> Vec<String> {
+/// The evidence for every lint this attribute silences, in source order.
+fn silenced_by(source: &str, item: Node<'_>) -> Vec<String> {
     let Some(attr) = syntax::attribute(source, item) else {
         return Vec::new();
     };
-    if attr.path.single() != Some("allow") {
+    let Some(head) = attr.path.single() else {
         return Vec::new();
-    }
+    };
     let Some(arguments) = attr.arguments else {
         return Vec::new();
     };
-    let Some(lints) = cfg::parse_list(&syntax::tokens(source, arguments)) else {
+    let Some(entries) = cfg::parse_list(&syntax::tokens(source, arguments)) else {
         return Vec::new();
     };
-    lints.into_iter().filter_map(clippy_lint_name).collect()
+    if SILENCING_LEVELS.contains(&head) {
+        return entries
+            .iter()
+            .filter_map(lint_name)
+            .map(|lint| render(head, &lint, false))
+            .collect();
+    }
+    if head == "cfg_attr" {
+        // The first entry is the configuration predicate; every entry after it
+        // is an attribute, applied when that predicate holds.
+        let mut silenced = Vec::new();
+        for entry in entries.iter().skip(1) {
+            collect_attributes(entry, &mut silenced);
+        }
+        return silenced;
+    }
+    Vec::new()
 }
 
-/// Renders one entry of an `allow` list as a lint name, and `None` when the
-/// entry is not a clippy lint.
-///
-/// The entry must be a bare path whose first segment is `clippy`, so
-/// `clippy::too_many_arguments` is reported and a rustc lint such as `dead_code`
-/// is not. A nested `clippy::all` group is reported by its path text, which is
-/// what the gate's remediation message quotes.
-fn clippy_lint_name(lint: Meta) -> Option<String> {
-    let Meta::Path(path) = lint else {
-        return None;
+/// Every silencing level inside a `cfg_attr` entry, recursing through a nested
+/// `cfg_attr`.
+fn collect_attributes(meta: &Meta, silenced: &mut Vec<String>) {
+    let Meta::List {
+        ref path,
+        ref children,
+    } = *meta
+    else {
+        return;
     };
-    (path.segments.first().map(String::as_str) == Some("clippy")).then(|| path.render())
+    let Some(head) = path.single() else {
+        return;
+    };
+    let Some(entries) = children.as_ref() else {
+        return;
+    };
+    if SILENCING_LEVELS.contains(&head) {
+        silenced.extend(
+            entries
+                .iter()
+                .filter_map(lint_name)
+                .map(|lint| render(head, &lint, true)),
+        );
+    } else if head == "cfg_attr" {
+        for entry in entries.iter().skip(1) {
+            collect_attributes(entry, silenced);
+        }
+    }
+}
+
+/// The lint an entry of a list names, or `None` when the entry is not a lint.
+///
+/// `reason = ".."` is a `Meta::NameValue` and a nested list is a `Meta::List`;
+/// neither names a lint. A leading `::` is not how a lint is written, so it is
+/// not read as one.
+fn lint_name(meta: &Meta) -> Option<String> {
+    match *meta {
+        Meta::Path(ref path) if !path.leading => Some(path.render()),
+        _ => None,
+    }
+}
+
+/// How one silenced lint is written, as the attribute that silenced it.
+fn render(level: &str, lint: &str, nested: bool) -> String {
+    if nested {
+        format!("#[cfg_attr(.., {level}({lint}))]")
+    } else {
+        format!("#[{level}({lint})]")
+    }
 }

@@ -231,8 +231,14 @@ pub(super) enum Tok {
     Punct(String),
     /// A literal, with its quotes.
     Literal(String),
-    /// A delimited group, without its delimiters.
-    Group(Vec<Tok>),
+    /// A delimited group, without its delimiters; `square` is whether it was
+    /// written `[..]`, which after a name is an index and not a call.
+    Group {
+        /// The tokens inside the delimiters.
+        inner: Vec<Tok>,
+        /// Whether the delimiters were square brackets.
+        square: bool,
+    },
     /// Anything else (a metavariable, a repetition).
     Other,
 }
@@ -257,9 +263,15 @@ impl Tok {
     /// The tokens of the group this token is.
     pub(super) fn group(&self) -> Option<&[Self]> {
         match *self {
-            Self::Group(ref inner) => Some(inner.as_slice()),
+            Self::Group { ref inner, .. } => Some(inner.as_slice()),
             _ => None,
         }
+    }
+
+    /// Whether this token is a group a name can be called with: written `(..)` or
+    /// `{..}`, not `[..]`.
+    pub(super) fn is_call(&self) -> bool {
+        matches!(*self, Self::Group { square: false, .. })
     }
 
     /// The text of the literal this token is.
@@ -292,7 +304,10 @@ pub(super) fn tokens(source: &str, tree: Node<'_>) -> Vec<Tok> {
 fn token(source: &str, node: Node<'_>) -> Tok {
     let spelled = text(source, node);
     match node.kind() {
-        "token_tree" => Tok::Group(tokens(source, node)),
+        "token_tree" => Tok::Group {
+            inner: tokens(source, node),
+            square: spelled.starts_with('['),
+        },
         "identifier" | "self" | "super" | "crate" | "primitive_type" | "mutable_specifier"
         | "boolean_literal" => Tok::Ident(spelled.to_owned()),
         "string_literal" | "raw_string_literal" | "char_literal" | "integer_literal"
