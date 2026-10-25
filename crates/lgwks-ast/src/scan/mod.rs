@@ -9,6 +9,10 @@
 //! [`scan_manifest`] is the manifest half, because a lint lowered for a whole
 //! package is the same act as an attribute written once per item.
 //!
+//! [`scan_source_with`] runs a selection of [`Rule`]s and [`scan_source`] runs
+//! [`Rule::ALL`], so a consumer that gates one class of defect selects it by
+//! name and pays for one parse (#699).
+//!
 //! The detectors read Rust through the one parser, [`crate::try_parse`], so the
 //! gate and structural inspection cannot disagree about a file, and the gate
 //! inherits the parser's bounds: a source past the byte ceiling, a tree past the
@@ -140,6 +144,67 @@ impl fmt::Display for ScanError {
 
 impl Error for ScanError {}
 
+/// One detector the scan can run, named by the rule its findings carry.
+///
+/// A consumer that wants one class of defect — a CI lane for swallowed errors
+/// only, say — selects it here rather than post-filtering strings out of a
+/// whole-file scan, so the rule set is the contract and a rule rename breaks a
+/// build instead of silently matching nothing (#699).
+///
+/// Non-exhaustive so a later rule cannot break a caller that matches every
+/// variant today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Rule {
+    /// `ERROR-SWALLOW`: an error value that nothing reads.
+    SwallowedError,
+    /// `unlogged-err-return`: a return whose failure no log carries.
+    UnloggedError,
+    /// `ALLOW-SILENCE`: a lint silenced, in source or in a manifest.
+    AllowSilence,
+    /// `long-try-chain`: more `?` in one statement than the bound allows.
+    LongTryChain,
+    /// `tautological-doc`: a docstring that restates its own name.
+    TautologicalDoc,
+}
+
+impl Rule {
+    /// Every detector, in the order findings are ordered within one line.
+    pub const ALL: [Self; 5] = [
+        Self::SwallowedError,
+        Self::UnloggedError,
+        Self::AllowSilence,
+        Self::LongTryChain,
+        Self::TautologicalDoc,
+    ];
+
+    /// The rule name a finding of this detector carries, verbatim.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SwallowedError => "ERROR-SWALLOW",
+            Self::UnloggedError => "unlogged-err-return",
+            Self::AllowSilence => "ALLOW-SILENCE",
+            Self::LongTryChain => "long-try-chain",
+            Self::TautologicalDoc => "tautological-doc",
+        }
+    }
+
+    /// The detector a rule name selects, or `None` for a name no detector
+    /// reports.
+    ///
+    /// Case-insensitive because a command line is typed by hand and the
+    /// capitalisation of a rule name is not a fact a caller should have to
+    /// remember.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|rule| rule.name().eq_ignore_ascii_case(name))
+    }
+}
+
 /// Scans one Rust source text with all five detectors, ordered by line.
 ///
 /// # Errors
@@ -147,15 +212,38 @@ impl Error for ScanError {}
 /// [`ScanError::Unparseable`] when the text is not Rust, and
 /// [`ScanError::Refused`] when it is past a bound of the checked parse.
 pub fn scan_source(source: &str, path: &str) -> Result<Vec<Hit>, ScanError> {
+    scan_source_with(source, path, &Rule::ALL)
+}
+
+/// Scans one Rust source text with `rules` and no other detector, ordered by
+/// line.
+///
+/// A rule named twice runs once: the selection is deduplicated before any
+/// detector runs, so a caller that concatenates rule lists cannot make a file
+/// cost twice the work or report a finding twice. The text is parsed once
+/// whatever is selected, so a narrow selection costs no extra parse.
+///
+/// # Errors
+///
+/// [`ScanError::Unparseable`] when the text is not Rust, and
+/// [`ScanError::Refused`] when it is past a bound of the checked parse.
+pub fn scan_source_with(source: &str, path: &str, rules: &[Rule]) -> Result<Vec<Hit>, ScanError> {
     let parsed =
         try_parse(source, Language::Rust).map_err(|refusal| refused(source, path, refusal))?;
     let root = parsed.root().get_inner_node();
+    let mut selected = rules.to_vec();
+    selected.sort_unstable();
+    selected.dedup();
     let mut hits = Vec::new();
-    swallow::detect(source, root, &mut hits);
-    unlogged::detect(source, root, &mut hits);
-    allow::detect(source, root, &mut hits);
-    chain::detect(source, root, &mut hits);
-    doc::detect(source, root, &mut hits);
+    for rule in selected {
+        match rule {
+            Rule::SwallowedError => swallow::detect(source, root, &mut hits),
+            Rule::UnloggedError => unlogged::detect(source, root, &mut hits),
+            Rule::AllowSilence => allow::detect(source, root, &mut hits),
+            Rule::LongTryChain => chain::detect(source, root, &mut hits),
+            Rule::TautologicalDoc => doc::detect(source, root, &mut hits),
+        }
+    }
     hits.sort_by(|left, right| (left.line, left.rule).cmp(&(right.line, right.rule)));
     Ok(hits)
 }
