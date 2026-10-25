@@ -1,5 +1,7 @@
-//! `lgwks-ast scan [--json] [PATH...]`: the zero-gate source detectors
-//! (INV-SCAN-ZERO, #408) over every `.rs` file under the paths named.
+//! `lgwks-ast scan [--json] [--rule NAME...] [PATH...]`: the zero-gate source
+//! detectors (INV-SCAN-ZERO, #408) over every `.rs` file under the paths named,
+//! narrowed to the detectors `--rule` names (#699) and extended to every
+//! `Cargo.toml` when ALLOW-SILENCE is among them.
 //!
 //! The five detectors of `lgwks_ast::scan` run through the checked parse, so a
 //! file past the byte, node, depth or time bound is refused by name and counted,
@@ -18,7 +20,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lgwks_ast::scan::{Hit, scan_manifest, scan_source};
+use lgwks_ast::scan::{Hit, Rule, scan_manifest, scan_source_with};
 use lgwks_std::json::Value;
 
 use super::{Wanted, files_under, object, read_bounded};
@@ -123,12 +125,13 @@ impl Counts {
     }
 }
 
-/// Scan one file: read it under the byte bound, then run the detectors.
-fn scan_file(path: PathBuf) -> ScanReading {
+/// Scan one file: read it under the byte bound, then run `rules` over it.
+fn scan_file(path: PathBuf, rules: &[Rule]) -> ScanReading {
     let outcome = read_bounded(&path)
         .map_err(|refusal| refusal.to_string())
         .and_then(|text| {
-            scan_source(&text, &path.display().to_string()).map_err(|refusal| refusal.to_string())
+            scan_source_with(&text, &path.display().to_string(), rules)
+                .map_err(|refusal| refusal.to_string())
         });
     ScanReading { path, outcome }
 }
@@ -147,7 +150,11 @@ fn scan_manifest_file(path: PathBuf) -> ScanReading {
 
 /// Every reading of `wanted` under `root`: one per file, or one refusal naming
 /// the root when the tree could not be walked.
-fn read_tree(root: &Path, wanted: Wanted, read: fn(PathBuf) -> ScanReading) -> Vec<ScanReading> {
+fn read_tree(
+    root: &Path,
+    wanted: Wanted,
+    read: impl Fn(PathBuf) -> ScanReading,
+) -> Vec<ScanReading> {
     match files_under(root, wanted) {
         Ok(files) => files.into_iter().map(read).collect(),
         Err(error) => vec![ScanReading {
@@ -159,16 +166,24 @@ fn read_tree(root: &Path, wanted: Wanted, read: fn(PathBuf) -> ScanReading) -> V
 
 /// Run `scan` over `roots`: findings on stdout one per line as
 /// `path:line: [rule] evidence`, a refused file on stderr, then the summary.
+///
+/// A manifest is read only when ALLOW-SILENCE is selected, because a manifest
+/// carries lint levels and no other rule reads one; a selection that leaves the
+/// rule out does not walk the tree a second time for tables it would discard.
 pub(super) fn run(
     roots: &[PathBuf],
     json: bool,
+    rules: &[Rule],
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<ExitCode> {
+    let manifests = rules.contains(&Rule::AllowSilence);
     let mut readings = Vec::new();
     for root in roots {
-        readings.extend(read_tree(root, Wanted::Rust, scan_file));
-        readings.extend(read_tree(root, Wanted::Manifest, scan_manifest_file));
+        readings.extend(read_tree(root, Wanted::Rust, |path| scan_file(path, rules)));
+        if manifests {
+            readings.extend(read_tree(root, Wanted::Manifest, scan_manifest_file));
+        }
     }
     let counts = Counts::of(&readings);
     if json {
