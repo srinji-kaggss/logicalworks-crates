@@ -11,11 +11,22 @@
 //! A run that was killed releases the lock with its process, so the next run
 //! finds the lease free and reclaims the volume: no process id is read, and no
 //! id is reused under a stranger.
+//!
+//! The name after the prefix is a time-ordered UUID (`Uuid::new_v7`, issue
+//! #715). It is distinct from every other run's, a listing of `/Volumes` or the
+//! temporary directory shows the leftovers oldest first, and it carries the
+//! instant it was made, so a leftover's age is read from its own name and not
+//! from a file's modification time that a copy or a `touch` can move. A name
+//! written by an older build (64 random bits in hex) is not a UUID and is aged
+//! by its lease file, as before.
 
 use std::fs::{self, File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(not(target_family = "wasm"))]
+use lgwks_std::id::Uuid;
 
 /// The name every scratch volume and lease starts with.
 const PREFIX: &str = "lgwks-gate-";
@@ -120,15 +131,67 @@ fn fresh_identity() -> Option<String> {
     None
 }
 
-/// A name no other run holds: 64 random bits, in hex.
+/// A name no other run holds, that sorts by when the run started: a time-ordered
+/// UUID, 62 random bits behind a millisecond stamp and a counter.
 #[cfg(not(target_family = "wasm"))]
 fn fresh_identity() -> Option<String> {
-    match lgwks_std::random::bytes::<8>() {
-        Ok(bytes) => Some(format!("{:016x}", u64::from_le_bytes(bytes))),
+    match Uuid::new_v7() {
+        Ok(identity) => Some(identity.to_string()),
         Err(error) => {
-            lgwks_std::trace::debug!(%error, "no entropy for a scratch name; the lanes use the system temporary directory");
+            lgwks_std::trace::debug!(%error, "no identity for a scratch name; the lanes use the system temporary directory");
             None
         }
+    }
+}
+
+/// The millisecond the run that made `stem` started, when its name says so.
+///
+/// WASI makes no scratch name (`fresh_identity` above), so there is nothing to
+/// read there.
+#[cfg(target_family = "wasm")]
+fn started_ms(_stem: &str) -> Option<u64> {
+    None
+}
+
+/// The millisecond the run that made `stem` started, when its name says so: the
+/// stamp of the time-ordered UUID after the prefix. A name that is not one (an
+/// older build's hex) has none.
+#[cfg(not(target_family = "wasm"))]
+fn started_ms(stem: &str) -> Option<u64> {
+    let tail = stem.strip_prefix(PREFIX)?;
+    match Uuid::parse(tail) {
+        Ok(identity) => identity.unix_millis(),
+        Err(error) => {
+            lgwks_std::trace::debug!(%error, name = stem, "a scratch name carries no start time; its lease file is aged instead");
+            None
+        }
+    }
+}
+
+/// How long ago the run that made `stem` started, read from the name, as of
+/// `now`. A name stamped after `now` (a clock that stepped back) is as young as
+/// a name can be, so it is never reclaimed on that reading.
+fn age_from_name(stem: &str, now: SystemTime) -> Option<Duration> {
+    let started = UNIX_EPOCH.checked_add(Duration::from_millis(started_ms(stem)?))?;
+    match now.duration_since(started) {
+        Ok(age) => Some(age),
+        Err(ahead) => {
+            lgwks_std::trace::debug!(ahead = ?ahead.duration(), name = stem, "a scratch name is stamped ahead of the clock");
+            Some(Duration::ZERO)
+        }
+    }
+}
+
+/// How long ago `entry`'s file was last modified, or nothing when the host
+/// cannot say.
+fn age_from_file(entry: &fs::DirEntry) -> Option<Duration> {
+    match entry
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map(|stamp| stamp.elapsed())
+    {
+        Ok(Ok(age)) => Some(age),
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
@@ -249,14 +312,8 @@ fn reclaim_stale(temp: &Path) {
         else {
             continue;
         };
-        let old_enough = match entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .map(|stamp| stamp.elapsed())
-        {
-            Ok(Ok(age)) => age >= FRESH,
-            Ok(Err(_)) | Err(_) => false,
-        };
+        let age = age_from_name(name, SystemTime::now()).or_else(|| age_from_file(&entry));
+        let old_enough = age.is_some_and(|found| found >= FRESH);
         if !old_enough || !lease_is_free(&entry.path()) {
             continue;
         }
@@ -279,7 +336,92 @@ mod tests {
     use std::error::Error;
     use std::fs;
 
+    #[cfg(not(target_family = "wasm"))]
+    use super::{PREFIX, age_from_name};
+    #[cfg(not(target_family = "wasm"))]
+    use lgwks_std::id::Uuid;
+    #[cfg(not(target_family = "wasm"))]
+    use std::time::{Duration, UNIX_EPOCH};
+
     type TestResult = Result<(), Box<dyn Error>>;
+
+    /// A scratch name as `fresh_identity` makes it, with the millisecond it
+    /// carries.
+    #[cfg(not(target_family = "wasm"))]
+    fn made_name() -> Result<(String, u64), Box<dyn Error>> {
+        let identity = Uuid::new_v7()?;
+        let stamp = identity.unix_millis().ok_or("a new id carries no stamp")?;
+        Ok((format!("{PREFIX}{identity}"), stamp))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    /// RFC 9562 section 5.7: the first 48 bits of a version 7 id are the
+    /// milliseconds since the Unix epoch, so a scratch name is as old as the
+    /// reader's clock is past its stamp.
+    fn a_name_reads_back_how_long_ago_its_run_started() -> TestResult {
+        let (name, stamp) = made_name()?;
+        let started = UNIX_EPOCH
+            .checked_add(Duration::from_millis(stamp))
+            .ok_or("a stamp past the clock's range")?;
+        let later = started
+            .checked_add(Duration::from_secs(90))
+            .ok_or("a clock past its range")?;
+        assert_eq!(
+            age_from_name(&name, later),
+            Some(Duration::from_secs(90)),
+            "a run that started 90 s before the reading is 90 s old"
+        );
+        assert_eq!(
+            age_from_name(&name, started),
+            Some(Duration::ZERO),
+            "a reading at the stamp is no age at all"
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    /// A reader whose clock stepped back sees a name stamped ahead of it; that
+    /// name must read as new, or a live run's volume would be ejected.
+    fn a_name_stamped_ahead_of_the_clock_is_as_young_as_a_name_can_be() -> TestResult {
+        let (name, stamp) = made_name()?;
+        let behind = UNIX_EPOCH
+            .checked_add(Duration::from_millis(stamp.saturating_sub(5_000)))
+            .ok_or("a stamp past the clock's range")?;
+        assert_eq!(
+            age_from_name(&name, behind),
+            Some(Duration::ZERO),
+            "a name five seconds ahead of the clock is zero seconds old"
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    /// An older build named its volumes with 64 random bits in hex, and a stray
+    /// file may carry the prefix with anything after it; neither carries a start
+    /// time, so neither is aged by its name.
+    fn a_name_that_is_not_a_time_ordered_id_has_no_start_time() -> TestResult {
+        let (made, stamp) = made_name()?;
+        let now = UNIX_EPOCH
+            .checked_add(Duration::from_millis(stamp))
+            .ok_or("a stamp past the clock's range")?;
+        let foreign = made.replacen(PREFIX, "other-", 1);
+        for name in [
+            format!("{PREFIX}0123456789abcdef"),
+            PREFIX.to_owned(),
+            format!("{PREFIX}not-an-id"),
+            foreign,
+        ] {
+            assert_eq!(
+                age_from_name(&name, now),
+                None,
+                "{name} must be aged by its lease file"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_held_lease_is_not_free_and_a_released_one_is() -> TestResult {

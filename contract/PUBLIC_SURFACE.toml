@@ -177,7 +177,8 @@
 "crates/lgwks-std/src/hex.rs" = 4
 "crates/lgwks-std/src/http.rs" = 33
 "crates/lgwks-std/src/http/exchange.rs" = 1
-"crates/lgwks-std/src/id.rs" = 6
+"crates/lgwks-std/src/id.rs" = 9
+"crates/lgwks-std/src/id/v7.rs" = 1
 "crates/lgwks-std/src/json.rs" = 11
 "crates/lgwks-std/src/leb128.rs" = 9
 "crates/lgwks-std/src/online.rs" = 3

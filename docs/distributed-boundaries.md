@@ -27,7 +27,7 @@ the capability: implemented here, caller policy, storefront BOUNDARY (requires
 | Capability | Status | Owner |
 |---|---|---|
 | UUID v4 generation + parse | Shipped | `lgwks_std::id` (feature `random`) |
-| Time-ordered IDs (UUIDv7-class) for WAL keys / dedup | Missing, recorded | `lgwks_std::id` (needs only `time` + `random`; ELIMINATE, not a new crate) |
+| Time-ordered IDs (UUIDv7) for WAL keys / dedup | Shipped | `lgwks_std::id` (`Uuid::new_v7`, `Uuid::unix_millis`; feature `random`): strictly increasing across the process, a backwards clock keeps the last stamp, a spent counter borrows the next millisecond (INV-ID-2) |
 | Keyed BLAKE3 MAC primitive | Shipped | `lgwks_std::hash::keyed` |
 | Key sourcing, rotation, keyring loading | Out of scope | Host secret manager; a keyring crate would be a storefront BOUNDARY |
 | Peer signatures (`ed25519`-class) | Missing | Storefront BOUNDARY, never `lgwks_std` directly |

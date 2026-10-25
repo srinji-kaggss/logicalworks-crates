@@ -1,12 +1,22 @@
-//! `id` owns UUID version 4 generation and canonical text parsing. Generated
-//! values carry version 4 and the RFC variant bits; parsing and raw-byte
-//! construction accept any 128-bit UUID value without imposing a version.
+//! `id` owns UUID version 4 and version 7 generation and canonical text
+//! parsing. Generated values carry their version and the RFC variant bits;
+//! parsing and raw-byte construction accept any 128-bit UUID value without
+//! imposing a version. A version 7 value sorts in issue order: see
+//! [`Uuid::new_v7`](crate::id::Uuid::new_v7) for the policy under a backwards
+//! clock, several identifiers in one millisecond and a spent counter.
 
 use std::error::Error;
 use std::fmt;
 
 use crate::hex::DecodeError;
 use crate::random::{self, EntropyError};
+
+mod v7;
+
+#[cfg(test)]
+mod sim_v7;
+
+pub use v7::V7Error;
 
 /// A 128-bit RFC 4122 identifier, stored as raw bytes in network order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,6 +26,56 @@ impl Uuid {
     /// Generates a version 4 UUID from OS entropy.
     pub fn new_v4() -> Result<Self, EntropyError> {
         Self::new_v4_with(random::bytes)
+    }
+
+    /// Generates a version 7 UUID (RFC 9562 section 5.7), strictly greater, as a
+    /// value and as text, than every one this process generated before it
+    /// through this call.
+    ///
+    /// One generator serves the process, so every thread and every tenant of it
+    /// shares the order. The 48-bit stamp is the wall clock in milliseconds, the
+    /// next 12 bits a counter, and the remaining 62 bits OS entropy. The rule is
+    /// the dedicated counter of section 6.2, method 1:
+    ///
+    /// - a later millisecond takes that stamp and reseeds the counter below
+    ///   2,048, so 2,048 more identifiers fit in the stamp before it overflows;
+    /// - the same millisecond, or a clock that stepped backwards, keeps the last
+    ///   stamp and adds one to the counter, because taking the earlier stamp
+    ///   would issue a value that sorts before one already issued;
+    /// - a counter that would pass 4,095 borrows the next millisecond and
+    ///   reseeds. It never waits on the clock and never repeats a value, so a
+    ///   burst past 2,048,000 identifiers a second only moves the stamp ahead
+    ///   of the wall clock;
+    /// - a stamp past 48 bits (the year 10889) is refused, never wrapped, and
+    ///   the generator is left as it was.
+    ///
+    /// Nothing is persisted: across a restart the first stamp is the wall clock,
+    /// so the order across a restart rests on the clock not having stepped back
+    /// past the last stamp issued.
+    ///
+    /// # Errors
+    ///
+    /// [`V7Error::ClockBeforeEpoch`] when the wall clock reads before 1970,
+    /// [`V7Error::TimestampOutOfRange`] when the stamp does not fit 48 bits, and
+    /// [`V7Error::Entropy`] when the OS entropy source cannot be read; nothing
+    /// is substituted for it.
+    pub fn new_v7() -> Result<Self, V7Error> {
+        v7::new_v7()
+    }
+
+    /// The millisecond a version 7 value was stamped with, since the Unix epoch,
+    /// or `None` for a value that is not an RFC version 7 identifier.
+    ///
+    /// The stamp is a lower bound on the issue time and not an exact clock
+    /// reading: a burst past 2,048 identifiers in one millisecond borrows the
+    /// following milliseconds.
+    #[must_use]
+    pub fn unix_millis(&self) -> Option<u64> {
+        if self.version() != Some(7) {
+            return None;
+        }
+        let [ts0, ts1, ts2, ts3, ts4, ts5, ..] = self.0;
+        Some(u64::from_be_bytes([0, 0, ts0, ts1, ts2, ts3, ts4, ts5]))
     }
 
     /// Obtains the bytes and applies the version and variant masks.
