@@ -66,9 +66,10 @@ impl Uuid {
     /// The millisecond a version 7 value was stamped with, since the Unix epoch,
     /// or `None` for a value that is not an RFC version 7 identifier.
     ///
-    /// The stamp is a lower bound on the issue time and not an exact clock
-    /// reading: a burst past 2,048 identifiers in one millisecond borrows the
-    /// following milliseconds.
+    /// The stamp is an upper bound on the wall clock at issue and not an exact
+    /// reading of it: a burst past 2,048 identifiers in one millisecond borrows
+    /// the following milliseconds, and a clock that stepped backwards keeps the
+    /// last stamp, so a stamp can run ahead of the clock and never behind it.
     #[must_use]
     pub fn unix_millis(&self) -> Option<u64> {
         if self.version() != Some(7) {

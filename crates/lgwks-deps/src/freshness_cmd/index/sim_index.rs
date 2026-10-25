@@ -96,10 +96,36 @@ fn a_file_reads_as_its_versions_and_their_yanked_flags() -> TestResult {
 }
 
 #[test]
-fn an_empty_file_is_a_crate_with_no_versions() -> TestResult {
-    assert!(parse("")?.is_empty(), "an empty body has no entries");
-    assert!(parse("\n\n")?.is_empty(), "blank lines have no entries");
+fn a_file_with_no_version_record_is_refused_not_read_as_current() -> TestResult {
+    // A locked package was published, so its file lists at least one version.
+    // An empty 200 is a hollow or cut answer, and it must not reach `newest`
+    // as a crate with nothing on offer (the review of #754).
+    for body in ["", "\n", "\n\n", "  \r\n\t\n", "   "] {
+        assert_eq!(
+            parse(body),
+            Err(IndexError::Empty),
+            "{body:?} holds no record and must be refused"
+        );
+    }
+    let record = line("1.0.0", false);
+    for blanks in 0..6_usize {
+        let body = format!("{}{record}{}", "\n".repeat(blanks), " \n".repeat(blanks));
+        assert_eq!(
+            parse(&body)?.len(),
+            1,
+            "{blanks} blank lines around one record leave exactly that record"
+        );
+    }
     Ok(())
+}
+
+#[test]
+fn the_empty_refusal_reads_as_a_lookup_that_did_not_finish() {
+    let text = IndexError::Empty.to_string();
+    assert!(
+        text.contains("no version record"),
+        "the row names what was missing: {text:?}"
+    );
 }
 
 #[test]

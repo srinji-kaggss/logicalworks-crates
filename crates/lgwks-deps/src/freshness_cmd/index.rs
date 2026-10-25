@@ -52,6 +52,8 @@ pub(super) enum IndexError {
         /// What is wrong with it.
         reason: String,
     },
+    /// A file with no version record in it.
+    Empty,
 }
 
 impl fmt::Display for IndexError {
@@ -63,6 +65,7 @@ impl fmt::Display for IndexError {
             Self::Line { line, ref reason } => {
                 write!(formatter, "index line {line}: {reason}")
             }
+            Self::Empty => formatter.write_str("the index file holds no version record"),
         }
     }
 }
@@ -108,6 +111,11 @@ fn directory(lower: &str) -> Option<String> {
 /// One unreadable line refuses the whole file. The newest version might be on
 /// that line, and a verdict computed without it would be a guess presented as
 /// an answer.
+///
+/// A file with no record at all is refused too. Every package in a lock was
+/// published, so a file that lists nothing is a truncated or hollow answer
+/// from the registry, and a row built from it would read as current when
+/// nothing was learned.
 pub(super) fn parse(body: &str) -> Result<Vec<Entry>, IndexError> {
     let mut entries = Vec::new();
     for (text, line) in body.lines().zip(1_usize..) {
@@ -121,7 +129,11 @@ pub(super) fn parse(body: &str) -> Result<Vec<Entry>, IndexError> {
         })?;
         entries.push(record);
     }
-    Ok(entries)
+    if entries.is_empty() {
+        Err(IndexError::Empty)
+    } else {
+        Ok(entries)
+    }
 }
 
 /// Why one line is not a version record.

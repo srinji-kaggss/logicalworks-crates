@@ -29,14 +29,18 @@ pub enum Reply {
     Body(String),
     /// This status with an empty body.
     Status(u16),
+    /// HTTP 200 with no length, then bytes until the client hangs up: a
+    /// registry that never finishes, which only a cap on the read can end.
+    Endless,
 }
 
 impl Reply {
-    /// The complete HTTP response for this reply.
+    /// The complete HTTP response for this reply; for `Endless`, its head.
     fn render(&self) -> String {
         match *self {
             Self::Body(ref body) => format_response(200, body),
             Self::Status(code) => format_response(code, ""),
+            Self::Endless => "HTTP/1.1 200 X\r\nConnection: close\r\n\r\n".to_owned(),
         }
     }
 }
@@ -213,14 +217,23 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
         Some(reply) => reply.render(),
         None => format_response(404, "not found"),
     };
+    let endless = matches!(shared.routes.get(&path), Some(&Reply::Endless));
     // Recorded before the bytes leave: the client may exit the instant it has the
     // response, and a test reading `served` after that must already find the path.
     shared.lock().served.push(path);
     if stream.write_all(response.as_bytes()).is_err() {
         // The client gave up first (its timeout); the counters below still hold.
+    } else if endless {
+        flood(&mut stream);
     }
     let mut state = shared.lock();
     state.in_flight = state.in_flight.saturating_sub(1);
+}
+
+/// Writes until the client hangs up, which is the only way this ends.
+fn flood(stream: &mut TcpStream) {
+    let chunk = [b'x'; 8_192];
+    while stream.write_all(&chunk).is_ok() {}
 }
 
 /// The path of the request line, once the headers have all arrived.
