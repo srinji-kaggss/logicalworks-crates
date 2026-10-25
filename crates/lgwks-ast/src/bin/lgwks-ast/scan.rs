@@ -4,8 +4,15 @@
 //! The five detectors of `lgwks_ast::scan` run through the checked parse, so a
 //! file past the byte, node, depth or time bound is refused by name and counted,
 //! never passed and never an abort. Nothing stops at the first problem: one run
-//! names every finding and every refused file, and the exit status is 2 when
-//! there is any.
+//! names every finding and every refused file.
+//!
+//! The exit status is the verdict, and the two failures have two statuses
+//! (#698): 0 when the tree is clean, 1 when findings stand against a tree every
+//! file of which was read, and 2 when something could not be read, with or
+//! without findings beside it. A caller mapping a status to a verdict therefore
+//! never reads "the detectors found defects" as "the scan measured nothing".
+//! `64` (EX_USAGE) is a command line the tool could not read: the caller's
+//! mistake, not the tree's.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -15,6 +22,14 @@ use lgwks_ast::scan::{Hit, scan_source};
 use lgwks_std::json::Value;
 
 use super::{files_under, object, read_bounded};
+
+/// The status when findings stand against a tree every file of which was read.
+const EXIT_FINDINGS: u8 = 1;
+
+/// The status when at least one file could not be read (#698): the same code a
+/// `script` verb uses for a refusal, and the one a CI engine already maps to
+/// "not measured" rather than to a verdict.
+const EXIT_UNREAD: u8 = 2;
 
 /// One file's scan: its path as the caller named it, and what the detectors
 /// found, or why the file could not be scanned at all.
@@ -33,6 +48,41 @@ struct Counts {
     findings: usize,
     /// Files the scan refused or could not read.
     refused: usize,
+}
+
+/// What the counts mean for the caller's verdict (#698): a tree the detectors
+/// read and cleared, a tree they read and refused, or a scan that could not
+/// read part of the tree. The third is not a verdict on the tree at all, which
+/// is why it is its own status and not the second one with a note attached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Every file was read and nothing stands against them.
+    Clean,
+    /// Findings stand against a tree every file of which was read.
+    Findings,
+    /// At least one file could not be read, whatever else was found.
+    Unread,
+}
+
+impl Verdict {
+    /// The status this verdict exits with.
+    fn exit(self) -> ExitCode {
+        match self {
+            Self::Clean => ExitCode::SUCCESS,
+            Self::Findings => ExitCode::from(EXIT_FINDINGS),
+            Self::Unread => ExitCode::from(EXIT_UNREAD),
+        }
+    }
+
+    /// The verdict as the word the text and JSON forms print, so an agent
+    /// reading a document and a script reading `$?` name the same thing.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Findings => "findings",
+            Self::Unread => "unread",
+        }
+    }
 }
 
 impl Counts {
@@ -56,9 +106,20 @@ impl Counts {
         }
     }
 
-    /// Whether nothing stands against the tree.
-    const fn clean(&self) -> bool {
-        self.findings == 0 && self.refused == 0
+    /// What these counts say about the tree.
+    const fn verdict(&self) -> Verdict {
+        // An unread file outranks a finding: the finding is a fact about a file
+        // that was read, while an unread file is the scan saying it does not
+        // know what that file holds. Reporting the knowledge while the
+        // ignorance is the larger fact would let a caller cache "defects found"
+        // where it owes "not measured".
+        if self.refused > 0 {
+            Verdict::Unread
+        } else if self.findings > 0 {
+            Verdict::Findings
+        } else {
+            Verdict::Clean
+        }
     }
 }
 
@@ -95,33 +156,31 @@ pub(super) fn run(
         write_text(&readings, out, err)?;
         write_summary(&counts, out, err)?;
     }
-    Ok(if counts.clean() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
-    })
+    Ok(counts.verdict().exit())
 }
 
-/// The closing line: `OK` on stdout for a clean tree, `REFUSED` on stderr with
-/// the counts otherwise.
+/// The closing line: `OK` on stdout for a clean tree, `REFUSED` on stderr when
+/// findings stand against a tree that was read, and `UNMEASURED` when part of
+/// the tree could not be read. The word is the status in prose, so a reader of
+/// the log and a reader of `$?` cannot come to different conclusions.
 fn write_summary(counts: &Counts, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
-    if counts.clean() {
-        return writeln!(
+    match counts.verdict() {
+        Verdict::Clean => writeln!(
             out,
             "OK  scan clean — {} files, zero findings",
             counts.files
-        );
+        ),
+        Verdict::Findings => writeln!(
+            err,
+            "REFUSED  scan: {} findings across {} files",
+            counts.findings, counts.files
+        ),
+        Verdict::Unread => writeln!(
+            err,
+            "UNMEASURED  scan: {} of {} files could not be read; {} findings across the rest",
+            counts.refused, counts.files, counts.findings
+        ),
     }
-    let unread = if counts.refused == 0 {
-        String::new()
-    } else {
-        format!(", {} files refused", counts.refused)
-    };
-    writeln!(
-        err,
-        "REFUSED  scan: {} findings across {} files{unread}",
-        counts.findings, counts.files
-    )
 }
 
 /// The human form of a scan: one line per finding, one per refused file.
@@ -175,6 +234,7 @@ fn write_json(readings: &[ScanReading], counts: &Counts, out: &mut impl Write) -
     }
     let document = object(vec![
         ("verb", Value::from("scan")),
+        ("verdict", Value::from(counts.verdict().word())),
         ("files", Value::from(counts.files)),
         ("findings", Value::from(counts.findings)),
         ("refused", Value::from(counts.refused)),

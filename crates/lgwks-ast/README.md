@@ -70,6 +70,21 @@ which every `lang-*` feature enables; `default-features = false, features =
 ["parser"]` is the parser with no grammar compiled, for a caller that
 registers its own through `CustomLang`.
 
+## The zero-gate scan
+
+`lgwks-ast scan [--json] [PATH...]` runs five detectors over every `.rs` file
+under the paths named: a swallowed error, a `return Err(..)` nothing logs, a
+silenced lint, an overlong `?` chain, and a docstring that only paraphrases its
+function. It reads Rust through the same checked parse the rest of the crate
+uses, so a file past a bound is refused by name and counted rather than quietly
+passed.
+
+The exit status is the verdict, and the two failures are two statuses: `0` when
+the tree is clean, `1` when findings stand against a tree every file of which
+was read, `2` when a file could not be read (with or without findings beside
+it), and `64` when the command line is wrong. A caller that gates on the status
+therefore never reads "defects found" as "nothing was measured".
+
 ## More
 
 The grammar features and the extension table are in
