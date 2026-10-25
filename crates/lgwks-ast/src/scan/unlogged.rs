@@ -234,8 +234,15 @@ impl ErrReturnWalker<'_> {
     fn walk(&mut self, node: Node<'_>) {
         match node.kind() {
             "function_item" if !syntax::is_in_trait(node) => {
-                self.test_scopes
-                    .push(cfg::is_test_or_helper(self.source, node));
+                self.open_scope(cfg::is_test_or_helper(self.source, node));
+                self.walk_children(node);
+                self.test_scopes.pop();
+            }
+            // A module under a `cfg` that cannot hold outside `test` is test
+            // code for every item it holds: the exemption is a scope, not a
+            // spelling, and the module doc says so (#699).
+            "mod_item" => {
+                self.open_scope(cfg::is_test_item(self.source, node));
                 self.walk_children(node);
                 self.test_scopes.pop();
             }
@@ -245,6 +252,14 @@ impl ErrReturnWalker<'_> {
             }
             _ => self.walk_children(node),
         }
+    }
+
+    /// Enter a scope that is test code when it says so itself or when any
+    /// enclosing scope already is: an inner function inside a test module is
+    /// still test code.
+    fn open_scope(&mut self, own: bool) {
+        let inherited = self.test_scopes.last().copied() == Some(true);
+        self.test_scopes.push(inherited || own);
     }
 
     /// Visit every named child of a node.

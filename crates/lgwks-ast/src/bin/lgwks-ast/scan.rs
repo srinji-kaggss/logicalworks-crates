@@ -15,13 +15,13 @@
 //! mistake, not the tree's.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lgwks_ast::scan::{Hit, scan_source};
+use lgwks_ast::scan::{Hit, scan_manifest, scan_source};
 use lgwks_std::json::Value;
 
-use super::{files_under, object, read_bounded};
+use super::{Wanted, files_under, object, read_bounded};
 
 /// The status when findings stand against a tree every file of which was read.
 const EXIT_FINDINGS: u8 = 1;
@@ -125,10 +125,36 @@ impl Counts {
 
 /// Scan one file: read it under the byte bound, then run the detectors.
 fn scan_file(path: PathBuf) -> ScanReading {
-    let outcome = read_bounded(&path).and_then(|text| {
-        scan_source(&text, &path.display().to_string()).map_err(|refusal| refusal.to_string())
-    });
+    let outcome = read_bounded(&path)
+        .map_err(|refusal| refusal.to_string())
+        .and_then(|text| {
+            scan_source(&text, &path.display().to_string()).map_err(|refusal| refusal.to_string())
+        });
     ScanReading { path, outcome }
+}
+
+/// Scan one manifest: read it under the byte bound, then read its lint tables.
+///
+/// A manifest that cannot be read is a refusal, not a pass, for the reason a
+/// source file is: the scan exists to read what silences a lint, and a table it
+/// never saw is one it cannot clear.
+fn scan_manifest_file(path: PathBuf) -> ScanReading {
+    let outcome = read_bounded(&path)
+        .map_err(|refusal| refusal.to_string())
+        .map(|text| scan_manifest(&text));
+    ScanReading { path, outcome }
+}
+
+/// Every reading of `wanted` under `root`: one per file, or one refusal naming
+/// the root when the tree could not be walked.
+fn read_tree(root: &Path, wanted: Wanted, read: fn(PathBuf) -> ScanReading) -> Vec<ScanReading> {
+    match files_under(root, wanted) {
+        Ok(files) => files.into_iter().map(read).collect(),
+        Err(error) => vec![ScanReading {
+            path: root.to_path_buf(),
+            outcome: Err(error.to_string()),
+        }],
+    }
 }
 
 /// Run `scan` over `roots`: findings on stdout one per line as
@@ -141,13 +167,8 @@ pub(super) fn run(
 ) -> io::Result<ExitCode> {
     let mut readings = Vec::new();
     for root in roots {
-        match files_under(root) {
-            Ok(files) => readings.extend(files.into_iter().map(scan_file)),
-            Err(error) => readings.push(ScanReading {
-                path: root.clone(),
-                outcome: Err(error),
-            }),
-        }
+        readings.extend(read_tree(root, Wanted::Rust, scan_file));
+        readings.extend(read_tree(root, Wanted::Manifest, scan_manifest_file));
     }
     let counts = Counts::of(&readings);
     if json {

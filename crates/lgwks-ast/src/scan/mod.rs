@@ -3,6 +3,12 @@
 //! return, no lint allowance, no overlong try chain, and no paraphrase
 //! docstring.
 //!
+//! ALLOW-SILENCE reads every way a lint is silenced, in source and in a
+//! manifest: `allow` and `expect` at any level, a rustc lint, a tool lint, a
+//! group, `cfg_attr(.., allow(..))`, and a package's `[lints]` table (#699).
+//! [`scan_manifest`] is the manifest half, because a lint lowered for a whole
+//! package is the same act as an attribute written once per item.
+//!
 //! The detectors read Rust through the one parser, [`crate::try_parse`], so the
 //! gate and structural inspection cannot disagree about a file, and the gate
 //! inherits the parser's bounds: a source past the byte ceiling, a tree past the
@@ -23,9 +29,12 @@ mod binding;
 mod cfg;
 mod chain;
 mod doc;
+mod manifest;
 mod swallow;
 mod syntax;
 mod unlogged;
+
+pub use manifest::scan_manifest;
 
 use std::error::Error;
 use std::fmt;

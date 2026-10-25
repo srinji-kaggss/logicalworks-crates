@@ -33,6 +33,7 @@
 
 #![cfg(feature = "scan")]
 
+mod allow;
 mod model;
 mod sim_rules;
 
@@ -43,10 +44,11 @@ use lgwks_std::{hex, random};
 
 use crate::sim::Rng;
 
+use allow::allow_block;
 use model::{
-    ALLOW, BANDS, Block, CHAIN, DOC, DocSpec, Drawn, File, Finding, Lints, MAX_TRY_CHAIN,
-    MIXED_SEEDS, PLACEMENTS, PUBLIC_DOC, ROUNDS, SEEDS, SHAPES, SPREAD, TENANTS, TestResult, agree,
-    allow_block, assemble, band_seeds, chain_block, doc_block, filler_block, mixed_blocks,
+    ALLOW, BANDS, Block, CHAIN, DOC, DocSpec, Drawn, File, Finding, LOUD_LEVELS, Lints,
+    MAX_TRY_CHAIN, MIXED_SEEDS, PLACEMENTS, PUBLIC_DOC, ROUNDS, SEEDS, SHAPES, SPREAD, TENANTS,
+    TestResult, agree, assemble, band_seeds, chain_block, doc_block, filler_block, mixed_blocks,
     mixed_file, mixed_receipt, mixed_seed, scanned, several, shuffle, sweep, tally,
 };
 
@@ -117,7 +119,8 @@ fn clean_files_report_nothing() -> TestResult {
         several(rng, |rng, index| match rng.below(4) {
             0 => {
                 let placement = *rng.pick_named("placements", &PLACEMENTS)?;
-                allow_block(rng, index, placement, "allow", Lints::OtherOnly)
+                let level = *rng.pick_named("loud levels", &LOUD_LEVELS)?;
+                allow_block(rng, index, placement, level, Lints::Mixed)
             }
             1 => chain_block(rng, index, false, &SHAPES, MAX_TRY_CHAIN),
             2 => doc_block(

@@ -24,6 +24,7 @@ mod sim_diagnostics;
 mod sim_parse_bounds;
 mod sim_parse_deadline;
 mod sim_scan_detectors;
+mod sim_scan_manifest;
 mod sim_script_find;
 
 /// A scratch directory that dies with the test that made it, the one every

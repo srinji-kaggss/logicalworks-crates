@@ -3,18 +3,19 @@
 
 use crate::sim::Rng;
 
+use super::allow::{allow_block, cfg_attr_block};
 use super::model::{
     ALLOW, CHAIN, DOC, DocSpec, LOUD_LEVELS, Lints, PLACEMENTS, PUBLIC_DOC, Placement, SEEDS,
-    SPREAD, Seen, Shape, TestResult, agree, allow_block, assemble, chain_block, doc_block, several,
+    SPREAD, Seen, Shape, TestResult, agree, assemble, chain_block, doc_block, several,
     some_line_exceeds, some_line_holds, sweep, swept_tally, trait_block,
 };
 
 // ── ALLOW-SILENCE ───────────────────────────────────────────────────────────
 
-/// An `allow` reports each clippy path it names, in order, and nothing for
-/// the rest of its list.
+/// An `allow` reports every lint it names, in order, clippy's and rustc's
+/// alike: a silenced lint is a silenced lint, whatever tool owns it (#699).
 #[test]
-fn allow_lists_report_every_clippy_path_in_order() -> TestResult {
+fn allow_lists_report_every_lint_in_order() -> TestResult {
     let swept = sweep(0xa110_0001, |rng| {
         several(rng, |rng, index| {
             let placement = *rng.pick_named("placements", &PLACEMENTS)?;
@@ -28,17 +29,51 @@ fn allow_lists_report_every_clippy_path_in_order() -> TestResult {
     Ok(())
 }
 
-/// A lint that is not clippy's — rustc's own, or another tool's path — is
-/// never silence, however the list is written.
+/// A rustc lint — `dead_code`, `unused_variables` — is silence exactly as a
+/// clippy lint is.
 #[test]
-fn a_lint_outside_clippy_is_never_silence() -> TestResult {
+fn a_rustc_lint_is_silence() -> TestResult {
     let swept = sweep(0xa110_0002, |rng| {
         several(rng, |rng, index| {
             let placement = *rng.pick_named("placements", &PLACEMENTS)?;
             allow_block(rng, index, placement, "allow", Lints::OtherOnly)
         })
     })?;
-    assert_eq!(swept_tally(&swept, ALLOW), 0, "no rustc lint is silence");
+    assert!(swept_tally(&swept, ALLOW) > 0, "a rustc lint is silence");
+    Ok(())
+}
+
+/// `expect` suppresses the emission the way `allow` does, so it is the same
+/// finding.
+#[test]
+fn an_expect_is_silence_as_surely_as_an_allow() -> TestResult {
+    let swept = sweep(0xa110_0006, |rng| {
+        several(rng, |rng, index| {
+            let placement = *rng.pick_named("placements", &PLACEMENTS)?;
+            allow_block(rng, index, placement, "expect", Lints::Mixed)
+        })
+    })?;
+    assert!(
+        swept_tally(&swept, ALLOW) > 0,
+        "an expectation silences a lint"
+    );
+    Ok(())
+}
+
+/// The same attribute inside a `cfg_attr` silences under a condition, which is
+/// a silence all the same.
+#[test]
+fn a_cfg_attr_attribute_is_silence() -> TestResult {
+    let swept = sweep(0xa110_0007, |rng| {
+        several(rng, |rng, index| {
+            let placement = *rng.pick_named("placements", &PLACEMENTS)?;
+            cfg_attr_block(rng, index, placement, "allow", Lints::Mixed)
+        })
+    })?;
+    assert!(
+        swept_tally(&swept, ALLOW) > 0,
+        "a cfg_attr allow reported a silence"
+    );
     Ok(())
 }
 
