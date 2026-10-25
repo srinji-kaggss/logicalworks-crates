@@ -17,13 +17,13 @@
 //! mistake, not the tree's.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lgwks_ast::scan::{Hit, Rule, scan_manifest, scan_source_with};
 use lgwks_std::json::Value;
 
-use super::{Wanted, files_under, object, read_bounded};
+use super::{Wanted, files_under, is_manifest, object, read_bounded};
 
 /// The status when findings stand against a tree every file of which was read.
 const EXIT_FINDINGS: u8 = 1;
@@ -148,28 +148,32 @@ fn scan_manifest_file(path: PathBuf) -> ScanReading {
     ScanReading { path, outcome }
 }
 
-/// Every reading of `wanted` under `root`: one per file, or one refusal naming
-/// the root when the tree could not be walked.
-fn read_tree(
-    root: &Path,
-    wanted: Wanted,
-    read: impl Fn(PathBuf) -> ScanReading,
-) -> Vec<ScanReading> {
-    match files_under(root, wanted) {
-        Ok(files) => files.into_iter().map(read).collect(),
-        Err(error) => vec![ScanReading {
-            path: root.to_path_buf(),
-            outcome: Err(error.to_string()),
-        }],
+/// Scan one file the walk (or the command line) named, with the reader that owns
+/// it: a `Cargo.toml` is read for its lint tables and anything else as Rust.
+///
+/// A manifest named on the command line while ALLOW-SILENCE is not selected has
+/// no detector to read it with. It is refused by name, never read as Rust, which
+/// it is not, and never passed unread.
+fn scan_path(path: PathBuf, rules: &[Rule], manifests: bool) -> ScanReading {
+    match (is_manifest(&path), manifests) {
+        (false, _) => scan_file(path, rules),
+        (true, true) => scan_manifest_file(path),
+        (true, false) => ScanReading {
+            outcome: Err(format!(
+                "{} is a manifest, and only ALLOW-SILENCE reads one",
+                path.display()
+            )),
+            path,
+        },
     }
 }
 
 /// Run `scan` over `roots`: findings on stdout one per line as
 /// `path:line: [rule] evidence`, a refused file on stderr, then the summary.
 ///
-/// A manifest is read only when ALLOW-SILENCE is selected, because a manifest
-/// carries lint levels and no other rule reads one; a selection that leaves the
-/// rule out does not walk the tree a second time for tables it would discard.
+/// Each root is walked once. A manifest is kept by that walk only when
+/// ALLOW-SILENCE is selected, because a manifest carries lint levels and no other
+/// rule reads one; a root that cannot be walked is one refusal naming the root.
 pub(super) fn run(
     roots: &[PathBuf],
     json: bool,
@@ -180,9 +184,16 @@ pub(super) fn run(
     let manifests = rules.contains(&Rule::AllowSilence);
     let mut readings = Vec::new();
     for root in roots {
-        readings.extend(read_tree(root, Wanted::Rust, |path| scan_file(path, rules)));
-        if manifests {
-            readings.extend(read_tree(root, Wanted::Manifest, scan_manifest_file));
+        match files_under(root, Wanted::Scan { manifests }) {
+            Ok(files) => readings.extend(
+                files
+                    .into_iter()
+                    .map(|path| scan_path(path, rules, manifests)),
+            ),
+            Err(error) => readings.push(ScanReading {
+                path: root.clone(),
+                outcome: Err(error.to_string()),
+            }),
         }
     }
     let counts = Counts::of(&readings);

@@ -169,7 +169,8 @@ pub enum Rule {
 }
 
 impl Rule {
-    /// Every detector, in the order findings are ordered within one line.
+    /// Every detector, in the order the scan runs them. Findings are ordered by
+    /// line and then by rule name, whatever order the rules were selected in.
     pub const ALL: [Self; 5] = [
         Self::SwallowedError,
         Self::UnloggedError,

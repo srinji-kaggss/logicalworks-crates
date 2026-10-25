@@ -3,13 +3,18 @@
 //! than from the reader (#699).
 //!
 //! The model is four statements: a declaration inside a lint table
-//! (`[lints]`, `[lints.*]`, `[workspace.lints]`, `[workspace.lints.*]`) or a
-//! top-level `lints.*` key is the only thing that can silence; a level of
-//! `allow` silences and every other level does not; a `scan-approved: <reason>`
-//! comment on the declaration or in the comment block directly above it makes
-//! that one declaration a reviewed exception, and a marker with no reason or one
+//! (`[lints]`, `[lints.*]`, `[workspace.lints]`, `[workspace.lints.*]`, however
+//! the header is spaced or quoted) or a `lints.*` key at the top of the file or
+//! under `[workspace]` is the only thing that can silence, and the same key
+//! under any other table is no lint; a level of `allow` silences and every other
+//! level does not, written as a string or as the `level` of the inline table
+//! Cargo writes a lint group as; a `scan-approved: <reason>` comment on the
+//! declaration or in the comment block directly above it makes that one
+//! declaration a reviewed exception, and a marker with no reason or one
 //! separated by a blank line approves nothing; and a value the reader cannot
-//! read is a finding rather than a pass.
+//! read (an inline table with no `level`, an array, an escaped string) is a
+//! finding rather than a pass, which only an approval clears. Cargo's lint
+//! tables are specified in the Cargo book, "Manifest: the `[lints]` section".
 //!
 //! | Family | Property it pins |
 //! |---|---|
@@ -45,7 +50,7 @@ const BANDS: u64 = 4;
 const SPREAD: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Lints a generated declaration may name.
-const LINTS: [&str; 6] = [
+pub(super) const LINTS: [&str; 6] = [
     "dead_code",
     "unused_variables",
     "unsafe_code",
@@ -67,7 +72,7 @@ const TABLES: [&str; 4] = [
 ];
 
 /// Reasons an approval may carry: every one is long enough to count.
-const REASONS: [&str; 3] = [
+pub(super) const REASONS: [&str; 3] = [
     "the FFI modules own it",
     "the corpus needs this one",
     "a measured exception",
@@ -87,6 +92,20 @@ fn finding(scope: &str, line: &str) -> String {
 /// Builds the evidence of a declaration the reader cannot read.
 fn unreadable(scope: &str, line: &str) -> String {
     format!("{scope} {line} — {UNREADABLE}")
+}
+
+/// The header that opens `table`, written the way TOML allows: plain, with
+/// spaces around the brackets and the dots, or with every segment quoted. All
+/// three name the same table, and the reader reports it as `[table]`.
+pub(super) fn header(table: &str, style: u32) -> String {
+    match style {
+        0 => format!("[{table}]"),
+        1 => format!("[ {} ]", table.replace('.', " . ")),
+        _ => {
+            let quoted: Vec<String> = table.split('.').map(|part| format!("\"{part}\"")).collect();
+            format!("[{}]", quoted.join("."))
+        }
+    }
 }
 
 /// The code part of a line, before any trailing comment.
@@ -123,7 +142,8 @@ fn lint_block(
 ) -> Result<(), Box<dyn Error>> {
     let table = *rng.pick_named("lint tables", &["lints", "lints.rust", "lints.clippy"])?;
     let scope = format!("[{table}]");
-    push(manifest, text, &format!("[{table}]"), None);
+    let style = rng.below(3);
+    push(manifest, text, &header(table, style), None);
     for _ in 0..rng.between(1, 4) {
         let lint = *rng.pick_named("lints", &LINTS)?;
         let level = *rng.pick_named("levels", &LEVELS)?;
@@ -144,23 +164,48 @@ fn lint_block(
             }
             _ => false,
         };
-        let (line, readable) = match rng.below(8) {
-            0 => (format!("{lint} = {{ inner = \"allow\" }}"), false),
-            1 => (format!("{lint} = [\"allow\"]"), false),
-            2 => ("workspace = true".to_owned(), true),
-            _ => (format!("{lint} = \"{level}\""), true),
+        let allows = level == "allow";
+        let (line, readable, silences) = match rng.below(10) {
+            0 => (format!("{lint} = {{ inner = \"allow\" }}"), false, false),
+            1 => (format!("{lint} = [\"allow\"]"), false, false),
+            2 => ("workspace = true".to_owned(), true, false),
+            // Cargo's own spelling of a lint group, in the orders and with the
+            // extra keys it is written with.
+            3 => (
+                format!("{lint} = {{ level = \"{level}\", priority = -1 }}"),
+                true,
+                allows,
+            ),
+            4 => (
+                format!("{lint} = {{ priority = -1, level = \"{level}\" }}"),
+                true,
+                allows,
+            ),
+            5 => (
+                format!("{lint} = {{ level = \"{level}\", check-cfg = ['cfg(a)', 'cfg(b)'] }}"),
+                true,
+                allows,
+            ),
+            // A level spelled with an escape: not decoded, so not read.
+            6 => (format!("{lint} = \"al\\u006cow\""), false, false),
+            // A literal string spells the level as a basic one does.
+            7 => (format!("{lint} = '{level}'"), true, allows),
+            _ => (format!("{lint} = \"{level}\""), true, allows),
         };
-        let approved_here = rng.chance(120) && readable;
+        let approved_here = rng.chance(120);
         let line = if approved_here {
             let reason = *rng.pick_named("reasons", &REASONS)?;
             format!("{line} {MARKER}{reason}")
         } else {
             line
         };
-        let silenced = line.starts_with(&format!("{lint} = \"allow\""));
-        let evidence = if !readable {
+        // A reviewed exception clears a silence and a declaration the reader
+        // cannot read alike.
+        let evidence = if approved_above || approved_here {
+            None
+        } else if !readable {
             Some(unreadable(&scope, code_of(&line)))
-        } else if silenced && !approved_above && !approved_here {
+        } else if silences {
             Some(finding(&scope, code_of(&line)))
         } else {
             None
@@ -200,17 +245,41 @@ fn dotted_block(
     Ok(())
 }
 
+/// A dotted `lints` key under `[workspace]`, which TOML makes
+/// `workspace.lints.*`, so it is a declaration; and the same key under a table
+/// that is not a lint table, which makes it a member of that table and no lint at
+/// all.
+fn nested_dotted_block(
+    rng: &mut Rng,
+    manifest: &mut Manifest,
+    text: &mut String,
+) -> Result<(), Box<dyn Error>> {
+    let lint = *rng.pick_named("lints", &LINTS)?;
+    let level = *rng.pick_named("levels", &LEVELS)?;
+    let line = format!("lints.rust.{lint} = \"{level}\"");
+    push(manifest, text, "[workspace]", None);
+    let evidence =
+        (level == "allow").then(|| finding(&format!("[workspace.lints.rust.{lint}]"), &line));
+    push(manifest, text, &line, evidence);
+    push(manifest, text, "", None);
+    push(manifest, text, "[package.metadata.x]", None);
+    push(manifest, text, &line, None);
+    Ok(())
+}
+
 /// A table, dotted keys, or filler: the whole shape of a block.
 ///
-/// A dotted key is only read as a lint declaration before the first section
-/// header: after one, TOML makes it a member of that table, so the generator
-/// writes it only at the top of a manifest and otherwise draws another table.
+/// A dotted key is only a lint declaration at the top of a manifest or under
+/// `[workspace]`: under any other header TOML makes it a member of that table,
+/// so the generator writes the bare form only at the top of a manifest and
+/// otherwise draws a table.
 fn block(rng: &mut Rng, manifest: &mut Manifest, text: &mut String) -> Result<(), Box<dyn Error>> {
-    let drawn = match rng.below(4) {
+    let drawn = match rng.below(5) {
         0 => lint_block(rng, manifest, text),
         1 => other_block(rng, manifest, text),
         2 if text.is_empty() => dotted_block(rng, manifest, text),
         2 => lint_block(rng, manifest, text),
+        3 => nested_dotted_block(rng, manifest, text),
         _ => {
             push(manifest, text, "# filler", None);
             push(manifest, text, "[[bin]]", None);
@@ -366,8 +435,11 @@ fn an_unreadable_shape_is_always_a_finding() -> Result<(), Box<dyn Error>> {
     for index in 0..256_u64 {
         let seed = seed_of(index ^ 0x0bad);
         let manifest = generate(seed)?;
-        let found = agree(seed, &manifest)?;
-        let reported: BTreeSet<usize> = found.iter().map(|finding| finding.0).collect();
+        agree(seed, &manifest)?;
+        // A reviewed exception clears an unreadable shape on purpose, so the
+        // property is read with every marker turned into an ordinary note.
+        let plain = manifest.text.replace("scan-approved:", "an ordinary note:");
+        let reported: BTreeSet<usize> = scanned(&plain).iter().map(|finding| finding.0).collect();
         for (number, line) in manifest.text.lines().enumerate() {
             let number = number.saturating_add(1);
             if line.contains("{ inner") || line.contains("[\"allow\"]") {
