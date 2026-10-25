@@ -21,8 +21,9 @@
 //! `diff`); `--top` bounds the rows a census prints. The exit status is 0 when
 //! nothing is refused, 2 when a script is refused or a file cannot be read, and 2 with
 //! the usage for an unknown command. A census measures and never gates, so it
-//! exits 0 and says how many scripts it could not read. `scan` exits 2 on any
-//! finding and on any file the checked parse refuses; it is in `scan.rs`.
+//! exits 0 and says how many scripts it could not read. `scan` has its own
+//! contract, written in `scan.rs`: 0 clean, 1 findings on a tree that was read,
+//! 2 a file that could not be read, and 64 a command line it could not read.
 //!
 //! `diff` takes two source roots — two directories, or two files — that a
 //! caller checked out, and reads both from disk: there is no git call in the
@@ -55,7 +56,9 @@ const USAGE: &str = "usage: lgwks-ast script map|check|census|diff [--json] [--t
           exit 1 on a widening with no `// lgwks-architecture-approved: <reason>`\n\
           line in the head source\n\
   scan    run the zero-gate detectors (error swallow, unlogged returns, lint\n\
-          allowances, try chains, docs); exit 2 on any finding or refused file\n\
+          allowances, try chains, docs); exit 0 when the tree is clean, 1 when\n\
+          findings stand against a tree every file of which was read, 2 when a\n\
+          file could not be read, 64 when the command line is wrong\n\
   --json  one JSON document on stdout instead of text (map, check, diff and scan)\n\
   --top   how many shapes a census prints\n\
   PATH    a directory to walk for .rs files, or one file; default `.`\n";
@@ -80,6 +83,20 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// The exit status when a write to stdout or stderr fails for a reason other
 /// than a closed pipe.
 const EXIT_IO: u8 = 74;
+
+/// The status for a command line the tool could not read: EX_USAGE, and the
+/// one `scan` answers with when its arguments are wrong (#698). The `script`
+/// verbs keep 2 for a misuse because their consumers already map 2 to a
+/// refused script, so their contract is unchanged.
+const EXIT_USAGE: u8 = 64;
+
+/// The status a misuse of `verb` exits with.
+const fn usage_exit(verb: Verb) -> u8 {
+    match verb {
+        Verb::Scan => EXIT_USAGE,
+        Verb::Map | Verb::Check | Verb::Census | Verb::Diff => 2,
+    }
+}
 
 /// What the command was asked to print.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -238,7 +255,7 @@ fn run(args: &[String], out: &mut impl Write, err: &mut impl Write) -> io::Resul
         Err(message) => {
             writeln!(err, "lgwks-ast: {message}\n")?;
             write!(err, "{USAGE}")?;
-            return Ok(ExitCode::from(2));
+            return Ok(ExitCode::from(usage_exit(verb)));
         }
     };
     if verb == Verb::Scan {
@@ -298,7 +315,9 @@ fn run_scan(
     scan::run(roots, json, out, err)
 }
 
-/// Without the `scan` feature the verb exists and says what it needs.
+/// Without the `scan` feature the verb exists and says what it needs: asking a
+/// build for a capability it does not hold is a misuse of that build, so the
+/// status is the usage one rather than a verdict on any tree.
 #[cfg(not(feature = "scan"))]
 fn run_scan(
     _roots: &[PathBuf],
@@ -307,7 +326,7 @@ fn run_scan(
     err: &mut impl Write,
 ) -> io::Result<ExitCode> {
     writeln!(err, "lgwks-ast: scan needs the `scan` feature")?;
-    Ok(ExitCode::from(2))
+    Ok(ExitCode::from(EXIT_USAGE))
 }
 
 /// Every `.rs` file under `root`, in walk order, or `root` itself when it is a

@@ -85,8 +85,8 @@ fn cli_reports_the_lost_errors_and_their_evidence() -> TestResult {
     let (stdout, stderr) = text(&output);
     assert_eq!(
         output.status.code(),
-        Some(2),
-        "a lost error must fail the gate: stdout {stdout} stderr {stderr}"
+        Some(1),
+        "findings on a tree every file of which was read exit 1 (#698): stdout {stdout} stderr {stderr}"
     );
     assert!(stderr.contains("REFUSED"), "{stderr}");
     assert!(stdout.contains("[ERROR-SWALLOW]"), "{stdout}");
@@ -102,6 +102,53 @@ fn cli_reports_the_lost_errors_and_their_evidence() -> TestResult {
         stdout.contains(".unwrap_or_else("),
         "the shadowed fallback is reported: {stdout}"
     );
+    Ok(())
+}
+
+/// The status is the verdict, so the two failures have two codes: a tree the
+/// scan read and refused is 1, and a scan that could not read part of the tree
+/// is 2, with or without findings beside it (#698).
+#[test]
+fn the_exit_status_separates_a_finding_from_a_file_that_could_not_be_read() -> TestResult {
+    let root = Scratch::new("scan-verdicts")?;
+    plant(root.path(), "a_lost.rs", LOST_ERRORS)?;
+    let findings_only = scan(root.path(), &[])?;
+    let (stdout, stderr) = text(&findings_only);
+    assert_eq!(findings_only.status.code(), Some(1), "{stdout} {stderr}");
+    assert!(
+        !stderr.contains("could not be read"),
+        "nothing was unread in this run: {stderr}"
+    );
+
+    plant(root.path(), "b_torn.rs", "fn torn(\n")?;
+    let with_unread = scan(root.path(), &[])?;
+    let (stdout, stderr) = text(&with_unread);
+    assert_eq!(
+        with_unread.status.code(),
+        Some(2),
+        "an unread file outranks the findings beside it: {stdout} {stderr}"
+    );
+    assert!(
+        stderr.contains("UNMEASURED") && stderr.contains("1 of 2 files could not be read"),
+        "the summary says what the status says: {stderr}"
+    );
+    assert!(
+        stdout.contains("[ERROR-SWALLOW]"),
+        "the findings the scan did read are still printed: {stdout}"
+    );
+    Ok(())
+}
+
+/// A tree the scan could not read at all, with no finding beside it, is still
+/// 2: "not measured" is a verdict of its own and never 0.
+#[test]
+fn a_tree_with_only_an_unreadable_file_exits_two() -> TestResult {
+    let root = Scratch::new("scan-unread-only")?;
+    plant(root.path(), "a_torn.rs", "fn torn(\n")?;
+    let output = scan(root.path(), &[])?;
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(2), "{stdout} {stderr}");
+    assert!(stderr.contains("UNMEASURED"), "{stderr}");
     Ok(())
 }
 
@@ -122,8 +169,8 @@ fn a_refused_file_is_counted_and_the_files_after_it_are_still_read() -> TestResu
         "the file after it was still scanned: {stdout}"
     );
     assert!(
-        stderr.contains("1 files refused"),
-        "the summary counts the refusal: {stderr}"
+        stderr.contains("UNMEASURED") && stderr.contains("1 of 2 files could not be read"),
+        "the summary counts the refusal in the word the status carries: {stderr}"
     );
     Ok(())
 }
@@ -182,6 +229,7 @@ fn the_json_document_carries_the_findings_and_the_refusals() -> TestResult {
     assert_eq!(output.status.code(), Some(2), "{stdout} {stderr}");
     let document: Value = lgwks_std::json::from_str(&stdout)?;
     assert_eq!(document["verb"], "scan", "{stdout}");
+    assert_eq!(document["verdict"], "unread", "{stdout}");
     assert_eq!(document["files"], 2, "{stdout}");
     assert_eq!(document["refused"], 1, "{stdout}");
     assert_eq!(document["findings"], 3, "{stdout}");
@@ -206,7 +254,11 @@ fn an_unknown_option_is_a_usage_error_and_scans_nothing() -> TestResult {
     plant(root.path(), "lost.rs", LOST_ERRORS)?;
     let output = scan(root.path(), &["--wat"])?;
     let (stdout, stderr) = text(&output);
-    assert_eq!(output.status.code(), Some(2), "{stdout} {stderr}");
+    assert_eq!(
+        output.status.code(),
+        Some(64),
+        "a command line the tool cannot read is EX_USAGE, never a verdict (#698): {stdout} {stderr}"
+    );
     assert!(
         stderr.contains("unknown option `--wat`") && stdout.is_empty(),
         "a misuse prints the usage and no findings: {stdout} {stderr}"
