@@ -3,14 +3,63 @@
 
 use crate::sim::Rng;
 
-use super::allow::{allow_block, cfg_attr_block};
+use super::allow::{allow_block, cfg_attr_block, include_block, spelled_block, unreadable_block};
 use super::model::{
-    ALLOW, CHAIN, DOC, DocSpec, LOUD_LEVELS, Lints, PLACEMENTS, PUBLIC_DOC, Placement, SEEDS,
-    SPREAD, Seen, Shape, TestResult, agree, assemble, chain_block, doc_block, several,
-    some_line_exceeds, some_line_holds, sweep, swept_tally, trait_block,
+    ALLOW, Block, CHAIN, DOC, DocSpec, Drawn, LOUD_LEVELS, Lints, PLACEMENTS, PUBLIC_DOC,
+    Placement, SEEDS, SPELLINGS, SPREAD, Seen, Shape, Spelling, TestResult, agree, assemble,
+    chain_block, doc_block, scanned, several, some_line_exceeds, some_line_holds, sweep,
+    swept_tally, trait_block,
 };
 
+/// The spellings that write a raw identifier somewhere.
+const RAW_SPELLINGS: [Spelling; 3] = [Spelling::RawHead, Spelling::RawLints, Spelling::RawBoth];
+
+/// Placements inside a macro: the body of a `macro_rules!`, and the arguments of
+/// an invocation.
+const MACRO_PLACEMENTS: [Placement; 2] = [Placement::MacroBody, Placement::MacroArgument];
+
+/// Code that holds attribute-shaped and `#`-shaped tokens inside macros and
+/// silences nothing: other attributes, a loud level, interpolation, and a call to
+/// a method named like a silencing level.
+const MACRO_CODE: &str = r#"macro_rules! carrier {
+    ($name:ident) => {
+        #[derive(Debug)]
+        #[doc = "carries"]
+        #[cfg(test)]
+        #[must_use]
+        #[allow]
+        #[deny(dead_code)]
+        #![warn(unused)]
+        struct $name;
+    };
+}
+fn interpolate(value: Option<u8>, name: &str) {
+    let first = quote! { #name };
+    let second = quote! { #(#name)* };
+    assert!(value.expect(name) > 0);
+    drop((first, second));
+}
+"#;
+
 // ── ALLOW-SILENCE ───────────────────────────────────────────────────────────
+
+/// What the scan reports for `block` alone in a file, as evidence text, once it
+/// agrees with the model.
+fn reported_by(seed: u64, block: Block) -> Drawn<Vec<String>> {
+    let file = assemble(&[block], &[0], &[0])?;
+    Ok(agree(seed, &file)?
+        .into_iter()
+        .map(|(_, _, snippet)| snippet)
+        .collect())
+}
+
+/// Whether every list in `reported` is the same as the one after it.
+fn all_alike(reported: &[Vec<String>]) -> bool {
+    reported.windows(2).all(|pair| match *pair {
+        [ref left, ref right] => left == right,
+        _ => false,
+    })
+}
 
 /// An `allow` reports every lint it names, in order, clippy's and rustc's
 /// alike: a silenced lint is a silenced lint, whatever tool owns it (#699).
@@ -107,18 +156,10 @@ fn an_allow_is_found_wherever_it_is_written() -> TestResult {
             // placement is read, so every placement writes the same list.
             let mut rng = Rng::new(seed);
             let block = allow_block(&mut rng, 0, placement, "allow", Lints::Mixed)?;
-            let file = assemble(&[block], &[0], &[0])?;
-            let snippets: Vec<String> = agree(seed, &file)?
-                .into_iter()
-                .map(|(_, _, snippet)| snippet)
-                .collect();
-            reported.push(snippets);
+            reported.push(reported_by(seed, block)?);
         }
         assert!(
-            reported.windows(2).all(|pair| match *pair {
-                [ref left, ref right] => left == right,
-                _ => false,
-            }),
+            all_alike(&reported),
             "seed {seed:#x}: placements reported different paths: {reported:?}"
         );
     }
@@ -143,6 +184,154 @@ fn an_allow_on_a_test_function_is_still_reported() -> TestResult {
     assert!(
         swept_tally(&swept, ALLOW) > 0,
         "a test function's allow was reported"
+    );
+    Ok(())
+}
+
+/// A raw identifier is the plain identifier it prefixes, so `#[r#allow(..)]`,
+/// `#[r#cfg_attr(.., r#allow(..))]` and `#[allow(r#dead_code)]` are the real
+/// attributes to rustc and silence exactly as the plain ones do (#758).
+#[test]
+fn a_raw_identifier_spelling_is_still_silence() -> TestResult {
+    let swept = sweep(0xa110_0008, |rng| {
+        several(rng, |rng, index| {
+            let placement = *rng.pick_named("placements", &PLACEMENTS)?;
+            let level = if rng.coin() { "allow" } else { "expect" };
+            let spelling = *rng.pick_named("raw spellings", &RAW_SPELLINGS)?;
+            let nested = rng.coin();
+            spelled_block(rng, index, placement, level, Lints::Mixed, nested, spelling)
+        })
+    })?;
+    assert!(
+        swept_tally(&swept, ALLOW) > 0,
+        "a raw spelling was reported"
+    );
+    for raw in ["r#allow(", "r#expect(", "r#cfg_attr(", "r#dead_code"] {
+        assert!(
+            swept.iter().any(|swept| swept.0.source.contains(raw)),
+            "the sweep wrote `{raw}`"
+        );
+    }
+    Ok(())
+}
+
+/// One list, written in each spelling, reports the same lints: spelling is
+/// never evidence of anything but how the author typed it (#758).
+#[test]
+fn a_spelling_never_changes_what_is_reported() -> TestResult {
+    for index in 0..SEEDS {
+        let seed = 0xa110_0009 ^ index.wrapping_mul(SPREAD);
+        let mut reported = Vec::new();
+        for spelling in SPELLINGS {
+            // A fresh stream per spelling: the list is drawn before the spelling
+            // is read, so every spelling writes the same list.
+            let mut rng = Rng::new(seed);
+            let nested = index % 2 == 0;
+            let block = spelled_block(
+                &mut rng,
+                0,
+                Placement::Item,
+                "allow",
+                Lints::Mixed,
+                nested,
+                spelling,
+            )?;
+            reported.push(reported_by(seed, block)?);
+        }
+        assert!(
+            all_alike(&reported),
+            "seed {seed:#x}: spellings reported different lints: {reported:?}"
+        );
+    }
+    Ok(())
+}
+
+/// An attribute inside a `macro_rules!` body or an invocation's arguments is
+/// inert text until the macro expands, and expansion leaves it on the item, so
+/// it silences the lint all the same (#758).
+#[test]
+fn an_allow_inside_a_macro_is_silence() -> TestResult {
+    let swept = sweep(0xa110_000a, |rng| {
+        several(rng, |rng, index| {
+            let placement = *rng.pick_named("macro placements", &MACRO_PLACEMENTS)?;
+            let level = if rng.coin() { "allow" } else { "expect" };
+            let spelling = *rng.pick_named("spellings", &SPELLINGS)?;
+            let nested = rng.coin();
+            spelled_block(rng, index, placement, level, Lints::Mixed, nested, spelling)
+        })
+    })?;
+    assert!(
+        swept_tally(&swept, ALLOW) > 0,
+        "a macro's allow was reported"
+    );
+    assert!(
+        swept
+            .iter()
+            .all(|swept| swept.0.source.contains("macro_rules!")),
+        "every file under test holds a macro"
+    );
+    Ok(())
+}
+
+/// A silencing attribute whose lints are a macro's metavariables cannot be read
+/// to a lint, and a list that cannot be read is a silence that cannot be shown
+/// empty: it is reported, with its lints shown as `..`, never skipped (#758).
+#[test]
+fn a_silencing_list_the_scan_cannot_read_is_reported_not_skipped() -> TestResult {
+    let swept = sweep(0xa110_000b, |rng| several(rng, unreadable_block))?;
+    let unread = swept
+        .iter()
+        .flat_map(|swept| swept.1.iter())
+        .filter(|finding| finding.2.contains("(..)"))
+        .count();
+    assert_eq!(
+        unread,
+        swept_tally(&swept, ALLOW),
+        "every finding of an unreadable list says so"
+    );
+    assert!(unread > 0, "the sweep reached a silencing level");
+    assert!(
+        swept.iter().any(|swept| swept.1.is_empty()),
+        "and a loud level, which silences nothing"
+    );
+    Ok(())
+}
+
+/// The walker reads `.rs` files, so `include!` and `#[path]` of any other file
+/// pull in source nothing scans; the file can hold a silence, and the scan says
+/// it cannot see it. A `.rs` file is read, and data or generated code is not
+/// authored source (#758).
+#[test]
+fn a_file_the_scan_never_reads_is_reported_wherever_it_is_pulled_in() -> TestResult {
+    let swept = sweep(0xa110_000c, |rng| several(rng, include_block))?;
+    let reported = swept_tally(&swept, ALLOW);
+    let pulled_in = swept
+        .iter()
+        .map(|swept| {
+            swept
+                .0
+                .source
+                .lines()
+                .filter(|line| line.contains("include") || line.contains("#[path"))
+                .count()
+        })
+        .sum::<usize>();
+    assert!(
+        reported > 0 && reported < pulled_in,
+        "both verdicts were reached: {reported} of {pulled_in}"
+    );
+    Ok(())
+}
+
+/// Attribute-shaped and `#`-shaped tokens inside a macro that silence nothing
+/// report nothing: the token-tree reader accuses only a silencing level over a
+/// bracket group, never `quote!`'s interpolation or a method named `expect`.
+#[test]
+fn macro_code_that_silences_nothing_reports_nothing() -> TestResult {
+    assert_eq!(
+        scanned(MACRO_CODE, "macro.rs")?,
+        Vec::new(),
+        "no finding in code that silences nothing"
     );
     Ok(())
 }
