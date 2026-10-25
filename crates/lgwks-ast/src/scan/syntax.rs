@@ -118,10 +118,22 @@ pub(super) fn attributes(node: Node<'_>) -> Vec<Node<'_>> {
     found
 }
 
+/// An identifier as the language reads it. A raw identifier (`r#allow`) is the
+/// plain identifier it prefixes, so it names the same attribute, lint, function or
+/// macro (Rust reference, "Raw identifiers"; RFC 2151): comparing the spelled text
+/// would let a different spelling of the same name past every detector.
+pub(super) fn unraw(name: &str) -> &str {
+    match name.strip_prefix("r#") {
+        Some(plain) => plain,
+        None => name,
+    }
+}
+
 /// A path as written: its segments, and whether it starts with `::`.
 ///
 /// Generic arguments are not part of it, which is how the detectors have always
-/// read a path: `Vec::<u8>::new` is `Vec`, `new`.
+/// read a path: `Vec::<u8>::new` is `Vec`, `new`. A raw identifier is read as the
+/// identifier it spells ([`unraw`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Path {
     /// Whether the path starts with `::`.
@@ -143,7 +155,7 @@ impl Path {
     fn collect(&mut self, source: &str, node: Node<'_>) -> bool {
         match node.kind() {
             "identifier" | "type_identifier" | "self" | "super" | "crate" | "primitive_type" => {
-                self.segments.push(text(source, node).to_owned());
+                self.segments.push(unraw(text(source, node)).to_owned());
                 true
             }
             "scoped_identifier" | "scoped_type_identifier" => {
@@ -157,7 +169,7 @@ impl Path {
                 }
                 match node.by_field("name") {
                     Some(name) => {
-                        self.segments.push(text(source, name).to_owned());
+                        self.segments.push(unraw(text(source, name)).to_owned());
                         true
                     }
                     None => false,

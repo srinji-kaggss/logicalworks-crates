@@ -11,7 +11,10 @@
 //!
 //! - ALLOW-SILENCE for every lint an `allow` or `expect` names — clippy, rustc,
 //!   tool lint or group — in order, wherever the attribute is written, test
-//!   functions included, and under a `cfg_attr`;
+//!   functions included, under a `cfg_attr`, spelled with raw identifiers, and
+//!   inside a `macro_rules!` body or an invocation's arguments; for a silencing
+//!   list it cannot read; and for an `include!` or `#[path]` of a file the walker
+//!   never reads (#758);
 //! - long-try-chain for a statement other than a `let` whose own expression
 //!   holds more than three `?`, judged in the innermost enclosing function and
 //!   never in one marked `test` or `test_*`;
@@ -29,6 +32,9 @@
 //! | `the_mixed_bands_cover_every_seed_exactly_once` | the bands partition the seed space |
 //! | `a_rule_selection_*` .. `every_rule_name_*` | a selected scan is the whole scan filtered by rule, over every seed |
 //! | `allow_*`, `an_allow_*`, `a_lint_*`, `deny_*` | ALLOW-SILENCE: clippy paths only, `allow` only, every placement |
+//! | `a_raw_identifier_*`, `a_spelling_*`, `an_allow_inside_*` | ALLOW-SILENCE: a raw spelling and a macro host are the same silence |
+//! | `a_silencing_list_*`, `a_file_the_scan_*`, `macro_code_*` | ALLOW-SILENCE: an unreadable list and an unread file are reported; code that silences nothing is not |
+//! | `the_shipped_scan_*` | the binary refuses what rustc honours and passes what it does not, exit 1 and exit 0 |
 //! | `a_statement_*` .. `a_production_function_*` | long-try-chain: the threshold, `let`, closures, conditions, exemptions, nesting |
 //! | `a_short_paraphrase_*` .. `a_test_function_is_never_judged` | tautological-doc: visibility, the six-token ceiling, stop words, methods, tests |
 //! | `clean_files_*` .. `the_same_seed_*` | no false positives, permutation, line shifts, order, tenants, malformed input, disk, replay |
@@ -44,6 +50,10 @@ use std::collections::BTreeSet;
 use lgwks_ast::scan::{Hit, Rule, ScanError, scan_path, scan_source, scan_source_with};
 use lgwks_std::{hex, random};
 
+#[cfg(feature = "tool")]
+use crate::cli::{plant, text, tool};
+#[cfg(feature = "tool")]
+use crate::scratch::Scratch;
 use crate::sim::Rng;
 
 use allow::allow_block;
@@ -419,6 +429,69 @@ fn scan_path_reads_what_scan_source_reads() -> TestResult {
     assert!(
         matches!(scan_path(&missing), Err(ScanError::Unparseable { .. })),
         "a missing file is refused"
+    );
+    Ok(())
+}
+
+/// The shipped binary on a scratch tree: a raw-identifier allow, an allow in a
+/// macro body and an `include!` of a file the walker never reads each scanned
+/// clean before #758 while rustc honoured them, and each is refused now, with its
+/// rule and line, and exit status 1 (the status a gate reads).
+#[cfg(feature = "tool")]
+#[test]
+fn the_shipped_scan_refuses_every_spelling_rustc_honours() -> TestResult {
+    let tree = Scratch::new("scan-spellings")?;
+    plant(
+        tree.path(),
+        "src/raw.rs",
+        "#[r#allow(dead_code)]\nfn unused() {}\n",
+    )?;
+    plant(
+        tree.path(),
+        "src/body.rs",
+        "macro_rules! make {\n    () => {\n        #[allow(dead_code)]\n        fn unused() {}\n    };\n}\nmake!();\n",
+    )?;
+    plant(tree.path(), "src/hosted.rs", "include!(\"lint.inc\");\n")?;
+    plant(
+        tree.path(),
+        "src/lint.inc",
+        "#[allow(dead_code)]\nfn unused() {}\n",
+    )?;
+    let output = tool(tree.path(), &["scan", "src"])?;
+    let (out, err) = text(&output);
+    let shown = format!("{out}{err}");
+    assert_eq!(output.status.code(), Some(1), "the scan said:\n{shown}");
+    for finding in [
+        "src/raw.rs:1: [ALLOW-SILENCE] #[allow(dead_code)]",
+        "src/body.rs:3: [ALLOW-SILENCE] #[allow(dead_code)]",
+        "src/hosted.rs:1: [ALLOW-SILENCE] include!(\"lint.inc\") — names a file the scan never reads",
+        "REFUSED  scan: 3 findings across 3 files",
+    ] {
+        assert!(shown.contains(finding), "`{finding}` is missing:\n{shown}");
+    }
+    Ok(())
+}
+
+/// The same binary passes a tree that spells nothing it refuses: a `.rs` include,
+/// a `#[path]` to a `.rs` file, and a macro that carries other attributes.
+#[cfg(feature = "tool")]
+#[test]
+fn the_shipped_scan_passes_a_tree_that_silences_nothing() -> TestResult {
+    let tree = Scratch::new("scan-clean")?;
+    plant(
+        tree.path(),
+        "src/lib.rs",
+        "include!(\"table.rs\");\n#[path = \"inner.rs\"]\nmod inner;\nmacro_rules! carrier {\n    ($name:ident) => {\n        #[derive(Debug)]\n        #[deny(dead_code)]\n        struct $name;\n    };\n}\n",
+    )?;
+    plant(tree.path(), "src/table.rs", "const TABLE: u8 = 1;\n")?;
+    plant(tree.path(), "src/inner.rs", "const INNER: u8 = 1;\n")?;
+    let output = tool(tree.path(), &["scan", "src"])?;
+    let (out, err) = text(&output);
+    let shown = format!("{out}{err}");
+    assert_eq!(output.status.code(), Some(0), "the scan said:\n{shown}");
+    assert!(
+        shown.contains("OK  scan clean — 3 files, zero findings"),
+        "the summary counts the three files:\n{shown}"
     );
     Ok(())
 }

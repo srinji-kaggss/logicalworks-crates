@@ -10,7 +10,7 @@ use lgwks_ast::scan::scan_source;
 
 use crate::sim::{Rng, Trace, receipt};
 
-use super::allow::{allow_block, cfg_attr_block};
+use super::allow::{include_block, spelled_block, unreadable_block};
 
 /// What a scenario reports when a precondition did not hold.
 pub(super) type TestResult = Result<(), Box<dyn Error>>;
@@ -116,6 +116,9 @@ pub(super) enum Expect {
         /// Whether the attribute is written inside a `cfg_attr`.
         nested: bool,
     },
+    /// A silence the scan can only name by its own words: a list it cannot read
+    /// (`#[allow(..)]`), or a file it never reads (`include!("x.inc")`).
+    Said(String),
     /// A statement of `count` `?` operators in the function declared at
     /// `fn_offset` of the same block.
     Chain {
@@ -188,6 +191,7 @@ pub(super) fn render(base: usize, offset: usize, wanted: &Expect) -> Finding {
                 format!("#[{level}({lint})]")
             },
         ),
+        Expect::Said(ref text) => (line, ALLOW, text.clone()),
         Expect::Chain { fn_offset, count } => (
             line,
             CHAIN,
@@ -293,14 +297,43 @@ pub(super) enum Placement {
     Method,
     /// On a function that also carries `#[test]`.
     TestFunction,
+    /// In the body of a `macro_rules!`, which puts it on the item it expands to.
+    MacroBody,
+    /// In the arguments of a macro invocation that hands the item back.
+    MacroArgument,
 }
 
 /// Every placement, for a draw.
-pub(super) const PLACEMENTS: [Placement; 4] = [
+pub(super) const PLACEMENTS: [Placement; 6] = [
     Placement::Item,
     Placement::Statement,
     Placement::Method,
     Placement::TestFunction,
+    Placement::MacroBody,
+    Placement::MacroArgument,
+];
+
+/// How an attribute's identifiers are written. A raw identifier is the plain
+/// identifier it prefixes, so rustc reads every spelling as the same attribute
+/// naming the same lint (Rust reference, "Raw identifiers"; #758).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Spelling {
+    /// `allow`, `dead_code`.
+    Plain,
+    /// `r#allow`, and `r#cfg_attr` around it: the attribute's own names.
+    RawHead,
+    /// `r#dead_code`: the lints a single identifier names.
+    RawLints,
+    /// Both of the above.
+    RawBoth,
+}
+
+/// Every spelling, for a draw.
+pub(super) const SPELLINGS: [Spelling; 4] = [
+    Spelling::Plain,
+    Spelling::RawHead,
+    Spelling::RawLints,
+    Spelling::RawBoth,
 ];
 
 /// Which lints an attribute's list is drawn from.
@@ -651,7 +684,7 @@ pub(super) fn filler_block(rng: &mut Rng) -> Drawn<Block> {
 
 /// A block of any kind, every knob drawn.
 pub(super) fn mixed_block(rng: &mut Rng, index: u32) -> Drawn<Block> {
-    match rng.below(4) {
+    match rng.below(6) {
         0 => {
             let placement = *rng.pick_named("placements", &PLACEMENTS)?;
             let level = if rng.chance(150) {
@@ -661,11 +694,9 @@ pub(super) fn mixed_block(rng: &mut Rng, index: u32) -> Drawn<Block> {
             } else {
                 "expect"
             };
-            if rng.coin() {
-                cfg_attr_block(rng, index, placement, level, Lints::Mixed)
-            } else {
-                allow_block(rng, index, placement, level, Lints::Mixed)
-            }
+            let nested = rng.coin();
+            let spelling = *rng.pick_named("spellings", &SPELLINGS)?;
+            spelled_block(rng, index, placement, level, Lints::Mixed, nested, spelling)
         }
         1 => {
             let exempt = rng.chance(200);
@@ -683,7 +714,9 @@ pub(super) fn mixed_block(rng: &mut Rng, index: u32) -> Drawn<Block> {
             };
             doc_block(rng, index, spec)
         }
-        _ => filler_block(rng),
+        3 => filler_block(rng),
+        4 => include_block(rng, index),
+        _ => unreadable_block(rng, index),
     }
 }
 

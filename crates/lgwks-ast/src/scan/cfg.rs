@@ -55,7 +55,8 @@ fn parse_path(tokens: &[Tok], at: &mut usize) -> Option<Path> {
         *at = at.saturating_add(1);
     }
     loop {
-        path.segments.push(ident_at(tokens, *at)?.to_owned());
+        path.segments
+            .push(syntax::unraw(ident_at(tokens, *at)?).to_owned());
         *at = at.saturating_add(1);
         let more =
             punct_at(tokens, *at) == Some("::") && ident_at(tokens, at.saturating_add(1)).is_some();

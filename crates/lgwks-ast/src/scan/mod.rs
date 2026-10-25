@@ -5,9 +5,13 @@
 //!
 //! ALLOW-SILENCE reads every way a lint is silenced, in source and in a
 //! manifest: `allow` and `expect` at any level, a rustc lint, a tool lint, a
-//! group, `cfg_attr(.., allow(..))`, and a package's `[lints]` table (#699).
-//! [`scan_manifest`] is the manifest half, because a lint lowered for a whole
-//! package is the same act as an attribute written once per item.
+//! group, `cfg_attr(.., allow(..))`, any of them spelled with raw identifiers or
+//! written inside a `macro_rules!` body or a macro's arguments, and a package's
+//! `[lints]` table (#699, #758). It also names the two places a silence can hide
+//! from a walk of `.rs` files: a silencing list it cannot read, and an
+//! `include!` or `#[path]` of a file that is not `.rs`. [`scan_manifest`] is the
+//! manifest half, because a lint lowered for a whole package is the same act as
+//! an attribute written once per item.
 //!
 //! [`scan_source_with`] runs a selection of [`Rule`]s and [`scan_source`] runs
 //! [`Rule::ALL`], so a consumer that gates one class of defect selects it by
