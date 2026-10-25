@@ -11,7 +11,8 @@
 //! an independent model written here in plain integers (SemVer 2.0 section 11:
 //! numeric before text, a release above its own pre-releases). The rest pin the
 //! shapes a seed would take many runs to reach: the three exit codes, a registry
-//! that is gone, every refusal, and a lock with packages from other sources.
+//! that is gone or says nothing, one that never stops sending (cut at the read
+//! cap), every refusal, and a lock with packages from other sources.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
