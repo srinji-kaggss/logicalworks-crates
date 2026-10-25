@@ -275,3 +275,91 @@ fn a_path_that_does_not_exist_is_refused_not_passed() -> TestResult {
     assert!(stderr.contains("nowhere.rs"), "the path is named: {stderr}");
     Ok(())
 }
+
+/// One root that cannot be walked is one refusal, whichever readers the scan
+/// owns: the tree is listed once and not once per reader (#699).
+#[test]
+fn one_unreadable_root_is_one_refusal() -> TestResult {
+    let root = Scratch::new("scan-one-refusal")?;
+    let output = scan(root.path(), &["nowhere"])?;
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(2), "{stdout} {stderr}");
+    assert!(
+        stderr.contains("1 of 1 files could not be read"),
+        "one root, one refusal: {stderr}"
+    );
+    Ok(())
+}
+
+/// A source file named on the command line is read as Rust and as nothing else:
+/// it is one file, not one for each reader the scan owns.
+#[test]
+fn a_named_source_file_is_not_read_as_a_manifest() -> TestResult {
+    let root = Scratch::new("scan-named-source")?;
+    plant(root.path(), "controls.rs", INFALLIBLE_CONTROLS)?;
+    let output = scan(root.path(), &["controls.rs"])?;
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(0), "{stdout} {stderr}");
+    assert!(stdout.contains("1 files, zero findings"), "{stdout}");
+    Ok(())
+}
+
+/// A manifest named on the command line is read for its lint tables and never
+/// parsed as Rust, which it is not.
+#[test]
+fn a_named_manifest_is_read_as_a_manifest_and_not_as_rust() -> TestResult {
+    let root = Scratch::new("scan-named-manifest")?;
+    plant(
+        root.path(),
+        "Cargo.toml",
+        "[lints.rust]\ndead_code = \"allow\"\n",
+    )?;
+    let output = scan(root.path(), &["Cargo.toml"])?;
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(1), "{stdout} {stderr}");
+    assert!(
+        stdout.contains("Cargo.toml:2: [ALLOW-SILENCE] [lints.rust] dead_code = \"allow\""),
+        "{stdout}"
+    );
+    assert!(stderr.contains("across 1 files"), "{stderr}");
+    Ok(())
+}
+
+/// Only ALLOW-SILENCE reads a manifest, so naming one while that rule is left
+/// out has no detector to read it with: it is refused by name, never read as
+/// Rust and never passed unread.
+#[test]
+fn a_named_manifest_without_allow_silence_is_refused_by_name() -> TestResult {
+    let root = Scratch::new("scan-named-manifest-unselected")?;
+    plant(
+        root.path(),
+        "Cargo.toml",
+        "[lints.rust]\ndead_code = \"allow\"\n",
+    )?;
+    let output = scan(root.path(), &["--rule", "ERROR-SWALLOW", "Cargo.toml"])?;
+    let (stdout, stderr) = text(&output);
+    assert_eq!(output.status.code(), Some(2), "{stdout} {stderr}");
+    assert!(
+        stderr.contains("Cargo.toml") && stderr.contains("only ALLOW-SILENCE reads one"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// A walk keeps a manifest only when ALLOW-SILENCE is selected, and keeps it
+/// beside the Rust files in the one listing.
+#[test]
+fn a_walk_lists_manifests_once_and_only_for_allow_silence() -> TestResult {
+    let root = Scratch::new("scan-walk-manifests")?;
+    plant(root.path(), "Cargo.toml", "[package]\nname = \"x\"\n")?;
+    plant(root.path(), "src/lib.rs", INFALLIBLE_CONTROLS)?;
+    let everything = scan(root.path(), &[])?;
+    let (stdout, stderr) = text(&everything);
+    assert_eq!(everything.status.code(), Some(0), "{stdout} {stderr}");
+    assert!(stdout.contains("2 files, zero findings"), "{stdout}");
+    let narrowed = scan(root.path(), &["--rule", "ERROR-SWALLOW"])?;
+    let (stdout, stderr) = text(&narrowed);
+    assert_eq!(narrowed.status.code(), Some(0), "{stdout} {stderr}");
+    assert!(stdout.contains("1 files, zero findings"), "{stdout}");
+    Ok(())
+}

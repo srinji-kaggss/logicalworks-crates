@@ -67,7 +67,8 @@ const USAGE: &str = "usage: lgwks-ast script map|check|census|diff [--json] [--t
   --top   how many shapes a census prints\n\
   --rule  run only the named scan detector, repeatable: ERROR-SWALLOW,\n\
           unlogged-err-return, ALLOW-SILENCE, long-try-chain, tautological-doc\n\
-  PATH    a directory to walk for .rs files, or one file; default `.`\n";
+  PATH    a directory to walk for .rs files (and, for scan, Cargo.toml), or one\n\
+          file; default `.`\n";
 
 /// Directory names never walked: build output, vendored and foreign trees,
 /// and version-control metadata.
@@ -368,21 +369,36 @@ fn run_scan(
 /// Which files a walk keeps.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wanted {
-    /// Every `.rs` file: the input of the script verbs and the source scan.
+    /// Every `.rs` file: the input of the script verbs.
     Rust,
-    /// Every `Cargo.toml`: where a package lowers a lint for a whole table,
-    /// which the source scan cannot see (#699).
-    Manifest,
+    /// Every `.rs` file for the source scan, and with `manifests` every
+    /// `Cargo.toml` too: where a package lowers a lint for a whole table, which
+    /// the source scan cannot see (#699). One walk keeps both, so a tree is
+    /// listed once however many readers the scan owns.
+    #[cfg(feature = "scan")]
+    Scan {
+        /// Whether manifests are kept as well.
+        manifests: bool,
+    },
 }
 
 impl Wanted {
     /// Whether a walked entry is one of the files this walk keeps.
     fn keeps(self, path: &Path) -> bool {
+        let rust = path.extension().is_some_and(|extension| extension == "rs");
         match self {
-            Self::Rust => path.extension().is_some_and(|extension| extension == "rs"),
-            Self::Manifest => path.file_name().is_some_and(|name| name == "Cargo.toml"),
+            Self::Rust => rust,
+            #[cfg(feature = "scan")]
+            Self::Scan { manifests } => rust || (manifests && is_manifest(path)),
         }
     }
+}
+
+/// Whether a path names a package manifest, which is read for its lint tables
+/// and not as Rust.
+#[cfg(feature = "scan")]
+fn is_manifest(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "Cargo.toml")
 }
 
 /// Why a tree could not be walked, or a file could not be read.

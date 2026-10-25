@@ -12,6 +12,13 @@
 //! no value (`Err(E::Flat)`, `Err("denied")`) has nothing to name, so the log on
 //! the path is the whole signal and any log evidences it.
 //!
+//! What a log names is read from its own arguments: an identifier among them
+//! that is not a label (`error` in `error = %e`), and a capture inside its format
+//! string (`e` in `"{e}"`). Its macro path (`tracing::error!`) and the prose of
+//! its message name nothing, so `error!("request failed")` does not excuse a
+//! `return Err(error)`. A literal beside the message (`"failed {}", 0`) is not
+//! context either.
+//!
 //! Three things are deliberately not evidence:
 //!
 //! - Prose. A comment is an `extra` node and a string literal is a literal, not
@@ -34,25 +41,27 @@ use tree_sitter::Node;
 use super::Hit;
 use super::cfg;
 use super::syntax::Fielded;
-use super::syntax::{self, Path};
+use super::syntax::{self, Path, Tok};
 
-/// Macro and path prefixes that count as a log emission.
-///
-/// Both the path prefix (`tracing::`) and the bare macro name (`warn!(`) are
-/// listed because the one match site renders a macro path from the tree and then
-/// looks for either spelling in that rendering. A marker absent from this list is
-/// a macro the detector does not treat as a signal.
-const LOG_MARKERS: &[&str] = &[
-    "tracing::",
-    "log::",
-    "info!(",
-    "warn!(",
-    "error!(",
-    "debug!(",
-    "trace!(",
-    "event!(",
-    "eprintln!(",
-    "eprint!(",
+/// Macro names that emit a log line, reached through any path: `warn!`,
+/// `tracing::warn!`, `lgwks_std::trace::warn!`. A name absent from this list is a
+/// macro the detector does not treat as a signal, and a longer name that merely
+/// ends in one (`my_info!`) is a different macro.
+const LOG_MACROS: &[&str] = &[
+    "info", "warn", "error", "debug", "trace", "event", "eprintln", "eprint",
+];
+
+/// Crates every macro of which is a log emission (`tracing::span!` aside, which
+/// emits nothing, none of their macros is anything else). Matched as the first
+/// whole segment of the macro's path, so `catalog::emit!` is not under `log::`.
+const LOG_CRATES: &[&str] = &["tracing", "log"];
+
+/// Words that are keywords or literals in a log's arguments, never a value the
+/// log names, though the token reader spells them as identifiers.
+const NOT_VALUES: &[&str] = &[
+    "true", "false", "as", "mut", "ref", "move", "if", "else", "match", "in", "for", "while",
+    "loop", "let", "return", "unsafe", "dyn", "async", "await", "crate", "super", "const",
+    "static", "fn",
 ];
 
 /// The fixed evidence text. CI printers key their remediation text off the rule
@@ -131,22 +140,35 @@ fn return_line(node: Node<'_>) -> usize {
     }
 }
 
-/// One log statement that has run on the path: its source text, and whether it
-/// carries any context beyond a bare format string.
-#[derive(Clone, Copy)]
-struct SeenLog<'a> {
-    /// The statement as written.
-    text: &'a str,
-    /// True when the macro passes a field, a capture or any argument beside its
-    /// format string: `debug!(index, "..")` and `error!(%cause, "..")` do,
-    /// `eprintln!("zero")` does not.
+/// One log statement that has run on the path: the values it names, and whether
+/// it carries any context beyond a bare format string.
+struct SeenLog {
+    /// Every value the log names: an identifier among its arguments that is not
+    /// a label, and each capture in its format string. Never its macro path and
+    /// never the prose of its message.
+    names: Vec<String>,
+    /// True when the macro passes a value of its own beside its format string:
+    /// `debug!(index, "..")` and `error!(%cause, "..")` do, `eprintln!("zero")`,
+    /// `eprintln!("saw {other}")` and `eprintln!("failed {}", 0)` do not.
     carries_context: bool,
 }
 
-/// The source text of a block statement that is itself a log emission, and
-/// whether it carries context: a macro invocation whose path spells one of
-/// [`LOG_MARKERS`], written as a statement or as an expression statement.
-fn seen_log<'s>(source: &'s str, statement: Node<'_>) -> Option<SeenLog<'s>> {
+/// Whether a macro path is a log emission: a log macro by name, or any macro of
+/// a logging crate.
+fn emits_log(path: &Path) -> bool {
+    let by_name = path.last().is_some_and(|name| LOG_MACROS.contains(&name));
+    let by_crate = path.segments.len() > 1
+        && path
+            .segments
+            .first()
+            .is_some_and(|first| LOG_CRATES.contains(&first.as_str()));
+    by_name || by_crate
+}
+
+/// A block statement that is itself a log emission, read for what it names: a
+/// macro invocation whose path [`emits_log`], written as a statement or as an
+/// expression statement.
+fn seen_log(source: &str, statement: Node<'_>) -> Option<SeenLog> {
     let invocation = match statement.kind() {
         "macro_invocation" => statement,
         "expression_statement" => match syntax::named_kids(statement).as_slice() {
@@ -158,58 +180,170 @@ fn seen_log<'s>(source: &'s str, statement: Node<'_>) -> Option<SeenLog<'s>> {
     let path = invocation
         .by_field("macro")
         .and_then(|name| Path::of(source, name))?;
-    let rendered = format!("{}!(", path.render());
-    if !LOG_MARKERS.iter().any(|marker| rendered.contains(marker)) {
+    if !emits_log(&path) {
         return None;
     }
-    // The invocation's last named child is its token tree: the macro path comes
-    // first and the arguments last, whatever spelling the path takes.
-    let mut kids = syntax::named_kids(invocation);
-    let args = match kids.pop() {
-        Some(tree) => syntax::named_kids(tree),
-        None => Vec::new(),
-    };
-    // A macro with no argument emits a fixed string; one string literal and
-    // nothing else is a bare message that names no value, so it cannot say what
-    // happened; anything further is context.
-    let carries_context = match args.len() {
-        0 => false,
-        1 => args
-            .first()
-            .is_some_and(|only| only.kind() != "string_literal"),
-        _ => true,
+    let reading = match syntax::macro_tokens(invocation) {
+        Some(tree) => read_arguments(&syntax::tokens(source, tree)),
+        None => Reading::default(),
     };
     Some(SeenLog {
-        text: syntax::text(source, invocation),
-        carries_context,
+        names: reading.names,
+        carries_context: reading.context,
     })
 }
 
-/// Whether `character` continues an identifier, which is how a mention is kept
-/// from matching inside a longer word (`e` inside `zero`, `error` inside `errors`).
-fn is_word(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
+/// What the arguments of one log macro name.
+#[derive(Default)]
+struct Reading {
+    /// Every value named, in source order, with repeats.
+    names: Vec<String>,
+    /// Whether an argument other than a format string names a value.
+    context: bool,
 }
 
-/// Whether `text` names `name` as a whole identifier, so a format capture
-/// (`"{e}"`), a field (`%e`) and a bare argument all count while prose inside a
-/// longer word does not.
-fn mentions(text: &str, name: &str) -> bool {
-    if name.is_empty() {
+/// Read a log's arguments, split at their top-level commas. The macro path is
+/// not among them, and an argument's label (`error` in `error = %e`) is not a
+/// value it names.
+fn read_arguments(tokens: &[Tok]) -> Reading {
+    let mut reading = Reading::default();
+    for argument in tokens.split(|token| token.punct() == Some(",")) {
+        collect(after_label(argument), &mut reading);
+    }
+    reading
+}
+
+/// The tokens of an argument after its `label =` or `label:` (`error = %e`,
+/// `error.message = %e`, `target: "x"`), which are all of it when it has none.
+fn after_label(argument: &[Tok]) -> &[Tok] {
+    let mut expect_name = true;
+    for (at, token) in argument.iter().enumerate() {
+        if expect_name {
+            if token.ident().is_none() {
+                break;
+            }
+            expect_name = false;
+            continue;
+        }
+        match token.punct() {
+            Some(".") => expect_name = true,
+            Some("=" | ":") => {
+                return match argument.get(at.saturating_add(1)..) {
+                    Some(value) => value,
+                    None => &[],
+                };
+            }
+            _ => break,
+        }
+    }
+    argument
+}
+
+/// Gather what a run of tokens names: each identifier that is a value, and each
+/// capture in a literal's format string, descending into groups.
+fn collect(tokens: &[Tok], reading: &mut Reading) {
+    for (at, token) in tokens.iter().enumerate() {
+        if let Some(name) = token.ident() {
+            if is_a_value(tokens, at, name) {
+                reading.names.push(name.to_owned());
+                reading.context = true;
+            }
+        } else if let Some(text) = token.literal() {
+            captures(text, &mut reading.names);
+        } else if let Some(inner) = token.group() {
+            collect(inner, reading);
+        }
+    }
+}
+
+/// Whether the identifier at `at` is a value the log names: a binding or `self`,
+/// not a keyword, a path segment (`Level::ERROR`), a field or method after a dot,
+/// a macro (`format!`), a label before `=`, or a callee. A `(..)` or `{..}` after
+/// an identifier makes it a callee; a `[..]` is an index, so `items` in
+/// `items[0]` is a value.
+fn is_a_value(tokens: &[Tok], at: usize, name: &str) -> bool {
+    let binding =
+        name == "self" || name.starts_with(|first: char| first.is_lowercase() || first == '_');
+    if !binding || NOT_VALUES.contains(&name) {
         return false;
     }
-    let mut from = 0;
-    while let Some(offset) = text.get(from..).and_then(|rest| rest.find(name)) {
-        let start = from.saturating_add(offset);
-        let end = start.saturating_add(name.len());
-        let before = text.get(..start).and_then(|head| head.chars().next_back());
-        let after = text.get(end..).and_then(|tail| tail.chars().next());
-        if !before.is_some_and(is_word) && !after.is_some_and(is_word) {
-            return true;
-        }
-        from = end;
+    let before = at
+        .checked_sub(1)
+        .and_then(|index| tokens.get(index))
+        .and_then(Tok::punct);
+    if matches!(before, Some("." | "::")) {
+        return false;
     }
-    false
+    match tokens.get(at.saturating_add(1)) {
+        Some(next) => !next.is_call() && !matches!(next.punct(), Some("::" | "!" | "=")),
+        None => true,
+    }
+}
+
+/// Append the names a format string captures: `e` in `{e}` and `{e:?}`, and a
+/// width or precision argument (`w` in `{:w$}`). Doubled braces are text, a
+/// positional field (`{}`, `{0}`) names nothing, and a brace never closed is not
+/// a field.
+fn captures(literal: &str, names: &mut Vec<String>) {
+    let mut chars = literal.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '{' {
+            continue;
+        }
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            continue;
+        }
+        let mut field = String::new();
+        let mut closed = false;
+        for inner in chars.by_ref() {
+            if inner == '}' {
+                closed = true;
+                break;
+            }
+            field.push(inner);
+        }
+        if !closed {
+            return;
+        }
+        let (argument, spec) = match field.split_once(':') {
+            Some(pair) => pair,
+            None => (field.as_str(), ""),
+        };
+        push_identifier(argument.trim(), names);
+        let mut parts = spec.split('$').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                push_identifier(trailing_word(part), names);
+            }
+        }
+    }
+}
+
+/// The identifier characters that end `text`.
+fn trailing_word(text: &str) -> &str {
+    let mut start = text.len();
+    for (index, character) in text.char_indices().rev() {
+        if !(character.is_alphanumeric() || character == '_') {
+            break;
+        }
+        start = index;
+    }
+    let Some(word) = text.get(start..) else {
+        return "";
+    };
+    word
+}
+
+/// Append `text` when it spells an identifier (not a number, not empty).
+fn push_identifier(text: &str, names: &mut Vec<String>) {
+    let mut characters = text.chars();
+    let starts = characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_');
+    if starts && characters.all(|rest| rest.is_alphanumeric() || rest == '_') {
+        names.push(text.to_owned());
+    }
 }
 
 /// Whether an identifier is a *name* rather than a value the error carries: the
@@ -271,12 +405,12 @@ struct EvidenceWalker<'a> {
     source: &'a str,
     /// Lines of `return Err(..)` expressions a log has already run before.
     evidenced: BTreeSet<usize>,
-    /// The source text of every log statement that certainly runs before the
-    /// node currently being visited, on every path that reaches it, with whether
-    /// it carries context. A stack rather than a flag, because the evidence a
-    /// return needs is the log's text: the log has to say something about the
-    /// value the error carries (#699).
-    logs: Vec<SeenLog<'a>>,
+    /// Every log statement that certainly runs before the node currently being
+    /// visited, on every path that reaches it, with the values it names and
+    /// whether it carries context. A stack rather than a flag, because the
+    /// evidence a return needs is what the log says: it has to say something
+    /// about the value the error carries (#699).
+    logs: Vec<SeenLog>,
 }
 
 impl<'a> EvidenceWalker<'a> {
@@ -328,28 +462,26 @@ impl<'a> EvidenceWalker<'a> {
         if carried.is_empty() {
             return true;
         }
-        self.logs.iter().any(|log| {
-            log.carries_context || carried.iter().any(|name| mentions(log.text, name.as_str()))
-        })
+        self.logs
+            .iter()
+            .any(|log| log.carries_context || carried.iter().any(|name| log.names.contains(name)))
     }
 
     /// A block inherits the evidence of the statement that encloses it and grows
     /// it as its own statements are read. A log statement that has already run
-    /// stays run for every later statement, including one reached through a later
-    /// `if`. A log inside a branch does not leak out, because the branch is a
-    /// nested block whose entries are dropped when it ends.
+    /// stays run for every later statement of the block, whatever sits between
+    /// it and the return. A log inside a branch does not leak out, because the
+    /// branch is a nested block whose entries are dropped when it ends.
     fn walk_block(&mut self, block: Node<'a>) {
         let depth = self.logs.len();
         for statement in syntax::named_kids(block) {
             if is_not_statement(statement) {
                 continue;
             }
-            if let Some(log) = seen_log(self.source, statement) {
-                self.logs.push(log);
-                continue;
+            match seen_log(self.source, statement) {
+                Some(log) => self.logs.push(log),
+                None => self.walk(statement),
             }
-            self.walk(statement);
-            self.logs.truncate(depth);
         }
         self.logs.truncate(depth);
     }
