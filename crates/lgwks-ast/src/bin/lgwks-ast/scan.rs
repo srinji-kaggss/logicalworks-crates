@@ -1,5 +1,7 @@
-//! `lgwks-ast scan [--json] [PATH...]`: the zero-gate source detectors
-//! (INV-SCAN-ZERO, #408) over every `.rs` file under the paths named.
+//! `lgwks-ast scan [--json] [--rule NAME...] [PATH...]`: the zero-gate source
+//! detectors (INV-SCAN-ZERO, #408) over every `.rs` file under the paths named,
+//! narrowed to the detectors `--rule` names (#699) and extended to every
+//! `Cargo.toml` when ALLOW-SILENCE is among them.
 //!
 //! The five detectors of `lgwks_ast::scan` run through the checked parse, so a
 //! file past the byte, node, depth or time bound is refused by name and counted,
@@ -18,10 +20,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use lgwks_ast::scan::{Hit, scan_source};
+use lgwks_ast::scan::{Hit, Rule, scan_manifest, scan_source_with};
 use lgwks_std::json::Value;
 
-use super::{files_under, object, read_bounded};
+use super::{Wanted, files_under, is_manifest, object, read_bounded};
 
 /// The status when findings stand against a tree every file of which was read.
 const EXIT_FINDINGS: u8 = 1;
@@ -123,29 +125,74 @@ impl Counts {
     }
 }
 
-/// Scan one file: read it under the byte bound, then run the detectors.
-fn scan_file(path: PathBuf) -> ScanReading {
-    let outcome = read_bounded(&path).and_then(|text| {
-        scan_source(&text, &path.display().to_string()).map_err(|refusal| refusal.to_string())
-    });
+/// Scan one file: read it under the byte bound, then run `rules` over it.
+fn scan_file(path: PathBuf, rules: &[Rule]) -> ScanReading {
+    let outcome = read_bounded(&path)
+        .map_err(|refusal| refusal.to_string())
+        .and_then(|text| {
+            scan_source_with(&text, &path.display().to_string(), rules)
+                .map_err(|refusal| refusal.to_string())
+        });
     ScanReading { path, outcome }
+}
+
+/// Scan one manifest: read it under the byte bound, then read its lint tables.
+///
+/// A manifest that cannot be read is a refusal, not a pass, for the reason a
+/// source file is: the scan exists to read what silences a lint, and a table it
+/// never saw is one it cannot clear.
+fn scan_manifest_file(path: PathBuf) -> ScanReading {
+    let outcome = read_bounded(&path)
+        .map_err(|refusal| refusal.to_string())
+        .map(|text| scan_manifest(&text));
+    ScanReading { path, outcome }
+}
+
+/// Scan one file the walk (or the command line) named, with the reader that owns
+/// it: a `Cargo.toml` is read for its lint tables and anything else as Rust.
+///
+/// A manifest named on the command line while ALLOW-SILENCE is not selected has
+/// no detector to read it with. It is refused by name, never read as Rust, which
+/// it is not, and never passed unread.
+fn scan_path(path: PathBuf, rules: &[Rule], manifests: bool) -> ScanReading {
+    match (is_manifest(&path), manifests) {
+        (false, _) => scan_file(path, rules),
+        (true, true) => scan_manifest_file(path),
+        (true, false) => ScanReading {
+            outcome: Err(format!(
+                "{} is a manifest, and only ALLOW-SILENCE reads one",
+                path.display()
+            )),
+            path,
+        },
+    }
 }
 
 /// Run `scan` over `roots`: findings on stdout one per line as
 /// `path:line: [rule] evidence`, a refused file on stderr, then the summary.
+///
+/// Each root is walked once. A manifest is kept by that walk only when
+/// ALLOW-SILENCE is selected, because a manifest carries lint levels and no other
+/// rule reads one; a root that cannot be walked is one refusal naming the root.
 pub(super) fn run(
     roots: &[PathBuf],
     json: bool,
+    rules: &[Rule],
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<ExitCode> {
+    let manifests = rules.contains(&Rule::AllowSilence);
     let mut readings = Vec::new();
     for root in roots {
-        match files_under(root) {
-            Ok(files) => readings.extend(files.into_iter().map(scan_file)),
+        match files_under(root, Wanted::Scan { manifests }) {
+            Ok(files) => readings.extend(
+                files
+                    .into_iter()
+                    .map(|path| scan_path(path, rules, manifests)),
+            ),
             Err(error) => readings.push(ScanReading {
                 path: root.clone(),
-                outcome: Err(error),
+                outcome: Err(error.to_string()),
             }),
         }
     }

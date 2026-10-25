@@ -9,8 +9,9 @@
 //! rules' contracts rather than from the scanner, says the three syntax-only
 //! detectors must report for it:
 //!
-//! - ALLOW-SILENCE for every clippy path an `allow` names, in order, wherever
-//!   the attribute is written, test functions included;
+//! - ALLOW-SILENCE for every lint an `allow` or `expect` names — clippy, rustc,
+//!   tool lint or group — in order, wherever the attribute is written, test
+//!   functions included, and under a `cfg_attr`;
 //! - long-try-chain for a statement other than a `let` whose own expression
 //!   holds more than three `?`, judged in the innermost enclosing function and
 //!   never in one marked `test` or `test_*`;
@@ -26,6 +27,7 @@
 //! |---|---|
 //! | `mixed_band_00..07` | 1,024 mixed files over eight bands agree with the model, replay to one trace, and reach every rule |
 //! | `the_mixed_bands_cover_every_seed_exactly_once` | the bands partition the seed space |
+//! | `a_rule_selection_*` .. `every_rule_name_*` | a selected scan is the whole scan filtered by rule, over every seed |
 //! | `allow_*`, `an_allow_*`, `a_lint_*`, `deny_*` | ALLOW-SILENCE: clippy paths only, `allow` only, every placement |
 //! | `a_statement_*` .. `a_production_function_*` | long-try-chain: the threshold, `let`, closures, conditions, exemptions, nesting |
 //! | `a_short_paraphrase_*` .. `a_test_function_is_never_judged` | tautological-doc: visibility, the six-token ceiling, stop words, methods, tests |
@@ -33,20 +35,22 @@
 
 #![cfg(feature = "scan")]
 
+mod allow;
 mod model;
 mod sim_rules;
 
 use std::collections::BTreeSet;
 
-use lgwks_ast::scan::{ScanError, scan_path, scan_source};
+use lgwks_ast::scan::{Hit, Rule, ScanError, scan_path, scan_source, scan_source_with};
 use lgwks_std::{hex, random};
 
 use crate::sim::Rng;
 
+use allow::allow_block;
 use model::{
-    ALLOW, BANDS, Block, CHAIN, DOC, DocSpec, Drawn, File, Finding, Lints, MAX_TRY_CHAIN,
-    MIXED_SEEDS, PLACEMENTS, PUBLIC_DOC, ROUNDS, SEEDS, SHAPES, SPREAD, TENANTS, TestResult, agree,
-    allow_block, assemble, band_seeds, chain_block, doc_block, filler_block, mixed_blocks,
+    ALLOW, BANDS, Block, CHAIN, DOC, DocSpec, Drawn, File, Finding, LOUD_LEVELS, Lints,
+    MAX_TRY_CHAIN, MIXED_SEEDS, PLACEMENTS, PUBLIC_DOC, ROUNDS, SEEDS, SHAPES, SPREAD, TENANTS,
+    TestResult, agree, assemble, band_seeds, chain_block, doc_block, filler_block, mixed_blocks,
     mixed_file, mixed_receipt, mixed_seed, scanned, several, shuffle, sweep, tally,
 };
 
@@ -107,6 +111,76 @@ fn the_mixed_bands_cover_every_seed_exactly_once() -> TestResult {
     Ok(())
 }
 
+// ── Rule selection ──────────────────────────────────────────────────────────
+
+/// A rule selection is the whole scan filtered by rule: over every seeded file
+/// and five selections each, a selected scan reports exactly the findings whose
+/// rule it names, in the same order and with the same evidence (#699).
+///
+/// The property is stated against the whole scan rather than against the model,
+/// so it pins the selection itself: a subset must neither gain a finding, lose
+/// one, nor reorder the ones it keeps.
+#[test]
+fn a_rule_selection_is_the_whole_scan_filtered() -> TestResult {
+    const MASKS: [u8; 5] = [0b0_0000, 0b0_0001, 0b1_0100, 0b1_1111, 0b0_1010];
+    let mut checked = 0_usize;
+    for band in 0..BANDS {
+        for index in band_seeds(band)? {
+            let seed = mixed_seed(index);
+            let file = mixed_file(seed)?;
+            let whole = scan_source(&file.source, "sim.rs")?;
+            for mask in MASKS {
+                let selected: Vec<Rule> = Rule::ALL
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|&(at, _)| mask & (1_u8 << at) != 0)
+                    .map(|(_, rule)| rule)
+                    .collect();
+                let chosen = scan_source_with(&file.source, "sim.rs", &selected)?;
+                let expected: Vec<Hit> = whole
+                    .iter()
+                    .filter(|hit| {
+                        Rule::from_name(hit.rule()).is_some_and(|rule| selected.contains(&rule))
+                    })
+                    .cloned()
+                    .collect();
+                assert_eq!(chosen, expected, "seed {seed:#x} selects {selected:?}");
+                checked = checked.saturating_add(1);
+            }
+        }
+    }
+    assert_eq!(
+        checked,
+        usize::try_from(MIXED_SEEDS)?.saturating_mul(MASKS.len()),
+        "every seed met every selection"
+    );
+    Ok(())
+}
+
+/// Every rule names itself and a name selects it back, in either case; a name no
+/// detector reports selects nothing rather than a default.
+#[test]
+fn every_rule_name_round_trips() -> TestResult {
+    for rule in Rule::ALL {
+        assert_eq!(
+            Rule::from_name(rule.name()),
+            Some(rule),
+            "`{}` must select itself",
+            rule.name()
+        );
+        assert_eq!(
+            Rule::from_name(&rule.name().to_ascii_uppercase()),
+            Some(rule),
+            "a typed command line may shout `{}`",
+            rule.name()
+        );
+    }
+    assert_eq!(Rule::from_name("no-such-rule"), None);
+    assert_eq!(Rule::from_name(""), None);
+    Ok(())
+}
+
 // ── Cross-cutting ───────────────────────────────────────────────────────────
 
 /// Files drawn only from the clean side of every rule report nothing: no
@@ -117,7 +191,8 @@ fn clean_files_report_nothing() -> TestResult {
         several(rng, |rng, index| match rng.below(4) {
             0 => {
                 let placement = *rng.pick_named("placements", &PLACEMENTS)?;
-                allow_block(rng, index, placement, "allow", Lints::OtherOnly)
+                let level = *rng.pick_named("loud levels", &LOUD_LEVELS)?;
+                allow_block(rng, index, placement, level, Lints::Mixed)
             }
             1 => chain_block(rng, index, false, &SHAPES, MAX_TRY_CHAIN),
             2 => doc_block(
