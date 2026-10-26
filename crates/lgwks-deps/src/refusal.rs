@@ -243,6 +243,46 @@ pub enum Refusal {
         /// Number of dependency-edge refusals the posture stood down.
         refusals: usize,
     },
+    /// A crate the deferral catalog still defers is approved: the request is
+    /// closed with the trigger and the owner, not with "not now".
+    DeferredAdmitted {
+        /// External package the catalog defers.
+        krate: String,
+        /// Estate owner that must be fixed first.
+        owner: String,
+        /// Measured trigger that would admit the crate.
+        trigger: String,
+    },
+    /// An upstream pin or sealed exception passed its expiry date: renew the
+    /// row with a review or remove the pin, but do not ship the excuse.
+    PatchExpired {
+        /// Crate the expired row is about.
+        krate: String,
+        /// ISO date the row stopped being honored.
+        expiry: String,
+        /// Upstream PR for a pin, or the exception record for a provider.
+        upstream: String,
+    },
+    /// A blocked TLS provider is in the resolved tree with no live sealed
+    /// exception: `ring` and `webpki-roots` carry licence terms no register
+    /// accepts, so the chain that pulled one in must be recorded or removed.
+    ProviderBlocked {
+        /// Blocked provider package in the resolved lockfile.
+        krate: String,
+        /// Resolved version.
+        version: String,
+        /// Dependency chain from the provider up to the undepended package.
+        via: String,
+    },
+    /// A supply-chain ledger the gate was told to read cannot be read or
+    /// parsed. The catalog and the ledger are opt-in, but a file that exists
+    /// and says nothing readable is a refusal, never a silent skip.
+    LedgerUnreadable {
+        /// Ledger file that could not be read or parsed.
+        file: String,
+        /// What was wrong, with the source line when parsing failed.
+        reason: String,
+    },
     /// The root manifest or the cargo config overrides where dependency bytes
     /// come from: a `[patch]` or `[replace]` table, or a source replacement
     /// other than crates.io read from `vendored-sources` (#266).
@@ -444,6 +484,35 @@ impl fmt::Display for Refusal {
                  approved; remove it (the one admitted override is \
                  `[source.crates-io] replace-with = \"vendored-sources\"`)"
             ),
+            Self::DeferredAdmitted {
+                ref krate,
+                ref owner,
+                ref trigger,
+            } => write!(
+                formatter,
+                "{krate} is approved but the deferral catalog still defers it: fix the \
+                 estate owner {owner} first, and admit it only when {trigger}"
+            ),
+            Self::PatchExpired {
+                ref krate,
+                ref expiry,
+                ref upstream,
+            } => write!(
+                formatter,
+                "the ledger row for {krate} expired on {expiry}: renew it with a review \
+                 or remove the pin; upstream is {upstream}"
+            ),
+            Self::ProviderBlocked {
+                ref krate,
+                ref version,
+                ref via,
+            } => write!(
+                formatter,
+                "{krate} {version} is a blocked TLS provider in the resolved tree with \
+                 no live sealed exception; record the owner, date, blast radius and \
+                 removal path, or remove the chain that pulled it in ({via})"
+            ),
+            Self::LedgerUnreadable { ref reason, .. } => write!(formatter, "{reason}"),
         }
     }
 }
@@ -454,9 +523,10 @@ impl Refusal {
     /// An adoption-mode refusal is not about any one crate: it is about the
     /// register's own `[policy]` block standing down a count of edge
     /// violations, so it carries no crate name and answers `"<policy>"`; so
-    /// does a register with no licence policy, which is about the block too. A
-    /// caller that wants to distinguish the two shapes matches on the variant
-    /// rather than on this label.
+    /// does a register with no licence policy, which is about the block too. An
+    /// override and an unreadable ledger are about a file's table, so both
+    /// answer `"override"`. A caller that wants to distinguish the shapes
+    /// matches on the variant rather than on this label.
     #[must_use]
     pub fn krate(&self) -> &str {
         match *self {
@@ -475,11 +545,15 @@ impl Refusal {
             | Self::FrozenSurfaceTier { ref krate, .. }
             | Self::LicenseNotAccepted { ref krate, .. }
             | Self::VendorTierConflict { ref krate, .. }
-            | Self::UnknownSurface { ref krate, .. } => krate,
+            | Self::UnknownSurface { ref krate, .. }
+            | Self::DeferredAdmitted { ref krate, .. }
+            | Self::PatchExpired { ref krate, .. }
+            | Self::ProviderBlocked { ref krate, .. } => krate,
             Self::AdoptionModeRefusals { .. } | Self::LicensePolicyUndeclared { .. } => "<policy>",
             // An override is about a file's table, not one crate: a `[patch]`
             // can carry many packages, and a source replacement carries them all.
-            Self::DependencyOverride { .. } => "<override>",
+            // A ledger that cannot be read is about the file, for the same reason.
+            Self::DependencyOverride { .. } | Self::LedgerUnreadable { .. } => "<override>",
         }
     }
 
