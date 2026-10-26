@@ -148,10 +148,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `slice:`, not `count:`: nextest deprecates counted partitioning as
+          # neither even nor stable; a slice deals the tests round-robin.
           - instance: lwc-3
-            partition: count:1/2
+            partition: slice:1/2
           - instance: lwc-4
-            partition: count:2/2
+            partition: slice:2/2
     env:
       PARTITION: ${{ matrix.partition }}
       # sccache refuses to cache an incremental compilation, and the workflow's
@@ -415,8 +417,15 @@ jobs:
     # ran 08:06:00-08:08:22 (its compile and tests 1 m 53 s), the matrix took the
     # instance until 08:09:25, and the first shard ran its 28 s of tests from
     # 08:09:35, so the saturation wave that needs this job started at 08:10:30
-    # and the run's wall was 8 m 23 s. The whole suite in one job is that one
-    # compile plus both shards' tests, about 2 m 25 s.
+    # and the run's wall was 8 m 23 s.
+    #
+    # As one job on lwc-5 it was then wave one's last link: run 40311162932 ran
+    # its 4,940 tests in 120 s (1,027 test-seconds over its threads, a warm
+    # compile of 0.7 s) and ended at 2 m 36 s, while the workspace shards ended
+    # by 1 m 51 s. Two slices on two instances halve the tests. The second is
+    # lwc-1, which holds only the 13 s clippy row before it in wave one
+    # (lwc-2, the other candidate, held 2 m of storefront and saturation work),
+    # and sccache serves its dependency compile from what lwc-5 wrote.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -424,6 +433,9 @@ jobs:
       matrix:
         include:
           - instance: lwc-5
+            partition: slice:1/2
+          - instance: lwc-1
+            partition: slice:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
       PARTITION: ${{ matrix.partition }}
@@ -974,10 +986,10 @@ jobs:
             instance: lwc-11
           - part: consumers-1
             instance: lwc-6
-            partition: count:1/2
+            partition: slice:1/2
           - part: consumers-2
             instance: lwc-6
-            partition: count:2/2
+            partition: slice:2/2
     steps:
       - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0
@@ -1432,11 +1444,17 @@ jobs:
   # job leaves to it on macOS, so it is part of the row. A cancelled or skipped
   # job is not `success`, so it fails this row too.
   #
-  # The sixth input is the run's wall (the Director, 2026-10-26: CI fails when it
-  # is over 5 minutes, whatever the excuse), so the required row fails with it.
+  # The row also holds the run's wall. The Director, 2026-10-26: "U WILL ADD A
+  # GLOBAL RULE OF CI FAILING IF OVER 5 MINUTES. AND I DO NOT CARE WHAT FUCKING
+  # EXCUSE THERE IS". GitHub has no run-level timeout (`timeout-minutes` bounds
+  # one job) and no context holds a run's duration, so this job needs every other
+  # job, reads the attempt's own start from the runs API, and fails past 300 s;
+  # the ruleset requires this row, so a run over 5 minutes cannot merge. The wall
+  # was a job of its own before this one on run 40311162932: two pickups and two
+  # jobs in series, 29 s of a 268 s run, for one API call.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, workspace_tail, tests_bot_full, tests_bot_saturation, tests_nodefault, ci_wall]
+    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, tests_bot_saturation_build, tests_bot_saturation, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
     if: ${{ always() }}
     # On an instance, not a hosted runner: this row starts when the saturation
     # job ends and is the run's last link beside the receipts, and a hosted
@@ -1453,25 +1471,11 @@ jobs:
           BOT_FULL: ${{ needs.tests_bot_full.result }}
           BOT_SATURATION: ${{ needs.tests_bot_saturation.result }}
           BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
-          WALL: ${{ needs.ci_wall.result }}
         run: |
-          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}, run wall ${WALL}"
-          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success && test "${WALL}" = success
-
-  # The Director, 2026-10-26: "U WILL ADD A GLOBAL RULE OF CI FAILING IF OVER 5
-  # MINUTES. AND I DO NOT CARE WHAT FUCKING EXCUSE THERE IS". GitHub has no
-  # run-level timeout (`timeout-minutes` bounds one job), and no context holds a
-  # run's duration, so this row reads the attempt's own start from the runs API
-  # once every other job has ended, and fails past 300 s. The required row above
-  # depends on it, so the ruleset refuses a merge whose run took longer.
-  ci_wall:
-    name: CI under five minutes
-    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, tests_bot_saturation_build, tests_bot_saturation, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
-    if: ${{ always() }}
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 5
-    steps:
+          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
+          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
       - name: Run wall is at most 300 seconds
+        if: ${{ always() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
