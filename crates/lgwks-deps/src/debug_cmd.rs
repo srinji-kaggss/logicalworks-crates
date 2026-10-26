@@ -333,7 +333,7 @@ pub(crate) fn print_debug_json(report: &DebugReport, out: &mut impl io::Write) -
         "checks": {
             "default_includes_trace": report.surface.default_includes_trace,
             "trace_includes_tracing": report.surface.trace_includes_tracing,
-            "install_includes_tracing_subscriber": report.surface.install_includes_subscriber,
+            "trace_includes_tracing_subscriber": report.surface.install_includes_subscriber,
             "tracing_declared": report.surface.tracing_declared,
             "tracing_subscriber_declared": report.surface.subscriber_declared
         }

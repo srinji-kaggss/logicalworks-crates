@@ -296,10 +296,7 @@ fn debug_reports_default_sdk_bootstrap_in_json() -> TestResult {
     assert_eq!(report["admitted"], true);
     assert_eq!(report["format"], "json");
     assert_eq!(report["checks"]["default_includes_trace"], true);
-    assert_eq!(
-        report["checks"]["install_includes_tracing_subscriber"],
-        true
-    );
+    assert_eq!(report["checks"]["trace_includes_tracing_subscriber"], true);
     Ok(())
 }
 
