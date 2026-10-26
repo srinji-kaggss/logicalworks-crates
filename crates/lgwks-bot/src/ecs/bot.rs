@@ -201,13 +201,6 @@ impl EcsBot {
         self.world.resource::<Fired>().0
     }
 
-    /// The world, for tests and instrumentation. Read-only: mutating it behind
-    /// the schedule's back would break the ordering the build validated.
-    #[must_use]
-    pub fn world(&self) -> &World {
-        &self.world
-    }
-
     /// The `Revision` of every source, in chain order.
     #[must_use]
     pub fn revisions(&self) -> Vec<u64> {
@@ -488,13 +481,20 @@ impl EcsBot {
     /// [`BotError::TickInsideRuntime`] as above, or the first domain failure of
     /// the tick.
     pub fn tick(&mut self) -> Result<usize, BotError> {
-        #[cfg(feature = "rt")]
-        if crate::rt::runtime::inside_runtime() {
+        if Self::driver_on_this_thread() {
             let refusal = Err(BotError::TickInsideRuntime);
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "tick: returning an error to the caller");
             return refusal;
         }
         lgwks_std::task::block_on(self.tick_async())
+    }
+
+    /// With no driver compiled in, no driver can be on this thread. With one,
+    /// the driver answers (`rt::runtime`), so the core names no driver (ADR
+    /// 0006 decision 4).
+    #[cfg(not(feature = "rt"))]
+    const fn driver_on_this_thread() -> bool {
+        false
     }
 
     /// Reset the per-tick scratch, so a tick starts from the same state however

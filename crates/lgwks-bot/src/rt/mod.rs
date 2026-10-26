@@ -1,11 +1,12 @@
-//! Async orchestration runtime: the async and runner surface of [`lgwks_bot`].
+//! The driver below the ECS world: the async and runner surface of [`lgwks_bot`].
 //!
-//! This is the crate's async tier and the runtime its callers enter. It owns the
-//! orchestration surface — bounded fan-out, supervision, deadlines, cancellation —
-//! and drives it through a private driver sourced from the [`lgwks_deps`]
-//! storefront (`feature = "tokio"`), so `lgwks_deps` is the only crate that authors a
-//! `tokio` edge (`INV-DEP-EDGE-OWNED`) and `lgwks_bot` is the crate a consumer
-//! reaches async through. No caller names the driver directly.
+//! ADR 0006: one ECS world is the core and this module is the one driver below
+//! it, carrying events in and effects out. It is built on tokio sourced from the
+//! [`lgwks_deps`] storefront (`feature = "tokio"`), so `lgwks_deps` is the only
+//! crate that authors a `tokio` edge (`INV-DEP-EDGE-OWNED`), and it is used only
+//! where rebuilding the piece makes no sense. The core never imports this module
+//! (`tests/it/core_boundary.rs`); this module extends core types instead, as
+//! `Clock::sleep` in [`time`] does. No caller names the driver directly.
 //!
 //! [`lgwks_bot`]: crate
 //! [`lgwks_deps`]: lgwks_deps

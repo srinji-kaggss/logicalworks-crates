@@ -318,6 +318,15 @@ pub(crate) fn inside_runtime() -> bool {
     lgwks_deps::tokio::runtime::Handle::try_current().is_ok()
 }
 
+impl crate::ecs::EcsBot {
+    /// Whether the driver already drives the calling thread, asked by
+    /// `EcsBot::tick` before it parks the thread. Answered here because the
+    /// world is core and names no driver (ADR 0006 decision 4).
+    pub(crate) fn driver_on_this_thread() -> bool {
+        inside_runtime()
+    }
+}
+
 /// Run one future to completion on a private current-thread runtime.
 ///
 /// This is the one-off entry for synchronous code that has no runtime to name:

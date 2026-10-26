@@ -2,10 +2,11 @@
 
 2026-10-25
 
-Every public item that existed in the 2026-10-21 releases still exists with the
-same signature (`contract/PUBLIC_SURFACE.toml` only grew). Three crates still
-take a major bump, because a type their public API names now comes from a
-newer major of its upstream (`docs/releasing.md` §3):
+Two public items are removed, both from `lgwks_bot` under ADR 0006 (below):
+`EcsBot::world`, and `Clock::sleep`, whose one caller is inside the crate (an
+action waits through `act`). Every other item from the 2026-10-21 releases
+still exists with the same signature. Three crates take a major bump, because a type their public API
+names now comes from a newer major of its upstream (`docs/releasing.md` §3):
 
 - `lgwks_deps` re-exports Bevy, which moved 0.19 to 0.20 (#729).
 - `lgwks_ast` re-exports `ast_grep_core::{AstGrep, Node}`, which moved 0.45 to
@@ -38,7 +39,8 @@ named no features now compiles more.
   the last stamp, a spent counter borrows the next millisecond, and a stamp past
   48 bits is refused (`V7Error`). `Uuid::unix_millis` reads the stamp (#715).
 - `build` feature: a build script's input digest and checked cargo directives
-  (#733).
+  (#733). An input spelled with `..` is refused as outside the root, and a
+  non-UTF-8 variable anywhere in the environment no longer panics the digest.
 - `EditDistance` scores through a kernel specialised to `char`; the scores do
   not change.
 - `GlobPattern::is_match` reuses one scratch per thread and no longer allocates
@@ -68,6 +70,16 @@ named no features now compiles more.
   a caller selects detectors by `Rule` and `--rule` (#699, #758).
 
 ## lgwks_bot 4.0.0
+
+**Direction: one ECS world, one driver ([ADR 0006](../adr/0006-one-ecs-world-one-tokio-axum-driver.md)).**
+The ECS world is the core and drives everything; tokio and axum are one driver
+below it, used only where rebuilding makes no sense; `script` is the framework
+an agent writes in. This release lands the first step: `tests/it/core_boundary.rs`
+fails the build if a core module names the driver or a file outside `ecs/`
+names bevy, and `EcsBot::world` and `Clock::sleep` are removed (breaking, no
+shim). The `Estate`,
+`Host` and `Supervisor` below still build their own runtimes and do not yet
+reach the world; ADR 0006 R2 and R3 change that in the next major.
 
 - `rt::estate::Estate`: one runtime, supervisor and host behind three tiers
   (`in_process`, `supervised`, `durable`), with a terminal `EstateReport`, and

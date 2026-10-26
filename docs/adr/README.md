@@ -40,6 +40,7 @@ Prose review does not catch a missing field; a refusal does.
 | [0002](0002-scan-routed-through-lgwks-ast.md) | The scan reads Rust through `lgwks_ast` |
 | [0003](0003-every-capability-on-by-default.md) | Every capability is on by default |
 | [0004](0004-documentation-governance.md) | ADRs are 42010, PRDs are 29148, both machine-checked |
-| [0005](0005-bot-core-is-an-event-driven-ecs.md) | The bot core is an event-driven ECS; tokio and the executors are drivers below it |
+| [0005](0005-bot-core-is-an-event-driven-ecs.md) | The bot core is an event-driven ECS; tokio and the executors are drivers below it (superseded by 0006) |
+| [0006](0006-one-ecs-world-one-tokio-axum-driver.md) | One ECS world is the core; one driver on tokio and axum carries events in and effects out |
 
 New records go at the bottom of that table.

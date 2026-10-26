@@ -41,12 +41,20 @@ runnable example.
 | `ephemeral`, `profile` | off | run identities from `lgwks_std::random`; the per-stage profiler |
 | `full` | off | every feature above |
 
-## Relationship to the driver
+## Architecture: one ECS world, one driver
 
-It is the runtime. The driver behind it is owned through the
-`lgwks_deps` storefront, so a consumer never names it directly. What the driver
-does not give you is the layer above: what to bound, what to retry, which tenant
-a step belongs to and where a failure happened.
+[ADR 0006](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/adr/0006-one-ecs-world-one-tokio-axum-driver.md)
+fixes the shape. One ECS world is the core: a source moving, a run admitted or
+settled, a timer firing is an event written to it, and effects leave through
+the journal. One driver on tokio and axum sits below the world, used only where
+rebuilding the piece makes no sense, and a consumer never names it: it is owned
+through the `lgwks_deps` storefront. `script!` is the framework above the world
+that an agent or a developer writes in.
+
+The boundary is a test, not a convention: `tests/it/core_boundary.rs` fails the
+build if a core module names the driver or a file outside `ecs/` names bevy.
+The `Estate`, `Host` and `Supervisor` still build their own runtimes in 4.0.0;
+ADR 0006 R2 and R3 move them onto the one driver and into the world.
 
 This is **not a sandbox**. In-process code can always dial out directly, and
 capability gating is auditable authority, not isolation.

@@ -139,6 +139,7 @@ mod authority;
 mod bot_front_door;
 mod cas;
 mod clock_restart;
+mod core_boundary;
 mod credential;
 mod dist_lease;
 #[cfg(feature = "net")]

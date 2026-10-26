@@ -4,8 +4,8 @@ Pages of this README: [overview](README.md) · [execution model](README-executio
 
 ## Async orchestration runtime
 
-`lgwks_bot` is the asynchronous orchestration runtime (default feature
-`rt`). The driver edge appears in `contract/APPROVED.toml` with
+`rt` (default feature) is the one driver below the ECS world (ADR 0006): it
+carries events in and effects out, and the core never imports it. The driver edge appears in `contract/APPROVED.toml` with
 `owner = "lgwks_deps"`, and `lgwks-deps check` refuses any other workspace crate
 that declares it directly (`INV-DEP-EDGE-OWNED`). `--no-default-features`
 is a narrow test build with no driver at all, not the supported surface.
