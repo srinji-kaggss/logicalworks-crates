@@ -1170,8 +1170,15 @@ jobs:
           # leg reads 1 m 19 s warm. Two resolutions per leg now, so a cold target
           # pays half the work: the no-default and default builds here, the
           # feature subsets and all-features on the leg below.
+          #
+          # Not on lwc-5: the bot-full slice is pinned there, and which of the
+          # two the runner took first was chance. Run 40311162932 ran the slice
+          # first; run 40318318318 ran this leg first, 11:52:48-11:54:18, and the
+          # slice, wave one's critical link, started 97 s into the run. lwc-11
+          # holds the docs.rs leg and the ml storefront leg, done by 1 m 40 s on
+          # run 40311162932, so this leg ends inside wave two either way.
           - part: lgwks-bot
-            instance: lwc-5
+            instance: lwc-11
           - part: lgwks-bot all
             instance: lwc-10
           - part: lgwks-ast
