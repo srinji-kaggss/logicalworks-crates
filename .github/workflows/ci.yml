@@ -1054,9 +1054,11 @@ jobs:
   # run 40318746945 the musl leg took lwc-4 first and the shard started 3 m 51 s
   # into the run, which runner pick-up order alone decided. Spread to idle
   # instances instead (run 40319385404), the legs' cross-target compiles ran at
-  # t=0 beside every suite. `needs: build` fixes the order: the musl leg follows
-  # the shard on its warm lwc-4, and the aarch64 leg is on lwc-9, whose Linux
-  # bot-full suite ends near the same time, so the two legs run in parallel.
+  # t=0 beside every suite. `needs: build` fixes the order: both legs follow the
+  # shard on lwc-4, whose target directory holds their cross-target builds. On
+  # lwc-9 (run 40320724987) the aarch64 leg queued 42 s behind the Linux suite
+  # and its check compiled cold for over 2 m; on lwc-4 the same check took 5 s
+  # (run 40311162932), and both legs together end before the saturation tiers.
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
     needs: build
@@ -1067,7 +1069,7 @@ jobs:
       matrix:
         include:
           - targets: aarch64-unknown-linux-gnu
-            instance: lwc-9
+            instance: lwc-4
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
             instance: lwc-4
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
