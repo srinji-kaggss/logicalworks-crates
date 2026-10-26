@@ -61,7 +61,7 @@ A crate that wants only the derive turns the parser off, and compiles no
 grammar and no tree-sitter at all:
 
 ```toml
-lgwks_ast = { version = "1", default-features = false }
+lgwks_ast = { version = "3", default-features = false }
 ```
 
 Without default features the crate is the derive and the `diagnostic` types
@@ -100,7 +100,8 @@ which exists only because Rust requires a proc macro to live in its own crate.
 It is not a surface of its own; use it through `lgwks_bot`. They share a
 release process, not a dependency graph: `lgwks_bot` and `lgwks_deps` depend on
 `lgwks_std` (unconditionally, plus an optional `lgwks_macros` behind `bot`'s
-`script` feature), and `lgwks_ast` stands alone.
+`script` feature), and `lgwks_ast` reaches `lgwks_deps` and `lgwks_std` only
+through its `script` and `tool` features.
 
 | Crate | What it gives you |
 |---|---|

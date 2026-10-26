@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "3.0.3"
+version = "3.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",

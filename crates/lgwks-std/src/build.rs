@@ -22,10 +22,11 @@
 
 use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::fs::{Descend, FileKind, WalkEntry, WalkOptions, walk_dir_entries};
 use crate::hash::{Digest, Hasher};
@@ -197,7 +198,9 @@ impl InputDigest {
         })
     }
 
-    /// Adds one file; a relative path is taken from the root.
+    /// Adds one file; a relative path is taken from the root. A path outside
+    /// the root, or one that spells a `..`, is refused by [`Self::finish`] with
+    /// [`BuildError::OutsideRoot`].
     pub fn file(&mut self, path: impl AsRef<Path>) {
         self.files.push(self.root.join(path));
     }
@@ -275,11 +278,7 @@ impl InputDigest {
                 .write_framed(name.as_bytes())
                 .write_framed(value.as_bytes());
         }
-        let mut features: Vec<(String, String)> = env::vars()
-            .filter(|pair| pair.0.starts_with(FEATURE_PREFIX))
-            .collect();
-        features.sort_unstable();
-        for pair in &features {
+        for pair in &feature_variables(env::vars_os())? {
             hasher
                 .write_framed(b"feature")
                 .write_framed(pair.0.as_bytes())
@@ -289,13 +288,25 @@ impl InputDigest {
     }
 
     /// The input's name below the root, `/`-separated on every platform.
+    ///
+    /// A `..` component is outside the root even when the joined path still
+    /// starts with it: `root/../stray.rs` names a file beside the root.
     fn portable_name(&self, path: &Path) -> Result<String, BuildError> {
-        let Ok(relative) = path.strip_prefix(&self.root) else {
-            let refusal = BuildError::OutsideRoot {
-                path: path.to_path_buf(),
-            };
-            debug!(error = %refusal, "portable_name: returning an error to the caller");
-            return Err(refusal);
+        let relative = match path.strip_prefix(&self.root) {
+            Ok(relative)
+                if !relative
+                    .components()
+                    .any(|component| component == Component::ParentDir) =>
+            {
+                relative
+            }
+            _ => {
+                let refusal = BuildError::OutsideRoot {
+                    path: path.to_path_buf(),
+                };
+                debug!(error = %refusal, "portable_name: returning an error to the caller");
+                return Err(refusal);
+            }
         };
         let mut parts = Vec::new();
         for component in relative.components() {
@@ -342,6 +353,39 @@ fn variable_value(name: &str) -> Result<String, BuildError> {
     }
 }
 
+/// The enabled cargo features in `environment`, sorted by name.
+///
+/// The environment is read as `OsString` pairs: `env::vars` panics on the
+/// first variable anywhere in the environment that is not UTF-8. A variable
+/// outside the feature prefix is skipped whatever its encoding; a feature
+/// variable that is not UTF-8 is refused by name.
+fn feature_variables(
+    environment: impl Iterator<Item = (OsString, OsString)>,
+) -> Result<Vec<(String, String)>, BuildError> {
+    let mut features = Vec::new();
+    for (name, value) in environment {
+        if !name
+            .as_encoded_bytes()
+            .starts_with(FEATURE_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        let refused = match (name.into_string(), value.into_string()) {
+            (Ok(name), Ok(value)) => {
+                features.push((name, value));
+                continue;
+            }
+            (Ok(name), Err(_)) => name,
+            (Err(name), _) => name.to_string_lossy().into_owned(),
+        };
+        let refusal = BuildError::NotUnicode { name: refused };
+        debug!(error = %refusal, "feature_variables: returning an error to the caller");
+        return Err(refusal);
+    }
+    features.sort_unstable();
+    Ok(features)
+}
+
 /// Resolves `path` to its canonical form, so names are taken against one spelling.
 fn canonical(path: &Path) -> Result<PathBuf, BuildError> {
     match path.canonicalize() {
@@ -354,5 +398,74 @@ fn canonical(path: &Path) -> Result<PathBuf, BuildError> {
             debug!(error = %refusal, "canonical: returning an error to the caller");
             Err(refusal)
         }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One environment pair from two UTF-8 strings.
+    fn pair(name: &str, value: &str) -> (OsString, OsString) {
+        (OsString::from(name), OsString::from(value))
+    }
+
+    /// Only the feature prefix is read, and the result is sorted by name
+    /// whatever order the environment yields.
+    #[test]
+    fn feature_variables_are_the_prefixed_pairs_in_name_order() -> Result<(), BuildError> {
+        let environment = vec![
+            pair("CARGO_FEATURE_ZETA", "1"),
+            pair("PATH", "/usr/bin"),
+            pair("CARGO_FEATURE_ALPHA", "1"),
+            pair("CARGO_PKG_NAME", "demo"),
+        ];
+        assert_eq!(
+            feature_variables(environment.into_iter())?,
+            vec![
+                (String::from("CARGO_FEATURE_ALPHA"), String::from("1")),
+                (String::from("CARGO_FEATURE_ZETA"), String::from("1")),
+            ],
+            "two features, sorted, and nothing else"
+        );
+        Ok(())
+    }
+
+    /// A non-UTF-8 variable outside the prefix is skipped where `env::vars`
+    /// would have panicked, and a non-UTF-8 feature value is refused by name.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_variable_is_skipped_or_refused_never_a_panic() -> Result<(), BuildError> {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = || OsString::from_vec(vec![0x66, 0xff, 0x6f]);
+        let unrelated = vec![
+            (OsString::from("LANG"), invalid()),
+            (invalid(), OsString::from("x")),
+            pair("CARGO_FEATURE_STD", "1"),
+        ];
+        assert_eq!(
+            feature_variables(unrelated.into_iter())?,
+            vec![(String::from("CARGO_FEATURE_STD"), String::from("1"))],
+            "a stray non-UTF-8 variable does not stop the digest"
+        );
+        let feature = vec![(OsString::from("CARGO_FEATURE_STD"), invalid())];
+        let outcome = feature_variables(feature.into_iter());
+        assert!(
+            matches!(outcome, Err(BuildError::NotUnicode { ref name }) if name == "CARGO_FEATURE_STD"),
+            "a non-UTF-8 feature is refused by name: {outcome:?}"
+        );
+        let mut name = b"CARGO_FEATURE_".to_vec();
+        name.push(0xff);
+        let named = vec![(OsString::from_vec(name), OsString::from("1"))];
+        assert!(
+            matches!(
+                feature_variables(named.into_iter()),
+                Err(BuildError::NotUnicode { .. })
+            ),
+            "a feature whose name is not UTF-8 is refused"
+        );
+        Ok(())
     }
 }

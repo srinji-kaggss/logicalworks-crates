@@ -497,12 +497,19 @@ impl Supervisor {
     /// [`Supervisor::snapshot`](crate::rt::supervise::Supervisor::snapshot) uses.
     #[must_use]
     pub fn task_state(&self, task: TaskId) -> Option<TaskState> {
-        let mut ordered: Vec<TaskId> = self.identities.values().copied().collect();
-        ordered.sort_unstable_by_key(|live| live.get());
-        ordered
-            .iter()
-            .position(|live| *live == task)
-            .map(|position| TaskState::Running { position })
+        // One pass and no allocation: the spawn-order position is the count of
+        // tracked identities issued before this one, so an owner reconciling
+        // every task pays O(n) per question rather than a copy and a sort.
+        let mut tracked = false;
+        let mut position = 0_usize;
+        for live in self.identities.values() {
+            if *live == task {
+                tracked = true;
+            } else if live.get() < task.get() {
+                position = position.saturating_add(1);
+            }
+        }
+        tracked.then_some(TaskState::Running { position })
     }
 
     /// The oldest terminal outcome this supervisor has not yet handed over.

@@ -9,6 +9,7 @@ breaks are listed explicitly under the crate.
 
 ## Releases, newest first
 
+- lgwks_std 3.1.0 / lgwks_deps 5.0.0 / lgwks_ast 3.0.0 / lgwks_bot 4.0.0 / lgwks_macros 1.1.6 - 2026-10-25: [notes](docs/changelog/04-v7-ids-estate-freshness-2026-10-25.md)
 - lgwks_std 3.0.3 / lgwks_bot 3.1.2 / lgwks_ast 2.2.1 / lgwks_deps 4.2.1 / lgwks_macros 1.1.5 - 2026-10-21: [notes](docs/changelog/03-estate-sims-and-docs-2026-10-21.md)
 - lgwks_std 3.0.2 / lgwks_bot 3.1.1 / lgwks_ast 2.2.0 / lgwks_deps 4.2.0 / lgwks_macros 1.1.4 - 2026-10-21: [notes](docs/changelog/02-sdk-front-doors-2026-10-21.md)
 - lgwks_std 3.0.1 / lgwks_bot 3.1.0 / lgwks_ast 2.1.0 / lgwks_deps 4.1.0 / lgwks_macros 1.1.3 - 2026-10-21: [notes](docs/changelog/01-lgwks-std-3-0-1-lgwks-bot-3-1-2026-10-21.md)

@@ -27,6 +27,35 @@ pub async fn sleep(duration: Duration) {
     lgwks_deps::tokio::time::sleep(duration).await;
 }
 
+impl Clock {
+    /// Wait `duration` on this clock.
+    ///
+    /// A wall clock waits real time through the driver's timer, which is the
+    /// production path and needs the runtime's `time` driver. A virtual clock
+    /// instead parks the future until a caller advances the counter to its
+    /// deadline, so the wait costs no real time and the move is the caller's:
+    /// this is the timer a test owns, and the one a settle schedule runs on.
+    ///
+    /// Implemented here rather than beside the clock: the clock is core and
+    /// names no driver (ADR 0006 decision 4), so the driver extends it.
+    ///
+    /// Crate-private because a consumer waits through the action it runs: the
+    /// `Scope` it is handed already names the clock, and `act` is the word that
+    /// spends it. Its one caller is `keyed`.
+    ///
+    /// # Panics
+    ///
+    /// A wall clock's wait panics when polled outside a runtime with the `time`
+    /// driver, exactly as any driver timer does. A virtual clock's wait needs
+    /// no runtime.
+    pub(crate) async fn sleep(&self, duration: Duration) {
+        match self.source() {
+            TimeSource::Wall => sleep(duration).await,
+            TimeSource::Virtual => self.sleep_virtual(duration).await,
+        }
+    }
+}
+
 /// Wait until `deadline` passes. The deadline is captured on first poll.
 pub async fn sleep_until(deadline: Instant) {
     lgwks_deps::tokio::time::sleep_until(deadline).await;

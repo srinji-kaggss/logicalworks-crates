@@ -21,9 +21,9 @@ crates/lgwks-bot/src/cap.rs:406	pub(crate) fn new(mut caps: Vec<Cap>) -> Self {
 crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<(), BotError> {
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs/admit.rs:344	RetryClass::Never => EntryState::Abandoned {
-crates/lgwks-bot/src/ecs/bot.rs:311	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/bot.rs:381	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
-crates/lgwks-bot/src/ecs/bot.rs:490	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/bot.rs:304	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/bot.rs:374	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
+crates/lgwks-bot/src/ecs/bot.rs:483	pub fn tick(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs/builder.rs:610	let mut shortages: Vec<Shortage> = Vec::new();
 crates/lgwks-bot/src/ecs/builder.rs:630	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/fold.rs:377	pub(super) fn fire_plan(world: &mut World) {
@@ -48,9 +48,9 @@ crates/lgwks-bot/src/language.rs:580	/// Creates a resolver pre-loaded with lear
 crates/lgwks-bot/src/language.rs:611	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	.insert(alias.utterance.clone(), alias)
 crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:82	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:109	#[cfg(feature = "sync")]
-crates/lgwks-bot/src/rt/mod.rs:121	#[cfg(all(feature = "signal", any(unix, windows)))]
+crates/lgwks-bot/src/rt/mod.rs:83	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:110	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:122	#[cfg(all(feature = "signal", any(unix, windows)))]
 crates/lgwks-bot/src/rt/process.rs:66	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:603	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:723	pub enum ProcessRunError {

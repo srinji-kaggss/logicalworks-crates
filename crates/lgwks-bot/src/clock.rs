@@ -435,31 +435,8 @@ impl Clock {
         }
     }
 
-    /// Wait `duration` on this clock.
-    ///
-    /// A wall clock waits real time through the engine's timer, which is the
-    /// production path and needs the runtime's `time` driver. A virtual clock
-    /// instead parks the future until a caller advances the counter to its
-    /// deadline, so the wait costs no real time and the move is the caller's:
-    /// this is the timer a test owns, and the one a settle schedule runs on.
-    ///
-    /// Hidden because a consumer waits through the action it runs: the `Scope`
-    /// it is handed already names the clock, and `act` is the word that spends
-    /// it. The method stays callable so a test can model a wait directly.
-    ///
-    /// # Panics
-    ///
-    /// A wall clock's wait panics when polled outside a runtime with the `time`
-    /// driver, exactly as any engine timer does. A virtual clock's wait needs
-    /// no runtime.
-    #[doc(hidden)]
-    #[cfg(feature = "time")]
-    pub async fn sleep(&self, duration: Duration) {
-        match self.inner.source {
-            TimeSource::Wall => crate::rt::time::sleep(duration).await,
-            TimeSource::Virtual => self.sleep_virtual(duration).await,
-        }
-    }
+    // `Clock::sleep` is implemented in `rt::time`: a wall wait is the driver's
+    // timer, and the core names no driver (ADR 0006 decision 4).
 
     #[doc(hidden)]
     /// Whether any future is parked on this clock's virtual sleep.
@@ -512,9 +489,10 @@ impl Clock {
         .await;
     }
 
-    /// [`Clock::sleep`] on a caller-advanceable clock.
+    /// [`Clock::sleep`] on a caller-advanceable clock: the half of the wait the
+    /// core owns, because it needs no driver.
     #[cfg(feature = "time")]
-    async fn sleep_virtual(&self, duration: Duration) {
+    pub(crate) async fn sleep_virtual(&self, duration: Duration) {
         let deadline = self.now().saturating_add(duration);
         std::future::poll_fn(|context| self.poll_virtual_sleep(deadline, context)).await;
     }

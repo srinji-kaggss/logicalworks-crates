@@ -232,6 +232,37 @@ fn sim_an_input_outside_the_root_is_refused() -> Outcome {
 }
 
 #[test]
+/// A `..` that climbs out of the root is outside it, though the joined path
+/// still starts with the root: the digest never names an input `../stray.rs`.
+fn sim_a_parent_component_is_outside_the_root() -> Outcome {
+    let parent = tempfile::tempdir()?;
+    let root = parent.path().join("crate");
+    fs::create_dir(&root)?;
+    fs::write(parent.path().join("stray.rs"), b"fn stray() {}")?;
+    fs::write(root.join("lib.rs"), b"fn lib() {}")?;
+    let mut inputs = InputDigest::new(DOMAIN, &root)?;
+    inputs.file("../stray.rs");
+    let outcome = inputs.finish(&mut Vec::new());
+    assert!(
+        matches!(outcome, Err(BuildError::OutsideRoot { .. })),
+        "a climbing input is refused by name: {outcome:?}"
+    );
+    let mut inside = InputDigest::new(DOMAIN, &root)?;
+    inside.file("sub/../lib.rs");
+    let mut plain = InputDigest::new(DOMAIN, &root)?;
+    plain.file("lib.rs");
+    assert!(
+        matches!(
+            inside.finish(&mut Vec::new()),
+            Err(BuildError::OutsideRoot { .. })
+        ),
+        "a `..` is refused even where it lands back inside the root"
+    );
+    plain.finish(&mut Vec::new())?;
+    Ok(())
+}
+
+#[test]
 /// A missing input file is a read refusal carrying the OS error.
 fn sim_a_missing_input_is_a_read_refusal() -> Outcome {
     let root = tempfile::tempdir()?;

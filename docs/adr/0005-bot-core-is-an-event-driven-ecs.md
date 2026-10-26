@@ -1,6 +1,6 @@
 # ADR 0005: the bot core is an event-driven ECS, and drivers sit below it
 
-Status: **accepted**, 2026-10-23. Plan: design-gate `b97012375d58a4a3`. It landed as 0003 (#736), and took 0005 when the #732 records took 0003 and 0004; the decision is unchanged.
+Status: **superseded**, 2026-10-23. Plan: design-gate `b97012375d58a4a3`. It landed as 0003 (#736), and took 0005 when the #732 records took 0003 and 0004; the decision is unchanged.
 
 Stakeholders: the Director; the executing agent of each step below; a consumer of `lgwks_bot` outside Logical Works, when one exists
 Concerns: tokio is called the glue yet sits beside the core; a tick visits every source whether or not anything moved; the engines under the core are admitted, not owned

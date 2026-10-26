@@ -7,12 +7,13 @@ consequence the name does not carry.
 ## Defaults
 
 ```toml
-default = ["rt", "time", "sync", "macros"]
+default = ["script"]
+script = ["rt", "time", "sync", "macros", "dep:lgwks_macros", "dep:lgwks_ast", "lgwks_ast/script"]
 ```
 
-That is the `cargo add lgwks_bot` build. It pulls tokio through the `lgwks_deps`
-storefront, and `lgwks_deps` is the only crate in the workspace that authors a
-`tokio` edge.
+That is the `cargo add lgwks_bot` build: `script!` and the four driver features
+it stands on. It pulls tokio through the `lgwks_deps` storefront, and
+`lgwks_deps` is the only crate in the workspace that authors a `tokio` edge.
 
 ## The full table
 
@@ -26,11 +27,14 @@ storefront, and `lgwks_deps` is the only crate in the workspace that authors a
 | `net` | `io` | `rt::net`: `TcpListener`, `TcpStream`, `UdpSocket`, `lookup_host` |
 | `process` | `io`, `sync` | `rt::process`: `Command` — how to describe a child, with `StdioPolicy::Capture` for a bounded stream. Running one is `Supervisor::spawn_process` (reported later) or `Supervisor::run_process` (returns its `ProcessRun`), and they are the only ways: `Child` and its pipes are deliberately not exported |
 | `fs` | `io` | `rt::fs`: an async filesystem, a blocking-threadpool wrapper |
-| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:121`) |
+| `signal` | `rt` | `rt::signal`: OS signal streams. Compiled only on `unix` or `windows` (`crates/lgwks-bot/src/rt/mod.rs:122`) |
 | `ephemeral` | | `EffectScope::ephemeral()`, `RunId::mint()`, `EnvironmentId::mint()`. Host-only: minting needs OS entropy, and `lgwks_std::random` is linux/macOS/windows only. Off by default for the same reason `signal` is — the default set is built for `wasm32-wasip1` |
-| `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal`, `ephemeral` |
+| `script` | `rt`, `time`, `sync`, `macros` | `script!`, `try_join!` and the `script` module, the supported interface; reads flows through `lgwks_ast`'s `script` reader. On by default |
+| `inspect` | | structural code inspection through `lgwks_ast` (every grammar) |
+| `profile` | | the per-stage profiler |
+| `full` | | `rt`, `time`, `sync`, `macros`, `io`, `net`, `process`, `fs`, `signal`, `ephemeral`, `script`, `inspect`, `profile` |
 
-The module gates are in `crates/lgwks-bot/src/rt/mod.rs:109`. `rt::supervise` and
+The module gates are in `crates/lgwks-bot/src/rt/mod.rs:110`. `rt::supervise` and
 `rt::sync` are both behind `sync`, so disabling `sync` removes the supervisor as
 well as the channels.
 
@@ -67,7 +71,7 @@ which this workspace bans.
 
 ## Limits by feature
 
-**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:82`
+**`rt` is not a scheduler with realtime guarantees.** `crates/lgwks-bot/src/rt/mod.rs:83`
 states the bound: future completion order across worker threads is not
 deterministic, and only the result order of `join_all_bounded` is.
 

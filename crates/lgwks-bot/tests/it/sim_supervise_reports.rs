@@ -203,10 +203,14 @@ fn every_placed_task_reports_exactly_once(band: Band) -> TestResult {
                         .saturating_add(snapshot.live_truncated()),
                     "in_flight counts what the snapshot lists plus what it truncated"
                 );
+                // Exactly the snapshot's state, position included: the
+                // accessor counts in one pass what the snapshot sorts, so a
+                // position off by one in either is a disagreement here.
                 for live in snapshot.live() {
-                    assert!(
-                        supervisor.task_state(live.task).is_some(),
-                        "a task the snapshot lists is tracked: {}",
+                    assert_eq!(
+                        supervisor.task_state(live.task),
+                        Some(live.state),
+                        "a task the snapshot lists reads its own state and position: {}",
                         live.task.get()
                     );
                 }

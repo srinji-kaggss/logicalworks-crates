@@ -33,7 +33,8 @@
 //! - `hash` — hash. Adds `blake3`.
 //! - `build` — build. A build script's input digest and cargo directives.
 //!   Implies `hash` and `trace`; adds no dependency of its own.
-//! - `sign` — sign. Adds `ed25519-dalek` (default-features off, `alloc` only).
+//! - `sign` — sign. Adds `ed25519-dalek` (default-features off, `alloc` and
+//!   `zeroize`, so a `SecretKey` is wiped on drop).
 //!   Implies `random` (key generation reads the one entropy source) and `hash`
 //!   (the sealed message carries the BLAKE3 of the record).
 //! - `pattern` — pattern. Adds `regex`.

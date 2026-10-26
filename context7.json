@@ -46,28 +46,28 @@
     "lgwks_bot::keyed keeps one effect per caller key on a receiver with no idempotency key: read, wait out the in-flight bound, read again, create once, and reconcile a lost create answer by read-back. gh::issue is its adapter.",
     "lgwks_macros is the proc-macro crate behind script!. It depends on lgwks_ast, which owns the one parser for the language (lgwks_ast::script::parse) and the one refusal vocabulary.",
     "lgwks_bot enables script! through its default `script` feature. Its other features (io, net, process, fs, signal, inspect, ephemeral, profile) are off by default; --no-default-features withdraws the runtime surface.",
-    "Prefer lgwks_std over a third-party crate for encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing; each is a Cargo feature and the default build carries only core and trace.",
+    "Prefer lgwks_std over a third-party crate for encoding, fs traversal, glob, hex, hashing, JSON, RON, regex, retry budgets, timestamps, UUIDs, HTTP and tracing; each is a Cargo feature, the default `standard` set carries all of them but http, and `full` adds http.",
     "Use lgwks_std::trace for diagnostics. Applications call install_default once at the process edge; libraries emit structured events and return typed errors, and do not unwrap or expect on recoverable paths.",
     "Every third-party engine (tokio, bevy, gpui, appcui, candle, tokenizers) is a default-off lgwks_deps feature reached through lgwks_deps::storefront.",
     "The lgwks-deps CLI audits a repository against contract/APPROVED.toml, and check_verdict is the same verdict as a library call.",
     "Licences differ by crate: lgwks_bot is MPL-2.0 (file-level copyleft), while lgwks_std, lgwks_ast, lgwks_deps and lgwks_macros are Apache-2.0. The LICENSE file in a crate's directory governs that crate.",
-    "A release is uploaded before it is tagged: `cargo run -p lgwks_deps --bin published-consumer` proves the published crates at their newest tags before any tag is created."
+    "A release is uploaded before it is tagged, and after the last tag `cargo run -p lgwks_deps --bin published-consumer` builds every published crate from crates.io at its newest tag."
   ],
   "previousVersions": [
     {
-      "tag": "lgwks_std-v3.0.0"
+      "tag": "lgwks_std-v3.0.3"
     },
     {
-      "tag": "lgwks_bot-v3.0.0"
+      "tag": "lgwks_bot-v3.1.2"
     },
     {
-      "tag": "lgwks_ast-v2.0.0"
+      "tag": "lgwks_ast-v2.2.1"
     },
     {
-      "tag": "lgwks_deps-v4.0.0"
+      "tag": "lgwks_deps-v4.2.1"
     },
     {
-      "tag": "lgwks_macros-v1.1.2"
+      "tag": "lgwks_macros-v1.1.5"
     }
   ]
 }
