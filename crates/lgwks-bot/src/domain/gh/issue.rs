@@ -37,7 +37,10 @@ use std::time::Duration;
 
 use lgwks_std::json::{self, Deserialize, Serialize};
 
-use super::{Gh, GhError, Repository, stage_input};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
+use super::Repository;
+use super::{Gh, GhError, stage_input};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::Action;
 use crate::cap::{Auth, Cap};
 use crate::clock::Clock;
@@ -574,6 +577,7 @@ impl OpenIssue {
     ///
     /// [`BotError::IncompleteSpec`] naming the target when it is not
     /// `owner/repo`.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub fn from_target(target: &str) -> Result<Action, BotError> {
         let repository = Repository::new(target).map_err(|refused| BotError::IncompleteSpec {
             field: "target",

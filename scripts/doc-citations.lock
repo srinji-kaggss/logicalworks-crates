@@ -75,12 +75,12 @@ crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lex
 crates/lgwks-bot/src/semantic.rs:117	pub trait Embedder {
 crates/lgwks-bot/src/semantic.rs:356	pub const DEFAULT: Self = Self {
 crates/lgwks-bot/src/session.rs:1	//! Validated declarative guidance flows and a synchronous session runner.
-crates/lgwks-bot/src/session/graph.rs:120	pub enum Disposition {
-crates/lgwks-bot/src/session/graph.rs:147	pub struct EffectLedger {
-crates/lgwks-bot/src/session/graph.rs:278	Refused {
-crates/lgwks-bot/src/session/graph.rs:385	pub struct FlowSpec {
-crates/lgwks-bot/src/session/graph.rs:419	bounds,
-crates/lgwks-bot/src/session/graph.rs:452	/// Parse and validate a flow using the shared JSON facade.
+crates/lgwks-bot/src/session/graph.rs:122	pub enum Disposition {
+crates/lgwks-bot/src/session/graph.rs:149	pub struct EffectLedger {
+crates/lgwks-bot/src/session/graph.rs:280	Refused {
+crates/lgwks-bot/src/session/graph.rs:387	pub struct FlowSpec {
+crates/lgwks-bot/src/session/graph.rs:421	bounds,
+crates/lgwks-bot/src/session/graph.rs:455	/// Parse and validate a flow using the shared JSON facade.
 crates/lgwks-bot/src/session/limits.rs:16	/// one costs memory for nothing.
 crates/lgwks-bot/src/session/receipt.rs:46	pub struct DecisionReceipt {
 crates/lgwks-bot/src/session/resolve.rs:40	/// renderings, so two thresholds differing in the last bit are two versions and
@@ -100,8 +100,8 @@ crates/lgwks-bot/src/session/value.rs:94	String,
 crates/lgwks-bot/src/session/value.rs:151	pub fn decode_answer(&self, answer: &str) -> Result<Value, AnswerRejection> {
 crates/lgwks-bot/src/session/value.rs:207	pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
 crates/lgwks-bot/src/session/value.rs:287	Literal(Value),
-crates/lgwks-bot/src/spec.rs:337	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:694	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:352	pub use crate::ecs::{
+crates/lgwks-bot/src/spec.rs:721	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:23	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-std/src/process/identity.rs:386	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task/blocking.rs:155	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>

@@ -1,22 +1,31 @@
 //! Admitted inputs and the pending-work vocabulary a caller resolves.
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use std::any::Any;
 use std::fmt;
 use std::time::Duration;
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::effect::InputIdentity;
+#[cfg(feature = "ecs")]
 use lgwks_deps::bevy_ecs::prelude::World;
-#[cfg(doc)]
+#[cfg(all(doc, feature = "ecs"))]
 use lgwks_deps::bevy_ecs::schedule::IntoScheduleConfigs;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use lgwks_std::hash::Hasher;
 
 use crate::effect::{ActionId, EffectKey};
-use crate::error::{BotError, Escaped};
+#[cfg(feature = "ecs")]
+use crate::error::BotError;
+use crate::error::Escaped;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::verb::Observe;
 
-#[cfg(doc)]
+#[cfg(all(doc, feature = "ecs"))]
 use super::bot::EcsBot;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use super::identity::OUTPUT_IDENTITY_DOMAIN;
+#[cfg(feature = "ecs")]
 use super::resources::TickError;
 
 /// Compare two erased outputs as `S::Output`.
@@ -36,6 +45,7 @@ use super::resources::TickError;
 ///
 /// Keeping them apart is what lets a state watch `0 → 1 → 0` fire three times
 /// while a redelivered [`EventId`] still retires.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 #[derive(Clone, Copy)]
 pub(crate) struct AdmittedInput {
     /// The content identity a dispatch digest binds.
@@ -53,6 +63,7 @@ pub(crate) struct AdmittedInput {
 /// distinguishable, which is the caller's to express via
 /// [`EventId`] or their own [`InputIdentity`] impl —
 /// content equality alone is not event identity (issue #101).
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) fn identify_output<S>(value: &dyn Any) -> AdmittedInput
 where
     S: Observe,
@@ -92,6 +103,7 @@ where
 /// an unreadable value as unchanged would silently suppress an effect, and the
 /// failure mode this whole substrate is built to avoid is an effect that does
 /// not happen with nothing to show for it.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) fn same_output<S>(left: &dyn Any, right: &dyn Any) -> bool
 where
     S: Observe + 'static,
@@ -118,6 +130,7 @@ where
 ///
 /// The report still names every cancelled chain, and the tick still returns the
 /// typed cancellation; what it does not do is stop the bot.
+#[cfg(feature = "ecs")]
 pub(super) fn parked(world: &World) -> bool {
     world.get_resource::<TickError>().is_some_and(|error| {
         error
@@ -437,18 +450,19 @@ impl fmt::Display for PendingWork {
 /// decision that matters — attempt it again or not — follows from which one
 /// they are. "Unknown and staying unknown" is not evidence and has no arm: an
 /// entry in that state stays reported, which is the honest outcome.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(
+    feature = "wire",
+    rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))
+)]
 #[non_exhaustive]
 pub enum EffectEvidence {
     /// The effect happened. The entry is acknowledged and never attempted

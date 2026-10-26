@@ -72,8 +72,10 @@ pub use value::*;
 
 // The leaves with nothing public re-export nothing; the siblings reach their
 // crate-private items through the root, so they are named here once.
+#[cfg(feature = "ron")]
+use parse::parse_ron;
 use parse::{
-    DeclaredNodes, check_flow_size, malformed_flow, merge_read_kinds, parse_json, parse_ron,
+    DeclaredNodes, check_flow_size, malformed_flow, merge_read_kinds, parse_json,
     reject_unknown_node_kinds,
 };
 use validate::{

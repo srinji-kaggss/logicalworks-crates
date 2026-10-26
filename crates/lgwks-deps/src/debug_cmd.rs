@@ -25,8 +25,10 @@ pub(crate) struct DebugSurface {
     default_includes_trace: bool,
     /// `trace = [...]` includes `dep:tracing`.
     trace_includes_tracing: bool,
-    /// `trace = [...]` includes `dep:tracing-subscriber`.
-    trace_includes_subscriber: bool,
+    /// `trace-install = [...]`, the installer feature, includes
+    /// `dep:tracing-subscriber` and `default` reaches it, so the bootstrap is
+    /// on by default while an emit-only consumer leaves the subscriber out.
+    install_includes_subscriber: bool,
     /// The `tracing` dependency is declared.
     tracing_declared: bool,
     /// The `tracing-subscriber` dependency is declared.
@@ -38,7 +40,7 @@ impl DebugSurface {
     const fn passes(&self) -> bool {
         self.default_includes_trace
             && self.trace_includes_tracing
-            && self.trace_includes_subscriber
+            && self.install_includes_subscriber
             && self.tracing_declared
             && self.subscriber_declared
     }
@@ -100,9 +102,12 @@ pub(crate) fn run_debug(args: &[String]) -> Result<DebugReport, String> {
     let service_name = config.service_name().to_owned();
     let filter = config.filter().to_owned();
     let format = config.format();
+    #[cfg(feature = "debug-doctor")]
     config
         .install()
         .map_err(|error| format!("cannot install debugger: {error}"))?;
+    #[cfg(not(feature = "debug-doctor"))]
+    let _ = config;
     let surface = inspect_debug_surface(&root)?;
     let root_text = format!("{}", root.display());
     lgwks_std::trace::info!(
@@ -130,14 +135,16 @@ pub(crate) fn inspect_debug_surface(root: &Path) -> Result<DebugSurface, String>
     // The manifest's `default` and `trace` lists decide the surface; an absent
     // list declares nothing, so the answer is "no" rather than a guess.
     let trace_value = assignment_value(&manifest, "trace");
+    let install_value = assignment_value(&manifest, "trace-install");
     Ok(DebugSurface {
         default_includes_trace: default_reaches(&manifest, "trace"),
         trace_includes_tracing: trace_value
             .as_ref()
             .is_some_and(|list| list.contains("\"dep:tracing\"")),
-        trace_includes_subscriber: trace_value
-            .as_ref()
-            .is_some_and(|list| list.contains("\"dep:tracing-subscriber\"")),
+        install_includes_subscriber: default_reaches(&manifest, "trace-install")
+            && install_value
+                .as_ref()
+                .is_some_and(|list| list.contains("\"dep:tracing-subscriber\"")),
         tracing_declared: dependency_declared(&manifest, "tracing"),
         subscriber_declared: dependency_declared(&manifest, "tracing-subscriber"),
     })
@@ -286,8 +293,8 @@ pub(crate) fn print_debug_human(
     )?;
     debug_check_line(
         writer,
-        report.surface.trace_includes_subscriber,
-        "trace includes default subscriber",
+        report.surface.install_includes_subscriber,
+        "default feature reaches trace-install, which includes the subscriber",
     )?;
     debug_check_line(
         writer,
@@ -326,7 +333,7 @@ pub(crate) fn print_debug_json(report: &DebugReport, out: &mut impl io::Write) -
         "checks": {
             "default_includes_trace": report.surface.default_includes_trace,
             "trace_includes_tracing": report.surface.trace_includes_tracing,
-            "trace_includes_tracing_subscriber": report.surface.trace_includes_subscriber,
+            "install_includes_tracing_subscriber": report.surface.install_includes_subscriber,
             "tracing_declared": report.surface.tracing_declared,
             "tracing_subscriber_declared": report.surface.subscriber_declared
         }

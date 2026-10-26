@@ -96,7 +96,9 @@ mod coordinator;
 #[cfg(feature = "net")]
 mod tcp;
 
-pub use coordinator::{Coordinator, DispatchError, Fence};
+#[cfg(feature = "wire")]
+pub use coordinator::Coordinator;
+pub use coordinator::{DispatchError, Fence};
 #[cfg(feature = "net")]
 pub use tcp::{AuthorityServer, ServeReport, TcpGrantChannel, WireKey};
 

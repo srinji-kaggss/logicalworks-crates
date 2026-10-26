@@ -80,7 +80,7 @@ cannot be denied for want of a capability at run time.** Two facts make that so:
   not granted does not exist to run.
 - Every per-call proof is minted from **the same list**. `run_any` and
   `run_any_on` share `execute_erased`, which calls
-  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:694`),
+  `grants.issue(self.0.required_caps())` (`crates/lgwks-bot/src/spec.rs:721`),
   and the action then checks `call.0.check(self.required_caps())`. The two cannot
   disagree, and the only writer of `Grants` besides `assemble` is
   `EcsBot::replace_grants`, which swaps the whole list rather than holding an

@@ -175,42 +175,72 @@ mod profile;
 #[cfg(feature = "profile")]
 pub use profile::{TickProfile, TickStage};
 
+// The substrate: every module that names `bevy_ecs`, behind `ecs` (#687).
+#[cfg(feature = "ecs")]
 mod admit;
+#[cfg(feature = "ecs")]
 mod bot;
+#[cfg(feature = "ecs")]
 mod bot_poll;
+#[cfg(feature = "ecs")]
 mod bot_run;
+#[cfg(feature = "ecs")]
 mod builder;
+#[cfg(feature = "ecs")]
 mod effects;
+#[cfg(feature = "ecs")]
 mod entry;
+#[cfg(feature = "ecs")]
 mod fold;
-mod identity;
+#[cfg(feature = "ecs")]
 mod ledger;
+#[cfg(feature = "ecs")]
 mod resources;
-mod scope;
+#[cfg(feature = "ecs")]
 mod watchdog;
+// The admitted-input identity the registry derives for `script` and
+// `inspect` as well as the substrate.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
+mod identity;
+#[cfg(feature = "ecs")]
+mod scope;
+// The vocabulary the substrate reports in, built in every configuration.
 mod work;
 
+#[cfg(feature = "ecs")]
 pub use bot::EcsBot;
+#[cfg(feature = "ecs")]
 pub use builder::EcsBuilder;
+#[cfg(feature = "ecs")]
 pub use builder::EcsObserveBuilder;
 pub use lgwks_std::retry::RetryPolicy;
+#[cfg(feature = "ecs")]
 pub use resources::ForcedRefresh;
+#[cfg(feature = "ecs")]
 pub use resources::StalledSource;
+#[cfg(feature = "ecs")]
 pub use resources::SupersededObservation;
+#[cfg(feature = "ecs")]
 pub use resources::TickReport;
+#[cfg(feature = "ecs")]
 pub use scope::EffectScope;
-#[cfg(feature = "ephemeral")]
+#[cfg(all(feature = "ecs", feature = "ephemeral"))]
 pub use scope::EphemeralError;
+#[cfg(feature = "ecs")]
 pub use watchdog::DEFAULT_POLL_DEADLINE;
+#[cfg(feature = "ecs")]
 pub use watchdog::MAX_POLL_DEADLINE;
 pub use work::AbandonReason;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) use work::AdmittedInput;
 pub use work::EffectEvidence;
 pub use work::PendingWork;
 pub use work::TransitionHold;
 pub use work::WorkId;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) use work::identify_output;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) use work::same_output;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ecs"))]
 pub(super) mod tests;

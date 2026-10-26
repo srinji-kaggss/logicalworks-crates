@@ -1,0 +1,17 @@
+[package]
+name = "process-only-consumer"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = []
+probe = []
+
+[dependencies]
+lgwks_bot = { path = "../../../../lgwks-bot", default-features = false, features = ["process"] }
+
+[[example]]
+name = "spawn"
+required-features = ["probe"]

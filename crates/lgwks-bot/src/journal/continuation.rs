@@ -84,6 +84,7 @@
 use core::fmt;
 use std::path::PathBuf;
 
+#[cfg(feature = "wire")]
 use lgwks_std::wire::WireError;
 
 use crate::effect::{ActionId, AttemptId, EffectKey};
@@ -447,16 +448,16 @@ impl ContinuationWatermark {
 /// attempt *older* than this one for the same action is refused by the successor
 /// rather than carried, which is what keeps the carry bounded by actions rather
 /// than by attempts; see the module's note on what the checkpoint compacts.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct SettledAttempt {
     /// The latest attempt the predecessor walked for its action, whose action and
     /// attempt number are read out of it rather than stored a second time: two
@@ -548,17 +549,16 @@ impl SettledAttempt {
 /// never do: an attempt whose bytes may have reached the outside world and whose
 /// outcome nobody established has to be unknown in the successor exactly as it
 /// was in the predecessor.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct UnresolvedAttempt {
     /// The attempt.
     key: EffectKey,
@@ -665,16 +665,16 @@ const fn status_of(index: u8) -> Option<AttemptStatus> {
 /// record that crosses a byte boundary, so a change to its shape changes every
 /// head computed after it — which is what makes a checkpoint an audit record
 /// rather than a hint.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct Continuation {
     /// Which generation this successor is. One is the first successor of a journal
     /// that never continued.
@@ -778,6 +778,7 @@ impl Continuation {
     /// # Errors
     ///
     /// [`JournalError::Encoding`] if the archive cannot be allocated.
+    #[cfg(feature = "wire")]
     pub fn to_payload(&self) -> Result<Vec<u8>, JournalError> {
         let archived =
             lgwks_std::wire::to_bytes::<WireError>(self).map_err(JournalError::Encoding)?;
@@ -804,6 +805,7 @@ impl Continuation {
     /// `Some(Err(JournalError::Encoding))` when the bytes behind the magic are
     /// not the archived record this build writes. A checkpoint is written whole
     /// or not at all, so this is a refusal rather than a truncated read.
+    #[cfg(feature = "wire")]
     pub fn from_payload(payload: &[u8]) -> Option<Result<Self, JournalError>> {
         let archived = payload.strip_prefix(CHECKPOINT_MAGIC.as_slice())?;
         match lgwks_std::wire::from_bytes::<Self, WireError>(archived) {
@@ -912,6 +914,7 @@ pub fn is_generation_path(path: &std::path::Path) -> bool {
 ///
 /// The alternative is a chain that quietly continues into a neighbouring number,
 /// and "which file is authoritative?" must have exactly one answer.
+#[cfg(feature = "wire")]
 pub(crate) fn refuse_ambiguous_base(path: &std::path::Path) -> Result<(), JournalError> {
     let Some(number) = path.file_name().and_then(name_number) else {
         return Ok(());
@@ -929,4 +932,5 @@ pub(crate) fn refuse_ambiguous_base(path: &std::path::Path) -> Result<(), Journa
 }
 
 #[cfg(test)]
+#[cfg(feature = "wire")]
 mod tests;

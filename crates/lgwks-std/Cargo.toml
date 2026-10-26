@@ -71,7 +71,12 @@ keywords = ["stdlib", "json", "uuid", "http-client", "tracing"]
 # and `--no-default-features --features <one>` builds one capability alone.
 default = ["standard"]
 core = []
-trace = ["dep:tracing", "dep:tracing-subscriber"]
+trace = ["dep:tracing"]
+# The default debugger bootstrap: installing a process-global subscriber needs
+# `tracing-subscriber`, which the trace macros do not use. It rides its own
+# feature so a consumer that only emits (a library, a process-only bot) does
+# not compile the subscriber; `standard` carries both.
+trace-install = ["trace", "dep:tracing-subscriber"]
 random = ["dep:getrandom"]
 hash = ["dep:blake3"]
 # A build script's input digest and cargo directives: composes `hash` and
@@ -86,7 +91,7 @@ http = ["dep:ureq", "dep:iri-string"]
 online = []
 fs-raw = ["dep:rustix"]
 process = ["dep:rustix", "rustix?/process"]
-standard = ["trace", "random", "hash", "build", "sign", "pattern", "json", "ron", "wire", "online", "fs-raw", "process"]
+standard = ["trace", "trace-install", "random", "hash", "build", "sign", "pattern", "json", "ron", "wire", "online", "fs-raw", "process"]
 full = ["standard", "http"]
 
 [dependencies]
