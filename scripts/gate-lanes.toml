@@ -161,8 +161,8 @@ required = true
 # The storefront consumer builds run in their own lane and CI job: they are
 # nested cargo builds that serialize on one target-directory lock, and in the
 # Tests job they alone held the step at 441 s of a 513 s job.
-# CI runs this as two shards by setting PARTITION=count:N/2; unset, it is the
-# whole suite.
+# CI runs this as two shards by setting PARTITION=slice:N/2 (nextest deprecates
+# `count:` as neither even nor stable); unset, it is the whole suite.
 # lgwks_bot's tests are not in this lane: the `tests-bot-full` and
 # `tests-bot-nodefault` lanes run them under the feature sets a consumer builds,
 # and the `build-verdict` row requires both with this one.
@@ -191,7 +191,7 @@ id = "tests-bot-nodefault"
 group = "bot-nodefault"
 surfaces = "local ci"
 required = true
-# CI runs it whole, beside the lgwks-std per-feature lanes; PARTITION=count:N/M
+# CI runs it whole, beside the lgwks-std per-feature lanes; PARTITION=slice:N/M
 # shards it again if that job grows past its budget.
 command = "cargo nextest run -p lgwks_bot --all-targets --locked --no-default-features ${PARTITION:+--partition $PARTITION}"
 ci_step = "Run lgwks-bot no-default-feature tests"
@@ -211,7 +211,7 @@ id = "tests-bot-full"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# CI runs this as three shards by setting PARTITION=count:N/3; unset, it is the
+# CI runs this whole in one job: it is bound by the machine-wide churn slots, so a second instance adds no throughput; unset PARTITION is the
 # whole suite less the saturation tiers, which `tests-bot-saturation` runs. Left
 # in, the three tiers (100, 1,000 and 10,000 concurrent runs) land in one shard:
 # on run 37205854158 that shard's test phase took 229 s against 61-63 s for the
@@ -252,19 +252,18 @@ id = "tests-bot-saturation"
 group = "bot-full"
 surfaces = "local ci"
 required = true
-# The saturation family on its own: it is CPU-bound for about two minutes, so it
-# gets its own runner instead of one shard's tail. Builds the `sim_review_path`
-# binary it runs, and lgwks_bot's `it` binary on the leg that runs `sim_scale`. That
-# binary's other 42 tests, the review-path simulations, and the 164 `sim_scale`
-# tests run here too and not in `tests-bot-full` on macOS (`.config/nextest.toml`'s
-# `ci` profile filters them out there), so this lane lifts that filter with
+# The saturation family on its own, after `tests-bot-full` rather than in it:
+# left in, the tiers set one shard's tail. The `sim_review_path` binary's 42
+# review-path simulations and lgwks_bot's 164 `sim_scale` tests run here too
+# and not in `tests-bot-full` on macOS (`.config/nextest.toml`'s `ci` profile
+# filters them out there), so this lane lifts that filter with
 # `--ignore-default-filter` and writes the JUnit report the receipt reads.
 #
-# CI runs the legs of this lane on two instances by setting SATURATION_FILTER to
-# the tests each leg takes (the 10,000 tier with the 42 simulations and the
-# `sim_scale` module; the 100 and 1,000 tiers together) and SATURATION_BINARIES
-# to the test binaries it builds (only the first leg needs `it`); unset, it is
-# the whole `sim_review_path` binary.
+# CI runs it as a step of the bot-full job after that suite, which has built
+# every binary it needs, with SATURATION_BINARIES naming both test binaries
+# and SATURATION_FILTER both families (two jobs of their own cost the run a
+# second job's hop, run 40321492424); unset, it is the whole `sim_review_path`
+# binary.
 command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E \"${SATURATION_FILTER:-binary(sim_review_path)}\""
 ci_step = "Run lgwks-bot saturation tiers"
 
@@ -797,21 +796,24 @@ ci_step = "Every clippy leg passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Clippy and scan"
 
 # The ruleset also requires "Build and workspace tests". The workspace job runs
-# every test but lgwks_bot's, and the lgwks_bot jobs (full, saturation, no default
-# features) run those; this row carries the required name and passes only when
-# all five passed (the fifth is the workspace job's tail: evidence, doc tests, smoke)
-# and the run's wall was at most 300 s (`ci-wall`).
+# every test but lgwks_bot's, and the lgwks_bot jobs (full with its saturation
+# step, no default features) run those; this row carries the required name and
+# passes only when all four passed (the fourth is the workspace job's tail:
+# evidence, doc tests, smoke)
+# and, in a second step of the same job, the run's wall was at most 300 s
+# (`ci-wall`).
 [[lane]]
 id = "build-verdict"
 surfaces = "ci"
 required = true
-command = "test \"${BUILD}\" = success && test \"${TAIL}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success && test \"${WALL}\" = success"
+command = "test \"${BUILD}\" = success && test \"${TAIL}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_NODEFAULT}\" = success"
 ci_step = "Every workspace test job passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Build and workspace tests"
 
 # The Director, 2026-10-26: CI fails when a run is over 5 minutes, whatever the
-# excuse. No GitHub setting bounds a run, so the last row reads the attempt's
-# start from the runs API and fails past 300 s; `build-verdict` requires it.
+# excuse. No GitHub setting bounds a run, so the required row's job, which needs
+# every other job, reads the attempt's start from the runs API and fails past
+# 300 s.
 [[lane]]
 id = "ci-wall"
 surfaces = "ci"
@@ -819,15 +821,3 @@ required = true
 command = "started=$(gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT\" --jq .run_started_at) && wall=$(( $(date -u +%s) - $(date -j -u -f %Y-%m-%dT%H:%M:%SZ \"$started\" +%s) )) && echo \"run wall ${wall} s since ${started}, limit 300 s\" && test \"$wall\" -le 300"
 ci_step = "Run wall is at most 300 seconds"
 reason = "a run's wall clock exists only in CI"
-
-# The saturation legs' compile, moved into the first wave on the instance that
-# runs the leg, so the leg after the wave compiles nothing (run 40289939847:
-# 1 m 35 s and 2 m 44 s of compile after the wave put the run at 8 m 23 s).
-[[lane]]
-id = "tests-bot-saturation-build"
-group = "bot-full"
-surfaces = "ci"
-required = true
-command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E \"${SATURATION_FILTER:-binary(sim_review_path)}\" --no-run"
-ci_step = "Build lgwks-bot saturation tiers"
-reason = "primes a CI instance's target directory; a local run of tests-bot-saturation compiles in place"
