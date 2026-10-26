@@ -476,6 +476,39 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
+      # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a
+      # real process boundary, the review-path simulations and lgwks-bot's
+      # `sim_scale` module), after the suite and in this job (#272: after the
+      # suites that share the machine's kernel, not beside them). The suite
+      # above built every binary they run (`--all-targets --features full
+      # --profile ci`), so this step compiles nothing. As two jobs of their own
+      # they waited on this one: run 40321492424 ended these tests at 12:20:57,
+      # and the legs began theirs at 12:21:28 after the upload, finalisation,
+      # pick-up, checkout and pin of a second job, and the run's wall was 301 s.
+      # The legs were bound by the kernel's file and process work, not by their
+      # instances (85 s and 83 s for 166 and 44 tests), so one step holds them.
+      # The lane's own command, with the binaries set in SATURATION_BINARIES and
+      # the tests in SATURATION_FILTER, as the sharded lanes set PARTITION: the
+      # gate-parity check compares this text with scripts/gate-lanes.toml.
+      # `--ignore-default-filter` lifts the `ci` profile's macOS filter, which
+      # keeps them out of the suite above. Six slots, as the legs ran: 68.5 s
+      # and 61.5 s at 6 against 77.7 s and 73.5 s at 12 (see the header).
+      - name: Run lgwks-bot saturation tiers
+        env:
+          SATURATION_BINARIES: "--test sim_review_path --test it"
+          SATURATION_FILTER: "binary(sim_review_path) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
+          LWC_CHURN_SLOTS: "6"
+        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E "${SATURATION_FILTER:-binary(sim_review_path)}"
+      # Under the `lgwks-bot-junit-*` name the acceptance job downloads: the
+      # review-path tests (T31-T34) are named in `docs/acceptance/t-rows.toml`.
+      # The suite's report was uploaded above, before this run rewrote the file.
+      - name: Upload lgwks-bot saturation JUnit report
+        uses: actions/upload-artifact@v7
+        with:
+          name: lgwks-bot-junit-saturation-${{ matrix.instance }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 7
 
   # The lgwks-std full-feature suite, apart from the lgwks-bot suite it shared a
   # job with: the pair compiled two feature sets and ran past 5 minutes.
@@ -523,146 +556,12 @@ jobs:
         timeout-minutes: 3
         run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
 
-  # The saturation tiers (100, 1,000 and 10,000 concurrent runs through a real
-  # process boundary) in a job of their own, beside the suite rather than after
-  # it: the 10,000 tier alone is 50,000 process starts and about two minutes.
-  # It compiles only lgwks-bot and this one test binary. The 10,000 tier is
-  # CPU-bound, 50,000 process starts: beside twelve other jobs it ran past the
-  # limit in its test step alone (run 38407172423: 5 m 14 s), and a hosted
-  # runner's 3 cores did worse (run 38416328077), so it has an instance of its
-  # own (lwc-2), apart from the 100 and 1,000 tiers on lwc-12. The binary's
-  # other 42 tests run on the lwc-2 leg too, in place of the bot-full job
-  # (`.config/nextest.toml`), and so do lgwks-bot's `sim_scale` module (164
-  # tests) on lwc-12: that suite is bounded by its work, and the 42 held 206
-  # slot-seconds and `sim_scale` 250 to 477 (runs 38904371387, 38912085538, each
-  # cancelled at the cap with every test passed). `sim_scale` was on lwc-2 until
-  # the legs ran in a second wave (#272): the 10,000 leg took 85 to 96 s against
-  # 31 s for the small leg (runs 39088344101, 39089412096), the run's wall is
-  # the longer of the two, and lwc-12 builds the `it` binary warm now that no
-  # leg queues behind the lgwks-ast leg on it (186 s cold, 38 s primed). The
-  # Linux container run still runs all of them. A leg's `binaries` names what it
-  # builds; unset, the lane builds the review-path binary alone.
-  tests_bot_saturation:
-    name: Saturation tiers (lgwks-bot full) (${{ matrix.tiers }})
-    # After the three suites that share this machine's kernel with it, not beside
-    # them (#272). On one host, with the test files on RAM disks, each job's test
-    # command run alone took: bot-full 58.6 s, no-default 28.7 s, workspace 21.0 s,
-    # the 10,000-tier leg 55.2 s, the 100 and 1,000 tiers 7.5 s: 171 s in all. Run
-    # together they took 293 s (run 39078914276), because the kernel serialises
-    # the process starts and file work of all of them, so the same work done at
-    # once costs more than done in turn, and the longest job was the one that met
-    # the cap. Run in two waves, the work is 171 s of kernel time plus each wave's
-    # checkout, and the 5 minutes of a job start when its `needs` are met, not
-    # when the run does. The other jobs do not wait: the matrices, the Linux legs
-    # and the lints run as before.
-    #
-    # The wave holds the tests, not the compile. On run 40289939847 the legs
-    # compiled for 1 m 35 s (lwc-2) and 2 m 44 s (lwc-12) after the wave ended
-    # and ran their tests for 85 s and 21 s, so the compile alone put the run
-    # past 300 s. `tests_bot_saturation_build` compiles the same command with
-    # `--no-run` on the same instance at the start of the run, and this job finds
-    # its binaries built.
-    needs: [build, tests_bot_full, tests_nodefault, tests_bot_saturation_build]
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tiers: "10000"
-            instance: lwc-2
-            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier))"
-          - tiers: "100 and 1000"
-            instance: lwc-12
-            binaries: "--test sim_review_path --test it"
-            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
-    env:
-      RUSTC_WORKSPACE_WRAPPER: ""
-    steps:
-      - uses: actions/checkout@v7
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.1"
-          nextest: "true"
-          # Eight, as the bot-full job: the lwc-2 leg runs 43 tests beside the
-          # 10,000 tier, which only logs its latency tails, and the lwc-12 leg
-          # the 164 `sim_scale` tests and the two small tiers.
-          test-share: "8"
-          build-share: "2"
-          # On the critical path now: 204 of 207 tests at the cap, run 39069794871.
-          defer: "0"
-      # The saturation tiers (100, 1,000 and 10,000 concurrent runs) are kept
-      # out of the partitioned suite: in a shard they set the run's wall (481 s
-      # on run 37205854158, test phase 229 s against 61-63 s for the other three
-      # shards).
-      # The lane's own command, with the binaries this leg builds set in
-      # SATURATION_BINARIES and the tests it runs in SATURATION_FILTER (unset, the
-      # command builds and selects the whole `sim_review_path` binary), as the
-      # sharded lanes set PARTITION: the gate-parity check compares this text
-      # with scripts/gate-lanes.toml. `--ignore-default-filter` lifts the `ci`
-      # profile's macOS filter, which keeps that binary and the `sim_scale`
-      # module out of the bot-full job.
-      - name: Run lgwks-bot saturation tiers
-        env:
-          SATURATION_BINARIES: ${{ matrix.binaries }}
-          SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E "${SATURATION_FILTER:-binary(sim_review_path)}"
-      # The JUnit report of what this leg ran, under the `lgwks-bot-junit-*` name
-      # the acceptance job downloads: the review-path tests (T31-T34) are named
-      # in `docs/acceptance/t-rows.toml`, so the macOS receipt reads them here.
-      - name: Upload lgwks-bot saturation JUnit report
-        uses: actions/upload-artifact@v7
-        with:
-          name: lgwks-bot-junit-saturation-${{ matrix.instance }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: error
-          retention-days: 7
-
-  # The saturation legs' compile, in the first wave. The same command as the leg,
-  # with `--no-run`, on the same instance and so into the same target directory:
-  # the leg after the wave then compiles nothing (see `tests_bot_saturation`).
-  # Compiling is not the kernel-bound process-start work #272 moved into a second
-  # wave, so it runs beside the suites.
-  tests_bot_saturation_build:
-    name: Saturation build (lgwks-bot full) (${{ matrix.tiers }})
-    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tiers: "10000"
-            instance: lwc-2
-            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier))"
-          - tiers: "100 and 1000"
-            instance: lwc-12
-            binaries: "--test sim_review_path --test it"
-            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
-    env:
-      RUSTC_WORKSPACE_WRAPPER: ""
-    steps:
-      - uses: actions/checkout@v7
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.1"
-          nextest: "true"
-          test-share: "8"
-          build-share: "2"
-          defer: "0"
-      - name: Build lgwks-bot saturation tiers
-        env:
-          SATURATION_BINARIES: ${{ matrix.binaries }}
-          SATURATION_FILTER: ${{ matrix.filter }}
-        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E "${SATURATION_FILTER:-binary(sim_review_path)}" --no-run
-
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
     # job builds one small binary (`acceptance-receipts`, std only) and reads the
     # XML files with it, so it costs seconds, not a second run of the tests.
     name: Acceptance receipts
-    needs: [tests_bot_full, tests_bot_saturation, tests_linux, process-windows]
+    needs: [tests_bot_full, tests_linux, process-windows]
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
     env:
@@ -1470,9 +1369,9 @@ jobs:
   # jobs in series, 29 s of a 268 s run, for one API call.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, tests_bot_saturation_build, tests_bot_saturation, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
+    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
     if: ${{ always() }}
-    # On an instance, not a hosted runner: this row starts when the saturation
+    # On an instance, not a hosted runner: this row starts when the bot-full
     # job ends and is the run's last link beside the receipts, and a hosted
     # runner's pick-up took 2 s on main run 39090275332 and 56 s on run
     # 39091155164 (queued 02:48:38, started 02:49:34, the run's wall 314 s
@@ -1485,11 +1384,10 @@ jobs:
           BUILD: ${{ needs.build.result }}
           TAIL: ${{ needs.workspace_tail.result }}
           BOT_FULL: ${{ needs.tests_bot_full.result }}
-          BOT_SATURATION: ${{ needs.tests_bot_saturation.result }}
           BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
         run: |
-          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
-          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
+          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full and saturation ${BOT_FULL}, lgwks_bot no default ${BOT_NODEFAULT}"
+          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_NODEFAULT}" = success
       - name: Run wall is at most 300 seconds
         if: ${{ always() }}
         env:
