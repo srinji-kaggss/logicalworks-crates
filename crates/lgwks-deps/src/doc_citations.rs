@@ -23,6 +23,9 @@
 //! and runs [`execute`], and `logical_ci`'s `docs-refs` gate calls [`execute`]
 //! as a library, so a changed document's dangling citations are NO-GO under
 //! one rule with one owner.
+//!
+//! [`options`]: crate::doc_citations::options
+//! [`execute`]: crate::doc_citations::execute
 
 mod lock;
 mod scan;

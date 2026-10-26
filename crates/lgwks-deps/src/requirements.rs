@@ -19,6 +19,8 @@
 //! [`execute`], and `logical_ci`'s `governance` gate calls [`execute`] as a
 //! library, so the requirement that a normative sentence moves only under a
 //! Supersession log entry exists once with one owner.
+//!
+//! [`execute`]: crate::requirements::execute
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
