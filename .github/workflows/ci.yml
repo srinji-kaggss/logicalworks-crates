@@ -419,13 +419,13 @@ jobs:
     # 08:09:35, so the saturation wave that needs this job started at 08:10:30
     # and the run's wall was 8 m 23 s.
     #
-    # As one job on lwc-5 it was then wave one's last link: run 40311162932 ran
-    # its 4,940 tests in 120 s (1,027 test-seconds over its threads, a warm
-    # compile of 0.7 s) and ended at 2 m 36 s, while the workspace shards ended
-    # by 1 m 51 s. Two slices on two instances halve the tests. The second is
-    # lwc-1, which holds only the 13 s clippy row before it in wave one
-    # (lwc-2, the other candidate, held 2 m of storefront and saturation work),
-    # and sccache serves its dependency compile from what lwc-5 wrote.
+    #
+    # Not two slices on two instances. The suite is bound by `churn-slot`, the
+    # machine-wide pool of `LWC_CHURN_SLOTS` lock files every job's test
+    # processes share (#272), not by its instance: on run 40319385404 the two
+    # slices (lwc-5, lwc-1) and both workspace shards were all still running 4 m
+    # in, the lwc-1 slice's processes parked at 0% CPU waiting on a slot, where
+    # the one job had ended at 2 m 36 s on run 40311162932.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -433,9 +433,6 @@ jobs:
       matrix:
         include:
           - instance: lwc-5
-            partition: slice:1/2
-          - instance: lwc-1
-            partition: slice:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
       PARTITION: ${{ matrix.partition }}
@@ -1052,14 +1049,17 @@ jobs:
   # on main runs 39087783845 and the pull request run 39087447996 before it, so it
   # is on lwc-6, which holds no job.
   #
-  # lwc-4 holds the second workspace shard, so these two legs left it. On run
-  # 40311162932 lwc-4 ran the shard, then both legs, ending at 4 m 09 s; on run
-  # 40318746945 the musl leg took lwc-4 first and the shard queued behind it.
-  # lwc-13 is done with its WASI and deps legs by 1 m 22 s, and lwc-9 with the
-  # Linux bot-full suite by 2 m 12 s (run 40311162932), and neither suite is on
-  # the critical path after that.
+  # After the workspace job, not beside it. On run 40311162932 lwc-4 ran the
+  # second workspace shard first and both legs after it, ending at 4 m 09 s; on
+  # run 40318746945 the musl leg took lwc-4 first and the shard started 3 m 51 s
+  # into the run, which runner pick-up order alone decided. Spread to idle
+  # instances instead (run 40319385404), the legs' cross-target compiles ran at
+  # t=0 beside every suite. `needs: build` fixes the order: the musl leg follows
+  # the shard on its warm lwc-4, and the aarch64 leg is on lwc-9, whose Linux
+  # bot-full suite ends near the same time, so the two legs run in parallel.
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
+    needs: build
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -1069,7 +1069,7 @@ jobs:
           - targets: aarch64-unknown-linux-gnu
             instance: lwc-9
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
-            instance: lwc-13
+            instance: lwc-4
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-6
     steps:
