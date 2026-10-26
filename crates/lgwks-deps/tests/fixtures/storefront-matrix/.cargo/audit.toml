@@ -1,0 +1,15 @@
+# This fixture is its own workspace, so `cargo audit` run from here reads this
+# file and not the repository root's. It silences only what the root's
+# `.cargo/audit.toml` silences for the same lockfile shape: the fixture selects
+# every storefront feature, and `ml-candle` pulls `candle-core`, whose `zip`
+# parent the root has assessed.
+
+[advisories]
+ignore = [
+  # SECURITY.md, "`zip 8.6.0`: RUSTSEC-2026-0367, -0368, -0369": candle-core is
+  # zip's only parent and never calls `extract`; reopen when candle-core moves
+  # to zip 9 or calls `extract`.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]

@@ -120,6 +120,7 @@ impl Driven {
 /// `supervised` is the supervisor's drain for tasks placed on it; `runs_admitted` and
 /// `runs_refused` are the host's admission counts for runs through `run_task`, `run_blocking` and
 /// the doors of `host`. They count different things and are not expected to be equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EstateReport {
     /// The tenant this estate ran for.
     tenant: String,

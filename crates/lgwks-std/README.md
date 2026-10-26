@@ -4,8 +4,8 @@ Everyday Rust primitives with no async runtime required: hex, base64,
 timestamps, UUIDs, hashing, glob matching, regex, JSON, HTTP, and structured
 logging, as single-import calls, each behind one audited dependency stack.
 
-Pick exactly what you need. The default build is `core` plus `trace`; every
-other capability is one feature with one vetted stack beneath it.
+The default `standard` set carries every capability but `http` (its TLS stack
+compiles C per target); `full` adds it. Each is one feature and one vetted stack.
 
 `trace` is default-on. Structured logging is the replacement for terminal
 output in library code, so it has to be reachable without selecting a feature
@@ -28,8 +28,8 @@ itself. The package is `lgwks_std` (underscore); its directory is
 ## Install
 
 ```sh
-cargo add lgwks_std                                    # core + trace
-cargo add lgwks_std --features json,http               # pick what you need
+cargo add lgwks_std                                    # standard: all but http
+cargo add lgwks_std --features http                    # add the HTTP client
 cargo add lgwks_std --no-default-features --features core   # zero deps
 cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo)
 ```
@@ -38,8 +38,8 @@ cargo run -p lgwks_std --example quickstart            # 10-line tour (this repo
 
 The core modules (`hex`, `time`, `encoding`, `glob`) need no feature: call
 `hex::encode`, `time::now_rfc3339`, `encoding::base64::encode` and
-`glob::matches`. The default `trace` feature gives `trace::install_default` and
-the `info!` and `warn!` level macros. The opt-in features each add one vetted
+`glob::matches`. The `trace` feature gives `trace::install_default` and
+the `info!` and `warn!` level macros. The other features each add one vetted
 stack (`json` is serde and serde_json, `ron` is serde and ron, `http` is ureq
 and iri-string, `fs-raw` and `process` share rustix): `id::Uuid` (`random`),
 `hash::blake3` (`hash`), `pattern::Regex` (`pattern`) and `json::from_str`.
@@ -57,14 +57,14 @@ One manifest key, three alternative lines. Use exactly one of them:
 
 ```toml
 [dependencies]
-# Zero external deps: defaults off, core selected. The default build is core
-# plus trace, so a bare `lgwks_std = "3"` is NOT zero-dependency.
+# Zero external deps: defaults off, core selected. The default build is
+# `standard`, so a bare `lgwks_std = "3"` is NOT zero-dependency.
 lgwks_std = { version = "3", default-features = false, features = ["core"] }
 
-# Pick what you need, on top of the default core + trace.
-# lgwks_std = { version = "3", features = ["hash", "json"] }
+# Only what you pick, with the defaults off.
+# lgwks_std = { version = "3", default-features = false, features = ["hash", "json"] }
 
-# Everything.
+# Everything, the C-compiling HTTP stack included.
 # lgwks_std = { version = "3", features = ["full"] }
 ```
 
@@ -89,7 +89,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
 - **getrandom** — zero deps in std-only mode
 - **ureq** — blocking HTTP client, rustls-only TLS stack plus small leaves
 - **iri-string** — zero-dep URI validation leaf at default features
-- **ed25519-dalek** — detached seals for the `sign` feature (alloc-only, no rand_core; key generation reads `lgwks_std::random`)
+- **ed25519-dalek** — detached seals for the `sign` feature (`alloc` and `zeroize`, no rand_core; key generation reads `lgwks_std::random`)
 - **rustix** — safe POSIX syscall surface for the `fs-raw` and `process` primitives; Unix-only, optional
 - **tracing** — default-on structured event facade for library diagnostics.
 - **tracing-subscriber** — default debugger bootstrap. `install_default("service")`
@@ -97,7 +97,7 @@ Cargo metadata; Cargo.lock preserves the exact transitive provenance.
   same stream to JSON lines. `attributes` stays off, so `#[instrument]` and its
   proc-macro stack do not enter this crate.
 
-`core` alone carries zero external dependencies; the default build is `core` plus `trace`. Every other feature flag is one capability and one stack.
+`core` alone carries zero external dependencies; the default build is `standard`, every capability but `http`. Every other feature flag is one capability and one stack.
 
 ## Minimum supported Rust version
 
@@ -106,7 +106,7 @@ when code or dependency requirements demand it.
 
 ## The other crates
 
-`lgwks_bot` and `lgwks_deps` depend on `lgwks_std`; `lgwks_ast` stands alone;
+`lgwks_bot` and `lgwks_deps` depend on `lgwks_std`; `lgwks_ast` needs it only for its `tool`;
 `lgwks_macros` carries the `script!` syntax and is used through `lgwks_bot`.
 
 | Crate | What it gives you |
