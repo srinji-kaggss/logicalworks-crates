@@ -39,6 +39,16 @@
 //! [`Plan`](crate::proposal::Plan) of operation *names*; it performs nothing and
 //! is not a fifth verb.
 //!
+//! Four more runtimes sit beside the words, called from ordinary Rust rather
+//! than new grammar: [`Justify`] evaluates allow/slow/park/block rules before
+//! every async word and retry attempt; [`graph`] runs a needs-ordered,
+//! capacity-bounded dependency graph whose failures block only downstream;
+//! [`compensated`] runs a [`Compensations`] stack in reverse order when its
+//! body fails; and [`pump`] reacts to each event of a live feed through a
+//! bounded [`StreamGate`]. Typed domains ([`TypedSource`], [`TypedAction`])
+//! name the registry identifier and the value types at the call site, over the
+//! same erased registry the words resolve against.
+//!
 //! Every flow takes a [`Scope`] first. The scope carries the [`Tenant`], the
 //! path of steps that led here, and the cancellation token, so identity,
 //! location and cancellation reach every step without being threaded by hand,
@@ -79,19 +89,32 @@
 //! [`Architecture`]: crate::script::Architecture
 //! [`Readiness`]: crate::script::Readiness
 //! [`FanOut`]: crate::script::FanOut
+//! [`Justify`]: crate::script::Justify
+//! [`graph`]: crate::script::graph
+//! [`compensated`]: crate::script::compensated
+//! [`Compensations`]: crate::script::Compensations
+//! [`pump`]: crate::script::pump
+//! [`StreamGate`]: crate::script::StreamGate
+//! [`TypedSource`]: crate::script::TypedSource
+//! [`TypedAction`]: crate::script::TypedAction
 
 mod admit;
+mod compensate;
 mod control;
 mod domain;
 mod each;
 mod error;
 mod fan_out;
+mod graph;
+mod justify;
 mod map;
 mod policy;
 mod ready;
 pub(crate) mod run_store;
 pub(crate) mod scope;
+mod stream;
 pub(crate) mod trail;
+mod typed;
 
 use std::time::Duration;
 
@@ -105,11 +128,14 @@ pub use admit::{
     Gate, RefusalRecord, admit, intervention_of, provenance_of, read_refusal, refusal_of,
     refusal_record,
 };
+pub use compensate::{Compensations, compensated};
 pub use control::{at_most, attempts, retry, retry_at, within, within_at, within_on};
 pub use domain::{Acted, DomainUse, act, admit_domains, observe};
 pub use each::{each, each_at};
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use fan_out::{FanOut, FanOutError};
+pub use graph::{GraphNode, GraphReport, MAX_GRAPH_NODES, NodeOutcome, graph};
+pub use justify::{Allowance, Decision, Justify, JustifyCtx, Rule, Verdict};
 pub use map::{Architecture, FlowShape, Passthrough, StepKind, StepShape};
 pub(crate) use policy::Policy;
 pub use ready::{
@@ -119,7 +145,9 @@ pub use ready::{
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
+pub use stream::{Overflow, PumpReport, StreamGate, pump};
 pub use trail::{Outcome, ScriptTrail, Site, TrailEntry};
+pub use typed::{TypedAction, TypedSource, act_typed, map_domain, observe_typed};
 
 /// How many step paths a scope's trail retains unless a host says otherwise.
 ///

@@ -18,6 +18,12 @@ use lgwks_bot::task::{Disposition, task};
 use lgwks_bot::verb::{Execute, Observe};
 use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
 
+/// The script vocabulary on the shipped binary: what each runtime answers
+/// through the public interface. A submodule rather than inline code, so the
+/// smoke keeps one responsibility and the vocabulary keeps its own.
+#[path = "estate/vocabulary.rs"]
+mod vocabulary;
+
 /// One line to the caller's locked stdout; a write error reaches `main` as an I/O error.
 fn say(line: &str) -> std::io::Result<()> {
     writeln!(std::io::stdout().lock(), "{line}")
@@ -513,6 +519,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut mismatch,
             format!("the effect ran {} times, not once", fired.get()),
         );
+    }
+
+    // The script vocabulary on the shipped artifact (#649, #650, #651, #653,
+    // #654, #657, #694): the runtime the words desugar into, exercised through
+    // the public interface with every refusal asserted.
+    match vocabulary::run(&driver) {
+        Ok(()) => {
+            say("vocabulary: every runtime answered through the public interface")?;
+        }
+        Err(error) => {
+            record(&mut mismatch, format!("the vocabulary failed: {error}"));
+        }
     }
 
     if let Some(mismatch) = mismatch {

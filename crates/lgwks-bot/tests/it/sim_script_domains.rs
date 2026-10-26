@@ -15,6 +15,7 @@
 //! | `an_unknown_domain_refuses_the_flow_before_any_step` | every undeclared identifier is named at the flow's entry, and no step runs |
 //! | `a_domain_short_of_authority_blocks_its_step` | a source's capabilities are checked against each host's own grant |
 //! | `an_external_action_runs_once_under_its_grant` | `act` runs an effect that leaves the process exactly once, with the value the flow gave it |
+//! | `typed_calls_match_the_erased_path` | typed `observe`/`act` poll and execute the same operations, and map refusals into the domain's error |
 //!
 //! Each family sweeps its band twice through `sim::assert_replays`, so a
 //! nondeterministic run fails on its hash as well as on its oracle.
@@ -23,7 +24,7 @@
 
 use std::error::Error;
 
-use lgwks_bot::script::Scope;
+use lgwks_bot::script::{FlowError, Scope, TypedAction, TypedSource, act_typed, observe_typed};
 use lgwks_bot::spec::{Bot, BotSpec};
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{Cap, GrantSet};
@@ -35,6 +36,52 @@ use crate::script_domains::{
 };
 use crate::sim::{self, Band, Sim};
 use crate::spec_materialize::take_trace;
+
+/// The domain's own error type: what a typed call maps a refusal into.
+#[derive(Debug, PartialEq)]
+struct TypedFailed(String);
+
+impl std::fmt::Display for TypedFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "typed domain failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for TypedFailed {}
+
+impl From<FlowError> for TypedFailed {
+    fn from(error: FlowError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+/// `test::counter` with a compile-time identity and output type.
+struct TypedCounter;
+
+impl TypedSource for TypedCounter {
+    const ID: &'static str = "test::counter";
+    type Output = u16;
+    type Error = TypedFailed;
+}
+
+/// `test::net_counter` with a compile-time identity and output type.
+struct TypedNetCounter;
+
+impl TypedSource for TypedNetCounter {
+    const ID: &'static str = "test::net_counter";
+    type Output = u16;
+    type Error = TypedFailed;
+}
+
+/// `test::page` with a compile-time identity, input type and output type.
+struct TypedPage;
+
+impl TypedAction for TypedPage {
+    const ID: &'static str = "test::page";
+    type Input = u16;
+    type Output = ();
+    type Error = TypedFailed;
+}
 
 /// A family's result: an error fails it with the seed's text.
 type SimResult = Result<(), Box<dyn Error>>;
@@ -252,4 +299,94 @@ fn effect_seed(hosts: &[Host; 2], sim: &mut Sim) -> SimResult {
 fn an_external_action_runs_once_under_its_grant() -> SimResult {
     let hosts = two_hosts()?;
     sim::assert_replays(Band::new(0, SEEDS), |sim| effect_seed(&hosts, sim))
+}
+
+// ── The typed family ───────────────────────────────────────────────────────
+
+/// One seed of the typed family: the same counter and page through their
+/// typed identities, a granted counter that succeeds, and a grant the typed
+/// error carries instead of the framework's.
+fn typed_seed(bare: &Host, granted: &Host, sim: &mut Sim) -> SimResult {
+    let count = below(sim, 10)?;
+    let label = format!("label-{}", below(sim, 4)?);
+    let value = below(sim, 1000)?;
+    let reading = task("reading", |scope: Scope, target: String| async move {
+        observe_typed::<TypedCounter>(&scope, &target)
+            .await
+            .map_err(FlowError::failed)
+    })?;
+    let paging = task(
+        "paging",
+        |scope: Scope, (label, value): (String, u16)| async move {
+            act_typed::<TypedPage>(&scope, &label, value)
+                .await
+                .map_err(FlowError::failed)
+        },
+    )?;
+    let counting = task("counting", |scope: Scope, target: String| async move {
+        observe_typed::<TypedNetCounter>(&scope, &target)
+            .await
+            .map_err(FlowError::failed)
+    })?;
+    let _ = take_trace();
+    let report = lgwks_bot::block_on(bare.run(&reading, count.to_string()));
+    assert_eq!(
+        report.result().ok().copied(),
+        Some(count),
+        "seed {}",
+        sim.seed
+    );
+    let _ = take_trace();
+    let stepped = lgwks_bot::block_on(bare.run(&paging, (label.clone(), value)));
+    assert!(
+        stepped.result().is_ok(),
+        "seed {}: {:?}",
+        sim.seed,
+        stepped.result()
+    );
+    let trace = take_trace();
+    assert_eq!(
+        trace,
+        [format!("execute:test::page:{label}:{value}")],
+        "seed {}: the typed action ran once with the flow's value",
+        sim.seed
+    );
+    let _ = take_trace();
+    let held = lgwks_bot::block_on(granted.run(&counting, count.to_string()));
+    assert_eq!(
+        held.result().ok().copied(),
+        Some(count),
+        "seed {}: the granted typed source polls",
+        sim.seed
+    );
+    let _ = take_trace();
+    let short = lgwks_bot::block_on(bare.run(&counting, count.to_string()));
+    let blocked = match short.result() {
+        Err(error) => error.to_string(),
+        Ok(value) => {
+            let refusal: SimResult =
+                Err(format!("seed {}: a short grant must fail, got {value}", sim.seed).into());
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "sweep: returning an error to the caller");
+            return refusal;
+        }
+    };
+    assert!(
+        blocked.contains("blocked"),
+        "seed {0}: the typed error carries the block, got {blocked}",
+        sim.seed
+    );
+    assert!(
+        take_trace().is_empty(),
+        "seed {}: the refused source was never polled",
+        sim.seed
+    );
+    sim.record(&format!("{count}:{label}:{value}"));
+    Ok(())
+}
+
+#[test]
+fn typed_calls_match_the_erased_path() -> SimResult {
+    let bare = host("acme", GrantSet::empty())?;
+    let granted = host("zenith", GrantSet::empty().grant(Cap::net()))?;
+    sim::assert_replays(Band::new(0, 128), |sim| typed_seed(&bare, &granted, sim))
 }

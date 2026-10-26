@@ -208,7 +208,9 @@ impl Host {
     ///
     /// The tenant is validated by [`Tenant::new`], so a name that would corrupt
     /// every step key and every error location is refused here rather than at
-    /// the first run.
+    /// the first run. The caller is the trusted host: the name is a partition
+    /// key it chooses, not an authenticated principal, and whoever builds with
+    /// the same string runs as the same tenant.
     ///
     /// # Errors
     ///

@@ -5,7 +5,7 @@ Pages of this README: [overview](README.md) · [execution model](README-executio
 [![crates.io](https://img.shields.io/crates/v/lgwks_bot.svg)](https://crates.io/crates/lgwks_bot)
 [![docs.rs](https://img.shields.io/docsrs/lgwks_bot)](https://docs.rs/lgwks_bot)
 
-Orchestration you cannot write wrongly: bounded fan-out, deadlines, retries under
+Orchestration with the common failure modes removed: bounded fan-out, deadlines, retries under
 a shared budget, tenant-keyed steps and a map of what a run declared.
 
 ```sh
@@ -57,7 +57,8 @@ The `Estate`, `Host` and `Supervisor` still build their own runtimes in 4.0.0;
 ADR 0006 R2 and R3 move them onto the one driver and into the world.
 
 This is **not a sandbox**. In-process code can always dial out directly, and
-capability gating is auditable authority, not isolation.
+capability gating is auditable authority, not isolation. A flow's `Tenant` is
+its trusted host's partition key rather than an authenticated identity.
 
 ## Stability
 

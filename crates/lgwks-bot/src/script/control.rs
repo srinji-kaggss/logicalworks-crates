@@ -10,6 +10,7 @@ use crate::rt::clock::{Clock, TimeSource};
 use crate::rt::time;
 use crate::rt::time::Deadline;
 
+use super::justify::refuse_if_unjustified;
 use super::trail::{Outcome, Site};
 use super::{FlowError, MAX_ATTEMPTS, MAX_BACKOFF, MAX_IN_FLIGHT, Scope, StepKey};
 
@@ -225,6 +226,12 @@ async fn bounded<T, Fut>(
 where
     Fut: Future<Output = Result<T, FlowError>>,
 {
+    // The justification rules are evaluated before the deadline is read, so a
+    // run the policy already stopped never starts a body it would only drop.
+    // A sync helper, not inline code: `within` pays one poll frame per nesting
+    // level, and the helper's frame is an ordinary call frame, freed before
+    // the race below is built, rather than state in this future.
+    refuse_if_unjustified(scope)?;
     let deadline = Deadline::after(clock, limit);
     let timed_out = || FlowError::TimedOut {
         at: Arc::clone(&at),
@@ -453,6 +460,15 @@ where
         if let Err(stopped) = here.checkpoint() {
             break Err(stopped);
         }
+        // The justification rules are evaluated before every attempt, so a
+        // run that ran out of budget stops with its reason code instead of
+        // spending another attempt. Boxed: the attempt loop pays no frame for
+        // the rules' future, which lives on the heap.
+        if here.justification().is_some()
+            && let Err(refused) = Box::pin(here.justified(attempt)).await
+        {
+            break Err(refused);
+        }
         let error = match body(here.clone(), attempt).await {
             Ok(value) => break Ok(value),
             Err(error) => error.located(here),
@@ -530,4 +546,84 @@ fn backoff_delay(base: Duration, attempt: u32, key: &StepKey) -> Duration {
     let scaled = grown.as_nanos().saturating_mul(u128::from(jitter_byte));
     let jitter = Duration::from_nanos(u64::saturating_from(scaled.div_euclid(512)));
     grown.saturating_add(jitter)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hint::black_box;
+    use std::time::Duration;
+
+    use super::{within, within_on};
+    use crate::script::{FlowError, Scope, Tenant};
+
+    /// A test's result: an error fails it with the error's text.
+    type TestResult = Result<(), String>;
+
+    /// CPU work no executor can preempt: 64M xorshift folds, which no closed
+    /// form removes and no machine finishes in a millisecond.
+    fn burn() -> u64 {
+        let mut acc = 0x9e37_79b9_7f4a_7c15_u64;
+        for i in 0..64_000_000_u64 {
+            acc ^= acc.wrapping_add(i).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        black_box(acc)
+    }
+
+    /// Deadlines are cooperative: a synchronous stretch between two awaits is
+    /// not preempted. A body that burns past its deadline with no await in it
+    /// returns its value, while the same work split around cooperative yields
+    /// is `TimedOut` — the deadline fires where the body yields, never inside
+    /// a stretch that never yields. The yields are scheduling points, not
+    /// wall-clock waits, so the test asserts ordering rather than timing.
+    #[test]
+    fn a_synchronous_stretch_is_not_preempted() -> TestResult {
+        let scope = Scope::root(Tenant::new("acme").map_err(|error| error.to_string())?);
+        let unyielding = crate::block_on(within(&scope, "burn", Duration::from_millis(1), async {
+            let _ = burn();
+            Ok::<u64, FlowError>(7)
+        }));
+        assert_eq!(
+            unyielding.map_err(|error| error.to_string())?,
+            7,
+            "a body that never yields runs past its deadline instead of being stopped inside it"
+        );
+        let yielding = crate::block_on(within(&scope, "burn", Duration::from_millis(1), async {
+            let _ = burn();
+            // Yield control without waiting: nothing here wakes the body, so
+            // the deadline is what ends it. A sleep would also keep the body
+            // pending past the deadline, but the test must assert ordering,
+            // not timing, and a timer is exactly the race it refuses to run.
+            std::future::pending::<()>().await;
+            Ok::<u64, FlowError>(7)
+        }));
+        match yielding {
+            Err(FlowError::TimedOut { .. }) => Ok(()),
+            Err(error) => Err(format!("a yielding overrun must be TimedOut, got {error}")),
+            Ok(_) => Err(String::from("a yielding overrun must not return its value")),
+        }
+    }
+
+    /// [`within_on`] reads the same cooperative rule on a named clock: the
+    /// synchronous stretch completes, located at the step.
+    #[test]
+    fn within_on_names_its_clock_and_its_step() -> TestResult {
+        let scope = Scope::root(Tenant::new("acme").map_err(|error| error.to_string())?);
+        let clock = scope.clock().clone();
+        let unyielding = crate::block_on(within_on(
+            &clock,
+            &scope,
+            "burn",
+            Duration::from_millis(1),
+            async {
+                let _ = burn();
+                Ok::<u64, FlowError>(11)
+            },
+        ));
+        assert_eq!(
+            unyielding.map_err(|error| error.to_string())?,
+            11,
+            "the named clock governs the deadline, and the step still completes its stretch"
+        );
+        Ok(())
+    }
 }

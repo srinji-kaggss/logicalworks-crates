@@ -29,7 +29,11 @@ A `Scope`'s tenant reaches every body under `each`, `retry` and
 `FanOut::run_in` (`sim_tenancy_scope`: two tenants key the same path
 differently, every retry attempt shares one tenant and key, `run_in` enters
 the caller's step, clock and stop; the standalone `FanOut::run` keeps its
-reserved tenant). `each` and `FanOut` still take no permit — tenant admission
+reserved tenant). The tenant name is a partition key the trusted host chooses,
+not an authenticated identity: whoever holds the string runs as that tenant,
+so isolation keeps honest tenants from colliding, not adversaries from choosing
+a name (`Tenant::new` refuses the crate's reserved `fan-out` name, and the same
+string is the same tenant). `each` and `FanOut` still take no permit — tenant admission
 bounds who is admitted, not the CPU an admitted body burns — so a scope's
 tenant reaches item scopes, not admission.
 

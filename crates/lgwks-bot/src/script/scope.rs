@@ -10,6 +10,7 @@ use crate::rt::clock::Clock;
 use crate::rt::sync::CancellationToken;
 use crate::task::{InputDigest, MAX_REQUEST_KEY_BYTES};
 
+use super::justify::Justify;
 use super::policy::Policy;
 use super::trail::{Mark, Outcome, Site, Trail};
 use super::{DEFAULT_TRAIL_STEPS, FlowError, MAX_DEPTH, MAX_TENANT_BYTES};
@@ -48,6 +49,14 @@ pub(crate) fn name_fault(name: &str, max: usize) -> Option<NameFault> {
     None
 }
 
+/// Names [`Tenant::new`] refuses so a caller cannot adopt the crate's own
+/// unsupervised identities by spelling them.
+///
+/// `fan-out` is the tenant [`FanOut`](super::FanOut) runs under when it has no
+/// caller scope; a host built with that string would key its steps exactly
+/// where unsupervised fan-outs key theirs.
+const RESERVED_TENANTS: [&str; 1] = ["fan-out"];
+
 /// The identity a flow runs on behalf of.
 ///
 /// Every [`Scope`] carries one, and every [`StepKey`] hashes it, so data keyed
@@ -55,6 +64,14 @@ pub(crate) fn name_fault(name: &str, max: usize) -> Option<NameFault> {
 /// The name is 1 to [`MAX_TENANT_BYTES`] bytes of ASCII letters, digits, and
 /// `-`, `_`, `.`, `:`, which keeps it safe to put in a path, a log line, and a
 /// file name without escaping.
+///
+/// A tenant is a partition key chosen by the trusted host that built it
+/// ([`Host::builder`](crate::task::Host::builder)), not an authenticated
+/// identity: whoever holds the string runs as that tenant, and two hosts built
+/// with the same string key the same steps. Isolation keeps honest tenants from
+/// colliding; it does not stop an adversary who chooses another tenant's name.
+/// The crate's own reserved names (its unsupervised fan-out, for one) are
+/// refused here so a caller cannot adopt them by spelling.
 ///
 /// Ordered by name, which is what lets per-tenant capacity state live in an
 /// ordered map: the round scheduler reads and writes it, and an ordered map is
@@ -65,10 +82,22 @@ pub struct Tenant(Arc<str>);
 impl Tenant {
     /// Validate and hold a tenant name.
     ///
+    /// The caller is the trusted host: this checks the spelling (non-empty,
+    /// bounded, ASCII letters, digits, `-_.:`) and refuses the crate's own
+    /// reserved names, but it does not authenticate anyone. A caller that
+    /// builds a host with another tenant's name runs as that tenant.
+    ///
     /// # Errors
     ///
     /// [`FlowError::InvalidTenant`] naming what is wrong with the name.
     pub fn new(name: &str) -> Result<Self, FlowError> {
+        if RESERVED_TENANTS.contains(&name) {
+            let refusal = Err(FlowError::InvalidTenant {
+                reason: "the tenant name is reserved for the crate's own use",
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "new: returning an error to the caller");
+            return refusal;
+        }
         let reason = match name_fault(name, MAX_TENANT_BYTES) {
             None => return Ok(Self(Arc::from(name))),
             Some(NameFault::Empty) => "the tenant name is empty",
@@ -219,6 +248,10 @@ struct ScopeInner {
     clock: Clock,
     /// The run this scope's records are keyed by, when a host minted one.
     run: Option<RunId>,
+    /// The justification rules every async word under this root answers to,
+    /// when the flow named any. Inherited by every descended scope, so one
+    /// installation governs the whole flow.
+    justify: Option<Arc<Justify>>,
     /// This step's entry in the trail, which [`Scope::settle`] completes;
     /// `None` at the root, which no step entered.
     mark: Option<Arc<Mark>>,
@@ -324,6 +357,7 @@ impl Scope {
                 trail,
                 clock,
                 run,
+                justify: None,
                 mark: None,
             }),
         }
@@ -336,6 +370,37 @@ impl Scope {
         trail: Arc<Trail>,
     ) -> Self {
         Self::with_token_trail_and_clock(tenant, token, trail, Clock::wall())
+    }
+
+    /// A sibling root scope that evaluates `justify` before every async word
+    /// and every retry attempt.
+    ///
+    /// The form a flow names its justification rules with: the rules are
+    /// inherited by every scope descended from here, so one installation beside
+    /// the flow's steps governs the whole run. The sibling shares this scope's
+    /// tenant, clock, run, policy, trail and stop token; it differs only in
+    /// answering to the rules.
+    #[must_use]
+    pub fn with_justification(&self, justify: Justify) -> Self {
+        Self {
+            inner: Arc::new(ScopeInner {
+                tenant: self.inner.tenant.clone(),
+                path: Arc::clone(&self.inner.path),
+                depth: self.inner.depth,
+                token: self.inner.token.clone(),
+                policy: Arc::clone(&self.inner.policy),
+                trail: Arc::clone(&self.inner.trail),
+                clock: self.inner.clock.clone(),
+                run: self.inner.run,
+                justify: Some(Arc::new(justify)),
+                mark: self.inner.mark.clone(),
+            }),
+        }
+    }
+
+    /// The justification rules this scope answers to, when the flow named any.
+    pub(crate) fn justification(&self) -> Option<&Justify> {
+        self.inner.justify.as_deref()
     }
 
     /// Enter the named step beneath this scope.
@@ -449,6 +514,7 @@ impl Scope {
                 trail: Arc::clone(&self.inner.trail),
                 clock: self.inner.clock.clone(),
                 run: self.inner.run,
+                justify: self.inner.justify.clone(),
                 mark: Some(mark),
             }),
         })
@@ -708,5 +774,50 @@ impl fmt::Debug for Scope {
             .field("path", &self.path())
             .field("cancelled", &self.is_cancelled())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESERVED_TENANTS, Tenant};
+
+    /// A test's result: an error fails it with the error's text.
+    type TestResult = Result<(), String>;
+
+    /// Every reserved name is refused, so a caller cannot adopt the crate's
+    /// own unsupervised identities by spelling them.
+    #[test]
+    fn reserved_tenant_names_are_refused() -> TestResult {
+        for reserved in RESERVED_TENANTS {
+            match Tenant::new(reserved) {
+                Ok(_) => {
+                    return Err(format!(
+                        "Tenant::new({reserved:?}) must refuse a reserved name"
+                    ));
+                }
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("reserved"),
+                        "the refusal names the reservation, got {error}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An ordinary name is still admitted, and two hosts built with the same
+    /// string run as the same tenant: the name is self-asserted, so isolation
+    /// covers mistakes, not adversaries.
+    #[test]
+    fn an_ordinary_name_is_admitted_and_self_asserted() -> TestResult {
+        let first = Tenant::new("acme").map_err(|error| error.to_string())?;
+        let second = Tenant::new("acme").map_err(|error| error.to_string())?;
+        assert_eq!(
+            first, second,
+            "the same string is the same tenant, with no authentication"
+        );
+        assert_eq!(first.as_str(), "acme", "the name reads back as validated");
+        Ok(())
     }
 }

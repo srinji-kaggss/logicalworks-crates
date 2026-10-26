@@ -158,6 +158,9 @@ pub fn admit_domains(scope: &Scope, uses: &[DomainUse]) -> Result<(), FlowError>
 /// authority does not cover the source's capabilities; the source's own
 /// failure; [`BotError::TypeMismatch`] when its value is not a `T`.
 pub async fn observe<T: 'static>(scope: &Scope, id: &str, target: &str) -> Result<T, FlowError> {
+    if scope.justification().is_some() {
+        Box::pin(scope.justified(0)).await?;
+    }
     let registry = resolve(scope, Role::Source, id)?;
     let source = registry
         .build_source(id, target)
@@ -216,6 +219,9 @@ pub async fn act<V: 'static>(
     target: &str,
     value: V,
 ) -> Result<Acted, FlowError> {
+    if scope.justification().is_some() {
+        Box::pin(scope.justified(0)).await?;
+    }
     let registry = resolve(scope, Role::Action, id)?;
     let action = registry
         .build_action(id, target)

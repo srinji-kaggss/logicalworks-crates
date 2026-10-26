@@ -51,6 +51,9 @@ set, and effects already in flight keep the proofs they started with.
 
 Custom capabilities use `Cap::new("your.domain.cap")`.
 
+### Tenant names are partition keys, not identities
+A flow's `Tenant` is chosen by the trusted host that builds it: it keeps honest
+tenants from sharing keys, not adversaries from choosing a name (`SECURITY.md`).
 ## Shipped domains
 
 Nine domains ship with the crate, each implementing one or more verbs:
