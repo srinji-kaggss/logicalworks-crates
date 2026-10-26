@@ -1,6 +1,6 @@
 [package]
 name = "lgwks_bot"
-description = "Opinionated async orchestration runtime: bounded fan-out, deadlines, retries under a shared budget, tenant-keyed steps. The runtime Observe, Evaluate, Execute and Query enter."
+description = "Workflow orchestration on one ECS world: script! flows with bounded fan-out, deadlines, retries under a shared budget and tenant-keyed steps, over one tokio driver used only where rebuilding makes no sense."
 version = "4.0.0"
 edition = "2024"
 rust-version = "1.98"
@@ -15,7 +15,7 @@ documentation = "https://docs.rs/lgwks_bot"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-bot"
 readme = "README.md"
 categories = ["development-tools", "asynchronous", "concurrency"]
-keywords = ["automation", "bot", "workflow", "agent", "ecs"]
+keywords = ["orchestration", "workflow", "ecs", "agent", "automation"]
 
 # The driver behind the orchestration runtime is this crate's, per the deps law;
 # its `tokio` edge is owned by the `lgwks_deps` storefront. `--no-default-features`

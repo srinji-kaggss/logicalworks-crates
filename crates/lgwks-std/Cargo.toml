@@ -9,8 +9,8 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 documentation = "https://docs.rs/lgwks_std"
 readme = "README.md"
 homepage = "https://github.com/srinji-kaggss/logicalworks-crates/tree/main/crates/lgwks-std"
-categories = ["development-tools", "encoding", "asynchronous"]
-keywords = ["stdlib", "zero-dependencies", "json", "tracing", "debug"]
+categories = ["development-tools", "encoding", "network-programming"]
+keywords = ["stdlib", "json", "uuid", "http-client", "tracing"]
 
 # INV-STDPLUS-APPROVED-ONLY: every dependency here is a vetted leaf or
 # single-purpose stack with zero further external deps. The gate test
