@@ -424,6 +424,36 @@ words = ["zoned time", "timezone", "dst arithmetic", "jiff", "calendar arithmeti
 replaces = ["jiff as a direct edge", "chrono as a direct edge for zoned work"]
 
 [[capability]]
+name = "http server"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "axum"
+default = "off"
+reason = "revenue-slice HTTP routing; axum never builds unless selected. One flag: --features axum (ADR 0003)."
+words = ["axum", "http server", "routing", "web server", "tower"]
+replaces = ["axum as a direct edge", "a hand-rolled http router"]
+
+[[capability]]
+name = "http middleware"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "tower-http"
+default = "off"
+reason = "cors, trace and compression layers for the revenue slice; never built unless selected. One flag: --features tower-http (ADR 0003)."
+words = ["tower-http", "tower", "middleware", "cors", "compression", "trace layer"]
+replaces = ["tower-http as a direct edge", "a hand-rolled middleware layer"]
+
+[[capability]]
+name = "ai input guard"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "llm-guard"
+default = "off"
+reason = "pure-Rust AI input scanners with no model download; never built unless selected. One flag: --features llm-guard (ADR 0003)."
+words = ["llm-guard", "guardrails", "prompt injection", "ai security", "input filter"]
+replaces = ["llm-guard as a direct edge", "a hand-rolled prompt filter"]
+
+[[capability]]
 name = "documentation governance"
 file = "docs/adr/README.md"
 crate = "repository"

@@ -15,6 +15,7 @@ capability is neither assumed to be present nor added as an unregistered edge:
 | `toml`, `serde_yaml`, `csv` | Not provided. Use `json`/`ron` for data; the gate parses TOML line-wise on purpose to avoid a TOML dependency. |
 | `sha2`, `hmac`, `aes-gcm`, `argon2`, `ed25519` | Not provided (BLAKE3 only). Crypto is a BOUNDARY tier: register it with the concrete reason. |
 | `rand` distributions | `lgwks_std::random` is OS entropy only; derive the distribution you need or register `rand`. |
+| In-process TLS providers | Terminate at the OS reverse proxy: zero new crates. `ring` and `webpki-roots` carry licence terms the register does not accept; see [patches](patches.md). |
 | `bytes`, `byteorder` | Use slices and `from_le_bytes`/`to_le_bytes`. |
 
 ### 6.1 The print ban is a lint, not a style preference
@@ -77,6 +78,10 @@ unregistered (`UnregisteredEdge`). Both directions are enforced.
 - `lgwks-deps check` runs as the first CI job, locally and on the build server.
   The same `check_dependencies` API is available to embedders, so the verdict
   cannot drift between a developer's machine and CI.
+- Upstream pins never become forks: `[patch]` stays refused, pins expire, and
+  the process lives in [patches](patches.md) with the TLS provider exception.
+- Deferred crates wait for their trigger in the [deferral catalog](deferral.md);
+  an approval the catalog still defers is refused with the owner and trigger.
 - The gate is fail-closed: a missing register, unparseable metadata, or
   unreadable lock is a refusal, never a pass.
 - `enforce = false` is an adoption posture, not an off switch. It remains a

@@ -155,6 +155,9 @@ macro_rules! storefront_families {
 
 storefront_families! {
     storefront_appcui_compiles_alone => ("appcui", "appcui"),
+    storefront_axum_compiles_alone => ("axum", "axum"),
+    storefront_tower_http_compiles_alone => ("tower-http", "tower_http"),
+    storefront_llm_guard_compiles_alone => ("llm-guard", "llm_guard"),
     storefront_bevy_ecs_compiles_alone => ("bevy-ecs", "bevy_ecs"),
     storefront_tokio_base_compiles_alone => ("tokio-base", "tokio_base"),
     storefront_tokio_time_compiles_alone => ("tokio-time", "tokio_time"),
@@ -185,6 +188,9 @@ fn the_storefront_matrix_default_graph_carries_no_optional_family() -> TestResul
     );
     for optional_package in [
         "appcui v",
+        "axum v",
+        "tower-http v",
+        "llm-guard v",
         "bevy_ecs v",
         "gpui v",
         "candle-core v",
