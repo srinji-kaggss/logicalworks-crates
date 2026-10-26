@@ -88,7 +88,8 @@ the rest of this table is design history and contributor policy.
 | [`docs/workflow/ci-runs.md`](workflow/ci-runs.md) | Workflow §12: the 25 measured CI runs, their layouts, wall clocks and verdicts. |
 | [`docs/governance/gates.md`](governance/gates.md) | Governance §3 and §4: the gates, and change control for governance. |
 | [`docs/governance/open-work.md`](governance/open-work.md) | Governance §6 and §7: open correctness and acceptance work, and the decisions requiring the Director. |
-| [`docs/governance/ledger-2026-10-21.md`](governance/ledger-2026-10-21.md) | Governance §5 ledger, 2026-10-21: the newest part. |
+| [`docs/governance/ledger-2026-10-26.md`](governance/ledger-2026-10-26.md) | Governance §5 ledger, 2026-10-26: the newest part. |
+| [`docs/governance/ledger-2026-10-21.md`](governance/ledger-2026-10-21.md) | Governance §5 ledger, 2026-10-21. |
 | [`docs/governance/ledger-2026-10-09.md`](governance/ledger-2026-10-09.md) | Governance §5 ledger, 2026-10-09 to 2026-10-20. |
 | [`docs/governance/ledger-2026-10-06.md`](governance/ledger-2026-10-06.md) | Governance §5 ledger, 2026-10-06 to 2026-10-08. |
 | [`docs/governance/ledger-2026-09-28-releases.md`](governance/ledger-2026-09-28-releases.md) | Governance §5 ledger: the release cuts of 2026-09-28 to 2026-10-06. |
