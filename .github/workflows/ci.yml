@@ -245,11 +245,11 @@ jobs:
   gate:
     name: Gate checks
     runs-on: macos-latest
-    # `main` and dispatch only: a hosted runner's pick-up and finalisation are
-    # outside this machine's clock, and a pull request is held to five minutes.
-    # The lanes still run on the commit that ships, and the self-hosted jobs
-    # cover the build, the tests and the matrices on every pull request.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Every event, pull requests included: nothing skips (the Director,
+    # 2026-10-26). A pull request merged on the self-hosted jobs alone left these
+    # lanes, clippy, the docs, the advisories, Miri and the Windows legs to fail
+    # first on `main`. On main run 40323588476 every hosted job ended inside
+    # 3 m 15 s of a 253 s run, so the 300 s wall holds with them in.
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -345,7 +345,6 @@ jobs:
   advisories:
     name: RustSec advisories
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -515,7 +514,6 @@ jobs:
   tests_std_full:
     name: Tests (lgwks-std full)
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     env:
       RUSTC_WORKSPACE_WRAPPER: ""
@@ -717,7 +715,6 @@ jobs:
   clippy:
     name: Clippy and scan (${{ matrix.part }})
     runs-on: macos-latest
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     strategy:
       fail-fast: false
@@ -806,10 +803,8 @@ jobs:
     # A GitHub-hosted runner: the local machine's 15 cores were shared by 13
     # jobs and this one measured 8m44s there (run 38339936125). Every step and
     # command is as it was; only the capacity under them changed. It runs on
-    # `main` and by hand for the same reason it is hosted: a pull request's
-    # five-minute budget cannot include a hosted runner's pick-up.
+    # every event, as the gate job says.
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -1204,16 +1199,11 @@ jobs:
       - run: cargo test --locked -p lgwks_deps --no-default-features --features appcui --doc
       - run: cargo clippy --locked -p lgwks_deps --no-default-features --features appcui --all-targets -- -D warnings
 
-  # The hosted native legs run on `main` and by hand. They are a job of their
-  # own so a pull request does not schedule a hosted runner at all: skipping
-  # their steps still left the runner to pick up and finalise the job, which
-  # held run 39630197234 open for 5 m 30 s after its last real step, against a
-  # five-minute budget. A job-level `if` cannot read the matrix, so the split is
-  # by job rather than by leg.
+  # The hosted native legs, a job of their own beside the self-hosted one. They
+  # run on every event, as the gate job says.
   appcui-native-hosted:
     name: AppCUI native storefront hosted (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     strategy:
       matrix:
@@ -1233,9 +1223,7 @@ jobs:
   gpui-windows:
     name: GPUI Windows renderer
     runs-on: windows-latest
-    # `main` and dispatch only: a hosted job's queue and finalisation are not
-    # this machine's clock, and the pull request budget is five minutes.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Every event, as the gate job says.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -1273,10 +1261,8 @@ jobs:
   process-windows:
     name: Process containment on Windows
     runs-on: windows-latest
-    # `main` and dispatch only, as the renderer above: the Windows receipt is a
-    # post-merge record, and a hosted runner's finalisation can hold a pull
-    # request open past its five-minute budget.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Every event, as the gate job says: the Windows receipt is recorded before
+    # a merge, not after it.
     timeout-minutes: 5
     env:
       # Lints run once, in the Clippy job.
@@ -1418,7 +1404,6 @@ jobs:
   miri_unsafe:
     name: Miri unsafe seams
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
