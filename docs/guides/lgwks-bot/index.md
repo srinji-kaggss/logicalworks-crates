@@ -3,8 +3,10 @@
 Pages of this guide: [overview](index.md) · [non-goals and next steps](index-scope.md)
 
 A Rust automation library built around four verbs: Observe, Evaluate, Execute,
-Query. `Bot` runs change-triggered condition/action chains on one ECS schedule.
-An optional runtime surface provides asynchronous task and I/O facilities.
+Query. One ECS world is the core: `Bot` runs change-triggered condition/action
+chains on its schedule. One driver on tokio sits below the world for tasks and
+I/O, used only where rebuilding a piece makes no sense, and `script!` is the
+framework above it ([ADR 0006](../../adr/0006-one-ecs-world-one-tokio-axum-driver.md)).
 Capability checks apply to participating library calls; the crate is not a
 sandbox.
 
@@ -57,23 +59,11 @@ a future. See [failures](failures.md) for why the refusal is not a failed tick.
 
 ## Supported versions
 
-`crates/lgwks-bot/Cargo.toml` declares version `1.0.0` and `rust-version =
-"1.98"`, edition 2024.
-
-The version in the manifest is not the whole story. Five modules first shipped
-in `lgwks_bot-v0.5.0` and are absent from the older `lgwks_bot-v0.4.2` tag:
-
-| Module | In the 0.4.2 tag | Verified by |
-|---|---|---|
-| `session` | no | `git show lgwks_bot-v0.4.2:crates/lgwks-bot/src/lib.rs` |
-| `language` | no | same |
-| `semantic` | no | same |
-| `interface` | no | same |
-| `frontier` | no | same |
-
-Everything else in this guide describes symbols the 0.4.2 tag exports. The two
-pages that cover the newer modules say so at the top:
-[sessions](sessions.md) and [resolution](resolution.md).
+`crates/lgwks-bot/Cargo.toml` declares version `4.0.0` and `rust-version =
+"1.98"`, edition 2024. Which release first carries a symbol, and what each
+major removed, is in [`CHANGELOG.md`](../../../CHANGELOG.md) and
+[`docs/changelog/`](../../changelog); 4.0.0 removed `EcsBot::world` and
+`Clock::sleep` under ADR 0006.
 
 ## Install and import
 
@@ -83,8 +73,9 @@ Add the crate and the default features come with it:
 cargo add lgwks_bot
 ```
 
-That is `rt`, `time`, `sync`, and `macros` (`crates/lgwks-bot/Cargo.toml`). The
-default build pulls tokio through the `lgwks_deps` storefront's `tokio` feature.
+That is `script`, which brings `rt`, `time`, `sync`, and `macros`
+(`crates/lgwks-bot/Cargo.toml`). The default build pulls tokio through the
+`lgwks_deps` storefront's `tokio` feature.
 
 `--no-default-features` withdraws the async surface and the tokio edge. It does
 **not** remove `bevy_ecs`. The ECS substrate is unconditional, so a no-default
