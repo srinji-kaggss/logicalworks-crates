@@ -15,24 +15,18 @@ bodies, `lgwks_ast` tree-sitter parsing of hostile source files,
 - `lgwks_bot` authority is explicit and auditable, not a sandbox: in-process
   code can always dial out directly.
 
-Out of scope for these crates (see `docs/distributed-boundaries.md`): mTLS /
-private CA handling, key lifecycle, tracing/metrics facades, consensus.
+Out of scope for these crates (see `docs/distributed-boundaries.md`): key lifecycle
+and rotation, tracing/metrics facades, consensus.
 
 ## Transitive advisories assessed and not actioned
 
-An advisory is a claim about a crate, not about the call paths a consumer
-reaches. Where the flagged code is unreachable from this workspace's dependency
-graph, it is recorded here with its evidence, so the position is checked rather
-than silent. Each entry names what would reopen it.
-
-For each RustSec advisory assessed here, the machine-readable half of the
-decision is `.cargo/audit.toml`, which the `advisories` lane of
-`scripts/gate-lanes.toml` reads: its `advisories.ignore` names these ids and
-nothing else, so a vulnerability none of these sections assesses fails the gate.
-The `grid` advisory has no RustSec id (it is a GitHub advisory, carried by
-Dependabot), so it cannot appear in that list. An id silenced there with no
-section here is a decision no reader can check, which is why the two are
-reviewed together.
+An advisory claims something about a crate, not about the call paths this
+workspace reaches. Where the flagged code is unreachable, the entry below
+records the evidence and what would reopen it. The machine-readable half is
+`.cargo/audit.toml` (`advisories.ignore` names these ids and nothing else);
+an id silenced there with no section here is unchecked and fails review. The
+`grid` entry below is a GitHub advisory with no RustSec id, so it cannot
+appear there.
 
 ### `grid`: GHSA-38c5-483c-4qqp, integer overflow in `Grid::expand_rows`
 
@@ -86,12 +80,9 @@ requiring `zip >= 9` appears; that bump makes this entry obsolete.
 
 ### Unmaintained transitive crates: ten default-off advisories behind `gpui` or Candle
 
-No advisory here has a patched version (`patched = []` in the database), so no
-bump clears one. Each is absent from the default graph and from every build that
-does not select the feature named below; one row per upstream chain (assessed
-2026-10-20). A `cargo update` offers `zbus_names 4.3.5` and `zvariant`/
-`zvariant_derive 5.15.1`, which stay flagged for the same reason, so the
-lockfile is left where it is.
+No advisory here has a patched version, so no bump clears one. Each is absent
+from the default graph and from every build that does not select the named
+feature (assessed 2026-10-20); the lockfile stays where `cargo update` leaves it.
 
 | Crates and versions | Advisory ids | Reached by | Reopen if |
 |---|---|---|---|
@@ -100,6 +91,16 @@ lockfile is left where it is.
 | `instant` 0.1.13; `proc-macro-error2` 2.0.1 | RUSTSEC-2024-0384, -0173 | `gpui` → `gpui_util` → `futures-lite` → `fastrand`; `gpui` → `stacksafe` → `stacksafe-macro` | `gpui` ships, or those parents drop them |
 | `zbus_names` 4.3.4; `zvariant` 5.15.0; `zvariant_derive` 5.15.0 | RUSTSEC-2026-0371, -0370, -0372 | `gpui` → `ashpd`, `oo7` → `zbus 5.19.0` → these three | `gpui` moves to `zbus` 6 (where these are modules), or ships |
 | `paste` 1.0.15 | RUSTSEC-2024-0436 | `gpui` → `image`, `metal`; `ml-candle` → `candle-core`, `tokenizers 0.22.2`; `ml-tokenizers` → `tokenizers 0.23.2` | any of the three features ships, or those parents drop `paste` |
+
+### `rsa 0.10.0-rc.19`: RUSTSEC-2023-0071, Marvin timing sidechannel
+
+Test-only `lgwks_std` dev edge for the #714 throwaway PKI
+(`allowed_kinds = "dev"` in `contract/APPROVED.toml`): fresh keys per run,
+loopback use in the same process, discarded after. No remote party observes
+decryption timing; `cargo tree -i rsa` shows only test-target parents, so the
+flagged path never ships. No fixed version exists, so no bump clears it.
+
+**Reopen if** a patched `rsa` appears, or if any non-test target depends on it.
 
 ## Reporting
 
