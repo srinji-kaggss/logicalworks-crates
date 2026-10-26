@@ -1,7 +1,7 @@
 //! The store's operations: open, the locked refresh-apply-sync step, and the keyed reads.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,23 +11,34 @@ use std::time::{Duration, Instant};
 use super::record::{
     Stored, fold, frame_record, full_replay, genesis_head, refresh, trim_to_committed,
 };
+use super::snapshot;
 use super::{
     BUSY_WAIT, HEADER_LEN, Index, KIND_LANE_DISPATCHED, LOCK_FILE, LOCK_SLICE_MS, LaneRow,
-    LockGuard, MAX_LISTED, OpenRun, Policy, RELEASES, RunEntry, RunRow, RunStart, STORE_FILE,
-    STORE_FORMAT, STORE_MAGIC, StoreInner, TenantStore, TenantStoreError, VERSION_BYTE,
-    close_decision, is_open_lane, is_pending, lane_ready, lock_file, lock_index, lock_is_stale,
-    now_nanos, tenant_rows, unknown_run,
+    LockGuard, MAX_LISTED, OpenRun, Policy, RELEASES, RunEntry, RunRow, RunStart,
+    SNAPSHOT_INTERVAL_FRAMES, STORE_FILE, STORE_FORMAT, STORE_MAGIC, StoreInner, TenantStore,
+    TenantStoreError, VERSION_BYTE, close_decision, is_open_lane, is_pending, lane_ready,
+    lock_file, lock_index, tenant_rows, unknown_run,
 };
 use crate::journal::frame::SaturatingFrom;
 use crate::journal::owner::{lock, wait_timeout};
+
+/// Open-or-create the store file, writing the header when new or empty.
+fn open_store_file(dir: &Path) -> Result<File, TenantStoreError> {
+    std::fs::create_dir_all(dir).map_err(TenantStoreError::storage)?;
+    let path = dir.join(STORE_FILE);
+    super::open_header_file(&path, &TenantStore::header()).map_err(TenantStoreError::storage)
+}
 
 impl TenantStore {
     /// Open (or create) the store under `dir`, waiting up to a minute for
     /// another coordinator's lock.
     ///
-    /// The directory is created when absent. A torn final frame is trimmed,
-    /// because an interrupted append was never anyone's answer; every earlier
-    /// frame is retained.
+    /// The directory is created when absent. The folded index is read back
+    /// from the snapshot beside the store when it names a length the file
+    /// holds, and only what was appended after it is drained; a missing or
+    /// damaged snapshot falls back to the full replay it replaces. A torn
+    /// final frame is trimmed, because an interrupted append was never
+    /// anyone's answer; every earlier frame is retained.
     ///
     /// # Errors
     ///
@@ -53,21 +64,7 @@ impl TenantStore {
         dir: &Path,
         busy_wait: Duration,
     ) -> Result<Self, TenantStoreError> {
-        std::fs::create_dir_all(dir).map_err(TenantStoreError::storage)?;
-        let path = dir.join(STORE_FILE);
-        let existed = path.exists();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(TenantStoreError::storage)?;
-        if !existed || file.metadata().map_err(TenantStoreError::storage)?.len() == 0 {
-            file.write_all(&Self::header())
-                .and_then(|()| file.sync_all())
-                .map_err(TenantStoreError::storage)?;
-        }
+        let file = open_store_file(dir)?;
         let store = Self {
             inner: Arc::new(StoreInner {
                 file: Mutex::new(file),
@@ -80,15 +77,32 @@ impl TenantStore {
                     tail: genesis_head(),
                 }),
                 busy_wait,
-                holder_seq: AtomicU64::new(0),
+                snapshot_frames: AtomicU64::new(0),
             }),
         };
-        let guard = store.acquire()?;
+        let guard = store.acquire_exclusive()?;
         {
             let mut inner_file = lock_file(&store.inner.file);
             let mut index = lock_index(&store.inner.index);
-            full_replay(&mut inner_file, &mut index)?;
+            match snapshot::read(&store.inner.dir)? {
+                Some(loaded) if loaded.committed >= u64::saturating_from(HEADER_LEN) => {
+                    index.policies = loaded.policies;
+                    index.runs = loaded.runs;
+                    index.frames = loaded.frames;
+                    index.committed = loaded.committed;
+                    index.tail = super::Digest::from_bytes(loaded.tail);
+                    store
+                        .inner
+                        .snapshot_frames
+                        .store(loaded.frames, Ordering::SeqCst);
+                    refresh(&mut inner_file, &mut index)?;
+                }
+                _ => {
+                    full_replay(&mut inner_file, &mut index)?;
+                }
+            }
             trim_to_committed(&mut inner_file, &index)?;
+            store.maybe_snapshot(&index)?;
         }
         drop(guard);
         Ok(store)
@@ -110,18 +124,43 @@ impl TenantStore {
 
     /// Hold the host lock across one step, waiting up to the busy timeout.
     ///
-    /// Stale locks are stolen by age: a live holder keeps the lock for one
-    /// small write and one sync, so a lock older than [`STALE_LOCK_AFTER`]
-    /// was orphaned by a crash. The wait is bounded by the busy timeout, and
-    /// exhaustion is a typed refusal, never a hang. A release in this process
-    /// wakes the waiter at once; one in another process is noticed within
-    /// [`LOCK_SLICE_MS`].
+    /// The lock is the operating system's, taken on a lock file beside the
+    /// store: writers take it exclusive, readers shared. The kernel releases
+    /// it when its holder dies, so a slow holder never loses a lock it still
+    /// holds and a dead one never keeps a lock it cannot release — no holder
+    /// is ever judged by the file's age, and no two holders ever write. The
+    /// wait is bounded by the busy timeout, and exhaustion is a typed refusal,
+    /// never a hang. A release in this process wakes the waiter at once; one
+    /// in another process is noticed within [`LOCK_SLICE_MS`].
     ///
     /// # Errors
     ///
     /// [`TenantStoreError::Busy`] when the lock stayed held past the bound;
     /// [`TenantStoreError::Storage`] when the device refuses.
-    fn acquire(&self) -> Result<LockGuard, TenantStoreError> {
+    fn acquire_exclusive(&self) -> Result<LockGuard, TenantStoreError> {
+        self.acquire(true)
+    }
+
+    /// Hold the host lock for one read, waiting up to the busy timeout.
+    ///
+    /// The shared half of [`acquire_exclusive`](Self::acquire_exclusive):
+    /// readers run beside each other and beside no writer, but never behind
+    /// another reader. Same bound, same refusal, same wake.
+    ///
+    /// # Errors
+    ///
+    /// As [`acquire_exclusive`](Self::acquire_exclusive).
+    fn acquire_shared(&self) -> Result<LockGuard, TenantStoreError> {
+        self.acquire(false)
+    }
+
+    /// Take the lock file's advisory lock, exclusive for a step that writes
+    /// and shared for one that only reads.
+    ///
+    /// One claim for the two halves, parameterized by the step's own need, so
+    /// the bound, the slice and the refusal cannot drift between readers and
+    /// writers.
+    fn acquire(&self, exclusive: bool) -> Result<LockGuard, TenantStoreError> {
         let path = self.lock_path();
         let started = Instant::now();
         let slice = Duration::from_millis(u64::saturating_from(LOCK_SLICE_MS));
@@ -129,50 +168,52 @@ impl TenantStore {
             // Read before the claim, so a release that lands between a refused
             // claim and the wait below is seen as a change and retried at once.
             let seen = *lock(&RELEASES.generation);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut claim) => {
-                    let seq = self.inner.holder_seq.fetch_add(1, Ordering::SeqCst);
-                    let holder = format!("{}-{seq}", now_nanos());
-                    if let Err(error) = claim.write_all(holder.as_bytes()) {
-                        drop(std::fs::remove_file(&path));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(TenantStoreError::storage)?;
+            let claimed = match if exclusive {
+                file.try_lock()
+            } else {
+                file.try_lock_shared()
+            } {
+                Ok(()) => true,
+                Err(error) => {
+                    let error = std::io::Error::from(error);
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        false
+                    } else {
                         lgwks_std::trace::warn!(
                             path = %path.display(),
                             %error,
-                            "tenant_store: lock claim write refused; released the claim"
+                            "tenant_store: lock claim refused by the device"
                         );
                         return Err(TenantStoreError::storage(error));
                     }
-                    return Ok(LockGuard { path });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if lock_is_stale(&path)? {
-                        drop(std::fs::remove_file(&path));
-                    } else if started.elapsed() >= self.inner.busy_wait {
-                        let waited = started.elapsed();
-                        lgwks_std::trace::warn!(
-                            path = %path.display(),
-                            waited_ms = waited.as_millis(),
-                            "tenant_store: lock stayed held past the busy bound; refusing as busy"
-                        );
-                        return Err(TenantStoreError::Busy { waited });
-                    } else {
-                        // A release in this process wakes the wait at once. A
-                        // release by another process sends no signal here, so the
-                        // slice bounds how late that one is noticed.
-                        let held = lock(&RELEASES.generation);
-                        if *held == seen {
-                            drop(wait_timeout(&RELEASES.released, held, slice));
-                        }
-                    }
-                }
-                Err(error) => {
-                    lgwks_std::trace::warn!(
-                        path = %path.display(),
-                        %error,
-                        "tenant_store: lock claim refused by the device"
-                    );
-                    return Err(TenantStoreError::storage(error));
-                }
+            };
+            if claimed {
+                return Ok(LockGuard { _file: file });
+            }
+            drop(file);
+            if started.elapsed() >= self.inner.busy_wait {
+                let waited = started.elapsed();
+                lgwks_std::trace::warn!(
+                    path = %path.display(),
+                    waited_ms = waited.as_millis(),
+                    "tenant_store: lock stayed held past the busy bound; refusing as busy"
+                );
+                return Err(TenantStoreError::Busy { waited });
+            }
+            // A release in this process wakes the wait at once. A release by
+            // another process sends no signal here, so the slice bounds how
+            // late that one is noticed.
+            let held = lock(&RELEASES.generation);
+            if *held == seen {
+                drop(wait_timeout(&RELEASES.released, held, slice));
             }
         }
     }
@@ -184,13 +225,13 @@ impl TenantStore {
     ///
     /// # Errors
     ///
-    /// Whatever the device, the lock, the replay or the mutation reports.
-    /// A refused mutation writes nothing.
+    /// Whatever the device, the lock, the snapshot, the replay or the mutation
+    /// reports. A refused mutation writes nothing.
     fn transact<T>(
         &self,
         apply: impl FnOnce(&mut Index) -> Result<(Option<Stored>, T), TenantStoreError>,
     ) -> Result<T, TenantStoreError> {
-        let _guard = self.acquire()?;
+        let _guard = self.acquire_exclusive()?;
         let mut file = lock_file(&self.inner.file);
         let mut index = lock_index(&self.inner.index);
         refresh(&mut file, &mut index)?;
@@ -205,16 +246,36 @@ impl TenantStore {
             index.tail = head;
             index.frames = index.frames.saturating_add(1);
             fold(&mut index, &stored);
+            self.maybe_snapshot(&index)?;
         }
         Ok(answer)
     }
 
+    /// Rewrite the snapshot when the index moved far enough past it.
+    ///
+    /// Best effort beside the commit it follows: the commit is already synced
+    /// and folded, so a snapshot the device refuses only costs the next open
+    /// its shortcut — which is what the interval bounds — and the refusal is
+    /// reported rather than hidden.
+    fn maybe_snapshot(&self, index: &Index) -> Result<(), TenantStoreError> {
+        let snapshotted = self.inner.snapshot_frames.load(Ordering::SeqCst);
+        if index.frames.saturating_sub(snapshotted) < SNAPSHOT_INTERVAL_FRAMES {
+            return Ok(());
+        }
+        snapshot::write(&self.inner.dir, index)?;
+        self.inner
+            .snapshot_frames
+            .store(index.frames, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Refresh the index past committed frames, then read through `read`.
     ///
-    /// Reads take the lock for the same reason writes do: without it a read
-    /// could answer from an index another coordinator has already moved past.
-    /// The lock is held for a memory probe, never across an `await` — this
-    /// surface is synchronous.
+    /// Reads take the shared half of the host lock: they run beside each
+    /// other and beside no writer, but never behind another reader. A refresh
+    /// only appends frames another coordinator committed, so two readers
+    /// refreshing at once fold the same tail and agree. The lock is held for a
+    /// memory probe, never across an `await` — this surface is synchronous.
     ///
     /// # Errors
     ///
@@ -223,7 +284,7 @@ impl TenantStore {
         &self,
         read: impl FnOnce(&Index) -> Result<T, TenantStoreError>,
     ) -> Result<T, TenantStoreError> {
-        let _guard = self.acquire()?;
+        let _guard = self.acquire_shared()?;
         let mut file = lock_file(&self.inner.file);
         let mut index = lock_index(&self.inner.index);
         refresh(&mut file, &mut index)?;

@@ -347,7 +347,8 @@ pub(super) async fn feed_stdin(
         }
         drop(pipe);
     };
-    drop(abandon.run_until_cancelled(write).await);
+    // The feed either wrote everything or was abandoned; either way the pipe is closed by the drop below.
+    let _written = abandon.run_until_cancelled(write).await;
 }
 
 /// Read a captured pipe to EOF, retaining at most `limit` bytes and counting

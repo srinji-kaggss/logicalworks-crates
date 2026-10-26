@@ -150,7 +150,7 @@
 "crates/lgwks-bot/src/tenant_store.rs" = 3
 "crates/lgwks-bot/src/tenant_store/error.rs" = 1
 "crates/lgwks-bot/src/tenant_store/rows.rs" = 27
-"crates/lgwks-bot/src/tenant_store/store.rs" = 15
+"crates/lgwks-bot/src/tenant_store/store.rs" = 14
 "crates/lgwks-bot/src/verb.rs" = 8
 "crates/lgwks-deps/src/audit.rs" = 2
 "crates/lgwks-deps/src/catalog.rs" = 13
