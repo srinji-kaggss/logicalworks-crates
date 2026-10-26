@@ -253,6 +253,13 @@ pub enum Refusal {
         /// Measured trigger that would admit the crate.
         trigger: String,
     },
+    /// An approved edge with no lifecycle mortgage: the register names the
+    /// edge, but no row says what replaces it, what retires it, or when it
+    /// was last reviewed.
+    MissingLifecycle {
+        /// External package with no mortgage row.
+        krate: String,
+    },
     /// An upstream pin or sealed exception passed its expiry date: renew the
     /// row with a review or remove the pin, but do not ship the excuse.
     PatchExpired {
@@ -493,6 +500,12 @@ impl fmt::Display for Refusal {
                 "{krate} is approved but the deferral catalog still defers it: fix the \
                  estate owner {owner} first, and admit it only when {trigger}"
             ),
+            Self::MissingLifecycle { ref krate } => write!(
+                formatter,
+                "{krate} is approved but the lifecycle ledger names no mortgage for it: \
+                 record its replacement, removal trigger and last review in \
+                 contract/LIFECYCLE.toml"
+            ),
             Self::PatchExpired {
                 ref krate,
                 ref expiry,
@@ -547,6 +560,7 @@ impl Refusal {
             | Self::VendorTierConflict { ref krate, .. }
             | Self::UnknownSurface { ref krate, .. }
             | Self::DeferredAdmitted { ref krate, .. }
+            | Self::MissingLifecycle { ref krate, .. }
             | Self::PatchExpired { ref krate, .. }
             | Self::ProviderBlocked { ref krate, .. } => krate,
             Self::AdoptionModeRefusals { .. } | Self::LicensePolicyUndeclared { .. } => "<policy>",
