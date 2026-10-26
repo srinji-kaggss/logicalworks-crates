@@ -409,6 +409,14 @@ jobs:
     # compiled it again. So the run after an edit is cancelled at the bound, and
     # the next one, with no other source built here between them, is the job's
     # measurement.
+    #
+    # One job, not two shards. The two shards queued on lwc-5 behind each other
+    # and behind the lgwks-bot feature matrix: on run 40289939847 the second shard
+    # ran 08:06:00-08:08:22 (its compile and tests 1 m 53 s), the matrix took the
+    # instance until 08:09:25, and the first shard ran its 28 s of tests from
+    # 08:09:35, so the saturation wave that needs this job started at 08:10:30
+    # and the run's wall was 8 m 23 s. The whole suite in one job is that one
+    # compile plus both shards' tests, about 2 m 25 s.
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -416,9 +424,6 @@ jobs:
       matrix:
         include:
           - instance: lwc-5
-            partition: count:1/2
-          - instance: lwc-5
-            partition: count:2/2
     # One job, so the full feature set is compiled once (see the header).
     env:
       PARTITION: ${{ matrix.partition }}
@@ -541,7 +546,14 @@ jobs:
     # checkout, and the 5 minutes of a job start when its `needs` are met, not
     # when the run does. The other jobs do not wait: the matrices, the Linux legs
     # and the lints run as before.
-    needs: [build, tests_bot_full, tests_nodefault]
+    #
+    # The wave holds the tests, not the compile. On run 40289939847 the legs
+    # compiled for 1 m 35 s (lwc-2) and 2 m 44 s (lwc-12) after the wave ended
+    # and ran their tests for 85 s and 21 s, so the compile alone put the run
+    # past 300 s. `tests_bot_saturation_build` compiles the same command with
+    # `--no-run` on the same instance at the start of the run, and this job finds
+    # its binaries built.
+    needs: [build, tests_bot_full, tests_nodefault, tests_bot_saturation_build]
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
     timeout-minutes: 5
     strategy:
@@ -597,6 +609,44 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
+
+  # The saturation legs' compile, in the first wave. The same command as the leg,
+  # with `--no-run`, on the same instance and so into the same target directory:
+  # the leg after the wave then compiles nothing (see `tests_bot_saturation`).
+  # Compiling is not the kernel-bound process-start work #272 moved into a second
+  # wave, so it runs beside the suites.
+  tests_bot_saturation_build:
+    name: Saturation build (lgwks-bot full) (${{ matrix.tiers }})
+    runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tiers: "10000"
+            instance: lwc-2
+            filter: "test(=saturation_r32_tier_10000) | (binary(sim_review_path) & not test(saturation_r32_tier))"
+          - tiers: "100 and 1000"
+            instance: lwc-12
+            binaries: "--test sim_review_path --test it"
+            filter: "test(=saturation_r32_tier_100) | test(=saturation_r32_tier_1000) | (package(lgwks_bot) & binary(it) & test(/^sim_scale::/))"
+    env:
+      RUSTC_WORKSPACE_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.1"
+          nextest: "true"
+          test-share: "8"
+          build-share: "2"
+          defer: "0"
+      - name: Build lgwks-bot saturation tiers
+        env:
+          SATURATION_BINARIES: ${{ matrix.binaries }}
+          SATURATION_FILTER: ${{ matrix.filter }}
+        run: cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E "${SATURATION_FILTER:-binary(sim_review_path)}" --no-run
 
   acceptance_receipts:
     # The receipt, built from the JUnit reports the shards already wrote. The
@@ -1381,9 +1431,12 @@ jobs:
   # tests of `sim_review_path` (42 simulations and the three tiers) that the full
   # job leaves to it on macOS, so it is part of the row. A cancelled or skipped
   # job is not `success`, so it fails this row too.
+  #
+  # The sixth input is the run's wall (the Director, 2026-10-26: CI fails when it
+  # is over 5 minutes, whatever the excuse), so the required row fails with it.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, workspace_tail, tests_bot_full, tests_bot_saturation, tests_nodefault]
+    needs: [build, workspace_tail, tests_bot_full, tests_bot_saturation, tests_nodefault, ci_wall]
     if: ${{ always() }}
     # On an instance, not a hosted runner: this row starts when the saturation
     # job ends and is the run's last link beside the receipts, and a hosted
@@ -1400,9 +1453,29 @@ jobs:
           BOT_FULL: ${{ needs.tests_bot_full.result }}
           BOT_SATURATION: ${{ needs.tests_bot_saturation.result }}
           BOT_NODEFAULT: ${{ needs.tests_nodefault.result }}
+          WALL: ${{ needs.ci_wall.result }}
         run: |
-          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}"
-          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success
+          echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full ${BOT_FULL}, lgwks_bot saturation ${BOT_SATURATION}, lgwks_bot no default ${BOT_NODEFAULT}, run wall ${WALL}"
+          test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_SATURATION}" = success && test "${BOT_NODEFAULT}" = success && test "${WALL}" = success
+
+  # The Director, 2026-10-26: "U WILL ADD A GLOBAL RULE OF CI FAILING IF OVER 5
+  # MINUTES. AND I DO NOT CARE WHAT FUCKING EXCUSE THERE IS". GitHub has no
+  # run-level timeout (`timeout-minutes` bounds one job), and no context holds a
+  # run's duration, so this row reads the attempt's own start from the runs API
+  # once every other job has ended, and fails past 300 s. The required row above
+  # depends on it, so the ruleset refuses a merge whose run took longer.
+  ci_wall:
+    name: CI under five minutes
+    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, tests_bot_saturation_build, tests_bot_saturation, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
+    if: ${{ always() }}
+    runs-on: [self-hosted, macOS, ARM64, lwc]
+    timeout-minutes: 5
+    steps:
+      - name: Run wall is at most 300 seconds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at) && wall=$(( $(date -u +%s) - $(date -j -u -f %Y-%m-%dT%H:%M:%SZ "$started" +%s) )) && echo "run wall ${wall} s since ${started}, limit 300 s" && test "$wall" -le 300
 
   # INV-STD-UNSAFE-1: the Miri proof, on every change. The two `unsafe` modules
   # carry a function-pointer seam each so the interpreter can drive the exact

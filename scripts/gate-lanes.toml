@@ -799,11 +799,35 @@ reason = "dedicated PR check row whose job name is the ruleset's required Clippy
 # The ruleset also requires "Build and workspace tests". The workspace job runs
 # every test but lgwks_bot's, and the lgwks_bot jobs (full, saturation, no default
 # features) run those; this row carries the required name and passes only when
-# all five passed (the fifth is the workspace job's tail: evidence, doc tests, smoke).
+# all five passed (the fifth is the workspace job's tail: evidence, doc tests, smoke)
+# and the run's wall was at most 300 s (`ci-wall`).
 [[lane]]
 id = "build-verdict"
 surfaces = "ci"
 required = true
-command = "test \"${BUILD}\" = success && test \"${TAIL}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success"
+command = "test \"${BUILD}\" = success && test \"${TAIL}\" = success && test \"${BOT_FULL}\" = success && test \"${BOT_SATURATION}\" = success && test \"${BOT_NODEFAULT}\" = success && test \"${WALL}\" = success"
 ci_step = "Every workspace test job passed"
 reason = "dedicated PR check row whose job name is the ruleset's required Build and workspace tests"
+
+# The Director, 2026-10-26: CI fails when a run is over 5 minutes, whatever the
+# excuse. No GitHub setting bounds a run, so the last row reads the attempt's
+# start from the runs API and fails past 300 s; `build-verdict` requires it.
+[[lane]]
+id = "ci-wall"
+surfaces = "ci"
+required = true
+command = "started=$(gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT\" --jq .run_started_at) && wall=$(( $(date -u +%s) - $(date -j -u -f %Y-%m-%dT%H:%M:%SZ \"$started\" +%s) )) && echo \"run wall ${wall} s since ${started}, limit 300 s\" && test \"$wall\" -le 300"
+ci_step = "Run wall is at most 300 seconds"
+reason = "a run's wall clock exists only in CI"
+
+# The saturation legs' compile, moved into the first wave on the instance that
+# runs the leg, so the leg after the wave compiles nothing (run 40289939847:
+# 1 m 35 s and 2 m 44 s of compile after the wave put the run at 8 m 23 s).
+[[lane]]
+id = "tests-bot-saturation-build"
+group = "bot-full"
+surfaces = "ci"
+required = true
+command = "cargo nextest run -p lgwks_bot --locked --features full --profile ci --ignore-default-filter ${SATURATION_BINARIES:---test sim_review_path} -E \"${SATURATION_FILTER:-binary(sim_review_path)}\" --no-run"
+ci_step = "Build lgwks-bot saturation tiers"
+reason = "primes a CI instance's target directory; a local run of tests-bot-saturation compiles in place"
