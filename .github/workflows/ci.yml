@@ -1051,6 +1051,13 @@ jobs:
   # android and ios leg shared lwc-7, and the no-default suite started 63 s late
   # on main runs 39087783845 and the pull request run 39087447996 before it, so it
   # is on lwc-6, which holds no job.
+  #
+  # lwc-4 holds the second workspace shard, so these two legs left it. On run
+  # 40311162932 lwc-4 ran the shard, then both legs, ending at 4 m 09 s; on run
+  # 40318746945 the musl leg took lwc-4 first and the shard queued behind it.
+  # lwc-13 is done with its WASI and deps legs by 1 m 22 s, and lwc-9 with the
+  # Linux bot-full suite by 2 m 12 s (run 40311162932), and neither suite is on
+  # the critical path after that.
   target-matrix:
     name: Target matrix (${{ matrix.targets }})
     runs-on: [self-hosted, macOS, ARM64, lwc, "${{ matrix.instance }}"]
@@ -1060,9 +1067,9 @@ jobs:
       matrix:
         include:
           - targets: aarch64-unknown-linux-gnu
-            instance: lwc-4
+            instance: lwc-9
           - targets: x86_64-unknown-linux-musl wasm32-wasip1
-            instance: lwc-4
+            instance: lwc-13
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-6
     steps:
