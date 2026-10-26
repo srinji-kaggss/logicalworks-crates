@@ -7,14 +7,17 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 
+use super::policy::{HostLease, host_pool};
 use super::trail::Site;
 use super::{FlowError, MAX_IN_FLIGHT, POLL_BUDGET, Scope};
 
 // ── each ────────────────────────────────────────────────────────────────────
 
 /// Run `body` once per item, at most `limit` at a time, and return the values
-/// in input order. With no `limit`, the root scope's policy sizes the fan-out
-/// to the machine (64 per available core).
+/// in input order. With no `limit`, the width is the process-wide host pool —
+/// 64 bodies per available core, shared by every root scope in the process and
+/// capped at 65,536 outstanding — so concurrent roots divide the allowance
+/// instead of each taking the machine's width for itself.
 ///
 /// - **Bounded.** At most `limit` bodies exist at once. Items are drawn from the
 ///   iterator only as slots free, so an iterator of a million items holds
@@ -117,11 +120,15 @@ where
     // the declared ceiling — which is a decision about capacity rather than a
     // value this call failed to produce. A caller's own limit is bounded by the
     // same ceiling, so neither path can ask for more bodies than the crate runs.
+    // The absent-limit width is drawn from the process-wide host pool as bodies
+    // are admitted, so concurrent roots divide the allowance; a written limit is
+    // the author's declared bound and keeps its own width.
     let declared = match limit {
         Some(caller_limit) => caller_limit,
         None => scope.policy().fan_out(),
     };
     let width = declared.get().min(MAX_IN_FLIGHT);
+    let lease = limit.is_none().then(|| HostLease::take(host_pool()));
     let wakes = Arc::new(Wakes::new(width));
     let wakers: Vec<Waker> = (0..width)
         .map(|position| {
@@ -136,6 +143,7 @@ where
         free: (0..width).rev().collect(),
         results: Vec::new(),
         exhausted: false,
+        lease,
     };
     let mut inputs = items.into_iter();
     let mut stopped = Box::pin(here.token().cancelled_owned());
@@ -201,7 +209,8 @@ struct Slot<Fut> {
     future: Pin<Box<Fut>>,
 }
 
-/// The state [`each`] drives: slots, the free list, and the ordered outputs.
+/// The state [`each`] drives: slots, the free list, the ordered outputs, and
+/// the host-pool permits this fan-out holds when it runs without a limit.
 struct Fan<T, Fut> {
     /// `limit` slots; `None` is free.
     slots: Vec<Option<Slot<Fut>>>,
@@ -211,10 +220,20 @@ struct Fan<T, Fut> {
     results: Vec<Option<T>>,
     /// Whether the input iterator has ended.
     exhausted: bool,
+    /// The host-pool permits held, or `None` under a written limit.
+    lease: Option<HostLease<'static>>,
 }
 
 impl<T, Fut: Future<Output = Result<T, FlowError>>> Fan<T, Fut> {
     /// Start bodies for new items while a slot is free and input remains.
+    ///
+    /// Under no written limit each admission also holds one host-pool permit,
+    /// and a pool with none left stops admission for this round without
+    /// consuming input: the admitted bodies still run, their completions wake
+    /// this task, and the next round admits again. With no body of its own
+    /// running a fan-out starts one without a permit, because nothing else
+    /// would ever wake it; so a starved fan-out waits on its own bodies rather
+    /// than parking for good, and a nested unbounded `each` always finishes.
     fn admit<I, F>(
         &mut self,
         inputs: &mut I,
@@ -227,10 +246,20 @@ impl<T, Fut: Future<Output = Result<T, FlowError>>> Fan<T, Fut> {
         F: Fn(Scope, I::Item) -> Fut,
     {
         while !self.exhausted {
+            let running = self.running();
             let Some(position) = self.free.pop() else {
                 break;
             };
+            if let Some(lease) = self.lease.as_mut()
+                && !lease.admit(running)
+            {
+                self.free.push(position);
+                break;
+            }
             let Some(item) = inputs.next() else {
+                if let Some(lease) = self.lease.as_mut() {
+                    lease.settle(running);
+                }
                 self.free.push(position);
                 self.exhausted = true;
                 break;
@@ -266,6 +295,10 @@ impl<T, Fut: Future<Output = Result<T, FlowError>>> Fan<T, Fut> {
         let at = Arc::clone(&slot.at);
         *entry = None;
         self.free.push(position);
+        let running = self.running();
+        if let Some(lease) = self.lease.as_mut() {
+            lease.settle(running);
+        }
         let value = outcome.map_err(|error| error.located_at(&at))?;
         if let Some(output) = self.results.get_mut(index) {
             *output = Some(value);
@@ -273,10 +306,19 @@ impl<T, Fut: Future<Output = Result<T, FlowError>>> Fan<T, Fut> {
         Ok(())
     }
 
-    /// Drop every body still running and admit nothing more.
+    /// Bodies in flight now: the slots not on the free list.
+    fn running(&self) -> usize {
+        self.slots.len().saturating_sub(self.free.len())
+    }
+
+    /// Drop every body still running and admit nothing more, handing back
+    /// every host-pool permit still held.
     fn clear(&mut self) {
         for slot in &mut self.slots {
             *slot = None;
+        }
+        if let Some(lease) = self.lease.as_mut() {
+            lease.release_all();
         }
         self.exhausted = true;
     }

@@ -81,7 +81,8 @@ impl<E: std::error::Error + 'static> std::error::Error for FanOutError<E> {
 /// carrying the item's own error.
 ///
 /// With no [`at_most`](Self::at_most) the bound is the runtime's: 64 bodies per
-/// available core, the same as [`each`] with no limit.
+/// available core, drawn from the process-wide host pool every unbounded
+/// `each` shares, the same as [`each`] with no limit.
 #[must_use = "a fan-out does nothing until `run` is awaited"]
 #[derive(Debug)]
 pub struct FanOut<I> {
