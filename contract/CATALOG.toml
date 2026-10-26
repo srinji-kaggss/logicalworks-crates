@@ -424,6 +424,28 @@ words = ["zoned time", "timezone", "dst arithmetic", "jiff", "calendar arithmeti
 replaces = ["jiff as a direct edge", "chrono as a direct edge for zoned work"]
 
 [[capability]]
+name = "durable sqlite"
+path = "lgwks_deps::sqlite"
+file = "crates/lgwks-deps/src/sqlite.rs"
+crate = "lgwks_deps"
+feature = "sqlite"
+default = "off"
+reason = "One pinned SQLite with the estate's opened-connection defaults (WAL, synchronous FULL, busy timeout, user_version migrations); the bundled C build is native-only. One flag: --features sqlite (ADR 0003)."
+words = ["sqlite", "rusqlite", "durable store", "durable sqlite", "wal", "user_version", "migration"]
+replaces = ["rusqlite as a direct edge", "libsqlite3-sys as a direct edge", "each service picking its own SQLite crate"]
+
+[[capability]]
+name = "durable sqlite engine"
+path = "lgwks_deps::storefront::rusqlite"
+file = "crates/lgwks-deps/src/lib.rs"
+crate = "lgwks_deps"
+feature = "sqlite"
+default = "off"
+reason = "The engine the durable store opens: reached only through the storefront, never declared directly. Same flag as the defaults above: --features sqlite (ADR 0003)."
+words = ["rusqlite", "sqlite engine", "storefront rusqlite"]
+replaces = ["rusqlite as a direct edge"]
+
+[[capability]]
 name = "documentation governance"
 file = "docs/adr/README.md"
 crate = "repository"

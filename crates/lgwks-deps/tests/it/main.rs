@@ -71,4 +71,6 @@ mod sim_policy_properties;
 mod sim_register_policy;
 mod sim_seed_draws;
 mod sim_vendor_coverage;
+#[cfg(feature = "sqlite")]
+mod sqlite_defaults;
 mod workstream_c;

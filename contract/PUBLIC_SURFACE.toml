@@ -91,7 +91,7 @@
 "crates/lgwks-bot/src/rt/io.rs" = 1
 "crates/lgwks-bot/src/rt/mod.rs" = 14
 "crates/lgwks-bot/src/rt/net.rs" = 6
-"crates/lgwks-bot/src/rt/process.rs" = 46
+"crates/lgwks-bot/src/rt/process.rs" = 55
 "crates/lgwks-bot/src/rt/process/confine.rs" = 14
 "crates/lgwks-bot/src/rt/process/frames.rs" = 17
 "crates/lgwks-bot/src/rt/runtime.rs" = 17
@@ -150,7 +150,7 @@
 "crates/lgwks-bot/src/tenant_store.rs" = 3
 "crates/lgwks-bot/src/tenant_store/error.rs" = 1
 "crates/lgwks-bot/src/tenant_store/rows.rs" = 27
-"crates/lgwks-bot/src/tenant_store/store.rs" = 14
+"crates/lgwks-bot/src/tenant_store/store.rs" = 15
 "crates/lgwks-bot/src/verb.rs" = 8
 "crates/lgwks-deps/src/audit.rs" = 2
 "crates/lgwks-deps/src/catalog.rs" = 13
@@ -159,7 +159,7 @@
 "crates/lgwks-deps/src/invariants/binding.rs" = 1
 "crates/lgwks-deps/src/invariants/resolve.rs" = 2
 "crates/lgwks-deps/src/invariants/verdict.rs" = 16
-"crates/lgwks-deps/src/lib.rs" = 26
+"crates/lgwks-deps/src/lib.rs" = 28
 "crates/lgwks-deps/src/lock.rs" = 9
 "crates/lgwks-deps/src/metadata.rs" = 2
 "crates/lgwks-deps/src/metadata/capture.rs" = 2
@@ -167,6 +167,7 @@
 "crates/lgwks-deps/src/metadata/edges.rs" = 1
 "crates/lgwks-deps/src/metadata/types.rs" = 16
 "crates/lgwks-deps/src/refusal.rs" = 4
+"crates/lgwks-deps/src/sqlite.rs" = 12
 "crates/lgwks-deps/src/vendor.rs" = 11
 "crates/lgwks-macros/src/emit.rs" = 1
 "crates/lgwks-macros/src/lib.rs" = 1

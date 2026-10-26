@@ -113,6 +113,14 @@ bevy-state = ["bevy-ecs", "dep:bevy_state"]
 # until ELIMINATE lands in lgwks_std::time. Default-off; lgwks_std::time stays
 # the UTC RFC 3339 core.
 time-jiff = ["dep:jiff"]
+# Durable state (SQLite). One pinned engine for every estate service that
+# keeps state across runs, opened with the estate's defaults (WAL readers
+# beside a writer, kernel-released locks, a busy timeout, `user_version`
+# migrations) through `lgwks_deps::sqlite`. Default-off: the bundled C build
+# is native-only and has no wasm surface, like every other storefront group
+# (ADR 0003). Consumers opt in via --features sqlite and declare no SQLite
+# crate of their own (#696, #700).
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 # The foundation this gate is built on, named rather than inherited: `core` is
@@ -156,6 +164,11 @@ tokenizers = { version = "0.23", optional = true }
 # default features so the no-flag build stays portable. Consumers opt in via
 # --features time-jiff and reach it only through lgwks_deps::storefront::jiff.
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo", "tzdb-concatenated"], optional = true }
+# Durable state: the one SQLite every estate service opens. Pinned exactly
+# (estate issues #696, #700), bundled so no system library is needed, and no
+# default features so the no-flag build stays portable: the engine is
+# selected, never the crate.
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled"], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"], optional = true }

@@ -11,6 +11,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use lgwks_std::random;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[path = "support/target_dir.rs"]
@@ -21,6 +23,37 @@ use target_dir::workspace_target_dir;
 fn cargo_check(manifest: &Path, args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
     let output = Command::new(env!("CARGO"))
         .arg("check")
+        .arg("--locked")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(args)
+        .env("CARGO_TARGET_DIR", workspace_target_dir()?)
+        .output()?;
+    Ok(output)
+}
+
+/// Run the `lgwks-deps` binary itself: the doctor under test, not a fixture
+/// consumer. The binary is the crate's default run, and the `sqlite` command
+/// rides the `sqlite` feature, so both are named outright.
+fn cargo_run_bin(manifest: &Path, args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
+    let mut full: Vec<&str> = vec!["--features", "sqlite", "--bin", "lgwks-deps", "--"];
+    full.extend(args.iter().copied());
+    cargo_run(manifest, &full)
+}
+
+/// Names scratch stores for the sqlite doctor test with the estate's entropy
+/// source: the OS never reuses a nonce the way it reuses a process id, so two
+/// runs never share a file without reaching for a clock.
+fn doctor_scratch() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let nonce = lgwks_std::hex::encode(random::bytes::<8>()?);
+    Ok(std::env::temp_dir().join(format!("lgwks-deps-sqlite-{nonce}")))
+}
+
+/// Run one storefront example to completion: a compile proves the facade
+/// resolves, and only a run proves the journey it sells.
+fn cargo_run(manifest: &Path, args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
+    let output = Command::new(env!("CARGO"))
+        .arg("run")
         .arg("--locked")
         .arg("--manifest-path")
         .arg(manifest)
@@ -168,9 +201,25 @@ storefront_families! {
     storefront_tokio_full_compiles_alone => ("tokio-full", "tokio_full"),
     storefront_ml_candle_compiles_alone => ("ml-candle", "ml_candle"),
     storefront_ml_tokenizers_compiles_alone => ("ml-tokenizers", "ml_tokenizers"),
+    storefront_sqlite_compiles_alone => ("sqlite", "sqlite"),
     storefront_gpui_compiles_alone => ("gpui", "gpui"),
     #[cfg(target_os = "macos")]
     storefront_ml_candle_metal_compiles_alone => ("ml-candle-metal", "ml_candle_metal"),
+}
+
+/// The sqlite journey runs, not just compiles: open with the estate defaults,
+/// migrate once, reopen and read back, refuse a downgrade. The example exits
+/// non-zero on the first refusal, so the status is the verdict.
+#[test]
+fn storefront_sqlite_runs_its_journey() -> TestResult {
+    let manifest = fixtures().join("storefront-matrix/Cargo.toml");
+    let output = cargo_run(&manifest, &["--features", "sqlite", "--example", "sqlite"])?;
+    assert!(
+        output.status.success(),
+        "sqlite journey failed:\n{}",
+        output_text(&output)
+    );
+    Ok(())
 }
 
 #[test]
@@ -189,6 +238,7 @@ fn the_storefront_matrix_default_graph_carries_no_optional_family() -> TestResul
         "gpui v",
         "candle-core v",
         "tokenizers v",
+        "rusqlite v",
         "tokio v",
         "nix v",
     ] {
@@ -197,5 +247,69 @@ fn the_storefront_matrix_default_graph_carries_no_optional_family() -> TestResul
             "default-features=false consumer acquired {optional_package}:\n{tree_text}"
         );
     }
+    Ok(())
+}
+
+/// The `sqlite` doctor reports a store and migrates it: open with the estate
+/// defaults, report the version the file carries, run one statement batch to
+/// version 1, and report the recorded version on a reopen. The scratch store
+/// is named with the estate's entropy source, and its removal is best-effort.
+#[test]
+fn storefront_sqlite_doctor_reports_and_migrates() -> TestResult {
+    let dir = doctor_scratch()?;
+    std::fs::create_dir_all(&dir)?;
+    let store = dir.join("store.sqlite");
+    let store_text = store.display().to_string();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+
+    let first = cargo_run_bin(&manifest, &["sqlite", store_text.as_str()])?;
+    assert!(
+        first.status.success(),
+        "sqlite report failed:\n{}",
+        output_text(&first)
+    );
+    let first_text = output_text(&first);
+    assert!(
+        first_text.contains("user_version=0"),
+        "sqlite report hid user_version=0:\n{first_text}"
+    );
+    assert!(
+        first_text.contains("journal_mode=wal"),
+        "sqlite report hid journal_mode=wal:\n{first_text}"
+    );
+
+    let migrated = cargo_run_bin(
+        &manifest,
+        &[
+            "sqlite",
+            store_text.as_str(),
+            "1",
+            "CREATE TABLE t(k TEXT PRIMARY KEY);",
+        ],
+    )?;
+    assert!(
+        migrated.status.success(),
+        "sqlite migrate failed:\n{}",
+        output_text(&migrated)
+    );
+    let migrated_text = output_text(&migrated);
+    assert!(
+        migrated_text.contains("user_version=1"),
+        "sqlite migrate hid user_version=1:\n{migrated_text}"
+    );
+
+    let again = cargo_run_bin(&manifest, &["sqlite", store_text.as_str()])?;
+    assert!(
+        again.status.success(),
+        "sqlite re-report failed:\n{}",
+        output_text(&again)
+    );
+    let again_text = output_text(&again);
+    assert!(
+        again_text.contains("user_version=1"),
+        "sqlite re-report hid user_version=1:\n{again_text}"
+    );
+
+    drop(std::fs::remove_dir_all(&dir));
     Ok(())
 }

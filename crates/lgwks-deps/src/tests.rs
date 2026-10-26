@@ -733,6 +733,7 @@ fn deps_are_approved_leaves() -> TestResult {
                 "candle-transformers",
                 "tokenizers",
                 "jiff",
+                "rusqlite",
             ],
             "unexpected gate dependencies: {declared:?}"
         );

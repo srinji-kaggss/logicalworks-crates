@@ -114,6 +114,8 @@
 //! | `ml-candle` | Candle tensors, layers and the transformer registry |
 //! | `ml-candle-metal` | `ml-candle` plus Candle's Metal backend (macOS) |
 //! | `ml-tokenizers` | the Hugging Face subword tokenizer |
+//! | `time-jiff` | interim zoned time until ELIMINATE lands in `lgwks_std::time` |
+//! | `sqlite` | the one durable SQLite, opened with the estate's defaults |
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
@@ -132,6 +134,15 @@ pub mod invariants;
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
+/// The estate's one durable store: SQLite opened one way, migrated by version.
+///
+/// Behind the `sqlite` storefront feature, so a consumer that needs state
+/// across runs selects it instead of declaring its own SQLite crate (#696).
+/// The engine itself travels through the storefront; this module is the
+/// opinion about how it is opened.
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub mod sqlite;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 #[doc(hidden)]
 pub mod vendor;
@@ -265,6 +276,17 @@ pub use tokenizers;
 #[doc(hidden)]
 pub use jiff;
 
+/// The one authored SQLite edge, re-exported for the storefront.
+///
+/// `lgwks_deps` owns this edge so no other crate declares `rusqlite` directly
+/// (`INV-DEP-EDGE-OWNED`). A service that needs durable state enables the
+/// `sqlite` storefront feature and opens it through [`sqlite`], which carries
+/// the estate's opened-connection defaults; reaching the engine without them
+/// is how every service invents its own pragma set (#696).
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub use rusqlite;
+
 /// The supported storefront: enable a feature and reach its engine here.
 ///
 /// Every path below is one audited edge this crate owns, so a consumer never
@@ -285,6 +307,10 @@ pub mod storefront {
     pub use crate::gpui;
     #[cfg(feature = "time-jiff")]
     pub use crate::jiff;
+    #[cfg(feature = "sqlite")]
+    pub use crate::rusqlite;
+    #[cfg(feature = "sqlite")]
+    pub use crate::sqlite;
     #[cfg(feature = "ml-tokenizers")]
     pub use crate::tokenizers;
     #[cfg(feature = "tokio")]

@@ -13,6 +13,7 @@ gpui = ["lgwks_deps/gpui"]
 ml-candle = ["lgwks_deps/ml-candle"]
 ml-candle-metal = ["lgwks_deps/ml-candle-metal"]
 ml-tokenizers = ["lgwks_deps/ml-tokenizers"]
+sqlite = ["lgwks_deps/sqlite"]
 all-storefront = [
     "appcui",
     "bevy-ecs",
@@ -20,6 +21,7 @@ all-storefront = [
     "ml-candle",
     "ml-candle-metal",
     "ml-tokenizers",
+    "sqlite",
     "tokio-base",
     "tokio-time",
     "tokio-sync",
@@ -63,6 +65,9 @@ required-features = ["ml-candle-metal"]
 [[example]]
 name = "ml_tokenizers"
 required-features = ["ml-tokenizers"]
+[[example]]
+name = "sqlite"
+required-features = ["sqlite"]
 [[example]]
 name = "tokio_base"
 required-features = ["tokio-base"]
