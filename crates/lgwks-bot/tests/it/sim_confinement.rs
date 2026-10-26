@@ -655,11 +655,22 @@ fn a_deny_beneath_lane_cannot_read_its_denied_subtree() -> TestResult {
     let runtime = Runtime::new()?;
     let mut supervisor = Supervisor::new(1);
 
-    // The denied read fails inside the confinement.
+    // The denied read fails inside the confinement. A Linux host that refuses
+    // every mount namespace (a container with neither `CAP_SYS_ADMIN` nor user
+    // namespaces) refuses the spawn as unsupported before the fork instead:
+    // fail-closed, so nothing ran, and that is the whole assertion there.
     let mut denied_spec = ProcessSpec::new("/bin/cat");
     denied_spec.arg(denied.join("secret.txt"));
     denied_spec.confinement(Confinement::deny_beneath([&denied]));
-    let denied_run = runtime.block_on(supervisor.run_process(&denied_spec))?;
+    let denied_run = match runtime.block_on(supervisor.run_process(&denied_spec)) {
+        Ok(run) => run,
+        Err(lgwks_bot::rt::process::ProcessRunError::NotStarted { source })
+            if cfg!(target_os = "linux") && source.kind() == std::io::ErrorKind::Unsupported =>
+        {
+            return Ok(());
+        }
+        Err(other) => return Err(other.into()),
+    };
     assert_ne!(
         denied_run.exit_code(),
         Some(0),

@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
 
-#[cfg(all(not(any(unix, windows)), feature = "process"))]
+#[cfg(all(not(unix), feature = "process"))]
 use super::unsupported;
 #[cfg(all(unix, feature = "process"))]
 use super::{errno_to_io, invalid_pid, pid_from_raw};
