@@ -192,6 +192,7 @@ mod rt_front_door;
 mod rt_joinset;
 mod rt_process;
 mod rt_process_files;
+mod rt_process_stdin;
 mod rt_runtime_stack;
 mod script_domains;
 mod script_flow;

@@ -91,7 +91,7 @@
 "crates/lgwks-bot/src/rt/io.rs" = 1
 "crates/lgwks-bot/src/rt/mod.rs" = 14
 "crates/lgwks-bot/src/rt/net.rs" = 6
-"crates/lgwks-bot/src/rt/process.rs" = 55
+"crates/lgwks-bot/src/rt/process.rs" = 46
 "crates/lgwks-bot/src/rt/process/confine.rs" = 14
 "crates/lgwks-bot/src/rt/process/frames.rs" = 17
 "crates/lgwks-bot/src/rt/runtime.rs" = 17

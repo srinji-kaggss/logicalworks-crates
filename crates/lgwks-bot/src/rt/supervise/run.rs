@@ -144,6 +144,7 @@ impl Supervisor {
         let permit = self.admit_process().await?;
         let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
+        let stdin = spec.stdin_feed();
         let (child, group_id) = start(spec)?;
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
@@ -164,7 +165,7 @@ impl Supervisor {
         let live = LiveProcess::enter(&self.cleanup_owners);
         let read = read(group_id)?;
         let placed = self.place_owned(task, async move {
-            let end = drive_process(&clock, child, &token, group, bounds).await;
+            let end = drive_process(&clock, child, &token, group, bounds, stdin).await;
             drop(live);
             task_end(end)
         });
@@ -220,6 +221,11 @@ impl Supervisor {
     ///   is retained up to its ceiling and drained past it, and
     ///   [`ProcessRun`] reports the retained bytes, the exact total and whether
     ///   the stream was truncated.
+    /// - **Fed.** A standard input with [`StdioPolicy::Piped`](crate::rt::process::StdioPolicy::Piped)
+    ///   receives what [`ProcessSpec::stdin_input`](crate::rt::process::ProcessSpec::stdin_input)
+    ///   stored — written while the child runs, under this same deadline — and
+    ///   then reads end-of-file. A child that exits before reading it all still
+    ///   reports its own exit, not an unwritten tail.
     /// - **Truthful about a stop.** A deadline kill is reported through
     ///   [`ProcessRun::deadline_fired`], not as a normal exit, and its cleanup
     ///   receipt is the group's.
@@ -354,6 +360,7 @@ impl Supervisor {
         }
         let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
+        let stdin = spec.stdin_feed();
         let (child, group_id) = match start(spec) {
             Ok(started) => started,
             Err(source) => {
@@ -376,7 +383,8 @@ impl Supervisor {
         #[cfg(all(unix, not(target_os = "linux"), feature = "process"))]
         let group = ProcessGroup::of(group_id, task, lease, Arc::clone(&self.cleanup_owners));
         self.spawned = self.spawned.saturating_add(1);
-        let end = drive_process_observed(&clock, child, &token, group, bounds, on_line).await;
+        let end =
+            drive_process_observed(&clock, child, &token, group, bounds, on_line, stdin).await;
         self.finish_run(end)
     }
 
