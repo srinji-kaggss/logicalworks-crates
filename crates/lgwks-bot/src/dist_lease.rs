@@ -5,8 +5,8 @@
 //! KEEL-SPEC puts the cross-host lease, queue and durable run state in scope
 //! as estate gaps to be upstreamed. This module is that upstream: a lease
 //! authority that mints fencing epochs, a [`WorkQueue`] that refuses
-//! rather than grows, and a [`Coordinator`] that commits every dispatch row to
-//! the [`TenantStore`](crate::tenant_store) before the lane starts and closes
+//! rather than grows, and a `Coordinator` (under `wire`) that commits every dispatch row to
+//! the `TenantStore` before the lane starts and closes
 //! dead coordinators' runs transactionally after they die.
 //!
 //! # The fencing rule
@@ -38,9 +38,9 @@
 //!
 //! # The distribution seam
 //!
-//! Single-host correctness is fully wired: the [`Coordinator`] validates the
+//! Single-host correctness is fully wired: the `Coordinator` validates the
 //! lease inline against its [`AuthorityHandle`] and commits to the
-//! [`TenantStore`](crate::tenant_store), so the durable run state that
+//! `TenantStore`, so the durable run state that
 //! survives coordinator loss is the keyed store, not a second log. Across
 //! hosts the validation travels: [`GrantChannel`] carries a grant to the
 //! authority and an answer back, and [`LoopbackChannel`] is the single-host
@@ -50,7 +50,7 @@
 //!
 //! # What a second executor host must implement
 //!
-//! 1. Share one [`TenantStore`](crate::tenant_store) directory (a shared
+//! 1. Share one `TenantStore` directory (a shared
 //!    filesystem) or replicate its record stream frame for frame. Every
 //!    mutation is one synced frame; a host that replays the frames sees every
 //!    commit.
@@ -63,7 +63,7 @@
 //!    `AuthorityServer` its far end: one keyed-BLAKE3-tagged request and reply
 //!    per question, the reply bound to a fresh random nonce so a recorded
 //!    answer cannot be replayed into a grant, and
-//!    [`Coordinator::with_fence`] validates every grant across it — dispatch,
+//!    `Coordinator::with_fence` validates every grant across it — dispatch,
 //!    end, finish, reconcile. A validation that never arrives is a wait,
 //!    never a grant.
 //! 4. Bound revoke-then-act windows by announcement delivery, and make the
@@ -75,8 +75,6 @@
 //!    a skewed clock must not be able to grant.
 //!
 //! [`WorkQueue`]: crate::dist_lease::WorkQueue
-//! [`Coordinator`]: crate::dist_lease::Coordinator
-//! [`Coordinator::with_fence`]: crate::dist_lease::Coordinator::with_fence
 //! [`LeaseError::StaleEpoch`]: crate::dist_lease::LeaseError::StaleEpoch
 //! [`Overfull`]: crate::dist_lease::Overfull
 //! [`AuthorityHandle`]: crate::dist_lease::AuthorityHandle

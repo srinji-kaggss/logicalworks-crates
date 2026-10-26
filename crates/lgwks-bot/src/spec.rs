@@ -4,7 +4,7 @@
 //!
 //! # Chains are typed against their source
 //!
-//! [`ObserveBuilder::on`] takes a condition that reads the source's output and
+//! `ObserveBuilder::on` takes a condition that reads the source's output and
 //! an action that takes exactly it, so a chain that cannot work does not build.
 //!
 //! `a_chain_typed_against_its_source_builds_under_an_effect_scope` (`tests/it/spec_front_door.rs`)
@@ -50,7 +50,6 @@
 //! stage's output instead of being chosen by the caller. A free parameter at
 //! this seam is how the chain became unprovable the first time.
 //!
-//! [`ObserveBuilder::on`]: crate::spec::ObserveBuilder::on
 
 mod admission;
 #[cfg(test)]
@@ -77,7 +76,7 @@ use super::verb::RefreshReason;
 
 /// The serializable bot contract: what an AI emits and what a manifest
 /// contains. `from_json` validates its shape; capability validation happens at
-/// build time from a [`GrantSet`], not from a spec.
+/// build time from a [`GrantSet`](crate::GrantSet), not from a spec.
 ///
 /// `#[non_exhaustive]`: this is a wire contract, so a new field is additive for
 /// the crate and a compile error for a consumer that built the struct

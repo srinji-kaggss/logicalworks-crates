@@ -258,7 +258,7 @@ impl fmt::Display for Authority {
 ///
 /// One broker per run. It holds no native handle itself: the adopter that
 /// actually owns the process, socket or input seat lives behind whatever
-/// [`EffectJournal`] adapter and dispatch path the host supplies. What this owns
+/// `EffectJournal` adapter and dispatch path the host supplies. What this owns
 /// is the fence, because fencing is a comparison and a comparison needs one
 /// place that holds the current generation.
 #[derive(Debug, Default)]

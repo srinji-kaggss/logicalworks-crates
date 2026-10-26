@@ -365,7 +365,7 @@ impl fmt::Display for TransitionHold {
 /// settlement site.
 ///
 /// The fields are private and there is no public constructor, so a caller can
-/// only ever settle work it read from [`EcsBot::pending`]. That is a seal, not
+/// only ever settle work it read from `Bot::pending`. That is a seal, not
 /// a formality: it makes "settle an attempt I invented" unrepresentable rather
 /// than merely refused.
 #[derive(Debug, Clone, PartialEq, Eq)]

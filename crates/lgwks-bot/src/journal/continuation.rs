@@ -172,7 +172,7 @@ const MAX_GENERATION_NAME: u64 = 999_999;
 /// is killed exactly at the boundary rather than somewhere near it.
 ///
 /// Public rather than `cfg(test)` for the reason
-/// [`crate::journal::FileJournal::open_with_stalled_storage`] is: "what does this
+/// `FileJournal::open_with_stalled_storage` is: "what does this
 /// bot's record look like after the disk dies mid-continuation" is a question
 /// about a real process, and a probe that only exists inside the crate's own test
 /// binary cannot answer it.
@@ -661,7 +661,7 @@ const fn status_of(index: u8) -> Option<AttemptStatus> {
 ///
 /// The record a checkpoint writes: the predecessor's chain head, where the
 /// successor's own chain starts, every unresolved attempt, and the folded state
-/// of every action. Archived through [`lgwks_std::wire`] like every other estate
+/// of every action. Archived through `lgwks_std::wire` like every other estate
 /// record that crosses a byte boundary, so a change to its shape changes every
 /// head computed after it — which is what makes a checkpoint an audit record
 /// rather than a hint.

@@ -33,7 +33,7 @@ each tick and runs the action on the ticks where the polled value moved. A
 condition that stays true does not re-fire, which is the difference between this
 and a timer that re-evaluates a predicate every interval.
 
-`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:352`
+`Bot` is not a separate type with a separate implementation. `crates/lgwks-bot/src/spec.rs:351`
 re-exports the ECS bot under the shorter name:
 
 ```rust

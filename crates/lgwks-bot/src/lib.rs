@@ -27,7 +27,7 @@
 //! minted from a grant that named a lifetime lapses once that lifetime has
 //! passed, but the lifetime is fixed at the mint and a bot mints afresh on
 //! every call, so it bounds a proof in hand rather than a running bot. Narrowing
-//! a running bot is one operation: [`Bot::replace_grants`](crate::Bot::replace_grants)
+//! a running bot is one operation: `Bot::replace_grants` (under `ecs`)
 //! swaps the retained set between ticks, atomically with respect to them, and
 //! reports the capabilities it withdrew — which the next tick's calls are denied
 //! for. Replacing the caller's set is still not that operation, and the boundary
@@ -422,9 +422,9 @@ pub mod skew;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
-/// [`Bot::from_spec`] is the materializer: a [`BotSpec`] plus a
-/// [`DomainRegistry`] plus the caller's [`GrantSet`] produces a runnable
-/// [`Bot`] through the same `assemble`/`build` path a native bot uses, with no
+/// `Bot::from_spec` (under `ecs`) is the materializer: a [`BotSpec`] plus a
+/// `DomainRegistry` plus the caller's [`GrantSet`] produces a runnable
+/// `Bot` through the same `assemble`/`build` path a native bot uses, with no
 /// second interpreter and no second execution path. It is all-or-nothing: an
 /// unmet need is reported as a complete, attributed [`NeedSet`] and nothing is
 /// built, and admission validates a registry with a duplicate identifier rather
