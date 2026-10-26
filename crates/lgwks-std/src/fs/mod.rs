@@ -199,9 +199,9 @@ pub(crate) fn relative_to_root(path: &Path, root_components: usize) -> &Path {
 /// entry without following a final symlink: holding it costs the caller no
 /// second stat, and it is a snapshot that does not change if the file does.
 ///
-/// [`WalkStreamEntry::relative_path`] names the same path through
-/// [`relative_to_root`], so the two walkers cannot drift into spelling it
-/// differently.
+/// [`WalkStreamEntry::relative_path`] names the same path through the shared
+/// `relative_to_root` helper, so the two walkers cannot drift into spelling
+/// it differently.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WalkEntry {
