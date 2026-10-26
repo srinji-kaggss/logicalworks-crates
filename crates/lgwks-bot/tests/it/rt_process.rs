@@ -100,7 +100,7 @@ async fn drain_shutdown(mut report: ShutdownReport) -> Result<Vec<TaskOutcome>, 
                 pending.pending_cleanup_count()
             )));
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drain_shutdown: returning an error to the caller");
-            return refusal;
+            refusal
         }
     }
 }

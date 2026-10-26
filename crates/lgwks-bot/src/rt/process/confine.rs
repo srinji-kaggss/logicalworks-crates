@@ -581,10 +581,10 @@ fn deny_platform(denied: &DenyBeneath) -> io::Result<Command> {
 /// that overmounts each denial before it execs the target.
 #[cfg(target_os = "linux")]
 fn deny_platform(denied: &DenyBeneath) -> io::Result<Command> {
-    if BWRAP.exists() {
+    if std::path::Path::new(BWRAP).exists() {
         return Ok(bwrap_deny(denied));
     }
-    if UNSHARE.exists() {
+    if std::path::Path::new(UNSHARE).exists() {
         return Ok(unshare_deny(denied));
     }
     lgwks_std::trace::warn!("no mount-namespace wrapper on this host");
@@ -603,13 +603,14 @@ fn deny_platform(_denied: &DenyBeneath) -> io::Result<Command> {
     ))
 }
 
-/// The `bwrap` that overmounts denials, and the `unshare` fallback.
+/// The `bwrap` that overmounts denials, and the `unshare` fallback. Text, not
+/// a `Path`: `Path::new` is not callable in a const on the pinned toolchain.
 #[cfg(target_os = "linux")]
-const BWRAP: &std::path::Path = std::path::Path::new("/usr/bin/bwrap");
+const BWRAP: &str = "/usr/bin/bwrap";
 
 /// The `unshare` that opens a mount namespace when `bwrap` is absent.
 #[cfg(target_os = "linux")]
-const UNSHARE: &std::path::Path = std::path::Path::new("/usr/bin/unshare");
+const UNSHARE: &str = "/usr/bin/unshare";
 
 /// `bwrap --bind / / --tmpfs <denied>... --`: the child sees its own root
 /// except for the denied subtrees, which read as empty directories.

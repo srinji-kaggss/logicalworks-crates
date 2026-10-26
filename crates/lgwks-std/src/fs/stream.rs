@@ -245,8 +245,10 @@ struct DirFrame {
 enum FrameReader {
     /// Not yet opened: the directory is listed when the walk reaches it.
     Unopened,
-    /// Entries yielded as the filesystem returns them.
-    Streaming(ReadDir),
+    /// Entries yielded as the filesystem returns them. Boxed: Windows'
+    /// `ReadDir` carries its find buffer inline, which makes the variant far
+    /// wider than the other two on that target.
+    Streaming(Box<ReadDir>),
     /// Entries buffered for a sorted walk.
     Sorted(vec::IntoIter<DirEntry>),
 }
@@ -360,7 +362,7 @@ impl WalkIter {
             }
         };
         if !self.options.sort_alphabetically {
-            self.stack[top].reader = FrameReader::Streaming(listing);
+            self.stack[top].reader = FrameReader::Streaming(Box::new(listing));
             return None;
         }
         let mut buffered = Vec::new();

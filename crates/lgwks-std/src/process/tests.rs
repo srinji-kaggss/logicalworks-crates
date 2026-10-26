@@ -44,9 +44,42 @@ fn nonexistent_group_surfs_os_error() {
 ///
 /// A gated child is resumed with SIGCONT; an ignored SIGCONT would leave it
 /// stopped forever, so no spawn may hand a child an ignored one.
+///
+/// On Linux the child reads its own ignored-signal mask from `/proc`, because
+/// `trap -p` is a bash extension that Debian's `dash` refuses (CI run
+/// 40371658031). SIGCONT is signal 18 there, bit 17 of `SigIgn`.
 #[test]
-#[cfg(all(unix, feature = "process"))]
+#[cfg(all(target_os = "linux", feature = "process"))]
 fn spawned_children_do_not_ignore_sigcont() -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("cat")
+        .arg("/proc/self/status")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(mask) = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))
+        .map(str::trim)
+    else {
+        return Err(format!("no SigIgn line in the child's status: {text:?}").into());
+    };
+    let ignored = u64::from_str_radix(mask, 16)?;
+    assert_eq!(
+        ignored & (1 << 17),
+        0,
+        "a spawned child must not ignore SIGCONT, SigIgn = {mask}"
+    );
+    Ok(())
+}
+
+/// The same property where the shell is bash or zsh (macOS and the BSDs),
+/// read through `trap -p`, which those shells support.
+#[test]
+#[cfg(all(unix, not(target_os = "linux"), feature = "process"))]
+fn spawned_children_do_not_ignore_sigcont_per_the_shell() -> Result<(), Box<dyn std::error::Error>>
+{
     let output = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg("trap -p CONT")

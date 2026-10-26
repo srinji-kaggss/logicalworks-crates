@@ -279,8 +279,9 @@ fn invalid_pid() -> io::Error {
     )
 }
 
-#[cfg(all(not(any(unix, windows)), feature = "process"))]
-/// Construct the unsupported-operation error for non-Unix targets.
+#[cfg(all(not(unix), feature = "process"))]
+/// Construct the unsupported-operation error for non-Unix targets, Windows
+/// included: the stop observation and the release are Unix-only there too.
 fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)
 }
