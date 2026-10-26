@@ -110,12 +110,12 @@ use crate::ladder::tier_ladder;
 use crate::matrix::workload_matrix;
 use crate::openloop::{SimSpec, simulate};
 use crate::overload::{OverloadShape, overload_and_recovery};
-use crate::saturation::{DEFAULT_CAPACITY_TARGET, body_for_bound, saturation_sweep};
+use crate::saturation::{DEFAULT_CAPACITY_TARGET, SweepRun, body_for_bound, saturation_sweep};
 use crate::sides::{ScenarioResult, bare_floor, baseline_side, facade_side, measure, mutant_check};
 pub(crate) use crate::support::widen;
 use crate::support::{
-    OVERLOAD_DEFAULT_BOUND, RecoveryLength, host_load_average, micros, print_columns, print_row,
-    refuse_failed,
+    BodyKind, OVERLOAD_DEFAULT_BOUND, RecoveryLength, host_load_average, micros, parse_body_kind,
+    print_columns, print_row, refuse_failed,
 };
 
 // The seeded simulation family names these at the crate root, exactly as it did
@@ -326,6 +326,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut recovery = RecoveryLength::SameAsBaseline;
     let mut overload_bound = OVERLOAD_DEFAULT_BOUND;
     let mut body_micros: u64 = 0;
+    let mut body_kind = BodyKind::Timer;
+    let mut cpu_rounds: u64 = 0;
     let mut capacity_target: u64 = DEFAULT_CAPACITY_TARGET;
     let mut workers: Option<usize> = None;
     // The first refusal is carried as a value and returned once after the loop,
@@ -358,6 +360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|seconds| recovery = RecoveryLength::Seconds(seconds))
         } else if let Some(value) = arg.strip_prefix("--body-micros=") {
             number(value, "body-micros must be a number").map(|micros| body_micros = micros)
+        } else if let Some(value) = arg.strip_prefix("--body-kind=") {
+            parse_body_kind(value).map(|kind| body_kind = kind)
+        } else if let Some(value) = arg.strip_prefix("--cpu-rounds=") {
+            number(value, "cpu-rounds must be a number").map(|rounds| cpu_rounds = rounds)
         } else if let Some(value) = arg.strip_prefix("--capacity-target=") {
             number(value, "capacity-target must be a rate").map(|rate| capacity_target = rate)
         } else if let Some(value) = arg.strip_prefix("--bound=") {
@@ -389,6 +395,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Err(reason) = parsed {
         let refusal = Err(reason.into());
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: refusing an argument");
+        return refusal;
+    }
+    // Rounds without the CPU door would silently run the timer door under the
+    // name of a CPU run: the flags refuse together rather than apart.
+    if cpu_rounds > 0 && body_kind == BodyKind::Timer {
+        let refusal: Result<(), Box<dyn std::error::Error>> = Err(
+            "--cpu-rounds needs --body-kind=cpu: timer bodies park, they burn no rounds".into(),
+        );
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "main: refusing an argument");
         return refusal;
     }
@@ -430,27 +445,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return open_loop_simulation();
     }
 
-    if saturation {
+    // The saturation and refusal doors are one sweep under two admissions;
+    // `--saturation` wins when both are named, as it always has.
+    let sweep_admission = if saturation {
+        Some(Admission::Backpressure)
+    } else if refusal {
+        Some(Admission::Refuse)
+    } else {
+        None
+    };
+    if let Some(admission) = sweep_admission {
         return block_on_mode(workers, || {
             saturation_sweep(
-                Admission::Backpressure,
-                Duration::from_secs(window_seconds),
-                capacity_target,
-                body_micros,
-                workers,
-                json.as_deref(),
-            )
-        });
-    }
-
-    if refusal {
-        return block_on_mode(workers, || {
-            saturation_sweep(
-                Admission::Refuse,
-                Duration::from_secs(window_seconds),
-                capacity_target,
-                body_micros,
-                workers,
+                SweepRun {
+                    admission,
+                    window: Duration::from_secs(window_seconds),
+                    capacity_target,
+                    body_override: body_micros,
+                    body_kind,
+                    cpu_ns_per_round: 0.0,
+                    cpu_rounds_override: cpu_rounds,
+                    workers,
+                },
                 json.as_deref(),
             )
         });

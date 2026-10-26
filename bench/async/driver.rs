@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::engine::{Admission, BaselineEngine, Engine, FacadeEngine, Side};
 use crate::gate::SideRun;
 use crate::openloop::{Recorder, RecorderSet, intended_arrival, period_nanos};
-use crate::support::{body_unit, nanos, narrow};
+use crate::support::{CPU_BODY_SEED, body_unit, cpu_hash_rounds, nanos, narrow};
 /// Queue-depth samples kept per open-loop run.
 ///
 /// Bounded, because a run is a measurement and a measurement's own storage is a cost
@@ -33,6 +33,14 @@ pub(crate) struct OpenLoopSpec {
     /// ceiling never binds and the "refuse" door never refuses. Any figure about refusal,
     /// drain or recovery is therefore meaningless unless the body is declared.
     pub(crate) body_micros: u64,
+    /// Hash rounds each CPU body burns, or `0` for a timer body.
+    ///
+    /// Zero means the timer door: the body parks for `body_micros` and the cores
+    /// idle. Non-zero means the CPU door: the body burns `cpu_rounds` seeded
+    /// hash rounds and `body_micros` is the declared cost those rounds were
+    /// derived from (or calibrated to, under a rounds override), so the ladder
+    /// and the knee budget read the same number on either door.
+    pub(crate) cpu_rounds: u64,
     /// Arrivals offered per second.
     pub(crate) offered_rate: u64,
     /// How long arrivals are offered for.
@@ -174,6 +182,9 @@ pub(crate) struct Arrival {
     pub(crate) intended: Instant,
     /// This body's own service cost, in microseconds, on top of its work unit.
     pub(crate) body_micros: u64,
+    /// Hash rounds this body burns, or `0` for a timer body; see
+    /// [`OpenLoopSpec::cpu_rounds`].
+    pub(crate) cpu_rounds: u64,
 }
 
 impl Arrival {
@@ -189,6 +200,25 @@ impl Arrival {
             shard: recorders.take(),
             intended,
             body_micros,
+            cpu_rounds: 0,
+        }
+    }
+
+    /// Mint a CPU arrival: the same identity, burning `cpu_rounds` seeded
+    /// hash rounds instead of parking on a timer.
+    pub(crate) fn mint_cpu(
+        work: &Arc<AtomicU64>,
+        recorders: &RecorderSet,
+        intended: Instant,
+        body_micros: u64,
+        cpu_rounds: u64,
+    ) -> Self {
+        Self {
+            counter: Arc::clone(work),
+            shard: recorders.take(),
+            intended,
+            body_micros,
+            cpu_rounds,
         }
     }
 
@@ -208,15 +238,26 @@ impl Arrival {
 /// Measuring from the intended instant rather than from the body's own first poll is
 /// the whole coordinated-omission correction: a generator that fell behind reports the
 /// queue it created rather than the service it managed to reach.
+///
+/// A timer arrival parks for its `body_micros`; a CPU arrival burns
+/// `cpu_rounds` seeded hash rounds and parks for nothing, so the cores are the
+/// binding constraint. Either way the body records exactly one work unit: the
+/// conservation gate requires `work_units == completed` on each side, and the
+/// hash state is spent through `black_box` rather than counted, so the
+/// fairness comparison stays about the engines and not about two different
+/// definitions of work.
 pub(crate) async fn recorded_body_unit(arrival: Arrival) {
     let Arrival {
         counter,
         shard,
         intended,
         body_micros,
+        cpu_rounds,
     } = arrival;
     body_unit(counter).await;
-    if body_micros > 0 {
+    if cpu_rounds > 0 {
+        std::hint::black_box(cpu_hash_rounds(CPU_BODY_SEED, cpu_rounds));
+    } else if body_micros > 0 {
         tokio::time::sleep(Duration::from_micros(body_micros)).await;
     }
     shard.record(latency_nanos(intended));
@@ -311,9 +352,18 @@ async fn open_loop_run<E: Engine>(
         // pays one predictable branch.
         let place = spec.drop_every == 0 || !offered.is_multiple_of(spec.drop_every);
         let placed = if place {
-            engine
-                .admit(Arrival::mint(&work, &recorders, intended, spec.body_micros))
-                .await
+            let arrival = if spec.cpu_rounds > 0 {
+                Arrival::mint_cpu(
+                    &work,
+                    &recorders,
+                    intended,
+                    spec.body_micros,
+                    spec.cpu_rounds,
+                )
+            } else {
+                Arrival::mint(&work, &recorders, intended, spec.body_micros)
+            };
+            engine.admit(arrival).await
         } else {
             // The control's defect in one line: the arrival is counted as offered and
             // reported as admitted, and nothing runs.

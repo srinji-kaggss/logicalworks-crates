@@ -80,10 +80,41 @@ with no OOM kill; the facade's peak was 47 MB lower. Its p99 at the widest
 tiers is about twice the baseline's: under two cores, the facade's per-task
 bookkeeping is on the admission path that every one of a million tasks takes.
 
+## Saturation with CPU bodies: the knee where the cores bind
+
+The `saturation-cpu` door (`--saturation --window=1 --body-kind=cpu
+--cpu-rounds=300000 --workers=2`, record
+[`saturation-cpu.json`](vps/saturation-cpu.json)): every body burns 300,000
+seeded hash rounds and records one work unit, so both sides do identical work
+and the fairness gate holds unchanged. Taken 2026-10-26 (3.36 ns/round, a
+1,008 µs body, declared capacity 1,984/s); the suite around it ran under
+extreme host load, so the absolutes are load-depressed and the paired columns
+are the finding.
+
+| bound | facade knee offered/s | achieved/s | p99 at knee | baseline knee | baseline achieved/s |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 496 | 496 | 6.0 ms | 496 | 496 |
+| 1,024 | 496 | 496 | 5.8 ms | 496 | 496 |
+| 10,000 | 1,984 | 1,947 | 44.0 ms | 1,984 | 1,966 |
+| 16,384 | 1,984 | 1,981 | 14.8 ms | 1,984 | 1,977 |
+| 100,000 | 1,984 | 1,981 | 16.9 ms | 1,984 | 1,979 |
+| 131,072 | 1,984 | 1,977 | 14.5 ms | 1,984 | 1,975 |
+
+The facade and the raw baseline declare the same knee at every bound, to the
+arrival: under CPU contention the facade's bookkeeping does not move the
+knee (p99 at knee 0.9–1.9x). No arrival refused on any CPU point; door peak
+RSS 50.4 MB facade against 50.2 MB. The ladder is derived from the workers'
+capacity, not the ceiling's: a CPU ceiling wider than the worker count never
+binds.
+
 ## What this does not claim
 
 - One run, one host's VM, OrbStack's scheduler under a cgroup quota; a real
   2-vCPU VPS also differs in cache, memory bandwidth and noisy neighbours.
-- `nproc` reports 4 because the quota limits CPU time, not visible cores, so
-  Tokio started one worker per visible core; a VPS with 2 visible cores would
-  start two.
+- `nproc` reported 4 on 2026-10-11 and 2 on 2026-10-26 because the quota
+  limits CPU time, not visible cores, so Tokio started one worker per visible
+  core; a VPS with 2 visible cores would start two.
+- The 2026-10-26 suite ran under extreme host load (53.10 at start) and was
+  killed at the 1 M in-flight tier, so its timer rows are not republished and
+  the CPU door's absolute knees are load-depressed; the paired
+  facade-versus-baseline columns saw the same load and stand.

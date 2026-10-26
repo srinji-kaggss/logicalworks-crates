@@ -149,6 +149,7 @@ async fn gated_body_unit(body: TierBody) {
         shard,
         intended,
         body_micros: 0,
+        cpu_rounds: 0,
     })
     .await;
 }

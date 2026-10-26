@@ -767,6 +767,47 @@ fn sim_a_recorder_reports_the_percentiles_it_was_given() {
 }
 
 #[test]
+fn sim_a_sample_past_the_ceiling_lands_in_the_top_bucket() {
+    // The defect #639's first CPU sweep found: the value clamp mapped the
+    // ceiling itself one slot past the bucket array, so a workload queueing
+    // past 34 s aborted the run in the recorder instead of reporting the
+    // queue. Every `u64` has a bucket, and a sample past the ceiling is
+    // counted in `clamped` and lands in the top one.
+    use crate::openloop::{CEILING_NANOS, SLOTS, slot_value};
+    assert_eq!(
+        slot_of(u64::MAX),
+        SLOTS - 1,
+        "the largest sample must land in the top bucket, not past the array"
+    );
+    assert_eq!(
+        slot_of(CEILING_NANOS),
+        SLOTS - 1,
+        "the ceiling itself must land in the top bucket, not past the array"
+    );
+    let recorder = Recorder::new();
+    recorder.record(CEILING_NANOS.saturating_add(1));
+    recorder.record(u64::MAX);
+    recorder.record(1);
+    let histogram = Histogram::of_one(&recorder);
+    assert_eq!(histogram.count(), 3, "every sample is counted");
+    assert_eq!(
+        histogram.clamped(),
+        2,
+        "the two samples past the ceiling are counted as clamped"
+    );
+    assert_eq!(
+        histogram.max_nanos(),
+        CEILING_NANOS,
+        "the maximum is the clamped ceiling, not a wrapped slot"
+    );
+    assert_eq!(
+        histogram.quantile_nanos(1.0),
+        slot_value(SLOTS - 1),
+        "the top quantile reads the top bucket"
+    );
+}
+
+#[test]
 fn sim_a_sharded_recorder_equals_an_unsharded_one() {
     // The live driver records through 16 shards from every worker thread. A merge
     // that lost or double-counted a bucket would quietly move a p99, so the
