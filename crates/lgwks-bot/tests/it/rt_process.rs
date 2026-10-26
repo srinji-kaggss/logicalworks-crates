@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use lgwks_bot::Runtime;
 use lgwks_bot::rt::process::ProcessSpec;
-use lgwks_bot::rt::supervise::{Supervisor, TaskOutcome};
+use lgwks_bot::rt::supervise::{ShutdownReport, Supervisor, TaskOutcome};
 use lgwks_bot::rt::time::{Instant, sleep};
 
 /// What a test reports when its precondition did not hold.
@@ -71,6 +71,37 @@ async fn next_outcome(
             return refusal;
         }
         sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Drain a shutdown report's pending cleanups within the budget, then collect
+/// its outcomes.
+///
+/// The shutdown drain every process test performs, written once: reap pending
+/// cleanups until none remain or the budget passes, then refuse a report that
+/// still holds work rather than reporting a partial outcome as complete.
+async fn drain_shutdown(mut report: ShutdownReport) -> Result<Vec<TaskOutcome>, std::io::Error> {
+    let Some(deadline) = Instant::now().checked_add(BUDGET) else {
+        let refusal = Err(std::io::Error::other("the cleanup deadline overflowed"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drain_shutdown: returning an error to the caller");
+        return refusal;
+    };
+    while report.pending_cleanup_count() > 0 && Instant::now() < deadline {
+        report.reap_pending_cleanups();
+        if report.pending_cleanup_count() > 0 {
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+    match report.into_outcomes() {
+        Ok(outcomes) => Ok(outcomes),
+        Err(pending) => {
+            let refusal = Err(std::io::Error::other(format!(
+                "{} process-group cleanup owners remained pending after shutdown",
+                pending.pending_cleanup_count()
+            )));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drain_shutdown: returning an error to the caller");
+            return refusal;
+        }
     }
 }
 
@@ -234,7 +265,7 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
 
         // Shutdown cancels the token, which is the path under test: the task
         // observes it, kills the group, and reports Cancelled.
-        let mut report = supervisor.shutdown().await;
+        let report = supervisor.shutdown().await;
         let stats = report.stats();
         let cancelled = stats.cancelled;
         let failed = stats.failed;
@@ -247,24 +278,7 @@ fn a_cancelled_process_is_killed_with_its_grandchild() -> TestResult {
                 )));
             }
         }
-        let Some(deadline) = Instant::now().checked_add(BUDGET) else {
-            return Err(std::io::Error::other("cleanup deadline overflowed"));
-        };
-        while report.pending_cleanup_count() > 0 && Instant::now() < deadline {
-            report.reap_pending_cleanups();
-            if report.pending_cleanup_count() > 0 {
-                sleep(POLL_INTERVAL).await;
-            }
-        }
-        if report.pending_cleanup_count() > 0 {
-            return Err(std::io::Error::other(format!(
-                "{} process-group cleanup owners remained pending after the observed pids exited",
-                report.pending_cleanup_count()
-            )));
-        }
-        let outcomes = report
-            .into_outcomes()
-            .map_err(|_| std::io::Error::other("process cleanup remained pending after shutdown"))?;
+        let outcomes = drain_shutdown(report).await?;
         Ok::<_, std::io::Error>((outcomes, cancelled, failed))
     })?;
 
@@ -465,6 +479,115 @@ fn a_command_that_cannot_start_reports_the_failure_to_the_caller() -> TestResult
     assert!(
         matches!(outcome, TaskOutcome::Completed { .. }),
         "the supervisor must be usable after a refused start: {outcome:?}"
+    );
+    Ok(())
+}
+
+/// A gated spawn holds its payload behind the gate: no outcome exists before
+/// the release, the identity is readable while it waits, and the release
+/// lets exactly that payload run to completion (#691).
+///
+/// Source: logical_ci#16's coordinator journey — a kill between the fork and
+/// the durable write must leave no running group nobody recorded. The
+/// record-then-release order below is that journey: the identity is observed
+/// first, and only then does the payload run. The proof is the supervisor's
+/// own report stream rather than a marker file, so no filesystem crossing is
+/// what the barrier stands on.
+#[test]
+fn a_gated_spawn_holds_its_payload_until_release() -> TestResult {
+    let runtime = Runtime::new()?;
+    runtime.block_on(async {
+        let mut supervisor = Supervisor::new(1);
+        let mut spec = ProcessSpec::new("sh");
+        spec.arg("-c").arg("exit 0");
+        let mut spawned = supervisor.spawn_process_identified_gated(&spec).await?;
+        assert!(
+            spawned.leader().pid() > 0,
+            "the identity is readable while the payload waits"
+        );
+        assert!(!spawned.is_released(), "a new gate reads as unreleased");
+        supervisor.reap();
+        assert!(
+            supervisor.next_report().is_none(),
+            "a gated payload produces no outcome before its release"
+        );
+        // The record-then-release order: the identity is observed first, and
+        // only then does the payload run.
+        spawned.release().await?;
+        assert!(spawned.is_released(), "a released gate reads as released");
+        spawned.release().await?;
+        let outcome = next_outcome(&mut supervisor, BUDGET)
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(
+            matches!(outcome, TaskOutcome::Completed { .. }),
+            "the released payload runs to completion: {outcome:?}"
+        );
+        Ok::<_, std::io::Error>(())
+    })?;
+    Ok(())
+}
+
+/// A thousand identified spawns report their cost: every identity resolves,
+/// and the per-spawn latency at p50 and p99 is printed with the run (#691).
+///
+/// The read runs on the blocking pool rather than the executor thread, so
+/// this is also the tripwire for a regression that parks the executor behind
+/// a process-table read: a stalled executor stops draining the supervisor's
+/// tasks, and the wall bound below is what names it.
+#[test]
+fn identified_spawns_at_scale_report_their_cost() -> TestResult {
+    use std::io::Write as _;
+
+    const SPAWNS: usize = 1_000;
+    const CEILING: usize = 128;
+    let runtime = Runtime::new()?;
+    let latencies = runtime.block_on(async {
+        let mut supervisor = Supervisor::new(CEILING);
+        let mut latencies = Vec::with_capacity(SPAWNS);
+        let mut reported = 0_usize;
+        for _ in 0..SPAWNS {
+            let spec = ProcessSpec::new("/usr/bin/true");
+            let started = std::time::Instant::now();
+            supervisor.spawn_process_identified(&spec).await?;
+            latencies.push(started.elapsed());
+            // The report buffer is capped at the in-flight ceiling, so a run
+            // that never drains it drops detail: drain as it spawns.
+            supervisor.reap();
+            while supervisor.next_report().is_some() {
+                reported = reported.saturating_add(1);
+            }
+        }
+        let outcomes = drain_shutdown(supervisor.shutdown().await).await?;
+        reported = reported.saturating_add(outcomes.len());
+        assert_eq!(
+            reported, SPAWNS,
+            "every identified spawn reports exactly once"
+        );
+        Ok::<_, std::io::Error>(latencies)
+    })?;
+    assert_eq!(
+        latencies.len(),
+        SPAWNS,
+        "every spawn contributed its latency"
+    );
+    let mut ordered = latencies;
+    ordered.sort();
+    let percentile =
+        |ratio: usize| ordered[SPAWNS.saturating_mul(ratio).div_ceil(100).min(SPAWNS - 1)];
+    let fastest = ordered[0];
+    let median = percentile(50);
+    let tail = percentile(99);
+    let slowest = ordered[SPAWNS - 1];
+    let mut stdout = std::io::stdout().lock();
+    writeln!(
+        stdout,
+        "identified-spawn: n={SPAWNS} ceiling={CEILING} fastest={fastest:?} p50={median:?} p99={tail:?} slowest={slowest:?}"
+    )
+    .map_err(|error| format!("the measured line could not be printed: {error}"))?;
+    assert!(
+        tail < Duration::from_secs(30),
+        "the p99 spawn latency stays within its bound: {tail:?}"
     );
     Ok(())
 }

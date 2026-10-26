@@ -45,7 +45,10 @@ use std::process::ExitCode;
 #[cfg(feature = "scan")]
 use lgwks_ast::scan::Rule;
 use lgwks_ast::script::{Invocation, read_source};
-use lgwks_std::fs::{Descend, FileKind, WalkOptions, walk_dir_entries};
+use lgwks_std::fs::{
+    FileKind, OmissionAction, OmissionPolicy, OmissionStage, WalkFailure, WalkIter, WalkOptions,
+    WalkStreamEntry, walk_dir_iter,
+};
 use lgwks_std::json::{Map, Value};
 
 /// The command line, shown on a usage error.
@@ -474,6 +477,12 @@ impl std::error::Error for ReadingError {}
 /// Every file of `wanted` under `root`, in walk order, or `root` itself when it
 /// is such a file.
 ///
+/// The walk streams entries out as the filesystem returns them instead of
+/// materializing the tree: one open listing per ancestor, never the tree.
+/// A directory the walk admits is withheld by name ([`SKIPPED`]) before the
+/// walk lists it, which is the exclusion the predicate walk states by
+/// refusing to descend.
+///
 /// # Errors
 ///
 /// [`ReadingError::UnreadableRoot`] when the root does not exist, and
@@ -492,39 +501,63 @@ fn files_under(root: &Path, wanted: Wanted) -> Result<Vec<PathBuf>, ReadingError
     if !metadata.is_dir() {
         return Ok(vec![root.to_path_buf()]);
     }
-    let entries = walk_dir_entries(root, &WalkOptions::default(), None, |path, kind| {
-        let skipped = kind == FileKind::Directory
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| SKIPPED.contains(&name));
-        if skipped {
-            Descend::Skip
+    let policy = OmissionPolicy::new(
+        OmissionAction::Report,
+        OmissionAction::Report,
+        OmissionAction::Report,
+    );
+    let mut walk: WalkIter = walk_dir_iter(root, &WalkOptions::default(), policy).map_err(|cause| {
+        // A root the walk cannot resolve is the same unreadable root the
+        // metadata check above reports; anything else stopped the walk.
+        let unreadable = cause
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<WalkFailure>())
+            .is_some_and(|failure| failure.stage() == OmissionStage::RootResolution);
+        let refusal = if unreadable {
+            ReadingError::UnreadableRoot {
+                root: root.to_path_buf(),
+                cause,
+            }
         } else {
-            Descend::Enter
-        }
-    })
-    .map_err(|cause| {
-        let refusal = ReadingError::UnlistableRoot {
-            root: root.to_path_buf(),
-            cause,
+            ReadingError::UnlistableRoot {
+                root: root.to_path_buf(),
+                cause,
+            }
         };
         lgwks_std::trace::debug!(error = %refusal, "files_under: returning an error to the caller");
         refusal
     })?;
-    Ok(entries
-        .iter()
-        .filter(|entry| entry.kind() == FileKind::File && wanted.keeps(entry.path()))
-        // `.` is the default root: name files from it as `src/lib.rs`, not
-        // `./src/lib.rs`, so a location pastes into an editor as the compiler's does.
-        .map(|entry| {
-            if root == Path::new(".") {
+    let mut kept = Vec::new();
+    while let Some(item) = walk.next() {
+        // A strict walk refuses on the first omission; the stream reports
+        // each one as an item, so the first reported one ends the walk the
+        // same way.
+        let entry: WalkStreamEntry = item.map_err(|failure| ReadingError::UnlistableRoot {
+            root: root.to_path_buf(),
+            cause: io::Error::new(failure.source_error().kind(), failure),
+        })?;
+        if entry.file_type().is_dir()
+            && entry
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| SKIPPED.contains(&name))
+        {
+            walk.skip_children();
+            continue;
+        }
+        if entry.kind() == FileKind::File && wanted.keeps(entry.path()) {
+            // `.` is the default root: name files from it as `src/lib.rs`,
+            // not `./src/lib.rs`, so a location pastes into an editor as the
+            // compiler's does.
+            kept.push(if root == Path::new(".") {
                 entry.relative_path().to_path_buf()
             } else {
                 root.join(entry.relative_path())
-            }
-        })
-        .collect())
+            });
+        }
+    }
+    Ok(kept)
 }
 
 /// Read one file and every `script!` in it.

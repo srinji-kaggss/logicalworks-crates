@@ -22,10 +22,10 @@ use super::owners::LiveProcess;
 #[cfg(all(target_os = "linux", feature = "process"))]
 use super::start::scope_tree;
 #[cfg(all(unix, feature = "process"))]
-use super::start::start;
+use super::start::{start, start_gated};
 use super::supervisor::Supervisor;
 #[cfg(not(windows))]
-use super::{IdentifiedSpawn, TaskId};
+use super::{GatedIdentifiedSpawn, IdentifiedSpawn, TaskId};
 use crate::rt::process::{ProcessRun, ProcessRunError, ProcessSpec};
 #[cfg(feature = "script")]
 use crate::script::Tenant;
@@ -93,7 +93,7 @@ impl Supervisor {
     /// permit is released when this function returns.
     #[cfg(all(unix, feature = "process"))]
     pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
-        let (task, ()) = self.spawn_process_reading(spec, |_| Ok(())).await?;
+        let (task, ()) = self.spawn_process_reading(spec, false, |_| Ok(())).await?;
         Ok(task)
     }
 
@@ -110,9 +110,18 @@ impl Supervisor {
     ///
     /// The identity is read after the child starts and before the supervisor
     /// can reap it, so the pid cannot have been reissued yet. On Linux the read
-    /// is two `/proc` files; elsewhere it runs `ps` once on the calling thread,
-    /// which is why it is a separate door: [`Supervisor::spawn_process`](crate::rt::supervise::Supervisor::spawn_process) does
-    /// not pay for it.
+    /// is two `/proc` files; elsewhere it runs `ps` once — and on every target
+    /// it runs on the blocking pool rather than the executor, so a burst of
+    /// spawns never stalls a sibling task. It is still a separate door,
+    /// because [`Supervisor::spawn_process`](crate::rt::supervise::Supervisor::spawn_process) does
+    /// not pay for the read.
+    ///
+    /// The child runs before this returns, so a kill between the fork and the
+    /// caller's durable write still leaves an unrecorded group. A coordinator
+    /// that cannot hold that window uses
+    /// [`Supervisor::spawn_process_identified_gated`](crate::rt::supervise::Supervisor::spawn_process_identified_gated):
+    /// the payload waits behind a gate until it is released, so a recorded
+    /// identity always predates the run.
     ///
     /// # Errors
     ///
@@ -126,8 +135,45 @@ impl Supervisor {
         &mut self,
         spec: &ProcessSpec,
     ) -> io::Result<IdentifiedSpawn> {
-        let (task, leader) = self.spawn_process_reading(spec, identify_leader).await?;
+        let (task, leader) = self
+            .spawn_process_reading(spec, false, identify_leader)
+            .await?;
         Ok(IdentifiedSpawn { task, leader })
+    }
+
+    /// Start `spec` with its payload held behind a gate, and return the
+    /// identity of the process that leads its group with the gate attached.
+    ///
+    /// The child forks stopped: it execs the payload only after
+    /// [`GatedIdentifiedSpawn::release`](crate::rt::supervise::GatedIdentifiedSpawn::release).
+    /// A caller that records
+    /// [`GatedIdentifiedSpawn::leader`](crate::rt::supervise::GatedIdentifiedSpawn::leader)
+    /// durably and then releases has no window in which a kill leaves a
+    /// running group nobody recorded — the payload never ran before the
+    /// record existed. The identity is read on the blocking pool, as
+    /// [`Supervisor::spawn_process_identified`](crate::rt::supervise::Supervisor::spawn_process_identified)
+    /// reads it.
+    ///
+    /// # Errors
+    ///
+    /// Every error
+    /// [`Supervisor::spawn_process_identified`](crate::rt::supervise::Supervisor::spawn_process_identified)
+    /// returns. A refused gate starts nothing.
+    #[cfg(all(unix, feature = "process"))]
+    pub async fn spawn_process_identified_gated(
+        &mut self,
+        spec: &ProcessSpec,
+    ) -> io::Result<GatedIdentifiedSpawn> {
+        let (task, leader) = self
+            .spawn_process_reading(spec, true, identify_leader)
+            .await?;
+        let pid = leader.pid();
+        Ok(GatedIdentifiedSpawn {
+            task,
+            leader,
+            pid,
+            released: false,
+        })
     }
 
     /// The one admission, start and placement both process spawns share.
@@ -135,16 +181,29 @@ impl Supervisor {
     /// `read` sees the leader's pid while the child is started, guarded and not
     /// yet reaped, and what it returns travels back beside the task id. A
     /// refusal from it drops the guards built so far, which kill the group.
+    /// `gated` holds the child's payload stopped until the caller releases it;
+    /// `false` starts the payload at once. The identity read runs on the
+    /// blocking pool, never inline on the executor thread, so a burst of
+    /// identified spawns pays one pool handoff per spawn rather than stalling
+    /// every sibling task behind a process-table read.
     #[cfg(all(unix, feature = "process"))]
     pub(super) async fn spawn_process_reading<T>(
         &mut self,
         spec: &ProcessSpec,
-        read: impl FnOnce(i32) -> io::Result<T>,
-    ) -> io::Result<(TaskId, T)> {
+        gated: bool,
+        read: impl FnOnce(i32) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<(TaskId, T)>
+    where
+        T: Send + 'static,
+    {
         let permit = self.admit_process().await?;
         let (token, bounds) = self.prepare_process(spec);
         let clock = self.clock.clone();
-        let (child, group_id) = start(spec)?;
+        let (child, group_id) = if gated {
+            start_gated(spec)?
+        } else {
+            start(spec)?
+        };
         // Construct the guard before the child is placed in the async task. If
         // the task is aborted before its first poll, this guard still owns the
         // cleanup fallback for a process that native spawning already started.
@@ -162,7 +221,22 @@ impl Supervisor {
         #[cfg(all(unix, not(target_os = "linux"), feature = "process"))]
         let group = ProcessGroup::of(group_id, task, permit, Arc::clone(&self.cleanup_owners));
         let live = LiveProcess::enter(&self.cleanup_owners);
-        let read = read(group_id)?;
+        // The identity read runs on the blocking pool rather than the executor
+        // thread, so a burst of identified spawns pays one pool handoff per
+        // spawn rather than stalling every sibling task behind a process-table
+        // read. The bounded submit refuses with a typed reason instead of
+        // queueing without bound; the supervisor's own ceiling bounds
+        // concurrent reads, so a refusal surfaces here rather than parking
+        // the spawn.
+        let identify =
+            lgwks_std::task::try_spawn_blocking(move || read(group_id)).map_err(|refused| {
+                use lgwks_std::task::SpawnError;
+                match refused {
+                    SpawnError::Os(error) => error,
+                    other => io::Error::new(io::ErrorKind::WouldBlock, other),
+                }
+            })?;
+        let read = identify.await?;
         let placed = self.place_owned(task, async move {
             let end = drive_process(&clock, child, &token, group, bounds).await;
             drop(live);
@@ -482,6 +556,16 @@ impl Supervisor {
         &mut self,
         spec: &ProcessSpec,
     ) -> io::Result<IdentifiedSpawn> {
+        let _ = spec;
+        Err(Self::no_process_group())
+    }
+
+    /// Process containment is unavailable beyond Unix and Windows targets.
+    #[cfg(all(not(any(unix, windows)), feature = "process"))]
+    pub async fn spawn_process_identified_gated(
+        &mut self,
+        spec: &ProcessSpec,
+    ) -> io::Result<GatedIdentifiedSpawn> {
         let _ = spec;
         Err(Self::no_process_group())
     }

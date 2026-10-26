@@ -33,7 +33,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use lgwks_bot::Runtime;
-use lgwks_bot::rt::process::{Confinement, ProcessSpec, SandboxProfile};
+use lgwks_bot::rt::process::{Confinement, DenyBeneath, ProcessSpec, SandboxProfile};
 use lgwks_bot::rt::supervise::Supervisor;
 
 /// What a scenario reports when a precondition did not hold.
@@ -50,16 +50,22 @@ const PROGRAMS: [&str; 3] = ["/bin/echo", "/usr/bin/true", "/usr/bin/env"];
 /// Words drawn arguments and values are built from.
 const WORDS: [&str; 6] = ["alpha", "beta", "gamma", "delta", "omega", "zed"];
 
-/// Bytes a profile-source draw may hold, hostile members included.
+/// Bytes a profile-source draw may hold, hostile members included. The model
+/// below accepts bytes at or above `0x80` as UTF-8 text a denied non-ASCII
+/// path is spelled in, so the alphabet carries only the ASCII range the
+/// validator can refuse.
 const PROFILE_BYTES: &[u8] = b"()version 1allowdefault-/_. \t\n\x01\x7f+(subpath)";
 
-/// The model's validity, restated from the documented rule.
+/// The model's validity, restated from the documented rule: empty and
+/// oversized sources are refused, and only ASCII control bytes other than tab
+/// and newline are refused — bytes at or above `0x80` are UTF-8 text a denied
+/// non-ASCII path is spelled in, not damage.
 fn model_valid(source: &str) -> bool {
     !source.is_empty()
         && source.len() <= SandboxProfile::MAX_SOURCE_BYTES
         && source
             .bytes()
-            .all(|byte| byte.is_ascii_graphic() || byte.is_ascii_whitespace())
+            .all(|byte| byte >= 0x80 || byte.is_ascii_graphic() || byte.is_ascii_whitespace())
 }
 
 /// One drawn index below `len`.
@@ -500,6 +506,175 @@ fn a_cgroup_scope_kills_a_setsid_escapee_where_the_mount_allows() -> TestResult 
         mechanism,
         ContainmentMechanism::CgroupKill,
         "where the mount admits a scope, the receipt must name the kernel owner that ran"
+    );
+    Ok(())
+}
+
+/// A profile source carrying UTF-8 validates, and only ASCII control bytes
+/// other than tab and newline are refused (#690).
+#[test]
+fn sandbox_profile_accepts_utf8_and_refuses_control_bytes() -> TestResult {
+    let ascii = SandboxProfile::try_new("(version 1)(allow default)")
+        .map_err(|error| format!("a plain ASCII profile validates: {error}"))?;
+    assert_eq!(
+        ascii.source(),
+        "(version 1)(allow default)",
+        "try_new carries the validated source"
+    );
+    let utf8 = SandboxProfile::try_new(
+        "(version 1)(allow default)(deny file-read* (subpath \"/srv/denied-josé\"))",
+    )
+    .map_err(|error| format!("a profile naming a non-ASCII path validates: {error}"))?;
+    utf8.validate()
+        .map_err(|error| format!("validation agrees with try_new on UTF-8: {error}"))?;
+    for refused in ["a\x01b", "a\x7fb", ""] {
+        assert!(
+            SandboxProfile::try_new(refused).is_err(),
+            "a control byte or an empty source refuses eagerly: {refused:?}"
+        );
+    }
+    assert!(
+        SandboxProfile::new("a\x01b").validate().is_err(),
+        "validation refuses the control byte the constructor carried"
+    );
+    Ok(())
+}
+
+/// The builder canonicalizes the denied directory and quotes it for SBPL, so
+/// a symlinked `$TMPDIR` and a `"` in the path name the resolved directory
+/// (#690).
+#[test]
+fn the_builder_canonicalizes_quotes_and_denies() -> TestResult {
+    use crate::scratch::Scratch;
+
+    let dir = Scratch::new("builder-quote\"dir")?;
+    let resolved = std::fs::canonicalize(dir.path())?;
+    let mut profile = SandboxProfile::allow_default();
+    profile
+        .deny_read_beneath(dir.path())
+        .map_err(|error| format!("the builder denies a real directory: {error}"))?;
+    profile
+        .validate()
+        .map_err(|error| format!("the built profile validates: {error}"))?;
+    let source = profile.source();
+    assert!(
+        source.starts_with("(version 1)(allow default)"),
+        "the builder extends the default profile: {source:?}"
+    );
+    assert!(
+        source.contains("(deny file-read*"),
+        "the builder appends a read denial: {source:?}"
+    );
+    let quoted = resolved.to_string_lossy().replace('"', "\\\"");
+    assert!(
+        source.contains(quoted.as_str()),
+        "the denial names the resolved directory, quoted for SBPL: {source:?}"
+    );
+    Ok(())
+}
+
+/// A profile denying a non-ASCII directory confines a `cat` of a file in it
+/// on macOS (#690).
+#[test]
+#[cfg(target_os = "macos")]
+fn a_deny_read_profile_confines_a_non_ascii_directory() -> TestResult {
+    use crate::scratch::Scratch;
+
+    let dir = Scratch::new("confine-josé")?;
+    let denied = dir.path().join("denied");
+    std::fs::create_dir_all(&denied)?;
+    std::fs::write(denied.join("secret.txt"), b"secret")?;
+    let mut profile = SandboxProfile::allow_default();
+    profile
+        .deny_read_beneath(&denied)
+        .map_err(|error| format!("a non-ASCII denial builds: {error}"))?;
+    profile
+        .validate()
+        .map_err(|error| format!("the non-ASCII profile validates: {error}"))?;
+
+    let runtime = Runtime::new()?;
+    let mut denied_spec = ProcessSpec::new("/bin/cat");
+    denied_spec.arg(denied.join("secret.txt"));
+    denied_spec.confinement(Confinement::SandboxProfile(profile.clone()));
+    let mut supervisor = Supervisor::new(1);
+    let denied_run = runtime.block_on(supervisor.run_process(&denied_spec))?;
+    assert_ne!(
+        denied_run.exit_code(),
+        Some(0),
+        "a read the profile denies fails inside the sandbox"
+    );
+    Ok(())
+}
+
+/// Denial validation agrees with its rule: non-empty, bounded, absolute, and
+/// NUL-free (#689).
+#[test]
+fn deny_beneath_validation_agrees_with_its_rule() -> TestResult {
+    let empty = DenyBeneath::new();
+    assert!(empty.validate().is_err(), "an empty denial list refuses");
+    let mut relative = DenyBeneath::new();
+    relative.deny("relative/dir");
+    assert!(relative.validate().is_err(), "a relative denial refuses");
+    let mut many = DenyBeneath::new();
+    for _ in 0..DenyBeneath::MAX_PATHS + 1 {
+        many.deny("/srv/denied");
+    }
+    assert!(many.validate().is_err(), "a denial past the bound refuses");
+    let mut one = DenyBeneath::new();
+    one.deny("/srv/denied");
+    one.validate()
+        .map_err(|error| format!("one absolute denial validates: {error}"))?;
+    assert_eq!(
+        one.paths().count(),
+        1,
+        "the accessor reports the denial in order"
+    );
+    assert_eq!(
+        Confinement::deny_beneath(["/srv/denied"]),
+        Confinement::DenyBeneath(one),
+        "the constructor builds the denial it names"
+    );
+    Ok(())
+}
+
+/// A lane denied its subtree cannot `cat` a file under it, on macOS through
+/// the sandbox profile and on Linux through the mount-namespace overmount,
+/// while the rest of the filesystem stays readable (#689).
+#[test]
+#[cfg(unix)]
+fn a_deny_beneath_lane_cannot_read_its_denied_subtree() -> TestResult {
+    use crate::scratch::Scratch;
+
+    let dir = Scratch::new("deny-beneath")?;
+    let denied = dir.path().join("denied");
+    std::fs::create_dir_all(&denied)?;
+    std::fs::write(denied.join("secret.txt"), b"secret")?;
+    let public = dir.path().join("public.txt");
+    std::fs::write(&public, b"public")?;
+
+    let runtime = Runtime::new()?;
+    let mut supervisor = Supervisor::new(1);
+
+    // The denied read fails inside the confinement.
+    let mut denied_spec = ProcessSpec::new("/bin/cat");
+    denied_spec.arg(denied.join("secret.txt"));
+    denied_spec.confinement(Confinement::deny_beneath([&denied]));
+    let denied_run = runtime.block_on(supervisor.run_process(&denied_spec))?;
+    assert_ne!(
+        denied_run.exit_code(),
+        Some(0),
+        "a read beneath the denied subtree fails inside the confinement"
+    );
+
+    // The public read succeeds: the denial takes one subtree, not the tree.
+    let mut public_spec = ProcessSpec::new("/bin/cat");
+    public_spec.arg(&public);
+    public_spec.confinement(Confinement::deny_beneath([&denied]));
+    let public_run = runtime.block_on(supervisor.run_process(&public_spec))?;
+    assert_eq!(
+        public_run.exit_code(),
+        Some(0),
+        "a read outside the denied subtree still succeeds"
     );
     Ok(())
 }
