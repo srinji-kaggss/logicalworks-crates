@@ -59,6 +59,16 @@ pub(super) fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     Ok((child, group))
 }
 
+/// Start `spec` with its program held behind a start gate.
+///
+/// The same constructor as [`start`], over the gated spec: the child forks
+/// stopped, so its identity is stable before the payload runs. The caller
+/// releases the child once the identity is recorded durably.
+#[cfg(all(unix, feature = "process"))]
+pub(super) fn start_gated(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
+    start(&spec.gated())
+}
+
 /// Serialises a start's spawn-to-track against every adoption sweep.
 ///
 /// [`track_leader`] runs after [`OwnedChild::own`], and owning takes locks and

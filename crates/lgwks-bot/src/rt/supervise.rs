@@ -125,6 +125,136 @@ impl IdentifiedSpawn {
     }
 }
 
+/// A process started by
+/// [`Supervisor::spawn_process_identified_gated`](crate::rt::supervise::Supervisor::spawn_process_identified_gated):
+/// the task that owns it, the identity of the process leading its group, and
+/// whether its payload was released.
+///
+/// The payload never ran before [`Self::release`]: a caller that records
+/// [`Self::leader`] durably and then releases has no window in which a kill
+/// leaves an unrecorded group. A caller that drops this without releasing
+/// kills a group that never ran, through the supervisor's own group guard.
+#[cfg(feature = "process")]
+#[derive(Debug)]
+pub struct GatedIdentifiedSpawn {
+    /// The task's id, as [`Supervisor::spawn_process`](crate::rt::supervise::Supervisor::spawn_process) would have returned it.
+    task: TaskId,
+    /// The group leader's identity, read while the payload waited.
+    leader: lgwks_std::process::ProcessIdentity,
+    /// The leader's pid, signalled on release.
+    pid: i32,
+    /// Whether the payload was released to run.
+    released: bool,
+}
+
+#[cfg(feature = "process")]
+impl GatedIdentifiedSpawn {
+    /// The id of the task that owns the process.
+    #[must_use]
+    pub const fn task(&self) -> TaskId {
+        self.task
+    }
+
+    /// The identity of the process leading the child's group — the record a
+    /// successor passes to
+    /// [`reap_orphaned_group`](crate::rt::process::reap_orphaned_group),
+    /// written down before [`Self::release`] lets the payload run.
+    #[must_use]
+    pub const fn leader(&self) -> &lgwks_std::process::ProcessIdentity {
+        &self.leader
+    }
+
+    /// Whether the payload was released to run.
+    #[must_use]
+    pub const fn is_released(&self) -> bool {
+        self.released
+    }
+
+    /// Release the payload to exec now, after the identity is recorded.
+    ///
+    /// The release waits until the child is observed stopped — a SIGCONT sent
+    /// before the child stops itself would be lost, while one sent after the
+    /// stop is observed resumes exactly the payload that waited. A leader
+    /// that already exited, or whose pid the OS reissued to a stranger (told
+    /// apart by the recorded start instant), needs no release: nothing of
+    /// this spawn will run, so the release is already moot.
+    ///
+    /// Idempotent: releasing a released spawn is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// The signal's own refusal when the child cannot be continued, or a
+    /// timeout when the child never stops within its bound. Either leaves the
+    /// spawn unreleased for a retry, and the supervisor's group guard still
+    /// owns the child — a refused release never runs the payload unrecorded.
+    #[cfg(all(unix, feature = "process"))]
+    pub async fn release(&mut self) -> io::Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        // The pid still names our leader: a reissued pid names a stranger the
+        // release must not touch, and an exited leader needs no release.
+        match lgwks_std::process::identify_process(self.pid)? {
+            None => {
+                self.released = true;
+                return Ok(());
+            }
+            Some(current) if current.started() != self.leader.started() => {
+                self.released = true;
+                return Ok(());
+            }
+            Some(_) => {}
+        }
+        let Some(deadline) = std::time::Instant::now().checked_add(RELEASE_BUDGET) else {
+            lgwks_std::trace::warn!(
+                pid = self.pid,
+                "GatedIdentifiedSpawn::release: the deadline overflowed the clock before the child stopped"
+            );
+            return Err(io::Error::other(
+                "the release deadline overflowed the clock",
+            ));
+        };
+        loop {
+            if lgwks_std::process::child_has_exited_without_reaping(self.pid)? {
+                self.released = true;
+                return Ok(());
+            }
+            if lgwks_std::process::child_stopped_without_reaping(self.pid)? {
+                match lgwks_std::process::continue_process(self.pid) {
+                    Ok(()) => {
+                        self.released = true;
+                        return Ok(());
+                    }
+                    Err(error) if is_absence(&error) => {
+                        self.released = true;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        lgwks_std::trace::warn!(
+                            %error,
+                            "GatedIdentifiedSpawn::release: the continue signal was refused"
+                        );
+                        return Err(error);
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                lgwks_std::trace::warn!(
+                    pid = self.pid,
+                    "GatedIdentifiedSpawn::release: a gated child never stopped behind its gate"
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "a gated child that never stopped within {RELEASE_BUDGET:?} is not released"
+                    ),
+                ));
+            }
+            sleep(RELEASE_POLL).await;
+        }
+    }
+}
+
 /// The identity of the just-started leader `pid`, which the supervisor has not
 /// reaped, so a process holding the pid is the leader itself.
 #[cfg(all(any(unix, windows), feature = "process"))]
@@ -142,7 +272,8 @@ fn identify_leader(pid: i32) -> io::Result<lgwks_std::process::ProcessIdentity> 
 
 #[cfg(all(feature = "process", feature = "script"))]
 use super::process::ProcessRunError;
-
+#[cfg(all(unix, feature = "process"))]
+use crate::rt::time::sleep;
 // Per-tenant admission needs `script::Tenant` — the estate's one tenant
 // identity, shared with step keys, `Host` and every run store — and
 // `crate::task`, which needs it too, is gated the same way. The policy and the
@@ -491,6 +622,26 @@ const DEATH_CONFIRM_PASSES: usize = 40;
 /// sleep, so it costs nothing on the paths that stop early.
 #[cfg(all(unix, feature = "process"))]
 const GROUP_SIGNAL_ATTEMPTS: usize = 4;
+
+/// How long [`GatedIdentifiedSpawn::release`] waits for the child to stop
+/// itself before it refuses.
+///
+/// The stop lands on the child's first scheduling after the fork, so the wait
+/// is milliseconds on any unloaded host; the bound is for the loaded one,
+/// where the release still ends rather than parking the caller. Past the
+/// bound the payload stays stopped under the supervisor's group guard, which
+/// still owns it.
+#[cfg(all(unix, feature = "process"))]
+const RELEASE_BUDGET: Duration = Duration::from_secs(10);
+
+/// How often a waiting [`GatedIdentifiedSpawn::release`] re-reads the child
+/// while it starts.
+///
+/// A millisecond, like every other poll in this module: fine enough that the
+/// release follows the stop with no added latency a caller could observe, and
+/// coarse enough that the wait parks on the runtime clock instead of spinning.
+#[cfg(all(unix, feature = "process"))]
+const RELEASE_POLL: Duration = Duration::from_millis(1);
 
 /// What one group signal delivered and what the OS then said.
 #[cfg(all(unix, feature = "process"))]

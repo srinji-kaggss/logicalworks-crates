@@ -38,7 +38,7 @@ mod windows;
 
 pub use capture::{
     ContainmentMechanism, DescendantSet, MAX_CAPTURED_DESCENDANTS, capture_descendants,
-    kill_process, process_exists, running_processes,
+    continue_process, kill_process, process_exists, running_processes,
 };
 #[cfg(target_os = "linux")]
 pub use cgroup::{
@@ -150,38 +150,53 @@ pub fn process_group_exists(pgid: i32) -> io::Result<bool> {
 
 /// Whether child `pid` has exited, leaving it un-reaped.
 ///
-/// This is `waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)`: it reports the
-/// exit and *leaves the child in the waitable state*, so a following
-/// `Child::wait` still returns the real exit status. That gap — exited but
-/// not reaped — is what a supervisor needs: an unreaped (zombie) leader
-/// still occupies its pid, so the group id cannot be reused by the OS while
-/// the supervisor still owes signals to it. Reaping is what releases the id,
-/// and this call never reaps.
+/// This is `waitid(P_PID, pid, WEXITED | WSTOPPED | WCONTINUED | WNOHANG |
+/// WNOWAIT)`: it reports the child's state *without reaping it*, so a
+/// following `Child::wait` still returns the real exit status. That gap —
+/// exited but not reaped — is what a supervisor needs: an unreaped (zombie)
+/// leader still occupies its pid, so the group id cannot be reused by the OS
+/// while the supervisor still owes signals to it. Reaping is what releases
+/// the id, and this call never reaps.
 ///
-/// `Ok(false)` means still running; `Ok(true)` means exited and still
+/// Only an exited child — normally, by signal, or with a core dump — counts
+/// as exited. A stopped or continued child is alive, and a waitid that only
+/// asked for exits would misread the stop the gated start depends on as an
+/// exit and have the supervisor kill a child that merely waited (#691).
+///
+/// `Ok(false)` means running or stopped; `Ok(true)` means exited and still
 /// waitable.
 #[cfg(all(unix, feature = "process"))]
 pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
+    Ok(wait_child_without_reaping(pid)?
+        .is_some_and(|state| state.exited() || state.killed() || state.dumped()))
+}
+
+/// The child's waitid state without reaping it, shared by the exit and stop
+/// observations: one validation, one full-mask wait, and the state for the
+/// caller to judge by its own `si_code`.
+#[cfg(all(unix, feature = "process"))]
+fn wait_child_without_reaping(pid: i32) -> io::Result<Option<rustix::process::WaitIdStatus>> {
     if pid <= 0 {
         let refusal = Err(invalid_pid());
         #[cfg(feature = "trace")]
-        crate::trace::debug!(error = ?refusal.as_ref().err(), "child_has_exited_without_reaping: returning an error to the caller");
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "wait_child_without_reaping: returning an error to the caller");
         return refusal;
     }
     let Some(target) = rustix::process::Pid::from_raw(pid) else {
         let refusal = Err(invalid_pid());
         #[cfg(feature = "trace")]
-        crate::trace::debug!(error = ?refusal.as_ref().err(), "child_has_exited_without_reaping: returning an error to the caller");
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "wait_child_without_reaping: returning an error to the caller");
         return refusal;
     };
-    let observed = rustix::process::waitid(
+    rustix::process::waitid(
         rustix::process::WaitId::Pid(target),
         rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::STOPPED
+            | rustix::process::WaitIdOptions::CONTINUED
             | rustix::process::WaitIdOptions::NOHANG
             | rustix::process::WaitIdOptions::NOWAIT,
     )
-    .map_err(errno_to_io)?;
-    Ok(observed.is_some())
+    .map_err(errno_to_io)
 }
 
 /// Whether process `pid` has exited while something still holds its object.
@@ -202,6 +217,35 @@ pub fn child_has_exited_without_reaping(pid: i32) -> io::Result<bool> {
     let _ = pid;
     Err(unsupported(
         "process child_has_exited_without_reaping is Unix-only",
+    ))
+}
+
+/// Whether child `pid` is stopped, leaving it un-reaped.
+///
+/// This is `waitid(P_PID, pid, WEXITED | WSTOPPED | WCONTINUED | WNOHANG |
+/// WNOWAIT)`: it reports the child's state *without reaping it and without
+/// changing it*, so a following SIGCONT resumes exactly the stop observed
+/// here. Only a stopped child counts: an exited one is answered by
+/// [`child_has_exited_without_reaping`], and a continued one is running.
+/// Asking for every state keeps the waitid from waiting on the one state the
+/// caller did not name.
+///
+/// `Ok(false)` means running, continued, or exited; `Ok(true)` means stopped
+/// and still waitable.
+#[cfg(all(unix, feature = "process"))]
+pub fn child_stopped_without_reaping(pid: i32) -> io::Result<bool> {
+    Ok(wait_child_without_reaping(pid)?.is_some_and(|state| state.stopped()))
+}
+
+/// Whether child `pid` is stopped, leaving it un-reaped.
+///
+/// The `process` capability's gate is Unix; other targets report
+/// [`std::io::ErrorKind::Unsupported`] rather than a fabricated answer.
+#[cfg(all(not(unix), feature = "process"))]
+pub fn child_stopped_without_reaping(pid: i32) -> io::Result<bool> {
+    let _ = pid;
+    Err(unsupported(
+        "process child_stopped_without_reaping is Unix-only",
     ))
 }
 
@@ -235,8 +279,9 @@ fn invalid_pid() -> io::Error {
     )
 }
 
-#[cfg(all(not(any(unix, windows)), feature = "process"))]
-/// Construct the unsupported-operation error for non-Unix targets.
+#[cfg(all(not(unix), feature = "process"))]
+/// Construct the unsupported-operation error for non-Unix targets, Windows
+/// included: the stop observation and the release are Unix-only there too.
 fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)
 }

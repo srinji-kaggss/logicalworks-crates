@@ -27,7 +27,7 @@ mod frames;
 #[cfg(unix)]
 mod resolve;
 
-pub use confine::{Confinement, LandlockRules, PathAccess, SandboxProfile};
+pub use confine::{Confinement, DenyBeneath, LandlockRules, PathAccess, SandboxProfile};
 pub use frames::{DEFAULT_FRAME_CEILING, FrameRead, FrameReadError, Frames, read_frames};
 
 /// The successor's half of
@@ -285,14 +285,45 @@ impl ProcessSpec {
     /// Confine the child past its process group.
     ///
     /// A [`Confinement::SandboxProfile`] wraps the spawn in `sandbox-exec` on
-    /// macOS and a [`Confinement::Landlock`] allowlist wraps it in `setpriv` on
-    /// Linux; each refuses the spawn anywhere else, so a confinement set by
+    /// macOS, a [`Confinement::Landlock`] allowlist wraps it in `setpriv` on
+    /// Linux, and a [`Confinement::DenyBeneath`] denial overmounts the denied
+    /// subtrees on Linux or denies reads beneath them in the profile on
+    /// macOS; each refuses the spawn anywhere else, so a confinement set by
     /// mistake on the wrong platform starts nothing rather than running the
     /// child unconfined. Confinement applies between the fork and the exec,
     /// so every descendant inherits it.
     pub fn confinement(&mut self, confinement: Confinement) -> &mut Self {
         self.confinement = confinement;
         self
+    }
+
+    /// Clone this spec with its program held behind a start gate.
+    ///
+    /// The gated child runs `/bin/sh`, which stops itself before it execs
+    /// this spec's program afterwards, keeping the same pid: an identity read
+    /// while the shell is stopped names the process the payload runs as, and
+    /// the stop is synchronous — the payload cannot run before the release no
+    /// matter when the child is scheduled. Crate-internal: the only producer
+    /// is the gated identified spawn, which releases the child once the
+    /// identity is recorded.
+    ///
+    /// The gate shell itself is confined exactly as this spec asks, because
+    /// the confinement wraps the shell and inherits across its exec. If the
+    /// stop itself failed the shell would exit before the exec, so a broken
+    /// gate never runs the payload unrecorded.
+    #[cfg(all(unix, feature = "process"))]
+    pub(crate) fn gated(&self) -> Self {
+        const SCRIPT: &str = "kill -STOP $$ || exit 99; exec \"$@\"";
+        let mut gated = self.clone();
+        let mut args = Vec::with_capacity(self.args.len().saturating_add(4));
+        args.push("-c".into());
+        args.push(SCRIPT.into());
+        args.push("lgwks-gate".into());
+        args.push(self.program.clone());
+        args.extend(self.args.iter().cloned());
+        gated.program = "/bin/sh".into();
+        gated.args = args;
+        gated
     }
 
     /// The program to execute, for inspection only.

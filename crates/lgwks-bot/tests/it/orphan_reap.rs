@@ -79,25 +79,35 @@ impl Drop for LaneGuard {
     }
 }
 
-/// The coordinator: start the lane, write its leader's identity whole, park
-/// until killed.
+/// The coordinator: start the lane held behind its gate, write its leader's
+/// identity whole, release the payload once the record is durable, and park
+/// until killed. A kill after the release leaves a recorded group the
+/// successor stops; a kill before it leaves a group that never ran.
 fn coordinator(dir: &std::path::Path) -> TestResult {
     let runtime = Runtime::new()?;
     let member_file = dir.join("member.pid");
     // The supervisor is returned out of the runtime so it — and the lane it
     // owns — stays alive for as long as this process does.
-    let (supervisor, spawned) = runtime.block_on(async {
+    let (supervisor, mut spawned) = runtime.block_on(async {
         let mut supervisor = Supervisor::default();
         let spawned = supervisor
-            .spawn_process_identified(&lane(&member_file))
+            .spawn_process_identified_gated(&lane(&member_file))
             .await?;
         Ok::<_, std::io::Error>((supervisor, spawned))
     })?;
-    wait_for_pid(&member_file, BUDGET).ok_or("the lane never recorded its member")?;
     // Written aside and renamed, so the parent never reads a half-written record.
     let partial = dir.join("leader.partial");
     std::fs::write(&partial, spawned.leader().to_string())?;
     std::fs::rename(&partial, dir.join("leader"))?;
+    // The record is durable: the payload may run now.
+    runtime.block_on(async {
+        spawned
+            .release()
+            .await
+            .map_err(|error| format!("the gate releases once the record is durable: {error}"))
+    })?;
+    assert!(spawned.is_released(), "a released gate reads as released");
+    wait_for_pid(&member_file, BUDGET).ok_or("the lane never recorded its member")?;
     for _ in 0..600 {
         pause(100);
     }
@@ -123,11 +133,14 @@ fn a_killed_coordinators_lane_is_stopped_by_its_successor() -> TestResult {
         .stdout(std::process::Stdio::null())
         .spawn()?,
     ));
+    // The member pid is the release's proof: the payload runs only after the
+    // record is durable, so a kill after this point always leaves a recorded
+    // group behind, and a kill before it leaves a group that never ran.
+    let member = wait_for_pid(&scratch.path().join("member.pid"), BUDGET)
+        .ok_or("the lane's member pid was never recorded")?;
     probe.kill_after_marker(&record, "orphan_reap coordinator")?;
 
     let leader: ProcessIdentity = std::fs::read_to_string(&record)?.parse()?;
-    let member = wait_for_pid(&scratch.path().join("member.pid"), BUDGET)
-        .ok_or("the lane's member pid was never recorded")?;
     let _backstop = LaneGuard(vec![leader.pid(), member]);
     assert!(
         pid_is_alive(leader.pid()) && pid_is_alive(member),

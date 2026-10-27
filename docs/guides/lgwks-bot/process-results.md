@@ -9,14 +9,14 @@ Pages of this guide: [tasks](background-work.md) ·
 
 `Supervisor::run_process(spec)` is `spawn_process` with the completion handed
 back: it awaits the child and returns a `ProcessRun`
-(`crates/lgwks-bot/src/rt/supervise/run.rs:258`). It reuses the same process-group
+(`crates/lgwks-bot/src/rt/supervise/run.rs:332`). It reuses the same process-group
 ownership, deadline and cleanup machinery, so a deadline stops the **group**,
 and the run reports the same `CleanupReceipt` a supervised task would.
 
 The report is data, and none of it is a verdict about the work:
 `ProcessRun::status` (with `exit_code` and `signal`), `stdout` and `stderr` as
 `CapturedStream`s, `deadline_fired`, and `cleanup`
-(`crates/lgwks-bot/src/rt/process.rs:675`). Exit zero is reported as exit zero;
+(`crates/lgwks-bot/src/rt/process.rs:706`). Exit zero is reported as exit zero;
 judging whether the command did what it was asked is the caller's job.
 
 A stream whose policy is `StdioPolicy::Capture(limit)`
@@ -70,7 +70,7 @@ the payload bytes one pass keeps, and the capture's own
 can actually refuse. Prefer `frames()` when the bytes are already in hand.
 
 `run_process` returns typed errors that separate the two worlds a caller acts
-on differently (`crates/lgwks-bot/src/rt/process.rs:795`): `Refused` (the
+on differently (`crates/lgwks-bot/src/rt/process.rs:826`): `Refused` (the
 supervisor was cancelled before the fork) and `NotStarted` (the platform
 refused the program) both establish that nothing ran; `AfterStart` establishes
 that the child did run and its outcome is unknown.
@@ -89,11 +89,11 @@ supervisor applies it through the platform's own exec wrapper, so the boundary
 holds the child and every descendant, a `setsid` escapee included:
 
 - `Confinement::SandboxProfile` (macOS) runs the child under `sandbox-exec -p`
-  (`crates/lgwks-bot/src/rt/process/confine.rs:52`).
+  (`crates/lgwks-bot/src/rt/process/confine.rs:79`).
 - `Confinement::Landlock` (Linux) runs it under util-linux `setpriv`, 2.40 or
   later, with a deny-by-default filesystem allowlist: `LandlockRules::allow(path,
   PathAccess::Read | ReadWrite)`, at most 64 rules
-  (`crates/lgwks-bot/src/rt/process/confine.rs:162`). Grant the child's
+  (`crates/lgwks-bot/src/rt/process/confine.rs:291`). Grant the child's
   program and libraries (`/usr`, `/lib`, `/etc`) read-only and its work tree
   read-write; anything unnamed is refused by the kernel with `EACCES`.
 
