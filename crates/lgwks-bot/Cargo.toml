@@ -282,6 +282,11 @@ path = "examples/quickstart.rs"
 required-features = ["script"]
 
 [[example]]
+name = "script_vocabulary"
+path = "examples/script_vocabulary.rs"
+required-features = ["script"]
+
+[[example]]
 name = "guarantees"
 path = "examples/guarantees.rs"
 required-features = ["script", "ephemeral"]

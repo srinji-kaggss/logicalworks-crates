@@ -13,7 +13,9 @@ bodies, `lgwks_ast` tree-sitter parsing of hostile source files,
   before consumers see them; the unchecked `parse` escape hatch is for
   diagnostics and tests only.
 - `lgwks_bot` authority is explicit and auditable, not a sandbox: in-process
-  code can always dial out directly.
+  code can always dial out directly. A flow's `Tenant` is its trusted host's
+  partition key, not an authenticated identity; direct file, network and process
+  paths from a flow are compile-time refusals, so I/O runs only through domains.
 
 Out of scope for these crates (see `docs/distributed-boundaries.md`): mTLS /
 private CA handling, key lifecycle, tracing/metrics facades, consensus.

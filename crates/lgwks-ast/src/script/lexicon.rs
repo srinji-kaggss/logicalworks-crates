@@ -199,13 +199,20 @@ impl Guarantee {
 /// A guarantee proved by a simulation in `lgwks_bot`'s `sim_script.rs`, the
 /// file whose flows the real macro expanded.
 const fn script_sim(axis: Axis, claim: &'static str, test: &'static str) -> Guarantee {
+    script_sim_in(SCRIPT_SIMS, axis, claim, test)
+}
+
+/// A guarantee proved by a seeded simulation in the named `sim_` file.
+const fn script_sim_in(
+    file: &'static str,
+    axis: Axis,
+    claim: &'static str,
+    test: &'static str,
+) -> Guarantee {
     Guarantee {
         axis,
         claim,
-        evidence: Evidence::Sim {
-            file: SCRIPT_SIMS,
-            test,
-        },
+        evidence: Evidence::Sim { file, test },
     }
 }
 
@@ -220,6 +227,14 @@ const fn refused(axis: Axis, claim: &'static str, case: &'static str) -> Guarant
 
 /// The simulation file whose flows the real macro expanded.
 const SCRIPT_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script.rs";
+
+/// The simulation file for the machine-sized and typed fan-outs: `each`
+/// without a bound and `FanOut`.
+const FANOUT_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script_fanout.rs";
+
+/// The simulation file for the step words: `together`, `step`, `for`, `let`,
+/// `run` and `fail`.
+const STEP_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script_steps.rs";
 
 /// The simulation file whose flows call registry domains (#388).
 const DOMAIN_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script_domains.rs";
@@ -418,7 +433,8 @@ pub const LEXICON: [Word; 15] = [
         ],
         guarantees: &[
             script_sim(Axis::Hyperscale, "bounded fan-out", "fan_bounded"),
-            script_sim(
+            script_sim_in(
+                FANOUT_SIMS,
                 Axis::Generalized,
                 "results in input order",
                 "fan_machine_sized",
@@ -486,12 +502,14 @@ pub const LEXICON: [Word; 15] = [
             "an indent under a line that opens no block",
         ],
         guarantees: &[
-            script_sim(
+            script_sim_in(
+                STEP_SIMS,
                 Axis::Ephemeral,
                 "every branch owned by this task",
                 "together_owned",
             ),
-            script_sim(
+            script_sim_in(
+                STEP_SIMS,
                 Axis::Hyperscale,
                 "first failure cancels the rest",
                 "together_fail_fast",
@@ -509,8 +527,14 @@ pub const LEXICON: [Word; 15] = [
         )],
         refuses: &["a name that is not one word"],
         guarantees: &[
-            script_sim(Axis::Ephemeral, "its own step key", "step_own_key"),
-            script_sim(
+            script_sim_in(
+                STEP_SIMS,
+                Axis::Ephemeral,
+                "its own step key",
+                "step_own_key",
+            ),
+            script_sim_in(
+                STEP_SIMS,
                 Axis::Decoupled,
                 "failures located at the step",
                 "step_failure_located",
@@ -528,12 +552,20 @@ pub const LEXICON: [Word; 15] = [
         )],
         refuses: &["a missing pattern or missing items"],
         guarantees: &[
-            script_sim(
-                Axis::Generalized,
-                "items in order, one at a time",
-                "for_in_order",
+            Guarantee {
+                axis: Axis::Generalized,
+                claim: "items in order, one at a time",
+                evidence: Evidence::Sim {
+                    file: STEP_SIMS,
+                    test: "for_in_order",
+                },
+            },
+            script_sim_in(
+                STEP_SIMS,
+                Axis::Ephemeral,
+                "one scope per item",
+                "for_scope_per_item",
             ),
-            script_sim(Axis::Ephemeral, "one scope per item", "for_scope_per_item"),
         ],
         example: "flow notify(users: Vec<User>):\n    for user in users:\n        run email(user)\n",
     },
@@ -575,7 +607,8 @@ pub const LEXICON: [Word; 15] = [
             "the block's last line becomes `x`",
         )],
         refuses: &["a `let` with no `=` or nothing after it"],
-        guarantees: &[script_sim(
+        guarantees: &[script_sim_in(
+            STEP_SIMS,
             Axis::Idiomatic,
             "the block's failure propagates before `x` is bound",
             "let_fails_before_binding",
@@ -591,7 +624,8 @@ pub const LEXICON: [Word; 15] = [
             "call another flow in this scope, await it, propagate its failure",
         )],
         refuses: &[],
-        guarantees: &[script_sim(
+        guarantees: &[script_sim_in(
+            STEP_SIMS,
             Axis::MultiTenant,
             "the callee runs in this tenant's scope",
             "run_in_callers_tenant",
@@ -668,7 +702,8 @@ pub const LEXICON: [Word; 15] = [
             "stop with a permanent / retryable failure",
         )],
         refuses: &["a reason missing after `with`"],
-        guarantees: &[script_sim(
+        guarantees: &[script_sim_in(
+            STEP_SIMS,
             Axis::Decoupled,
             "a typed failure the caller can classify",
             "fail_is_classified",

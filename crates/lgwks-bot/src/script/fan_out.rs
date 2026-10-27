@@ -135,7 +135,10 @@ impl<I: IntoIterator> FanOut<I> {
         F: Fn(I::Item) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let scope = Scope::root(Tenant::new(TENANT).map_err(FanOutError::Flow)?);
+        // The crate's own reserved tenant, minted through the crate-private
+        // path: `Tenant::new` refuses it so no caller can adopt the
+        // unsupervised fan-out's namespace by spelling it.
+        let scope = Scope::root(Tenant::assumed(TENANT));
         self.drive(&scope, "run", body).await
     }
 

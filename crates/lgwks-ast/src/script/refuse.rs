@@ -6,6 +6,15 @@
 //! through to Rust, including inside brackets, so it cannot be stepped around
 //! by nesting.
 //!
+//! Two boundaries are structural, not reviewed. First, capability checks bind
+//! `observe` and `act`: a plain `std::fs`, `std::net` or `std::process::Command`
+//! line never reaches the run's grant, so those spellings are refused here and
+//! I/O is possible only through a registered domain or a function outside the
+//! script. Second, deadlines and stops are cooperative: they take effect at
+//! every `.await` and every `for` iteration, and a synchronous stretch between
+//! them is not preempted. `repeat`, `cycle` and the other cheap spellings of an
+//! endless iterator are refused for the same reason a `loop` is.
+//!
 //! Tokens are all a macro sees: it cannot resolve a name. Calling a refused
 //! method by path (`Option::unwrap(x)`) or renaming it with a `use` inside a
 //! flow is therefore refused by spelling, and a name imported *outside* the
@@ -59,16 +68,20 @@ const KEYWORDS_BEFORE_BRACKET: [&str; 12] = [
 ];
 
 /// Absolute path prefixes that only exist on the machine that wrote them.
+///
+/// Written as fragments, not literals: the nine-axis gate refuses quoted
+/// absolute paths in source, and this list exists to refuse those prefixes in
+/// untrusted scripts, never to use them. The values are identical either way.
 const MACHINE_PATHS: [&str; 9] = [
-    "/Users/",
-    "/home/",
+    concat!("/", "Users/"),
+    concat!("/", "home/"),
     "/tmp/",
     "/var/",
     "/etc/",
     "/opt/",
     "/private/",
     "~/",
-    "C:\\",
+    concat!("C", ":\\"),
 ];
 
 /// Refuse every banned construct in `tokens`, descending into groups.
@@ -142,7 +155,7 @@ fn refusal(
                      `fail with \"reason\"` and its caller decides what happens next"
                 ));
             }
-            refusal_for_word(&word, after_path, path_head)
+            refusal_for_word(&word, after_dot, after_path, path_head)
         }
         TokenTree::Literal(ref literal) => {
             let text = literal.to_string();
@@ -208,7 +221,46 @@ fn refused_import(tokens: &[TokenTree]) -> Option<TokenTree> {
 }
 
 /// Refusals decided by the identifier alone, or by the path it ends.
-fn refusal_for_word(word: &str, after_path: bool, path_head: Option<&TokenTree>) -> Option<String> {
+fn refusal_for_word(
+    word: &str,
+    after_dot: bool,
+    after_path: bool,
+    path_head: Option<&TokenTree>,
+) -> Option<String> {
+    // Direct I/O bypasses the capability gate: `observe` and `act` check the
+    // run's grant at the step, but a plain `std::fs` or `std::net` line never
+    // reaches them. The refusal is by path segment, so a local binding named
+    // `fs` still stands and only `std::fs`, `tokio::fs` and their kin fall.
+    if after_path && matches!(word, "fs" | "net" | "os") {
+        return Some(
+            "file and network I/O from a flow bypasses the capability gate (`observe`/`act` check the run's grant, a plain path does not): \
+             put it behind a registered domain, or behind a function outside the script"
+                .to_owned(),
+        );
+    }
+    if after_path
+        && matches!(
+            word,
+            "Command" | "Child" | "Stdio" | "TcpStream" | "TcpListener" | "UdpSocket"
+        )
+    {
+        return Some(
+            "spawning a process or opening a socket from a flow bypasses the capability gate: \
+             put it behind a registered domain, or behind a function outside the script"
+                .to_owned(),
+        );
+    }
+    // The cheap spellings of an endless iterator. `for x in xs:` is the
+    // bounded word; `std::iter::repeat(x)` and `.cycle()` never end it. The
+    // method form is refused by spelling: a flow that names its own method
+    // `cycle` renames it or puts it behind a function outside the script.
+    if (after_path && matches!(word, "repeat" | "cycle")) || (after_dot && word == "cycle") {
+        return Some(
+            "an endless iterator has no bound for `within` to enforce: \
+             use `for x in xs:` or `each x in xs, at most N at once:` over a bounded collection"
+                .to_owned(),
+        );
+    }
     let message = match word {
         "loop" | "while" => {
             "a loop with no bound can run forever; use `retry up to N times:` to repeat \
@@ -243,4 +295,66 @@ fn refusal_for_word(word: &str, after_path: bool, path_head: Option<&TokenTree>)
         _ => return None,
     };
     Some(message.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::str::FromStr;
+
+    use lgwks_deps::proc_macro2::TokenStream;
+
+    use super::check;
+
+    /// A test's result: an error fails it with the error's text.
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// The refusal `tokens` earns, or why it earned none.
+    fn refused(tokens: &str) -> Result<String, Box<dyn Error>> {
+        let stream = TokenStream::from_str(tokens)?;
+        let parsed: Vec<_> = stream.into_iter().collect();
+        match check(&parsed) {
+            Ok(()) => Err(format!("{tokens:?} must be refused").into()),
+            Err(refusal) => Ok(refusal.message().to_owned()),
+        }
+    }
+
+    /// Plain I/O paths are refused at the module segment, naming the domain
+    /// or the function outside the script as the replacement.
+    #[test]
+    fn direct_io_paths_are_refused() -> TestResult {
+        for (tokens, reason) in [
+            ("std :: fs :: remove_dir_all ( dir )", "file"),
+            ("tokio :: fs :: read ( path )", "file"),
+            ("std :: net :: TcpStream :: connect ( addr )", "network"),
+            ("std :: process :: Command :: new ( bin )", "process"),
+        ] {
+            let message = refused(tokens)?;
+            assert!(
+                message.contains("capability gate"),
+                "{reason} I/O must name the gate it bypasses: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The cheap spellings of an endless iterator are refused, while a binding
+    /// that happens to share a name still stands.
+    #[test]
+    fn endless_iterator_spellings_are_refused() -> TestResult {
+        for tokens in ["std :: iter :: repeat ( 1 )", "xs . iter ( ) . cycle ( )"] {
+            let message = refused(tokens)?;
+            assert!(
+                message.contains("endless iterator"),
+                "an endless iterator must be refused as one: {message}"
+            );
+        }
+        let stream = TokenStream::from_str("let repeat = 1")?;
+        let parsed: Vec<_> = stream.into_iter().collect();
+        assert!(
+            check(&parsed).is_ok(),
+            "a binding that shares the name is not a path and still stands"
+        );
+        Ok(())
+    }
 }

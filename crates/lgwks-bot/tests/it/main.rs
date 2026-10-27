@@ -306,6 +306,9 @@ mod sim_run_boundaries;
 mod sim_scale;
 mod sim_script;
 mod sim_script_domains;
+mod sim_script_fanout;
+mod sim_script_steps;
+mod sim_script_vocab;
 mod sim_session_front_door;
 mod sim_skew;
 #[cfg(all(feature = "ecs", feature = "wire"))]
