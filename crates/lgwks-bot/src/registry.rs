@@ -54,13 +54,20 @@
 //! downstream consequence by `tests/spec_materialize.rs`'s
 //! `a_duplicate_registry_is_refused_naming_the_identifier`.
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use std::any::Any;
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::cap::Cap;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::ecs::{AdmittedInput, identify_output, same_output};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::effect::InputIdentity;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::error::BotError;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::spec::{EvaluateAny, ExecuteAny, ObserveAny, TypedEval, TypedExec, Witness};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use crate::verb::{Evaluate, Execute, Observe};
 
 #[cfg(feature = "script")]
@@ -97,11 +104,13 @@ impl Role {
 ///
 /// A function pointer rather than a closure: the registry is a `static`, and a
 /// capturing closure cannot live in one.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub type SourceCtor = fn(&str) -> Result<Source, BotError>;
 
 /// Builds one action from the `target` its spec names.
 ///
 /// A function pointer for the same reason as [`SourceCtor`].
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub type ActionCtor = fn(&str) -> Result<Action, BotError>;
 
 /// A source, erased to the view the runner calls, plus the metadata a chain
@@ -126,21 +135,26 @@ pub type ActionCtor = fn(&str) -> Result<Action, BotError>;
 /// the change filter binds, and [`Source::new`] for the bounds this needs.
 ///
 /// [`InputIdentity::SCHEMA_ID`]: crate::effect::InputIdentity::SCHEMA_ID
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub struct Source {
     /// The observer, erased to the view the runner calls.
     inner: Box<dyn ObserveAny>,
     /// Equality for this source's output, captured from `O::Output: PartialEq`
     /// where the type was still a parameter.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     same: fn(&dyn Any, &dyn Any) -> bool,
     /// The admitted-input identity of this source's output.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     identify: fn(&dyn Any) -> AdmittedInput,
     /// What type this source produces, taken here where it is a parameter.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     witness: Witness,
     /// Builds a condition for this source's own output type from a wire
     /// identifier, so a spec's condition resolves against the type it will see.
     condition: fn(&str) -> Result<Condition, BotError>,
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl Source {
     /// Erase a concrete source into the handle a registry entry returns.
     ///
@@ -152,6 +166,7 @@ impl Source {
     /// a struct included. A source whose output is ordered and parseable uses
     /// [`Source::ordered`] to answer the threshold conditions as well.
     #[must_use]
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub fn new<O>(source: O) -> Self
     where
         O: Observe + 'static,
@@ -170,6 +185,7 @@ impl Source {
     /// the sources that offer thresholds, rather than every source a registry
     /// can hold.
     #[must_use]
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub fn ordered<O>(source: O) -> Self
     where
         O: Observe + 'static,
@@ -184,6 +200,7 @@ impl Source {
 
     /// Capture the chain metadata where `O::Output` is still a type
     /// parameter, with the condition vocabulary the caller chose.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     fn erase<O>(source: O, condition: fn(&str) -> Result<Condition, BotError>) -> Self
     where
         O: Observe + 'static,
@@ -233,6 +250,7 @@ impl Source {
     ///
     /// The one seam the ECS chain assembler uses. Kept crate-internal because
     /// the pieces are the substrate's own types, not a second public surface.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub(crate) fn into_parts(self) -> SourceParts {
         (self.inner, self.same, self.identify, self.witness)
     }
@@ -243,6 +261,7 @@ impl Source {
 ///
 /// One name for the tuple, so [`Source::into_parts`] and the chain assembler
 /// agree on the order without either spelling out four types.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) type SourceParts = (
     Box<dyn ObserveAny>,
     fn(&dyn Any, &dyn Any) -> bool,
@@ -254,6 +273,7 @@ pub(crate) type SourceParts = (
 ///
 /// Monomorphized on `O`, so `O::Output` is the concrete type the condition
 /// evaluates and no schema table has to be matched by hand.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn make_condition<O>(condition_id: &str) -> Result<Condition, BotError>
 where
     O: Observe + 'static,
@@ -274,6 +294,7 @@ where
 
 /// Build the wire condition `condition_id` names for an ordered source `O`:
 /// the two thresholds, then the order-free vocabulary of [`make_condition`].
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn make_ordered_condition<O>(condition_id: &str) -> Result<Condition, BotError>
 where
     O: Observe + 'static,
@@ -301,6 +322,7 @@ where
 }
 
 /// The argument inside `prefix(...)`, or `None` when `identifier` is not that.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn parenthesized<'a>(identifier: &'a str, prefix: &str) -> Option<&'a str> {
     identifier
         .strip_prefix(prefix)?
@@ -316,6 +338,7 @@ fn parenthesized<'a>(identifier: &'a str, prefix: &str) -> Option<&'a str> {
 /// condition the caller has to repair — but it is the part that distinguishes
 /// an empty threshold from a malformed one, so it rides along beside
 /// `identifier`.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn parse_bound<T>(argument: &str, identifier: &str) -> Result<T, BotError>
 where
     T: std::str::FromStr,
@@ -335,6 +358,7 @@ where
         })
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl std::fmt::Debug for Source {
     /// Names the domain, not the source.
     ///
@@ -351,8 +375,10 @@ impl std::fmt::Debug for Source {
 }
 
 /// An action, erased to the view the runner calls.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub struct Action(Box<dyn ExecuteAny>);
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl Action {
     /// Erase a concrete action into the handle a registry entry returns.
     #[must_use]
@@ -378,11 +404,13 @@ impl Action {
     }
 
     /// Take the erased action, for the chain assembler.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub(crate) fn into_execute_any(self) -> Box<dyn ExecuteAny> {
         self.0
     }
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl std::fmt::Debug for Action {
     /// Names the domain, not the action, for the reason [`Source`]'s does.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -397,7 +425,7 @@ impl std::fmt::Debug for Action {
 ///
 /// A spec names a condition as text and [`Source::condition`] builds one for its
 /// own output type; a native chain names one directly through
-/// [`ObserveBuilder::on`](crate::spec::ObserveBuilder::on). Both arrive here, so
+/// `ObserveBuilder::on` (feature `ecs`). Both arrive here, so
 /// the two paths share one erasure and one type-mismatch report rather than each
 /// carrying its own.
 ///
@@ -407,8 +435,10 @@ impl std::fmt::Debug for Action {
 /// condition built for one type and handed a value of another reports
 /// [`BotError::EvaluateError`] rather than
 /// answering a false.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub struct Condition(Box<dyn EvaluateAny>);
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl Condition {
     /// Erase a concrete condition, typed against `T`.
     #[must_use]
@@ -424,11 +454,13 @@ impl Condition {
     }
 
     /// Take the erased condition, for the chain assembler.
+    #[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
     pub(crate) fn into_evaluate_any(self) -> Box<dyn EvaluateAny> {
         self.0
     }
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl std::fmt::Debug for Condition {
     /// Prints `Condition`, because an erased condition carries no identity of
     /// its own: what it evaluates is the source's output type, which the chain,
@@ -491,6 +523,7 @@ impl std::fmt::Debug for Condition {
 /// from the same `&str` but produce different erased traits, and one identifier
 /// may legitimately name both — a domain that observes a repository and also
 /// acts on one is one domain with two roles, not a name collision.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub struct DomainRegistry {
     /// The name the registry was declared under, when `domains!` declared it:
     /// what a refusal names so a reader knows which list to edit.
@@ -501,6 +534,7 @@ pub struct DomainRegistry {
     actions: &'static [(&'static str, ActionCtor)],
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl DomainRegistry {
     /// Assemble a registry from the two declaration lists.
     #[must_use]
@@ -690,6 +724,7 @@ fn closest<C>(ids: &[(&'static str, C)], domain_id: &str) -> Option<&'static str
         .map(|(_, declared)| declared)
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl std::fmt::Debug for DomainRegistry {
     /// Lists the identifiers rather than the function pointers, which have no
     /// useful rendering and would make two registries with the same domains
@@ -717,6 +752,7 @@ impl std::fmt::Debug for DomainRegistry {
 /// Linear because the list is a handful of entries and is read at most once per
 /// spec, not per tick. A map would be a second structure to keep in step with
 /// the first for no gain at this size.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn find<T: Copy>(entries: &[(&'static str, T)], domain_id: &str) -> Option<T> {
     let mut found: Option<T> = None;
     for &(registered, ctor) in entries {
@@ -734,6 +770,7 @@ fn find<T: Copy>(entries: &[(&'static str, T)], domain_id: &str) -> Option<T> {
 /// when the list is distinct. Quadratic in a list of a handful of entries —
 /// the check runs once per build, not per tick — and written with comparisons
 /// rather than index arithmetic, which the workspace lints forbid.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 fn first_duplicate<T: PartialEq>(entries: &[(&'static str, T)]) -> Option<(usize, usize)> {
     for (first, &(registered, _)) in entries.iter().enumerate() {
         for (second, &(other, _)) in entries.iter().enumerate() {

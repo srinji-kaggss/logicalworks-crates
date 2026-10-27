@@ -93,7 +93,7 @@ pub enum BotError {
     /// The spec names a domain this binary does not run.
     ///
     /// The registry is the list of domains a binary declares at compile time —
-    /// see [`crate::DomainRegistry`] — so this is a mismatch between the
+    /// see `DomainRegistry` — so this is a mismatch between the
     /// document and the program it was handed to, not a runtime failure. The
     /// domain may exist and be registered elsewhere; it is simply not linked
     /// here, and no amount of retrying adds it. The identifier is carried as a
@@ -120,7 +120,7 @@ pub enum BotError {
     /// A duplicate would make dispatch depend on declaration order: the first
     /// constructor would silently win and a spec would have no way to name the
     /// ambiguity. The registry therefore refuses to build anything until the
-    /// lists are distinct — see [`crate::DomainRegistry::validate`]. An
+    /// lists are distinct — see `DomainRegistry::validate`. An
     /// identifier may still appear once as a source and once as an action: a
     /// domain that observes a repository and also acts on one is one domain
     /// with two roles, not a collision.
@@ -186,7 +186,7 @@ pub enum BotError {
         /// line.
         argument_parse: String,
     },
-    /// The synchronous adapter, [`Bot::tick`](crate::Bot::tick), was called on a
+    /// The synchronous adapter, `Bot::tick`, was called on a
     /// thread an async runtime is already driving.
     ///
     /// This is a refusal rather than a failure of the work: the adapter parks
@@ -195,7 +195,7 @@ pub enum BotError {
     /// driver cannot advance a timer, report a socket ready, or run the sibling
     /// task a verb is waiting on, so the tick would never return. The repair is
     /// at the call site and there are two of them: await the tick from inside
-    /// the runtime ([`Bot::tick_async`](crate::Bot::tick_async)), or move the
+    /// the runtime (`Bot::tick_async`), or move the
     /// call out of the runtime.
     ///
     /// Reported even when the runtime has several worker threads, where parking
@@ -690,7 +690,7 @@ pub enum BotError {
         ///
         /// A tick that gave up on an entry reports the error that caused the
         /// abandonment instead, since that keeps the typed variant intact;
-        /// [`crate::spec::Bot::pending`] is where abandoned entries are named.
+        /// `Bot::pending` is where abandoned entries are named.
         ///
         /// Boxed for the reason [`PendingWork`] boxes its key: the hold names
         /// when a backoff ends and how long a deadline ran, and inline those
@@ -731,7 +731,7 @@ pub enum BotError {
     /// bot *does* declare at an entry with nothing to settle. This one has no
     /// address to report at all, because the key's action does not appear in the
     /// declaration: the key came from somewhere other than
-    /// [`Bot::pending`](crate::spec::Bot::pending) — another bot's journal, or a
+    /// `Bot::pending` — another bot's journal, or a
     /// journal this run does not own — and no evidence about it can be applied
     /// here.
     ActionNotDeclared {
@@ -812,8 +812,8 @@ pub enum BotError {
     /// non-idempotent effect is exactly the duplicate the durable path exists
     /// to prevent.
     ///
-    /// The repair is [`Bot::resolve_effect`](crate::spec::Bot::resolve_effect)
-    /// with the key from [`Bot::pending`](crate::spec::Bot::pending):
+    /// The repair is `Bot::resolve_effect`
+    /// with the key from `Bot::pending`:
     /// [`NotApplied`](EffectEvidence::NotApplied) makes the entry eligible
     /// again, [`Applied`](EffectEvidence::Applied) records that the effect
     /// landed and the entry the key names is done for the generation the

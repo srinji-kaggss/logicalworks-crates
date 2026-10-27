@@ -27,10 +27,12 @@ mod band_family;
 #[path = "../support/compile.rs"]
 mod compile;
 
+#[cfg(all(feature = "ecs", feature = "wire"))]
 #[path = "../support/declarable.rs"]
 mod declarable;
 
 #[path = "../support/effects.rs"]
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod effects;
 
 #[cfg(all(
@@ -53,6 +55,7 @@ mod fake_gh_issues;
 mod inspect_support;
 
 #[path = "../support/journal.rs"]
+#[cfg(feature = "wire")]
 mod journal_fixtures;
 
 #[cfg(feature = "script")]
@@ -62,6 +65,7 @@ mod load;
 #[path = "../support/lock.rs"]
 mod lock;
 
+#[cfg(all(feature = "ecs", feature = "wire"))]
 #[path = "../support/poll.rs"]
 mod poll;
 
@@ -75,6 +79,7 @@ mod poll;
 #[path = "../support/process.rs"]
 mod process_probe;
 
+#[cfg(any(feature = "script", all(feature = "ecs", feature = "wire")))]
 #[path = "../../../lgwks-std/tests/support/prop.rs"]
 mod prop;
 
@@ -95,6 +100,7 @@ mod request_fixtures;
 mod resume_fixtures;
 
 #[cfg(feature = "rt")]
+#[cfg(feature = "wire")]
 #[path = "../support/liveness.rs"]
 mod liveness_fixtures;
 
@@ -117,6 +123,7 @@ mod sweep_fixtures;
 /// argument shape cannot drift between them. `test` is the libtest name: the
 /// test's path below the crate root, which is what a test's own thread is named
 /// and what [`probe_test`] builds from a `module_path!()`.
+#[cfg(feature = "wire")]
 fn probe_command(test: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.args([test, "--exact", "--nocapture"]);
@@ -127,6 +134,7 @@ fn probe_command(test: &str) -> Result<std::process::Command, Box<dyn std::error
 ///
 /// libtest names a test by its path below the crate root; the crate's own
 /// segment is what `module_path!()` adds and an `--exact` filter must not carry.
+#[cfg(feature = "wire")]
 fn probe_test(module: &str, test: &str) -> String {
     match module.split_once("::") {
         Some((_crate, path)) => format!("{path}::{test}"),
@@ -134,57 +142,80 @@ fn probe_test(module: &str, test: &str) -> String {
     }
 }
 
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod ambiguous_commit;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod authority;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod bot_front_door;
 mod cas;
 mod clock_restart;
 mod core_boundary;
 mod credential;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod dist_lease;
 #[cfg(feature = "net")]
+#[cfg(feature = "wire")]
 mod dist_lease_tcp;
+#[cfg(feature = "net")]
 mod domain_values;
 mod durable_crash_group_commit;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod durable_crash_observation;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod durable_dispatch;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod effect_identity;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod effect_journal;
 mod ephemeral;
 #[cfg(feature = "script")]
 mod estate;
+#[cfg(all(feature = "ecs", feature = "wire", feature = "ron"))]
 mod flow_ron;
 mod gh_binding;
 mod gh_issue;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod grant_replace;
 mod inspect;
 mod inspect_contract;
 mod inspect_non_execution;
 mod inspect_scale;
 mod inspect_wiring;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod journal_continuation;
+#[cfg(feature = "wire")]
 mod journal_liveness;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod journal_scale;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod journal_writer_fence;
 mod locator_eligibility;
 mod net_split;
 mod no_default;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod observe_refresh;
+#[cfg(feature = "wire")]
 mod orphan_reap;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod owner_epoch_takeover;
 mod pr_review_journey;
 mod process_escape;
 mod process_fire;
 mod process_ownership;
 mod prop_each;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod prop_journal;
 mod proposal;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod readme_front_door;
 mod ready;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod registry;
 mod repair;
 mod request_key;
 mod resume_liveness;
+#[cfg(feature = "net")]
 mod retry_proxy;
 mod rt_async_tier;
 #[cfg(all(feature = "rt", feature = "time", feature = "sync"))]
@@ -202,24 +233,32 @@ mod script_refusals;
 mod script_trail;
 mod session;
 mod session_front_door;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_append_verdict;
 mod sim_cancel_under_load;
 mod sim_cas;
 mod sim_cas_corrupt;
 mod sim_cas_disk;
 mod sim_cas_execute;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_change_ticks;
 mod sim_clock;
+#[cfg(feature = "wire")]
 mod sim_clock_kill;
 mod sim_clock_wiring;
 mod sim_confinement;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_continuation;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_continuation_seal;
 mod sim_credential;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_dispatch;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_dist_lease;
 #[cfg(feature = "net")]
 mod sim_dist_lease_tcp;
+#[cfg(feature = "ecs")]
 mod sim_ecs_backoff;
 mod sim_epoch_identity;
 #[cfg(feature = "script")]
@@ -229,13 +268,18 @@ mod sim_gh_issue;
 mod sim_group_commit;
 mod sim_inspect;
 mod sim_inspect_wiring;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_journal;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_journal_liveness;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_journal_tail;
 mod sim_keyed;
 mod sim_landlock;
 mod sim_language;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_network;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_observe_refresh;
 mod sim_permit_release;
 mod sim_process;
@@ -244,17 +288,20 @@ mod sim_process_orphans;
 mod sim_process_output;
 mod sim_progress_overflow;
 mod sim_proposal;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_readme_front_door;
 mod sim_ready;
 mod sim_repair;
 mod sim_repeat_ceiling;
 mod sim_replay_drift;
 mod sim_request_key;
+#[cfg(feature = "net")]
 mod sim_retry_proxy;
 mod sim_review_pr;
 #[cfg(all(feature = "rt", feature = "time", feature = "sync"))]
 mod sim_rt_front_door;
 mod sim_run_boundaries;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_scale;
 mod sim_script;
 mod sim_script_domains;
@@ -263,7 +310,9 @@ mod sim_script_steps;
 mod sim_script_vocab;
 mod sim_session_front_door;
 mod sim_skew;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_source_matrix;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_spec_materialize;
 mod sim_stability;
 mod sim_step_key_runs;
@@ -272,6 +321,7 @@ mod sim_store_scale;
 mod sim_substrate;
 mod sim_supervise_reports;
 mod sim_supervise_wait;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_t_rows;
 mod sim_t_rows_default;
 mod sim_task;
@@ -282,10 +332,14 @@ mod sim_tenancy_flood;
 mod sim_tenancy_model;
 mod sim_tenancy_scope;
 mod sim_tenant_delivery;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_tenant_journal_kill;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_tenant_store;
 mod skew;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod spec_front_door;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod spec_materialize;
 mod stability;
 mod store_read_failure;
@@ -300,5 +354,7 @@ mod task_million;
 mod task_resume;
 mod tenancy;
 mod tenancy_scale;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod tenant_store;
+#[cfg(all(feature = "ecs", feature = "wire"))]
 mod wrong_identity_evidence;

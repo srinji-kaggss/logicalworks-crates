@@ -1,10 +1,15 @@
 //! Scanning a journal file: reading frames, classifying a torn or lying tail, and verifying each frame's chain.
 
+#[cfg(feature = "wire")]
+use super::File;
+#[cfg(feature = "wire")]
+use super::{ChainBreak, Continuation, JournalEntry, JournalPosition};
 use super::{
-    ChainBreak, Continuation, Corruption, CorruptionKind, EffectEvent, File, FramePiece,
-    HEAD_BYTES, JournalEntry, JournalError, JournalLimitKind, JournalPosition, LENGTH_BYTES,
-    MAX_FRAME_BYTES, Prefix, Read, SaturatingFrom, WireError, from_bytes,
+    Corruption, CorruptionKind, FramePiece, HEAD_BYTES, JournalError, JournalLimitKind,
+    LENGTH_BYTES, MAX_FRAME_BYTES, Prefix, Read, SaturatingFrom,
 };
+#[cfg(feature = "wire")]
+use super::{EffectEvent, WireError, from_bytes};
 
 /// Which read failure a frame scan hit, and where.
 #[derive(Debug)]
@@ -55,6 +60,7 @@ pub(super) fn read_exact_classified(
 /// lying length; [`JournalError::Storage`] when the disk refuses, or when the file
 /// holds more behind the prefix than any cut-short frame could have left (it moved
 /// while it was being opened).
+#[cfg(feature = "wire")]
 pub(super) fn resolve_ambiguous_tail(
     file: &mut File,
     offset: u64,
@@ -96,6 +102,7 @@ pub(super) fn resolve_ambiguous_tail(
 /// The search hands over a slice of the file at whatever offset the candidate
 /// starts, and the archive is read only from an aligned copy, as the run store
 /// reads its candidates (`frame::decodable`).
+#[cfg(feature = "wire")]
 pub(super) fn is_framed_record(payload: &[u8]) -> bool {
     let aligned = super::super::frame::decodable(payload);
     let bytes = aligned.as_slice();
@@ -217,6 +224,7 @@ fn next_frame(
 /// lets a successor's own chain start at its predecessor's tail and still be a
 /// chain — the same thing an etcd snapshot does when its index names the entry it
 /// was taken at.
+#[cfg(feature = "wire")]
 pub(super) fn scan(reader: &mut impl Read, max_events: usize) -> Result<Scanned, JournalError> {
     let mut entries = Vec::new();
     let mut carried: Option<Continuation> = None;
@@ -312,6 +320,7 @@ pub(super) fn scan(reader: &mut impl Read, max_events: usize) -> Result<Scanned,
 /// its payload is an event or a sealed checkpoint: a frame that cannot
 /// re-derive its own head was not framed by this journal's writer, and the bytes
 /// behind it may have been acknowledged.
+#[cfg(feature = "wire")]
 pub(super) fn verify_frame(
     payload: &[u8],
     head: &[u8; HEAD_BYTES],
@@ -343,6 +352,7 @@ pub(super) fn verify_frame(
 
 /// What a scan found: the events, the two checkpoints a file can hold, and where
 /// the scan stopped.
+#[cfg(feature = "wire")]
 pub(super) struct Scanned {
     /// Every effect event committed before the stop, in commit order.
     pub(super) entries: Vec<JournalEntry>,

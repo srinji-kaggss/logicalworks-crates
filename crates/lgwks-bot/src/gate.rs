@@ -206,10 +206,11 @@ impl GrantSet {
     /// withdraws and adds, each sorted by dotted name, so two runs over the
     /// same pair of sets report the same lists.
     ///
-    /// [`EcsBot::replace_grants`](crate::ecs::EcsBot::replace_grants) is the one caller:
+    /// `EcsBot::replace_grants` is the one caller:
     /// a bot that swaps its retained set reports exactly this, which is what
     /// makes the narrowing auditable. It lives at the end of this `impl` so
     /// the line numbers the guides cite above it never move for it.
+    #[cfg(feature = "ecs")]
     pub(crate) fn difference(&self, next: &GrantSet) -> GrantReplacement {
         let mut withdrawn: Vec<Cap> = self
             .granted
@@ -231,7 +232,7 @@ impl GrantSet {
 
 /// What swapping a built bot's grant set withdrew and added.
 ///
-/// Returned by [`EcsBot::replace_grants`](crate::ecs::EcsBot::replace_grants): the two lists
+/// Returned by `EcsBot::replace_grants`: the two lists
 /// that tell an operator what changed, so revocation is auditable rather than
 /// silent. Both lists are sorted by dotted name. It lives after the `GrantSet`
 /// implementation for the same reason `difference` lives at the end of it.

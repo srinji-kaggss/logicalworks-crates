@@ -5,6 +5,7 @@
 use std::fmt;
 
 use super::{AuthorityHandle, ChannelError, Lease, LeaseError};
+#[cfg(feature = "wire")]
 use crate::tenant_store::{RunStart, TenantStore, TenantStoreError};
 
 /// Why a coordinated grant was refused.
@@ -15,7 +16,9 @@ pub enum DispatchError {
     /// Nothing was written.
     Lease(LeaseError),
     /// The store refused: the device, the lock, a bound, or a row that no
-    /// longer matches. Nothing was half-written.
+    /// longer matches. Nothing was half-written. With `wire`, which the store
+    /// persists through.
+    #[cfg(feature = "wire")]
     Store(TenantStoreError),
     /// The grant got no authenticated answer from a remote authority, so it
     /// is unvalidated, and an unvalidated grant is not a grant. Nothing was
@@ -28,6 +31,7 @@ impl fmt::Display for DispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Lease(ref cause) => write!(formatter, "the grant is stale: {cause}"),
+            #[cfg(feature = "wire")]
             Self::Store(ref cause) => write!(formatter, "the run store refused: {cause}"),
             Self::Unvalidated(ref cause) => write!(formatter, "the grant is unvalidated: {cause}"),
         }
@@ -39,6 +43,7 @@ impl std::error::Error for DispatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Lease(ref cause) => Some(cause),
+            #[cfg(feature = "wire")]
             Self::Store(ref cause) => Some(cause),
             Self::Unvalidated(ref cause) => Some(cause),
         }
@@ -53,6 +58,7 @@ impl From<LeaseError> for DispatchError {
     }
 }
 
+#[cfg(feature = "wire")]
 impl From<TenantStoreError> for DispatchError {
     /// A store refusal reaches the caller as itself, so a device fault never
     /// reads as a fencing decision.
@@ -107,6 +113,7 @@ impl Fence for AuthorityHandle {
 ///
 /// `F` is where every lease is checked: by default the [`AuthorityHandle`] on
 /// this host, or any [`Fence`] through [`with_fence`](Self::with_fence).
+#[cfg(feature = "wire")]
 #[derive(Debug, Clone)]
 pub struct Coordinator<F = AuthorityHandle> {
     /// Where every grant is checked.
@@ -117,6 +124,7 @@ pub struct Coordinator<F = AuthorityHandle> {
     host: String,
 }
 
+#[cfg(feature = "wire")]
 impl Coordinator {
     /// A coordinator over `store` on `host`, with its own fresh authority.
     ///
@@ -155,6 +163,7 @@ impl Coordinator {
     }
 }
 
+#[cfg(feature = "wire")]
 impl<F: Fence> Coordinator<F> {
     /// A coordinator over `store` on `host` whose every grant is checked by
     /// `fence` before the store is touched.
@@ -184,6 +193,7 @@ impl<F: Fence> Coordinator<F> {
     /// so the fence cannot drift between them: the store is touched only past
     /// a current lease, and a stale or unvalidated one is refused before a
     /// byte moves.
+    #[cfg(feature = "wire")]
     fn checked<T>(
         &self,
         lease: &Lease,
@@ -200,6 +210,7 @@ impl<F: Fence> Coordinator<F> {
     /// [`DispatchError::Lease`] when the grant is stale;
     /// [`DispatchError::Store`] when the store refuses;
     /// [`DispatchError::Unvalidated`] when the fence gave no answer.
+    #[cfg(feature = "wire")]
     pub fn begin_run(
         &self,
         lease: &Lease,
@@ -220,6 +231,7 @@ impl<F: Fence> Coordinator<F> {
     /// [`DispatchError::Lease`] when the grant is stale;
     /// [`DispatchError::Store`] when the row is gone or past dispatch;
     /// [`DispatchError::Unvalidated`] when the fence gave no answer.
+    #[cfg(feature = "wire")]
     pub fn dispatch_lane(
         &self,
         lease: &Lease,
@@ -236,6 +248,7 @@ impl<F: Fence> Coordinator<F> {
     /// [`DispatchError::Lease`] when the grant is stale;
     /// [`DispatchError::Store`] when the row is gone or already ended;
     /// [`DispatchError::Unvalidated`] when the fence gave no answer.
+    #[cfg(feature = "wire")]
     pub fn end_lane(
         &self,
         lease: &Lease,
@@ -257,6 +270,7 @@ impl<F: Fence> Coordinator<F> {
     /// [`DispatchError::Lease`] when the grant is stale;
     /// [`DispatchError::Store`] when the store refuses;
     /// [`DispatchError::Unvalidated`] when the fence gave no answer.
+    #[cfg(feature = "wire")]
     pub fn finish_run(
         &self,
         lease: &Lease,
@@ -285,6 +299,7 @@ impl<F: Fence> Coordinator<F> {
     /// [`DispatchError::Lease`] when the grant is stale;
     /// [`DispatchError::Store`] when the store refuses;
     /// [`DispatchError::Unvalidated`] when the fence gave no answer.
+    #[cfg(feature = "wire")]
     pub fn recover(
         &self,
         lease: &Lease,

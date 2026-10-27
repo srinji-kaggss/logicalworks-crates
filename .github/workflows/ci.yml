@@ -968,6 +968,12 @@ jobs:
             instance: lwc-4
           - targets: x86_64-unknown-freebsd aarch64-linux-android aarch64-apple-ios
             instance: lwc-6
+    env:
+      # As in the workspace job: sccache cannot cache an incremental build, and
+      # with the workflow's `CARGO_INCREMENTAL: "1"` these legs rebuilt every
+      # cross-target dependency from nothing on a cold instance and the cap
+      # cancelled two of them at 271 s and 273 s (run 40408433583).
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
       - name: Pin Rust 1.99.0

@@ -1,12 +1,19 @@
 //! Opening a journal: the constructors, replay on open, and the read-side accessors.
 
+#[cfg(feature = "wire")]
+use super::HashMap;
+#[cfg(feature = "wire")]
 use super::{
-    BufReader, Continuation, ContinuationPolicy, EffectEvent, EventKind, FileJournal, FileView,
-    HashMap, JournalEntry, JournalError, JournalLimitKind, JournalPosition, MAX_GENERATION_WALK,
-    MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, OpenKind, OpenOptions, Path, PathBuf, Recovered, Replay,
-    ReplayCursor, SaturatingFrom, ScanStop, Scanned, SealPause, StorageOwner, ladder_hold,
-    recover_continued, resolve_ambiguous_tail, scan, successor_is_complete, successor_path,
+    BufReader, ContinuationPolicy, EventKind, FileView, MAX_GENERATION_WALK, MAX_JOURNAL_BYTES,
+    OpenKind, OpenOptions, ReplayCursor, ScanStop, Scanned, StorageOwner, ladder_hold,
 };
+use super::{
+    Continuation, EffectEvent, FileJournal, JournalEntry, JournalError, JournalLimitKind,
+    JournalPosition, MAX_JOURNAL_EVENTS, Path, PathBuf, Recovered, Replay, SaturatingFrom,
+    SealPause, recover_continued, successor_path,
+};
+#[cfg(feature = "wire")]
+use super::{resolve_ambiguous_tail, scan, successor_is_complete};
 
 impl FileJournal {
     /// Open the journal at `path`, creating the file when it does not exist
@@ -41,6 +48,7 @@ impl FileJournal {
     /// successor is the authoritative journal; and
     /// [`JournalError::CapacityExceeded`] when the complete history exceeds
     /// [`MAX_JOURNAL_BYTES`] or [`MAX_JOURNAL_EVENTS`].
+    #[cfg(feature = "wire")]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         Self::open_impl(path.as_ref(), OpenKind::Plain)
     }
@@ -69,6 +77,7 @@ impl FileJournal {
     /// # Errors
     ///
     /// Whatever [`FileJournal::open`](crate::journal::FileJournal::open) reports.
+    #[cfg(feature = "wire")]
     pub fn open_continuing(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         Self::open_impl(
             path.as_ref(),
@@ -88,6 +97,7 @@ impl FileJournal {
     /// # Errors
     ///
     /// Whatever [`FileJournal::open`](crate::journal::FileJournal::open) reports.
+    #[cfg(feature = "wire")]
     pub fn open_continuing_with(
         path: impl AsRef<Path>,
         policy: ContinuationPolicy,
@@ -108,6 +118,7 @@ impl FileJournal {
     ///
     /// Whatever the last journal reports, and [`JournalError::Superseded`] naming
     /// the next successor when the walk ran out of generations.
+    #[cfg(feature = "wire")]
     pub fn open_active(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let mut here = path.as_ref().to_path_buf();
         for _ in 0..MAX_GENERATION_WALK {
@@ -210,6 +221,7 @@ impl FileJournal {
     /// # Errors
     ///
     /// Whatever the file, the lock, the scan or the authority rule reports.
+    #[cfg(feature = "wire")]
     pub(super) fn open_impl(path: &Path, kind: OpenKind) -> Result<Self, JournalError> {
         let path = path.to_path_buf();
         super::super::continuation::refuse_ambiguous_base(&path)?;

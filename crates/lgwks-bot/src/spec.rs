@@ -4,7 +4,7 @@
 //!
 //! # Chains are typed against their source
 //!
-//! [`ObserveBuilder::on`] takes a condition that reads the source's output and
+//! `ObserveBuilder::on` takes a condition that reads the source's output and
 //! an action that takes exactly it, so a chain that cannot work does not build.
 //!
 //! `a_chain_typed_against_its_source_builds_under_an_effect_scope` (`tests/it/spec_front_door.rs`)
@@ -50,27 +50,33 @@
 //! stage's output instead of being chosen by the caller. A free parameter at
 //! this seam is how the chain became unprovable the first time.
 //!
-//! [`ObserveBuilder::on`]: crate::spec::ObserveBuilder::on
 
 mod admission;
 #[cfg(test)]
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 mod tests;
 
 pub use admission::{Admission, Need, NeedSet};
 
 use lgwks_std::json::{Deserialize, Serialize};
-use std::any::{Any, TypeId, type_name};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
+use std::any::Any;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
+use std::any::{TypeId, type_name};
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use super::cap::{Auth, Cap};
 use super::error::BotError;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use super::gate::GrantSet;
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 use super::verb::RefreshReason;
 
 // ── Serializable spec ──────────────────────────────────────────────────────
 
 /// The serializable bot contract: what an AI emits and what a manifest
 /// contains. `from_json` validates its shape; capability validation happens at
-/// build time from a [`GrantSet`], not from a spec.
+/// build time from a [`GrantSet`](crate::GrantSet), not from a spec.
 ///
 /// `#[non_exhaustive]`: this is a wire contract, so a new field is additive for
 /// the crate and a compile error for a consumer that built the struct
@@ -267,6 +273,7 @@ impl ActionSpec {
 /// type-mismatch error must not drift between call sites, and issuing the proof
 /// *before* the downcast is the property that makes a type mismatch fail without
 /// a side effect.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) fn typed_entry<C, A, T>(condition: C, action: A) -> ChainEntry
 where
     T: 'static,
@@ -293,6 +300,7 @@ where
 /// materializer pairs a condition it built against an already-erased source.
 /// Keeping them on one type is what stops the two paths from diverging on the
 /// downcast and the type-mismatch report.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) struct TypedEval<C, T> {
     /// The condition, typed against `T`.
     pub(crate) inner: C,
@@ -300,6 +308,7 @@ pub(crate) struct TypedEval<C, T> {
     pub(crate) _marker: std::marker::PhantomData<T>,
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
     fn check_any(&self, value: &Erased) -> Result<bool, BotError> {
         match value.as_any().downcast_ref::<T>() {
@@ -317,32 +326,37 @@ impl<C: super::verb::Evaluate<T>, T: 'static> EvaluateAny for TypedEval<C, T> {
 
 // ── Live bot ───────────────────────────────────────────────────────────────
 
-#[cfg(feature = "ephemeral")]
+#[cfg(all(feature = "ecs", feature = "ephemeral"))]
 pub use crate::ecs::EphemeralError;
+pub use crate::ecs::{
+    AbandonReason, EffectEvidence, PendingWork, RetryPolicy, TransitionHold, WorkId,
+};
 /// A built bot: name, admitted capabilities, and the `bevy_ecs` world its
 /// chains execute in.
 ///
 /// **One bot, one executor.** `Bot` *is* the ECS bot: `tick` runs one schedule
 /// step, and a condition is `Changed<Revision>` on the source entity rather than
 /// a re-evaluation of a value that did not move. There is no second way to run a
-/// bot, and no feature flag that adds one.
+/// bot. The bot lives behind the default-on `ecs` feature, so a consumer that
+/// only supervises processes opts out with `--no-default-features` (#687).
 ///
-/// The rest of this re-export is the vocabulary of the substrate's ledger —
+/// The re-export above it is the vocabulary of the substrate's ledger —
 /// which work is outstanding, what is holding it, and how a caller settles an
 /// effect that may or may not have happened. It is re-exported here, next to
-/// `Bot`, because a caller reading [`Bot::pending`] or matching on
+/// `Bot`, because a caller reading `Bot::pending` or matching on
 /// [`BotError::PendingTransition`] has to be
 /// able to name what those return; `ecs` itself stays private, because it is the
 /// implementation rather than a second way to run a bot.
+#[cfg(feature = "ecs")]
 pub use crate::ecs::{
-    AbandonReason, EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder,
-    EffectEvidence, EffectScope, PendingWork, RetryPolicy, TransitionHold, WorkId,
+    EcsBot as Bot, EcsBuilder as BotBuilder, EcsObserveBuilder as ObserveBuilder, EffectScope,
 };
 #[cfg(feature = "ephemeral")]
 pub use crate::effect::MintError;
 pub use crate::effect::{EffectIdentity, EffectKey};
 
 /// One `(condition, action)` tuple in a chain.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) struct ChainEntry {
     /// The condition half. Type-erased because the builder accepts any
     /// `Evaluate<T>`; it downcasts the observed value back to `T` on check.
@@ -352,6 +366,7 @@ pub(crate) struct ChainEntry {
     pub(crate) action: Box<dyn ExecuteAny>,
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl ChainEntry {
     /// Assemble one entry from halves that are already erased.
     ///
@@ -388,6 +403,7 @@ impl ChainEntry {
 /// produces is written down nowhere a document could name. Do not reach for
 /// `TypeId` to answer it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) struct Witness {
     /// The type, as an identity. This is the comparison.
     id: TypeId,
@@ -395,6 +411,7 @@ pub(crate) struct Witness {
     name: &'static str,
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl Witness {
     /// The witness for `T`, taken where `T` is still a type parameter.
     pub(crate) fn of<T: 'static>() -> Self {
@@ -447,6 +464,7 @@ impl Witness {
 ///   proves the pairing is type-correct, which is all a type can prove, and that
 ///   is strictly more than the index pairing proved before it — but it is not a
 ///   chain identity, and the next reader should not assume it is one.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) struct Erased {
     /// The value itself.
     pub(crate) value: Box<dyn Any>,
@@ -454,6 +472,7 @@ pub(crate) struct Erased {
     pub(crate) witness: Witness,
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl Erased {
     /// Box `value` and record the type it is being erased from.
     pub(crate) fn new<T: 'static>(value: T) -> Self {
@@ -475,6 +494,7 @@ impl Erased {
 /// domain's own value at the type-erasure boundary, which is where it must be
 /// boxed anyway. The caller's [`Auth`] is checked here, before the source is
 /// touched, so an erasure bug cannot bypass the gate.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) trait ObserveAny {
     /// Forwards to [`Observe::domain_id`].
     fn domain_id(&self) -> &str;
@@ -537,6 +557,7 @@ pub(crate) trait ObserveAny {
 /// closed by `EcsObserveBuilder::observe`, which already demands
 /// `S::Output: PartialEq` for its change filter, so a source that could reach
 /// this impl without it could not have been admitted to a chain anyway.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl<T: super::verb::Observe + 'static> ObserveAny for T
 where
     T::Output: PartialEq + 'static,
@@ -587,6 +608,7 @@ where
 /// evaluated type. `check_any` downcasts to the `T` the closure was registered
 /// with; a mismatch is [`BotError::EvaluateError`], never a false result, so a
 /// wiring bug cannot masquerade as a condition that simply did not fire.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) trait EvaluateAny {
     /// Downcast `value` to this condition's `T` and evaluate it. Returns
     /// [`BotError::EvaluateError`] when the observed value is a different type,
@@ -598,6 +620,7 @@ pub(crate) trait EvaluateAny {
 /// input and the output. `run_any` issues a fresh [`Auth`] from the grant set
 /// for the action's own caps and checks the downcast input before the action
 /// runs, so a type mismatch fails without a side effect.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) trait ExecuteAny {
     /// Forwards to [`Execute::required_caps`].
     fn required_caps(&self) -> &[Cap];
@@ -662,8 +685,10 @@ pub(crate) trait ExecuteAny {
 /// before it can be boxed. This is that wrapper, and it is the only one: an
 /// action built by [`typed_entry`] and one built from a registry entry reach the
 /// same erasure, so a correction to one cannot leave the other behind.
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 pub(crate) struct TypedExec<A>(A);
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl<A> TypedExec<A> {
     /// Wrap one concrete action for erasure.
     pub(crate) const fn new(action: A) -> Self {
@@ -671,6 +696,7 @@ impl<A> TypedExec<A> {
     }
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl<A: super::verb::Execute> TypedExec<A>
 where
     A::Input: 'static,
@@ -710,6 +736,7 @@ where
     }
 }
 
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 impl<A: super::verb::Execute> ExecuteAny for TypedExec<A>
 where
     A::Input: 'static,

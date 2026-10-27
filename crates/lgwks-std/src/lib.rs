@@ -27,8 +27,9 @@
 //!   carries a C toolchain.
 //! - `core` — encoding, fs, glob, hex, leb128, retry, seeded,
 //!   similarity, task, time. Zero deps.
-//! - `trace` — trace. Adds `tracing` plus the default subscriber
-//!   bootstrap (`std` only; no `attributes`, so no `syn`).
+//! - `trace` — trace. Adds `tracing` (`std` only; no `attributes`, so no `syn`).
+//! - `trace-install` — the default debugger bootstrap. Implies `trace`; adds
+//!   `tracing-subscriber`.
 //! - `random` — random, id. Adds `getrandom`.
 //! - `hash` — hash. Adds `blake3`.
 //! - `build` — build. A build script's input digest and cargo directives.
